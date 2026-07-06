@@ -444,24 +444,18 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
 /// `Tidepool.Session.Lib.G<gen>` module. Panics on an out-of-range generation
 /// (a caller bug — generations only ever count existing turns).
 ///
-/// `shadow_wildcard_imports`: whether this turn's (and prior turns') decl
-/// heads get hidden from every unqualified `env.imports` line (`Library`,
-/// `Tidepool.Prelude`, …) so a decl reusing a name those modules also export
-/// (e.g. `over`, which `Tidepool.Prelude` re-exports from `Control.Lens`)
-/// shadows gracefully instead of an "ambiguous occurrence" — GHCi parity for
-/// a genuine top-level declaration. Pass `false` for a pure `let`/`<-` bind
-/// promoted into a decl only for GHCi-parity type generalization (see
-/// `tidepool-repl`'s `try_pure_bind_as_decl`): there, a collision with a
-/// wildcard-imported name is a real warning sign, not an intentional
-/// redefinition, so it should surface as a loud compile error instead of
-/// silently shadowing.
+/// This turn's (and prior turns') decl heads are always hidden from every
+/// unqualified `env.imports` line (`Library`, `Tidepool.Prelude`, …) so a decl
+/// reusing a name those modules also export (e.g. `over`, which
+/// `Tidepool.Prelude` re-exports from `Control.Lens`) shadows gracefully
+/// instead of an "ambiguous occurrence" — GHCi parity for ANY session decl,
+/// pure or genuine (ledger #36): a pure `let`/`<-` bind promoted into a decl
+/// for GHCi-parity type generalization (see `tidepool-repl`'s
+/// `try_pure_bind_as_decl`) must shadow a colliding wildcard-imported name
+/// exactly as a genuine top-level declaration would, so pure and effectful
+/// binds stay interchangeable.
 #[must_use]
-pub fn render_module(
-    log: &DeclLog,
-    gen: Generation,
-    env: &ModuleEnv,
-    shadow_wildcard_imports: bool,
-) -> RenderedModule {
+pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> RenderedModule {
     let g = gen.0 as usize;
     assert!(
         g >= 1 && g <= log.turns.len(),
@@ -527,14 +521,10 @@ pub fn render_module(
     // (tidepool-repl) already guards on the stmt-preamble side (BUG-7); this
     // ports the same guard to EVERY unqualified decl-module import (not just
     // `Library`) now that the decl env always carries the full
-    // `Tidepool.Prelude` surface (see `session_decl_module_env`). Empty when
-    // `shadow_wildcard_imports` is false, so a pure-bind-promoted decl gets NO
-    // shadowing and a collision surfaces loudly instead.
-    let all_session_heads: Vec<&ExportItem> = if shadow_wildcard_imports {
-        prior.iter().chain(this.items.iter()).collect()
-    } else {
-        Vec::new()
-    };
+    // `Tidepool.Prelude` surface (see `session_decl_module_env`). Applies to
+    // ANY session decl, pure or genuine (ledger #36) — a pure-bind-promoted
+    // decl shadows exactly like a real one.
+    let all_session_heads: Vec<&ExportItem> = prior.iter().chain(this.items.iter()).collect();
 
     let prev_module = if g >= 2 {
         Some(SessionModule::lib(Generation((g - 1) as u64)))
@@ -659,7 +649,7 @@ mod tests {
         // `.+` (which is a GHC parse error in an export list).
         let mut log = DeclLog::new();
         log.push(turn("a .+ b = a + b", vec![val(".+")]));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(
             r.source.contains("(.+)"),
             "operator export must be parenthesized:\n{}",
@@ -672,7 +662,7 @@ mod tests {
         );
         // And the prior-gen `hiding` clause must parenthesize too (redefine `.+`).
         log.push(turn("a .+ b = a - b", vec![val(".+")]));
-        let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default(), true);
+        let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         assert!(
             r2.source.contains("hiding ((.+))"),
             "hiding clause must parenthesize:\n{}",
@@ -684,7 +674,7 @@ mod tests {
     fn first_gen_has_no_prior_import() {
         let mut log = DeclLog::new();
         log.push(turn("slug t = T.toLower t", vec![val("slug")]));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert_eq!(r.module.module_name(), "Tidepool.Session.Lib.G1");
         assert!(r.source.contains("module Tidepool.Session.Lib.G1 ("));
         assert!(r.source.contains("    slug\n"));
@@ -697,7 +687,7 @@ mod tests {
         let mut log = DeclLog::new();
         log.push(turn("slug t = t", vec![val("slug")]));
         log.push(turn("shout t = T.toUpper t", vec![val("shout")]));
-        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // No redefinition → plain import + module re-export.
         assert!(r.source.contains("import Tidepool.Session.Lib.G1\n"));
         assert!(r.source.contains("module Tidepool.Session.Lib.G1,"));
@@ -712,7 +702,7 @@ mod tests {
         log.push(turn("slug t = t", vec![val("slug")]));
         log.push(turn("other t = t", vec![val("other")]));
         log.push(turn("slug t = T.replace \" \" \"-\" t", vec![val("slug")]));
-        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         // G3 redefines slug → hide it from G2's re-export (latest-wins).
         assert!(r
             .source
@@ -730,7 +720,7 @@ mod tests {
             "data Foo = X | A | B",
             vec![ty("Foo", &["X", "A", "B"])],
         ));
-        let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default(), true);
+        let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // The reshape hides the OLD Foo and its constructors, avoiding GHC's
         // conflicting-export error, and re-declares + exports the new shape.
         assert!(r2
@@ -739,7 +729,7 @@ mod tests {
         assert!(r2.source.contains("    Foo(..)"));
         assert!(r2.source.contains("data Foo = X | A | B"));
         // G1 still renders standalone (old shape stays compilable / resolvable).
-        let r1 = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r1 = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(r1.source.contains("data Foo = A | B"));
         assert!(r1.source.contains("    Foo(..)"));
     }
@@ -752,7 +742,7 @@ mod tests {
         let mut log = DeclLog::new();
         log.push(turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]));
         log.push(turn("data Bar = A | C", vec![ty("Bar", &["A", "C"])]));
-        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // Foo is NOT redefined → no `hiding (Foo(..))`; it stays re-exported.
         assert!(!r.source.contains("hiding (Foo(..))"));
         assert!(r.source.contains("import Tidepool.Session.Lib.G1\n"));
@@ -770,7 +760,7 @@ mod tests {
             "slug t = T.toUpper t\ndata Greeter = Hi | Yo",
             vec![val("slug"), ty("Greeter", &["Hi", "Yo"])],
         ));
-        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         assert!(r
             .source
             .contains("import Tidepool.Session.Lib.G1 hiding (slug)"));
@@ -837,7 +827,7 @@ mod tests {
     fn type_synonym_renders_bare_not_dotdot() {
         let mut log = DeclLog::new();
         log.push(turn("type Name = T.Text", vec![ty("Name", &[])]));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(r.source.contains("    Name\n"));
         assert!(!r.source.contains("Name(..)"));
     }
@@ -849,7 +839,7 @@ mod tests {
             "{-# LANGUAGE DeriveAnyClass #-}\ndata Foo = Foo deriving (Eq, Show)",
             vec![ty("Foo", &["Foo"])],
         ));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         let pragma_pos = r.source.find("{-# LANGUAGE").expect("pragma block present");
         let module_pos = r
             .source
@@ -882,7 +872,7 @@ mod tests {
             "{-# LANGUAGE DeriveGeneric #-}\n{-# LANGUAGE OverloadedStrings #-}\ndata Bar = Bar",
             vec![ty("Bar", &["Bar"])],
         ));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         let module_pos = r
             .source
             .find("module Tidepool.Session.Lib.G1")
@@ -904,7 +894,7 @@ mod tests {
             "import Data.Char (toUpper)\ntoUpper' c = toUpper c",
             vec![val("toUpper'")],
         ));
-        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         let module_pos = r
             .source
             .find("module Tidepool.Session.Lib.G1")
@@ -989,7 +979,7 @@ mod tests {
         log.push(turn("findings = []", vec![val("findings")]));
         log.push(turn("keep t = t", vec![val("keep")]));
         log.push(retract_turn(&["findings"]));
-        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default(), true);
+        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         // The retraction shell hides `findings` from the prior-gen import (so
         // `module Prev` no longer re-exports it) and adds no new decl for it.
         assert!(

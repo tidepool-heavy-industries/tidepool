@@ -304,28 +304,13 @@ impl SessionLib {
     /// `define`. Empty/whitespace sources are dropped; an all-empty batch is a
     /// no-op.
     ///
-    /// Shadows wildcard-imported names (`Library`, `Tidepool.Prelude`, …) with
-    /// this session's own decl heads — the right default for a genuine
-    /// top-level declaration (GHCi parity: `f x = …` at the prompt always
-    /// shadows an imported `f`). See [`Self::define_batch_scoped`] for the
-    /// pure-bind-promotion caller, which needs the opposite policy.
+    /// Always shadows wildcard-imported names (`Library`, `Tidepool.Prelude`,
+    /// …) with this session's own decl heads — GHCi parity for ANY session
+    /// decl, pure or genuine (ledger #36): `f x = …` at the prompt always
+    /// shadows an imported `f`, and a pure `let`/`<-` bind promoted into a
+    /// decl (`tidepool-repl`'s `try_pure_bind_as_decl`) shadows exactly the
+    /// same way, so pure and effectful binds stay interchangeable.
     pub fn define_batch(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
-        self.define_batch_scoped(decl_texts, true)
-    }
-
-    /// As [`Self::define_batch`], with explicit control over whether this
-    /// turn's (and prior turns') decl heads shadow wildcard-imported names.
-    ///
-    /// `try_pure_bind_as_decl` (`tidepool-repl`) promotes a pure `let`/`<-`
-    /// bind into a decl purely for GHCi-parity type generalization — the user
-    /// did not necessarily intend to redefine a Prelude/Library name, so a
-    /// collision there should surface as a loud "ambiguous occurrence" error
-    /// (`shadow_wildcard_imports: false`) rather than silently shadow.
-    pub fn define_batch_scoped(
-        &mut self,
-        decl_texts: &[&str],
-        shadow_wildcard_imports: bool,
-    ) -> Result<Generation, SessionError> {
         let sources: Vec<String> = decl_texts
             .iter()
             .filter(|s| !s.trim().is_empty())
@@ -346,7 +331,7 @@ impl SessionLib {
             retracts: Vec::new(),
         });
         let gen = self.log.generation();
-        let rendered = render::render_module(&self.log, gen, &self.env, shadow_wildcard_imports);
+        let rendered = render::render_module(&self.log, gen, &self.env);
         self.write_module(&rendered)?;
 
         // Validate ALL turns via GHC. On failure, roll back the log and delete
@@ -384,7 +369,7 @@ impl SessionLib {
             retracts: vec![name.to_string()],
         });
         let gen = self.log.generation();
-        let rendered = render::render_module(&self.log, gen, &self.env, true);
+        let rendered = render::render_module(&self.log, gen, &self.env);
         if let Err(e) = self.write_module(&rendered) {
             self.log.turns.pop(); // keep the log consistent with disk
             return Err(e);
