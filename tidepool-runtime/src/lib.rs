@@ -215,6 +215,8 @@ pub fn compile_haskell_salted(
     })
 }
 
+/// Default JIT allocation nursery size (64 MiB), used by [`compile_and_run`]
+/// and [`compile_and_run_pure`].
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 
 /// Stack size for eval threads. The JIT's clean recursion-overflow guard needs

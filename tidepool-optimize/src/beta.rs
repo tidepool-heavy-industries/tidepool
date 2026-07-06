@@ -8,7 +8,7 @@ use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 ///
 /// Replaces function applications `(\x -> body) arg` with the body where
 /// `x` is substituted for `arg` — but only when that substitution cannot
-/// duplicate work (see [`try_beta_at`]).
+/// duplicate work (see `try_beta_at` in this module).
 pub struct BetaReduce;
 
 impl Pass for BetaReduce {

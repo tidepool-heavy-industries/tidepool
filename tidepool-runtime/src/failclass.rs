@@ -86,8 +86,12 @@ impl Phase {
 /// Successful evals never build one — this rides only the error path.
 #[derive(Clone, Debug)]
 pub struct FailureEnvelope {
+    /// WHAT failed.
     pub class: FailureClass,
+    /// WHEN it failed.
     pub phase: Phase,
+    /// Human-facing message (already re-messaged for a version skew; the
+    /// error's own `Display` text otherwise).
     pub message: String,
 }
 
@@ -104,7 +108,7 @@ impl FailureEnvelope {
 /// THE classifier: map a [`CompileError`] to its `(class, phase)` and message.
 ///
 /// A wire-format rejection ([`CompileError::ReadError`]) is re-messaged into a
-/// self-diagnosing skew report (see [`version_skew_message`]); every other
+/// self-diagnosing skew report (see `version_skew_message`); every other
 /// variant keeps its own Display text.
 #[must_use]
 pub fn classify_compile(err: &CompileError) -> FailureEnvelope {

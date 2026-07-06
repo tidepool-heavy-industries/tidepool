@@ -128,14 +128,19 @@ pub enum EvalError {
     /// Arity mismatch (wrong number of arguments or fields)
     #[error("arity mismatch: expected {expected} {context}, got {got}")]
     ArityMismatch {
+        /// Which count is being compared (arguments vs. case binders).
         context: ArityContext,
+        /// The expected count.
         expected: usize,
+        /// The count actually observed.
         got: usize,
     },
     /// Type mismatch during evaluation
     #[error("type mismatch: expected {expected}, got {got}")]
     TypeMismatch {
+        /// Name of the expected type/shape.
         expected: &'static str,
+        /// The kind of value actually found.
         got: ValueKind,
     },
     /// No matching alternative in case expression

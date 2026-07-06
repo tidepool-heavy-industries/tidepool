@@ -72,13 +72,20 @@ struct GateInner {
 /// `AbortRequested`; the mcp dispatcher exercises the pause states too.
 #[derive(Clone, PartialEq)]
 pub enum GateState {
+    /// Executing normally; [`PauseGate::checkpoint`] returns immediately.
     Run,
+    /// A pause was requested; the next checkpoint will park and flip to [`Self::Paused`].
     PauseRequested,
+    /// The eval thread is parked at a checkpoint, waiting for resume or abort.
     Paused,
+    /// An abort was requested with the given reason; the next checkpoint
+    /// returns `Err` with it and the gate resets to [`Self::Run`].
     AbortRequested(String),
 }
 
 impl PauseGate {
+    /// Create a fresh gate in the `Run` state, wrapped in an `Arc` for sharing
+    /// between the eval thread and the server-side dispatcher.
     pub fn new() -> Arc<Self> {
         Arc::new(PauseGate {
             inner: parking_lot::Mutex::new(GateInner {

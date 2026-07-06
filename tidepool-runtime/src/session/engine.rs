@@ -29,8 +29,8 @@
 //! effect machine — already a reified coroutine (its continuation is a heap
 //! value; the native stack fully unwinds between yields) — is handed back as
 //! DATA. The eval thread packages the stowed `JitEffectMachine` + its table +
-//! the handler stack into a boxed resume closure ([`StowedResume`]), sends it in
-//! [`EngineMessage::SuspendedAsk`], and EXITS. The [`Continuation`]'s
+//! the handler stack into a boxed resume closure (`StowedResume`), sends it in
+//! `EngineMessage::SuspendedAsk`, and EXITS. The `Continuation`'s
 //! `AwaitingAnswer` state holds that closure (plus the turn's semaphore permit,
 //! transferred off the exiting thread so the suspended session keeps its pool
 //! slot). On [`resume`](SessionEngine::resume) a FRESH eval thread re-enters the
@@ -320,9 +320,16 @@ pub struct StartTurn<H, O> {
 /// Engine tunables. `cont_prefix` distinguishes ids across servers (`cont_`
 /// here, `scont_` for the resident session server).
 pub struct EngineConfig {
+    /// Pool size: the number of turns/continuations allowed to run concurrently.
     pub max_concurrent: usize,
+    /// Admission ceiling: [`SessionEngine::start_turn`] refuses new turns
+    /// ([`StartError::Overloaded`]) once this many detached (timed-out) threads
+    /// are still being reaped.
     pub max_orphaned: usize,
+    /// Prefix for generated continuation ids (e.g. `"cont"` → `cont_1`).
     pub cont_prefix: String,
+    /// The default turn window in seconds, returned by
+    /// [`SessionEngine::default_timeout_secs`].
     pub default_timeout_secs: u64,
     /// Registry-shape seam (see [`RenderPolicy`]).
     pub render: RenderPolicy,

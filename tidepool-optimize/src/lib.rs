@@ -3,13 +3,21 @@
 //! Includes beta reduction, case reduction, dead code elimination, inlining,
 //! occurrence analysis, and partial evaluation.
 
+/// Beta reduction: `(\x -> body) arg` → `body` with `x` substituted for `arg`.
 pub mod beta;
+/// Case-of-known-constructor and case-of-known-literal reduction.
 pub mod case_reduce;
+/// Dead code elimination: drop unreferenced `Let`/`LetRec` bindings.
 pub mod dce;
+/// Inlining: substitute a single-use `LetNonRec` binding at its use site.
 pub mod inline;
+/// Occurrence analysis: counts how many times each bound variable is used.
 pub mod occ;
+/// First-order partial evaluation over statically-known values.
 pub mod partial;
+/// The [`Pass`] trait and its `Changed` return type, shared by every pass.
 pub mod pass;
+/// Fixed-point pipeline orchestration: runs a sequence of passes to convergence.
 pub mod pipeline;
 mod rewrite;
 

@@ -253,7 +253,14 @@ pub enum TextShapeError {
     /// An off/len field did not unbox to an Int.
     BadOffLen,
     /// Negative or out-of-bounds slice.
-    BadSlice { off: i64, len: i64, ba_len: usize },
+    BadSlice {
+        /// The requested offset.
+        off: i64,
+        /// The requested length.
+        len: i64,
+        /// The backing byte array's actual length.
+        ba_len: usize,
+    },
 }
 
 /// STRICT slice policy: reject negative or out-of-bounds `off`/`len` with a
@@ -430,10 +437,15 @@ pub fn walk_map_entries<'a>(
 /// Constructor ids for building an aeson `Number (Scientific coeff exp)`.
 #[derive(Clone, Copy)]
 pub struct NumberConIds {
+    /// `Number` constructor (arity 1, wraps a `Scientific`).
     pub number: DataConId,
+    /// `Scientific` constructor (arity 2: coefficient `Integer`, base10Exponent `Int`).
     pub scientific: DataConId,
+    /// `IS` — the single-machine-word `Integer` constructor.
     pub is: DataConId,
+    /// `IP` — the positive-multi-limb `Integer` constructor.
     pub ip: DataConId,
+    /// `IN` — the negative-multi-limb `Integer` constructor.
     pub in_: DataConId,
 }
 

@@ -55,7 +55,14 @@ pub enum ReadError {
 
 /// 4-byte magic: ASCII 'TPLR'
 pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
+/// Wire format major version. A payload whose major version differs from
+/// this build's is rejected (`ReadError::UnsupportedVersion`) — bump this
+/// only on a breaking shape change, in the same commit as the Haskell
+/// serializer and the regenerated fixture corpora.
 pub const VERSION_MAJOR: u16 = 1;
+/// Wire format minor version. An older minor within the same major is
+/// accepted (forward-compatible read); a newer minor than this build
+/// supports is rejected.
 pub const VERSION_MINOR: u16 = 1;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;

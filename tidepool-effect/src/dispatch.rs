@@ -231,7 +231,11 @@ impl<'a, U> EffectContext<'a, U> {
 /// }
 /// ```
 pub trait EffectHandler<U = ()> {
+    /// The Haskell-side effect request this handler consumes, decoded from
+    /// the Core `Value` via [`FromCore`].
     type Request: FromCore;
+
+    /// Handle one decoded request and produce a response.
     fn handle(
         &mut self,
         req: Self::Request,
@@ -248,6 +252,7 @@ pub trait EffectHandler<U = ()> {
 /// You don't implement this manually — it's derived for `frunk::HList![H0, H1, ...]`
 /// when each `Hi: EffectHandler`.
 pub trait DispatchEffect<U = ()> {
+    /// Route `request` to the handler at position `tag` in the HList and run it.
     fn dispatch(
         &mut self,
         tag: u64,

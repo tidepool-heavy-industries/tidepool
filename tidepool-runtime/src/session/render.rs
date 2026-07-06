@@ -26,8 +26,11 @@ use tidepool_repr::{Generation, SessionModule};
 /// that later `instance` declarations can see the methods.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExportItem {
+    /// A function/value binder.
     Value { name: String },
+    /// A type/data constructor head plus its data-constructor children.
     Type { name: String, cons: Vec<String> },
+    /// A typeclass head plus its method names.
     Class { name: String, methods: Vec<String> },
 }
 
@@ -147,10 +150,12 @@ pub struct DeclTurn {
 /// (`Generation(0)` is the empty session, with no module).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclLog {
+    /// Turns in append order; `turns[i]` is generation `i + 1`.
     pub turns: Vec<DeclTurn>,
 }
 
 impl DeclLog {
+    /// An empty log (`Generation(0)`, no turns).
     #[must_use]
     pub fn new() -> DeclLog {
         DeclLog { turns: Vec::new() }
@@ -196,7 +201,7 @@ impl DeclLog {
     /// both define `rf` (`rf x = x+1` then `rf x = x+2`) would emit two
     /// conflicting `rf` equations — an overlapping-clause pair GHC rejects as
     /// "multiple declarations of rf". The eval-time scope already resolves this
-    /// latest-wins (see [`cumulative_exports_before`]); this mirrors that rule
+    /// latest-wins (see `cumulative_exports_before`); this mirrors that rule
     /// for the flat repaint.
     ///
     /// The rule matches the module scoping: a turn is dropped iff **every** head
@@ -293,7 +298,9 @@ impl ModuleEnv {
 /// A rendered session-library module: its name and source text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedModule {
+    /// The generation-versioned module name (`Tidepool.Session.Lib.G<g>`).
     pub module: SessionModule,
+    /// The rendered module's full Haskell source text.
     pub source: String,
     /// Number of generated lines (pragmas, header, imports) before the user's
     /// declaration text — the offset for mapping GHC's line numbers back to

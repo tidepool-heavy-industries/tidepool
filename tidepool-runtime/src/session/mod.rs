@@ -68,6 +68,8 @@ fn derive_stdlib_include() -> Vec<std::path::PathBuf> {
 /// Errors from the declaration-accumulation path.
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    /// Filesystem I/O failure (creating the session root, writing/reading a
+    /// gen module, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     /// GHC binder extraction failed (parse error in the declaration, or the

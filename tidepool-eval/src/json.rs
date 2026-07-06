@@ -42,25 +42,41 @@ pub struct JsonConIds {
     pub left: Option<DataConId>,
     /// `Right` constructor (arity 1) — `None` when `Either` is not in scope.
     pub right: Option<DataConId>,
+    /// `Object` constructor (arity 1, wraps the backing `Data.Map`).
     pub object: DataConId,
+    /// `Array` constructor (arity 1, wraps the backing cons list).
     pub array: DataConId,
+    /// `String` constructor (arity 1, wraps a `Text`).
     pub string: DataConId,
+    /// `Number` constructor (arity 1, wraps a `Scientific`).
     pub number: DataConId,
     /// `Scientific` (arity 2: coefficient `Integer`, base10Exponent `Int`).
     pub scientific: DataConId,
     /// `Integer` constructors for the `Scientific` coefficient.
     pub is: DataConId,
+    /// `IP` — the positive-multi-limb `Integer` constructor.
     pub ip: DataConId,
+    /// `IN` — the negative-multi-limb `Integer` constructor.
     pub in_: DataConId,
+    /// `Bool` constructor (arity 1, wraps the `True`/`False` payload).
     pub bool_con: DataConId,
+    /// `Null` constructor (arity 0).
     pub null: DataConId,
+    /// `True` constructor (arity 0), the `Bool` payload.
     pub true_con: DataConId,
+    /// `False` constructor (arity 0), the `Bool` payload.
     pub false_con: DataConId,
+    /// `Data.Map.Strict.Bin` — internal balanced-tree node backing `Object`.
     pub bin: DataConId,
+    /// `Data.Map.Strict.Tip` — the empty-map leaf backing `Object`.
     pub tip: DataConId,
+    /// `I#` — boxed-`Int#` constructor, used for map sizes and integers.
     pub i_hash: DataConId,
+    /// `Text` constructor (arity 3, the GHC `Text ByteArray# Int# Int#` worker).
     pub text: DataConId,
+    /// `:` — cons constructor backing `Array`'s element list.
     pub cons: DataConId,
+    /// `[]` — nil constructor backing `Array`'s element list.
     pub nil: DataConId,
 }
 

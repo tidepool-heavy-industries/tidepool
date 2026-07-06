@@ -21,9 +21,13 @@ use crate::value::Value;
 /// timestamp).
 #[derive(Debug, Clone, Copy)]
 pub struct TimeConIds {
+    /// `Left` constructor (arity 1), wraps the error `Text` on parse failure.
     pub left: DataConId,
+    /// `Right` constructor (arity 1), wraps the parsed `UTCTime`.
     pub right: DataConId,
+    /// `I#` — boxed-`Int#` constructor, boxes the epoch-millis `Int`.
     pub i_hash: DataConId,
+    /// `Text` constructor (arity 3, the GHC `Text ByteArray# Int# Int#` worker).
     pub text: DataConId,
 }
 

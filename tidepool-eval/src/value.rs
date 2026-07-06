@@ -24,16 +24,22 @@ pub enum Value {
     Con(DataConId, Vec<Value>),
     /// Function closure: captured env + binder + body (GHC PAP/FUN).
     Closure {
+        /// The environment captured at the closure's creation site.
         env: Env,
+        /// The lambda's parameter.
         binder: VarId,
+        /// The lambda's body, evaluated once `binder` is bound.
         body: CoreExpr,
     },
     /// Reference to a heap-allocated thunk (GHC Thunk).
     ThunkRef(ThunkId),
     /// Join point continuation (GHC Join Point).
     JoinCont {
+        /// The join point's parameters.
         params: Vec<VarId>,
+        /// The join point's right-hand side.
         body: CoreExpr,
+        /// The environment captured at the join point's definition site.
         env: Env,
     },
     /// Partially-applied data constructor function: carries the constructor id,
@@ -171,7 +177,7 @@ fn detach_children(v: &mut Value, queue: &mut Vec<DropWork>) {
 ///
 /// Covers both spine families: `Con`/`ConFun` field spines AND
 /// `Closure`/`JoinCont` environment chains (the latter via `im`'s own
-/// refcount-aware drop — see [`detach_children`]).
+/// refcount-aware drop — see `detach_children`).
 impl Drop for Value {
     fn drop(&mut self) {
         // Leaves (and already-emptied containers) own nothing recursive — skip
