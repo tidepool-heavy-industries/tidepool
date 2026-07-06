@@ -111,7 +111,7 @@ module Tidepool.Prelude
   , until
     -- * Monadic combinators
   , mapM, mapM_, sequence, sequence_, sequenceA
-  , traverse_, for_
+  , traverse_, for_, for
   , when, unless, void, join, guard
   , forM, forM_
   , (=<<), (>=>), (<=<)  -- (<&>) comes via module Control.Lens
@@ -260,6 +260,7 @@ import Prelude
   , mapM, mapM_, sequence, sequence_, sequenceA
   )
 import Data.Foldable (traverse_, for_)
+import Data.Traversable (for)
 import qualified Prelude as P (show, drop, length, null, dropWhile)
 import Data.Text (Text)
 -- Vendored drop-in for Data.Text: re-exports all of Data.Text but overrides the

@@ -17,13 +17,23 @@ crateName body = case [ l | l <- T.lines body, T.isPrefixOf "name " l || T.isPre
   _       -> ""
 
 -- | In-workspace path-dependency crate names from a Cargo.toml body.
+-- Section-aware: only the real @[dependencies]@ table, NOT
+-- @[dev-dependencies]@ / @[build-dependencies]@ — folding those in creates
+-- test-only back-edges (e.g. tidepool-testing → core) that make the graph
+-- cyclic and collapse 'topoOrder' to @CYCLE:@.
 crateDeps :: Text -> [Text]
 crateDeps body =
   [ T.strip (T.takeWhile (\c -> c /= ' ' && c /= '=') l)
-  | l <- T.lines body
+  | l <- depsSection body
   , T.isPrefixOf "tidepool" (T.strip l)
   , T.isInfixOf "path" l
   ]
+  where
+    -- Lines from just after the [dependencies] header to the next [section].
+    depsSection = takeWhile (not . T.isPrefixOf "[" . T.strip)
+                . drop 1
+                . dropWhile ((/= "[dependencies]") . T.strip)
+                . T.lines
 
 -- | The workspace dependency graph: crate -> its in-workspace deps.
 -- readGlob isolates per-file read failures (#328); a Cargo.toml that fails to
