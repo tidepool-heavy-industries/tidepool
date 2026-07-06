@@ -8,7 +8,7 @@
 //!
 //! Usage: `tidepool-lsp-daemon [--root DIR] [--socket PATH]`
 //!   --root    workspace root (default: current directory)
-//!   --socket  socket path (default: $TIDEPOOL_LSP_SOCK or <root>/.tidepool/lsp.sock)
+//!   --socket  socket path (default: $TIDEPOOL_LSP_SOCK or `<root>/.tidepool/lsp.sock`)
 
 mod diff;
 mod jsonrpc;

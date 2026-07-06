@@ -29,7 +29,7 @@ use tidepool_repr::{CoreExpr, CoreFrame, JoinId, MapLayer, TreeBuilder, VarId};
 /// same unregistered-join error.
 ///
 /// `fresh` is a `VarId` minted strictly above every `VarId` in the tree (see
-/// [`max_var_id`]), one per crossing label. `Translate.hs` can reuse the join's
+/// `max_var_id`), one per crossing label. `Translate.hs` can reuse the join's
 /// own numeric id as the value binder because GHC's `Id`/join uniques share one
 /// disjoint space; a hand-built producer that seeds a 0-based `JoinId`/`VarId`
 /// space could otherwise have `VarId(label.0)` silently shadow a live value
