@@ -280,10 +280,13 @@ pub enum AbortOutcome {
 }
 
 /// Why [`SessionEngine::start_turn`] declined to run a turn (admission control).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StartError {
     /// Too many timed-out evals are still being reaped — shed load.
+    #[error("overloaded: too many timed-out evals are still being reaped")]
     Overloaded,
     /// Every pool slot is busy and none could be evicted.
+    #[error("busy: every pool slot is occupied and none could be evicted")]
     Busy,
 }
 

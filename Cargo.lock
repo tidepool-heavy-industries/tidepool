@@ -3752,6 +3752,7 @@ dependencies = [
  "proptest",
  "rustc-hash",
  "serial_test",
+ "thiserror 1.0.69",
  "tidepool-eval",
  "tidepool-repr",
  "tidepool-testing",

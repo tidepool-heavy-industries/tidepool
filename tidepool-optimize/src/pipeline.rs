@@ -17,9 +17,13 @@ pub const MAX_PIPELINE_ITERATIONS: usize = 1000;
 /// (a pass that keeps reporting a change). A dedicated type replaces the old
 /// `Result<_, String>` so callers match on structure, not a `format!`ed string;
 /// the human-readable text lives in the `Display` impl.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PipelineError {
     /// A pass (or pass sequence) never stopped reporting changes.
+    #[error(
+        "optimization exceeded maximum iterations ({max}); \
+         potential infinite loop in passes: {passes:?}"
+    )]
     MaxIterationsExceeded {
         /// The cap that was hit ([`MAX_PIPELINE_ITERATIONS`]).
         max: usize,
@@ -27,20 +31,6 @@ pub enum PipelineError {
         passes: Vec<String>,
     },
 }
-
-impl std::fmt::Display for PipelineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PipelineError::MaxIterationsExceeded { max, passes } => write!(
-                f,
-                "optimization exceeded maximum iterations ({max}); \
-                 potential infinite loop in passes: {passes:?}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PipelineError {}
 
 /// Statistics from a pipeline run.
 #[derive(Debug, Clone, Default)]

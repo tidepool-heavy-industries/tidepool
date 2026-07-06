@@ -244,15 +244,19 @@ fn unbox_int_with(v: &Value, is_int_con: &dyn Fn(DataConId) -> bool) -> Option<i
 }
 
 /// Why a strict Text decode was rejected.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TextShapeError {
     /// Not a 3-field Text worker con.
+    #[error("not a 3-field Text worker constructor")]
     WrongShape,
     /// The backing field has no recognizable byte form (see [`text_backing`]).
+    #[error("Text backing field has no recognizable byte form")]
     BadBacking,
     /// An off/len field did not unbox to an Int.
+    #[error("Text off/len field did not unbox to an Int")]
     BadOffLen,
     /// Negative or out-of-bounds slice.
+    #[error("Text slice out of bounds: off={off}, len={len}, backing len={ba_len}")]
     BadSlice {
         /// The requested offset.
         off: i64,
