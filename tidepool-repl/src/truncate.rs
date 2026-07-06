@@ -31,6 +31,21 @@ use serde_json::{Map, Value};
 /// emits, which the pass-through patch turns into a no-op.
 pub const RESULT_BUDGET: usize = 4096;
 
+/// Fold-forward ceiling for the `it`-bound bare-expression path
+/// ([`crate::session::Session::run_bare_expr`]): a rendered result above this
+/// size skips the structural preview entirely — see [`truncate_for_it`].
+/// ~8× [`RESULT_BUDGET`]: well past "a bit too big to show," but small enough
+/// that the header collapse fires before a genuinely huge value costs real
+/// time to render/copy.
+pub const HUGE_CEILING: usize = RESULT_BUDGET * 8;
+
+/// The neutral (non-recipe, non-type-specific) affordance note appended to a
+/// truncated/huge `it`-bound result's hint — see `plans/README.md`'s wording
+/// rule: never "fold it", never a type-specific hint (`Map.fromListWith`,
+/// `.path`, …), just the existence of `it` as the escape hatch.
+const IT_NOTE: &str =
+    "result too large to render fully; bound to `it` — use functions to summarize or inspect it";
+
 /// Rendered-JSON chars per `:stub` page. Well above the common oversized-field
 /// size so a fetch like the 4470-char dogfooding case round-trips in ONE page;
 /// genuinely huge stubs (a whole-file readFile) come back paged.
@@ -138,6 +153,35 @@ pub fn truncate_result(v: Value) -> (Value, Vec<Value>, Option<String>) {
         ))
     };
     (truncated, stubs, hint)
+}
+
+/// Fold-forward sibling of [`truncate_result`] for the `it`-bound
+/// bare-expression response (`Session::run_bare_expr`): a result whose
+/// rendered size exceeds [`HUGE_CEILING`] collapses to a terse header —
+/// `{"type": <type_display>, "size": <chars>, "note": ..}` — with NO
+/// structural preview at all, while the full value is still stashed as
+/// `stub_0` (`:stub 0` pages it, exactly like a normal truncation stub).
+/// Below `HUGE_CEILING`, this defers to [`truncate_result`]'s existing
+/// structural truncation, only appending the `it` affordance note (type +
+/// rendered size) to its hint. `type_display` is the caller's already-known
+/// Haskell type (e.g. `binder.type_display`); `None` renders as `_`.
+pub fn truncate_for_it(
+    v: Value,
+    type_display: Option<&str>,
+) -> (Value, Vec<Value>, Option<String>) {
+    let size = val_size(&v);
+    let ty = type_display.unwrap_or("_");
+    if size > HUGE_CEILING {
+        let header = serde_json::json!({
+            "type": ty,
+            "size": size,
+            "note": IT_NOTE,
+        });
+        return (header, vec![v], Some(IT_NOTE.to_string()));
+    }
+    let (out, stubs, hint) = truncate_result(v);
+    let hint = hint.map(|h| format!("{h} — type: {ty}, ~{size} chars; {IT_NOTE}"));
+    (out, stubs, hint)
 }
 
 /// Port of `truncArr`: keep elements that fit the running budget (charging
@@ -444,6 +488,69 @@ mod tests {
         assert_eq!(stubs.len(), 1);
         assert_eq!(stubs[0], json!("s".repeat(5000)));
         assert!(hint.unwrap().contains(":stub"));
+    }
+
+    // ---- truncate_for_it ----
+
+    #[test]
+    fn truncate_for_it_passthrough_when_small() {
+        let v = json!({"a": 1});
+        let (out, stubs, hint) = truncate_for_it(v.clone(), Some("Int"));
+        assert_eq!(out, v);
+        assert!(stubs.is_empty());
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn truncate_for_it_mid_tier_appends_neutral_note_with_type_and_size() {
+        let big = "x".repeat(4470);
+        let v = json!({"region": big});
+        let (out, stubs, hint) = truncate_for_it(v, Some("Region"));
+        // Structural truncation is unchanged (same shape truncate_result gives).
+        assert_eq!(out["region"], json!("[~4472 chars -> stub_0]"));
+        assert_eq!(stubs.len(), 1);
+        let hint = hint.expect("mid-tier truncation must still produce a hint");
+        assert!(
+            hint.contains(":stub 0"),
+            "mid-tier hint must still name the fetch command: {hint}"
+        );
+        assert!(
+            hint.contains("Region") && hint.contains("`it`"),
+            "mid-tier hint must carry the type + the `it` affordance: {hint}"
+        );
+        assert!(
+            !hint.to_lowercase().contains("fold"),
+            "the affordance note must be neutral, not a fold-specific recipe: {hint}"
+        );
+    }
+
+    #[test]
+    fn truncate_for_it_huge_collapses_to_header_and_stashes_full_value() {
+        let s = "y".repeat(HUGE_CEILING + 1000);
+        let v = json!(s);
+        let (out, stubs, hint) = truncate_for_it(v.clone(), Some("Text"));
+        let obj = out
+            .as_object()
+            .expect("huge result must render as a header object");
+        assert_eq!(obj["type"], json!("Text"));
+        assert_eq!(obj["size"], json!(val_size(&v)));
+        let note = obj["note"].as_str().expect("header must carry a note");
+        assert!(note.contains("`it`") && !note.to_lowercase().contains("fold"));
+        assert_eq!(hint.as_deref(), Some(note));
+        // The FULL value is stashed as stub_0, fetchable via stub_fetch.
+        assert_eq!(stubs.len(), 1);
+        assert_eq!(stubs[0], v);
+        let fetched = stub_fetch(&stubs, 0, None);
+        // Large enough to page (well over STUB_PAGE_CHARS), but the first
+        // page must start with the real content, not a marker.
+        assert_eq!(fetched["stub"], json!(0));
+    }
+
+    #[test]
+    fn truncate_for_it_missing_type_display_renders_placeholder() {
+        let s = "z".repeat(HUGE_CEILING + 1);
+        let (out, _stubs, _hint) = truncate_for_it(json!(s), None);
+        assert_eq!(out["type"], json!("_"));
     }
 
     // ---- stub_fetch ----
