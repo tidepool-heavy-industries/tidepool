@@ -394,7 +394,7 @@ fn gen_lam(ty: SimpleType, depth: u32, mut ctx: Context) -> BoxedStrategy<(TreeB
     match ty {
         SimpleType::Fun(a, b) => {
             let binder = ctx.add_var(*a);
-            gen_expr(*b, depth, ctx)
+            gen_expr(*b, depth.saturating_sub(1), ctx)
                 .prop_map(move |(mut builder, body)| {
                     let root = builder.push(CoreFrame::Lam { binder, body });
                     (builder, root)

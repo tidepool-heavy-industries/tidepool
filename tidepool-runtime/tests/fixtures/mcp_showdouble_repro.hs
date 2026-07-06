@@ -70,7 +70,7 @@ say :: Text -> M ()
 say t = do
   send (Print t)
   v <- send (KvGet "__sayChars")
-  let cur = case v of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let cur = case v of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   send (KvSet "__sayChars" (toJSON (cur + T.length t)))
 
 showI :: Int -> Text
@@ -158,5 +158,5 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)
