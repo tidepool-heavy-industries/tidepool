@@ -358,8 +358,9 @@ result = classify (Array [Number 42.0])
 // Test 6: toJSON + case match (construct via typeclass, then dispatch)
 // ---------------------------------------------------------------------------
 
+// #342 FIXED (Data.Scientific restored as the exact JSON number carrier,
+// b4748de3): toJSON/Number case-matching works. Active regression test.
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn tojson_then_case_match() {
     let src = r#"
 module Test where
@@ -589,8 +590,10 @@ result = classify (object ["a" .= (1 :: Int), "b" .= (2 :: Int)])
 // This is the closest reproduction of the actual failing code.
 // ---------------------------------------------------------------------------
 
+// #342 FIXED (Data.Scientific restored as the exact JSON number carrier,
+// b4748de3): valSize/truncGo over Number-bearing Value works. Active
+// regression test.
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn preamble_valsize_truncgo_pattern() {
     let src = r#"
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
@@ -828,8 +831,9 @@ result =
     );
 }
 
+// #342 FIXED (Data.Scientific restored as the exact JSON number carrier,
+// b4748de3): show on Number derived from toJSON works. Active regression test.
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn show_value_number_from_tojson_int() {
     // Reproduces the paginateResult crash: show on Number where the Double
     // comes from toJSON (someInt) — i.e., Number (fromIntegral n) where n
@@ -890,8 +894,10 @@ result =
     );
 }
 
+// #342 FIXED (Data.Scientific restored as the exact JSON number carrier,
+// b4748de3): showDouble inside the Eff continuation tree works. Active
+// regression test.
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn show_double_mcp_preamble_context() {
     // Reproduce the FULL MCP context: Eff stack return type means GHC compiles
     // differently (continuations, effect dispatch). The result is Eff-wrapped
@@ -1114,8 +1120,11 @@ result = do
 /// EXACT MCP reproduction: full preamble with all 10 effect types, Library,
 /// pagination helpers, and the showDouble-triggering user code.
 /// Source is loaded from the filesystem to match exactly what tidepool-extract sees.
+///
+/// The fixture's `result :: M Value` sends real effects (KvSet/KvGet/Ask), so
+/// it must run through effect dispatch (`run` + mock handlers) — `run_pure`
+/// skips dispatch entirely and is only for effect-free `Eff`-free programs.
 #[test]
-#[ignore = "exposes #296 — test evaluates Eff purely and hits TAG_CLOSURE"]
 fn show_double_exact_mcp_repro() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let repro_src = manifest
@@ -1128,11 +1137,17 @@ fn show_double_exact_mcp_repro() {
     }
     let src = std::fs::read_to_string(&repro_src).unwrap();
     let user_lib = manifest.parent().unwrap().join(".tidepool").join("lib");
-    let mut h = harness();
+    let mut h = harness().with_effects_module();
     if user_lib.exists() {
         h = h.with_include(user_lib);
     }
-    let result = h.run_pure(&src, "result").into_result();
+    let result = h
+        .run(
+            &src,
+            "result",
+            tidepool_testing::eval_harness::mock::min_stack(),
+        )
+        .into_result();
     assert!(
         result.is_ok(),
         "MCP repro should not crash: {:?}",
@@ -1143,8 +1158,10 @@ fn show_double_exact_mcp_repro() {
 /// Test showDouble in an Eff-wrapped result binding with Library import.
 /// This matches what MCP does: module Expr with all effect types, Library,
 /// and the paginateResult wrapper calling show on Value containing Number.
+///
+/// `result :: M Value` sends real effects (KvSet, Ask), so it must run
+/// through effect dispatch (`run` + mock handlers), not `run_pure`.
 #[test]
-#[ignore = "exposes #296 — test evaluates Eff purely and hits TAG_CLOSURE"]
 fn show_double_in_eff_with_library() {
     let src = r#"
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
@@ -1210,9 +1227,15 @@ result = do
         eprintln!("Skipping: .tidepool/lib/Library.hs not found");
         return;
     }
+    use tidepool_testing::eval_harness::mock::{MockAsk, MockConsole, MockKv};
     let result = harness()
+        .with_effects_module()
         .with_include(user_lib)
-        .run_pure(src, "result")
+        .run(
+            src,
+            "result",
+            frunk::hlist![MockConsole, MockKv::new(), MockAsk],
+        )
         .into_result();
     assert!(
         result.is_ok(),

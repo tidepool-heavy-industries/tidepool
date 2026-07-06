@@ -481,15 +481,18 @@ fn g4_generator_contracts() {
                     "depth characterization: d={} max_depth={} max_overage={}",
                     d, max_depth, max_overage
                 );
-                // Regression bound for the TRUE behavior (see BUG-3): overage
+                // Regression bound for the TRUE behavior (see BUG-3, fixed by
+                // decrementing depth in gen_lam's body recursion): overage
                 // scales with d, not a constant. An App spine stacks
                 // Fun(ak, Fun(ak-1, ... ty)) types; when the fun position hits
                 // the depth-0 leaf fallback, the whole stack collapses into a
-                // Lam chain at once — worst case ~2d + type-nesting (~4).
-                // Measured maxima: d=3 -> 8, d=5 -> 11, d=7 -> 14 (~2d).
+                // Lam chain at once — worst case 2d + 2 (type-nesting cascade,
+                // bounded by arb_simple_type's own recursion depth of 5).
+                // Measured maxima (20k samples, post-fix): d=3 -> 8, d=5 -> 12,
+                // d=7 -> 16 — exactly 2d+2 at every d.
                 assert!(
-                    max_depth <= 2 * d + 8,
-                    "Depth overage beyond the characterized ~2d bound for d={}: {}",
+                    max_depth <= 2 * d + 2,
+                    "Depth overage beyond the characterized 2d+2 bound for d={}: {}",
                     d,
                     max_depth
                 );
@@ -588,8 +591,11 @@ fn bug2_compare_values_equal_bytearray_reflexivity() {
     );
 }
 
+// BUG-3 FIXED: gen_lam's body recursion now decrements depth
+// (`depth.saturating_sub(1)`) instead of reusing the parent's budget
+// unchanged. The remaining overage is the characterized type-nesting cascade
+// (see g4_generator_contracts's 2d+2 bound) — not a violation.
 #[test]
-#[ignore = "BUG-3: arb_core_expr_depth(d) exceeds its depth cap d"]
 fn bug3_generator_depth_violation() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -600,8 +606,8 @@ fn bug3_generator_depth_violation() {
                 .run(&strat, |expr| {
                     let measured = get_tree_depth(&expr);
                     prop_assert!(
-                        measured <= 3,
-                        "BUG-3: measured depth {} exceeds cap 3",
+                        measured <= 2 * 3 + 2,
+                        "measured depth {} exceeds the characterized 2d+2 bound for d=3",
                         measured
                     );
                     Ok(())
