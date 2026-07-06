@@ -117,6 +117,9 @@ processFile args path = do
         -- threaded into meta.cbor for the Rust side. Nothing for non-eval
         -- extractions (no @__user@). See GhcPipeline.capturedUserType.
         mCapturedTy = fmap T.pack (prCapturedType result)
+        -- Success-path GHC warnings for the target module (empty on a clean
+        -- compile). See GhcPipeline.prWarnings.
+        warnTexts = map T.pack (prWarnings result)
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
 
     if argDumpCore args
@@ -202,7 +205,7 @@ processFile args path = do
                         [ wiredInMeta, tyconMeta, Map.elems allMetaMap
                         , scanMeta, transitiveMeta ]
             hasIO = any (targetBindingHasIO binds) uniqueNames
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy []
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -210,7 +213,7 @@ processFile args path = do
       (Just targetName, False) ->
         -- Whole-module mode: serialize all bindings as nested lets around the
         -- target (shared with the session path; see 'writeWholeModuleClosed').
-        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName
+        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior)
@@ -233,7 +236,7 @@ processFile args path = do
             -- loader rejects them loudly instead of one silently winning.
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-        let metaCbor = encodeMetadata allMeta False mCapturedTy []
+        let metaCbor = encodeMetadata allMeta False mCapturedTy [] warnTexts
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -262,8 +265,8 @@ processFile args path = do
 -- @targetName@, write its CBOR + the merged DataCon meta. Shared by the normal
 -- whole-module mode ('processFile') and the Wave-3b session modes
 -- ('processSessionFile') so the runtime gets identical JIT-able Core either way.
-writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> String -> IO ()
-writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName = do
+writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> IO ()
+writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName = do
   ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
                , cmReachBinds = reachBinds, cmVarNames = varNames
                } <- translateModuleClosed hscEnv binds targetName
@@ -290,7 +293,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName = do
       allMeta = mergeMetaPreserving
                   [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
       hasIO = targetBindingHasIO binds targetName
-  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy varNames
+  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy varNames warnTexts
   let metaFile = outDir </> "meta.cbor"
   BS.writeFile metaFile metaCbor
   putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -314,6 +317,7 @@ processSessionFile args path = do
         tycons = prTyCons result
         hscEnv = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
+        warnTexts = map T.pack (prWarnings result)
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
     if argDumpCore args then putStrLn (dumpCore binds) else return ()
     let outDir = case argOutDir args of
@@ -321,7 +325,7 @@ processSessionFile args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
     -- The JIT-able Core for the target (same emission as whole-module mode).
-    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName
+    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
   case res of

@@ -95,6 +95,14 @@ pub struct MetaWarnings {
     /// decls, but cross-turn typechecking of references may eventually need a
     /// structured type rather than this string (see GhcPipeline.PipelineResult).
     pub captured_type: Option<String>,
+    /// GHC warnings emitted while compiling the target module (e.g.
+    /// `-Wincomplete-patterns`, name shadowing), rendered by GHC's own
+    /// diagnostic pretty-printer (`Expr.hs:<line>:<col>: warning: ...`).
+    /// Warnings from dependency modules (the preamble, stdlib) are excluded —
+    /// only diagnostics whose source span is the target file survive (see
+    /// `GhcPipeline.warnCollectorHook`). Empty on a clean compile or from an
+    /// older extractor that didn't emit the key.
+    pub warnings: Vec<String>,
 }
 
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
@@ -241,6 +249,15 @@ fn parse_warnings(val: &Value) -> MetaWarnings {
                                             warnings.var_names.push((id, nm.clone()));
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                    "warnings" => {
+                        if let Value::Array(items) = v {
+                            for item in items {
+                                if let Value::Text(t) = item {
+                                    warnings.warnings.push(t.clone());
                                 }
                             }
                         }

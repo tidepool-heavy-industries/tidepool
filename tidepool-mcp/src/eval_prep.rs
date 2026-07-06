@@ -834,4 +834,107 @@ mod tests {
         assert!(src.contains("toJSON _r"), "default must use toJSON _r");
         assert!(!src.contains("toWire _r"), "default must not use toWire _r");
     }
+
+    /// GHC not available outside `nix develop` — the same skip-gate every
+    /// GHC-heavy test in this workspace uses (see `tidepool-runtime/src/lib.rs`).
+    fn ghc_available() -> bool {
+        std::process::Command::new("ghc")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// A REAL compile error, through the REAL `template_haskell` wrapping (the
+    /// preamble + effects module + a multi-line `helpers`/`code` payload), must
+    /// have its `Expr.hs:<n>` line rebased onto the caller's own source — this
+    /// is the eval/repl feedback-loop guarantee (`format_error_with_source` /
+    /// `remap_expr_lines`), not just a property of the synthetic strings the
+    /// other tests in this module use.
+    #[test]
+    fn format_error_with_source_rebases_real_compile_error_line() {
+        if !ghc_available() {
+            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+            return;
+        }
+        let decls = crate::standard_decls();
+        let preamble = crate::build_preamble(&decls, false);
+        let stack = crate::build_effect_stack_type(&decls);
+        // A 3-line user expression: the type error ( `ok + True`, no `Num
+        // Bool` instance) sits on line 2 of the SNIPPET the caller wrote.
+        let code = "let ok = (1 :: Int)\n    bad = ok + True\n in pure bad";
+        let source = template_haskell(&preamble, &stack, code, "", "", None, None);
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let prelude_dir = manifest_dir.parent().unwrap().join("haskell/lib");
+        let user_lib_dir = manifest_dir.parent().unwrap().join(".tidepool/lib");
+        assert!(
+            user_lib_dir.join("Library.hs").exists(),
+            ".tidepool/lib/Library.hs not found"
+        );
+        let effects_dir = crate::ensure_effects_module(&decls).expect("write effects module");
+        let include = [
+            prelude_dir.as_path(),
+            user_lib_dir.as_path(),
+            effects_dir.as_path(),
+        ];
+
+        let err = tidepool_runtime::compile_haskell(&source, "result", &include)
+            .expect_err("expected a type error for `ok + True`");
+        let raw = match err {
+            tidepool_runtime::CompileError::ExtractFailed(msg) => msg,
+            other => panic!("expected ExtractFailed, got: {other:?}"),
+        };
+        // Sanity check the fixture actually reproduces the intended failure
+        // (guards against a future GHC/Prelude change silently no-oping it).
+        assert!(
+            raw.contains("Expr.hs:"),
+            "expected a located GHC diagnostic, got: {raw}"
+        );
+
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Compile Error",
+            &raw,
+            &source,
+        );
+
+        // Rebased: line 2 of the snippet (`bad = ok + True`), NOT the raw
+        // ~150+ line offset into the generated wrapper module.
+        assert!(
+            formatted.contains("Expr.hs:2:"),
+            "expected the error rebased to Expr.hs:2 (the snippet's own line \
+             2), got:\n{formatted}"
+        );
+        assert!(
+            !raw_offset_line_survives(&raw, &formatted),
+            "the wrapper's raw (un-rebased) line number leaked into the \
+             formatted output:\n{formatted}"
+        );
+        assert!(formatted.contains("bad = ok + True"));
+    }
+
+    /// True if `formatted` still contains the (necessarily larger) raw
+    /// `Expr.hs:<n>` line number(s) that `raw` reports — i.e. rebasing didn't
+    /// actually happen.
+    fn raw_offset_line_survives(raw: &str, formatted: &str) -> bool {
+        const NEEDLE: &str = "Expr.hs:";
+        let mut rest = raw;
+        while let Some(idx) = rest.find(NEEDLE) {
+            rest = &rest[idx + NEEDLE.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<usize>() {
+                // The snippet is only 3 lines; any raw line able to survive
+                // rebasing unchanged would have to already be tiny (<=2),
+                // which the generated preamble never is.
+                if n > 2 && formatted.contains(&format!("Expr.hs:{n}:")) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }

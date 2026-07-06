@@ -95,8 +95,11 @@ encodeFlatAltCon = \case
 -- (the eval's @__user@ binding type — see GhcPipeline.capturedUserType) it also
 -- carries @captured_type@. The Rust reader (serial/read.rs parse_warnings)
 -- tolerates either map shape, so omitting the key on Nothing is backward-safe.
-encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text, [Text])] -> Bool -> Maybe Text -> [(Word64, Text)] -> ByteString
-encodeMetadata entries hasIO mCapturedType varNames = tplrHeader <> toStrictByteString (
+-- The trailing @[Text]@ is the GHC diagnostic warnings for the target module
+-- (see GhcPipeline.prWarnings) — an empty list omits the @warnings@ key
+-- entirely, keeping a clean compile's meta.cbor byte-identical to before.
+encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text, [Text])] -> Bool -> Maybe Text -> [(Word64, Text)] -> [Text] -> ByteString
+encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
   <> warningsMap)
@@ -105,13 +108,18 @@ encodeMetadata entries hasIO mCapturedType varNames = tplrHeader <> toStrictByte
     -- so both directions are version-tolerant.
     warningsMap =
       encodeMapLen (1 + maybe 0 (const 1) mCapturedType
-                      + (if null varNames then 0 else 1))
+                      + (if null varNames then 0 else 1)
+                      + (if null warnings then 0 else 1))
       <> encodeString "has_io" <> encodeBool hasIO
       <> maybe mempty (\ty -> encodeString "captured_type" <> encodeString ty) mCapturedType
       <> (if null varNames then mempty else
             encodeString "var_names"
             <> encodeListLen (fromIntegral (length varNames))
             <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) varNames)
+      <> (if null warnings then mempty else
+            encodeString "warnings"
+            <> encodeListLen (fromIntegral (length warnings))
+            <> foldMap encodeString warnings)
 
 encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text, [Text]) -> Encoding
 encodeMetaEntry (dcid, name, tag, arity, bangs, qualName, fieldLabels) =
