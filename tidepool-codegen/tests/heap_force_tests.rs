@@ -71,13 +71,13 @@ fn test_heap_force_on_evaluated_thunk() {
 
         // 1. Result object (Lit)
         let lit_ptr = start;
-        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit_ptr.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
 
         // 2. Already evaluated thunk pointing to that Lit
         let thunk_ptr = start.add(layout::LIT_SIZE);
-        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
         *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = lit_ptr;
 
@@ -96,7 +96,7 @@ fn test_heap_force_on_lit_object() {
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
 
         let lit_ptr = start;
-        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit_ptr.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 100;
 
@@ -119,7 +119,7 @@ fn test_heap_force_on_con_object() {
 
         let con_ptr = start;
         let size = layout::CON_FIELDS_OFFSET;
-        layout::write_header(con_ptr, layout::TAG_CON, size as u16);
+        layout::write_header(con_ptr, layout::TAG_CON, size as u32);
         *(con_ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = 7; // DataConId(7)
         *(con_ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
 

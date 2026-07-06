@@ -139,7 +139,7 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
     }
 
     let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
-    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u16);
+    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u32);
 
     match heap_layout::HeapTag::from_byte(tag_byte) {
         Some(heap_layout::HeapTag::Lit) => {
@@ -195,7 +195,7 @@ pub enum HeapError {
     NullCodePtr,
     /// Size field doesn't match expected size for the object type
     #[error("size mismatch: expected >= {expected_min}, got {actual}")]
-    SizeMismatch { expected_min: u16, actual: u16 },
+    SizeMismatch { expected_min: u32, actual: u32 },
     /// A field pointer is null
     #[error("null pointer in field {index}")]
     NullField { index: usize },
@@ -225,7 +225,7 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
     }
 
     let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
-    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u16);
+    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u32);
 
     if size == 0 {
         return Err(HeapError::ZeroSize);
@@ -241,7 +241,7 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
             let num_captured =
                 *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             let expected_min =
-                (layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * num_captured as usize) as u16;
+                (layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * num_captured as usize) as u32;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -252,7 +252,7 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
         Some(heap_layout::HeapTag::Con) => {
             let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
             let expected_min =
-                (layout::CON_FIELDS_OFFSET as usize + 8 * num_fields as usize) as u16;
+                (layout::CON_FIELDS_OFFSET as usize + 8 * num_fields as usize) as u32;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -261,18 +261,18 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
             }
         }
         Some(heap_layout::HeapTag::Lit) => {
-            if size < layout::LIT_TOTAL_SIZE as u16 {
+            if size < layout::LIT_TOTAL_SIZE as u32 {
                 return Err(HeapError::SizeMismatch {
-                    expected_min: layout::LIT_TOTAL_SIZE as u16,
+                    expected_min: layout::LIT_TOTAL_SIZE as u32,
                     actual: size,
                 });
             }
         }
         Some(heap_layout::HeapTag::Thunk) => {
             // Thunks are at least header + state + code_ptr
-            if size < layout::THUNK_MIN_SIZE as u16 {
+            if size < layout::THUNK_MIN_SIZE as u32 {
                 return Err(HeapError::SizeMismatch {
-                    expected_min: layout::THUNK_MIN_SIZE as u16,
+                    expected_min: layout::THUNK_MIN_SIZE as u32,
                     actual: size,
                 });
             }

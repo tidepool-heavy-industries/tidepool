@@ -444,9 +444,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             // whole traversal; vmctx_ptr is the caller's exclusive borrow.
             ValueFrame::Leaf(p) => unsafe { leaf_to_heap(&*p, &mut *vmctx_ptr) },
             ValueFrame::Con(id, field_ptrs) => unsafe {
-                // The header stores size and num_fields as u16; silently
-                // truncating (`len as u16`) made a 65536-field Con roundtrip to
-                // ZERO fields (proptest_boundary_roundtrip B5). Refuse cleanly at
+                // The header stores num_fields as u16; silently truncating
+                // (`len as u16`) made a 65536-field Con roundtrip to ZERO
+                // fields (proptest_boundary_roundtrip B5). Refuse cleanly at
                 // the same MAX_FIELDS bound heap_to_value enforces on read.
                 if field_ptrs.len() > MAX_FIELDS {
                     return Err(BridgeError::TooManyFields {
@@ -458,7 +458,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                 if ptr.is_null() {
                     return Err(BridgeError::NurseryExhausted);
                 }
-                heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
+                heap_layout::write_header(ptr, layout::TAG_CON, size as u32);
                 *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = id.0;
                 *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) =
                     field_ptrs.len() as u16;
@@ -484,7 +484,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
-            heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+            heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
 
             match lit {
                 Literal::LitInt(n) => {
@@ -559,7 +559,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
-            heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+            heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
             *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_BYTEARRAY as u8;
             *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
             Ok(ptr)

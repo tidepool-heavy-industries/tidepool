@@ -35,10 +35,10 @@ fn alloc_buf(size: usize) -> AllocGuard {
     AllocGuard { ptr, layout }
 }
 
-/// Mirrors the production pattern: write_header(ptr, TAG_CON, (24 + 8*len) as u16)
+/// Mirrors the production pattern: write_header(ptr, TAG_CON, (24 + 8*len) as u32)
 unsafe fn write_con_raw(ptr: *mut u8, con_tag: u64, fields: &[*mut u8]) {
     let len = fields.len();
-    let size = (24 + 8 * len) as u16; // Deliberate cast to mirror production
+    let size = (24 + 8 * len) as u32; // Deliberate cast to mirror production
     write_header(ptr, TAG_CON, size);
     *(ptr.add(CON_TAG_OFFSET) as *mut u64) = con_tag;
     *(ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16) = len as u16;
@@ -91,17 +91,19 @@ mod group1_header {
 
     #[test]
     fn test_header_fenceposts() {
-        let sizes = [0, 1, 8, 255, 256, 257, 4095, 65534, 65535];
+        // Includes fenceposts above the old u16 ceiling (65535) to lock in
+        // the C1 fix: the size field no longer wraps at 65536.
+        let sizes = [0, 1, 8, 255, 256, 257, 4095, 65534, 65535, 65536, 1_000_000];
         let tags = [TAG_CLOSURE, TAG_THUNK, TAG_CON, TAG_LIT, TAG_FORWARDED];
         for &tag in &tags {
             for &size in &sizes {
-                let guard = alloc_buf(65536);
+                let guard = alloc_buf(65536.max(size as usize + 8));
                 unsafe {
-                    write_header(guard.ptr, tag, size as u16);
+                    write_header(guard.ptr, tag, size);
                     assert_eq!(read_tag(guard.ptr), tag, "Tag mismatch for size {}", size);
                     assert_eq!(
                         read_size(guard.ptr),
-                        size as u16,
+                        size,
                         "Size mismatch for size {}",
                         size
                     );
@@ -113,8 +115,8 @@ mod group1_header {
     proptest! {
         #![proptest_config(ProptestConfig { cases: 400, ..ProptestConfig::default() })]
         #[test]
-        fn prop_header_roundtrip(tag in 0..=255u8, size in 0..=65535u16) {
-            let guard = alloc_buf(65536);
+        fn prop_header_roundtrip(tag in 0..=255u8, size in 0..=1_000_000u32) {
+            let guard = alloc_buf(65536.max(size as usize + 8));
             unsafe {
                 write_header(guard.ptr, tag, size);
                 prop_assert_eq!(read_tag(guard.ptr), tag);
@@ -131,19 +133,21 @@ mod group1_header {
             let ptr = unsafe { std::alloc::alloc(layout) };
             unsafe {
                 std::ptr::write_bytes(ptr, 0xAA, 8);
-                write_header(ptr, TAG_CON, size as u16);
-                let padding = std::slice::from_raw_parts(ptr.add(3), 5);
+                write_header(ptr, TAG_CON, size as u32);
+                // Header is tag(1) + size(4) + padding(3); padding now sits at
+                // offset 5..8 (the size field widened from u16 to u32).
+                let padding = std::slice::from_raw_parts(ptr.add(5), 3);
                 if size >= 8 {
                     assert_eq!(
                         padding,
-                        &[0, 0, 0, 0, 0],
+                        &[0, 0, 0],
                         "Padding should be zeroed for size {}",
                         size
                     );
                 } else {
                     assert_eq!(
                         padding,
-                        &[0xAA, 0xAA, 0xAA, 0xAA, 0xAA],
+                        &[0xAA, 0xAA, 0xAA],
                         "Padding should NOT be zeroed for size {}",
                         size
                     );
@@ -167,7 +171,7 @@ mod group2_con {
             unsafe {
                 write_con_raw(guard.ptr, 0xDEADBEEF, &fields);
                 assert_eq!(read_tag(guard.ptr), TAG_CON);
-                assert_eq!(read_size(guard.ptr), byte_size as u16);
+                assert_eq!(read_size(guard.ptr), byte_size as u32);
                 let read_con_tag = *(guard.ptr.add(CON_TAG_OFFSET) as *const u64);
                 assert_eq!(read_con_tag, 0xDEADBEEF);
                 let read_num_fields = *(guard.ptr.add(CON_NUM_FIELDS_OFFSET) as *const u16);
@@ -183,17 +187,22 @@ mod group2_con {
     #[test]
     fn test_con_65535_fields() {
         // Only if ~512KB malloc per case is acceptable: do it as a #[test], not inside proptest.
+        // C1 FIXED: 524304 bytes used to wrap to 16 under the old u16 size
+        // field (524304 % 65536 = 16); the u32 field now stores it exactly.
         let count = 65535;
         let byte_size = 24 + 8 * count; // 524304 bytes
         let guard = alloc_buf(byte_size);
         unsafe {
-            let size_cast = (24 + 8 * count) as u16; // 524304 % 65536 = 16
-            write_header(guard.ptr, TAG_CON, size_cast);
+            write_header(guard.ptr, TAG_CON, byte_size as u32);
             *(guard.ptr.add(CON_TAG_OFFSET) as *mut u64) = 0xCAFE;
             *(guard.ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16) = count as u16;
 
             assert_eq!(read_tag(guard.ptr), TAG_CON);
-            assert_eq!(read_size(guard.ptr), 16); // SILENT WRAP
+            assert_eq!(
+                read_size(guard.ptr),
+                byte_size as u32,
+                "C1 regressed: size wrapped"
+            );
             assert_eq!(*(guard.ptr.add(CON_NUM_FIELDS_OFFSET) as *const u16), 65535);
         }
     }
@@ -211,7 +220,7 @@ mod group3_lit {
         for tag_val in 0..=9u8 {
             let guard = alloc_buf(LIT_SIZE);
             unsafe {
-                write_header(guard.ptr, TAG_LIT, LIT_SIZE as u16);
+                write_header(guard.ptr, TAG_LIT, LIT_SIZE as u32);
                 *guard.ptr.add(LIT_TAG_OFFSET) = tag_val;
                 let heap_tag = LitTag::from_byte(tag_val);
                 assert!(
@@ -236,7 +245,7 @@ mod group3_lit {
         fn prop_lit_nan_preservation(bits in any::<u64>()) {
             let guard = alloc_buf(LIT_SIZE);
             unsafe {
-                write_header(guard.ptr, TAG_LIT, LIT_SIZE as u16);
+                write_header(guard.ptr, TAG_LIT, LIT_SIZE as u32);
                 *guard.ptr.add(LIT_TAG_OFFSET) = LitTag::Double as u8;
                 *(guard.ptr.add(LIT_VALUE_OFFSET) as *mut u64) = bits;
                 let read_bits = *(guard.ptr.add(LIT_VALUE_OFFSET) as *const u64);
@@ -426,7 +435,7 @@ mod group5_thunk {
         let byte_size = 24 + 8 * ncaps;
         let guard = alloc_buf(byte_size);
         unsafe {
-            write_header(guard.ptr, TAG_THUNK, byte_size as u16);
+            write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_UNEVALUATED;
             let mut count = 0;
             for_each_pointer_field(guard.ptr, |_| count += 1);
@@ -440,7 +449,7 @@ mod group5_thunk {
         let byte_size = 24 + 8 * ncaps;
         let guard = alloc_buf(byte_size);
         unsafe {
-            write_header(guard.ptr, TAG_THUNK, byte_size as u16);
+            write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_EVALUATED;
             let mut count = 0;
             for_each_pointer_field(guard.ptr, |_| count += 1);
@@ -457,7 +466,7 @@ mod group5_thunk {
         let byte_size = 24 + 8 * ncaps;
         let guard = alloc_buf(byte_size);
         unsafe {
-            write_header(guard.ptr, TAG_THUNK, byte_size as u16);
+            write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
             let mut count = 0;
             for_each_pointer_field(guard.ptr, |_| count += 1);
@@ -473,12 +482,12 @@ mod group5_thunk {
             unsafe {
                 // 1. Write a Lit in from-space
                 let lit_ptr = from_guard.ptr;
-                write_header(lit_ptr, TAG_LIT, LIT_SIZE as u16);
+                write_header(lit_ptr, TAG_LIT, LIT_SIZE as u32);
 
                 // 2. Write a BlackHole Thunk in from-space capturing the Lit
                 let thunk_ptr = from_guard.ptr.add(LIT_SIZE);
                 let thunk_size = 24 + 8;
-                write_header(thunk_ptr, TAG_THUNK, thunk_size as u16);
+                write_header(thunk_ptr, TAG_THUNK, thunk_size as u32);
                 *thunk_ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
                 *(thunk_ptr.add(THUNK_CAPTURED_OFFSET) as *mut *mut u8) = lit_ptr;
 
@@ -518,30 +527,37 @@ mod bug_repros {
     use super::*;
 
     #[test]
-    #[ignore = "BUG: C1 silent wrap in write_header"]
     fn bug_c1_header_wrap() {
+        // C1 FIXED: the header size field is a u32, so a 65536-byte object no
+        // longer wraps to 0 the way it did under the old u16 field.
         let guard = alloc_buf(8);
         unsafe {
             let size: usize = 65536;
-            write_header(guard.ptr, TAG_CON, size as u16);
+            write_header(guard.ptr, TAG_CON, size as u32);
             let read = read_size(guard.ptr);
-            assert_eq!(read, 0, "Expected 0 due to wrap, but got {}", read);
+            assert_eq!(read, 65536, "C1 regressed: size wrapped to {}", read);
         }
     }
 
     #[test]
-    #[ignore = "BUG: C2 Con writer silent wrap and GC corruption"]
     fn bug_c2_con_writer_wrap_gc() {
+        // C2 FIXED: a Con with 8189 fields (size 24 + 8*8189 = 65536) no
+        // longer wraps its header size to 0, so the GC evacuates the whole
+        // object instead of silently dropping it.
         let verdict = fork_contained(|| {
             let from_guard = alloc_buf(70000);
             let to_guard = alloc_buf(70000);
             unsafe {
-                // Con with 8189 fields => size 24 + 8*8189 = 65536 => 0 as u16
+                // Con with 8189 fields => size 24 + 8*8189 = 65536.
                 let count = 8189;
                 let fields: Vec<*mut u8> = (0..count).map(|_| 0x1234 as *mut u8).collect();
                 write_con_raw(from_guard.ptr, 0xCAFE, &fields);
 
-                assert_eq!(read_size(from_guard.ptr), 0);
+                assert_eq!(
+                    read_size(from_guard.ptr),
+                    65536,
+                    "C2 regressed: size wrapped"
+                );
 
                 let mut root = from_guard.ptr;
                 let roots = [&mut root as *mut *mut u8];
@@ -549,8 +565,8 @@ mod bug_repros {
                 let res = cheney_copy(&roots, from_guard.ptr, from_guard.ptr.add(70000), to_space);
 
                 assert_eq!(
-                    res.bytes_copied, 0,
-                    "Evacuate copied {} bytes but object has 8189 fields",
+                    res.bytes_copied, 65536,
+                    "Evacuate copied {} bytes but object is 65536 bytes (8189 fields)",
                     res.bytes_copied
                 );
             }

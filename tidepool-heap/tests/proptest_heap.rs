@@ -16,7 +16,7 @@ fn any_tag() -> impl Strategy<Value = u8> {
 proptest! {
     /// Test that we can allocate a raw object, write its header, and read it back correctly.
     #[test]
-    fn prop_allocate_and_read_back(tag in any_tag(), size in 16..512u16) {
+    fn prop_allocate_and_read_back(tag in any_tag(), size in 16..512u32) {
         let heap = ArenaHeap::new();
         // Ensure size is 8-byte aligned as required by alloc_raw and layout
         let aligned_size = (size + 7) & !7;
@@ -64,7 +64,7 @@ proptest! {
         let size = 24;
         let ptr = heap.alloc_raw(size).unwrap();
         unsafe {
-            write_header(ptr, tag, size as u16);
+            write_header(ptr, tag, size as u32);
             assert_eq!(read_tag(ptr), tag);
         }
     }
@@ -77,11 +77,11 @@ proptest! {
         let ptr = heap.alloc_raw(size).unwrap();
 
         unsafe {
-            write_header(ptr, TAG_CON, size as u16);
+            write_header(ptr, TAG_CON, size as u32);
             std::ptr::write_unaligned(ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16, num_fields);
 
             assert_eq!(read_tag(ptr), TAG_CON);
-            assert_eq!(read_size(ptr), size as u16);
+            assert_eq!(read_size(ptr), size as u32);
             let read_num_fields = std::ptr::read_unaligned(ptr.add(CON_NUM_FIELDS_OFFSET) as *const u16);
             assert_eq!(read_num_fields, num_fields);
         }
@@ -286,6 +286,6 @@ proptest! {
         prop_assert!(heap.nursery_has_space(used_before));
         let new_raw_ptr = heap.alloc_raw(used_before).unwrap();
         prop_assert_eq!(heap.bytes_used(), used_before);
-        unsafe { write_header(new_raw_ptr, TAG_LIT, used_before as u16); }
+        unsafe { write_header(new_raw_ptr, TAG_LIT, used_before as u32); }
     }
 }

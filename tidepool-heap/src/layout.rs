@@ -181,7 +181,7 @@ impl std::fmt::Display for LitTag {
 
 /// Offset of the tag byte (u8).
 pub const OFFSET_TAG: usize = 0;
-/// Offset of the size field (u16).
+/// Offset of the size field (u32).
 pub const OFFSET_SIZE: usize = 1;
 
 // -- Closure layout (HeapTag::Closure) --
@@ -223,7 +223,7 @@ pub const LIT_SIZE: usize = 24;
 /// Stride between consecutive pointer fields (8 bytes on 64-bit).
 pub const FIELD_STRIDE: usize = 8;
 
-/// tag(1) + size(2) + padding(5) = 8 bytes aligned
+/// tag(1) + size(4) + padding(3) = 8 bytes aligned
 pub const HEADER_SIZE: usize = 8;
 
 /// Read the tag byte from a heap object pointer.
@@ -251,10 +251,10 @@ pub unsafe fn read_heap_tag(ptr: *const u8) -> Option<HeapTag> {
 /// # Safety
 ///
 /// ptr must point to a valid HeapObject.
-pub unsafe fn read_size(ptr: *const u8) -> u16 {
+pub unsafe fn read_size(ptr: *const u8) -> u32 {
     // SAFETY: Caller guarantees ptr points to a valid HeapObject. Size is stored at offset 1
-    // as u16. read_unaligned handles the unaligned u16 read at byte offset 1.
-    std::ptr::read_unaligned(ptr.add(OFFSET_SIZE) as *const u16)
+    // as u32. read_unaligned handles the unaligned u32 read at byte offset 1.
+    std::ptr::read_unaligned(ptr.add(OFFSET_SIZE) as *const u32)
 }
 
 /// Write tag + size header.
@@ -263,20 +263,20 @@ pub unsafe fn read_size(ptr: *const u8) -> u16 {
 ///
 /// ptr must point to allocated memory of at least `HEADER_SIZE` bytes.
 /// size must be at least `HEADER_SIZE`.
-pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u16) {
+pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u32) {
     // SAFETY: Caller guarantees ptr points to at least HEADER_SIZE (8) bytes of writable memory.
-    // Tag is written at offset 0, size at offset 1 (unaligned u16), padding zeroed at offsets 3-7.
+    // Tag is written at offset 0, size at offset 1 (unaligned u32), padding zeroed at offsets 5-7.
     *ptr.add(OFFSET_TAG) = tag;
-    std::ptr::write_unaligned(ptr.add(OFFSET_SIZE) as *mut u16, size);
-    // Padding bytes are from offset 3 to 7 (5 bytes).
+    std::ptr::write_unaligned(ptr.add(OFFSET_SIZE) as *mut u32, size);
+    // Padding bytes are from offset 5 to 7 (3 bytes).
     // Note: decisions.md says variant-specific payload follows at offset 3,
     // but also says all objects are 8-byte aligned.
     // If payload starts at offset 3, we should NOT zero these bytes.
-    // However, the spec ALSO says: "tag(1) + size(2) + padding(5) = 8 bytes aligned"
+    // However, the spec ALSO says: "tag(1) + size(4) + padding(3) = 8 bytes aligned"
     // in the Wave 1 description. We will follow the padding description for now
     // but only zero if size as usize >= HEADER_SIZE to be safe.
     if size as usize >= HEADER_SIZE {
-        std::ptr::write_bytes(ptr.add(3), 0, 5);
+        std::ptr::write_bytes(ptr.add(5), 0, 3);
     }
 }
 
@@ -300,8 +300,9 @@ mod tests {
     #[test]
     fn test_alignment_roundtrip() {
         // Only header is written, so 8-byte buffer is enough for the header.
-        // We test various logical sizes to ensure the size u16 can store them.
-        let sizes = [8, 16, 64, 256, 1024, 65535];
+        // We test various logical sizes to ensure the size u32 can store them,
+        // including values above the old u16 ceiling (65535).
+        let sizes: [u32; 7] = [8, 16, 64, 256, 1024, 65535, 1_000_000];
         for &size in &sizes {
             let mut buffer = [0u8; 8];
             let ptr = buffer.as_mut_ptr();

@@ -781,7 +781,7 @@ impl CompiledEffectMachine {
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
-        heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
+        heap_layout::write_header(ptr, layout::TAG_CON, size as u32);
         *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = con_tag;
         *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = fields.len() as u16;
         for (i, &fp) in fields.iter().enumerate() {

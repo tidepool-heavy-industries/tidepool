@@ -1075,10 +1075,9 @@ fn repro_b5_con_field_count_u16_truncation() {
     }
 }
 
-// The hunting property that discovered B2. `#[ignore]`d so the active suite is
-// GREEN; its committed `.proptest-regressions` seed pins the minimal failure.
-// Remove `#[ignore]` to re-run the search (it will fail and re-shrink to
-// off=-1, len=1).
+// The hunting property that discovered B2. FIXED 2026-06-10 alongside
+// `repro_b2_text_offset_overflow_panic` above; its committed
+// `.proptest-regressions` seed pins the minimal failure (off=-1, len=1).
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
@@ -1094,7 +1093,6 @@ proptest! {
     })]
 
     #[test]
-    #[ignore = "BUG B2: hunting property for Text off+len overflow; seed committed"]
     #[serial]
     fn prop_text_offset_malformed_clean_err(off in -2i64..=2i64, len in 0i64..=3i64) {
         let table = std_table();

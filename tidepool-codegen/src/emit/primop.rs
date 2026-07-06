@@ -2879,7 +2879,7 @@ fn emit_lit_bytearray(
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
     let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY as i64);
     builder
@@ -2904,7 +2904,7 @@ fn emit_lit_boxed_array(
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
     let lt = builder.ins().iconst(types::I8, lit_tag as i64);
     builder

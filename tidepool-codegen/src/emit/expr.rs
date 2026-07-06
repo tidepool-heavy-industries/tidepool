@@ -459,7 +459,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             args.builder
                 .ins()
                 .store(MemFlags::trusted(), tag_val, ptr, 0);
-            let size_val = args.builder.ins().iconst(types::I16, size as i64);
+            let size_val = args.builder.ins().iconst(types::I32, size as i64);
             args.builder
                 .ins()
                 .store(MemFlags::trusted(), size_val, ptr, 1);
@@ -505,7 +505,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             args.builder
                 .ins()
                 .store(MemFlags::trusted(), tag_val, ptr, 0);
-            let size_val = args.builder.ins().iconst(types::I16, size as i64);
+            let size_val = args.builder.ins().iconst(types::I32, size as i64);
             args.builder
                 .ins()
                 .store(MemFlags::trusted(), size_val, ptr, 1);
@@ -1364,7 +1364,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
     args.builder
         .ins()
         .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-    let size_val = args.builder.ins().iconst(types::I16, closure_size as i64);
+    let size_val = args.builder.ins().iconst(types::I32, closure_size as i64);
     args.builder
         .ins()
         .store(MemFlags::trusted(), size_val, closure_ptr, 1);
@@ -1595,7 +1595,7 @@ fn emit_thunk_promised(
     args.builder
         .ins()
         .store(MemFlags::trusted(), tag_val, thunk_ptr, 0);
-    let size_val = args.builder.ins().iconst(types::I16, thunk_size as i64);
+    let size_val = args.builder.ins().iconst(types::I32, thunk_size as i64);
     args.builder
         .ins()
         .store(MemFlags::trusted(), size_val, thunk_ptr, 1);
@@ -2518,7 +2518,7 @@ impl EmitContext {
                     args.builder
                         .ins()
                         .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-                    let size_val = args.builder.ins().iconst(types::I16, closure_size as i64);
+                    let size_val = args.builder.ins().iconst(types::I32, closure_size as i64);
                     args.builder
                         .ins()
                         .store(MemFlags::trusted(), size_val, closure_ptr, 1);
@@ -2553,7 +2553,7 @@ impl EmitContext {
                     args.builder
                         .ins()
                         .store(MemFlags::trusted(), tag_val, ptr, 0);
-                    let size_val = args.builder.ins().iconst(types::I16, size as i64);
+                    let size_val = args.builder.ins().iconst(types::I32, size as i64);
                     args.builder
                         .ins()
                         .store(MemFlags::trusted(), size_val, ptr, 1);
@@ -3230,7 +3230,7 @@ fn emit_lit(
 
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
 
     match lit {
@@ -3343,7 +3343,7 @@ fn emit_lit_bytearray_literal(
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
     let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY as i64);
     builder
@@ -3400,7 +3400,7 @@ fn emit_lit_string(
 
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
     let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_STRING as i64);
     builder
@@ -3482,7 +3482,7 @@ pub(crate) fn ensure_heap_ptr(
             let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
             let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
             builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-            let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+            let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
             builder.ins().store(MemFlags::trusted(), size, ptr, 1);
             let lit_tag_val = builder.ins().iconst(types::I8, lit_tag as i64);
             builder

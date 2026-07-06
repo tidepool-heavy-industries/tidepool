@@ -11,7 +11,7 @@ fn test_for_each_pointer_field_con_zero_fields() {
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         let size = CON_FIELDS_OFFSET;
-        write_header(ptr, TAG_CON, size as u16);
+        write_header(ptr, TAG_CON, size as u32);
         *(ptr.add(CON_TAG_OFFSET) as *mut u64) = 42;
         *(ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
 
@@ -29,7 +29,7 @@ fn test_for_each_pointer_field_closure_zero_captures() {
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         let size = CLOSURE_CAPTURED_OFFSET;
-        write_header(ptr, TAG_CLOSURE, size as u16);
+        write_header(ptr, TAG_CLOSURE, size as u32);
         *(ptr.add(CLOSURE_CODE_PTR_OFFSET) as *mut usize) = 0x12345678;
         *(ptr.add(CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = 0;
 
@@ -66,7 +66,7 @@ fn test_thunk_state_machine() {
     let mut buf_data = AlignedBuf::<THUNK_MIN_SIZE>([0u8; THUNK_MIN_SIZE]);
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
-        write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u16);
+        write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u32);
 
         // 1. Set Unevaluated
         *(ptr.add(THUNK_STATE_OFFSET)) = THUNK_UNEVALUATED;

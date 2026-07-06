@@ -14,7 +14,7 @@ fn test_heap_to_value_lit_int() {
     let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
-        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(ptr.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
 
@@ -33,19 +33,19 @@ fn test_heap_to_value_con_pair() {
     let start = buf_data.0.as_mut_ptr();
     unsafe {
         let lit1 = start;
-        layout::write_header(lit1, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit1, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit1.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit1.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 10;
 
         let lit2 = start.add(layout::LIT_SIZE);
-        layout::write_header(lit2, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit2, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit2.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit2.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 20;
 
         let con = start.add(2 * layout::LIT_SIZE);
         let num_fields = 2;
         let con_size = layout::CON_FIELDS_OFFSET + num_fields * 8;
-        layout::write_header(con, layout::TAG_CON, con_size as u16);
+        layout::write_header(con, layout::TAG_CON, con_size as u32);
         *(con.add(layout::CON_TAG_OFFSET) as *mut u64) = 1;
         *(con.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = num_fields as u16;
         *(con.add(layout::CON_FIELDS_OFFSET) as *mut *const u8) = lit1;
@@ -72,7 +72,7 @@ fn test_heap_to_value_deeply_nested_cons() {
         let mut current = start;
 
         // Leaf LitInt(0)
-        layout::write_header(current, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(current, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(current.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(current.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 0;
 
@@ -82,7 +82,7 @@ fn test_heap_to_value_deeply_nested_cons() {
         for _ in 0..100 {
             let num_fields = 1;
             let con_size = layout::CON_FIELDS_OFFSET + num_fields * 8;
-            layout::write_header(current, layout::TAG_CON, con_size as u16);
+            layout::write_header(current, layout::TAG_CON, con_size as u32);
             *(current.add(layout::CON_TAG_OFFSET) as *mut u64) = 0;
             *(current.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = num_fields as u16;
             *(current.add(layout::CON_FIELDS_OFFSET) as *mut *const u8) = last_ptr;
@@ -113,7 +113,7 @@ fn test_heap_to_value_lit_smallarray_null() {
     let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
-        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_SMALLARRAY as u8;
         // Null pointer for the array data
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
@@ -132,7 +132,7 @@ fn test_heap_to_value_lit_array_null() {
     let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
-        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_ARRAY as u8;
         // Null pointer for the array data
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
@@ -226,14 +226,14 @@ fn null_vmctx_bridge_survives_later_gc() {
     let start = buf_data.0.as_mut_ptr();
     let bridged = unsafe {
         let lit_int = start;
-        layout::write_header(lit_int, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit_int, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit_int.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit_int.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 123;
 
         let con = start.add(layout::LIT_SIZE);
         let num_fields = 1;
         let con_size = layout::CON_FIELDS_OFFSET + num_fields * 8;
-        layout::write_header(con, layout::TAG_CON, con_size as u16);
+        layout::write_header(con, layout::TAG_CON, con_size as u32);
         *(con.add(layout::CON_TAG_OFFSET) as *mut u64) = 7;
         *(con.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = num_fields as u16;
         *(con.add(layout::CON_FIELDS_OFFSET) as *mut *const u8) = lit_int;

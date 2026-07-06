@@ -47,7 +47,7 @@ fn boxed_int(n: i64) -> (Vec<u64>, *mut u8) {
     let mut storage = vec![0u64; (layout::LIT_TOTAL_SIZE / 8) as usize];
     let ptr = storage.as_mut_ptr() as *mut u8;
     unsafe {
-        tidepool_heap::layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+        tidepool_heap::layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
         *ptr.add(layout::LIT_TAG_OFFSET as usize) = layout::LIT_TAG_INT as u8;
         *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = n;
     }
