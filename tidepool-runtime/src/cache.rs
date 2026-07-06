@@ -293,13 +293,23 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
     }
 }
 
+/// Sentinel payload: blake3(expr_bytes) || blake3(meta_bytes), 64 raw bytes.
+/// Anything else (missing, empty, wrong length — an old-format entry from
+/// before this checksum existed) is treated as absent, forcing a MISS.
+const SENTINEL_LEN: usize = 64;
+
 /// Attempts to load the Core expression and metadata from the cache.
 /// Returns `Some((expr_bytes, meta_bytes))` on success.
-/// Only returns data if the sentinel file exists, indicating a complete store.
+/// Beyond mere sentinel existence (completeness), the sentinel's two blake3
+/// digests are recomputed over the loaded bytes and compared: a bit-flip that
+/// still decodes as valid CBOR (cache bug F6 — a corrupted-but-plausible
+/// payload silently served as a different program) now fails the checksum
+/// and falls through to a MISS/recompile instead of being served.
 pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
-    let sentinel = dir.join(format!("{}.ok", key));
-    if !sentinel.exists() {
+    let sentinel_path = dir.join(format!("{}.ok", key));
+    let sentinel = fs::read(&sentinel_path).ok()?;
+    if sentinel.len() != SENTINEL_LEN {
         return None;
     }
 
@@ -309,12 +319,20 @@ pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>)> {
     let expr = fs::read(&expr_path).ok()?;
     let meta = fs::read(&meta_path).ok()?;
 
+    if blake3::hash(&expr).as_bytes() != &sentinel[0..32]
+        || blake3::hash(&meta).as_bytes() != &sentinel[32..64]
+    {
+        return None;
+    }
+
     Some((expr, meta))
 }
 
 /// Stores the compilation results in the cache. Each file is replaced atomically
 /// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
-/// complete — `cache_load` checks for this before reading.
+/// complete — `cache_load` checks for this before reading. The sentinel body is
+/// blake3(expr_bytes) || blake3(meta_bytes) (F6), letting `cache_load` detect a
+/// bit-flip that still decodes as plausible CBOR.
 pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
@@ -351,8 +369,12 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
         return;
     }
 
-    // Sentinel written last — entry is only valid when this exists.
-    let _ = fs::write(&sentinel, b"");
+    // Sentinel written last — entry is only valid when this exists. Its body
+    // binds the checksums, not just completeness (F6).
+    let mut checksum = [0u8; SENTINEL_LEN];
+    checksum[0..32].copy_from_slice(blake3::hash(expr_bytes).as_bytes());
+    checksum[32..64].copy_from_slice(blake3::hash(meta_bytes).as_bytes());
+    let _ = fs::write(&sentinel, checksum);
 }
 
 #[cfg(test)]

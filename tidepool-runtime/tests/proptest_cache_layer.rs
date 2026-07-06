@@ -21,9 +21,12 @@
 //! twin asserting the *correct* behavior (run with `--ignored` to see it
 //! fail). FIXED 2026-06-11: F1a/F1b (length-framed key fields), F2 (include
 //! order preserved), F3a (binary content hash, memoized), F3b/F4 (.hs content
-//! hash through symlinks), F5 (quoted exec targets) — their twins are now the
-//! ACTIVE regression tests and the old buggy-behavior pins are deleted. F6
-//! (payload integrity) remains open with its ignored twin.
+//! hash through symlinks), F5 (quoted exec targets). FIXED 2026-07-06: F6
+//! (payload integrity — the `.ok` sentinel now carries blake3(expr) ||
+//! blake3(meta), so a bit-flip that still decodes as plausible CBOR fails the
+//! checksum and MISSes instead of being served). All fixed findings' twins
+//! are now the ACTIVE regression tests and the old buggy-behavior pins are
+//! deleted.
 //!
 //! Findings table: `plans/proptest-findings-cache.md`.
 
@@ -745,86 +748,54 @@ fn partial_write_states_are_misses() {
     }
 }
 
-/// Sentinel content is ignored — only its existence is checked. Garbage in
-/// .ok still validates the entry (documented; harmless today, but it means
-/// the natural home for an integrity hash is currently unused).
+/// FIXED (F6): the sentinel now carries blake3(expr) || blake3(meta), so
+/// garbage .ok content fails the checksum recompute and falls through to a
+/// MISS/recompile — it no longer validates the entry.
 #[test]
 #[serial]
-fn sentinel_content_is_ignored() {
+fn garbage_sentinel_forces_recompile() {
     let h = Harness::new();
     let src = unique_src("sentinel");
     let original = h.compile(&src, "t", &[]).unwrap();
+    assert_eq!(h.runs(), 1);
     let (_, _, ok) = h.entry_paths();
     fs::write(&ok, b"garbage-not-a-checksum").unwrap();
     let res = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(
         h.runs(),
-        1,
-        "entry still HITs with garbage sentinel content"
+        2,
+        "garbage sentinel content must MISS and recompile"
     );
-    assert_eq!(res.expr, original.expr);
+    assert_eq!(
+        res.expr, original.expr,
+        "recompile must restore the artifact"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// F6: no integrity check — surviving bit-flips are served as valid
+// F6: bit-flip integrity — FIXED, blake3 checksum lives in the sentinel
 // ---------------------------------------------------------------------------
 
-/// BUG F6 (B1, confirmed): there is no checksum binding the cached payloads.
-/// The .ok sentinel guards COMPLETENESS only. A single bit-flip in a value
-/// byte of the cached .cbor still decodes as a VALID CoreExpr — for a
-/// different program — and is served as a cache hit with no recompile. The
-/// test scans for such a surviving flip (the LitInt value byte qualifies)
-/// and proves it is served. Same applies to meta.cbor (e.g. the has_io
-/// warning bit, which gates IOTypeDetected rejection downstream).
+/// FIXED (F6): the .ok sentinel used to guard COMPLETENESS only, so a single
+/// bit-flip in a value byte of the cached .cbor that still decoded as a VALID
+/// CoreExpr — for a different program — was served as a cache hit with no
+/// recompile. The sentinel now also carries blake3(expr) || blake3(meta)
+/// (see `cache_store`/`cache_load`), so a surviving flip fails the checksum
+/// and falls through to a MISS/recompile instead. This is now the ACTIVE
+/// regression test (the old buggy-behavior pin has been deleted, per this
+/// suite's convention for fixed findings).
 #[test]
 #[serial]
-fn corruption_bitflip_served_as_valid_different_program() {
+fn corrupted_payload_should_be_rejected_or_recompiled() {
     let h = Harness::new();
-    let src = unique_src("bitflip");
+    let src = unique_src("bitflip-fix");
     let original = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(h.runs(), 1);
     let (cbor, _, _) = h.entry_paths();
     let bytes = fs::read(&cbor).unwrap();
 
-    // Find a flip that the consumer decoder accepts but that changes meaning.
-    let mut corrupted: Option<Vec<u8>> = None;
-    'outer: for i in (0..bytes.len()).rev() {
-        for bit in 0..8u8 {
-            let mut m = bytes.clone();
-            m[i] ^= 1 << bit;
-            if let Ok(t) = read_cbor(&m) {
-                if t != original.expr {
-                    corrupted = Some(m);
-                    break 'outer;
-                }
-            }
-        }
-    }
-    let corrupted = corrupted
-        .expect("no surviving bit-flip found — integrity may have been added (re-evaluate F6)");
-    fs::write(&cbor, &corrupted).unwrap();
-
-    let served = h.compile(&src, "t", &[]).unwrap();
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F6: bit-flipped entry was served as a HIT (no integrity check)"
-    );
-    assert_ne!(
-        served.expr, original.expr,
-        "BUG F6: corrupted payload decoded to a DIFFERENT program and was served as valid"
-    );
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F6: cached payloads carry no checksum — bit-flips that survive CBOR decoding are served as a different, 'valid' program"]
-fn corrupted_payload_should_be_rejected_or_recompiled() {
-    let h = Harness::new();
-    let src = unique_src("bitflip-fix");
-    let original = h.compile(&src, "t", &[]).unwrap();
-    let (cbor, _, _) = h.entry_paths();
-    let bytes = fs::read(&cbor).unwrap();
+    // Find a flip that the consumer decoder still accepts as valid CBOR but
+    // that changes meaning (the class of corruption the checksum must catch).
     let mut found = None;
     'outer: for i in (0..bytes.len()).rev() {
         for bit in 0..8u8 {
@@ -838,14 +809,20 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
             }
         }
     }
-    if let Some(m) = found {
-        fs::write(&cbor, m).unwrap();
-        let served = h.compile(&src, "t", &[]).unwrap();
-        assert!(
-            h.runs() == 2 || served.expr == original.expr,
-            "corrupted cache payload must never be served as a different program"
-        );
-    }
+    let corrupted =
+        found.expect("no surviving bit-flip found — re-evaluate whether F6 still applies");
+    fs::write(&cbor, &corrupted).unwrap();
+
+    let served = h.compile(&src, "t", &[]).unwrap();
+    assert_eq!(
+        h.runs(),
+        2,
+        "corrupted payload must MISS the checksum and recompile"
+    );
+    assert_eq!(
+        served.expr, original.expr,
+        "recompile must restore the original program, not the corrupted one"
+    );
 }
 
 // ---------------------------------------------------------------------------
