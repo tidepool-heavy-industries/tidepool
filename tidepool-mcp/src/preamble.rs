@@ -269,11 +269,35 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     // without a fundamentally different mechanism (e.g. a closed type family
     // computing a type-level `Bool` for "has ToJSON", dispatched via a
     // separate class hierarchy) — treat as a design question, not a quick fix.
+    // Container instances (added after the floor/Text/Value trio above): a
+    // list/Maybe/tuple/Either result renders as structural JSON (Array/Null/
+    // Object) with its LEAVES still Show-strings — only containers gain
+    // structure, the Show floor is untouched. `Array`/`Object` here are the
+    // vendored `Tidepool.Aeson.Value` constructors, whose payload is a plain
+    // `[Value]`/`Map.Map Key Value` (NOT `Data.Vector.Vector` — this module
+    // deliberately avoids Vector/HashMap primops, see
+    // `Tidepool.Aeson.Value`'s module haddock), so no `Data.Vector` import is
+    // needed: `Array [toWire a, toWire b]` / `Array . map toWire` build the
+    // constructor directly from a list literal, mirroring the `ToJSON [a]`/
+    // `ToJSON (a,b)` instances in that same module. The `[Char]`/`[a]` overlap
+    // is the same one aeson's own `ToJSON` instances carry (`{-# OVERLAPPING
+    // #-}` on `[Char]` is enough — GHC only needs ONE side of an overlapping
+    // pair flagged, and the `Show a => ToWire a` floor above is already
+    // OVERLAPPABLE, so `[a]`/`[Char]`/`Maybe a`/tuples/`Either` all resolve
+    // over it with no extra pragma).
     out.push_str(concat!(
         "class ToWire a where toWire :: a -> Value\n",
         "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . show\n",
         "instance ToWire Text where toWire = String\n",
         "instance ToWire Value where toWire = id\n",
+        "instance {-# OVERLAPPING #-} ToWire [Char] where toWire = String . T.pack\n",
+        "instance ToWire a => ToWire [a] where toWire = Array . map toWire\n",
+        "instance ToWire a => ToWire (Maybe a) where toWire = maybe Null toWire\n",
+        "instance (ToWire a, ToWire b) => ToWire (a, b) where toWire (a, b) = Array [toWire a, toWire b]\n",
+        "instance (ToWire a, ToWire b, ToWire c) => ToWire (a, b, c) where toWire (a, b, c) = Array [toWire a, toWire b, toWire c]\n",
+        "instance (ToWire a, ToWire b) => ToWire (Either a b) where\n",
+        "  toWire (Left a) = Object (Map.singleton \"Left\" (toWire a))\n",
+        "  toWire (Right b) = Object (Map.singleton \"Right\" (toWire b))\n",
         "\n",
     ));
 

@@ -22,6 +22,7 @@
 
 mod common;
 use common::*;
+use serde_json::json;
 
 /// CASE 1 — Text is first-class: bind a Text, then read/transform it.
 ///
@@ -360,5 +361,136 @@ async fn function_applied_at_bind_time() {
         out.expect_ok("reference h").contains("42"),
         "function-applied-at-bind: expected 42, got: {}",
         out.text
+    );
+}
+
+/// CASE 10 — ToWire container instances: lists/Maybe/tuples render as
+/// STRUCTURAL JSON (Array/Null), not a flat Show string, while the Show floor
+/// (a bare custom ADT) is unchanged and String/Text still render bare.
+///
+/// Parses `Turn.text` as JSON and asserts on the `value` field's JSON shape
+/// directly, rather than substring-matching, so a regression to the flat
+/// Show-string form (`"[1,2,3]"` as a JSON STRING) is caught even though it
+/// would still textually "contain" the digits.
+fn value_of(turn: &Turn) -> serde_json::Value {
+    let v = serde_json::from_str::<serde_json::Value>(&turn.text)
+        .unwrap_or_else(|e| panic!("turn text is not JSON ({e}): {}", turn.text));
+    // `run_block_single` (common/mod.rs) deliberately omits `value` from the
+    // merged JSON when it is JSON `null` (its merge loop skips null so it
+    // never clobbers an item field) — so a MISSING key here means the real
+    // value was `null`, exactly the case `Nothing` renders as.
+    v.get("value").cloned().unwrap_or(serde_json::Value::Null)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn towire_list_of_int_renders_as_json_array() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    let out = repl.eval("pure ([1, 2, 3] :: [Int])").await;
+    out.expect_ok("list of Int");
+    let v = value_of(&out);
+    // The CONTAINER is structural (a real JSON array), but each LEAF is still
+    // a Show-string — there is no `ToWire Int` instance, `Int` falls through
+    // the `Show a => ToWire a` floor, so elements are "1"/"2"/"3", not 1/2/3.
+    assert_eq!(
+        v,
+        json!(["1", "2", "3"]),
+        "expected a structural JSON array of Show-string leaves, got: {v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn towire_list_of_records_renders_as_array_of_show_leaves() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.def("data Pt = Pt { px :: Int, py :: Int } deriving Show")
+        .await
+        .expect_ok("def Pt");
+    let out = repl.eval("pure [Pt 1 2, Pt 3 4]").await;
+    out.expect_ok("list of records");
+    let v = value_of(&out);
+    let arr = v
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a JSON array of records, got: {v}"));
+    assert_eq!(arr.len(), 2, "expected 2 elements, got: {v}");
+    for elem in arr {
+        let s = elem
+            .as_str()
+            .unwrap_or_else(|| panic!("record leaf should be a Show-string, got: {elem}"));
+        assert!(
+            s.contains("Pt"),
+            "record leaf should be the derived Show text: {s}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn towire_string_and_text_stay_bare() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    // A bare [Char]/String result stays a plain JSON string, not `["'h'",...]`.
+    let out = repl.eval("pure \"hi\"").await;
+    out.expect_ok("bare String");
+    assert_eq!(
+        value_of(&out),
+        json!("hi"),
+        "String must render bare, not as a list of chars"
+    );
+
+    let out = repl.eval("pure (T.pack \"hi\")").await;
+    out.expect_ok("bare Text");
+    assert_eq!(value_of(&out), json!("hi"), "Text must render bare");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn towire_maybe_renders_as_null_or_payload() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    // The payload is still a Show-string leaf ("3", not JSON number 3 — Int
+    // has no `ToWire` instance of its own) — `Maybe` only contributes the
+    // Just/Nothing -> payload/null STRUCTURE, same leaf-vs-container split as
+    // the list case above.
+    let just_out = repl.eval("pure (Just (3 :: Int))").await;
+    just_out.expect_ok("Just 3");
+    assert_eq!(
+        value_of(&just_out),
+        json!("3"),
+        "Just 3 should unwrap to the bare Show-string payload \"3\", not a string \"Just 3\" or a JSON number"
+    );
+
+    let nothing_out = repl.eval("pure (Nothing :: Maybe Int)").await;
+    nothing_out.expect_ok("Nothing");
+    assert_eq!(
+        value_of(&nothing_out),
+        serde_json::Value::Null,
+        "Nothing should render as JSON null"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn towire_bare_show_only_adt_still_hits_the_floor() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.def("data Color = Red | Green | Blue deriving Show")
+        .await
+        .expect_ok("def Color");
+    let out = repl.eval("pure Green").await;
+    out.expect_ok("bare Show-only ADT");
+    assert_eq!(
+        value_of(&out),
+        json!("Green"),
+        "a non-container Show-only ADT must still hit the Show floor"
     );
 }
