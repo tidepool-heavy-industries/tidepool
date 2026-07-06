@@ -21,13 +21,29 @@ use tidepool_repr::{CoreExpr, CoreFrame, JoinId, MapLayer, TreeBuilder, VarId};
 /// frontend — so codegen's precondition holds regardless of producer.
 ///
 /// A crossing `Join { label, params, rhs, body }` becomes
-/// `LetNonRec { binder = VarId(label.0), rhs = \params -> rhs, body }` (a join
-/// binder and a value binder share one numeric id space, same as
-/// `Translate.hs`'s `Id`/`varId`), and every `Jump { label, args }` anywhere in
-/// the tree becomes the application chain `Var(label) args...`. Converting
-/// every occurrence (not just those inside `body`, as `Translate.hs` does) is
-/// a strict superset: once a label's `Join` is gone, any surviving raw `Jump`
-/// to it — wherever it lives — would hit the same unregistered-join error.
+/// `LetNonRec { binder = fresh, rhs = \params -> rhs, body }`, and every
+/// `Jump { label, args }` anywhere in the tree becomes the application chain
+/// `Var(fresh) args...`. Converting every occurrence (not just those inside
+/// `body`, as `Translate.hs` does) is a strict superset: once a label's `Join`
+/// is gone, any surviving raw `Jump` to it — wherever it lives — would hit the
+/// same unregistered-join error.
+///
+/// `fresh` is a `VarId` minted strictly above every `VarId` in the tree (see
+/// [`max_var_id`]), one per crossing label. `Translate.hs` can reuse the join's
+/// own numeric id as the value binder because GHC's `Id`/join uniques share one
+/// disjoint space; a hand-built producer that seeds a 0-based `JoinId`/`VarId`
+/// space could otherwise have `VarId(label.0)` silently shadow a live value
+/// binder across the join body. Minting fresh sidesteps that regardless of
+/// producer.
+///
+/// PRECONDITION — crossing joins must be non-recursive: no `Jump` back to a
+/// join's own `label` (under a `Lam`) inside its own `rhs`. GHC's `NonRec`
+/// joins and the fuzzer's generators both guarantee this. A self-recursive
+/// join whose back-edge crosses a `Lam` would need a `LetRec` wrapper (the
+/// non-recursive `LetNonRec` here would leave the recursive `Var(fresh)`
+/// unbound in the wrapped `rhs`); that shape is produced by no current
+/// frontend and is not handled — `compute_crossing_joins` scans only `body`,
+/// so it is left untouched rather than mis-lowered.
 pub fn lower_jump_crosses_lam(tree: &CoreExpr) -> CoreExpr {
     if tree.nodes.is_empty() {
         return tree.clone();
@@ -155,6 +171,34 @@ fn reaches_under_lam(
     }
 }
 
+/// Largest `VarId.0` mentioned anywhere in the tree (0 if none), scanning both
+/// references (`Var`) and every binder site (`Lam`/`LetNonRec`/`LetRec`/`Case`
+/// binders, `Join` params). Converted-join binders are minted above this so
+/// they cannot shadow a live value binder — see [`lower_jump_crosses_lam`].
+fn max_var_id(tree: &CoreExpr) -> u64 {
+    let mut max = 0u64;
+    for node in &tree.nodes {
+        match node {
+            CoreFrame::Var(v) => max = max.max(v.0),
+            CoreFrame::Lam { binder, .. }
+            | CoreFrame::LetNonRec { binder, .. }
+            | CoreFrame::Case { binder, .. } => max = max.max(binder.0),
+            CoreFrame::LetRec { bindings, .. } => {
+                for (b, _) in bindings {
+                    max = max.max(b.0);
+                }
+            }
+            CoreFrame::Join { params, .. } => {
+                for p in params {
+                    max = max.max(p.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    max
+}
+
 /// Whole-tree rewrite: convert every crossing `Join` into `LetNonRec` plus a
 /// `Lam` wrapper, and every `Jump` to a converted label into an application
 /// chain. Explicit-stack postorder copy (same shape as
@@ -165,6 +209,21 @@ fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> C
         Enter(usize),
         Exit(usize),
     }
+    // Fresh binder per crossing label, minted strictly above every VarId in
+    // the tree (sorted for deterministic assignment) so a converted join's
+    // value binder never shadows a live in-scope binder.
+    let base = max_var_id(tree) + 1;
+    let mut crossing: Vec<JoinId> = crosses
+        .iter()
+        .filter_map(|(&k, &c)| c.then_some(k))
+        .collect();
+    crossing.sort_by_key(|k| k.0);
+    let fresh: FxHashMap<JoinId, VarId> = crossing
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| (k, VarId(base + i as u64)))
+        .collect();
+
     let mut b = TreeBuilder::new();
     let mut old_to_new: FxHashMap<usize, usize> = FxHashMap::default();
     let mut stack = vec![Step::Enter(root)];
@@ -190,9 +249,9 @@ fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> C
                         if crosses.get(label).copied().unwrap_or(false) =>
                     {
                         // Converted join: a Jump becomes a call to the closure
-                        // now bound at `VarId(label.0)` — Var applied to each
+                        // now bound at `fresh[label]` — Var applied to each
                         // (already-mapped) arg in order.
-                        let head = b.push(CoreFrame::Var(VarId(label.0)));
+                        let head = b.push(CoreFrame::Var(fresh[label]));
                         args.iter().fold(head, |fun, &a| {
                             b.push(CoreFrame::App {
                                 fun,
@@ -216,7 +275,7 @@ fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> C
                             })
                         });
                         b.push(CoreFrame::LetNonRec {
-                            binder: VarId(label.0),
+                            binder: fresh[label],
                             rhs: wrapped,
                             body: new_body,
                         })
@@ -282,11 +341,87 @@ mod tests {
                 "expected no Join/Jump to survive conversion, found {node:?}"
             );
         }
+        // The converted binder is minted fresh, strictly above every VarId in
+        // the tree (p=VarId(1), x=VarId(2) ⇒ max 2 ⇒ base 3), not reused from
+        // the join's own id.
         let root = &lowered.nodes[lowered.nodes.len() - 1];
         match root {
-            CoreFrame::LetNonRec { binder, .. } => assert_eq!(*binder, VarId(k.0)),
+            CoreFrame::LetNonRec { binder, .. } => {
+                assert!(
+                    binder.0 >= 3,
+                    "converted binder must be fresh, got {binder:?}"
+                );
+            }
             other => panic!("expected root LetNonRec, got {other:?}"),
         }
+    }
+
+    /// A crossing join whose numeric label collides with a live in-scope
+    /// `VarId` — the shape a producer that seeds a 0-based `JoinId`/`VarId`
+    /// space would emit — must mint a FRESH binder, never shadow the value.
+    /// Guards the id-space-collision hazard.
+    #[test]
+    fn crossing_join_binder_does_not_shadow_colliding_varid() {
+        // let v0 = 99 in (join 0(p) = p in (\x -> jump 0 v0) 0)
+        // The Jump passes `Var(VarId(0))`, which must keep resolving to the
+        // outer `let v0` — not be captured by a converted binder reusing id 0.
+        let v0 = VarId(0); // collides numerically with JoinId(0)
+        let p = VarId(5);
+        let x = VarId(6);
+        let k = JoinId(0);
+        let mut b = TreeBuilder::new();
+        let rhs = b.push(CoreFrame::Var(p));
+        let ref_v0 = b.push(CoreFrame::Var(v0));
+        let jmp = b.push(CoreFrame::Jump {
+            label: k,
+            args: vec![ref_v0],
+        });
+        let lam = b.push(CoreFrame::Lam {
+            binder: x,
+            body: jmp,
+        });
+        let arg = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let app = b.push(CoreFrame::App { fun: lam, arg });
+        let join = b.push(CoreFrame::Join {
+            label: k,
+            params: vec![p],
+            rhs,
+            body: app,
+        });
+        let outer_rhs = b.push(CoreFrame::Lit(Literal::LitInt(99)));
+        b.push(CoreFrame::LetNonRec {
+            binder: v0,
+            rhs: outer_rhs,
+            body: join,
+        });
+        let tree = b.build();
+
+        let lowered = lower_jump_crosses_lam(&tree);
+
+        // The converted join is the LetNonRec whose rhs is a Lam wrapper; its
+        // binder must be fresh (>= max var 6 ⇒ base 7), never VarId(0).
+        let converted = lowered.nodes.iter().find_map(|n| match n {
+            CoreFrame::LetNonRec { binder, rhs, .. }
+                if matches!(lowered.nodes[*rhs], CoreFrame::Lam { .. }) =>
+            {
+                Some(*binder)
+            }
+            _ => None,
+        });
+        let binder = converted.expect("a converted-join LetNonRec with a Lam rhs");
+        assert!(
+            binder.0 >= 7,
+            "converted binder must be fresh, got {binder:?}"
+        );
+        assert_ne!(binder, v0, "must not reuse the colliding label id 0");
+        // The outer `let v0 = 99` binder is untouched.
+        assert!(
+            lowered
+                .nodes
+                .iter()
+                .any(|n| matches!(n, CoreFrame::LetNonRec { binder, .. } if *binder == v0)),
+            "outer VarId(0) binding must survive"
+        );
     }
 
     /// A recursive join whose back-edge stays inside `rhs` (no Lam crossing)
