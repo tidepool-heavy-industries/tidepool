@@ -172,6 +172,49 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
     }
 }
 
+/// The exact node count of the `Value` [`json_to_value`] would build for `j` —
+/// equal to `json_to_value(j, ids).node_count()` for ANY `ids`, since
+/// [`Value::node_count`] walks tree SHAPE and ignores constructor ids. Lets a
+/// caller reject a response that would overflow the effect-response
+/// materialization cap with a TYPED error, before it reaches the generic
+/// mid-effect abort in `tidepool-codegen`.
+///
+/// Counting the serde tree directly under-counts badly: bridging a JSON object
+/// to a `Data.Map` spine adds a `Bin` node, a boxed `I#` size, and a boxed
+/// `Text` key PER ENTRY (an object bridges several-fold larger than its serde
+/// node count), which is why an approximate serde-side guard let object-heavy
+/// responses slip past and abort. This builds the real `Value` and counts it —
+/// the same work the machine does on the abort path (`resp_val.node_count()`),
+/// so the numbers agree by construction; cheap relative to the network fetch.
+#[must_use]
+pub fn bridged_node_count(j: &serde_json::Value) -> usize {
+    // node_count is shape-only, so every id can be the same placeholder.
+    let z = DataConId(0);
+    let ids = JsonConIds {
+        left: None,
+        right: None,
+        object: z,
+        array: z,
+        string: z,
+        number: z,
+        scientific: z,
+        is: z,
+        ip: z,
+        in_: z,
+        bool_con: z,
+        null: z,
+        true_con: z,
+        false_con: z,
+        bin: z,
+        tip: z,
+        i_hash: z,
+        text: z,
+        cons: z,
+        nil: z,
+    };
+    json_to_value(j, &ids).node_count()
+}
+
 /// Parse a JSON document and wrap the result: `Right v` on success, `Left <err>`
 /// (the serde_json error message as a `Text`) on any parse error. This is the
 /// semantics of the internal `eitherDecodeValue :: Text -> Either Text Value`
@@ -207,4 +250,66 @@ pub fn set_json_con_ids(ids: Option<JsonConIds>) {
 /// The JSON constructor ids cached for this thread, if any.
 pub fn json_con_ids() -> Option<JsonConIds> {
     JSON_CON_IDS.with(|c| c.get())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Naive serde node count (what an approximate guard would use).
+    fn serde_nodes(j: &serde_json::Value) -> usize {
+        match j {
+            serde_json::Value::Array(a) => 1 + a.iter().map(serde_nodes).sum::<usize>(),
+            serde_json::Value::Object(m) => 1 + m.values().map(serde_nodes).sum::<usize>(),
+            _ => 1,
+        }
+    }
+
+    /// A JSON object bridges several-fold larger than its serde tree — each
+    /// entry adds a `Bin` node, a boxed `I#` size, and a boxed `Text` key. This
+    /// gap is exactly why a serde-side guard under-counts and lets object-heavy
+    /// responses reach the abort; `bridged_node_count` measures the real size.
+    #[test]
+    fn object_bridges_several_fold_larger_than_serde_tree() {
+        let obj = serde_json::json!({
+            "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8,
+        });
+        let serde = serde_nodes(&obj);
+        let bridged = bridged_node_count(&obj);
+        assert!(
+            bridged >= 4 * serde,
+            "object should bridge much larger: serde={serde}, bridged={bridged}"
+        );
+    }
+
+    /// `bridged_node_count` is independent of which ids are used (shape-only),
+    /// so the placeholder-ids count equals a real-ids build's `node_count`.
+    #[test]
+    fn bridged_count_is_id_independent() {
+        let j = serde_json::json!({"xs": [1, 2, 3], "s": "hi", "nested": {"k": true}});
+        let z = DataConId(7); // arbitrary non-zero ids
+        let ids = JsonConIds {
+            left: None,
+            right: None,
+            object: z,
+            array: z,
+            string: z,
+            number: z,
+            scientific: z,
+            is: z,
+            ip: z,
+            in_: z,
+            bool_con: z,
+            null: z,
+            true_con: z,
+            false_con: z,
+            bin: z,
+            tip: z,
+            i_hash: z,
+            text: z,
+            cons: z,
+            nil: z,
+        };
+        assert_eq!(bridged_node_count(&j), json_to_value(&j, &ids).node_count());
+    }
 }

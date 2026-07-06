@@ -11,24 +11,13 @@ pub fn parse_json_str(s: &str) -> Result<serde_json::Value, HttpError> {
     serde_json::from_str(s).map_err(|e| HttpError::HttpBadJson(format!("invalid JSON: {e}")))
 }
 
-/// Node count of a serde value: each scalar is 1; a container is 1 + its
-/// children. (Object *keys* aren't serde nodes, but they DO become boxed heap
-/// objects once bridged.)
-fn count_json_nodes(v: &serde_json::Value) -> usize {
-    match v {
-        serde_json::Value::Array(xs) => 1 + xs.iter().map(count_json_nodes).sum::<usize>(),
-        serde_json::Value::Object(m) => 1 + m.values().map(count_json_nodes).sum::<usize>(),
-        _ => 1,
-    }
-}
-
-/// Deliberately well below the machine's `MAX_EFFECT_RESPONSE_NODES` (100_000):
-/// bridging a JSON tree to the tidepool heap MULTIPLIES its node count — object
-/// keys become boxed `Text`, objects become `Data.Map` spines, arrays become
-/// cons cells — so a serde tree this large reliably overflows the bridged cap.
-/// Guarding here turns that generic mid-effect abort into a typed, recoverable
-/// `Left (HttpTooLarge n)` the eval can pattern-match (#335 error-as-data).
-const MAX_RESPONSE_NODES: usize = 32_000;
+/// Headroom below the machine's `MAX_EFFECT_RESPONSE_NODES` (100_000, in
+/// `tidepool_codegen::jit_machine`). The count from `bridged_node_count` is the
+/// exact size of the response `Value`; the machine additionally counts the
+/// `Right`/effect-envelope nodes wrapping it, so this leaves room for those and
+/// guarantees a response that passes here can NEVER hit the generic abort. The
+/// rejected band (bridged 90k–100k) is only genuinely-huge responses.
+const MAX_RESPONSE_NODES: usize = 90_000;
 
 #[derive(Clone)]
 pub struct HttpHandler;
@@ -79,7 +68,10 @@ impl HttpHandler {
     fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, HttpError> {
         let v = serde_json::from_str(body)
             .unwrap_or_else(|_| serde_json::Value::String(body.to_string()));
-        let nodes = count_json_nodes(&v);
+        // Count the BRIDGED node size (what the machine's cap measures), not the
+        // serde tree — a JSON object bridges several-fold larger, so a serde-side
+        // count under-reports and lets object-heavy responses abort.
+        let nodes = tidepool_eval::json::bridged_node_count(&v);
         if nodes > MAX_RESPONSE_NODES {
             return Err(HttpError::HttpTooLarge(nodes as i64));
         }
