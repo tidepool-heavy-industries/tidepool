@@ -290,7 +290,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
     on_ready(machine.cancel_handle());
     let value = machine.run(&table, handlers, user)?;
-    Ok(EvalResult::new(value, table))
+    Ok(EvalResult::new(value, table, warnings.warnings))
 }
 
 /// The outcome of driving a turn that may SUSPEND at the ask boundary (E2
@@ -361,9 +361,11 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
     on_ready(machine.cancel_handle());
     match machine.run_suspendable(&table, handlers, user, ask_tag)? {
-        SuspendableOutcome::Completed(value) => {
-            Ok(SuspendableRun::Completed(EvalResult::new(value, table)))
-        }
+        SuspendableOutcome::Completed(value) => Ok(SuspendableRun::Completed(EvalResult::new(
+            value,
+            table,
+            warnings.warnings,
+        ))),
         SuspendableOutcome::Suspended { request } => Ok(SuspendableRun::Suspended {
             machine,
             table,
@@ -390,7 +392,14 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
     on_ready(machine.cancel_handle());
     match machine.resume_suspended(table, handlers, user, ask_tag, input)? {
         SuspendableOutcome::Completed(value) => {
-            Ok(ResumedRun::Completed(EvalResult::new(value, table.clone())))
+            // No recompile happens on resume (the JIT machine is reused as-is),
+            // so there are no new warnings to report here — they were already
+            // surfaced on the turn that produced this continuation.
+            Ok(ResumedRun::Completed(EvalResult::new(
+                value,
+                table.clone(),
+                Vec::new(),
+            )))
         }
         SuspendableOutcome::Suspended { request } => Ok(ResumedRun::Suspended { request }),
     }
@@ -429,7 +438,7 @@ pub fn compile_and_run_pure_salted(
     table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile(&expr, &table, DEFAULT_NURSERY_SIZE)?;
     let value = machine.run_pure()?;
-    Ok(EvalResult::new(value, table))
+    Ok(EvalResult::new(value, table, warnings.warnings))
 }
 
 /// Compile Haskell source and run it with the given effect handlers,
@@ -556,5 +565,56 @@ mod tests {
         } else {
             panic!("Expected ExtractFailed error, got {:?}", res);
         }
+    }
+
+    /// A compile that SUCCEEDS but triggers a GHC diagnostic (overlapping
+    /// patterns — on by default, no -Wall needed) surfaces that warning in
+    /// `MetaWarnings::warnings` instead of dropping it silently.
+    #[test]
+    #[serial]
+    fn test_compile_warnings_captured() {
+        if !ensure_extract_available() {
+            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+            return;
+        }
+        let source = "module WarnProbe where\n\
+                       f :: Int -> Int\n\
+                       f x = 1\n\
+                       f x = 2\n\
+                       \n\
+                       result :: Int\n\
+                       result = f 0\n";
+        let CompileResult { warnings, .. } =
+            compile_haskell(source, "result", &[]).expect("Failed to compile result");
+        assert!(
+            !warnings.warnings.is_empty(),
+            "expected at least one GHC warning for the overlapping `f` clauses"
+        );
+        assert!(
+            warnings
+                .warnings
+                .iter()
+                .any(|w| w.to_lowercase().contains("overlapping")),
+            "expected an overlapping-patterns warning, got: {:?}",
+            warnings.warnings
+        );
+    }
+
+    /// A clean compile (no diagnostics) reports no warnings.
+    #[test]
+    #[serial]
+    fn test_compile_no_warnings_on_clean_source() {
+        if !ensure_extract_available() {
+            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+            return;
+        }
+        let source = "module CleanProbe where\nresult :: Int\nresult = 1 + 1\n";
+        let CompileResult { warnings, .. } =
+            compile_haskell(source, "result", &[]).expect("Failed to compile result");
+        assert!(
+            warnings.warnings.is_empty(),
+            "expected no warnings for a clean compile, got: {:?}",
+            warnings.warnings
+        );
     }
 }

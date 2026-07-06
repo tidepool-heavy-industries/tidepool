@@ -98,7 +98,7 @@ pub fn write_metadata(
     // Warnings map mirrors `encodeMetadata`'s emission exactly (key order and
     // presence rules) so a read→re-encode of Haskell-produced meta is
     // byte-identical: `has_io` always; `captured_type` only when present;
-    // `var_names` only when non-empty.
+    // `var_names`/`warnings` only when non-empty.
     let mut warnings_pairs = vec![(
         Value::Text("has_io".to_string()),
         Value::Bool(warnings.has_io),
@@ -119,6 +119,18 @@ pub fn write_metadata(
                     .map(|(id, nm)| {
                         Value::Array(vec![Value::Integer((*id).into()), Value::Text(nm.clone())])
                     })
+                    .collect(),
+            ),
+        ));
+    }
+    if !warnings.warnings.is_empty() {
+        warnings_pairs.push((
+            Value::Text("warnings".to_string()),
+            Value::Array(
+                warnings
+                    .warnings
+                    .iter()
+                    .map(|w| Value::Text(w.clone()))
                     .collect(),
             ),
         ));

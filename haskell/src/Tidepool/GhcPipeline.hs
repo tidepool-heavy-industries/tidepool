@@ -10,7 +10,9 @@ import GHC.Driver.Env (hscUpdateFlags)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Driver.Make (load')
-import GHC.Types.Error (mkUnknownDiagnostic)
+import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage)
+import GHC.Utils.Logger (LogAction)
+import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
@@ -33,6 +35,8 @@ import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import GHC.Types.Unique (getKey)
 import Data.Maybe (fromMaybe)
+import Data.List (nub)
+import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName)
@@ -64,6 +68,13 @@ data PipelineResult = PipelineResult
   -- binder (every non-bind extraction — reference turns, fixtures, one-shot
   -- evals — so the field is inert off the bind path).
   , prResultType :: Maybe Type
+  -- | GHC diagnostic warnings (@-Wincomplete-patterns@, name shadowing, ...)
+  -- emitted while compiling the TARGET module — dependency modules (the
+  -- preamble, stdlib) are excluded, see 'warnCollectorHook'. Rendered by
+  -- GHC's own diagnostic pretty-printer, so a warning carries its
+  -- @Expr.hs:<line>:<col>@ location exactly like a compile error does. Empty
+  -- on a clean compile.
+  , prWarnings :: [String]
   }
 
 -- | The normal one-shot eval extraction. Byte-identical to its historical
@@ -115,6 +126,11 @@ runNormalPipeline path includes = do
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
+    -- Success-path warning capture (see 'warnCollectorHook'): installed before
+    -- any typecheck runs so every diagnostic the per-module loop below emits
+    -- for the target file is recorded, not just printed.
+    warnRef <- liftIO (newIORef [])
+    pushLogHookM (warnCollectorHook path warnRef)
     -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
     -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
     -- splice-needed home modules' ms_hspp_opts to -O0 +
@@ -181,17 +197,40 @@ runNormalPipeline path includes = do
     let allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscEnv <- getSession
+    warnings <- liftIO (nub . reverse <$> readIORef warnRef)
     return PipelineResult
       { prBinds  = allBinds
       , prTyCons = allTyCons
       , prHscEnv = hscEnv
       , prCapturedType = capturedTy
       , prResultType   = resultTy
+      , prWarnings     = warnings
       }
 
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+-- | A 'GHC.Utils.Logger.LogAction' hook that records every @SevWarning@
+-- diagnostic whose source span is @targetPath@ (the file being extracted,
+-- NOT a dependency module — the preamble/stdlib compile alongside it in the
+-- same GHC session and must not leak their own warnings into the eval's).
+-- Rendered with 'mkLocMessage', the same formatter GHC's default log action
+-- uses, so the text carries the familiar @Expr.hs:<line>:<col>: warning:
+-- ...@ shape callers already parse compile errors out of. Delegates to
+-- `fallback` unconditionally so normal stderr printing is unaffected — this
+-- only ADDS a capture, it never suppresses.
+warnCollectorHook :: FilePath -> IORef [String] -> LogAction -> LogAction
+warnCollectorHook targetPath ref fallback flags msgClass srcSpan msg = do
+  case msgClass of
+    MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
+      modifyIORef' ref (rendered :)
+    _ -> pure ()
+  fallback flags msgClass srcSpan msg
+  where
+    rendered = renderWithContext defaultSDocContext (mkLocMessage msgClass srcSpan msg)
+    inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
+    inTarget _ = False
 
 -- | The session-setup DynFlags transform shared by BOTH the normal and the
 -- session paths, so the extracted Core is identical regardless of which entry
@@ -243,6 +282,10 @@ runSessionPipeline scope path includes = do
     setSessionDynFlags (extractionDynFlags dflags includes)
     target <- guessTarget path Nothing Nothing
     setTargets [target]
+    -- Success-path warning capture — see the identical install in
+    -- 'runNormalPipeline' for why this must precede the per-module loop.
+    warnRef <- liftIO (newIORef [])
+    pushLogHookM (warnCollectorHook path warnRef)
     let targetModName = capitalize (takeBaseName path)
         -- The injected source-less @Val.G<g>@ modules: exclude from the
         -- downsweep (no source to summarise) — the target's @import@ of them
@@ -324,12 +367,14 @@ runSessionPipeline scope path includes = do
     let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscFinal <- getSession
+    warnings <- liftIO (nub . reverse <$> readIORef warnRef)
     return PipelineResult
       { prBinds        = allBinds
       , prTyCons       = allTyCons
       , prHscEnv       = hscUpdateFlags canonicalizeDFlags hscFinal
       , prCapturedType = capturedTy
       , prResultType   = resultTy
+      , prWarnings     = warnings
       }
 
 -- | Read the inferred type of the @__user@ binding out of a module's

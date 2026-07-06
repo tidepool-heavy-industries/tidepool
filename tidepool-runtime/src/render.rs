@@ -15,11 +15,19 @@ const MAX_LIST_LEN: usize = 10000;
 pub struct EvalResult {
     value: Value,
     table: DataConTable,
+    /// GHC warnings from the compile that produced this result (empty on a
+    /// clean compile, or when the turn didn't recompile — e.g. a resumed
+    /// continuation). See `MetaWarnings::warnings`.
+    warnings: Vec<String>,
 }
 
 impl EvalResult {
-    pub(crate) fn new(value: Value, table: DataConTable) -> Self {
-        Self { value, table }
+    pub(crate) fn new(value: Value, table: DataConTable, warnings: Vec<String>) -> Self {
+        Self {
+            value,
+            table,
+            warnings,
+        }
     }
 
     /// Render the result as structured JSON.
@@ -27,11 +35,19 @@ impl EvalResult {
         self.into()
     }
 
-    /// Pretty-print the JSON representation.
+    /// GHC warnings from the compile that produced this result.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Pretty-print the JSON representation, with a trailing `## Warnings`
+    /// section appended when the compile produced any (a clean compile is
+    /// byte-identical to the pre-warnings rendering — no noise on the happy
+    /// path).
     pub fn to_string_pretty(&self) -> String {
         let j = self.to_json();
         // For simple scalars, use compact form
-        match &j {
+        let rendered = match &j {
             serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
                 j.to_string()
             }
@@ -44,7 +60,17 @@ impl EvalResult {
                 }
             }
             _ => serde_json::to_string_pretty(&j).unwrap_or_else(|_| j.to_string()),
+        };
+        if self.warnings.is_empty() {
+            return rendered;
         }
+        let mut out = rendered;
+        out.push_str("\n\n## Warnings\n");
+        for w in &self.warnings {
+            out.push_str(w.trim_end());
+            out.push('\n');
+        }
+        out
     }
 
     /// Consume and return the inner Value (escape hatch for callers that need raw access).
@@ -533,6 +559,55 @@ mod tests {
         let table = test_table();
         let val = Value::Lit(Literal::LitInt(42));
         assert_eq!(value_to_json(&val, &table, 0), json!(42));
+    }
+
+    /// A clean compile (no warnings) renders byte-identical to the
+    /// pre-warnings shape — no `## Warnings` noise on the happy path.
+    #[test]
+    fn to_string_pretty_no_warnings_is_unchanged() {
+        let table = test_table();
+        let result = EvalResult::new(Value::Lit(Literal::LitInt(42)), table, Vec::new());
+        assert_eq!(result.to_string_pretty(), "42");
+        assert!(!result.to_string_pretty().contains("Warnings"));
+    }
+
+    /// A compile that produced GHC warnings appends them under a `##
+    /// Warnings` section, each warning's text preserved verbatim.
+    #[test]
+    fn to_string_pretty_appends_warnings_section() {
+        let table = test_table();
+        let warnings = vec![
+            "Expr.hs:3:1: warning: [-Woverlapping-patterns]\n    Pattern match is redundant"
+                .to_string(),
+        ];
+        let result = EvalResult::new(Value::Lit(Literal::LitInt(42)), table, warnings);
+        let rendered = result.to_string_pretty();
+        assert!(rendered.starts_with("42\n\n## Warnings\n"));
+        assert!(rendered.contains("Woverlapping-patterns"));
+        assert!(rendered.contains("Pattern match is redundant"));
+    }
+
+    /// Multiple warnings each get their own line under the one section.
+    #[test]
+    fn to_string_pretty_multiple_warnings() {
+        let table = test_table();
+        let warnings = vec!["warning: one".to_string(), "warning: two".to_string()];
+        let result = EvalResult::new(Value::Lit(Literal::LitInt(1)), table, warnings);
+        let rendered = result.to_string_pretty();
+        assert!(rendered.contains("warning: one"));
+        assert!(rendered.contains("warning: two"));
+    }
+
+    /// `warnings()` exposes the raw list independent of rendering.
+    #[test]
+    fn warnings_accessor_returns_raw_list() {
+        let table = test_table();
+        let result = EvalResult::new(
+            Value::Lit(Literal::LitInt(1)),
+            table,
+            vec!["w1".to_string()],
+        );
+        assert_eq!(result.warnings(), &["w1".to_string()]);
     }
 
     #[test]
