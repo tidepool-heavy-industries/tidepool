@@ -257,22 +257,325 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
 /// `emit/expr.rs`; the two MUST agree so the oracle and JIT thunk exactly the
 /// same Con fields (a diverging/erroring sub-expression under a constructor must
 /// not be forced at construction time on either backend).
+///
+/// Explicit work-stack (mirrors [`deep_force`]'s style): a chain of nested
+/// trivial `Con`/`PrimOp` wrappers — e.g. the 1200-deep `Con(NODE, [l, r])`
+/// spines built by the freer-queue proptests — walks this predicate before
+/// `eval_at` ever touches it, so it must be stack-safe on its own.
 fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
+    enum Work {
+        Visit(usize),
+        Combine(usize), // number of children just visited, to AND together
+    }
+    let mut stack = vec![Work::Visit(idx)];
+    let mut results: Vec<bool> = Vec::new();
+    while let Some(w) = stack.pop() {
+        match w {
+            Work::Visit(i) => match &expr.nodes[i] {
+                CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } => results.push(true),
+                CoreFrame::Con { fields, .. } => {
+                    stack.push(Work::Combine(fields.len()));
+                    for &f in fields.iter().rev() {
+                        stack.push(Work::Visit(f));
+                    }
+                }
+                CoreFrame::PrimOp { args, .. } => {
+                    stack.push(Work::Combine(args.len()));
+                    for &a in args.iter().rev() {
+                        stack.push(Work::Visit(a));
+                    }
+                }
+                _ => results.push(false), // App, Case, LetNonRec, LetRec, Join, Jump
+            },
+            Work::Combine(n) => {
+                let start = results.len() - n;
+                let all = results[start..].iter().all(|&b| b);
+                results.truncate(start);
+                results.push(all);
+            }
+        }
+    }
+    results.pop().unwrap_or(false)
+}
+
+/// Evaluate a `Lam` node to a `Closure` value. Never recurses — a lambda
+/// captures its body as an unevaluated subtree, it does not evaluate it — so
+/// this is safe to call directly wherever `LetNonRec`/`LetRec` need a lambda
+/// RHS's value without routing through the [`eval_at`] work-stack machine.
+fn eval_lam_leaf(expr: &CoreExpr, idx: usize, env: &Env) -> Value {
     match &expr.nodes[idx] {
-        CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } => true,
-        CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
-        CoreFrame::PrimOp { args, .. } => args.iter().all(|&a| is_trivial_field(a, expr)),
-        _ => false, // App, Case, LetNonRec, LetRec, Join, Jump
+        CoreFrame::Lam { binder, body } => Value::Closure {
+            env: env.clone(),
+            binder: *binder,
+            body: expr.extract_subtree(*body),
+        },
+        other => unreachable!("eval_lam_leaf called on a non-Lam node: {other:?}"),
     }
 }
 
+/// A pending continuation in [`eval_at`]'s explicit work-stack — what to do
+/// once the sub-evaluation currently in flight produces a value. Replaces
+/// recursive self-calls for structure WITHIN a single `expr` tree (a deep
+/// `App` spine, nested trivial `Con`s, a `Case`-in-scrutinee chain, or a
+/// nested `PrimOp` arg no longer grows the host stack).
+///
+/// What this deliberately does NOT cover: applying a `Closure` still calls
+/// `eval` on the closure's body, and `Join`/`Jump` still drive through
+/// `eval_settled`/`enqueue_jump` (see their doc comments) — both are genuine
+/// nested Rust recursion, mirroring an actual Haskell function call or the
+/// join trampoline's own re-entry, bounded by program logic rather than by
+/// this walker's per-node overhead. Converting those would fight the
+/// documented trampoline design instead of fixing gotcha #5.
+enum Frame {
+    /// `App`: still need `arg`'s value (under the App's own `env`) before
+    /// applying; produced once `fun` is evaluated and forced.
+    AppFun { arg: usize, env: Env },
+    /// `App`: `fun` is forced to `fun_val`; the value just produced is `arg`'s
+    /// (deliberately NOT forced, matching the original laziness).
+    AppArg { fun_val: Value },
+    /// `Con`: field at `node_idx`'s `next_pos - 1` produced the value; resume
+    /// scanning fields from `next_pos`, with `built` accumulated so far.
+    ConField {
+        node_idx: usize,
+        next_pos: usize,
+        built: Vec<Value>,
+        env: Env,
+    },
+    /// `PrimOp`: mirrors `ConField`, but every arg participates (no
+    /// triviality split) and is FORCED as it arrives, matching the original
+    /// per-arg `force(eval_at(..))`.
+    PrimOpArg {
+        node_idx: usize,
+        next_pos: usize,
+        built: Vec<Value>,
+        env: Env,
+    },
+    /// `Case`: the scrutinee's value is ready; dispatch against the
+    /// alternatives at `node_idx` once forced.
+    CaseDispatch { node_idx: usize, env: Env },
+}
+
+/// Continue building the `Con` at `node_idx` from field position `pos`,
+/// given the values accumulated so far in `built`. Returns the finished
+/// value if every remaining field resolves immediately (non-trivial fields
+/// thunk in O(1)), or parks a [`Frame::ConField`] and asks the driver to
+/// evaluate the next trivial field.
+fn con_step(
+    expr: &CoreExpr,
+    node_idx: usize,
+    mut pos: usize,
+    mut built: Vec<Value>,
+    env: Env,
+    heap: &mut dyn Heap,
+    stack: &mut Vec<Frame>,
+) -> Mode {
+    let (tag, fields) = match &expr.nodes[node_idx] {
+        CoreFrame::Con { tag, fields } => (*tag, fields),
+        other => unreachable!("con_step resumed on a non-Con node: {other:?}"),
+    };
+    while pos < fields.len() {
+        let f = fields[pos];
+        // Thunkify non-trivial fields to enable lazy evaluation, using the
+        // SAME triviality predicate as the JIT (`is_trivial_field` in
+        // tidepool-codegen `emit/expr.rs`). A field is evaluated eagerly only
+        // when it is already in WHNF or built entirely from trivial parts;
+        // anything that could diverge or error when forced — including a
+        // `PrimOp`/`Con` with a non-trivial argument like
+        // `Just (1 + <diverging>)` — is thunked, so constructing a Con never
+        // forces it on either backend.
+        if is_trivial_field(f, expr) {
+            stack.push(Frame::ConField {
+                node_idx,
+                next_pos: pos + 1,
+                built,
+                env: env.clone(),
+            });
+            return Mode::Eval(f, env);
+        }
+        let subtree = expr.extract_subtree(f);
+        let thunk_id = heap.alloc(env.clone(), subtree);
+        built.push(Value::ThunkRef(thunk_id));
+        pos += 1;
+    }
+    Mode::Unwind(Value::Con(tag, built))
+}
+
+/// Continue gathering the `PrimOp` at `node_idx`'s args from position `pos`,
+/// dispatching once every arg (forced) is collected. Mirrors [`con_step`]'s
+/// shape but without a triviality split — every primop arg is evaluated.
+fn primop_step(
+    expr: &CoreExpr,
+    node_idx: usize,
+    pos: usize,
+    built: Vec<Value>,
+    env: Env,
+    heap: &mut dyn Heap,
+    stack: &mut Vec<Frame>,
+) -> Result<Mode, EvalError> {
+    let (op, args) = match &expr.nodes[node_idx] {
+        CoreFrame::PrimOp { op, args } => (*op, args),
+        other => unreachable!("primop_step resumed on a non-PrimOp node: {other:?}"),
+    };
+    if pos < args.len() {
+        stack.push(Frame::PrimOpArg {
+            node_idx,
+            next_pos: pos + 1,
+            built,
+            env: env.clone(),
+        });
+        return Ok(Mode::Eval(args[pos], env));
+    }
+    dispatch_primop_with_intercepts(op, built, heap).map(Mode::Unwind)
+}
+
+/// Primops that need `heap` access for deep forcing (Text/JSON/ISO-8601
+/// decoding) — intercepted here, ahead of the pure [`dispatch_primop`] table.
+fn dispatch_primop_with_intercepts(
+    op: PrimOpKind,
+    arg_vals: Vec<Value>,
+    heap: &mut dyn Heap,
+) -> Result<Value, EvalError> {
+    match op {
+        // ShowDoubleAddr/ShowSignedDoubleAddr: the single-field-Con
+        // arms below are a deliberately narrower mirror of
+        // `shapes::unbox_double`/`unbox_int` — this function has no
+        // `&DataConTable` in scope (only `Value`/`Heap`), so they
+        // can't verify the con is actually named `D#`/`I#` and
+        // instead accept ANY single-field Con after forcing its
+        // field. Not a migration candidate without threading a
+        // table through the whole eval_at call chain.
+        PrimOpKind::ShowDoubleAddr => {
+            if arg_vals.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: arg_vals.len(),
+                });
+            }
+            let d = expect_double(&arg_vals[0], heap)?;
+            let s = eval_haskell_show_double(d);
+            let mut bytes = s.into_bytes();
+            bytes.push(0); // null terminator for IndexCharOffAddr
+            Ok(Value::Lit(Literal::LitString(bytes)))
+        }
+        PrimOpKind::ShowSignedDoubleAddr => {
+            // (prec :: Int, d :: Double) — precedence-aware show; must
+            // match the JIT host fn `runtime_show_signed_double_addr`.
+            if arg_vals.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 2,
+                    got: arg_vals.len(),
+                });
+            }
+            let prec = expect_int(&arg_vals[0], heap)?;
+            let d = expect_double(&arg_vals[1], heap)?;
+            let body = eval_haskell_show_double(d);
+            // `showSignedFloat`'s `x < 0` test (so -0.0 does NOT parenthesize).
+            let s = if prec > 6 && d < 0.0 {
+                format!("({body})")
+            } else {
+                body
+            };
+            let mut bytes = s.into_bytes();
+            bytes.push(0);
+            Ok(Value::Lit(Literal::LitString(bytes)))
+        }
+        PrimOpKind::JsonDecode => {
+            // eitherDecodeValue :: Text -> Either Text Value. Parse the
+            // Text's UTF-8 bytes with serde_json and build the aeson
+            // `Either Text Value` ADT (`Left <err>` / `Right v`) — the
+            // SAME builder the JIT host fn uses, so the two agree by
+            // construction. Needs `heap` to force the Text Con's (lazy)
+            // fields, hence handled here, not in `dispatch_primop`.
+            if arg_vals.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: arg_vals.len(),
+                });
+            }
+            let ids = crate::json::json_con_ids().ok_or_else(|| {
+                EvalError::InternalError(
+                    "eitherDecode: aeson Value/Either/Map constructors not in scope".into(),
+                )
+            })?;
+            let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
+            crate::json::decode_json_str(&s, &ids).ok_or_else(|| {
+                EvalError::InternalError(
+                    "eitherDecode: Either (Left/Right) constructors not in scope".into(),
+                )
+            })
+        }
+        PrimOpKind::ParseISO8601 => {
+            // parseISO8601 :: Text -> Either Text UTCTime. Chrono parses
+            // the Text's UTF-8 bytes and builds the `Either Text UTCTime`
+            // ADT — the SAME builder the JIT host fn uses, so the two
+            // agree by construction. Needs `heap` to force the Text Con's
+            // (lazy) fields, hence handled here, not in `dispatch_primop`.
+            if arg_vals.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: arg_vals.len(),
+                });
+            }
+            let ids = crate::time::time_con_ids().ok_or_else(|| {
+                EvalError::InternalError(
+                    "parseISO8601: Either/I#/Text constructors not in scope".into(),
+                )
+            })?;
+            let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
+            Ok(crate::time::parse_iso8601_str(&s, &ids))
+        }
+        _ => dispatch_primop(op, arg_vals, heap),
+    }
+}
+
+/// Driver state for [`eval_at`]'s explicit work-stack: either evaluate the
+/// node at `(idx, env)`, or a value is ready to feed to the frame on top of
+/// the stack (or to return, if the stack is empty).
+enum Mode {
+    Eval(usize, Env),
+    Unwind(Value),
+}
+
 /// Evaluate the node at `idx` in the expression tree.
+///
+/// Iterative: an explicit [`Frame`] stack replaces recursive self-calls for
+/// structure local to `expr` (deep `App` spines, nested trivial `Con`s, a
+/// `Case`-in-scrutinee chain, nested `PrimOp` args), so a 1200-deep expression
+/// evaluates in O(1) host stack. See [`Frame`]'s doc comment for what is
+/// deliberately left as real Rust recursion (closure application, the
+/// Join/Jump trampoline) and why.
 fn eval_at(
     expr: &CoreExpr,
     idx: usize,
     env: &Env,
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut mode = Mode::Eval(idx, env.clone());
+    loop {
+        mode = match mode {
+            Mode::Eval(idx, env) => eval_step(expr, idx, env, heap, &mut stack)?,
+            Mode::Unwind(value) => match stack.pop() {
+                None => return Ok(value),
+                Some(frame) => resume_frame(expr, frame, value, heap, &mut stack)?,
+            },
+        };
+    }
+}
+
+/// One step of the [`eval_at`] driver: produce a value directly (`Unwind`),
+/// or park a [`Frame`] and ask for a sub-node's value (`Eval`).
+fn eval_step(
+    expr: &CoreExpr,
+    idx: usize,
+    env: Env,
+    heap: &mut dyn Heap,
+    stack: &mut Vec<Frame>,
+) -> Result<Mode, EvalError> {
     match &expr.nodes[idx] {
         CoreFrame::Var(v) => {
             let tag = (v.0 >> 56) as u8;
@@ -292,64 +595,33 @@ fn eval_at(
                     SentinelKind::Undefined => EvalError::Undefined,
                 });
             }
-            env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))
+            let val = env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))?;
+            Ok(Mode::Unwind(val))
         }
         // A ByteArray# literal (e.g. a BigNat# payload) becomes a mutable byte
         // array so the byte-array primops (sizeofByteArray#, indexWordArray#, the
         // mpn intercepts) read it uniformly with runtime-allocated arrays.
-        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(Value::ByteArray(std::sync::Arc::new(
-            std::sync::Mutex::new(bytes.clone()),
+        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(Mode::Unwind(Value::ByteArray(
+            std::sync::Arc::new(std::sync::Mutex::new(bytes.clone())),
         ))),
-        CoreFrame::Lit(lit) => Ok(Value::Lit(lit.clone())),
+        CoreFrame::Lit(lit) => Ok(Mode::Unwind(Value::Lit(lit.clone()))),
         CoreFrame::App { fun, arg } => {
-            let mut fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
-            let arg_val = eval_at(expr, *arg, env, heap)?;
-            // `ref mut` + replace/take: Value implements Drop (iterative
-            // spine dismantle), so fields cannot be moved out by pattern.
-            // The swaps are pointer-sized — no clones on this hot path.
-            match fun_val {
-                Value::Closure {
-                    env: ref mut clos_env,
-                    binder,
-                    ref mut body,
-                } => {
-                    let mut new_env = std::mem::replace(clos_env, Env::new());
-                    let body =
-                        std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
-                    new_env.insert(binder, arg_val);
-                    eval(&body, &new_env, heap)
-                }
-                Value::ConFun(tag, arity, ref mut args) => {
-                    let mut args = std::mem::take(args);
-                    args.push(arg_val);
-                    if args.len() == arity {
-                        // Don't force fields — leave thunks intact for lazy evaluation.
-                        // Fields will be forced on demand when case-matched or used by primops.
-                        Ok(Value::Con(tag, args))
-                    } else {
-                        Ok(Value::ConFun(tag, arity, args))
-                    }
-                }
-                _ => Err(EvalError::NotAFunction),
-            }
-        }
-        CoreFrame::Lam { binder, body } => {
-            let body_expr = expr.extract_subtree(*body);
-            Ok(Value::Closure {
+            stack.push(Frame::AppFun {
+                arg: *arg,
                 env: env.clone(),
-                binder: *binder,
-                body: body_expr,
-            })
+            });
+            Ok(Mode::Eval(*fun, env))
         }
+        CoreFrame::Lam { .. } => Ok(Mode::Unwind(eval_lam_leaf(expr, idx, &env))),
         CoreFrame::LetNonRec { binder, rhs, body } => {
             let rhs_val = if matches!(&expr.nodes[*rhs], CoreFrame::Lam { .. }) {
-                eval_at(expr, *rhs, env, heap)? // Lambdas are values
+                eval_lam_leaf(expr, *rhs, &env) // Lambdas are values
             } else {
                 let thunk_id = heap.alloc(env.clone(), expr.extract_subtree(*rhs));
                 Value::ThunkRef(thunk_id)
             };
             let new_env = env.update(*binder, rhs_val);
-            eval_at(expr, *body, &new_env, heap)
+            Ok(Mode::Eval(*body, new_env))
         }
         CoreFrame::LetRec { bindings, body } => {
             let mut new_env = env.clone();
@@ -374,7 +646,7 @@ fn eval_at(
             // 2. Evaluate lambda RHSes and back-patch thunks. Update env with Closures.
             for (binder, tid, rhs_idx) in &thunks {
                 if matches!(&expr.nodes[*rhs_idx], CoreFrame::Lam { .. }) {
-                    let lam_val = eval_at(expr, *rhs_idx, &new_env, heap)?;
+                    let lam_val = eval_lam_leaf(expr, *rhs_idx, &new_env);
                     heap.write(*tid, ThunkState::Evaluated(lam_val.clone()));
                     new_env = new_env.update(*binder, lam_val);
                 } else {
@@ -383,38 +655,119 @@ fn eval_at(
                 }
             }
 
-            eval_at(expr, *body, &new_env, heap)
+            Ok(Mode::Eval(*body, new_env))
         }
-        CoreFrame::Con { tag, fields } => {
-            let field_vals = fields
-                .iter()
-                .map(|&f| {
-                    // Thunkify non-trivial fields to enable lazy evaluation, using
-                    // the SAME triviality predicate as the JIT (`is_trivial_field`
-                    // in tidepool-codegen `emit/expr.rs`). A field is evaluated
-                    // eagerly only when it is already in WHNF or built entirely
-                    // from trivial parts; anything that could diverge or error
-                    // when forced — including a `PrimOp`/`Con` with a non-trivial
-                    // argument like `Just (1 + <diverging>)` — is thunked, so
-                    // constructing a Con never forces it on either backend.
-                    if is_trivial_field(f, expr) {
-                        eval_at(expr, f, env, heap)
-                    } else {
-                        let subtree = expr.extract_subtree(f);
-                        let thunk_id = heap.alloc(env.clone(), subtree);
-                        Ok(Value::ThunkRef(thunk_id))
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::Con(*tag, field_vals))
+        CoreFrame::Con { .. } => Ok(con_step(expr, idx, 0, Vec::new(), env, heap, stack)),
+        CoreFrame::Case { scrutinee, .. } => {
+            stack.push(Frame::CaseDispatch {
+                node_idx: idx,
+                env: env.clone(),
+            });
+            Ok(Mode::Eval(*scrutinee, env))
         }
-        CoreFrame::Case {
-            scrutinee,
-            binder,
-            alts,
+        CoreFrame::PrimOp { .. } => primop_step(expr, idx, 0, Vec::new(), env, heap, stack),
+        CoreFrame::Join {
+            label,
+            params,
+            rhs,
+            body,
         } => {
-            let scrut_val = force(eval_at(expr, *scrutinee, env, heap)?, heap)?;
-            let case_env = env.update(*binder, scrut_val.clone());
+            let join_val = Value::JoinCont {
+                params: params.clone(),
+                body: expr.extract_subtree(*rhs),
+                env: env.clone(),
+            };
+            let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
+            let new_env = env.update(join_var, join_val);
+            // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
+            // in the body (the only place this join is in scope) parks itself in
+            // JUMP_SLOT and signals `JumpInFlight`. Catching it HERE means a
+            // `Join` node always yields a settled value, so a join expression in
+            // a non-tail position (e.g. a `case (join … in …) of …` scrutinee)
+            // never leaks the signal. Self-jumps from the rhs iterate in this
+            // same loop — O(1) host stack. This is a genuine nested Rust call
+            // (see `Frame`'s doc comment) — the join trampoline is out of scope
+            // for this work-stack conversion.
+            Ok(Mode::Unwind(eval_settled(expr, *body, &new_env, heap)?))
+        }
+        CoreFrame::Jump { label, args } => {
+            Ok(Mode::Unwind(enqueue_jump(expr, label, args, &env, heap)?))
+        }
+    }
+}
+
+/// Resume the [`Frame`] on top of the stack with a freshly produced `value`.
+fn resume_frame(
+    expr: &CoreExpr,
+    frame: Frame,
+    value: Value,
+    heap: &mut dyn Heap,
+    stack: &mut Vec<Frame>,
+) -> Result<Mode, EvalError> {
+    match frame {
+        Frame::AppFun { arg, env } => {
+            let fun_val = force(value, heap)?;
+            stack.push(Frame::AppArg { fun_val });
+            Ok(Mode::Eval(arg, env))
+        }
+        // `ref mut` + replace/take: Value implements Drop (iterative spine
+        // dismantle), so fields cannot be moved out by pattern. The swaps
+        // are pointer-sized — no clones on this hot path. `arg_val` (the
+        // just-produced `value`) is deliberately NOT forced — thunks stay
+        // intact for lazy evaluation.
+        Frame::AppArg { mut fun_val } => {
+            let arg_val = value;
+            match fun_val {
+                Value::Closure {
+                    env: ref mut clos_env,
+                    binder,
+                    ref mut body,
+                } => {
+                    let mut new_env = std::mem::replace(clos_env, Env::new());
+                    let body =
+                        std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
+                    new_env.insert(binder, arg_val);
+                    Ok(Mode::Unwind(eval(&body, &new_env, heap)?))
+                }
+                Value::ConFun(tag, arity, ref mut args) => {
+                    let mut args = std::mem::take(args);
+                    args.push(arg_val);
+                    if args.len() == arity {
+                        // Don't force fields — leave thunks intact for lazy evaluation.
+                        // Fields will be forced on demand when case-matched or used by primops.
+                        Ok(Mode::Unwind(Value::Con(tag, args)))
+                    } else {
+                        Ok(Mode::Unwind(Value::ConFun(tag, arity, args)))
+                    }
+                }
+                _ => Err(EvalError::NotAFunction),
+            }
+        }
+        Frame::ConField {
+            node_idx,
+            next_pos,
+            mut built,
+            env,
+        } => {
+            built.push(value);
+            Ok(con_step(expr, node_idx, next_pos, built, env, heap, stack))
+        }
+        Frame::PrimOpArg {
+            node_idx,
+            next_pos,
+            mut built,
+            env,
+        } => {
+            built.push(force(value, heap)?);
+            primop_step(expr, node_idx, next_pos, built, env, heap, stack)
+        }
+        Frame::CaseDispatch { node_idx, env } => {
+            let scrut_val = force(value, heap)?;
+            let (binder, alts) = match &expr.nodes[node_idx] {
+                CoreFrame::Case { binder, alts, .. } => (*binder, alts),
+                other => unreachable!("CaseDispatch resumed on a non-Case node: {other:?}"),
+            };
+            let case_env = env.update(binder, scrut_val.clone());
 
             // Try specific alternatives first; Default is a fallback, not positional.
             // GHC Core can place DEFAULT first in the alt list.
@@ -435,14 +788,14 @@ fn eval_at(
                                 for (b, v) in alt.binders.iter().zip(fields.iter()) {
                                     alt_env = alt_env.update(*b, v.clone());
                                 }
-                                return eval_at(expr, alt.body, &alt_env, heap);
+                                return Ok(Mode::Eval(alt.body, alt_env));
                             }
                         }
                     }
                     AltCon::LitAlt(lit) => {
                         if let Value::Lit(l) = &scrut_val {
                             if l == lit {
-                                return eval_at(expr, alt.body, &case_env, heap);
+                                return Ok(Mode::Eval(alt.body, case_env));
                             }
                         }
                     }
@@ -452,135 +805,10 @@ fn eval_at(
                 }
             }
             if let Some(alt) = default_alt {
-                return eval_at(expr, alt.body, &case_env, heap);
+                return Ok(Mode::Eval(alt.body, case_env));
             }
             Err(EvalError::NoMatchingAlt)
         }
-        CoreFrame::PrimOp { op, args } => {
-            let arg_vals: Vec<Value> = args
-                .iter()
-                .map(|&arg| force(eval_at(expr, arg, env, heap)?, heap))
-                .collect::<Result<_, _>>()?;
-            // Handle primops that need heap access for deep forcing
-            match op {
-                // ShowDoubleAddr/ShowSignedDoubleAddr: the single-field-Con
-                // arms below are a deliberately narrower mirror of
-                // `shapes::unbox_double`/`unbox_int` — this function has no
-                // `&DataConTable` in scope (only `Value`/`Heap`), so they
-                // can't verify the con is actually named `D#`/`I#` and
-                // instead accept ANY single-field Con after forcing its
-                // field. Not a migration candidate without threading a
-                // table through the whole eval_at call chain.
-                PrimOpKind::ShowDoubleAddr => {
-                    if arg_vals.len() != 1 {
-                        return Err(EvalError::ArityMismatch {
-                            context: ArityContext::Arguments,
-                            expected: 1,
-                            got: arg_vals.len(),
-                        });
-                    }
-                    let d = expect_double(&arg_vals[0], heap)?;
-                    let s = eval_haskell_show_double(d);
-                    let mut bytes = s.into_bytes();
-                    bytes.push(0); // null terminator for IndexCharOffAddr
-                    Ok(Value::Lit(Literal::LitString(bytes)))
-                }
-                PrimOpKind::ShowSignedDoubleAddr => {
-                    // (prec :: Int, d :: Double) — precedence-aware show; must
-                    // match the JIT host fn `runtime_show_signed_double_addr`.
-                    if arg_vals.len() != 2 {
-                        return Err(EvalError::ArityMismatch {
-                            context: ArityContext::Arguments,
-                            expected: 2,
-                            got: arg_vals.len(),
-                        });
-                    }
-                    let prec = expect_int(&arg_vals[0], heap)?;
-                    let d = expect_double(&arg_vals[1], heap)?;
-                    let body = eval_haskell_show_double(d);
-                    // `showSignedFloat`'s `x < 0` test (so -0.0 does NOT parenthesize).
-                    let s = if prec > 6 && d < 0.0 {
-                        format!("({body})")
-                    } else {
-                        body
-                    };
-                    let mut bytes = s.into_bytes();
-                    bytes.push(0);
-                    Ok(Value::Lit(Literal::LitString(bytes)))
-                }
-                PrimOpKind::JsonDecode => {
-                    // eitherDecodeValue :: Text -> Either Text Value. Parse the
-                    // Text's UTF-8 bytes with serde_json and build the aeson
-                    // `Either Text Value` ADT (`Left <err>` / `Right v`) — the
-                    // SAME builder the JIT host fn uses, so the two agree by
-                    // construction. Needs `heap` to force the Text Con's (lazy)
-                    // fields, hence handled here, not in `dispatch_primop`.
-                    if arg_vals.len() != 1 {
-                        return Err(EvalError::ArityMismatch {
-                            context: ArityContext::Arguments,
-                            expected: 1,
-                            got: arg_vals.len(),
-                        });
-                    }
-                    let ids = crate::json::json_con_ids().ok_or_else(|| {
-                        EvalError::InternalError(
-                            "eitherDecode: aeson Value/Either/Map constructors not in scope".into(),
-                        )
-                    })?;
-                    let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
-                    crate::json::decode_json_str(&s, &ids).ok_or_else(|| {
-                        EvalError::InternalError(
-                            "eitherDecode: Either (Left/Right) constructors not in scope".into(),
-                        )
-                    })
-                }
-                PrimOpKind::ParseISO8601 => {
-                    // parseISO8601 :: Text -> Either Text UTCTime. Chrono parses
-                    // the Text's UTF-8 bytes and builds the `Either Text UTCTime`
-                    // ADT — the SAME builder the JIT host fn uses, so the two
-                    // agree by construction. Needs `heap` to force the Text Con's
-                    // (lazy) fields, hence handled here, not in `dispatch_primop`.
-                    if arg_vals.len() != 1 {
-                        return Err(EvalError::ArityMismatch {
-                            context: ArityContext::Arguments,
-                            expected: 1,
-                            got: arg_vals.len(),
-                        });
-                    }
-                    let ids = crate::time::time_con_ids().ok_or_else(|| {
-                        EvalError::InternalError(
-                            "parseISO8601: Either/I#/Text constructors not in scope".into(),
-                        )
-                    })?;
-                    let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
-                    Ok(crate::time::parse_iso8601_str(&s, &ids))
-                }
-                _ => dispatch_primop(*op, arg_vals, heap),
-            }
-        }
-        CoreFrame::Join {
-            label,
-            params,
-            rhs,
-            body,
-        } => {
-            let join_val = Value::JoinCont {
-                params: params.clone(),
-                body: expr.extract_subtree(*rhs),
-                env: env.clone(),
-            };
-            let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
-            let new_env = env.update(join_var, join_val);
-            // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
-            // in the body (the only place this join is in scope) parks itself in
-            // JUMP_SLOT and signals `JumpInFlight`. Catching it HERE means a
-            // `Join` node always yields a settled value, so a join expression in
-            // a non-tail position (e.g. a `case (join … in …) of …` scrutinee)
-            // never leaks the signal. Self-jumps from the rhs iterate in this
-            // same loop — O(1) host stack.
-            eval_settled(expr, *body, &new_env, heap)
-        }
-        CoreFrame::Jump { label, args } => enqueue_jump(expr, label, args, env, heap),
     }
 }
 
@@ -1934,15 +2162,15 @@ fn dispatch_primop(
         }
         PrimOpKind::Int64Negate => {
             let a = expect_int_like(&args[0], heap)?;
-            Ok(Value::Lit(Literal::LitInt(-a)))
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_neg())))
         }
         PrimOpKind::Int64Shra => {
             let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a >> (b as u32))))
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_shr(b as u32))))
         }
         PrimOpKind::Word64Shl => {
             let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a << (b as u32))))
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_shl(b as u32))))
         }
         PrimOpKind::Word64Shrl => {
             let (a, b) = bin_op_word(op, &args, heap)?;

@@ -603,7 +603,6 @@ fn small_stack_depth_64_green() {
 // recursion (gotcha #5: ~600 OK / 700 ABORT at 8MB dev) — a different
 // walker, planned as its own slice. Activate when the eval slice lands.
 #[test]
-#[ignore = "blocked on eval_at expression recursion (gotcha #5): repro depth is expression depth, not queue depth; apply_cont itself is iterative since 2026-06-11"]
 fn bug_b3_left_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
         let n = 1_200;
@@ -627,7 +626,6 @@ fn bug_b3_left_biased_depth_1200_8mb_stack() {
 // Same status and caveat as the left-biased twin: queue walk iterative,
 // repro blocked on eval_at expression recursion.
 #[test]
-#[ignore = "blocked on eval_at expression recursion (gotcha #5): repro depth is expression depth, not queue depth; apply_cont itself is iterative since 2026-06-11"]
 fn bug_b3_right_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
         let n = 1_200;
