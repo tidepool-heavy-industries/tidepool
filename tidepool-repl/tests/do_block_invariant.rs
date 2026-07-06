@@ -346,14 +346,12 @@ async fn plane_opacity_binds_interchangeable() {
     assert!(c.contains("10"), "purej + effk = 10, got: {c}");
 }
 
-/// OPACITY LEAK (ledger #36) — decl-plane cannot intentionally shadow a Prelude
-/// re-export, so a PURE bind of a Prelude name behaves DIFFERENTLY from an
-/// effectful one: the invariant says they should be interchangeable. `let
-/// lookup = (42 :: Int)` routes to the decl plane, whose Prelude import does NOT
-/// hide session names → "Ambiguous occurrence 'lookup'" on later use. The fix
-/// is to hide session-redefined names from the decl module's Prelude import
-/// (mirroring the stmt plane). Un-ignore when the do-block invariant fix lands.
-#[ignore = "do-block: decl-plane can't shadow a Prelude re-export via a pure bind, ledger #36"]
+/// OPACITY LEAK FIXED (ledger #36) — decl-plane now intentionally shadows a
+/// Prelude re-export, so a PURE bind of a Prelude name behaves the SAME as an
+/// effectful one: the invariant holds. `let lookup = (42 :: Int)` routes to the
+/// decl plane, whose Prelude import hides session-redefined names (mirroring
+/// the stmt plane's `patched_preamble`), so later use resolves to the bind, not
+/// an "Ambiguous occurrence".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plane_opacity_pure_bind_shadows_prelude_name() {
     if !extract_available() {
@@ -375,13 +373,12 @@ async fn plane_opacity_pure_bind_shadows_prelude_name() {
 }
 
 /// OPACITY LEAK (ledger #28) — a fully-open `HasField`-constrained record-dot
-/// helper (`let f h = h.path`, both the record type AND field type free) binds
-/// on the WARM live server but fails COLD in the test harness, falling to the
-/// materialize path whose `pure f` can't monomorphize the unresolved `HasField`
-/// constraint → "No instance for HasField". The invariant wants a record-dot
-/// helper to bind on the decl plane and generalize regardless of process warmth.
-/// Un-ignore when `SessionLib::define`'s cold Core extraction is fixed.
-#[ignore = "do-block: fully-open HasField record-dot helper fails cold in-harness, ledger #28"]
+/// helper (`let f h = h.path`, both the record type AND field type free) must
+/// bind on the decl plane and generalize regardless of process warmth, the same
+/// in a fresh cold-started test-harness session as on a long-lived server.
+/// Verified fixed: the decl module env now always carries the same
+/// Prelude/Aeson/pragma surface production uses (`session_decl_module_env`,
+/// #28's original gap), so the decl compiles and generalizes cold too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plane_opacity_open_hasfield_helper_binds_cold() {
     if !extract_available() {
