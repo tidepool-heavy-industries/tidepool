@@ -290,6 +290,15 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . show\n",
         "instance ToWire Text where toWire = String\n",
         "instance ToWire Value where toWire = id\n",
+        // Bare scalars: delegate to the vendored ToJSON so numbers/bools render
+        // as native JSON scalars (not Show-strings) — `[Int]` -> `[10,20]`,
+        // `Just True` -> `true`. toJSON avoids the vendored-Scientific
+        // no-Fractional trap (it builds Number via `scientific`, not realToFrac).
+        "instance ToWire Int where toWire = toJSON\n",
+        "instance ToWire Integer where toWire = toJSON\n",
+        "instance ToWire Double where toWire = toJSON\n",
+        "instance ToWire Float where toWire = toJSON\n",
+        "instance ToWire Bool where toWire = toJSON\n",
         "instance {-# OVERLAPPING #-} ToWire [Char] where toWire = String . T.pack\n",
         "instance ToWire a => ToWire [a] where toWire = Array . map toWire\n",
         "instance ToWire a => ToWire (Maybe a) where toWire = maybe Null toWire\n",

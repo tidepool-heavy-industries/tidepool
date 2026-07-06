@@ -363,18 +363,16 @@ async fn block_runner_input_and_type_cleanups() {
         Some("[Int]"),
         "monadic expr with trailing `where` should report its inner type, not null; got: {last_item}"
     );
-    // The eff path renders via Show-default (toWire); a [Int] now renders as a
-    // structural JSON array (ToWire container instances) rather than a flat
-    // Show string — the fix under test is the non-null TYPE above. Leaves stay
-    // Show-strings (no `ToWire Int` instance; `Int` falls through the
-    // `Show a => ToWire a` floor), so the elements are the strings "10"/"20",
-    // not JSON numbers — only the CONTAINER gained structure.
+    // The eff path renders via Show-default (toWire); a [Int] renders as a
+    // structural JSON array (ToWire container instances) with native number
+    // leaves (ToWire Int delegates to toJSON) — the fix under test is the
+    // non-null TYPE above; here we confirm both elements as JSON numbers.
     let val_arr = v
         .get("value")
         .and_then(|x| x.as_array())
         .unwrap_or_else(|| panic!("where-expr value should be a JSON array; got: {v}"));
     assert!(
-        val_arr.contains(&serde_json::json!("10")) && val_arr.contains(&serde_json::json!("20")),
+        val_arr.contains(&serde_json::json!(10)) && val_arr.contains(&serde_json::json!(20)),
         "where-expr value should contain both elements; got: {v}"
     );
 }

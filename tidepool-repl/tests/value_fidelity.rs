@@ -391,13 +391,12 @@ async fn towire_list_of_int_renders_as_json_array() {
     let out = repl.eval("pure ([1, 2, 3] :: [Int])").await;
     out.expect_ok("list of Int");
     let v = value_of(&out);
-    // The CONTAINER is structural (a real JSON array), but each LEAF is still
-    // a Show-string — there is no `ToWire Int` instance, `Int` falls through
-    // the `Show a => ToWire a` floor, so elements are "1"/"2"/"3", not 1/2/3.
+    // Structural array AND native scalar leaves: `ToWire Int` (delegating to
+    // toJSON) renders each element as a JSON number, so `[Int]` -> `[1,2,3]`.
     assert_eq!(
         v,
-        json!(["1", "2", "3"]),
-        "expected a structural JSON array of Show-string leaves, got: {v}"
+        json!([1, 2, 3]),
+        "expected a structural JSON array of number leaves, got: {v}"
     );
 }
 
@@ -456,16 +455,14 @@ async fn towire_maybe_renders_as_null_or_payload() {
     }
     let repl = Repl::new();
 
-    // The payload is still a Show-string leaf ("3", not JSON number 3 — Int
-    // has no `ToWire` instance of its own) — `Maybe` only contributes the
-    // Just/Nothing -> payload/null STRUCTURE, same leaf-vs-container split as
-    // the list case above.
+    // `Maybe` contributes the Just/Nothing -> payload/null structure; the Int
+    // payload renders as a native JSON number via `ToWire Int`.
     let just_out = repl.eval("pure (Just (3 :: Int))").await;
     just_out.expect_ok("Just 3");
     assert_eq!(
         value_of(&just_out),
-        json!("3"),
-        "Just 3 should unwrap to the bare Show-string payload \"3\", not a string \"Just 3\" or a JSON number"
+        json!(3),
+        "Just 3 should unwrap to the bare number payload 3, not \"Just 3\" or \"3\""
     );
 
     let nothing_out = repl.eval("pure (Nothing :: Maybe Int)").await;
