@@ -552,23 +552,24 @@ impl Session {
     /// route fails BECAUSE the RHS references a materialized/effectful value
     /// (out of decl scope) — the caller then falls back to the materialize path.
     ///
-    /// When the decl route fails for ANY OTHER reason (a name collision with an
-    /// imported name — `let toList …` clashes with `Tidepool.Prelude.toList` —
-    /// or a plain type error), we return that error as `Some(Error)` instead of
-    /// `None`, so the caller does NOT materialize. Materializing such a case
-    /// papers over a real error with a broken binding: a polymorphic value
-    /// (`toList :: Tree a -> [a]`) materialized as a monomorphic `Tier1Closure`
-    /// gets a thin iface with a FREE type variable, which then fails cryptically
-    /// ("Iface type variable out of scope: a") only when later referenced.
-    /// Surfacing the decl error (e.g. the clean "Ambiguous occurrence") is the
-    /// same actionable message the bare-decl form already gives.
+    /// When the decl route fails for ANY OTHER reason (a plain type error), we
+    /// return that error as `Some(Error)` instead of `None`, so the caller does
+    /// NOT materialize. Materializing such a case papers over a real error with
+    /// a broken binding: a polymorphic value (`toList :: Tree a -> [a]`)
+    /// materialized as a monomorphic `Tier1Closure` gets a thin iface with a
+    /// FREE type variable, which then fails cryptically ("Iface type variable
+    /// out of scope: a") only when later referenced. Surfacing the decl error is
+    /// the same actionable message the bare-decl form already gives.
+    ///
+    /// `shadow_wildcard_imports: true` (ledger #36) — a pure bind must be able
+    /// to shadow a Prelude/Library/effect-verb name exactly as a genuine
+    /// top-level decl does (`run_def`/`define_batch`), so pure and effectful
+    /// binds stay interchangeable (do-block plane-opacity invariant): `let
+    /// lookup = 42` must shadow `Prelude.lookup`, not raise an "Ambiguous
+    /// occurrence" that a bare `f x = …` decl would never hit.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
-        // shadow_wildcard_imports: false — a pure bind promoted here for GHCi-
-        // parity generalization did not necessarily intend to redefine a
-        // Prelude/Library name, so a collision must surface loudly (see the
-        // doc comment above) rather than silently shadow.
-        match self.lib.define_batch_scoped(&[decl.as_str()], false) {
+        match self.lib.define_batch_scoped(&[decl.as_str()], true) {
             Ok(gen) => {
                 let type_display = self.probe_pure_type(name).unwrap_or_default();
                 // Register in the environment (decl plane) so :bindings/stale/etc.

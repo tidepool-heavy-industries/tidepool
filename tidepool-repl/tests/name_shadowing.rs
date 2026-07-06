@@ -18,14 +18,11 @@ use common::*;
 /// `let lookup = …` binds a value whose name collides with `Prelude.lookup`.
 /// Using `lookup` on a LATER turn must resolve to the binding (the session name
 /// shadows the import), not raise an ambiguous occurrence.
-// REGRESSION (do-block track, ledger #36): the M2 pure-bind→decl lowering routes
-// `let lookup = 42` to the DECL plane, whose Prelude import does NOT hide session
-// names (only Library is hidden) → "Ambiguous occurrence 'lookup'". The proper fix
-// is to hide session-redefined names from the decl module's Prelude import too
-// (mirroring the stmt plane's hide_prelude_names / the #32-deeper item), which also
-// lets a Prelude name be intentionally shadowed by a bind. Deferred to the do-block
-// invariant work; un-ignore when that lands.
-#[ignore = "do-block track: decl-plane Prelude-name shadowing (ledger #36)"]
+// FIXED (do-block track, ledger #36): the M2 pure-bind→decl lowering routes
+// `let lookup = 42` to the DECL plane; `try_pure_bind_as_decl` now hides
+// session-redefined names from the decl module's Prelude import too (mirroring
+// the stmt plane's `patched_preamble` / `hide_prelude_names`), so a Prelude name
+// can be intentionally shadowed by a pure bind exactly as an effectful one would.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn value_bind_shadows_prelude_name() {
     if !extract_available() {
