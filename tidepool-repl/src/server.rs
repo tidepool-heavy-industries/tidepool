@@ -915,6 +915,17 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
         "tidepool-repl — a GHCi-style stateful Haskell session. ONE resident JIT machine whose \
          value heap and module scope persist across turns; declarations accumulate across \
          `session_run` calls.\n\n\
+         WHY STATEFUL (vs one-shot eval) — the session IS your typed working memory across \
+         turns, and that is the whole reason to reach for the repl. Lean on it:\n\
+         • BUILD UP: bind an expensive substrate ONCE (a corpus, a parsed graph, an API \
+         result) and interrogate it over many cheap turns — no re-fetch, no re-derive.\n\
+         • ACCUMULATE: grow a result across turns by rebinding a name from its own prior \
+         value — `acc <- pure (x : acc)` reads the old `acc` and shadows it (GHCi `>>=` \
+         semantics, not a recursive `let`). Define helpers early; refine them turn over turn.\n\
+         • KEEP IT OFF-CONTEXT: a big intermediate lives in the session heap, NOT your \
+         context window. Fold it IN the session (count / group / sort / join) and return only \
+         the conclusion — aggregate, don't dump. A value too large to render is auto-stubbed \
+         but stays a live binding you can keep computing on.\n\n\
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
