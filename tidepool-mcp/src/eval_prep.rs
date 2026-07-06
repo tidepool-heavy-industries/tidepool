@@ -813,6 +813,24 @@ mod tests {
             orch.contains("instance ToWire Value"),
             "Value instance missing from orchestrate module"
         );
+        // Container instances (KEEP the Show floor — leaves stay Show-strings,
+        // only containers gain structure).
+        assert!(
+            orch.contains("instance {-# OVERLAPPING #-} ToWire [Char]"),
+            "[Char] overlap instance missing from orchestrate module"
+        );
+        assert!(
+            orch.contains("instance ToWire a => ToWire [a]"),
+            "[a] list instance missing from orchestrate module"
+        );
+        assert!(
+            orch.contains("instance ToWire a => ToWire (Maybe a)"),
+            "Maybe instance missing from orchestrate module"
+        );
+        assert!(
+            orch.contains("instance (ToWire a, ToWire b) => ToWire (a, b)"),
+            "tuple instance missing from orchestrate module"
+        );
     }
 
     #[test]
