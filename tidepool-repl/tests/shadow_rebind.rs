@@ -54,6 +54,43 @@ async fn rebind_value_name_newest_wins() {
     );
 }
 
+/// CASE 1b — SELF-REFERENTIAL rebind (the accumulator idiom).
+///
+/// `n <- pure (1 :: Int)` ; `n <- pure (n + 1)` ; `n <- pure (n + 1)` ; `n` => 3.
+/// The RHS references the name being rebound, so GHCi `>>=` semantics apply:
+/// each `pure (n + 1)` reads the PRIOR `n` and the new bind shadows it.
+///
+/// WAS A BUG: the "a pure bind is a declaration" route lowered `n <- pure (n+1)`
+/// to the top-level decl `n = n + 1`, which is RECURSIVE in Haskell — forcing it
+/// self-forced to a `blackhole detected (thunk forced itself)` runtime error.
+/// FIXED: `self_referential_monadic_pure_bind` diverts these to the
+/// materialize/shadow path (`run_bind`), which compiles the RHS against the
+/// imported PRIOR `n`. (CASE 1 above doesn't catch this — its RHS is a constant.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_referential_rebind_reads_prior() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    repl.eval("n <- pure (1 :: Int)")
+        .await
+        .expect_ok("bind n=1");
+    repl.eval("n <- pure (n + 1)")
+        .await
+        .expect_ok("accumulate n=n+1 (must read prior n, not self-force)");
+    repl.eval("n <- pure (n + 1)")
+        .await
+        .expect_ok("accumulate again");
+
+    let out = repl.eval("n").await;
+    let out = out.expect_ok("read accumulated n (expected 3, not a blackhole)");
+    assert!(
+        out.contains('3'),
+        "self-referential accumulator: expected 3 (1 -> 2 -> 3), got: {out}"
+    );
+}
+
 /// CASE 2 — Rebind a name at a DIFFERENT type; newest type must win.
 ///
 /// `x <- pure (1 :: Int)` ; `x <- pure (T.pack "hi")` ; `T.length x` => 2.

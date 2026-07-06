@@ -226,7 +226,36 @@ impl Session {
     fn session_imports(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
         if let Some(m) = self.lib.current_module() {
-            lines.push(m.module_name());
+            // Cross-plane shadow: the value plane wins over the decl plane. A
+            // name that migrated decl→value (a self-referential `n <- pure (n+1)`
+            // that materialized, or `n <- pure 1` then `n <- someEffect`) is
+            // STILL exported by the decl module — the lib log can't retract it —
+            // so importing that module unqualified would clash with the name's
+            // `Val.G<g>` module (GHC-87543 ambiguous occurrence). Hide exactly the
+            // decl-exported value heads the value plane now owns; each then
+            // resolves unambiguously to its value module. (Same `hiding` idiom the
+            // preamble uses to let session decls shadow the Library re-exports.)
+            let val_names: std::collections::HashSet<&str> = self
+                .bindings
+                .iter_current()
+                .map(|(n, _)| n.0.as_str())
+                .collect();
+            let shadowed: Vec<String> = self
+                .lib
+                .decl_value_names()
+                .into_iter()
+                .filter(|h| val_names.contains(h))
+                .map(hiding_entry)
+                .collect();
+            if shadowed.is_empty() {
+                lines.push(m.module_name());
+            } else {
+                lines.push(format!(
+                    "{} hiding ({})",
+                    m.module_name(),
+                    shadowed.join(", ")
+                ));
+            }
         }
         lines.extend(self.current_val_modules());
         lines.join("\n")
@@ -755,8 +784,16 @@ impl Session {
                     // to a monomorphic heap value. If it fails to compile as a
                     // decl (its RHS references a materialized/effectful value, so
                     // it's out of decl scope), fall back to the materialize path.
-                    if let Some(outcome) = self.try_pure_bind_as_decl(expr_text, &name) {
-                        return outcome;
+                    //
+                    // EXCEPT a self-referential monadic pure bind (`n <- pure
+                    // (n+1)`): the decl route would emit the RECURSIVE top-level
+                    // `n = n + 1` (self-forcing blackhole). GHCi's `>>=` reads the
+                    // PRIOR `n` and shadows, which is exactly what the materialize
+                    // path does — so divert straight to it.
+                    if !self_referential_monadic_pure_bind(expr_text, &name) {
+                        if let Some(outcome) = self.try_pure_bind_as_decl(expr_text, &name) {
+                            return outcome;
+                        }
                     }
                     self.run_bind(expr_text, name, handlers, captured)
                 }
@@ -2255,6 +2292,35 @@ fn pure_bind_to_decl(expr_text: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Whether `expr_text` is a MONADIC pure bind (`name <- pure e` /
+/// `name <- return e`) whose RHS `e` references `name`. Such a bind must read
+/// the PRIOR `name` and shadow — GHCi `>>=` semantics (`pure e >>= \name -> …`
+/// evaluates `e` in the outer scope, so `name` there is the old binding). The
+/// decl route ([`pure_bind_to_decl`]) would instead emit a top-level
+/// `name = e`, which in Haskell is RECURSIVE (`n = n + 1` self-forces to a
+/// blackhole). So these divert to the materialize/shadow path.
+///
+/// `let name = e` is deliberately EXCLUDED: Haskell `let` is recursive, so
+/// `let n = n + 1` looping matches GHCi — only the `<-` form shadows.
+fn self_referential_monadic_pure_bind(expr_text: &str, name: &str) -> bool {
+    let t = expr_text.trim();
+    if t.starts_with("let ") {
+        return false;
+    }
+    let Some(rhs) = t
+        .strip_prefix(name)
+        .map(str::trim_start)
+        .and_then(|a| a.strip_prefix("<-"))
+        .map(str::trim_start)
+    else {
+        return false;
+    };
+    ["pure ", "return "]
+        .iter()
+        .find_map(|kw| rhs.strip_prefix(kw))
+        .is_some_and(|e| mentions_word(e, name))
+}
+
 /// Whether `text` contains `word` as a whole identifier (Haskell ident
 /// boundaries: alnum, `_`, `'`). Used to find binds that reference a
 /// redefined decl (the `stale:` field).
@@ -2508,6 +2574,7 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 
 #[cfg(test)]
 mod slim_tests {
+    use super::self_referential_monadic_pure_bind;
     use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
     use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
 
@@ -2630,6 +2697,30 @@ mod slim_tests {
             pure_bind_to_decl("let d = 5 :: Double", "d").as_deref(),
             Some("d = 5 :: Double")
         );
+    }
+
+    #[test]
+    fn self_ref_monadic_pure_bind_detected() {
+        // The accumulator idiom: `<-` form referencing the prior binding — must
+        // divert to materialize (shadow), NOT the recursive decl route.
+        assert!(self_referential_monadic_pure_bind("n <- pure (n + 1)", "n"));
+        assert!(self_referential_monadic_pure_bind(
+            "xs <- return (0 : xs)",
+            "xs"
+        ));
+        // Non-self-referential `<-` pure binds still take the decl route.
+        assert!(!self_referential_monadic_pure_bind("xs <- pure []", "xs"));
+        assert!(!self_referential_monadic_pure_bind(
+            "n <- pure (m + 1)",
+            "n"
+        ));
+        // `let` is recursive in GHCi — left on the decl route intentionally.
+        assert!(!self_referential_monadic_pure_bind("let n = n + 1", "n"));
+        // A substring of the name is not a self-reference (whole-word only).
+        assert!(!self_referential_monadic_pure_bind(
+            "n <- pure (nn + 1)",
+            "n"
+        ));
     }
     use crate::command::TurnOutcome;
 
