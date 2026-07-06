@@ -210,7 +210,10 @@ fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> C
                         let new_body = old_to_new[body];
                         // \p0 -> \p1 -> ... -> rhs (identity when params is empty).
                         let wrapped = params.iter().rev().fold(new_rhs, |acc, &p| {
-                            b.push(CoreFrame::Lam { binder: p, body: acc })
+                            b.push(CoreFrame::Lam {
+                                binder: p,
+                                body: acc,
+                            })
                         });
                         b.push(CoreFrame::LetNonRec {
                             binder: VarId(label.0),
@@ -256,7 +259,10 @@ mod tests {
             label: k,
             args: vec![xsum],
         });
-        let lam = b.push(CoreFrame::Lam { binder: x, body: jmp });
+        let lam = b.push(CoreFrame::Lam {
+            binder: x,
+            body: jmp,
+        });
         let arg = b.push(CoreFrame::Lit(Literal::LitInt(0)));
         let app = b.push(CoreFrame::App { fun: lam, arg });
         b.push(CoreFrame::Join {
@@ -309,7 +315,10 @@ mod tests {
         let tree = b.build();
 
         let lowered = lower_jump_crosses_lam(&tree);
-        assert_eq!(lowered, tree, "non-crossing join must pass through unchanged");
+        assert_eq!(
+            lowered, tree,
+            "non-crossing join must pass through unchanged"
+        );
     }
 
     /// A tree with no Join at all is returned unchanged (fast path).
