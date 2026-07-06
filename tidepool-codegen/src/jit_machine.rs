@@ -1277,6 +1277,202 @@ impl JitEffectMachine {
         result
     }
 
+    /// The single-compile `it`-binding primitive: run `func_id` through the
+    /// effect step loop, and at `Yield::Done(tuple_ptr)` — the result of the
+    /// wrapped `pure (it, toWire it)` — bridge field 1 (the render) into an
+    /// OWNED [`Value`] first, then tenure field 0 (`it` itself) alone,
+    /// returning both. Replaces the old two-compile `run_bare_expr` (one
+    /// compile to bind `it` via [`Self::run_fragment_and_bind`], a second,
+    /// separate compile to render `toWire it`).
+    ///
+    /// **Why field1-before-field0-tenure is load-bearing:** when `toWire` is
+    /// the identity (`toWire :: Aeson.Value -> Aeson.Value`, e.g. a bare
+    /// `pure input`), field 0 and field 1 resolve to the exact SAME heap
+    /// object. [`heap_bridge::heap_to_value_forcing`] returns a COMPLETE DEEP
+    /// COPY — every leaf is owned Rust data, no pointer into the JIT heap
+    /// survives the call — so bridging field 1 into `rendered` FIRST makes it
+    /// immune to whatever `tenure` does to that shared object afterward.
+    /// Tenuring field 0 SECOND (and ONLY field 0 — field 1 is never tenured)
+    /// means at most one object in this call ever gets forwarded, so the
+    /// aliasing corruption a naive `pure (it, toWire it)` +
+    /// `run_fragment_and_bind_projected` hit (independently tenuring both
+    /// fields of a shared object — see that method's doc and
+    /// `old_space::tenure`'s forward-skip fix) cannot recur here.
+    ///
+    /// `field0_forced`: mirrors `run_fragment_and_bind`'s `forced` flag —
+    /// `true` (Tier0Data) deep-forces field 0 to NF before tenuring; `false`
+    /// (Tier1 closure) tenures field 0 as-is, unforced.
+    ///
+    /// **Reclaim ordering** follows `run_fragment_and_bind`/`_projected`:
+    /// tenure inside the Done arm (before arm_reclaim), arm reclaim LAST after
+    /// the loop exits.
+    ///
+    /// # Panics
+    /// Panics if called on a non-session machine.
+    pub fn run_fragment_and_bind_render<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        field0_forced: bool,
+    ) -> Result<(crate::old_space::RootSlot, Value), JitError> {
+        assert!(
+            self.session.is_some(),
+            "run_fragment_and_bind_render requires a session machine"
+        );
+
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
+
+        crate::signal_safety::install();
+        let mut _guard = self.install_registries();
+
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
+        let vmctx = self.make_session_vmctx();
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
+        // NOTE: do NOT arm reclaim before the step loop (same ordering as
+        // run_fragment_and_bind / _projected — tenure is in the Done arm).
+
+        let result = drive_to_done(
+            &mut machine,
+            &self.cancel_flag,
+            table,
+            handlers,
+            user,
+            "stepping effectful computation (bind-render)",
+            " (bind-render)",
+        )
+        .and_then(|tuple_ptr| {
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+            }
+            if tuple_ptr.is_null() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+            }
+
+            // `Yield::Done` (effect_machine::parse_result) already forces the
+            // Val field to WHNF before returning it, so tuple_ptr is
+            // guaranteed a real Con here (never a thunk) — safe to read its
+            // header directly, no additional WHNF force needed.
+            let tag = unsafe { *tuple_ptr };
+            if tag != crate::layout::TAG_CON {
+                return Err(JitError::Yield(
+                    crate::yield_type::YieldError::UnexpectedTag(tag),
+                ));
+            }
+            let n_actual = unsafe {
+                *(tuple_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+                    as usize
+            };
+            if n_actual != 2 {
+                return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                    crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                        "bind-render: result tuple has {} fields, expected 2",
+                        n_actual
+                    )),
+                )));
+            }
+
+            // Read-only, no GC-capable calls in between — both field
+            // pointers are consistent with the (already-WHNF) tuple_ptr.
+            let field0_ptr = unsafe {
+                *(tuple_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+            };
+            let field1_ptr = unsafe {
+                *(tuple_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+            };
+
+            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+
+            // Root field0_ptr across the field1 bridge below: bridging can
+            // force thunks reachable from field1's subtree, which can
+            // allocate and trigger a minor GC that relocates field0's object
+            // (whether or not it aliases field1). Registering it here keeps
+            // it live and GC-updated so the value we tenure afterward is
+            // correct post-GC.
+            let mut field0_ptr = field0_ptr;
+            // SAFETY: vmctx_ptr is the active run's VMContext; the scope
+            // covers exactly the field1 bridge call below.
+            let _root0 = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+            // SAFETY: the slot lives on this frame until _root0 drops.
+            unsafe {
+                crate::host_fns::register_rust_root(vmctx_ptr, &mut field0_ptr as *mut *mut u8);
+            }
+
+            // READ-BEFORE-TENURE (load-bearing): bridge field1 (the render)
+            // into a fully OWNED Value before field0 is forced or tenured.
+            // heap_to_value_forcing's result retains no pointer into the JIT
+            // heap, so it is unaffected by whatever tenure() below does to
+            // field0's object — even when field0 and field1 alias.
+            let bridge_res = unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    heap_bridge::heap_to_value_forcing(field1_ptr, vmctx_ptr)
+                })
+            }
+            .map_err(JitError::Signal)?;
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+            }
+            let rendered =
+                crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
+
+            // field0_ptr is no longer needed as a GC root past this point —
+            // `deep_force` (if field0_forced) roots its own traversal, and
+            // `tenure` triggers no JIT GC.
+            drop(_root0);
+
+            // Force (iff field0_forced, mirroring run_fragment_and_bind's
+            // tier-driven forcing) and tenure field0 ONLY. field1 is never
+            // tenured — it was already fully consumed into `rendered` above.
+            let nf_field0 = if field0_forced {
+                let nf = unsafe {
+                    crate::signal_safety::with_signal_protection(|| {
+                        crate::host_fns::deep_force(
+                            machine.vmctx_mut() as *mut VMContext,
+                            field0_ptr,
+                        )
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                nf
+            } else {
+                field0_ptr
+            };
+
+            // Capture from_range AFTER any forcing above (GC may have
+            // changed the active region) — same ordering as `_projected`.
+            let from = self
+                .machine_state
+                .gc_active_range()
+                .expect("GC state installed for the bind run");
+            let from_range = (from.0 as *const u8, unsafe {
+                from.0.add(from.1) as *const u8
+            });
+            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+            let slot = unsafe {
+                self.session
+                    .as_mut()
+                    .expect("session machine")
+                    .old_space
+                    .tenure(vmctx_ptr, nf_field0, from_range)
+            };
+            Ok((slot, rendered))
+        });
+
+        // Arm reclaim LAST (after all self.session access — tenure is in the
+        // epilogue above). Same UAF ordering as run_fragment_and_bind.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+        result
+    }
+
     /// Register a session-scoped GC root slot that survives across runs (i.e.
     /// across `RegistryGuard` drops), unlike the per-run rust roots.
     ///

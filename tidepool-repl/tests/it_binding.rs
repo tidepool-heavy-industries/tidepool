@@ -321,3 +321,49 @@ async fn huge_value_is_header_only_bound_to_it_and_stub_fetchable() {
         out.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Alias case: `toWire` is the identity (`instance ToWire Value where toWire =
+// id`), so a bare expression whose value is already an `Aeson.Value` makes
+// `it` and `toWire it` the SAME heap object. This is the exact case the
+// single-compile `(it, toWire it)` tuple + `run_fragment_and_bind_render`
+// primitive must handle without corruption (the naive attempt hit
+// `unexpected heap tag: 255` here — a stale forwarding marker from tenuring
+// the same shared object twice).
+// ---------------------------------------------------------------------------
+
+/// CASE 7 — a bare expression that is `pure <an Aeson.Value>` (so `it` and
+/// `toWire it` alias): the rendered `value` must round-trip correctly AND
+/// `it` must bind to a live, uncorrupted value usable on the next turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_expr_towire_identity_alias_renders_and_binds() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    let t = repl
+        .eval(r#"pure (object ["a" .= (1 :: Int), "b" .= (2 :: Int)])"#)
+        .await;
+    let out = t.expect_ok("aliasing pure (Aeson.Value)");
+    let parsed: serde_json::Value = serde_json::from_str(out)
+        .unwrap_or_else(|e| panic!("response should be JSON: {e}; got: {out}"));
+    let value = &parsed["value"];
+    assert_eq!(
+        value["a"], 1,
+        "rendered value must round-trip correctly, got: {out}"
+    );
+    assert_eq!(
+        value["b"], 2,
+        "rendered value must round-trip correctly, got: {out}"
+    );
+
+    // `it` must be bound to a live, uncorrupted value — not the stale
+    // TAG_FORWARDED stub the aliasing bug would have rooted.
+    let t = repl.eval(r#"it ^? key "a" . _Int"#).await;
+    let out = t.expect_ok("it ^? key \"a\" . _Int after the aliasing pure");
+    assert!(
+        out.contains('1'),
+        "it should still hold the aliased value, got: {out}"
+    );
+}
