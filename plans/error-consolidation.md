@@ -1,8 +1,30 @@
 # Error Type Consolidation
 
-## Status: Queued (after idiom-cleanup merges)
+## Status: Done
 
-## Problem
+Landed incrementally across many prior commits (`refactor(eval): type-driven
+error enums`, `refactor(codegen): consolidate YieldError/RuntimeError via
+Runtime(#[from] …)`, and others) without ever closing this doc out — by the
+time `root.error-consolidation` picked this up, all 16 originally-listed error
+enums already derived `thiserror::Error` with faithful `Display` messages, and
+the `From` hierarchy (`EmitError -> PipelineError -> JitError`,
+`CompileError`/`JitError -> RuntimeError`, `EvalError`/`BridgeError ->
+EffectError -> JitError`) was already wired. The `.expect()` hot spots named
+below (`serial/mod.rs`, `heap_bridge.rs`, `host_fns.rs`) were also already
+clean — zero production `.expect()`/`.unwrap()` remained in any of the three.
+
+Remaining work done in this pass: derived `thiserror::Error` on three error
+enums that were missed by the earlier passes (not part of the original
+16-enum inventory below, found by an exhaustive re-scan) — `PipelineError`
+(`tidepool-optimize`, previously hand-rolled `Display`/`Error`), `TextShapeError`
+(`tidepool-eval/src/shapes.rs`, previously undecorated), and `StartError`
+(`tidepool-runtime/src/session/engine.rs`, previously undecorated). A full
+production-code `.expect()`/`.unwrap()` re-scan (excluding tests, examples,
+build scripts, proc-macro expansion, and test-support crates) found no
+further genuinely-recoverable panics to convert — see the branch's submit
+note for the per-site judgment list.
+
+## Problem (as originally scoped — see Status above for current state)
 16 error enums across 8 crates with manual wrapping, 72 `.expect()` calls in production code, inconsistent `From` impl coverage. Error chains are opaque — `JitError::Compilation(String)` loses the original error type.
 
 ## Current Error Landscape
