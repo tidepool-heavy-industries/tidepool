@@ -301,6 +301,12 @@ impl JitEffectMachine {
         }
         let expr = tidepool_repr::normalize(expr, table);
         let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        // Defensive precondition restore: the real Haskell pipeline never emits
+        // a Jump crossing a Lam boundary (Translate.hs's `jumpCrossesLam` rewrites
+        // it first), but hand-built/synthetic CoreExpr producers can. Re-check
+        // after normalize/datacon-env wrapping so whatever final shape reaches
+        // emission satisfies codegen's join-registration invariant.
+        let expr = crate::lower::lower_jump_crosses_lam(&expr);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols())?;
         // Give data-case dispatch runtime tolerance for bare Lit scrutinees of
         // boxed-literal wrapper constructors (e.g. a Rust-materialized aeson

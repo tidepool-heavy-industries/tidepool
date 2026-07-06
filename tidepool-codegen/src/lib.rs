@@ -16,6 +16,7 @@ pub mod heap_bridge;
 pub mod host_fns;
 pub mod jit_machine;
 pub mod layout;
+pub mod lower;
 pub mod machine_state;
 pub mod nursery;
 pub mod old_space;
