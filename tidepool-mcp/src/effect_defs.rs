@@ -441,6 +441,7 @@ macro_rules! http_effect_def {
                 { ctor HttpNetwork,    fields { detail: "Text" as String },              doc "a network-level failure (connect/timeout/read)" },
                 { ctor HttpStatus,     fields { code: "Int" as i64, body: "Text" as String }, doc "a non-2xx HTTP response" },
                 { ctor HttpBadJson,    fields { detail: "Text" as String },              doc "the body is not valid JSON" },
+                { ctor HttpTooLarge,   fields { nodes: "Int" as i64 },                   doc "the JSON response exceeds the materialization cap (node count); narrow the query" },
             ],
             verbs [
                 { ctor HttpGet, method http_get,
@@ -1130,7 +1131,7 @@ mod tests {
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
         assert!(d.type_defs.iter().any(|t| *t
             == "data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | \
-                HttpStatus Int Text | HttpBadJson Text deriving (Show, Eq)"));
+                HttpStatus Int Text | HttpBadJson Text | HttpTooLarge Int deriving (Show, Eq)"));
     }
 
     /// #335 Llm wave: LlmStructured threads `Either LlmError`, `LlmBudget` is

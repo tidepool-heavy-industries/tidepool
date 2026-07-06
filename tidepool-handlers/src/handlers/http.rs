@@ -11,6 +11,25 @@ pub fn parse_json_str(s: &str) -> Result<serde_json::Value, HttpError> {
     serde_json::from_str(s).map_err(|e| HttpError::HttpBadJson(format!("invalid JSON: {e}")))
 }
 
+/// Node count of a serde value: each scalar is 1; a container is 1 + its
+/// children. (Object *keys* aren't serde nodes, but they DO become boxed heap
+/// objects once bridged.)
+fn count_json_nodes(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Array(xs) => 1 + xs.iter().map(count_json_nodes).sum::<usize>(),
+        serde_json::Value::Object(m) => 1 + m.values().map(count_json_nodes).sum::<usize>(),
+        _ => 1,
+    }
+}
+
+/// Deliberately well below the machine's `MAX_EFFECT_RESPONSE_NODES` (100_000):
+/// bridging a JSON tree to the tidepool heap MULTIPLIES its node count — object
+/// keys become boxed `Text`, objects become `Data.Map` spines, arrays become
+/// cons cells — so a serde tree this large reliably overflows the bridged cap.
+/// Guarding here turns that generic mid-effect abort into a typed, recoverable
+/// `Left (HttpTooLarge n)` the eval can pattern-match (#335 error-as-data).
+const MAX_RESPONSE_NODES: usize = 32_000;
+
 #[derive(Clone)]
 pub struct HttpHandler;
 
@@ -58,7 +77,13 @@ impl HttpHandler {
     }
 
     fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, HttpError> {
-        serde_json::from_str(body).or_else(|_| Ok(serde_json::Value::String(body.to_string())))
+        let v = serde_json::from_str(body)
+            .unwrap_or_else(|_| serde_json::Value::String(body.to_string()));
+        let nodes = count_json_nodes(&v);
+        if nodes > MAX_RESPONSE_NODES {
+            return Err(HttpError::HttpTooLarge(nodes as i64));
+        }
+        Ok(v)
     }
 
     /// Map a `ureq` call failure to a typed `HttpError`: a non-2xx response
@@ -157,6 +182,25 @@ mod tests {
         let val = Value::Con(con_id, vec![url, body]);
         let req = HttpReq::from_value(&val, &table).unwrap();
         assert!(matches!(req, HttpReq::HttpPost(ref u, _) if u == "https://example.com/api"));
+    }
+
+    /// An over-cap JSON response is a typed `Left (HttpTooLarge n)`, not a
+    /// generic mid-effect abort: a 40k-element array bridges past the
+    /// materialization cap, so `parse_response` short-circuits.
+    #[test]
+    fn oversized_json_response_is_typed_too_large() {
+        let big = serde_json::Value::Array((0..40_000).map(|i| serde_json::json!(i)).collect());
+        let body = serde_json::to_string(&big).unwrap();
+        match HttpHandler::parse_response("https://x", &body) {
+            Err(HttpError::HttpTooLarge(n)) => assert!(n as usize > MAX_RESPONSE_NODES),
+            _ => panic!("expected Left (HttpTooLarge _)"),
+        }
+    }
+
+    /// A normal-size JSON response is unaffected by the guard.
+    #[test]
+    fn small_json_response_is_ok() {
+        assert!(HttpHandler::parse_response("https://x", r#"{"a":1,"b":[1,2,3]}"#).is_ok());
     }
 
     /// #335 acceptance: `httpGet` on a malformed URL is a typed
