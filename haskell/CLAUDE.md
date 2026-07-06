@@ -122,25 +122,6 @@ extract with optics:
 - Orchestration: let the LLM DECIDE (`SEnum`/`SBool`) and let deterministic code
   EMIT syntax (regex/AST) — models are unreliable at generating domain syntax.
 
-## Known Limits
-
-Clean-error boundaries, not silent failures (see `plans/gotcha-audit.md` for the
-full empirical audit these are drawn from):
-
-- **`cycle` (and other `Data.List` loop-breakers)** — `take 5 (cycle [1,2])`
-  fails with "unresolved variable" from the GHC fat-interface limit: the
-  recursive loop-breaker binding has no unfolding to load. Workaround: manual
-  recursion, or `concat (replicate n xs)`.
-- **`Integer` arithmetic beyond `+`/`-`** in some eval paths compiles cleanly
-  to a GMP-symbol error rather than running: native ghc-bignum shims cover
-  add/sub; other multi-limb ops (e.g. `read`-derived big multiplication)
-  are not yet shimmed. Use `parseInt`/`parseDouble` where applicable.
-- **Unguarded recursion in an eager argument position** — a by-design
-  strictness boundary, not a bug: user code that recurses unguarded inside
-  a strict argument position dies with a clean stack-overflow yield error at
-  roughly 10K-20K frames rather than running unbounded. Tail-recursive and
-  Prelude-library recursion are unaffected (TCO, laziness work already done).
-
 ## Adding new Prelude functions
 
 Dictionary polymorphism runs on the JIT: custom classes, multi-param classes,
