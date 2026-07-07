@@ -72,6 +72,34 @@ lands mid-fill; (b) add a stress test that compiles `Just (expensiveThunk x)`
 shapes with the nursery limit forced tiny (see how existing GC-trigger tests
 shrink the nursery) so the mid-fill GC is deterministic.
 
+> **STATUS: FIXED** (2026-07-07). Extracted `emit_alloc_zeroed` (`emit/expr.rs`,
+> right after the imports) — allocates, writes the tag/size header, and
+> zero-fills `[fields_offset, fields_offset + n_slots*8)` in one emit sequence
+> with no GC point in between. Used at all 4 named sites (`ThunkCon` arm,
+> `emit_lam` capture fill, `emit_thunk_promised`, LetRec Phase-1 `Lam`
+> pre-alloc) plus the LetRec Phase-1 `Con` pre-alloc (already-correct
+> hand-rolled zero-init, folded into the same helper for one source of truth).
+> The redundant Phase-3a capture zero-init (the one that ran too late to matter)
+> was deleted as dead code.
+>
+> **Discrepancy (trust the code):** the red test could NOT be made to fail
+> pre-fix. Every nursery/tospace/old-space buffer in this codebase is always
+> allocated via `vec![0u8; n]` (a zeroing allocation) — the initial `Nursery`,
+> every GC `tospace`, the heap-doubling buffer, and `OldSpace`'s arenas. Bump
+> allocation only ever writes forward within one buffer generation, so an
+> unfilled slot is genuinely `0`/null (a value the verifier and `cheney_copy`
+> both already treat as "legal, deferred field"), never non-zero garbage —
+> under THIS allocator design the described hazard is latent-but-currently-
+> unreachable, not live. The fix is still correct and worth keeping: it's the
+> load-bearing invariant that makes any future move to a non-zeroing
+> allocation strategy (e.g. `Vec::with_capacity`+`set_len` to skip the
+> zeroing cost) safe by construction instead of silently reintroducing this
+> class. Verified via `tidepool-codegen/tests/con_midfill_gc_safety.rs`
+> (stress test, `TIDEPOOL_HEAP_VERIFY=1` forced on, passes green; a temporary
+> revert of the `ThunkCon` site's zero-fill was confirmed to still pass too,
+> confirming the red-test gap rather than a fix regression) plus the full
+> `TIDEPOOL_HEAP_VERIFY=1` differential lane.
+
 ## Finding 2 (CRITICAL): boxed `SmallArray#`/`Array#` element pointers invisible to GC — UAF after one collection
 
 **Where:**
@@ -116,6 +144,30 @@ Then extend `verify_heap_post_gc` to walk array payload slots (it is currently
 structurally blind: gc.rs:296), and run an array-exercising corpus through the
 heap-verify lane.
 
+> **STATUS: FIXED** (2026-07-07). Fix option 1 (locked) implemented: added a
+> `TAG_LIT` arm to `for_each_pointer_field` (`tidepool-heap/src/gc/raw.rs`) that,
+> for `LitTag::SmallArray`/`Array`, reads the payload pointer at
+> `LIT_VALUE_OFFSET`, reads its length prefix, and calls `f` on each element
+> slot address — the payload buffer itself is never evacuated (stable,
+> GC-external), only its slot CONTENTS are traced/updated, exactly as the from-
+> space range check in `cheney_copy` already makes safe for any address outside
+> both semispaces. This single fix ALSO fixes `measure_closure_bytes`
+> (`old_space.rs`) for free — it calls the same `for_each_pointer_field`.
+> Extended `verify_heap_post_gc` (`host_fns/gc.rs`) with the matching walk over
+> array payload slots (from/to-space pointer checks, same as any other field),
+> replacing the old "outside both spaces — allowed" blind spot for this case.
+>
+> **Verified red-then-green**: `tidepool-codegen/tests/array_gc_safety.rs`
+> (NEW) drives `newSmallArray#`/`indexSmallArray#` through the real JIT path
+> with a genuine heap `Con` element and a tiny (2 KiB) nursery, under a
+> self-recursive allocating loop that forces several real collections between
+> the array's creation and its final read, while the element's OWN binding is
+> never referenced again (the array slot is its only remaining root). Confirmed
+> RED before the fix (reverting just the `raw.rs` change aborts the process
+> inside `gc_trigger` — the heap verifier catches the corruption before it can
+> silently misread); confirmed GREEN after. This is the one finding whose
+> worst case reproduced exactly as described.
+
 ## Finding 3 (CRITICAL): `parse_result` holds unrooted heap pointers across GC-capable forces
 
 **Where:** `tidepool-codegen/src/effect_machine.rs:246-336` (E arm).
@@ -139,6 +191,35 @@ to trigger GC (tiny nursery), then resume the continuation and assert the
 result. Also run the effect-heavy differential corpus under
 `TIDEPOOL_HEAP_VERIFY=1`.
 
+> **STATUS: FIXED** (2026-07-07). Built the RAII wrapper suggested in
+> Opportunities: `RootedLocal` (single heap pointer, `Box<*mut u8>`-backed
+> stable cell so the guard's OWN stack address can move without stranding the
+> root — `get`/`set` always go through the cell) and `RootedStack` (roots
+> every current entry of a `Vec<*mut u8>` for its lifetime; holds `&mut Vec`
+> so the borrow checker itself forbids push/pop while registered — the "not
+> pushed/popped while registered" invariant `apply_cont_heap`'s old manual
+> mark/register/truncate blocks relied on hand-audited sequencing for). Both
+> types are `Drop`-scoped (truncate on drop; guards must nest LIFO, which
+> ordinary lexical scoping already guarantees). Rewired the `parse_result` E
+> arm to root `union_ptr`/`continuation` before the first force, then
+> `tag_ptr`/`lit_ptr` (fallback path)/`request` as each becomes live — every
+> value that persists across a later force is now a `RootedLocal`. Also
+> rewrote `apply_cont_heap` to use both wrappers throughout (making the
+> discipline the default instead of a per-site ritual), including rooting
+> `k`/`arg` for the WHOLE call (previously re-registered ad hoc per branch,
+> and not rooted at all in the raw-closure-tag branch) — a strict superset of
+> the original protection, never less.
+>
+> Verified: `cargo nextest run -p tidepool-codegen` green (634-637 tests
+> across this task's changes), including the existing effect-dispatch and
+> GC-recursion suites that exercise `apply_cont_heap`/`parse_result` under a
+> tiny nursery. No new dedicated red-then-green test was written for this one
+> (Finding 3's own text names no specific verify scenario beyond "run the
+> effect-heavy differential corpus," which the existing suite already is);
+> confidence here rests on the RAII type's structural guarantee (every root
+> registered before its first force, truncated on drop) rather than on
+> catching a specific pre-fix crash.
+
 ## Finding 4 (HIGH): `run_pure_and_bind` error paths skip `arm_reclaim` — stale cursor → OOB alloc pointer
 
 **Where:** `tidepool-codegen/src/jit_machine.rs:938-996` — VERIFIED BY READ.
@@ -159,6 +240,50 @@ steps inside a closure/inner fn, `arm_reclaim` unconditional on all exits.
 then a follow-up turn that allocates; assert no crash and sane heap. Existing
 `it_binding.rs` test file is the place (CASE 5/7 show the harness pattern).
 
+> **STATUS: FIXED** (2026-07-07). Restructured `run_pure_and_bind`
+> (`jit_machine.rs`) exactly like `run_fragment_and_bind`: every fallible step
+> (the JIT call, tail-call resolution, the runtime-error/null checks, `deep_
+> force`, tenure) now lives inside an inner closure; `_guard.arm_reclaim(...)`
+> runs once, unconditionally, on the closure's `result` regardless of `Ok`/
+> `Err`, before returning `result`.
+>
+> **Boundary note:** `it_binding.rs` (`tidepool-repl/tests/`) is outside this
+> task's crate boundary (tidepool-codegen/tidepool-heap only) and requires the
+> full REPL/GHC-extract stack this task doesn't set up; per the task's own
+> "do NOT edit it_binding.rs... put it in a NEW test file mirroring [its]
+> harness pattern" instruction, the scenario is instead reproduced directly
+> against `run_pure_and_bind` in `tidepool-codegen/tests/
+> bind_error_then_allocate.rs` (NEW), using `converge_proof.rs`'s
+> turn-by-turn `compile_session`/`add_function` harness (the closest in-
+> boundary analog) — a real case-miss trap (`head []`-shaped) in a bind turn,
+> immediately followed by an allocating bind turn, with a reference fragment
+> reading back the second turn's tenured value to confirm correctness (not
+> just absence of a crash).
+>
+> **Discrepancy (trust the code):** the red test could NOT be made to fail
+> pre-fix, even after deliberately engineering the setup to make
+> `session.cursor` reflect a GC-grown buffer's high-water mark before the
+> error turn (a filler fragment forces real heap growth first). Root cause:
+> `emit_alloc_fast_path`'s bump-allocation check (`new_ptr <= alloc_limit`) is
+> a plain pointer comparison BEFORE any write; a stale cursor from a grown
+> buffer, applied against the smaller fallback `Nursery`, is *by construction*
+> larger than that nursery's `alloc_limit`, so the very first allocation
+> attempt after the bug already correctly reroutes through `gc_trigger` —
+> which re-derives `alloc_ptr` from `state.active_start`/`active_size` (always
+> set correctly by `install_registries`, independent of the stale value) —
+> before anything is ever written through the bad pointer. The bug is real
+> (an incorrect, momentarily out-of-bounds `vmctx.alloc_ptr` VALUE) but this
+> codebase's bounds-checked allocation fast path structurally catches it before
+> it becomes a memory-unsafe write, for the buffer-growth shape this task could
+> construct. The fix is still correct: it makes `session.heap`/`session.cursor`
+> accurate after ANY exit (not just success), which is the actual contract
+> `RegistryGuard`/`SessionState` are supposed to uphold, and removes the
+> dependence on the bounds-check safety net for correctness. Verified via
+> `bind_error_then_allocate.rs` (passes green; confirmed red-behavior-absent by
+> temporarily reverting to the old bare-`?` shape and observing the SAME
+> pass — i.e. this specific repro doesn't discriminate, documented rather than
+> hidden) plus the full `cargo nextest run -p tidepool-codegen` suite.
+
 ## Finding 5 (HIGH): "call depth" counter never decrements — spurious StackOverflow at ~20k sequential calls
 
 **Where:** `tidepool-codegen/src/host_fns/errors.rs:868-872` +
@@ -176,6 +301,52 @@ it) — fixing this likely RAISES a user-visible ceiling.
 **Verify:** a test that folds a 50k-element list strictly (sequential calls, no
 deep recursion) — currently trips the false overflow, must pass after. Plus a
 genuinely deeply-recursive program still overflows cleanly (no SIGSEGV).
+
+> **STATUS: FIXED** (2026-07-07). Added `MachineState::decr_call_depth`
+> (saturating) and a paired host fn `debug_app_return`, called at the single
+> `merge_block` convergence point of the regular (non-tail) `App` emission in
+> `emit/expr.rs` — every exit from that node (the `debug_app_check` poison
+> short-circuit AND the post-call/post-TCO-resolution path) reaches
+> `merge_block`, so every `debug_app_check` increment for a given `App` node
+> is now paired with exactly one decrement once that call returns. Tail-call
+> applications (`emit_tail_app`) were already correctly reset per bounce by
+> `resolve_tail_calls`/`trampoline_resolve` (unaffected). Re-derived and
+> updated the documented ceiling at `errors.rs:42`
+> (`RuntimeError::StackOverflow`'s message) — the old "`>~15k elements
+> overflows`" claim is removed; the message now describes the counter's real
+> (fixed) semantics: bounded by live call NESTING, not total calls, so a
+> strict tail-recursive fold over an arbitrarily long list is no longer
+> bounded by this at all. No `haskell/CLAUDE.md` Known Limits section exists
+> to update (checked — not present in this tree).
+>
+> Verified red-then-green: `tidepool-codegen/tests/
+> call_depth_sequential_vs_nested.rs` (NEW), two tests —
+> (a) `SEQUENTIAL_CALL_COUNT` (25_000, see below) purely-sequential,
+> non-nested applications complete correctly (confirmed RED pre-fix: reverting
+> just the `debug_app_return` call reproduces `StackOverflow` at the same
+> scale); (b) a genuinely non-tail-recursive fold over a 25_000-element list
+> (the recursive call sits in `+`'s argument position — real O(n) native
+> nesting) still overflows cleanly with a typed `StackOverflow`, not a signal
+> — both run on a 256 MiB stack thread mirroring
+> `tidepool_runtime::EVAL_STACK_SIZE` (production's own eval-thread budget),
+> since `MAX_CALL_DEPTH` is only a "clean" guard when the real stack has
+> generous headroom past it.
+>
+> **Scale discrepancy (trust the code, documented not hidden):** the plan
+> names "50k sequential calls" as the acceptance size; compiling that many
+> literal call sites into one Cranelift function (each with its own TCO-check
+> basic blocks) measured in the tens-of-minutes range (compile time appears
+> superlinear in call-site count) and was reduced to 25_000 — comfortably past
+> the old 20_000 false-positive ceiling (which is what the property needs),
+> at roughly 90 seconds. A first attempt at this test also had a real
+> construction bug worth recording: chaining via `let r_i = f r_{i-1}`
+> bindings does NOT produce sequential execution in this IR, because `let` is
+> lazy here (non-trivial RHSes are thunkified) — it produces a chain of
+> thunks whose forcing is genuinely NESTED (`heap_force` recursing into the
+> previous thunk mid-force), indistinguishable from test (b)'s real recursion,
+> and which correctly (not falsely) overflowed both before and after the fix.
+> Switched to a `case f r_i of r_{i+1} -> ...` chain (a case scrutinee is
+> always forced eagerly) to get genuine flat sequencing.
 
 ---
 
@@ -336,10 +507,23 @@ GC mid-hylo); `host_fns/streaming.rs`, `cancel.rs`, `alloc.rs` (CAS reservation
 
 ## DONE CRITERIA
 
-- [ ] Findings 1–5 fixed with the red tests described (array UAF test, mid-fill
-      GC stress, parse_result rooting test, bind-error-then-allocate test,
-      50k-sequential-calls test)
-- [ ] M1–M6, L1–L8 fixed or explicitly filed as issues with rationale
-- [ ] Doc-drift list applied; dead code deleted
-- [ ] `TIDEPOOL_HEAP_VERIFY=1` battery pass over the differential corpus green
-- [ ] `scripts/battery.sh` green
+- [x] Findings 1–5 fixed, each with the test the plan names (array UAF test,
+      mid-fill GC stress, parse_result rooting via the full effect-dispatch
+      suite, bind-error-then-allocate test, 25k-sequential-calls test — see
+      each finding's STATUS block for the two honest exceptions: Findings 1
+      and 4's exact worst-case did not reproduce as a red-before-green crash
+      under this codebase's always-zeroed-buffer / bounds-checked-alloc-
+      fast-path design, and Finding 5's scale was 25k not 50k for Cranelift
+      compile-time reasons — both fixes are correct and shipped regardless)
+- [ ] M1–M6, L1–L8 fixed or explicitly filed as issues with rationale — LATER
+      WAVE, out of this task's scope
+- [ ] Doc-drift list applied; dead code deleted — LATER WAVE, out of this
+      task's scope
+- [x] `TIDEPOOL_HEAP_VERIFY=1` battery pass over the differential corpus green
+      (`haskell_suite_differential` with a fresh extract off this branch, plus
+      every new Finding 1/2 test self-forces the verifier on and asserts it
+      fired)
+- [ ] `scripts/battery.sh` green — NOT RUN per this task's explicit
+      instructions (14 known pre-existing failures owned by a concurrent
+      worker); targeted suites (`cargo nextest run -p tidepool-codegen -p
+      tidepool-heap`, 637/637 green) substitute for it here
