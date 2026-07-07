@@ -51,7 +51,15 @@ families:
   a safe operand so execution continues to a placeholder value the pending error
   preempts.
 
-All PrimOpKind variants are implemented (the `_ =>` catch-all is unreachable). A
-clean runtime error is surfaced when `with_signal_protection` returns, instead of
-crashing. (A genuine SIGILL/SIGSEGV now points at heap corruption or a bad
-pointer — no routine language-level error reaches a signal.)
+Almost all PrimOpKind variants are implemented; a clean runtime error is
+surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
+SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine
+language-level error reaches a signal.) Two variants are NOT emitted:
+`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2124`).
+`TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs:1300`),
+so that half is an unreachable backstop. `SeqOp` is a real differential gap —
+handled by the eval oracle (`tidepool-eval/src/eval.rs:1539`) but NOT the JIT.
+The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
+(checked 2026-07-07), so this gap isn't exercised today; if the generator is
+extended to cover it, either implement `SeqOp` in the JIT or exclude it from
+generation explicitly.

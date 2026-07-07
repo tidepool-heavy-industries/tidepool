@@ -201,8 +201,6 @@ impl TailCtx {
 ///
 /// Single-threaded, same-session use (the machine is pinned to one thread), so
 /// no `Send`/`Sync` is required despite the raw pointers.
-///
-/// SCAFFOLD STATE (Wave 0): always empty; threaded but never read.
 #[derive(Clone, Default)]
 pub struct ExternalEnv(FxHashMap<VarId, *mut *mut u8>);
 
@@ -330,15 +328,14 @@ impl Default for EnvScope {
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
-    /// Session-scoped external bindings (`VarId` → seeded **raw heap pointer**),
-    /// consulted at Var-miss sites to resolve a reference to a value bound in a
-    /// *prior* JIT fragment (the ghci-session re-entry path; Wave 1, component
-    /// C). Empty for the one-shot eval path and all current callers.
-    ///
-    /// SCAFFOLD STATE (Wave 0): threaded but never read — `compile_expr` seeds
-    /// it from its `external_env` argument and it is cloned into nested function
-    /// contexts, but no emission code consults it yet. See [`ExternalEnv`] for
-    /// the type-level invariant (raw pointers, not per-function SSA `Value`s).
+    /// Session-scoped external bindings (`VarId` → seeded **root slot
+    /// address**, NOT a heap pointer directly — see [`ExternalEnv`]'s doc for
+    /// why that distinction is the GC-staleness invariant), consulted at
+    /// Var-miss sites (`expr.rs`'s Var-miss arm) to resolve a reference to a
+    /// value bound in a *prior* JIT fragment (the ghci-session re-entry path;
+    /// Wave 1, component C). `compile_expr` seeds it from its `external_env`
+    /// argument and clones it into nested function contexts. Empty for the
+    /// one-shot eval path and all current one-shot callers.
     pub external_env: ExternalEnv,
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,

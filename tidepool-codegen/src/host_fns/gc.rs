@@ -261,9 +261,12 @@ pub fn heap_verify_run_count() -> usize {
 ///   to-space (then 8-aligned), or outside BOTH spaces (poison / malloc'd
 ///   byte arrays) — a pointer into FROM-SPACE is a dangling evacuation and
 ///   fails loudly here instead of as a SIGSEGV collections later. BLACKHOLE
-///   capture slots are checked too: `for_each_pointer_field` skips them
-///   (S3-C6), so a from-space capture in a blackholed thunk is that bug
-///   manifesting.
+///   capture slots are checked too, as defense-in-depth alongside the
+///   general field walk: `for_each_pointer_field` traces
+///   `THUNK_UNEVALUATED`/`THUNK_BLACKHOLE` captures identically (the S3-C6
+///   skip was fixed in `raw.rs`, 2026-06-11), so a from-space capture here
+///   would now be caught by the main Cheney scan too — this check just
+///   guards the invariant a second way rather than covering a live gap.
 ///
 /// From-space addresses are COMPARED, never dereferenced (the buffer may
 /// already be freed). Known v1 gap: in the heap-doubling path the
@@ -463,8 +466,10 @@ unsafe fn verify_heap_post_gc(
                         );
                     }
                     l::THUNK_BLACKHOLE => {
-                        // for_each_pointer_field skips blackhole captures
-                        // (S3-C6): a from-space capture here is that bug live.
+                        // for_each_pointer_field traces THUNK_BLACKHOLE
+                        // captures identically to THUNK_UNEVALUATED (S3-C6
+                        // fixed in raw.rs, 2026-06-11) — this is a second,
+                        // redundant check on the same invariant, not a gap.
                         let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
                         for i in 0..n {
                             check_field(
@@ -472,7 +477,7 @@ unsafe fn verify_heap_post_gc(
                                 idx,
                                 obj,
                                 l::THUNK_CAPTURED_OFFSET as usize + 8 * i,
-                                "BLACKHOLE capture (S3-C6: invisible to GC)",
+                                "BLACKHOLE capture",
                             );
                         }
                     }

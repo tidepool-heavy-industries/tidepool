@@ -855,18 +855,17 @@ pub(crate) fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
     }
 }
 
-/// Return the list of host function symbols for JIT registration.
-///
-/// Usage: `CodegenPipeline::new(&host_fn_symbols())`
-/// Debug: called before every App call_indirect to validate the function pointer.
-/// Prints the heap tag and code_ptr. Aborts on non-closure.
-///
-/// # Safety
-///
-/// `fun_ptr` must point to a valid HeapObject if not null.
-/// Maximum call depth before raising StackOverflow. This catches infinite
-/// recursion (e.g. `[0..]` in non-fusing context) with a clean error
-/// instead of SIGSEGV from stack overflow.
+/// Ceiling on live call NESTING depth, not total calls made (finding 5,
+/// repo-review-2026-07-06/01-gc-memory-safety.md, fixed the counter to
+/// actually decrement on return — see `debug_app_return`/
+/// `MachineState::decr_call_depth` — so this bounds concurrently-active,
+/// unreturned calls, matching what the name always implied but the old
+/// never-decrementing counter did not). Catches genuine unbounded/very deep
+/// non-tail recursion (e.g. `[0..]` in a non-fusing context) with a clean
+/// `RuntimeError::StackOverflow` instead of a SIGSEGV from stack overflow. A
+/// long list processed via a strict, TAIL-recursive fold is NOT bounded by
+/// this at all (tail calls reset the counter per bounce; see
+/// `resolve_tail_calls`/`trampoline_resolve`).
 const MAX_CALL_DEPTH: u32 = 20_000;
 
 /// Returns 0 if the call is safe to proceed, or a poison pointer if the call

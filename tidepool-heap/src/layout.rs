@@ -268,13 +268,10 @@ pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u32) {
     // Tag is written at offset 0, size at offset 1 (unaligned u32), padding zeroed at offsets 5-7.
     *ptr.add(OFFSET_TAG) = tag;
     std::ptr::write_unaligned(ptr.add(OFFSET_SIZE) as *mut u32, size);
-    // Padding bytes are from offset 5 to 7 (3 bytes).
-    // Note: decisions.md says variant-specific payload follows at offset 3,
-    // but also says all objects are 8-byte aligned.
-    // If payload starts at offset 3, we should NOT zero these bytes.
-    // However, the spec ALSO says: "tag(1) + size(4) + padding(3) = 8 bytes aligned"
-    // in the Wave 1 description. We will follow the padding description for now
-    // but only zero if size as usize >= HEADER_SIZE to be safe.
+    // Frozen header ABI: tag(1) + size(4) + padding(3) = 8-byte HEADER_SIZE;
+    // variant-specific payload starts at offset 8 (CON_TAG_OFFSET/
+    // LIT_TAG_OFFSET/CLOSURE_CODE_PTR_OFFSET/THUNK_STATE_OFFSET all agree).
+    // Zero the padding whenever the object is large enough to have it.
     if size as usize >= HEADER_SIZE {
         std::ptr::write_bytes(ptr.add(5), 0, 3);
     }

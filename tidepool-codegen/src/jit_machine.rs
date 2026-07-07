@@ -169,8 +169,8 @@ impl CancelHandle {
 struct SessionState {
     heap: Option<Vec<u64>>,
     cursor: usize,
-    // Wave 1.A (Worker-Tenure): populated at bind time; scaffold only until tenure lands.
-    #[allow(dead_code)]
+    // Wave 1.A (Worker-Tenure): populated at bind time; read by the four
+    // *_and_bind* run entries to tenure NF values into stable old-space slots.
     old_space: crate::old_space::OldSpace,
 }
 
@@ -1664,9 +1664,13 @@ pub enum ResumeInput {
     /// Feed the (already-validated, bridged) answer value into the suspended
     /// ask and continue driving.
     Answer(tidepool_eval::value::Value),
-    /// Abort the suspended ask: record `Cancelled` as the first cause on this
-    /// machine and unwind — the same terminal outcome a pre-E2 caller-abort
-    /// produced, without running the continuation.
+    /// Abort the suspended ask WITHOUT running the continuation (a stowed
+    /// machine has no thread) — returns `JitError::Effect(EffectError::
+    /// Handler("ask aborted by caller: {reason}"))` directly, the same
+    /// terminal outcome a pre-E2 caller-abort produced. This does NOT touch
+    /// the first-cause cell / record `RuntimeError::Cancelled` — that cause
+    /// is reserved for the gate/timeout abort path, not a caller-supplied
+    /// abort reason.
     Abort(String),
 }
 
