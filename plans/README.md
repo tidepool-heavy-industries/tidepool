@@ -100,6 +100,6 @@ been deleted (tier 09).
 - [ ] 06 Repl session
 - [ ] 07 MCP + handlers
 - [ ] 08 Test infra
-- [ ] 09 Hygiene / docs / misc
+- [x] 09 Hygiene / docs / misc — merged (fed2a5df)
 
 Mark a file's checkbox only when its own DONE CRITERIA section is satisfied.
