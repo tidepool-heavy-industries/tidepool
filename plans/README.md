@@ -92,7 +92,7 @@ been deleted (tier 09).
 
 ### Status
 
-- [ ] 01 GC / memory safety — Findings 1-5 (CRITICAL/HIGH) merged (5ad34be4); side effect: #34 sorted-fromList footgun retired (false ceiling, ea303d2e); M/L/doc/dead-code in flight (gc-mediums)
+- [ ] 01 GC / memory safety — ALL findings merged (1-5: 5ad34be4; M/L/doc/dead-code: 180f1791; L6 verified false); #34 sorted-fromList footgun retired (ea303d2e); remaining: final battery only (root close-out)
 - [ ] 02 Haskell stdlib + extract — all findings merged (H tier 2760024b; M/LOW tier 7d5cba1e); remaining: root close-out only (final battery, redeploy, live H1/H2 spot-check) + RustSections.hs LOWs (untracked WIP, root-owned)
 - [x] 03 Engine / runtime / macro / bridge — merged (50456e8c); freer_names consts exported for 05's F2 (in flight)
 - [ ] 04 Optimizer shadowing
