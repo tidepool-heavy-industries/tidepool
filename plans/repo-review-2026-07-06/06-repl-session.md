@@ -106,6 +106,10 @@ re-wait can't self-heal, and the session is marked `Wedged` unnecessarily.
   failure, then `classify_turn` AGAIN in `run_eval` — three process spawns
   before the real compile. Plumb the verdict from `decl_shaped_text` into
   `run_one_item`. (~seconds per stmt item; biggest repl-latency win found.)
+  **FILED, not implemented this pass** (touches the hot classification path;
+  needs its own change + perf verification) — plumb `decl_shaped_text`'s
+  verdict through `run_one_item`'s `Auto` arm so a Stmt-classified item pays
+  exactly one `classify_turn` instead of three.
 - **Hidden `:stub 0` on huge values:** `truncate_for_it`'s hint
   (`truncate.rs:174-181`) mentions only `it`; the module doc promises the full
   value is "fetchable via `:stub 0`" but the response never says so. One
@@ -144,9 +148,9 @@ the `BindingTable`; orphaned `Val.G<g>.hi` at a reused gen is inert.
 
 ## DONE CRITERIA
 
-- [ ] F1+F2 fixed together; stub-payload red test + bind-final-null test green;
+- [x] F1+F2 fixed together; stub-payload red test + bind-final-null test green;
       tool description / CLAUDE.md / command.rs aligned
-- [ ] F3 fixed; comment-led decl gets real head + painted type
-- [ ] F4 rebuild-then-swap + cancel-slot clear
-- [ ] Opportunities triaged (at minimum: file the triple-spawn latency fix)
+- [x] F3 fixed; comment-led decl gets real head + painted type
+- [x] F4 rebuild-then-swap + cancel-slot clear
+- [x] Opportunities triaged (at minimum: file the triple-spawn latency fix)
 - [ ] `cargo nextest run --ignore-default-filter -p tidepool-repl` green

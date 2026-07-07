@@ -256,9 +256,11 @@ pub enum TurnOutcome {
     /// `session_run` block result: per-item outcomes + the last expression value.
     Block {
         items: Vec<BlockItemResult>,
-        /// The value produced by the last value-yielding `Stmt` in the block
-        /// (`None` if no expression was evaluated or the block errored before
-        /// any expression ran).
+        /// The block's result value: populated ONLY when the FINAL executed
+        /// item is a value-producing expression. `None` when the block ends in
+        /// a bind/decl/meta command, or errored (even if an earlier expression
+        /// produced a value) — read `items[].result` for an intermediate
+        /// expression's value instead.
         value: Option<Json>,
         /// Inferred type of the last expression (`None` when the block ends in
         /// a bind or declaration, or when the type probe failed).

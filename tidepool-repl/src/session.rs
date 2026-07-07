@@ -364,6 +364,11 @@ impl Session {
         let mut last_value: Option<serde_json::Value> = None;
         let mut last_type: Option<String> = None;
         let mut last_truncated: Option<String> = None;
+        // The `results` INDEX of the item whose `TurnOutcome::Value` most
+        // recently set `last_value` — recorded at the moment it is assigned, so
+        // the post-loop step below strips fields from exactly that item, never
+        // an unrelated item re-derived by some other heuristic.
+        let mut last_value_pos: Option<usize> = None;
 
         // Process items, batching maximal runs of consecutive decl-shaped
         // items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC
@@ -478,7 +483,8 @@ impl Session {
                 let ok = !outcome.is_error()
                     && !matches!(&outcome, TurnOutcome::Meta(v) if v.get("error").is_some());
 
-                // Track the last value-producing expression result.
+                // Track the last value-producing expression result, and WHICH
+                // `results` slot it will land in.
                 if let TurnOutcome::Value {
                     ref value,
                     ref type_display,
@@ -488,6 +494,7 @@ impl Session {
                     last_value = Some(value.clone());
                     last_type = type_display.clone();
                     last_truncated = truncated.clone();
+                    last_value_pos = Some(results.len());
                 }
 
                 results.push(BlockItemResult {
@@ -504,17 +511,31 @@ impl Session {
             }
         }
 
-        // Suppress `value` (and `truncated`) from the last ok value item's slim
-        // result — those fields go to the top-level `value`/`truncated` only,
-        // eliminating the duplication between items[].value and the top-level value.
-        if last_value.is_some() {
-            for r in results.iter_mut().rev() {
-                if r.ok {
-                    if let serde_json::Value::Object(ref mut obj) = r.result {
-                        obj.remove("value");
-                        obj.remove("truncated");
-                    }
-                    break;
+        // The top-level `value` reflects the block's FINAL executed item ONLY —
+        // a block ending in a bind/decl/meta (or one that errored after an
+        // earlier expression ran) leaves it null, matching the documented
+        // contract ("a block ending in a bind leaves `value` null") and GHCi
+        // intuition. `last_value_pos` was recorded at assignment time, so this
+        // is a direct index comparison, not a re-derived "last ok item" scan.
+        if last_value_pos != results.len().checked_sub(1) {
+            last_value = None;
+            last_type = None;
+            last_truncated = None;
+            last_value_pos = None;
+        }
+
+        // Suppress `value` (and `truncated`) from the item that produced
+        // `last_value` — that data now lives at the top level only, eliminating
+        // duplication between items[].value and the top-level value. Strips
+        // exactly `results[last_value_pos]`, never an unrelated item (e.g. a
+        // trailing `:stub` meta result that happens to carry its OWN `value`
+        // key) — the bug this replaced re-scanned for "the last ok item of any
+        // kind" and could strip the wrong one.
+        if let Some(pos) = last_value_pos {
+            if let Some(r) = results.get_mut(pos) {
+                if let serde_json::Value::Object(ref mut obj) = r.result {
+                    obj.remove("value");
+                    obj.remove("truncated");
                 }
             }
         }
@@ -1543,16 +1564,11 @@ impl Session {
                 }))
             }
             MetaCommand::Reset => {
-                // Drop the resident machine (frees the session heap + every
-                // persistent root) and clear both planes: the decl log (reopen
-                // the lib at gen 0) and the value bindings + session table.
-                self.machine = None;
-                self.turn_counter = 0;
-                self.bindings = BindingTable::new();
-                self.val_gen = Generation(0);
-                self.session_table = DataConTable::new();
-                self.last_stubs = Vec::new();
-                self.pure_binds.clear();
+                // Rebuild-then-swap: open the new lib FIRST, mutate `self` only
+                // on success. If `SessionLib::open` fails (IO error), the
+                // session is left completely untouched instead of a half-reset
+                // state (old decl log kept, but every bind that referenced it
+                // already cleared) behind an error implying nothing changed.
                 match SessionLib::open(
                     self.cfg.id,
                     self.cfg.root.clone(),
@@ -1560,6 +1576,24 @@ impl Session {
                 ) {
                     Ok(lib) => {
                         self.lib = lib.with_validation_include(self.cfg.base_include.clone());
+                        // Drop the resident machine (frees the session heap +
+                        // every persistent root) and clear both planes: the
+                        // decl log (just rebuilt above at gen 0) and the value
+                        // bindings + session table.
+                        self.machine = None;
+                        // `self.machine = None` bypasses `bootstrap_machine`,
+                        // so publish the (now empty) cancel handle explicitly —
+                        // otherwise the shared `CancelSlot` keeps the dropped
+                        // machine's stale `CancelHandle` until the next
+                        // bootstrap, and a server-side timeout in that window
+                        // cancels a dead flag instead of a live one.
+                        self.publish_cancel();
+                        self.turn_counter = 0;
+                        self.bindings = BindingTable::new();
+                        self.val_gen = Generation(0);
+                        self.session_table = DataConTable::new();
+                        self.last_stubs = Vec::new();
+                        self.pure_binds.clear();
                         TurnOutcome::Meta(serde_json::json!({"reset": true}))
                     }
                     Err(e) => TurnOutcome::Error(format!("reset failed: {e}")),
@@ -2597,12 +2631,39 @@ fn split_discard_bind(text: &str) -> Option<&str> {
     Some(text[idx + 2..].trim())
 }
 
+/// Strip leading blank lines and `--` line comments so `decl_head` extracts
+/// the real token instead of the comment marker. A leading `-- slugify a
+/// title\nslug t = ...` must classify head `"slug"`, not `"--"` — a stray
+/// `"--"` head poisons the type-probe gate (`defines_head`), the within-block
+/// redefinition splitter, and `mentions_word`'s stale-bind detection, since
+/// all three key off the (wrong) head text.
+///
+/// Follows the Haskell lexical rule that a dash run immediately followed by
+/// another symbol character is an OPERATOR, not a comment (`-->`, `|--`), so
+/// such lines are left alone for the caller's own parsing.
+fn strip_leading_comments(text: &str) -> &str {
+    const SYMBOL_CHARS: &str = "!#$%&*+./<=>?@\\^|~:-";
+    let mut s = text;
+    loop {
+        let trimmed = s.trim_start_matches(char::is_whitespace);
+        match trimmed.strip_prefix("--") {
+            Some(rest) if !rest.starts_with(|c: char| SYMBOL_CHARS.contains(c)) => {
+                s = match rest.find('\n') {
+                    Some(nl) => &rest[nl + 1..],
+                    None => "",
+                };
+            }
+            _ => return trimmed,
+        }
+    }
+}
+
 /// Extract the declared head identifier from a Haskell declaration string,
 /// for the slim `{"decl":"name"}` block item result. Strips keyword prefixes
 /// for type/class/instance declarations; for function definitions returns the
 /// first identifier. Returns `""` for empty or unrecognised text.
 fn decl_head(text: &str) -> &str {
-    let s = text.trim();
+    let s = strip_leading_comments(text).trim();
     // Import: name the module being imported, not the `import` keyword. (#317)
     if let Some(rest) = s.strip_prefix("import ") {
         let rest = rest.trim_start();
@@ -2795,7 +2856,10 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 mod slim_tests {
     use super::self_referential_monadic_pure_bind;
     use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
-    use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
+    use super::{
+        decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind,
+        strip_leading_comments,
+    };
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
     /// helper (so the sig line is not the first line) and a multi-sentence
@@ -2985,6 +3049,24 @@ mod slim_tests {
     }
 
     #[test]
+    fn decl_head_skips_leading_comments() {
+        // A leading `-- comment` line must not poison the head as "--".
+        assert_eq!(
+            decl_head("-- slugify a title\nslug t = T.replace \" \" \"-\" t"),
+            "slug"
+        );
+        // Blank lines + multiple comment lines before the real decl.
+        assert_eq!(
+            decl_head("\n-- first note\n-- second note\ndata Foo = Bar"),
+            "Foo"
+        );
+        // A dash-run immediately followed by a symbol char is an OPERATOR, not
+        // a comment (Haskell lexical rule) — left untouched.
+        assert_eq!(decl_head("(-->) x y = x"), "-->");
+        assert_eq!(strip_leading_comments("--> merge x y"), "--> merge x y");
+    }
+
+    #[test]
     fn defines_head_sig_vs_binding() {
         use super::defines_head;
         // A binding defines; a bare signature does not.
@@ -3160,6 +3242,138 @@ mod hiding_tests {
         assert!(
             out.contains("import Tidepool.Orchestrate hiding (memo)"),
             "Orchestrate helper shadowed by a session name: {out}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::{
+        Generation, MetaCommand, ModuleEnv, PureBind, Session, SessionConfig, SessionId,
+        TurnOutcome, DEFAULT_NURSERY_SIZE,
+    };
+
+    fn minimal_config(root: std::path::PathBuf) -> SessionConfig {
+        SessionConfig {
+            id: SessionId(1),
+            root,
+            base_include: Vec::new(),
+            decls: Vec::new(),
+            preamble: String::new(),
+            effect_stack: String::new(),
+            ask_tag: 0,
+            module_env: ModuleEnv::standalone_default(),
+            nursery_size: DEFAULT_NURSERY_SIZE,
+        }
+    }
+
+    /// F4(a): a failed `SessionLib::open` inside `:reset` must leave the
+    /// session's state COMPLETELY untouched — not a half-reset where the value
+    /// plane / turn counter were already cleared before the reopen was even
+    /// attempted. `SessionLib::open` only does `fs::create_dir_all`, so this
+    /// forces a real IO failure with no GHC/extract dependency.
+    #[test]
+    fn reset_leaves_state_untouched_when_reopen_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::open(minimal_config(dir.path().to_path_buf()))
+            .expect("session opens on a fresh dir");
+
+        // Poke markers into fields the pre-fix "clear before open" code path
+        // wiped unconditionally, even on a failed reopen.
+        session.turn_counter = 7;
+        session.val_gen = Generation(3);
+        session.pure_binds.insert(
+            "marker".to_string(),
+            PureBind {
+                type_display: "Int".to_string(),
+                defining_expr: "42".to_string(),
+                gen: Generation(1),
+            },
+        );
+
+        // Sabotage `cfg.root` so the reopen inside `:reset` fails: replace the
+        // existing directory with a plain file at the same path.
+        std::fs::remove_dir_all(&session.cfg.root).expect("remove session root");
+        std::fs::write(&session.cfg.root, b"not a directory").expect("write blocker file");
+
+        let outcome = session.run_meta(&MetaCommand::Reset);
+        assert!(
+            matches!(outcome, TurnOutcome::Error(_)),
+            "a failed reopen must surface as an error: {outcome:?}"
+        );
+
+        assert_eq!(
+            session.turn_counter, 7,
+            "a failed reopen must not clear turn_counter"
+        );
+        assert_eq!(
+            session.val_gen,
+            Generation(3),
+            "a failed reopen must not clear val_gen"
+        );
+        assert!(
+            session.pure_binds.contains_key("marker"),
+            "a failed reopen must not clear pure_binds — the old decl log must stay usable"
+        );
+    }
+
+    /// F4(b): an in-block `:reset` drops the resident machine WITHOUT going
+    /// through `bootstrap_machine`'s `publish_cancel` call, so the shared
+    /// `CancelSlot` must be cleared explicitly — otherwise it keeps the
+    /// dropped machine's stale `CancelHandle` until the next bootstrap, and a
+    /// server-side timeout in that window cancels a dead flag instead of a
+    /// live one. Needs a real compiled machine (GHC extract), so this test
+    /// mirrors `tests/common/mod.rs`'s minimal-stack setup at the bare
+    /// `Session` level.
+    #[test]
+    fn reset_clears_stale_cancel_handle_from_slot() {
+        if !tidepool_testing::eval_harness::extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+        let stack = tidepool_handlers::build_minimal_stack();
+        let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
+        let effects_dir =
+            tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        let prelude_dir = tidepool_testing::eval_harness::prelude_path();
+        let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+        let preamble = crate::truncate::passthrough_paginate(
+            &tidepool_mcp::build_preamble_non_interactive(&decls, false),
+        );
+        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = SessionConfig {
+            id: SessionId(1),
+            root: dir.path().to_path_buf(),
+            base_include: vec![effects_dir, prelude_dir],
+            decls,
+            preamble,
+            effect_stack,
+            ask_tag,
+            module_env,
+            nursery_size: DEFAULT_NURSERY_SIZE,
+        };
+        let mut session = Session::open(cfg).expect("session opens");
+
+        let slot = crate::worker::empty_cancel_slot();
+        session.set_cancel_slot(slot.clone());
+        session.ensure_effect_machine();
+        assert!(
+            session.machine.is_some(),
+            "machine must bootstrap from a trivial `pure ()` fragment"
+        );
+        assert!(
+            slot.lock().is_some(),
+            "bootstrap must publish a cancel handle into the shared slot"
+        );
+
+        session.run_meta(&MetaCommand::Reset);
+
+        assert!(
+            slot.lock().is_none(),
+            "in-block :reset must clear the stale cancel handle, not leave the dropped \
+             machine's handle in the shared slot"
         );
     }
 }
