@@ -96,7 +96,7 @@ been deleted (tier 09).
 - [ ] 02 Haskell stdlib + extract — all findings merged (H tier 2760024b; M/LOW tier 7d5cba1e); remaining: root close-out only (final battery, redeploy, live H1/H2 spot-check) + RustSections.hs LOWs (untracked WIP, root-owned)
 - [x] 03 Engine / runtime / macro / bridge — merged (50456e8c); freer_names consts exported for 05's F2 (in flight)
 - [x] 04 Optimizer shadowing — merged (F1-F3 81e3b91f, F5/F6 fecd34b7, F4 acbd6f05; worker died pre-commit on F4, root verified 3/3 shadowing proptests + committed)
-- [ ] 05 Repr wire + eval oracle — respawned as wire-oracle2 (first worker halted unstarted on a self-contradictory spec boundary; corrected spec, base includes 03's freer_names + 04's normalize rewrite)
+- [x] 05 Repr wire + eval oracle — merged (dc6bcbf2); freer_names single-sourced into tidepool-repr (effect re-exports). Residual follow-up: F7's typed rejection covers the untrusted decode_json_str boundary; parse_decimal_token's other callers (mcp/bridge) still silently zero an unparseable exponent — shared-signature fix deferred (see plan STATUS)
 - [x] 06 Repl session — merged (51df6121; worker died pre-commit, root verified 189/189 + committed)
 - [x] 07 MCP + handlers — merged (930b2ca4)
 - [x] 08 Test infra — merged (8aca76b6); F5 + redeploy preflight finished by root in scripts/; battery 2720/2720 green (worker full run; root spot-checked the 14 ex-failing)
