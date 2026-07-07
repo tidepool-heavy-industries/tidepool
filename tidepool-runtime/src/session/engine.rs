@@ -72,11 +72,12 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{timeout, Duration};
 
 use tidepool_bridge::{FromCore, ToCore};
+use tidepool_effect::error::EffectError;
 use tidepool_effect::pause::PauseGate;
 
 use crate::{
-    classify, value_to_json, CancelHandle, DispatchEffect, FailureClass, Phase, ResumeInput,
-    ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
+    classify, value_to_json, CancelHandle, DispatchEffect, FailureClass, JitError, Phase,
+    ResumeInput, ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -178,11 +179,19 @@ enum ContinuationState<O: OutputSink> {
     /// Paused at the timeout-yield boundary: a real eval thread is parked on the
     /// gate mid-computation (NOT an ask boundary, so the native stack is live
     /// and cannot be stowed). Resume wakes the gate and drives the same thread;
-    /// abort wakes it with an error.
+    /// abort wakes it with an error. `cancel_slot` is the SAME slot the running
+    /// thread's `on_ready` callback installed its `CancelHandle` into — it MUST
+    /// be threaded back into the re-drive (not a fresh empty slot), or a
+    /// runaway resumed into pure compute can never be cancelled (F1).
+    /// `timeout_secs` is the turn's original caller-clamped window, carried so
+    /// a resume/abort re-drives with it instead of silently falling back to
+    /// `config.default_timeout_secs`.
     Paused {
         session_rx: UnboundedReceiver<EngineMessage<O>>,
         thread: Option<JoinHandle<()>>,
         gate: Arc<PauseGate>,
+        cancel_slot: Arc<Mutex<Option<CancelHandle>>>,
+        timeout_secs: u64,
     },
     /// Suspended at an `Ask`: STOWED as data (E2). No thread. `resume` re-enters
     /// on a fresh thread; `permit` is the session's held pool slot, handed to
@@ -609,6 +618,8 @@ impl<O: OutputSink> SessionEngine<O> {
                 session_rx: UnboundedReceiver<EngineMessage<O>>,
                 thread: Option<JoinHandle<()>>,
                 gate: Arc<PauseGate>,
+                cancel_slot: Arc<Mutex<Option<CancelHandle>>>,
+                timeout_secs: u64,
                 captured: O,
                 source: Arc<str>,
             },
@@ -637,6 +648,8 @@ impl<O: OutputSink> SessionEngine<O> {
                         session_rx,
                         thread,
                         gate,
+                        cancel_slot,
+                        timeout_secs,
                     } = session.state
                     else {
                         unreachable!("matched Paused above")
@@ -646,6 +659,8 @@ impl<O: OutputSink> SessionEngine<O> {
                         session_rx,
                         thread,
                         gate,
+                        cancel_slot,
+                        timeout_secs,
                         captured: session.captured,
                         source: session.source,
                     }
@@ -690,12 +705,13 @@ impl<O: OutputSink> SessionEngine<O> {
             }
         };
 
-        let timeout_secs = self.config.default_timeout_secs;
         match taken {
             Taken::Paused {
                 session_rx,
                 thread,
                 gate,
+                cancel_slot,
+                timeout_secs,
                 captured,
                 source,
             } => ResumeOutcome::Driven(
@@ -706,7 +722,7 @@ impl<O: OutputSink> SessionEngine<O> {
                     thread,
                     gate,
                     timeout_secs,
-                    Arc::new(Mutex::new(None)),
+                    cancel_slot,
                 )
                 .await,
             ),
@@ -717,6 +733,7 @@ impl<O: OutputSink> SessionEngine<O> {
                 source,
                 canonical,
             } => {
+                let timeout_secs = self.config.default_timeout_secs;
                 let body =
                     move |ctx: EvalThreadCtx<O>| resume(ctx, EngineResumeInput::Answer(canonical));
                 ResumeOutcome::Driven(
@@ -740,12 +757,13 @@ impl<O: OutputSink> SessionEngine<O> {
             }
         };
 
-        let timeout_secs = self.config.default_timeout_secs;
         match session.state {
             ContinuationState::Paused {
                 session_rx,
                 thread,
                 gate,
+                cancel_slot,
+                timeout_secs,
             } => {
                 gate.request_abort(format!("aborted by caller (while paused): {reason}"));
                 AbortOutcome::Driven(
@@ -756,12 +774,13 @@ impl<O: OutputSink> SessionEngine<O> {
                         thread,
                         gate,
                         timeout_secs,
-                        Arc::new(Mutex::new(None)),
+                        cancel_slot,
                     )
                     .await,
                 )
             }
             ContinuationState::AwaitingAnswer { resume, permit, .. } => {
+                let timeout_secs = self.config.default_timeout_secs;
                 let body =
                     move |ctx: EvalThreadCtx<O>| resume(ctx, EngineResumeInput::Abort(reason));
                 AbortOutcome::Driven(
@@ -819,6 +838,8 @@ impl<O: OutputSink> SessionEngine<O> {
                                         session_rx,
                                         thread: handle.take(),
                                         gate,
+                                        cancel_slot,
+                                        timeout_secs,
                                     },
                                 },
                             );
@@ -1091,12 +1112,16 @@ fn describe_run_error(e: &RuntimeError, effect_names: &[String]) -> (String, Fai
     let env = classify(e);
     let diagnostics = crate::drain_diagnostics();
     let mut detail = env.message;
-    // Annotate UnhandledEffect with the effect name + roster.
-    if let Some(tag_str) = detail.strip_prefix("Unhandled effect at tag ") {
-        if let Ok(tag) = tag_str.trim().parse::<usize>() {
-            if tag < effect_names.len() {
-                detail = format!("{} (effect: {})", detail, effect_names[tag]);
-            }
+    // Annotate UnhandledEffect with the effect name + roster. Classified
+    // STRUCTURALLY from the typed error (in hand here), not by string-matching
+    // `env.message` — `JitError::Effect`'s `Display` renders as "effect
+    // dispatch error: Unhandled effect at tag N", so a bare
+    // `strip_prefix("Unhandled effect at tag ")` never matched and this
+    // annotation was dead code (#F2).
+    if let RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag })) = e {
+        let tag = *tag as usize;
+        if tag < effect_names.len() {
+            detail = format!("{} (effect: {})", detail, effect_names[tag]);
         }
         let roster: String = effect_names
             .iter()
@@ -1226,6 +1251,36 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F2: an `UnhandledEffect` over an N-handler stack must name the
+    /// out-of-range tag's effect and append the full registered-effects
+    /// roster — previously dead code, since `JitError::Effect`'s `Display`
+    /// ("effect dispatch error: Unhandled effect at tag N") never matched the
+    /// bare `strip_prefix("Unhandled effect at tag ")` this now replaces with
+    /// a structural match on the typed error.
+    #[test]
+    fn describe_run_error_annotates_unhandled_effect_with_name_and_roster() {
+        let effect_names = vec!["Console".to_string(), "Kv".to_string(), "Fs".to_string()];
+        let err = RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag: 2 }));
+        let (detail, class, phase) = describe_run_error(&err, &effect_names);
+
+        assert_eq!(class, FailureClass::Runtime);
+        assert_eq!(phase, Phase::Run);
+        assert!(
+            detail.contains("(effect: Fs)"),
+            "expected tag 2's effect name (Fs) annotated, got: {detail}"
+        );
+        assert!(
+            detail.contains("Registered effects:"),
+            "expected the roster header, got: {detail}"
+        );
+        for line in ["0 = Console", "1 = Kv", "2 = Fs"] {
+            assert!(
+                detail.contains(line),
+                "expected roster line {line:?}, got: {detail}"
+            );
+        }
+    }
 
     #[derive(Clone, Default)]
     struct TestSink {
