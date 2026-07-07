@@ -415,31 +415,61 @@ fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
             );
         }
         prefix.to_string()
-    } else if let (Some(open), Some(close)) = (imp.find('('), imp.rfind(')')) {
-        // Explicit import list. An entry collides when its head identifier
-        // (the text before any `(..)` suffix; the whole `(op)` for an
-        // operator entry) matches a session head.
-        let kept: Vec<&str> = split_top_level_commas(&imp[open + 1..close])
-            .into_iter()
-            .map(str::trim)
-            .filter(|e| !e.is_empty())
-            .filter(|e| {
-                let head = match e.split('(').next().map(str::trim) {
-                    Some("") | None => *e, // operator entry like `(<+>)`
-                    Some(h) => h,
-                };
-                !all_session_heads
-                    .iter()
-                    .any(|p| p.head_name() == head || op_wrap(p.head_name()) == head)
-            })
-            .collect();
-        return format!("{}({}){}", &imp[..open], kept.join(", "), &imp[close + 1..]);
     } else {
+        let head_names: Vec<&str> = all_session_heads.iter().map(|p| p.head_name()).collect();
+        if let Some(rewritten) = subtract_import_list_names(imp, &head_names) {
+            return rewritten;
+        }
         imp.to_string()
     };
     hides.sort();
     hides.dedup();
     format!("{base} hiding ({})", hides.join(", "))
+}
+
+/// Subtract `names` from an unqualified `import M (a, b)` explicit-list line.
+/// GHC forbids combining an explicit list with a `hiding` clause, so shadowing
+/// a listed name means REMOVING its entry; an emptied list stays `import M ()`
+/// (valid — imports only instances). An entry collides when its head
+/// identifier (the text before any `(..)`/constructor suffix; the whole
+/// `(op)` for an operator entry) matches a name, bare or parenthesized.
+///
+/// Returns `None` when the line is not an explicit-list import (qualified,
+/// carries a `hiding` clause, or has no list) — callers fall back to their
+/// `hiding`-clause handling. Shared by the session decl-module renderer
+/// ([`hide_session_heads`]) and `tidepool-repl`'s per-turn eval-preamble
+/// patching, so the two shadowing planes can't drift on this shape again.
+#[must_use]
+pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> {
+    let t = line.trim_start();
+    if !t.starts_with("import ") || t.starts_with("import qualified") || line.contains(" hiding (")
+    {
+        return None;
+    }
+    let (open, close) = (line.find('(')?, line.rfind(')')?);
+    if open >= close {
+        return None;
+    }
+    let kept: Vec<&str> = split_top_level_commas(&line[open + 1..close])
+        .into_iter()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .filter(|e| {
+            let head = match e.split('(').next().map(str::trim) {
+                Some("") | None => *e, // operator entry like `(<+>)`
+                Some(h) => h,
+            };
+            !names
+                .iter()
+                .any(|n| *n == head || format!("({n})") == head)
+        })
+        .collect();
+    Some(format!(
+        "{}({}){}",
+        &line[..open],
+        kept.join(", "),
+        &line[close + 1..]
+    ))
 }
 
 /// Split an import/export list on commas at paren depth 0, so entries like
@@ -712,6 +742,26 @@ mod tests {
             hide_session_heads("import Tidepool.Shell (sh)", &heads),
             "import Tidepool.Shell (sh)"
         );
+    }
+
+    #[test]
+    fn subtract_returns_none_for_non_list_shapes() {
+        // hiding-clause, qualified, and clause-less imports are the callers'
+        // hiding-path business, not a list to subtract from.
+        let names = ["sh"];
+        assert_eq!(
+            subtract_import_list_names("import Tidepool.Prelude hiding (error)", &names),
+            None
+        );
+        assert_eq!(
+            subtract_import_list_names("import qualified Tidepool.Shell as Shell", &names),
+            None
+        );
+        assert_eq!(
+            subtract_import_list_names("import Tidepool.Effects", &names),
+            None
+        );
+        assert_eq!(subtract_import_list_names("default (Int, Text)", &names), None);
     }
 
     #[test]

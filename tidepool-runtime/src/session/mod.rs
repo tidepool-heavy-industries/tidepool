@@ -36,7 +36,9 @@ use std::path::{Path, PathBuf};
 
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
-pub use render::{DeclLog, DeclTurn, ExportItem, ModuleEnv, RenderedModule};
+pub use render::{
+    subtract_import_list_names, DeclLog, DeclTurn, ExportItem, ModuleEnv, RenderedModule,
+};
 
 /// Derive the `lib/` directory that holds Tidepool stdlib source files
 /// (e.g. `Tidepool.Data.Text`) by walking the `TIDEPOOL_EXTRACT` path up to the

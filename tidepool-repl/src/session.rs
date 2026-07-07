@@ -32,8 +32,8 @@ use tidepool_runtime::session::errmap::{
     dedupe_diagnostics, drop_foreign_gen_warnings, remap_generated_coords,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionError, SessionLib,
-    TurnKind, ValueTier,
+    classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, SessionBind,
+    SessionError, SessionLib, TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -1877,7 +1877,17 @@ impl Session {
         // the generated Tidepool.Orchestrate module, imported unqualified by the
         // eval expr module. A session bind that collides with one (e.g. `let memo
         // = …`) must shadow the import, not become an ambiguous occurrence.
-        hide_module_names(&p, "Tidepool.Orchestrate", &refs)
+        let p = hide_module_names(&p, "Tidepool.Orchestrate", &refs);
+        // Explicit-list imports (e.g. the preamble's `import Tidepool.Shell
+        // (sh)`) can't take a `hiding` clause — a session-owned name is
+        // instead SUBTRACTED from the list. Shape-detected per line, so no
+        // module enumeration to keep in sync with the preamble.
+        p.split('\n')
+            .map(|line| {
+                subtract_import_list_names(line, &refs).unwrap_or_else(|| line.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Drop the resident machine, freeing the session heap. Called from
