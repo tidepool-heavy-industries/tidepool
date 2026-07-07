@@ -22,22 +22,53 @@ import Prelude
   , Semigroup(..), Monoid(..)
   , ($), (.), otherwise, not, (&&), (||), negate, fst, snd
   , map, filter, foldl, foldl', foldr
-  , null, error, fromIntegral
+  , null, error, fromIntegral, (++)
   , zip, length, replicate, reverse, concatMap
   )
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
-import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing, strip)
+import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing, strip, break)
 import Tidepool.TextFormat (padRightWith)
 
 -- ---------------------------------------------------------------------------
 -- Parsing
 -- ---------------------------------------------------------------------------
 
--- | Parse CSV text into rows of fields.
--- Handles simple CSV (no quoting). Splits on commas and newlines.
+-- | Parse CSV text into rows of fields, RFC-4180 quote-aware: a field wrapped
+-- in double quotes may contain a literal comma, and a doubled quote (@\"\"@)
+-- inside a quoted field decodes to one literal quote. Rows are still split on
+-- '\n' before quote parsing (like every other row-oriented verb here), so a
+-- literal newline INSIDE a quoted field is not supported.
 parseCsv :: Text -> [[Text]]
-parseCsv = parseDelimited ','
+parseCsv t = map (parseCsvRowS . T.unpack) (filter (not . T.null . strip) (lines t))
+
+-- | Quote-aware split of one CSV row, in @String@ space (mirroring
+-- "Tidepool.Patch"'s String-space discipline for the tree-walking
+-- interpreter's empty-'Text' gap).
+parseCsvRowS :: String -> [Text]
+parseCsvRowS = map T.pack . goField []
+  where
+    goField acc s = case s of
+      ('"' : rest) -> goQuoted acc rest
+      _            -> goUnquoted acc s
+
+    goUnquoted acc s = case break (== ',') s of
+      (field, [])       -> [reverse acc ++ field]
+      (field, _ : rest) -> (reverse acc ++ field) : goField [] rest
+
+    goQuoted acc s = case s of
+      ('"' : '"' : rest) -> goQuoted ('"' : acc) rest
+      ('"' : rest)       -> goAfterQuote acc rest
+      (c : rest)         -> goQuoted (c : acc) rest
+      []                 -> [reverse acc]
+
+    -- Content after a closing quote but before the next comma is malformed
+    -- per strict RFC-4180, but is appended literally (lenient — matches
+    -- common real-world CSV parsers) rather than rejected.
+    goAfterQuote acc s = case s of
+      (',' : rest) -> reverse acc : goField [] rest
+      []           -> [reverse acc]
+      (c : rest)   -> goAfterQuote (c : acc) rest
 
 -- | Parse TSV text into rows of fields.
 parseTsv :: Text -> [[Text]]

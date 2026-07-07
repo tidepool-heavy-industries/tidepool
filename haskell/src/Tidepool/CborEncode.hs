@@ -130,10 +130,10 @@ encodeMetaEntry (dcid, name, tag, arity, bangs, qualName, fieldLabels) =
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral tag
   in
-  -- 7-element entry: the trailing field-labels array is new. The Rust reader
-  -- accepts arrays of length 5/6/7, so older readers of a 6-element entry and
-  -- newer readers of this 7-element entry both decode. Positional constructors
-  -- carry an empty labels array.
+  -- 7-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
+  -- requires EXACTLY 7 elements — a 5- or 6-element entry is a hard
+  -- InvalidStructure error, not a backward-compatible short form. Positional
+  -- constructors carry an empty labels array.
   encodeListLen 7
   <> encodeWord64 dcid
   <> encodeString name
