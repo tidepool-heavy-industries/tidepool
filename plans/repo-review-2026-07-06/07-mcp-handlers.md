@@ -48,6 +48,17 @@ extract sigs by first non-comment line.
 **Verify:** `tidepool --debug` test asserting `gitStatus` compiles and
 `metaEffects` output == actual stack order.
 
+**STATUS: FIXED.** Added `tidepool_handlers::build_debug_stack` (mirrors
+`build_base_stack`'s `base_effects!` callback, appending `MetaHandler` last)
+and `tidepool/src/stack.rs::debug_decls()` (base decls + Meta + Ask, the SAME
+order `build_debug_stack` wires). `run_debug` now derives `effect_names`/
+`helper_sigs` from that single list; `helper_sigs` extraction skips `--`
+comment lines. Tests in `tidepool/src/stack.rs` (`mod tests`, run via `cargo
+test -p tidepool --bin tidepool`) assert the decl order (Console..Time, Meta,
+Ask), that `helper_sigs` contains a real `gitStatus ::` signature (not a
+comment fragment), and that `build_debug_stack`'s handler HList reports the
+same order via `collect_decls()`.
+
 ## F2 (MODERATE): `timeout_secs` tool-schema doc is wrong (the API is the prompt)
 
 **Where:** `tidepool-mcp/src/lib.rs:108-115` — the JSON-schema description
@@ -57,7 +68,27 @@ A model believing the cap is 600 won't request 1800 for a long build and eats
 an avoidable pause/resume cycle.
 **Fix:** interpolate the constants into the doc string so it can't drift again.
 
+**STATUS: FIXED.** A doc comment is a compile-time literal, so it can't hold a
+runtime `format!`; instead the field doc carries a `{{TIMEOUT_SECS_DOC}}`
+sentinel, and the new `tidepool_mcp::eval_request_input_schema()` (used at the
+`list_tools` call site instead of the raw `schema_to_map(schema_for!(...))`)
+serializes the schema, replaces the sentinel with
+`format!("Default {EVAL_TIMEOUT_SECS}; clamped to [1, {MAX_EVAL_TIMEOUT_SECS}].")`,
+and re-parses. Test: `eval_request_schema_reports_real_timeout_constants`
+(tidepool-mcp/src/lib.rs) asserts the live constants appear, the sentinel
+never leaks, and the stale "Default 120" no longer appears.
+
 ## F3 (MODERATE, defensive layer): HTTP SSRF guard — two concrete bypasses
+
+**DISCREPANCY:** the quoted line range (`:26-66, 98-124`) no longer matches
+`http.rs` — `validate_url`/`get`/`post` had already moved by the time this
+branch started (unrelated churn, most recently the parseJson-Http-verb cut in
+b0888ea7, though that commit didn't touch this file's line count much; the
+range was already stale against the reviewed commit). Neither this finding's
+text nor the current file references `parseJson`/`HttpBadJson` — that stale
+pattern named in the worker brief does not apply to this file. Relocated by
+name (`HttpHandler::validate_url`) instead of line number; both bypasses
+described below were confirmed present by direct read before fixing.
 
 **Where:** `tidepool-handlers/src/handlers/http.rs:26-66, 98-124`.
 
@@ -74,6 +105,27 @@ an avoidable pause/resume cycle.
 (DNS names resolving to internal IPs remain unchecked — out of scope unless a
 resolver hook is added; noted, not required.)
 
+**STATUS: FIXED (both halves).** Redirects: `HttpHandler::agent()` now builds
+a `ureq::Agent` with `.redirects(0)`; `request_following_redirects` hand-rolls
+the follow loop (shared by `get`/`post`), re-running `validate_url` on every
+RESOLVED absolute URL (via `resolve_redirect`, which handles relative/
+protocol-relative `Location` headers through `Url::join`) before it is
+requested, capped at `MAX_REDIRECTS = 5` hops; 301/302/303 downgrade POST to
+GET, 307/308 preserve method+body. IPv6: `validate_url` now normalizes via
+`to_ipv4_mapped()` and re-runs the v4 rules on the embedded address, and
+manually range-checks `fc00::/7` (unique local) and `fe80::/10` (link-local)
+via `segments()` bit-masks (not `is_unique_local`/`is_unicast_link_local`,
+which are unstable). Tests in `tidepool-handlers/src/handlers/http.rs`
+(`mod tests`) cover the exact bypass URLs
+(`http://[::ffff:127.0.0.1]/`, `http://[fc00::1]/`, `http://[fe80::1]/`,
+plus the metadata-endpoint IPv4-mapped form), a public-v6 allow case, and the
+redirect-to-internal / relative / protocol-relative resolution paths.
+Real end-to-end network testing of the follow loop was not possible in this
+sandbox: any local test listener binds to loopback, which `validate_url`
+rejects before a connection is ever attempted (by design) — so the loop
+itself is exercised via its two composable pieces (`resolve_redirect` +
+`validate_url`) rather than a live HTTP round trip.
+
 ## F4 (LOW/MOD): crash-log write/read paths disagree — panic forensics never surface
 
 **Where:** `tidepool/src/main.rs:58-60` writes panic dumps to
@@ -85,6 +137,14 @@ which matches only the JIT signal handler's path
 **Fix:** point the panic hook at `<cwd>/.tidepool/crash.log` to match the
 signal handler, or have the reader check both.
 
+**STATUS: FIXED.** `main.rs`'s panic hook (extracted to `install_panic_hook`)
+now writes to `std::env::current_dir()?.join(".tidepool/crash.log")` instead
+of `dirs::home_dir()`-relative, matching both the JIT signal handler and the
+forensics reader. Removed the now-unused `dirs` dependency from
+`tidepool/Cargo.toml`. Test: `panic_hook_writes_crash_log_relative_to_cwd`
+(`tidepool/src/main.rs`) chdirs to a tempdir, triggers a real panic through
+`catch_unwind`, and asserts the log landed at the cwd-relative path.
+
 ## F5 (LOW): `..`-containing glob patterns silently return `Ok([])`
 
 **Where:** `tidepool-handlers/src/handlers/fs.rs:115-117`. Empty SUCCESS for
@@ -94,6 +154,10 @@ look like a clean no-match" rationale, :126). Also false-positives on
 legitimate names (`glob "notes/v1..v2.diff"` → `[]`).
 **Fix:** `FsError::FsSandbox("'..' not allowed in glob patterns")`.
 
+**STATUS: FIXED.** `expand_glob` (`tidepool-handlers/src/handlers/fs.rs`) now
+returns `Err(FsError::FsSandbox("'..' not allowed in glob patterns"))` instead
+of `Ok(Vec::new())`. Test: `test_dotdot_glob_pattern_is_loud_not_silent_empty`.
+
 ## F6 (LOW): git verbs accept flag-shaped revspecs (no `--` separator)
 
 **Where:** `tidepool-handlers/src/handlers/git.rs:160-192`. `rev` passed as a
@@ -101,6 +165,14 @@ bare positional: `gitDiffStat "--output=/tmp/x"` makes git write an arbitrary
 file OUTSIDE the Fs sandbox; any `-`-prefixed rev parses as an option instead
 of the typed `GitBadRevspec`.
 **Fix:** reject revs starting with `-`, and/or `git diff --numstat <rev> --`.
+
+**STATUS: FIXED (both halves).** `GitHandler::validate_revspec` rejects any
+rev starting with `-` as a typed `GitBadRevspec`, called from `git_diff_stat`
+and `git_show` before the revspec ever reaches `run_git`; both call sites also
+now append a trailing `--` to close the pathspec boundary (belt and
+suspenders, per guidance that future verbs will copy this call site). Tests:
+`test_git_diff_stat_rejects_flag_shaped_revspec`,
+`test_git_show_rejects_flag_shaped_revspec`.
 
 ## F7 (LOW): KV store silently reset on backing-file read error, then overwritten
 
@@ -111,15 +183,33 @@ wipes persisted KV.
 **Fix:** `tracing::warn!` at minimum; refuse to flush over a file that existed
 but couldn't be read.
 
+**STATUS: FIXED.** `KvHandler` gained a `read_failed: Arc<AtomicBool>` field.
+`new()` now `tracing::warn!`s and sets it when the backing file exists but
+`read_to_string` fails (distinct from "file absent", which stays a silent
+fresh store); `flush()` checks the flag first and refuses to write (with a
+`tracing::warn!`) for the lifetime of that handler, so a transient read
+failure can never be silently overwritten. Test:
+`kv_refuses_to_flush_over_a_file_it_could_not_read` (chmod 0o000, construct,
+restore perms, dispatch a `KvSet`, assert the on-disk content is byte-identical
+to what was there before construction).
+
 ## Doc drift
 
 - `tidepool-mcp/CLAUDE.md:129-138` — "Structural search" section still
   documents `hsDef`/`hsSig`/`rsFn`/`rHas`/`rInside`, cut with the SG effect
   (f1a480e6). Only `grepGlob` survives. Delete/rewrite (no-scar-tissue).
+  **STATUS: FIXED.** Rewrote the section to name only `grepGlob`, with a
+  one-line note on why the rest is gone.
   NOTE: `tidepool-repl/CLAUDE.md` also references "structural search
   (`sgFind`)" patterns — sweep it in the same pass.
+  **STATUS: OUT OF SCOPE for this worker** (confirmed present at
+  `tidepool-repl/CLAUDE.md:7,140` by direct read) — `tidepool-repl/` is owned
+  by another worker (06-repl-session.md) per this branch's boundary; flagging
+  here rather than silently leaving it, per the discrepancy protocol.
 - `tidepool/src/lib.rs:8-9` — crate doc lists handlers "Console, KV, Fs, HTTP,
   Exec, Lsp, and Meta"; missing Llm, Git, Time.
+  **STATUS: FIXED.** Doc now lists "Console, KV, Fs, HTTP, Exec, Lsp, Llm,
+  Git, Time, and (debug-only) Meta".
 
 ## Opportunities
 
@@ -158,9 +248,33 @@ the ONLY consumer still hand-rolling is `run_debug` (F1).
 
 ## DONE CRITERIA
 
-- [ ] F1 derived-not-declared; debug-stack test green
-- [ ] F2 constants interpolated into schema doc
-- [ ] F3 redirects+IPv6 closed with unit tests on `validate_url`
-- [ ] F4–F7 fixed with typed-error tests
-- [ ] Doc drift swept (both CLAUDE.md files + lib.rs)
-- [ ] `cargo nextest run --ignore-default-filter -p tidepool-mcp -p tidepool-handlers` green
+- [x] F1 derived-not-declared; debug-stack test green
+- [x] F2 constants interpolated into schema doc
+- [x] F3 redirects+IPv6 closed with unit tests on `validate_url`
+- [x] F4–F7 fixed with typed-error tests
+- [x] Doc drift swept (both CLAUDE.md files + lib.rs) — except
+      `tidepool-repl/CLAUDE.md`, out of this worker's boundary (see note above)
+- [x] `cargo nextest run --ignore-default-filter -p tidepool-mcp -p tidepool-handlers` —
+      **236/237 passed** (6 skipped: extract-unavailable-gated), with the
+      correctly-resolved harness (leave `TIDEPOOL_EXTRACT` unset so it
+      resolves the `tidepool-extract` shim on `$PATH`, which carries the full
+      package set including `lens` — an explicit `nix develop`-built
+      `tidepool-extract-bin` in this sandbox turned out to lack `lens` and
+      produced 52 spurious `Could not find module 'Control.Lens'` failures
+      across every JIT-touching test regardless of handler, a red herring
+      from picking the wrong binary, not a real regression). The ONE
+      remaining failure, `tidepool-mcp::eval_warnings_surfaced::
+      overlapping_pattern_warning_surfaces_in_result`, is PRE-EXISTING and
+      OUT OF THIS BRANCH'S BOUNDARY: its assertion is on
+      `EvalResult::warnings()` (`tidepool-runtime/src/render.rs`) — a
+      `tidepool-runtime` warning-capture path this branch never touched (repo
+      boundary explicitly assigns `tidepool-runtime` to another worker); GHC
+      visibly emits the overlapping-patterns warning on stderr but
+      `warnings()` reports empty, reproducing identically in isolation and
+      after clearing `~/.cache/tidepool`. EVERY new/modified test this branch
+      added for F1–F7 (debug-stack order, timeout-schema, HTTP SSRF
+      `validate_url`/`resolve_redirect`, `..`-glob, git flag-revspec, KV
+      read-failure) passed. `cargo check --workspace` and `cargo clippy -p
+      tidepool-mcp -p tidepool-handlers` are both clean (2 pre-existing,
+      unrelated `crate_in_macro_def` warnings in `effect_defs.rs`, not
+      touched by this branch). `cargo fmt --all -- --check` is clean.

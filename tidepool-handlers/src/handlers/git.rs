@@ -48,6 +48,22 @@ impl GitHandler {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Reject a revspec that could be mistaken for an option by git's own
+    /// argv parser (e.g. `--output=/tmp/x` writing OUTSIDE the Fs sandbox via
+    /// `git diff`'s `--output`). No legitimate ref/revspec starts with `-`
+    /// (git itself refuses to create such refs), so this is a pure guard —
+    /// callers pass the revspec positionally, and `run_git` never invokes a
+    /// shell, so this is the one place flag-shaped input can still reach git.
+    fn validate_revspec(rev: &str) -> Result<(), GitError> {
+        if rev.starts_with('-') {
+            return Err(GitError::GitBadRevspec(format!(
+                "revspec must not start with '-' (looks like a git option): {:?}",
+                rev
+            )));
+        }
+        Ok(())
+    }
+
     /// Parse `git log --format="%H%x00%s%x00%an%x00%cI" --name-only` output.
     ///
     /// Each commit block is separated by a blank line (`\n\n`).  The first
@@ -175,11 +191,15 @@ impl GitHandler {
     }
 
     fn git_diff_stat(&mut self, rev: String) -> Result<Vec<GitFileDelta>, GitError> {
-        let output = self.run_git(&["diff", "--numstat", &rev])?;
+        Self::validate_revspec(&rev)?;
+        // Trailing `--` closes the pathspec boundary so `rev` can never be
+        // reinterpreted as (or followed by) an option, even defensively.
+        let output = self.run_git(&["diff", "--numstat", &rev, "--"])?;
         Ok(Self::parse_numstat_output(&output))
     }
 
     fn git_show(&mut self, rev: String) -> Result<GitCommit, GitError> {
+        Self::validate_revspec(&rev)?;
         let output = self.run_git(&[
             "log",
             "-n",
@@ -187,6 +207,7 @@ impl GitHandler {
             &rev,
             "--format=%H%x00%s%x00%an%x00%cI",
             "--name-only",
+            "--",
         ])?;
         Self::parse_single_commit(&output, &rev)
     }
@@ -547,6 +568,32 @@ file_c.txt\n\
                 );
             }
             other => panic!("expected Left (GitBadRevspec _), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_git_diff_stat_rejects_flag_shaped_revspec() {
+        let dir = make_scratch_repo();
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+        match handler.git_diff_stat("--output=/tmp/tidepool-git-f6-poc".to_string()) {
+            Err(GitError::GitBadRevspec(_)) => {}
+            Err(other) => panic!("expected GitBadRevspec, got a different GitError: {other:?}"),
+            Ok(_) => panic!("expected Err(GitBadRevspec(_)), got Ok"),
+        }
+        assert!(
+            !std::path::Path::new("/tmp/tidepool-git-f6-poc").exists(),
+            "flag-shaped revspec must never reach git's argv"
+        );
+    }
+
+    #[test]
+    fn test_git_show_rejects_flag_shaped_revspec() {
+        let dir = make_scratch_repo();
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+        match handler.git_show("-n1".to_string()) {
+            Err(GitError::GitBadRevspec(_)) => {}
+            Err(other) => panic!("expected GitBadRevspec, got a different GitError: {other:?}"),
+            Ok(_) => panic!("expected Err(GitBadRevspec(_)), got Ok"),
         }
     }
 

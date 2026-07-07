@@ -3524,7 +3524,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "dirs",
  "frunk",
  "rmcp",
  "serde",

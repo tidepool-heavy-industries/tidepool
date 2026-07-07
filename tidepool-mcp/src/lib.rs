@@ -106,13 +106,39 @@ pub struct EvalRequest {
     #[serde(default)]
     pub max_len: Option<u32>,
     /// Optional eval window in SECONDS before the timeout-yield fires.
-    /// Default 120; clamped to [1, 600]. Raise it for deliberately heavy
+    /// {{TIMEOUT_SECS_DOC}} Raise it for deliberately heavy
     /// evals — e.g. a `cargo check`/`cargo build` driven through the `run`
     /// effect — so they aren't cut off mid-compile. The runaway backstop is
     /// unchanged: at the window an eval at an effect boundary parks as a
     /// continuation, and a pure infinite loop is still detached.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+}
+
+/// Sentinel spliced into the generated `EvalRequest` JSON schema's
+/// `timeout_secs` description (see the doc comment above) and replaced by
+/// [`eval_request_input_schema`] with the live `EVAL_TIMEOUT_SECS`/
+/// `MAX_EVAL_TIMEOUT_SECS` constants — a doc comment is a compile-time
+/// literal, so this is the one place the numbers can be interpolated instead
+/// of hand-copied (the drift that made the doc claim "600" while the real
+/// cap is 1800).
+const TIMEOUT_SECS_DOC_SENTINEL: &str = "{{TIMEOUT_SECS_DOC}}";
+
+/// The `eval` tool's JSON input schema, with the `timeout_secs` sentinel
+/// resolved to the actual timeout constants (formatted exactly once, here).
+pub fn eval_request_input_schema() -> Result<Arc<serde_json::Map<String, serde_json::Value>>, String>
+{
+    let schema = schemars::schema_for!(EvalRequest);
+    let json = serde_json::to_string(&schema)
+        .map_err(|e| format!("failed to serialize EvalRequest schema: {e}"))?;
+    let doc = format!("Default {EVAL_TIMEOUT_SECS}; clamped to [1, {MAX_EVAL_TIMEOUT_SECS}].");
+    let json = json.replace(TIMEOUT_SECS_DOC_SENTINEL, &doc);
+    match serde_json::from_str(&json)
+        .map_err(|e| format!("failed to reparse EvalRequest schema: {e}"))?
+    {
+        serde_json::Value::Object(o) => Ok(Arc::new(o)),
+        _ => Ok(Arc::new(serde_json::Map::new())),
+    }
 }
 
 /// Request parameters for the `resume` tool.
@@ -1049,6 +1075,29 @@ data Console a where
     #[test]
     fn test_eval_timeout_value() {
         assert_eq!(EVAL_TIMEOUT_SECS, 600);
+    }
+
+    /// The `eval` tool schema must attest to the REAL clamp (600/1800), not a
+    /// stale hand-copied "Default 120; clamped to [1, 600]" claim — and the
+    /// sentinel must never leak into the client-visible schema.
+    #[test]
+    fn eval_request_schema_reports_real_timeout_constants() {
+        let schema = eval_request_input_schema().unwrap();
+        let json = serde_json::to_string(schema.as_ref()).unwrap();
+        assert!(
+            json.contains(&format!(
+                "Default {EVAL_TIMEOUT_SECS}; clamped to [1, {MAX_EVAL_TIMEOUT_SECS}]."
+            )),
+            "schema must contain the live timeout constants: {json}"
+        );
+        assert!(
+            !json.contains(TIMEOUT_SECS_DOC_SENTINEL),
+            "sentinel must not leak into the client-visible schema: {json}"
+        );
+        assert!(
+            !json.contains("Default 120"),
+            "the old stale default (120) must not appear: {json}"
+        );
     }
 
     #[test]

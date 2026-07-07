@@ -113,7 +113,9 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
         ));
     }
     if pattern.contains("..") {
-        return Ok(Vec::new());
+        return Err(FsError::FsSandbox(
+            "'..' not allowed in glob patterns".to_string(),
+        ));
     }
     if pattern.starts_with('/') || pattern.starts_with('\\') {
         return Err(FsError::FsSandbox(
@@ -719,6 +721,24 @@ mod tests {
             format!("{e}").contains("matches EVERYTHING"),
             "empty readGlob should still abort loudly, got: {e}"
         );
+    }
+
+    #[test]
+    fn test_dotdot_glob_pattern_is_loud_not_silent_empty() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("notes"), "").unwrap();
+        let handler = FsHandler::new(root.clone());
+
+        // A literal (non-traversal) filename containing ".." must not be
+        // swallowed into a false-positive empty result.
+        match handler.expand_glob("notes/v1..v2.diff") {
+            Err(FsError::FsSandbox(d)) => assert!(d.contains("'..'"), "{d}"),
+            other => {
+                panic!("expected Err(FsSandbox(_)) for a '..'-containing pattern, got {other:?}")
+            }
+        }
     }
 
     #[test]

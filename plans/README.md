@@ -98,7 +98,7 @@ been deleted (tier 09).
 - [ ] 04 Optimizer shadowing
 - [ ] 05 Repr wire + eval oracle
 - [ ] 06 Repl session
-- [ ] 07 MCP + handlers
+- [x] 07 MCP + handlers
 - [ ] 08 Test infra
 - [x] 09 Hygiene / docs / misc — merged (fed2a5df)
 
