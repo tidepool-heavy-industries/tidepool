@@ -473,9 +473,20 @@ fn strip_module_header(source: &str) -> HaskellHeader {
     let mut imports = Vec::new();
     let mut body_lines: Vec<&str> = Vec::new();
     let mut past_header = false;
+    // True from a `module Foo` line (export list not yet closed) until a line
+    // containing `where` closes it — a multi-line header
+    // (`module Foo\n  ( x )\n  where`) must skip every line in between, or the
+    // export-list/`where` fragment leaks into the inlined body (#F4).
+    let mut in_module_clause = false;
     for line in source.lines() {
         let trimmed = line.trim();
         if !past_header {
+            if in_module_clause {
+                if trimmed.contains("where") {
+                    in_module_clause = false;
+                }
+                continue;
+            }
             if trimmed.starts_with("{-#") && trimmed.contains("LANGUAGE") {
                 // Extract extensions from pragma like {-# LANGUAGE Foo, Bar #-}
                 if let Some(start) = trimmed.find("LANGUAGE") {
@@ -492,7 +503,13 @@ fn strip_module_header(source: &str) -> HaskellHeader {
                 }
                 continue;
             }
-            if trimmed.starts_with("{-#") || trimmed.starts_with("module ") || trimmed.is_empty() {
+            if trimmed.starts_with("{-#") || trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("module ") {
+                if !trimmed.contains("where") {
+                    in_module_clause = true;
+                }
                 continue;
             }
             if trimmed.starts_with("import ") {
@@ -521,13 +538,30 @@ fn capitalize(s: &str) -> String {
 /// Run `tidepool-extract` to compile a Haskell source file.
 ///
 /// Tries the tool from PATH first (normal workflow inside `nix develop`),
-/// falls back to `nix run {flake}#tidepool-extract` if not found.
+/// falls back to `nix run {flake}#tidepool-extract` only when that spawn
+/// itself fails to find the binary — a binary that RAN and exited nonzero
+/// (a real GHC diagnostic) is reported directly, never masked behind a
+/// redundant (and slower) nix re-run that would only reproduce the same
+/// error (#F3).
 fn run_tidepool_extract(
     hs_path: &Path,
     output_dir: &Path,
     target: Option<&str>,
     manifest_dir: &Path,
 ) -> Result<(), String> {
+    // The output dir is fully regenerated on every expansion; clear stale
+    // bindings first — the extractor's own `createDirectoryIfMissing` never
+    // removes anything, so a renamed/removed binding's stale `.cbor` would
+    // otherwise keep being served silently after this rebuild (#F4).
+    if let Err(e) = std::fs::remove_dir_all(output_dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "failed to clear stale output dir {}: {e}",
+                output_dir.display()
+            ));
+        }
+    }
+
     // Try tidepool-extract directly from PATH first
     let mut cmd = Command::new("tidepool-extract");
     cmd.arg(hs_path);
@@ -540,8 +574,21 @@ fn run_tidepool_extract(
 
     match cmd.output() {
         Ok(output) if output.status.success() => return Ok(()),
-        Ok(_) | Err(_) => {
-            // tidepool-extract not on PATH or failed — fall back to nix run
+        Ok(output) => {
+            // The binary ran and failed — this IS the diagnostic (a GHC type
+            // error, a missing binding, ...). Surface it verbatim; falling
+            // back to nix here would only re-run the SAME failing compile.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "tidepool-extract failed (exit {}):\n{}",
+                output.status, stderr
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // tidepool-extract not on PATH — fall back to nix run below.
+        }
+        Err(e) => {
+            return Err(format!("failed to spawn tidepool-extract: {e}"));
         }
     }
 
@@ -625,5 +672,49 @@ fn find_single_binding(output_dir: &Path) -> Result<PathBuf, String> {
                 names
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_module_header;
+
+    #[test]
+    fn single_line_module_header_still_strips_cleanly() {
+        let src =
+            "{-# LANGUAGE OverloadedStrings #-}\nmodule Foo where\nimport Data.Text\nfoo = 1\n";
+        let header = strip_module_header(src);
+        assert_eq!(header.extensions, vec!["OverloadedStrings".to_string()]);
+        assert_eq!(header.imports, vec!["import Data.Text".to_string()]);
+        assert_eq!(header.body.trim(), "foo = 1");
+    }
+
+    /// #F4: a `module Foo\n  ( x )\n  where` header spanning multiple lines
+    /// must be skipped IN FULL — a naive single-line check leaks the
+    /// `( x )`/`where` continuation lines into the inlined body.
+    #[test]
+    fn multi_line_module_header_does_not_leak_into_body() {
+        let src = "module Foo\n  ( x\n  , y\n  )\n  where\n\nx = 1\ny = 2\n";
+        let header = strip_module_header(src);
+        assert!(
+            !header.body.contains("where"),
+            "multi-line module header leaked into body: {:?}",
+            header.body
+        );
+        assert!(
+            !header.body.contains('('),
+            "export-list fragment leaked into body: {:?}",
+            header.body
+        );
+        assert_eq!(header.body.trim(), "x = 1\ny = 2");
+    }
+
+    /// The `where` closing a multi-line header may share a line with the last
+    /// export (`  ) where`), not just stand alone.
+    #[test]
+    fn multi_line_module_header_where_on_closing_paren_line() {
+        let src = "module Foo\n  ( x\n  ) where\n\nx = 1\n";
+        let header = strip_module_header(src);
+        assert_eq!(header.body.trim(), "x = 1");
     }
 }
