@@ -182,17 +182,17 @@ fn test_lines() {
 
 #[test]
 fn test_parse_int() {
-    assert_eq!(run_plain(r#"parseInt "42""#), json!(42));
+    assert_eq!(run_plain(r#"parseIntM "42""#), json!(42));
 }
 
 #[test]
 fn test_parse_int_neg() {
-    assert_eq!(run_plain(r#"parseInt "-7""#), json!(-7));
+    assert_eq!(run_plain(r#"parseIntM "-7""#), json!(-7));
 }
 
 #[test]
 fn test_parse_double() {
-    assert_eq!(run_plain(r#"parseDouble "3.14""#), json!(3.14));
+    assert_eq!(run_plain(r#"parseDoubleM "3.14""#), json!(3.14));
 }
 
 #[test]

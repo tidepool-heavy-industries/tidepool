@@ -139,7 +139,7 @@ enum HExpr {
     Sum(Box<HExpr>),    // sum of [Int]
     Product(Box<HExpr>),
     FoldlAdd(i64, Box<HExpr>), // foldl' (+) k xs
-    NegateE(Box<HExpr>),       // negate via abs'/0-x at value level: 0 - e
+    NegateE(Box<HExpr>),       // negate via abs/0-x at value level: 0 - e
     IfInt(Box<HExpr>, Box<HExpr>, Box<HExpr>),
     WhereGo {
         start: i64,
@@ -593,7 +593,7 @@ fn ppfn(f: IntFn) -> String {
         IntFn::SubK(k) => format!("(\\x -> x - {})", lit(k)),
         IntFn::MulK(k) => format!("(\\x -> x * {})", lit(k)),
         IntFn::Neg => "(\\x -> 0 - x)".to_string(),
-        IntFn::AbsF => "(\\x -> abs' x)".to_string(),
+        IntFn::AbsF => "(\\x -> abs x)".to_string(),
         IntFn::Id => "(\\x -> x)".to_string(),
     }
 }

@@ -394,6 +394,14 @@ default (Int, Text)
 error :: Text -> a
 error = P.error . T.unpack
 
+-- Effect-local error ADTs. Production generates these from effect_defs.rs at
+-- codegen time (see tidepool-mcp/src/effect_defs.rs); this static preamble
+-- hand-declares the same shapes so GADT return types below can reference them.
+data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
+data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
+data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
+data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
+
 data Console a where
   Print :: Text -> Console ()
 data KV a where
@@ -407,7 +415,7 @@ data Fs a where
   FsListDir :: Text -> Fs [Text]
   FsGlob :: Text -> Fs [Text]
   FsExists :: Text -> Fs Bool
-  FsMetadata :: Text -> Fs (Int, Bool, Bool)
+  FsMetadata :: Text -> Fs (Maybe FileMeta)
 data SG a where
   SgFind :: Text -> Text -> Text -> [Text] -> SG [Value]
   SgPreview :: Text -> Text -> Text -> [Text] -> SG [Value]
@@ -415,12 +423,12 @@ data SG a where
   SgRuleFind :: Text -> Value -> [Text] -> SG [Value]
   SgRuleReplace :: Text -> Value -> Text -> [Text] -> SG Int
 data Http a where
-  HttpGet :: Text -> Http Value
-  HttpPost :: Text -> Value -> Http Value
+  HttpGet :: Text -> Http (Either HttpError Value)
+  HttpPost :: Text -> Value -> Http (Either HttpError Value)
   HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value
 data Exec a where
-  Run :: Text -> Exec (Int, Text, Text)
-  RunIn :: Text -> Text -> Exec (Int, Text, Text)
+  Run :: Text -> Exec (Either ExecError Proc)
+  RunIn :: Text -> Text -> Exec (Either ExecError Proc)
   RunJson :: Text -> Exec Value
 data Meta a where
   MetaConstructors :: Meta [(Text, Int)]
@@ -432,14 +440,14 @@ data Meta a where
   MetaHelp :: Meta [Text]
 data Git a where
   GitLog :: Text -> Int -> Git [Value]
-  GitShow :: Text -> Git Value
+  GitShow :: Text -> Git (Either GitError Commit)
   GitDiff :: Text -> Git [Value]
   GitBlame :: Text -> Int -> Int -> Git [Value]
   GitTree :: Text -> Text -> Git [Value]
   GitBranches :: Git [Value]
 data Llm a where
   LlmChat :: Text -> Llm Text
-  LlmStructured :: Text -> Value -> Llm Value
+  LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 data Ask a where
   Ask :: Text -> Ask Value
 
@@ -599,8 +607,13 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
     pub struct MockHttp;
     impl EffectHandler for MockHttp {
         type Request = HttpReq;
-        fn handle(&mut self, _req: HttpReq, cx: &EffectContext) -> Result<Response, EffectError> {
-            cx.respond(())
+        fn handle(&mut self, req: HttpReq, cx: &EffectContext) -> Result<Response, EffectError> {
+            match req {
+                HttpReq::HttpGet(_) | HttpReq::HttpPost(_, _) => {
+                    cx.respond(Ok::<serde_json::Value, String>(serde_json::json!({})))
+                }
+                HttpReq::HttpRequest(_, _, _, _) => cx.respond(serde_json::json!({})),
+            }
         }
     }
 
@@ -704,7 +717,15 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
                     let empty: Vec<Value> = vec![];
                     cx.respond(empty)
                 }
-                GitReq::GitShow(_) => cx.respond(()),
+                GitReq::GitShow(_) => cx.respond(Ok::<tidepool_bridge_effects::GitCommit, String>(
+                    tidepool_bridge_effects::GitCommit {
+                        sha: String::new(),
+                        subject: String::new(),
+                        author: String::new(),
+                        date: String::new(),
+                        files: vec![],
+                    },
+                )),
             }
         }
     }
@@ -724,7 +745,9 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         fn handle(&mut self, req: LlmReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
                 LlmReq::LlmChat(_) => cx.respond(String::from("mock")),
-                LlmReq::LlmStructured(_, _) => cx.respond(()),
+                LlmReq::LlmStructured(_, _) => {
+                    cx.respond(Ok::<serde_json::Value, String>(serde_json::json!({})))
+                }
             }
         }
     }
@@ -740,7 +763,7 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
     impl EffectHandler for MockAsk {
         type Request = AskReq;
         fn handle(&mut self, _req: AskReq, cx: &EffectContext) -> Result<Response, EffectError> {
-            cx.respond(String::from("stub_response"))
+            cx.respond(serde_json::json!("stub_response"))
         }
     }
 

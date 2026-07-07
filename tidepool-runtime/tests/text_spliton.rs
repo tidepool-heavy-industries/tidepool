@@ -300,7 +300,7 @@ data Fs a where
   FsListDir :: Text -> Fs [Text]
   FsGlob :: Text -> Fs [Text]
   FsExists :: Text -> Fs Bool
-  FsMetadata :: Text -> Fs (Int, Bool, Bool)
+  FsMetadata :: Text -> Fs (Maybe FileMeta)
 
 data Ask a where
   Ask :: Text -> Ask Value

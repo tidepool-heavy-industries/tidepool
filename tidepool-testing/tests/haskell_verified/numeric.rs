@@ -61,14 +61,14 @@ fn test_numeric_binop() {
     run_template(50, gen_numeric_binop());
 }
 
-// Template 2 (numeric-unary): abs', signum'
+// Template 2 (numeric-unary): abs, signum
 fn gen_numeric_unary() -> impl Strategy<Value = (String, serde_json::Value)> {
-    let ops = prop_oneof![Just("abs'"), Just("signum'")];
+    let ops = prop_oneof![Just("abs"), Just("signum")];
     (arb_int(), ops).prop_map(|(n, op)| {
         let src = format!("{} ({}) :: Int", op, n);
         let expected = match op {
-            "abs'" => n.abs(),
-            "signum'" => n.signum(),
+            "abs" => n.abs(),
+            "signum" => n.signum(),
             _ => unreachable!(),
         };
         (src, json!(expected))
@@ -110,14 +110,14 @@ fn test_numeric_cmp() {
     run_template(50, gen_numeric_cmp());
 }
 
-// Template 4 (numeric-minmax): min', max'
+// Template 4 (numeric-minmax): min, max
 fn gen_numeric_minmax() -> impl Strategy<Value = (String, serde_json::Value)> {
-    let ops = prop_oneof![Just("min'"), Just("max'")];
+    let ops = prop_oneof![Just("min"), Just("max")];
     (arb_int(), arb_int(), ops).prop_map(|(a, b, op)| {
         let src = format!("{} ({}) ({}) :: Int", op, a, b);
         let expected = match op {
-            "min'" => a.min(b),
-            "max'" => a.max(b),
+            "min" => a.min(b),
+            "max" => a.max(b),
             _ => unreachable!(),
         };
         (src, json!(expected))
