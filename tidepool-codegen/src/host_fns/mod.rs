@@ -68,7 +68,7 @@ pub use gc::{
 
 use errors::unresolved_var_trap;
 pub use errors::{
-    debug_app_check, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
+    debug_app_check, debug_app_return, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
     error_poison_ptr_lazy_msg, get_exec_context, has_runtime_error, is_lazy_poison,
     push_diagnostic, raise_lazy_poison, register_var_names, runtime_bad_thunk_state_trap,
     runtime_blackhole_trap, runtime_error, runtime_error_dynamic, runtime_error_with_msg,
@@ -126,6 +126,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_error_dynamic", runtime_error_dynamic as *const u8),
         ("debug_app_check", debug_app_check as *const u8),
+        ("debug_app_return", debug_app_return as *const u8),
         ("trampoline_resolve", trampoline_resolve as *const u8),
         ("runtime_cancel_check", runtime_cancel_check as *const u8),
         (

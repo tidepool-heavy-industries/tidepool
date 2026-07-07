@@ -39,7 +39,7 @@ pub enum RuntimeError {
     BadFunPtrTag(u8),
     #[error("heap overflow (nursery exhausted after GC)")]
     HeapOverflow,
-    #[error("stack overflow — likely unbounded/non-tail recursion, or a very long list strict-forced at a bind (`x <- e` deep-forces its result; >~15k elements overflows — process inside one expression or bind an aggregate instead)")]
+    #[error("stack overflow — likely unbounded or very deep non-tail recursion (~20k live nested calls); a long list processed via a strict, TAIL-recursive fold is not bounded by this (only concurrently-live call nesting counts, not total calls made)")]
     StackOverflow,
     #[error("blackhole detected (infinite loop: thunk forced itself)")]
     BlackHole,
@@ -918,6 +918,23 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
         return error_poison_ptr();
     }
     std::ptr::null_mut() // 0 = ok, proceed with the call
+}
+
+/// Pairs with `debug_app_check`: called once a non-tail `App` call has
+/// returned (every path out of that emission — the poison short-circuit and
+/// the post-call/post-TCO-resolution merge both converge here), so
+/// `call_depth` tracks actual live-call nesting instead of a running total of
+/// every call ever made (Finding 5: ~20k purely-sequential, non-nested
+/// applications used to trip the same `MAX_CALL_DEPTH` a genuinely
+/// 20k-deep recursion would, because nothing ever decremented).
+///
+/// # Safety
+/// `vmctx` must be non-null with `machine_state` installed.
+pub unsafe extern "C" fn debug_app_return(vmctx: *mut VMContext) -> i64 {
+    // SAFETY: caller contract above.
+    let ms = unsafe { machine_state(vmctx) };
+    ms.decr_call_depth();
+    0
 }
 
 /// The shared shape/tag-mismatch trap. The JIT calls this (unconditionally, on

@@ -124,6 +124,14 @@ impl MachineState {
         self.call_depth.set(0);
     }
 
+    /// Pair with `incr_call_depth`: called when a non-tail call RETURNS, so
+    /// the counter tracks the number of currently-active (unreturned) calls
+    /// — actual nesting depth — instead of a monotonically increasing total.
+    /// Saturating: never underflows past 0 even if some path double-decrements.
+    pub(crate) fn decr_call_depth(&self) {
+        self.call_depth.set(self.call_depth.get().saturating_sub(1));
+    }
+
     pub(crate) fn incr_call_depth(&self) -> u32 {
         let d = self.call_depth.get() + 1;
         self.call_depth.set(d);
