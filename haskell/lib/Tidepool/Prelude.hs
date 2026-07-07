@@ -214,7 +214,7 @@ module Tidepool.Prelude
   , textReplicate
   , commonPrefixes
     -- * UTC time (Tidepool.Data.Time)
-  , UTCTime(..), formatISO8601, parseISO8601, daysFromCivil
+  , UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil
   , diffUTCTime, addUTCTime, epochMillis
     -- Deliberately absent from the unqualified shadow — each canonical
     -- Prelude/Data.List name below is reached through a qualifier instead
@@ -293,7 +293,7 @@ import Control.Monad
   , foldM, foldM_
   )
 import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
-import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
+import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

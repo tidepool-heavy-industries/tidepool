@@ -141,6 +141,7 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     let has_git = effects.iter().any(|e| e.type_name == "Git");
     if has_exec {
         imports.push("import qualified Tidepool.Shell as Shell".into());
+        imports.push("import Tidepool.Shell (sh)".into());
         imports.push("import qualified Tidepool.Cargo as Cargo".into());
     }
     if has_git {
@@ -193,6 +194,7 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
     let has_git = effects.iter().any(|e| e.type_name == "Git");
     if has_exec {
         out.push_str("import qualified Tidepool.Shell as Shell\n");
+        out.push_str("import Tidepool.Shell (sh)\n");
         out.push_str("import qualified Tidepool.Cargo as Cargo\n");
     }
     if has_git {
@@ -247,6 +249,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     let has_http = effects.iter().any(|e| e.type_name == "Http");
     if has_exec && has_http {
         out.push_str("import qualified Tidepool.Shell as Shell\n");
+        out.push_str("import Tidepool.Shell (sh)\n");
         out.push_str("import qualified Tidepool.Git as Git\n");
         out.push_str("import qualified Tidepool.Cargo as Cargo\n");
     }
@@ -690,6 +693,12 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             "`liftEither` unwraps a `Right` or aborts the eval on the `Left`. In a fold ",
             "over many items, keep per-item failures as DATA and return both sides ",
             "(`partitionEithers`) \u{2014} an abort mid-batch discards the completed work.\n",
+            "`sh \"cmd\"` is the happy-path form of `run`: stripped stdout on success, ",
+            "throws with the exit code + stderr on nonzero \u{2014} reach for `run` directly when a ",
+            "nonzero exit is itself data worth inspecting; qualified `Shell.`/`Git.`/`Cargo.` ",
+            "cover the wider argv-typed shell/git/cargo surface when Exec is in the stack.\n",
+            "Commit/log dates (e.g. from `gitShow`/`gitLog`) arrive strict ISO-8601 \u{2014} ",
+            "`parseISO8601 c.date` then `formatDay` to bucket by day, `Map.fromListWith` to group.\n",
             "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
         ));
         // DERIVED from the decls (crate::describe): one entry per effect —

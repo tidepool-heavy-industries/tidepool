@@ -10,6 +10,8 @@ module Tidepool.Data.Time
   ( UTCTime(..)
   , formatISO8601
   , parseISO8601
+  , toGregorian
+  , formatDay
   , daysFromCivil
   , diffUTCTime
   , addUTCTime
@@ -34,6 +36,12 @@ newtype UTCTime = UTCTime Int
 
 instance Show UTCTime where
   show t = T.unpack (formatISO8601 t)
+
+-- | Epoch-milliseconds to epoch-days, via floor division. Shared by
+-- 'formatISO8601' and 'toGregorian' so the negative-millis flooring behavior
+-- (see 'formatISO8601') is defined exactly once.
+msToDays :: Int -> Int
+msToDays ms = ms `div` 1000 `div` 86400
 
 -- | Howard Hinnant civil_from_days: epoch-days → (year, month, day).
 -- Pure Int arithmetic; correct for the full range of 32-bit epoch-days.
@@ -83,6 +91,25 @@ pad4 n
   | n < 1000  = T.pack ('0' : showInt n "")
   | otherwise = T.pack (showInt n "")
 
+-- | Canonical @Data.Time@ decomposition: 'UTCTime' -> (year, month, day).
+-- Pure Int civil-date math ('civilFromDays' over the shared 'msToDays'
+-- flooring), the same date the day portion of 'formatISO8601' renders.
+--
+-- >>> toGregorian (UTCTime 1709164800000)
+-- (2024,2,29)
+toGregorian :: UTCTime -> (Int, Int, Int)
+toGregorian (UTCTime ms) = civilFromDays (msToDays ms)
+
+-- | Zero-padded @YYYY-MM-DD@ date prefix of a 'UTCTime' (the date portion of
+-- 'formatISO8601', without the time-of-day suffix).
+--
+-- >>> formatDay (UTCTime 1709164800000)
+-- "2024-02-29"
+formatDay :: UTCTime -> Text
+formatDay t =
+  let (y, mo, d) = toGregorian t
+  in pad4 y <> "-" <> pad2 mo <> "-" <> pad2 d
+
 -- | Render a 'UTCTime' as an ISO-8601 string (UTC, no sub-second precision).
 --
 -- >>> formatISO8601 (UTCTime 0)
@@ -91,19 +118,16 @@ pad4 n
 -- >>> formatISO8601 (UTCTime 1709164800000)
 -- "2024-02-29T00:00:00Z"
 formatISO8601 :: UTCTime -> Text
-formatISO8601 (UTCTime ms) =
-  let totalSecs  = ms `div` 1000
-      -- Haskell `div` is FLOOR division (unlike C's truncation), so no
+formatISO8601 t@(UTCTime ms) =
+  let -- Haskell `div` is FLOOR division (unlike C's truncation), so no
       -- negative-branch adjustment: floor is exactly what civil-date math
       -- needs, and `mod`'s always-non-negative remainder gives secsInDay.
-      daysSince  = totalSecs `div` 86400
+      totalSecs  = ms `div` 1000
       secsInDay  = totalSecs `mod` 86400
-      (y, mo, d) = civilFromDays daysSince
       hh         = secsInDay `div` 3600
       mm         = (secsInDay `mod` 3600) `div` 60
       ss         = secsInDay `mod` 60
-  in pad4 y <> "-" <> pad2 mo <> "-" <> pad2 d
-          <> "T" <> pad2 hh <> ":" <> pad2 mm <> ":" <> pad2 ss <> "Z"
+  in formatDay t <> "T" <> pad2 hh <> ":" <> pad2 mm <> ":" <> pad2 ss <> "Z"
 
 -- | Howard Hinnant days_from_civil: (year, month, day) → epoch-days.
 -- Pure Int arithmetic; the inverse of 'civilFromDays'.

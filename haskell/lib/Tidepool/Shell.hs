@@ -11,7 +11,8 @@
 -- No shell metachar expansion — @$VAR@, globs, pipes are literal.
 -- Lens-free: deconstruct 'Value' with 'KM.lookup' + case, not optics.
 module Tidepool.Shell
-  ( sh1
+  ( sh
+  , sh1
   , shLines
   , shJson
   , shTry
@@ -24,7 +25,19 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc(..), ok)
-import Tidepool.Effects (M, runArgv, liftEither)
+import Tidepool.Effects (M, run, runArgv, liftEither)
+
+-- | Run a shell-string command, strip stdout, throw on nonzero exit — the
+-- shell-string sibling of 'sh1'. Shell metachars (@$VAR@, globs, pipes, @&&@)
+-- are LIVE here, unlike 'sh1's argv (no expansion at all). A nonzero exit is
+-- DATA, not a spawn failure: when it's expected, inspect it directly via
+-- `run` (`Right p <- run cmd; p.exitCode`) instead of `sh`.
+sh :: Text -> M Text
+sh cmd = do
+  p <- run cmd >>= liftEither
+  if ok p
+    then pure (T.strip p.stdout)
+    else Prelude.error ("sh: exit " ++ show p.exitCode ++ ": " ++ T.unpack (T.strip p.stderr))
 
 -- | Run a command (argv, no shell), strip stdout, throw on nonzero exit.
 -- `runArgv` is typed (#335): a spawn failure aborts via `liftEither`, same as
