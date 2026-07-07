@@ -68,22 +68,38 @@ fn is_phantom_data(ty: &Type) -> bool {
 /// `Module.Constructor` path) and the error variant carries the qualified
 /// name. When `module` is `None`, it falls back to the existing
 /// name+arity lookup for backward compatibility. The lookup returns a
-/// `DataConId`; arity validation still happens at the call site via the
-/// existing field-count check so mismatched arities are surfaced as
-/// `ArityMismatch` (qualified-name lookup does not pre-filter by arity).
+/// `Result<DataConId, BridgeError>`; arity validation still happens at the
+/// call site via the existing field-count check so mismatched arities are
+/// surfaced as `ArityMismatch` (qualified-name lookup does not pre-filter by
+/// arity).
+///
+/// `question_mark` selects whether the emitted expression ends in `?`
+/// (unwrap-or-propagate — the right call for a single-shape decode/encode
+/// site where a missing constructor IS the whole failure) or is left as a
+/// bare `Result` for the caller to match on (the enum `FromCore` per-variant
+/// site: a missing constructor there means "this variant can't match, try
+/// the next one", not "abort" — see `generate_from_core`, #F7). Keeping one
+/// shared emitter (instead of a second copy without the `?`) is what keeps
+/// the qualified/unqualified resolution logic itself single-sourced.
 fn emit_datacon_lookup(
     module: Option<&String>,
     core_name: &str,
     core_arity_u32: u32,
     core_arity_usize: usize,
+    question_mark: bool,
 ) -> TokenStream {
+    let suffix = if question_mark {
+        quote! { ? }
+    } else {
+        quote! {}
+    };
     if let Some(module) = module {
         let qualified = format!("{}.{}", module, core_name);
         quote! {
             table.get_by_qualified_name(#qualified)
                 .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConQualified {
                     qualified_name: #qualified.to_string(),
-                })?
+                })#suffix
         }
     } else {
         // Silence unused-var warnings in the `Some` branch where arity isn't
@@ -94,7 +110,7 @@ fn emit_datacon_lookup(
                 .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConNameArity {
                     name: #core_name.to_string(),
                     arity: #core_arity_u32 as usize,
-                })?
+                })#suffix
         }
     }
 }
@@ -171,19 +187,29 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
             quote! { #name::#rust_name(#(#field_exprs),*) }
         };
 
-        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity);
+        // `question_mark = false`: a failed lookup for THIS variant's
+        // constructor must be a SKIP, not an abort. A bare `?` here — the
+        // shape every other `emit_datacon_lookup` call site uses — would fail
+        // fast on the FIRST variant whose constructor happens to be absent
+        // from this compilation's table, even when the value being decoded is
+        // a LATER variant whose constructor IS present (#F7). Matching on the
+        // bare `Result` instead means a missing constructor just skips to the
+        // next variant; only `Err(UnknownDataCon)` after every variant has
+        // had a turn is a genuine decode failure.
+        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, false);
 
         match_arms.push(quote! {
-            let variant_id = #lookup;
-            if *id == variant_id {
-                if fields.len() != #core_arity {
-                    return Err(tidepool_bridge::BridgeError::ArityMismatch {
-                        con: *id,
-                        expected: #core_arity,
-                        got: fields.len(),
-                    });
+            if let Ok(variant_id) = #lookup {
+                if *id == variant_id {
+                    if fields.len() != #core_arity {
+                        return Err(tidepool_bridge::BridgeError::ArityMismatch {
+                            con: *id,
+                            expected: #core_arity,
+                            got: fields.len(),
+                        });
+                    }
+                    return Ok(#construction);
                 }
-                return Ok(#construction);
             }
         });
     }
@@ -283,7 +309,7 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
                 quote! { tidepool_bridge::ToCore::to_value(#ident, table)? }
             });
 
-        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity);
+        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
 
         match_arms.push(quote! {
             #pattern => {
@@ -355,7 +381,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
         quote! { #name { #(#field_constructions),* } }
     };
 
-    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity);
+    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
 
     quote! {
         impl #impl_generics tidepool_bridge::sealed::FromCoreSealed for #name #ty_generics #where_clause {}
@@ -454,7 +480,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
         quote! { #name { #(#destructure_fields),* } }
     };
 
-    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity);
+    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
 
     quote! {
         impl #impl_generics tidepool_bridge::sealed::ToCoreSealed for #name #ty_generics #where_clause {}

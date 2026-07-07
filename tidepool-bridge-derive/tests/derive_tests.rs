@@ -291,3 +291,64 @@ fn test_struct_arity_mismatch() {
     let res = GetBranchRequest::from_value(&value, &table);
     assert!(matches!(res, Err(BridgeError::ArityMismatch { .. })));
 }
+
+// === F7: an EARLIER variant's missing DataCon must not fail-fast a LATER,
+// present variant's decode ===
+
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+enum TwoVariant {
+    #[core(name = "FirstVariant")]
+    First(i64),
+    #[core(name = "SecondVariant")]
+    Second(i64),
+}
+
+/// A table that registers ONLY `SecondVariant` — `FirstVariant` is absent
+/// entirely (as if this compilation's table simply never carried it).
+fn partial_two_variant_table() -> DataConTable {
+    let mut t = standard_datacon_table();
+    t.insert(DataCon {
+        id: DataConId(50),
+        name: "SecondVariant".into(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: None,
+    });
+    t
+}
+
+/// Decoding a value of the LATER variant (`Second`) must succeed even though
+/// the EARLIER variant's (`First`) constructor lookup fails — before the fix,
+/// each variant's lookup ended in a bare `?`, so `First`'s
+/// `UnknownDataConNameArity` aborted `from_value` before `Second` ever got a
+/// chance, regardless of what the actual value was.
+#[test]
+fn later_variant_decodes_despite_earlier_variants_missing_constructor() {
+    let table = partial_two_variant_table();
+    let second_id = table.get_by_name("SecondVariant").unwrap();
+    let value = Value::Con(
+        second_id,
+        vec![Value::Lit(tidepool_repr::Literal::LitInt(7))],
+    );
+
+    let decoded = TwoVariant::from_value(&value, &table)
+        .expect("Second must decode even though First's constructor is absent from the table");
+    assert_eq!(decoded, TwoVariant::Second(7));
+}
+
+/// A value that matches NEITHER variant (both because `First` isn't in the
+/// table and this id genuinely isn't `Second`) is still a real decode
+/// failure — the skip-on-missing-lookup fix must not swallow genuine errors.
+#[test]
+fn no_variant_matches_is_still_an_error() {
+    let table = partial_two_variant_table();
+    let unrelated_id = table.get_by_name("True").unwrap();
+    let value = Value::Con(unrelated_id, vec![]);
+
+    let res = TwoVariant::from_value(&value, &table);
+    assert!(
+        matches!(res, Err(BridgeError::UnknownDataCon(id)) if id == unrelated_id),
+        "expected UnknownDataCon({unrelated_id:?}), got {res:?}"
+    );
+}
