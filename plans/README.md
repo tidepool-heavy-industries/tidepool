@@ -92,8 +92,8 @@ been deleted (tier 09).
 
 ### Status
 
-- [ ] 01 GC / memory safety — ALL findings merged (1-5: 5ad34be4; M/L/doc/dead-code: 180f1791; L6 verified false); #34 sorted-fromList footgun retired (ea303d2e); remaining: final battery only (root close-out)
-- [ ] 02 Haskell stdlib + extract — all findings merged (H tier 2760024b; M/LOW tier 7d5cba1e); remaining: root close-out only (final battery, redeploy, live H1/H2 spot-check) + RustSections.hs LOWs (untracked WIP, root-owned)
+- [x] 01 GC / memory safety — ALL findings merged (1-5: 5ad34be4; M/L/doc/dead-code: 180f1791; L6 verified false); #34 sorted-fromList footgun retired (ea303d2e); close-out battery green (2810/2810)
+- [x] 02 Haskell stdlib + extract — all findings merged (H tier 2760024b; M/LOW tier 7d5cba1e); close-out battery green; live H1/H2 spot-check confirmed (`map fromEnum "hé"` → `[104,233]`, `T.length "héllo"` → `5`); RustSections.hs LOWs fixed (root, untracked WIP)
 - [x] 03 Engine / runtime / macro / bridge — merged (50456e8c); freer_names consts exported for 05's F2 (in flight)
 - [x] 04 Optimizer shadowing — merged (F1-F3 81e3b91f, F5/F6 fecd34b7, F4 acbd6f05; worker died pre-commit on F4, root verified 3/3 shadowing proptests + committed)
 - [x] 05 Repr wire + eval oracle — merged (dc6bcbf2); freer_names single-sourced into tidepool-repr (effect re-exports). Residual follow-up: F7's typed rejection covers the untrusted decode_json_str boundary; parse_decimal_token's other callers (mcp/bridge) still silently zero an unparseable exponent — shared-signature fix deferred (see plan STATUS)
@@ -103,3 +103,28 @@ been deleted (tier 09).
 - [x] 09 Hygiene / docs / misc — merged (fed2a5df)
 
 Mark a file's checkbox only when its own DONE CRITERIA section is satisfied.
+
+### Close-out (all 9 files merged)
+
+Full `scripts/battery.sh` on the merged tree: **2810/2810 green**. Two
+merge-boundary bugs surfaced only once all branches landed together (each was
+green alone) and were fixed by root, not any individual worker:
+
+- `hide_session_heads` (session decl-module renderer) and the repl's
+  `patched_preamble` both appended a `hiding (…)` clause to shadow a
+  session-owned name — invalid when the target import already carries an
+  explicit list (`import Tidepool.Shell (sh)`, added by the stdlib-sh-time
+  tweak below). Fixed by subtracting from the list instead, via one shared
+  `subtract_import_list_names` core so the two shadowing planes can't drift
+  on this shape again (`8e4555e1`, `b2ba3a08`).
+- A genuine name collision: `.tidepool/lib/Dev.hs`'s pre-existing `sh` verb
+  vs. the new stdlib `sh` — surfaced live post-redeploy, fixed by deleting
+  the project-lib duplicate (`07582940`).
+
+`scripts/redeploy.sh` run; `/mcp` reconnected; all four live spot-checks
+green (H1/H2 unicode, bare `sh`, `toGregorian`/`formatDay`).
+
+Small unrelated additions folded into this close-out (see conversation):
+one-eval-one-snapshot + errors-as-data taught in the `eval` tool description;
+bare `sh :: Text -> M Text` + `toGregorian`/`formatDay` added to the stdlib
+and advertised in the description.
