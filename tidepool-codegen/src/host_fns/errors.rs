@@ -368,26 +368,32 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
 /// the poison into adjacent heap — we've observed glibc "corrupted size vs.
 /// prev_size" aborts as a direct consequence.
 ///
-/// The JIT never clamps allocation size at emit time. The effective upper
-/// bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (i.e. the largest Con the
-/// read-side `heap_bridge` is willing to decode; see `MAX_FIELDS = 1024`
-/// there). Closures and thunks are bounded by the same field/capture count
-/// in practice. We size the poison to comfortably absorb that worst case so
-/// any OOM path can complete its field writes harmlessly.
-///
-/// 16 KiB: `24 + 8 * 1024 = 8216` bytes for a max-arity Con, doubled for
-/// headroom. Stays well under the `u16` header `size` encoding limit.
-pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
+/// The JIT never clamps allocation size at emit time. For a Con, the
+/// effective upper bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (the
+/// largest Con the read-side `heap_bridge` is willing to decode; see
+/// `MAX_FIELDS = 1024` there). Closures and thunks have NO equivalent
+/// emit-time or read-side cap (L4, repo-review-2026-07-06/01-gc-memory-
+/// safety.md) — `num_captured` is a bare `u16` field, so the true worst
+/// case is `u16::MAX` captures, not "the same … count in practice"; past
+/// 2045 captures the old 16 KiB sizing (tuned only for `MAX_FIELDS`) was
+/// already smaller than the write, silently reopening the PR-#272 class
+/// this buffer exists to close. Sized here to the actual structural
+/// maximum (a `u16` capture count) rather than an emit-time cap, so no
+/// otherwise-valid program can ever exceed it — a static, one-time
+/// (`OnceLock`) allocation, so the larger size costs nothing per OOM event.
+pub(crate) const POISON_BUF_SIZE: usize =
+    layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
 
 /// Compile-time guard: the poison buffer must be large enough to absorb a
 /// post-OOM write of a worst-case Con at the read-side decoder's
-/// `MAX_FIELDS` ceiling. If `MAX_FIELDS` is bumped without updating
-/// `POISON_BUF_SIZE`, this assertion fails to compile rather than
-/// regressing into the runtime heap-corruption symptom that PR #272
-/// originally diagnosed (glibc "corrupted size vs. prev_size" aborts on
-/// OOM paths writing past the old 24-byte poison). The matching runtime
-/// regression test lives in the module's `tests` block under
-/// `poison_buf_absorbs_max_con_write`.
+/// `MAX_FIELDS` ceiling, AND a worst-case Closure/Thunk capture write (L4:
+/// `u16::MAX` captures — nothing else bounds it). If either ceiling is
+/// bumped without updating `POISON_BUF_SIZE`, this assertion fails to
+/// compile rather than regressing into the runtime heap-corruption symptom
+/// that PR #272 originally diagnosed (glibc "corrupted size vs. prev_size"
+/// aborts on OOM paths writing past an undersized poison). The matching
+/// runtime regression tests live in the module's `tests` block under
+/// `poison_buf_absorbs_max_con_write` and `poison_buf_absorbs_max_capture_write`.
 const _: () = {
     let worst_case_con = layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
     assert!(
@@ -395,6 +401,13 @@ const _: () = {
         "POISON_BUF_SIZE must absorb worst-case Con write \
          (CON_FIELDS_OFFSET + MAX_FIELDS * 8); bump POISON_BUF_SIZE \
          when MAX_FIELDS grows",
+    );
+    let worst_case_captures = layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
+    assert!(
+        POISON_BUF_SIZE >= worst_case_captures,
+        "POISON_BUF_SIZE must absorb a worst-case Closure/Thunk capture \
+         write (CLOSURE_CAPTURED_OFFSET + u16::MAX * 8) — num_captured has \
+         no cap other than its u16 width (L4)",
     );
 };
 
@@ -621,6 +634,13 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
             // Re-read offset/len AFTER the force above (cur may have moved).
             let f1 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
             let f2 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 16) as *const *mut u8);
+            // L2: every sibling field access in this function guards null
+            // (nulls are legal transients per the GC verifier) — these two
+            // didn't, so a null offset/len field segfaulted inside
+            // read_small_int's read_tag.
+            if f1.is_null() || f2.is_null() {
+                return None;
+            }
             let off = read_small_int(f1)? as usize;
             let len = read_small_int(f2)? as usize;
             if off <= bytes.len() {
@@ -1028,10 +1048,22 @@ pub extern "C" fn runtime_shape_trap(
         vec![]
     };
 
-    // Dump raw bytes for any object type
-    // SAFETY: ptr points to a heap object. Reading 32 bytes for diagnostic dump.
-    // Heap objects are always at least this size (minimum header is 8 bytes + fields).
-    let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
+    // Dump raw bytes for any object type.
+    //
+    // L3 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings): every
+    // heap object is AT LEAST `MIN_OBJECT_DUMP_SIZE` (24) bytes — Lit's total
+    // size, and Con/Closure/Thunk's fixed header before any variable-length
+    // payload — but this used to unconditionally read 32, 8 bytes past a
+    // bare (0-field/0-capture) 24-byte object. A Lit sitting at the very end
+    // of the nursery made that an out-of-bounds read past the allocation.
+    // Clamped to the guaranteed-safe minimum instead of the shape-specific
+    // (and here unknown, since decoding it further isn't worth the risk in a
+    // fault-diagnostic path) total size.
+    // SAFETY: ptr points to a heap object at least MIN_OBJECT_DUMP_SIZE bytes.
+    const MIN_OBJECT_DUMP_SIZE: usize = 24;
+    let raw_bytes: Vec<u8> = (0..MIN_OBJECT_DUMP_SIZE)
+        .map(|i| unsafe { *ptr.add(i) })
+        .collect();
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "[{}] raw bytes: {:02x?}", label, raw_bytes);
 
@@ -1163,6 +1195,119 @@ mod tests {
             // we don't leak state to other tests sharing this thread.
             let err = take_runtime_error().expect("runtime_oom must flag an error");
             assert!(matches!(err, RuntimeError::HeapOverflow));
+        });
+    }
+
+    /// L4 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
+    /// unlike Con (`MAX_FIELDS = 1024`, read-side-decoder-bounded), a
+    /// Closure/Thunk's `num_captured` has NO cap other than its `u16`
+    /// width — past 2045 captures the old 16 KiB `POISON_BUF_SIZE` (tuned
+    /// only for `MAX_FIELDS`) was already smaller than the write, reopening
+    /// the PR-#272 heap-corruption class for large closures. Simulates the
+    /// JIT's post-OOM write sequence for a worst-case (`u16::MAX`-capture)
+    /// Closure into the poison buffer and verifies no OOB writes occur.
+    #[test]
+    fn poison_buf_absorbs_max_capture_write() {
+        crate::machine_state::test_support::with_test_machine(|| {
+            let worst_case_captures =
+                layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
+            assert!(
+                POISON_BUF_SIZE >= worst_case_captures,
+                "poison buffer ({} B) must cover worst-case Closure/Thunk capture footprint ({} B)",
+                POISON_BUF_SIZE,
+                worst_case_captures,
+            );
+
+            // Simulate the JIT's post-OOM write sequence exactly as
+            // `emit_alloc_fast_path` + the Closure emitter do: tag at 0,
+            // size word at 1, code_ptr at 8, num_captured at 16, captures
+            // from 24.
+            let ptr = runtime_oom();
+            assert!(!ptr.is_null());
+
+            // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >=
+            // worst_case_captures). Writing a TAG_CLOSURE header and
+            // u16::MAX u64 capture slots stays entirely within the
+            // allocation after the fix. `write_unaligned` mirrors the JIT's
+            // `MemFlags::trusted()` unaligned stores.
+            unsafe {
+                ptr.write(layout::TAG_CLOSURE);
+                (ptr.add(1) as *mut u32).write_unaligned(worst_case_captures as u32);
+                (ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *mut usize)
+                    .write_unaligned(0xDEAD_BEEF);
+                (ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *mut u16)
+                    .write_unaligned(u16::MAX);
+                for i in 0..(u16::MAX as usize) {
+                    let off = layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i;
+                    (ptr.add(off) as *mut u64).write_unaligned(0xCAFE_0000_0000_0000 | (i as u64));
+                }
+                let last_off =
+                    layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * (u16::MAX as usize - 1);
+                assert_eq!(
+                    (ptr.add(last_off) as *const u64).read_unaligned(),
+                    0xCAFE_0000_0000_0000 | (u16::MAX as u64 - 1),
+                );
+            }
+
+            let err = take_runtime_error().expect("runtime_oom must flag an error");
+            assert!(matches!(err, RuntimeError::HeapOverflow));
+        });
+    }
+
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+
+    /// L2: `materialize_message`'s Text branch (`nf == 3`) reads the
+    /// offset/len fields directly from the Con with no null guard, unlike
+    /// every sibling field access in this function — nulls are legal
+    /// transients per the GC verifier. A `Text` Con whose offset field is
+    /// null must return `None` (message-less error), not segfault inside
+    /// `read_small_int`'s `read_tag`.
+    #[test]
+    fn materialize_message_text_null_offset_field_does_not_segfault() {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
+            let ms = crate::machine_state::MachineState::new();
+            let mut nursery = [0u8; 256];
+            let mut vmctx = VMContext::new(
+                nursery.as_mut_ptr(),
+                nursery.as_ptr().add(nursery.len()),
+                mock_gc_trigger,
+            );
+            vmctx.machine_state = &ms as *const _ as *mut _;
+            let vmctx_ptr = &mut vmctx as *mut VMContext;
+
+            // The ByteArray/LitString payload: [len: u64]["hi"].
+            let mut payload = [0u8; 8 + 2];
+            payload[0..8].copy_from_slice(&2u64.to_le_bytes());
+            payload[8] = b'h';
+            payload[9] = b'i';
+
+            let mut buf = vec![0u8; 256];
+            let mut off = 0usize;
+
+            // The string Lit: TAG_LIT, lit_tag=5 (LitString), value = ptr to payload.
+            let str_lit = buf.as_mut_ptr().add(off);
+            heap_layout::write_header(str_lit, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
+            *str_lit.add(layout::LIT_TAG_OFFSET as usize) = 5;
+            *(str_lit.add(layout::LIT_VALUE_OFFSET as usize) as *mut *const u8) = payload.as_ptr();
+            off += layout::LIT_TOTAL_SIZE as usize;
+
+            // The Text Con: 3 fields — [bytearray, off, len]. `off` (field 1)
+            // is null — the shape this test guards.
+            let text_con = buf.as_mut_ptr().add(off);
+            let con_size = layout::CON_FIELDS_OFFSET as u32 + 3 * 8;
+            heap_layout::write_header(text_con, layout::TAG_CON, con_size);
+            *(text_con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 3;
+            *(text_con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = str_lit;
+            *(text_con.add(layout::CON_FIELDS_OFFSET as usize + 8) as *mut *mut u8) =
+                std::ptr::null_mut(); // null offset field
+            *(text_con.add(layout::CON_FIELDS_OFFSET as usize + 16) as *mut *mut u8) =
+                std::ptr::null_mut();
+
+            let msg = materialize_message(vmctx_ptr, text_con);
+            assert_eq!(
+                msg, None,
+                "null offset field must yield no message, not a segfault"
+            );
         });
     }
 }

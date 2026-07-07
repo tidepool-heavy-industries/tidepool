@@ -69,6 +69,27 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         let result = f(vmctx, current);
                         truncate_rust_roots(vmctx, mark);
 
+                        // L1 (repo-review-2026-07-06/01-gc-memory-safety.md,
+                        // Low findings): a JIT call chain (App's
+                        // null_propagate_block / trampoline_resolve's
+                        // defensive "shouldn't happen" paths) can return null
+                        // WITHOUT setting has_runtime_error. Memoizing that
+                        // null as this thunk's indirection (the branch below
+                        // would otherwise do exactly that) leaves a null
+                        // pointer for a LATER force to dereference when it
+                        // follows THUNK_EVALUATED's indirection — segfault.
+                        // Guard it exactly like the code_ptr==0 case above:
+                        // record a real error and memoize the poison object
+                        // (never null) instead.
+                        if result.is_null() {
+                            overwrite_runtime_error(RuntimeError::BadPointer);
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
+                                as *mut *mut u8) = error_poison_ptr();
+                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
+                                layout::THUNK_EVALUATED;
+                            return error_poison_ptr();
+                        }
+
                         // If the thunk body raised an error (e.g. HeapOverflow
                         // from runtime_oom), memoize the poison result so
                         // re-forces follow the indirection instead of
@@ -543,6 +564,58 @@ mod tests {
             assert_eq!(res, error_poison_ptr());
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::NullFunPtr));
+        });
+    }
+
+    /// L1: a thunk entry can return null (App's `null_propagate_block` /
+    /// `trampoline_resolve`'s defensive "shouldn't happen" paths) without
+    /// `has_runtime_error()` being set. Memoizing that null as the thunk's
+    /// indirection would leave a null pointer for a LATER force to
+    /// dereference when it follows `THUNK_EVALUATED`'s indirection —
+    /// segfault. Confirms both the first force (returns poison, records
+    /// `BadPointer`, memoizes a non-null indirection) and a SECOND force on
+    /// the same (now `THUNK_EVALUATED`) thunk (must follow the memoized
+    /// indirection safely, not dereference null).
+    #[test]
+    fn test_heap_force_thunk_null_result_is_not_memoized_as_null() {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
+            };
+
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_UNEVALUATED;
+            TEST_RESULT.with(|r| r.set(std::ptr::null_mut())); // entry returns null
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *mut usize) =
+                test_thunk_entry as *const () as usize;
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res, error_poison_ptr());
+            assert!(!res.is_null(), "must never return null itself");
+            let err = take_runtime_error().expect("null thunk result must set an error");
+            assert!(matches!(err, RuntimeError::BadPointer), "got {err:?}");
+            assert_eq!(
+                *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)),
+                layout::THUNK_EVALUATED
+            );
+            let memoized =
+                *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *mut u8);
+            assert!(
+                !memoized.is_null(),
+                "the memoized indirection must never be null"
+            );
+
+            // A LATER force on the same (now THUNK_EVALUATED) thunk follows
+            // the memoized indirection — must not dereference a null pointer.
+            let res2 = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res2, error_poison_ptr());
         });
     }
 
