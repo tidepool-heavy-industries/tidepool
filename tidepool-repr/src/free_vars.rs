@@ -37,6 +37,10 @@ pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
                 }
                 stack.push(Step::Exit(i));
                 for_each_child_rev(&tree.nodes[i], |c| {
+                    debug_assert!(
+                        c < i,
+                        "free_vars: child {c} is not strictly earlier than parent {i}"
+                    );
                     if !memo.contains_key(&c) {
                         stack.push(Step::Enter(c));
                     }

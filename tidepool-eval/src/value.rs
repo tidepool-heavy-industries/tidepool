@@ -102,6 +102,45 @@ impl std::fmt::Display for Value {
     }
 }
 
+/// Render a `Value` for an error message, with `Con` spine depth capped at
+/// `max_depth` levels.
+///
+/// Debug/Display on a raw `Value` recurse per `Con` level via the derived
+/// impl — fine for shallow values, but effect responses/results can be
+/// cons-spines tens of thousands deep (the same depths `deep_force`/
+/// `node_count` were made iterative for), and formatting one directly with
+/// `{:?}` in an error path SIGSEGVs outside the JIT's signal protection.
+/// Recursion here is bounded by `max_depth` regardless of `v`'s actual depth,
+/// so it is safe unconditionally; anything past the cap is elided with an
+/// ellipsis, and the value's total node count (via the already-iterative
+/// [`Value::node_count`]) is appended so the elision is informative.
+pub fn render_capped(v: &Value, max_depth: usize) -> String {
+    let mut out = String::new();
+    render_capped_at(v, max_depth, &mut out);
+    let total = v.node_count();
+    if total > max_depth {
+        out.push_str(&format!(" …(elided; {total} total nodes)"));
+    }
+    out
+}
+
+fn render_capped_at(v: &Value, remaining: usize, out: &mut String) {
+    if remaining == 0 {
+        out.push('…');
+        return;
+    }
+    match v {
+        Value::Con(id, fields) => {
+            out.push_str(&format!("<Con#{}>", id.0));
+            for field in fields {
+                out.push(' ');
+                render_capped_at(field, remaining - 1, out);
+            }
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 impl Value {
     /// Count total nodes in a Value tree. O(n) walk used for size checks.
     pub fn node_count(&self) -> usize {
@@ -352,6 +391,42 @@ mod tests {
             Value::JoinCont { .. } => (),
             _ => panic!("Expected JoinCont"),
         }
+    }
+
+    /// F6: rendering a `Value` for an error message must not recurse per
+    /// `Con` level — a raw `{:?}` on a spine this deep is what used to
+    /// SIGSEGV outside the JIT's signal protection (we don't pin the crash
+    /// itself here, just that the capped path completes instead).
+    #[test]
+    fn render_capped_handles_very_deep_spine_without_overflow() {
+        let depth = 200_000;
+        let mut v = Value::Lit(Literal::LitInt(0));
+        for _ in 0..depth {
+            v = Value::Con(DataConId(1), vec![v]);
+        }
+        let rendered = render_capped(&v, 64);
+        assert!(
+            rendered.contains('…'),
+            "expected an elision marker in: {rendered}"
+        );
+        assert!(
+            rendered.contains(&(depth + 1).to_string()),
+            "expected total node count {} in: {rendered}",
+            depth + 1
+        );
+    }
+
+    #[test]
+    fn render_capped_uncapped_for_shallow_value() {
+        let v = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(Literal::LitInt(1)),
+                Value::Lit(Literal::LitInt(2)),
+            ],
+        );
+        let rendered = render_capped(&v, 64);
+        assert_eq!(rendered, "<Con#1> 1 2");
     }
 
     #[test]

@@ -486,6 +486,27 @@ pub fn parse_decimal_token(tok: &str) -> (String, i64) {
     (coeff, exponent)
 }
 
+/// Whether `tok` (a raw JSON number token, e.g. from `serde_json::Number::as_str`
+/// under `arbitrary_precision`) has an exponent part [`parse_decimal_token`]
+/// cannot represent as an `i64` — the case it silently maps to `unwrap_or(0)`
+/// (`1e99999999999999999999` would decode as `1×10⁰` instead of erroring).
+/// `parse_decimal_token` itself stays infallible (shared by `tidepool-bridge`
+/// and `tidepool-mcp`'s eval-prep source rendering, neither of which has a
+/// decode-error path); the untrusted-JSON-text boundary that DOES need one —
+/// [`crate::json::decode_json_str`], the `JsonDecode` primop — calls this
+/// first and rejects the token as a decode error instead of building on it.
+pub fn decimal_token_exponent_overflows(tok: &str) -> bool {
+    let rest = tok
+        .strip_prefix('-')
+        .or_else(|| tok.strip_prefix('+'))
+        .unwrap_or(tok);
+    let mantissa_and_exp = rest.split_once(['e', 'E']);
+    match mantissa_and_exp {
+        Some((_, exp_part)) => exp_part.parse::<i64>().is_err(),
+        None => false,
+    }
+}
+
 /// Build an exact aeson `Number (Scientific coeff exp)` from a parsed JSON
 /// number. No precision is lost: the coefficient rides an exact `Integer`
 /// (`IS`/`IP`/`IN`) and the base-10 exponent an `Int`. Requires
@@ -865,6 +886,23 @@ mod tests {
             parse_decimal_token("9007199254740993"),
             ("9007199254740993".into(), 0)
         );
+    }
+
+    /// F7: `decimal_token_exponent_overflows` must flag exactly the tokens
+    /// whose exponent `parse_decimal_token` would otherwise silently zero.
+    #[test]
+    fn decimal_token_exponent_overflows_flags_unparseable_exponent() {
+        assert!(decimal_token_exponent_overflows("1e99999999999999999999"));
+        assert!(decimal_token_exponent_overflows("-1e99999999999999999999"));
+        assert!(decimal_token_exponent_overflows(
+            "1E999999999999999999999999"
+        ));
+        // Sanity: ordinary tokens (including large-but-representable exponents
+        // and exponent-free tokens) are NOT flagged.
+        assert!(!decimal_token_exponent_overflows("1e10"));
+        assert!(!decimal_token_exponent_overflows("3.14"));
+        assert!(!decimal_token_exponent_overflows("42"));
+        assert!(!decimal_token_exponent_overflows("1e9223372036854775807"));
     }
 
     #[test]

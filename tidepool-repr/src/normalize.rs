@@ -297,7 +297,26 @@ fn transform_canonicalize_effect_tag(
     var_map: &HashMap<crate::VarId, usize>,
     old_to_new: &[usize],
 ) {
-    let union_id = match table.get_by_name_arity("Union", 2) {
+    // F2: resolve qualified-name-first (falling back to the unqualified name
+    // only when no qualified entry exists), mirroring `machine.rs`/
+    // `effect_machine.rs`'s oracle/JIT resolution — NOT `get_by_name_arity`,
+    // which returns the LAST-INSERTED match on ambiguity. A user program
+    // defining its own `Union` (rep_arity 2) would otherwise silently become
+    // the "last-inserted" match, so this pass would canonicalize the USER's
+    // `Con` (splicing a raw `LitWord` where codegen expects a boxed field)
+    // and skip the real freer `Union` entirely — a production-path bug only
+    // `debug_assert`ed downstream (silent in release). `resolve` doesn't
+    // filter by arity, so the `rep_arity == 2` check below still applies to
+    // whatever it finds (a qualified match at the wrong arity is not our
+    // `Union`, and falls through to the `None` early-return exactly as
+    // `get_by_name_arity` would have).
+    let union_id = match crate::freer_names::resolve(
+        table,
+        crate::freer_names::UNION_QUALIFIED,
+        crate::freer_names::UNION,
+    )
+    .filter(|id| table.get(*id).is_some_and(|dc| dc.rep_arity == 2))
+    {
         Some(id) => id,
         None => return,
     };
@@ -678,6 +697,118 @@ mod tests {
         };
         let expected = expected_raw.extract_subtree(6);
         assert_eq!(normalized, expected);
+    }
+
+    /// F2 regression: a user `Union` (rep_arity 2), inserted AFTER the real
+    /// freer `Union`, must NOT hijack effect-tag canonicalization.
+    /// `get_by_name_arity("Union", 2)` returns the LAST-inserted match — the
+    /// user's — so pre-fix this pass unboxed the user's harmless field while
+    /// leaving the real freer `Union`'s tag boxed (the production bug: codegen
+    /// expects that tag as a raw `LitWord`). Post-fix, `freer_names::resolve`
+    /// picks the freer `Union` via its qualified name regardless of insertion
+    /// order.
+    #[test]
+    fn effect_tag_resolves_qualified_freer_union_not_last_inserted_user_union() {
+        use crate::datacon::DataCon;
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(101),
+            name: "W#".to_string(),
+            tag: 0,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        let w_hash = DataConId(101);
+
+        // The real freer Union, inserted FIRST.
+        let freer_union_id = DataConId(200);
+        table.insert(DataCon {
+            id: freer_union_id,
+            name: "Union".to_string(),
+            tag: 0,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some(crate::freer_names::UNION_QUALIFIED.to_string()),
+        });
+
+        // A user's own `data Union a b = Union a b`, inserted AFTER — same
+        // bare name and arity, distinct qualified name.
+        let user_union_id = DataConId(300);
+        table.insert(DataCon {
+            id: user_union_id,
+            name: "Union".to_string(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some("MyMod.Union".to_string()),
+        });
+
+        // Sanity: this IS the ambiguity the fix must route around.
+        assert_eq!(
+            table.get_by_name_arity("Union", 2),
+            Some(user_union_id),
+            "get_by_name_arity returns the last-inserted match — the bug this test guards against"
+        );
+
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitWord(7)), // 0: freer tag literal
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![0],
+                }, // 1: W# 7 (freer's boxed tag)
+                CoreFrame::Var(VarId(10)),           // 2: freer request
+                CoreFrame::Con {
+                    tag: freer_union_id,
+                    fields: vec![1, 2],
+                }, // 3: the real freer Union
+                CoreFrame::Lit(Literal::LitWord(9)), // 4: user field literal
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![4],
+                }, // 5: W# 9 (user's own boxed field — NOT an effect tag)
+                CoreFrame::Var(VarId(20)),           // 6: user's second field
+                CoreFrame::Con {
+                    tag: user_union_id,
+                    fields: vec![5, 6],
+                }, // 7: the user's own Union
+                CoreFrame::App { fun: 3, arg: 7 },   // 8: keep both roots reachable
+            ],
+        };
+        let normalized = normalize(&expr, &table);
+
+        let freer_fields = normalized
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                CoreFrame::Con { tag, fields } if *tag == freer_union_id => Some(fields.clone()),
+                _ => None,
+            })
+            .expect("freer Union Con survives normalization");
+        let user_fields = normalized
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                CoreFrame::Con { tag, fields } if *tag == user_union_id => Some(fields.clone()),
+                _ => None,
+            })
+            .expect("user Union Con survives normalization");
+
+        assert!(
+            matches!(
+                normalized.nodes[freer_fields[0]],
+                CoreFrame::Lit(Literal::LitWord(7))
+            ),
+            "the real freer Union's tag field must be canonicalized to a raw Lit"
+        );
+        assert!(
+            matches!(
+                &normalized.nodes[user_fields[0]],
+                CoreFrame::Con { tag, .. } if *tag == w_hash
+            ),
+            "the user's own Union field must stay boxed — it is not an effect tag"
+        );
     }
 
     #[test]

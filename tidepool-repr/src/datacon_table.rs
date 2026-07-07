@@ -67,10 +67,15 @@ impl DataConTable {
     /// constructor already bound to the same id (a `stableVarId` collision).
     ///
     /// A re-encounter of the SAME constructor (identical module-qualified
-    /// identity) is idempotent — the table load legitimately sees a constructor
-    /// from several metadata sources. Only a different-identity clash at one id
-    /// is an error. Zero extra cost in the no-collision case beyond the existing
-    /// `by_id` lookup that `insert` already performs.
+    /// identity, AND agreeing tag/rep_arity) is idempotent — the table load
+    /// legitimately sees a constructor from several metadata sources. An
+    /// agreeing identity that disagrees on tag or rep_arity is still an error:
+    /// two encodings of "the same" constructor that disagree on its actual
+    /// shape indicate a corrupt or mismatched metadata source, not a harmless
+    /// re-encounter, and silently keeping the last-inserted shape (as plain
+    /// `insert` would) risks a runtime tag/arity mismatch downstream. Zero
+    /// extra cost in the no-collision case beyond the existing `by_id` lookup
+    /// that `insert` already performs.
     ///
     /// This is the always-on table-integrity guard; it covers every producer,
     /// including future non-extract ones. (The Haskell extractor additionally
@@ -82,6 +87,23 @@ impl DataConTable {
                     id: dc.id,
                     first: dc_identity(existing).to_string(),
                     second: dc_identity(&dc).to_string(),
+                });
+            }
+            if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
+                return Err(DataConCollision {
+                    id: dc.id,
+                    first: format!(
+                        "{} (tag={}, rep_arity={})",
+                        dc_identity(existing),
+                        existing.tag,
+                        existing.rep_arity
+                    ),
+                    second: format!(
+                        "{} (tag={}, rep_arity={})",
+                        dc_identity(&dc),
+                        dc.tag,
+                        dc.rep_arity
+                    ),
                 });
             }
         }
@@ -370,7 +392,8 @@ mod tests {
         assert_eq!(table.get_by_name("Same"), Some(DataConId(2)));
 
         table.insert(dc4.clone());
-        // Two "Same" entries — get_by_name would panic, use get_all_by_name instead
+        // Two "Same" entries — get_by_name returns None (ambiguous), use
+        // get_all_by_name instead
         let all = table.get_all_by_name("Same");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0], DataConId(2));
@@ -570,6 +593,30 @@ mod tests {
             table.get_by_qualified_name("GHC.Maybe.Just"),
             Some(DataConId(7))
         );
+    }
+
+    /// An agreeing qualified name but DISAGREEING tag/rep_arity must still be
+    /// rejected — the old last-wins behavior (plain `insert`) would silently
+    /// keep whichever shape arrived last, and a downstream consumer that
+    /// resolved the id earlier would then disagree with the table about the
+    /// constructor's actual tag/arity.
+    #[test]
+    fn insert_checked_rejects_same_identity_disagreeing_tag_arity() {
+        let mut table = DataConTable::new();
+        table
+            .insert_checked(make_datacon_qualified(5, "Foo", 1, 2, "Mod.Foo"))
+            .expect("first insert is clean");
+        let err = table
+            .insert_checked(make_datacon_qualified(5, "Foo", 2, 3, "Mod.Foo"))
+            .expect_err("agreeing identity but disagreeing tag/arity must collide");
+        assert_eq!(err.id, DataConId(5));
+        assert!(err.first.contains("tag=1"), "first: {}", err.first);
+        assert!(err.first.contains("rep_arity=2"), "first: {}", err.first);
+        assert!(err.second.contains("tag=2"), "second: {}", err.second);
+        assert!(err.second.contains("rep_arity=3"), "second: {}", err.second);
+        // The survivor (first insert) is unchanged.
+        assert_eq!(table.get(DataConId(5)).unwrap().tag, 1);
+        assert_eq!(table.get(DataConId(5)).unwrap().rep_arity, 2);
     }
 
     /// Without qualified names, identity falls back to the unqualified name:

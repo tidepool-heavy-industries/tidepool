@@ -240,11 +240,44 @@ pub fn bridged_node_count(j: &serde_json::Value) -> usize {
 /// absent, so callers can surface a clean error. In practice this only happens
 /// when the `DataConTable` lacks `Either` in scope — programs that reach the
 /// JSON-decode primop always have it in scope.
+/// First JSON number token (in document order) whose exponent
+/// [`crate::shapes::decimal_token_exponent_overflows`] flags, if any.
+/// Recursion depth is bounded by serde_json's own nesting limit (128 by
+/// default, same rationale as `json_to_value`), so this never approaches
+/// host-stack exhaustion.
+fn find_exponent_overflow(j: &serde_json::Value) -> Option<String> {
+    match j {
+        serde_json::Value::Number(n) => {
+            let tok = n.as_str();
+            crate::shapes::decimal_token_exponent_overflows(tok).then(|| tok.to_string())
+        }
+        serde_json::Value::Array(arr) => arr.iter().find_map(find_exponent_overflow),
+        serde_json::Value::Object(map) => map.values().find_map(find_exponent_overflow),
+        _ => None,
+    }
+}
+
 pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
     let left = ids.left?;
     let right = ids.right?;
     match serde_json::from_str::<serde_json::Value>(input) {
-        Ok(j) => Some(Value::Con(right, vec![json_to_value(&j, ids)])),
+        Ok(j) => {
+            // F7: an exponent too large for parse_decimal_token's `i64` would
+            // otherwise be silently zeroed (`1e99999999999999999999` -> 1×10⁰)
+            // deep inside `json_to_value`/`scientific_from_number` — a wrong
+            // answer, not a crash, so it must be caught here where a typed
+            // decode error (`Left`) is still an option.
+            if let Some(tok) = find_exponent_overflow(&j) {
+                return Some(Value::Con(
+                    left,
+                    vec![text_value(
+                        &format!("unparseable exponent in JSON number: {tok}"),
+                        ids,
+                    )],
+                ));
+            }
+            Some(Value::Con(right, vec![json_to_value(&j, ids)]))
+        }
         Err(e) => Some(Value::Con(left, vec![text_value(&e.to_string(), ids)])),
     }
 }
@@ -327,5 +360,82 @@ mod tests {
             nil: z,
         };
         assert_eq!(bridged_node_count(&j), json_to_value(&j, &ids).node_count());
+    }
+
+    /// F7: `decode_json_str` on a huge-exponent JSON number must produce
+    /// `Left <err>`, not silently build `Right (Number (Scientific 1 0))`
+    /// (the `1e0` the old `unwrap_or(0)` in `parse_decimal_token` produced).
+    #[test]
+    fn decode_json_str_rejects_huge_exponent_as_left() {
+        let left_id = DataConId(1);
+        let right_id = DataConId(2);
+        let z = DataConId(9); // arbitrary non-zero placeholder for the rest
+        let ids = JsonConIds {
+            left: Some(left_id),
+            right: Some(right_id),
+            object: z,
+            array: z,
+            string: z,
+            number: z,
+            scientific: z,
+            is: z,
+            ip: z,
+            in_: z,
+            bool_con: z,
+            null: z,
+            true_con: z,
+            false_con: z,
+            bin: z,
+            tip: z,
+            i_hash: z,
+            text: z,
+            cons: z,
+            nil: z,
+        };
+        let result = decode_json_str("1e99999999999999999999", &ids).expect("ids are complete");
+        match result {
+            Value::Con(id, _) => assert_eq!(
+                id, left_id,
+                "expected Left (decode error) for an unparseable exponent, got Con#{}",
+                id.0
+            ),
+            other => panic!("expected Value::Con, got {other:?}"),
+        }
+    }
+
+    /// Sanity counterpart: an ordinary large-but-representable exponent still
+    /// decodes to `Right`.
+    #[test]
+    fn decode_json_str_accepts_ordinary_exponent_as_right() {
+        let left_id = DataConId(1);
+        let right_id = DataConId(2);
+        let z = DataConId(9);
+        let ids = JsonConIds {
+            left: Some(left_id),
+            right: Some(right_id),
+            object: z,
+            array: z,
+            string: z,
+            number: z,
+            scientific: z,
+            is: z,
+            ip: z,
+            in_: z,
+            bool_con: z,
+            null: z,
+            true_con: z,
+            false_con: z,
+            bin: z,
+            tip: z,
+            i_hash: z,
+            text: z,
+            cons: z,
+            nil: z,
+        };
+        let result = decode_json_str("1e10", &ids).expect("ids are complete");
+        match result {
+            Value::Con(id, _) => assert_eq!(id, right_id),
+            other => panic!("expected Value::Con, got {other:?}"),
+        }
     }
 }

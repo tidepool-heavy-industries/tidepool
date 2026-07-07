@@ -59,6 +59,14 @@ impl RecursiveTree<CoreFrame<usize>> {
                     // Children pop left-to-right, matching the recursive walk's
                     // child order (and thus node ordering).
                     for_each_child_rev(&self.nodes[i], |c| {
+                        // Complements the wire-decode `child < my_idx` check
+                        // (`serial/read.rs`'s `validate_indices`, F1) for trees
+                        // built directly by internal constructors, which skip
+                        // that decode-time gate entirely.
+                        debug_assert!(
+                            c < i,
+                            "extract_subtree: child {c} is not strictly earlier than parent {i}"
+                        );
                         if !old_to_new.contains_key(&c) {
                             stack.push(WalkStep::Enter(c));
                         }
@@ -216,6 +224,10 @@ pub fn replace_subtree(
                 }
                 stack.push(WalkStep::Exit(i));
                 for_each_child_rev(&expr.nodes[i], |c| {
+                    debug_assert!(
+                        c < i,
+                        "replace_subtree: child {c} is not strictly earlier than parent {i}"
+                    );
                     if !old_to_new.contains_key(&c) {
                         stack.push(WalkStep::Enter(c));
                     }
