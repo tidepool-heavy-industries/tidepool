@@ -20,7 +20,7 @@
 
 use crate::frame::CoreFrame;
 use crate::tree::MapLayer;
-use crate::types::{DataConId, Literal};
+use crate::types::{DataConId, Literal, VarId};
 use crate::{CoreExpr, DataConTable, RecursiveTree};
 use std::collections::HashMap;
 
@@ -58,32 +58,22 @@ pub fn normalize(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
 fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) {
     let mut out = Vec::with_capacity(expr.nodes.len());
     let mut old_to_new: Vec<usize> = Vec::with_capacity(expr.nodes.len());
-    let mut var_map = HashMap::new();
 
-    // Pre-pass: collect bindings from the original tree.
-    // In GHC Core, Let/Lam nodes usually point to their RHS/body nodes.
-    // Bottom-up traversal means usage is seen before binding, so we
-    // collect bindings here to enable look-through during the main pass.
-    for frame in expr.nodes.iter() {
-        match frame {
-            CoreFrame::LetNonRec { binder, rhs, .. } => {
-                var_map.insert(*binder, *rhs);
-            }
-            CoreFrame::LetRec { bindings, .. } => {
-                for (binder, rhs) in bindings {
-                    var_map.insert(*binder, *rhs);
-                }
-            }
-            _ => {}
-        }
-    }
+    // Scope-respecting bindings: `scoped_bindings[old_idx]` is the
+    // Let/LetRec binder -> rhs map actually visible AT that node, computed by
+    // a top-down (root-first) walk so an inner binder — or an opaque
+    // Lam/Case/Join binder with no resolvable rhs — correctly shadows an
+    // outer same-named one, rather than the last binding encountered in
+    // array order winning irrespective of scope. See `collect_scoped_bindings`.
+    let scoped_bindings = collect_scoped_bindings(expr);
 
     for (old_idx, frame) in expr.nodes.iter().enumerate() {
         let mut mapped = frame.clone().map_layer(|child_old| old_to_new[child_old]);
+        let var_map = &scoped_bindings[old_idx];
 
         // Rules that transform the node in-place
-        transform_unbox_prim_args(&mut mapped, &out, table, &var_map, &old_to_new);
-        transform_canonicalize_effect_tag(&mut mapped, &out, table, &var_map, &old_to_new);
+        transform_unbox_prim_args(&mut mapped, &out, table, var_map, &old_to_new);
+        transform_canonicalize_effect_tag(&mut mapped, &out, table, var_map, &old_to_new);
 
         // Rules that collapse the node to an existing index
         let new_idx = if let Some(replacement_idx) = try_flatten_box(&mapped, &out, table) {
@@ -100,6 +90,113 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
         .last()
         .expect("normalize: old_to_new is non-empty (input RecursiveTree had ≥1 node)");
     (RecursiveTree { nodes: out }, last_mapped_idx)
+}
+
+/// Build, for every node index, the `Let`/`LetRec` binder -> rhs bindings
+/// that are actually in lexical scope there.
+///
+/// A single top-down (root-first) walk, threading an environment that is
+/// cloned-and-extended on entry to a binding scope — mirroring how the
+/// shadow-aware passes (`PartialEval`, `subst`) thread their envs — so an
+/// inner binder correctly shadows an outer same-named one. `Lam`/`Case`-alt/
+/// `Join`-param binders have no resolvable rhs, but still MASK (remove) any
+/// outer entry for the same `VarId` while inside their scope, so a variable
+/// shadowed by one of those opaque binders is never incorrectly looked
+/// through to an unrelated outer `Let`'s rhs.
+///
+/// Explicit-stack (not recursive), matching this crate's convention for
+/// whole-tree walks (see `tree.rs`'s `extract_subtree`/`replace_subtree`).
+/// DAG-shared nodes are visited once, via whichever parent path reaches them
+/// first — acceptable because a node's meaning only depends on the SAME free
+/// variable being bound consistently across the paths that share it.
+fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
+    let len = expr.nodes.len();
+    let mut result = vec![HashMap::new(); len];
+    if len == 0 {
+        return result;
+    }
+    let root = len - 1;
+    let mut visited = vec![false; len];
+    let mut stack = vec![(root, HashMap::new())];
+    while let Some((idx, env)) = stack.pop() {
+        if visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        result[idx] = env.clone();
+        match &expr.nodes[idx] {
+            CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
+            CoreFrame::App { fun, arg } => {
+                stack.push((*fun, env.clone()));
+                stack.push((*arg, env));
+            }
+            CoreFrame::Lam { binder, body } => {
+                let mut body_env = env;
+                body_env.remove(binder);
+                stack.push((*body, body_env));
+            }
+            CoreFrame::LetNonRec { binder, rhs, body } => {
+                // Non-recursive: rhs does NOT see its own binder.
+                stack.push((*rhs, env.clone()));
+                let mut body_env = env;
+                body_env.insert(*binder, *rhs);
+                stack.push((*body, body_env));
+            }
+            CoreFrame::LetRec { bindings, body } => {
+                let mut rec_env = env;
+                for (b, r) in bindings {
+                    rec_env.insert(*b, *r);
+                }
+                for (_, r) in bindings {
+                    stack.push((*r, rec_env.clone()));
+                }
+                stack.push((*body, rec_env));
+            }
+            CoreFrame::Case {
+                scrutinee,
+                binder,
+                alts,
+            } => {
+                stack.push((*scrutinee, env.clone()));
+                for alt in alts {
+                    let mut alt_env = env.clone();
+                    alt_env.remove(binder);
+                    for b in &alt.binders {
+                        alt_env.remove(b);
+                    }
+                    stack.push((alt.body, alt_env));
+                }
+            }
+            CoreFrame::Con { fields, .. } => {
+                for &f in fields {
+                    stack.push((f, env.clone()));
+                }
+            }
+            CoreFrame::Join {
+                params, rhs, body, ..
+            } => {
+                // Join params scope over rhs only, mirroring how the other
+                // shadow-aware passes treat join points.
+                let mut rhs_env = env.clone();
+                for p in params {
+                    rhs_env.remove(p);
+                }
+                stack.push((*rhs, rhs_env));
+                stack.push((*body, env));
+            }
+            CoreFrame::Jump { args, .. } => {
+                for &a in args {
+                    stack.push((a, env.clone()));
+                }
+            }
+            CoreFrame::PrimOp { args, .. } => {
+                for &a in args {
+                    stack.push((a, env.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 const BOX_NAMES: &[&str] = &["I#", "W#", "C#", "F#", "D#"];
@@ -662,6 +759,125 @@ mod tests {
         };
         let normalized = normalize(&expr, &table);
         assert_eq!(normalized, expr);
+    }
+
+    /// F3 regression: `let x = I# 1 in \x -> IntAdd(x, x)` — the lambda's own
+    /// `x` shadows the outer let's `x`. Before scoping the var_map, a global
+    /// last-wins table (or any table not aware of the Lam binder masking the
+    /// outer entry) would resolve the lambda-bound `x` THROUGH the outer
+    /// let's rhs and incorrectly unbox both args to `Lit(1)` — even though
+    /// the lambda's `x` is an opaque runtime parameter, not statically 1.
+    #[test]
+    fn prim_args_not_unboxed_through_lam_shadowed_var() {
+        let table = setup_table();
+        let i_hash = table.get_by_name("I#").unwrap();
+        let x = VarId(1);
+        // let x = I# 1 in \x -> PrimOp(IntAdd, [x, x])
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(1)), // 0
+                CoreFrame::Con {
+                    tag: i_hash,
+                    fields: vec![0],
+                }, // 1: I# 1 (outer rhs)
+                CoreFrame::Var(x),                  // 2
+                CoreFrame::Var(x),                  // 3
+                CoreFrame::PrimOp {
+                    op: crate::types::PrimOpKind::IntAdd,
+                    args: vec![2, 3],
+                }, // 4
+                CoreFrame::Lam { binder: x, body: 4 }, // 5
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 1,
+                    body: 5,
+                }, // 6
+            ],
+        };
+        let normalized = normalize(&expr, &table);
+        // The lambda-bound `x` must stay opaque: no rule can fire (the
+        // shadowed var must never resolve through the outer let's rhs), so
+        // normalize is identity here.
+        assert_eq!(normalized, expr);
+    }
+
+    /// F3 regression: nested `LetNonRec`s reusing the SAME `VarId` (the
+    /// duplicate-binder-id shadowing class `subst`'s DAG-sharing can produce).
+    /// A reference in the inner scope must resolve through the INNER
+    /// binding, not whichever binding a plain array-order scan visits last.
+    #[test]
+    fn effect_tag_var_map_respects_duplicate_binder_shadowing() {
+        let table = setup_table();
+        let union_id = table.get_by_name("Union").unwrap();
+        let w_hash = table.get_by_name("W#").unwrap();
+        let x = VarId(1);
+        // let x = W# 7 in let x = W# 9 in Con(Union, [x, request])
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitWord(7)), // 0
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![0],
+                }, // 1: W# 7 (outer rhs)
+                CoreFrame::Lit(Literal::LitWord(9)), // 2
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![2],
+                }, // 3: W# 9 (inner rhs)
+                CoreFrame::Var(x),                   // 4: x (reference, inner scope)
+                CoreFrame::Var(VarId(10)),           // 5: request
+                CoreFrame::Con {
+                    tag: union_id,
+                    fields: vec![4, 5],
+                }, // 6: Union x request
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 3,
+                    body: 6,
+                }, // 7: let x = W# 9 in ...
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 1,
+                    body: 7,
+                }, // 8: let x = W# 7 in ...
+            ],
+        };
+        let normalized = normalize(&expr, &table);
+        // The Union's tag field resolves through the INNER let (rhs = W# 9,
+        // never the outer W# 7); both `LetNonRec` wrappers and both `W#`
+        // Cons stay in the tree (each Let's own `rhs` edge keeps its Con
+        // reachable) — only the now-unreferenced `Var(x)` is pruned.
+        let expected_raw = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitWord(7)), // 0
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![0],
+                }, // 1
+                CoreFrame::Lit(Literal::LitWord(9)), // 2
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![2],
+                }, // 3
+                CoreFrame::Var(VarId(10)),           // 4: request
+                CoreFrame::Con {
+                    tag: union_id,
+                    fields: vec![2, 4],
+                }, // 5: Union, tag redirected to Lit(9) directly
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 3,
+                    body: 5,
+                }, // 6: inner let
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 1,
+                    body: 6,
+                }, // 7: outer let
+            ],
+        };
+        let expected = expected_raw.extract_subtree(7);
+        assert_eq!(normalized, expected);
     }
 }
 
