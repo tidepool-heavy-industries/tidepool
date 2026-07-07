@@ -97,7 +97,7 @@ been deleted (tier 09).
 - [ ] 03 Engine / runtime / macro / bridge
 - [ ] 04 Optimizer shadowing
 - [ ] 05 Repr wire + eval oracle
-- [ ] 06 Repl session
+- [x] 06 Repl session — merged (51df6121; worker died pre-commit, root verified 189/189 + committed)
 - [x] 07 MCP + handlers — merged (930b2ca4)
 - [ ] 08 Test infra
 - [x] 09 Hygiene / docs / misc — merged (fed2a5df)

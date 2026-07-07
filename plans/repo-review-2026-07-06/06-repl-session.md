@@ -153,4 +153,6 @@ the `BindingTable`; orphaned `Val.G<g>.hi` at a reused gen is inert.
 - [x] F3 fixed; comment-led decl gets real head + painted type
 - [x] F4 rebuild-then-swap + cancel-slot clear
 - [x] Opportunities triaged (at minimum: file the triple-spawn latency fix)
-- [ ] `cargo nextest run --ignore-default-filter -p tidepool-repl` green
+- [x] `cargo nextest run --ignore-default-filter -p tidepool-repl` green
+      (189/189 passed, 1 skipped — run by root with fresh extract; the worker
+      died during this verification step, before committing)
