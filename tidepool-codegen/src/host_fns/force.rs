@@ -1,8 +1,10 @@
 //! WHNF/NF forcing (`heap_force`, `deep_force`) and the tail-call trampoline.
 
 use crate::context::VMContext;
+use crate::effect_machine::RootedLocal;
 use crate::layout;
 use crate::machine_state::machine_state;
+use rustc_hash::FxHashSet;
 use tidepool_heap::layout as heap_layout;
 
 use super::cancel::check_cancel_and_set_error;
@@ -149,6 +151,17 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 /// `8 * index` field arithmetic in `effect_machine.rs` / `layout` Con reads.
 const CON_FIELD_PTR_STRIDE: usize = 8;
 
+/// How many work items `deep_force` processes between external-cancellation
+/// checks (M3). A fully-evaluated structure (every field already a Con/Lit,
+/// nothing left to actually force) never triggers a GC and so never crosses
+/// `heap_force`'s own cancel-adjacent safepoints — for a large such structure
+/// (e.g. an already-forced million-element list handed back to `deep_force`
+/// again) the old loop had NO cancel check anywhere in it and was, in
+/// practice, unkillable until it walked the whole graph. This is a plain
+/// counter check (no GC point), so the interval can be small without being
+/// a meaningful cost center.
+const CANCEL_CHECK_INTERVAL: u32 = 4096;
+
 /// Force a heap value to **normal form** (NF), iteratively (Wave 1.B, component K).
 ///
 /// Unlike [`heap_force`] (WHNF — stops at the outermost constructor), this drives
@@ -165,11 +178,45 @@ const CON_FIELD_PTR_STRIDE: usize = 8;
 /// deep structure (long list, deep tree) cannot overflow the host stack.
 ///
 /// GC-safety: forcing a thunk runs JIT code that can allocate and trigger a
-/// collection, relocating live objects. Every still-pending work item (a parent
-/// heap pointer) plus the NF root is registered as a Rust GC root across each
-/// [`heap_force`] call, so the copying GC rewrites them in place and no pending
-/// pointer dangles. A field slot is recomputed from its (possibly relocated)
-/// parent *after* the force, never cached across it.
+/// collection, relocating live objects. Each work item roots its own parent
+/// pointer via a [`RootedLocal`] (registered once when pushed, truncated once
+/// when popped — see the M3 doc block below for why this replaced a
+/// per-iteration full-stack re-registration), so the copying GC rewrites it
+/// in place and no pending pointer dangles. A field slot is recomputed from
+/// its (possibly relocated) parent *after* the force, never cached across it.
+///
+/// ## M3 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings)
+///
+/// Three fixes over the original version, all in this one function:
+///
+/// - **O(n²) root re-registration**: the old loop re-registered EVERY still-
+///   pending work item as a root on EVERY iteration (a fresh
+///   register-then-immediately-truncate scan over the whole remaining
+///   stack), because a work item was a bare `*mut u8` inside a `Vec` that
+///   reallocates as it grows — any root registered at a raw address into
+///   that `Vec`'s backing buffer would dangle across a later `push`. Each
+///   item now carries its OWN [`RootedLocal`] (a heap-stable `Box` cell,
+///   immune to the outer `Vec` reallocating) registered exactly once at push
+///   time and dropped (truncating exactly that one registration) exactly
+///   once at pop time — O(1) amortized per item instead of O(n) per pop.
+///   This relies on `work` behaving as a strict LIFO stack (push child items
+///   only after popping+finishing their parent item), which keeps the
+///   per-item registrations perfectly nested with the global rust_roots
+///   stack; do not reorder pops/pushes without re-checking that invariant.
+/// - **No visited set (exponential blowup on shared DAGs)**: a value like
+///   `iterate (\v -> (v,v)) x !! 40` shares the SAME sub-object from both
+///   fields of every level, so an unforced traversal re-descends into it at
+///   every level — 2^40 for a depth-40 tower. `visited` (keyed by object
+///   ADDRESS) skips re-pushing a `Con`'s fields once already queued. Because
+///   the GC can relocate objects (and later reuse a vacated address for
+///   something unrelated), a raw address-keyed set is only trustworthy
+///   between two points with no collection in between: `gc_generation()` is
+///   snapshotted around every [`heap_force`] call, and any change clears
+///   `visited` entirely rather than risk a false "already visited" hit on a
+///   coincidentally-reused address. This only ever costs a redundant (but
+///   bounded, non-exponential) re-descent right after a collection, never a
+///   correctness bug.
+/// - **No cancel safepoint**: see [`CANCEL_CHECK_INTERVAL`].
 ///
 /// Returns the (possibly relocated) NF root pointer, or the error poison pointer
 /// if forcing raised a runtime error.
@@ -195,39 +242,58 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
         let base_mark = rust_roots_mark(vmctx);
         register_rust_root(vmctx, &mut nf_root as *mut *mut u8);
 
-        // Work items are (parent heap pointer, field index). Parents are exterior
-        // heap-object pointers — GC-relocatable, and rewritten in place because we
-        // register them; the field index is stable, so the field slot is
-        // recomputed from the live parent after each force (never cached across a
-        // collection).
-        let mut work: Vec<(*mut u8, usize)> = Vec::new();
-        push_con_fields(nf_root, &mut work);
+        // Address-keyed dedup for shared sub-graphs (M3); see the doc block.
+        let mut visited: FxHashSet<usize> = FxHashSet::default();
 
-        while let Some((mut parent, idx)) = work.pop() {
-            // Register every pending parent + the current parent so a GC inside
-            // the upcoming heap_force rewrites them all in place. (nf_root is
-            // already registered at base_mark and stays so.)
-            let mark = rust_roots_mark(vmctx);
-            for item in work.iter_mut() {
-                register_rust_root(vmctx, &mut item.0 as *mut *mut u8);
+        // Work items are (rooted parent pointer, field index). The field index
+        // is stable, so the field slot is recomputed from the live (GC-updated)
+        // parent after each force, never cached across it.
+        let mut work: Vec<(RootedLocal, usize)> = Vec::new();
+        push_con_fields(vmctx, nf_root, &mut work, &mut visited);
+
+        let mut since_cancel_check: u32 = 0;
+        while let Some((parent_root, idx)) = work.pop() {
+            since_cancel_check += 1;
+            if since_cancel_check >= CANCEL_CHECK_INTERVAL {
+                since_cancel_check = 0;
+                if check_cancel_and_set_error(vmctx) {
+                    drop(parent_root);
+                    truncate_rust_roots(vmctx, base_mark);
+                    return error_poison_ptr();
+                }
             }
-            register_rust_root(vmctx, &mut parent as *mut *mut u8);
 
-            // Read the child from the live parent, force it, then write the NF
-            // child back into the (possibly relocated) parent's field slot.
+            // Read the child from the live (possibly-relocated-by-an-earlier-
+            // iteration) parent, force it, then write the NF child back.
             let field_off = layout::CON_FIELDS_OFFSET as usize + idx * CON_FIELD_PTR_STRIDE;
-            let child = *(parent.add(field_off) as *const *mut u8);
+            let child = *(parent_root.get().add(field_off) as *const *mut u8);
+
+            let gen_before = machine_state(vmctx).gc_generation();
             let forced_child = heap_force(vmctx, child);
-            truncate_rust_roots(vmctx, mark);
+
             if has_runtime_error() {
+                drop(parent_root);
                 truncate_rust_roots(vmctx, base_mark);
                 return error_poison_ptr();
             }
-            // `parent` may have moved during the force; recompute the slot.
-            *(parent.add(field_off) as *mut *mut u8) = forced_child;
+            if machine_state(vmctx).gc_generation() != gen_before {
+                // A collection ran during this force: every address `visited`
+                // remembers may now be stale (moved) or reused by something
+                // else entirely — discard it rather than risk a false hit.
+                visited.clear();
+            }
+
+            // `parent` may have moved during the force; re-read through the
+            // still-registered root before writing back.
+            *(parent_root.get().add(field_off) as *mut *mut u8) = forced_child;
+
+            // Done with this item: drop its root registration (truncates
+            // exactly this one entry — see the LIFO-nesting doc above) BEFORE
+            // pushing any of `forced_child`'s own fields.
+            drop(parent_root);
 
             // Descend into Tier-0 data only; Lits are leaves, Closures are Tier-1.
-            push_con_fields(forced_child, &mut work);
+            push_con_fields(vmctx, forced_child, &mut work, &mut visited);
         }
 
         truncate_rust_roots(vmctx, base_mark);
@@ -235,19 +301,31 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
     }
 }
 
-/// Push `(obj, i)` for each field index of a `Con` object onto `work`.
-/// No-op for non-`Con` objects (`Lit` leaves; `Closure`/PAP = Tier-1, not
-/// descended).
+/// Push `(rooted parent, i)` for each field index of a `Con` object onto
+/// `work`, registering each as its own GC root. No-op for non-`Con` objects
+/// (`Lit` leaves; `Closure`/PAP = Tier-1, not descended) OR an `obj` already
+/// present in `visited` (M3: a shared sub-graph is only ever queued once).
 ///
 /// # Safety
-/// `obj` must be a valid heap-object pointer.
-unsafe fn push_con_fields(obj: *mut u8, work: &mut Vec<(*mut u8, usize)>) {
+/// `obj` must be a valid heap-object pointer; `vmctx` must be a valid, live
+/// `VMContext`.
+unsafe fn push_con_fields(
+    vmctx: *mut VMContext,
+    obj: *mut u8,
+    work: &mut Vec<(RootedLocal, usize)>,
+    visited: &mut FxHashSet<usize>,
+) {
     if heap_layout::read_tag(obj) != layout::TAG_CON {
+        return;
+    }
+    if !visited.insert(obj as usize) {
         return;
     }
     let n = *(obj.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
     for i in 0..n {
-        work.push((obj, i));
+        // SAFETY: vmctx is valid for this call (caller contract).
+        let root = unsafe { RootedLocal::new(vmctx, obj) };
+        work.push((root, i));
     }
 }
 
@@ -490,5 +568,76 @@ mod tests {
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
         });
+    }
+
+    /// M3: a large, ALREADY-EVALUATED (thunk-free) linear Con chain gives
+    /// `heap_force` nothing to allocate for, so it never reaches a GC point —
+    /// the only way `deep_force` can observe an external cancellation is the
+    /// EXPLICIT periodic check added in this fix. Pre-set the cancel flag,
+    /// then confirm a chain several `CANCEL_CHECK_INTERVAL`s long bails with
+    /// `RuntimeError::Cancelled` instead of walking to the end.
+    #[test]
+    fn test_deep_force_observes_cancel_with_no_gc_points() {
+        use crate::machine_state::{
+            install_current_machine, restore_current_machine, MachineState,
+        };
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        const N: usize = CANCEL_CHECK_INTERVAL as usize * 3;
+        const CON_SIZE: usize = layout::CON_FIELDS_OFFSET as usize + 8; // 1 field
+        let mut buf = vec![0u8; layout::LIT_TOTAL_SIZE as usize + N * CON_SIZE + 64];
+
+        let ms = MachineState::new();
+        // `check_cancel_and_set_error` records `RuntimeError::Cancelled` via
+        // the CURRENT_MACHINE-reached free-fn shim (`errors::set_first_cause`),
+        // NOT through `vmctx`, so this machine needs to be BOTH the vmctx's
+        // machine AND the thread's CURRENT_MACHINE for the whole call.
+        let prev_machine = install_current_machine(&ms as *const MachineState as *mut MachineState);
+        let mut vmctx = VMContext {
+            alloc_ptr: std::ptr::null_mut(),
+            alloc_limit: std::ptr::null_mut(),
+            gc_trigger: mock_gc_trigger,
+            tail_callee: std::ptr::null_mut(),
+            tail_arg: std::ptr::null_mut(),
+            machine_state: &ms as *const MachineState as *mut MachineState,
+        };
+        let vmctx_ptr = &mut vmctx as *mut VMContext;
+
+        unsafe {
+            // Terminal Lit.
+            let lit_ptr = buf.as_mut_ptr();
+            heap_layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
+            *lit_ptr.add(layout::LIT_TAG_OFFSET as usize) = layout::LIT_TAG_INT as u8;
+            *(lit_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 0;
+
+            // N single-field Cons, each pointing to the previous (no sharing —
+            // dedup would otherwise mask whether the cancel check itself works).
+            let mut child = lit_ptr;
+            let mut off = layout::LIT_TOTAL_SIZE as usize;
+            for _ in 0..N {
+                let here = buf.as_mut_ptr().add(off);
+                heap_layout::write_header(here, layout::TAG_CON, CON_SIZE as u32);
+                *(here.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = 1;
+                *(here.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
+                *(here.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = child;
+                child = here;
+                off += CON_SIZE;
+            }
+            let head = child;
+
+            ms.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+            let result = deep_force(vmctx_ptr, head);
+            assert_eq!(
+                result,
+                error_poison_ptr(),
+                "a pre-set cancel flag must short-circuit deep_force, not run to completion"
+            );
+            let err = take_runtime_error().expect("cancel must set a runtime error");
+            assert!(matches!(err, RuntimeError::Cancelled), "got {err:?}");
+        }
+
+        restore_current_machine(prev_machine);
     }
 }

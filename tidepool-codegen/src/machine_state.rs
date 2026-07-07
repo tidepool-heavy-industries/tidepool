@@ -67,6 +67,14 @@ pub struct MachineState {
     diagnostics: RefCell<Vec<String>>,
     parked_streams: RefCell<HashMap<StreamId, ParkedStream>>,
     stream_next_id: Cell<u64>,
+    /// Bumped once per actual collection (`perform_gc`). `deep_force` (M3,
+    /// repo-review-2026-07-06/01-gc-memory-safety.md) reads this to
+    /// invalidate its address-keyed visited set whenever a GC could have
+    /// relocated (or freed, then let something else reuse the address of)
+    /// an object it recorded — an address-only check with no way to detect
+    /// staleness would risk a false "already visited" hit after a
+    /// collection reuses a since-vacated address for an unrelated object.
+    gc_generation: Cell<u64>,
     gc_state: RefCell<Option<GcState>>,
     /// Run-scoped GC roots (mirrors the old `RUST_ROOTS` thread-local):
     /// heap-pointer slots registered by Rust host-fn frames the JIT frame
@@ -95,6 +103,7 @@ impl MachineState {
             diagnostics: RefCell::new(Vec::new()),
             parked_streams: RefCell::new(HashMap::new()),
             stream_next_id: Cell::new(1),
+            gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
             persistent_roots: RefCell::new(Vec::new()),
@@ -258,6 +267,22 @@ impl MachineState {
     /// Remove a parked stream by id (source exhausted).
     pub(crate) fn remove_parked_stream(&self, id: StreamId) {
         self.parked_streams.borrow_mut().remove(&id);
+    }
+
+    // --- GC generation counter (M3) --------------------------------------
+
+    /// Bump the generation counter. Called once per actual collection
+    /// (`perform_gc`), never for a no-op `gc_trigger` that finds no work.
+    pub(crate) fn bump_gc_generation(&self) {
+        self.gc_generation
+            .set(self.gc_generation.get().wrapping_add(1));
+    }
+
+    /// Current generation count, for detecting "did at least one collection
+    /// run between these two points" (compare a snapshot taken before and
+    /// after).
+    pub(crate) fn gc_generation(&self) -> u64 {
+        self.gc_generation.get()
     }
 
     // --- GC state (T6 leaf 3) --------------------------------------------

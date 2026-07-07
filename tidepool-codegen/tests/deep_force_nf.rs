@@ -208,3 +208,63 @@ fn deep_force_null_is_identity() {
     let r = host_fns::deep_force(std::ptr::null_mut(), std::ptr::null_mut());
     assert!(r.is_null());
 }
+
+/// M3 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
+/// without an address-keyed visited set, a shared DAG like
+/// `iterate (\v -> (v,v)) x !! 40` — where EVERY level's two fields alias the
+/// SAME previous-level object — re-descends into that shared object from
+/// both fields at every level, unfolding 2^40 work items for a depth-40
+/// tower. With dedup, the shared sub-object is queued exactly once per
+/// level: O(depth) total instead of O(2^depth).
+///
+/// Runs on a background thread with a generous but bounded timeout so a
+/// regression fails the test instead of hanging the whole suite.
+#[test]
+fn deep_force_shared_dag_terminates_fast() {
+    const DEPTH: usize = 40;
+    // Lit (24) + DEPTH 2-field Cons (40 each) + slack. Only DEPTH distinct
+    // objects ever exist — the exponential blowup this guards against is in
+    // TRAVERSAL work, not allocated memory.
+    const CON_SIZE: usize = 40;
+
+    // `*mut u8` isn't `Send`, and the backing `buf`/`vmctx` must outlive the
+    // pointer anyway — do the whole force + assertions on the worker thread,
+    // sending back only a plain bool.
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 24 + DEPTH * CON_SIZE + 64];
+
+        let ms = tidepool_codegen::machine_state::MachineState::new();
+        let mut nursery = [0u8; 64];
+        let mut vmctx = tidepool_codegen::context::VMContext::new(
+            nursery.as_mut_ptr(),
+            unsafe { nursery.as_ptr().add(nursery.len()) },
+            host_fns::gc_trigger,
+        );
+        vmctx.machine_state = &ms as *const _ as *mut _;
+        let vmctx_ptr = &mut vmctx as *mut tidepool_codegen::context::VMContext;
+
+        let head = unsafe {
+            let mut off = write_lit(&mut buf, 0, 1);
+            let mut level = buf.as_mut_ptr(); // level0 = Lit(1)
+            for _ in 0..DEPTH {
+                let here = buf.as_mut_ptr().add(off);
+                // BOTH fields alias the SAME previous-level object.
+                off = write_con(&mut buf, off, 1, &[level, level]);
+                level = here;
+            }
+            level
+        };
+
+        let forced = host_fns::deep_force(vmctx_ptr, head);
+        let ok = forced != host_fns::error_poison_ptr()
+            && unsafe { heap_layout::read_tag(forced) } == layout::TAG_CON;
+        let _ = tx.send(ok);
+    });
+
+    let ok = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(
+        "deep_force on a shared DAG did not return within 10s — \
+         looks like the exponential re-descent regressed",
+    );
+    assert!(ok, "deep_force on the shared DAG returned a bad result");
+}

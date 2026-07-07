@@ -483,6 +483,10 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
         {
             let mut gc_state = ms.gc_state_mut();
             if let Some(state) = gc_state.as_mut() {
+                // M3 (deep_force): a real collection is about to run — bump
+                // so callers holding an address-keyed cache across this call
+                // (e.g. deep_force's visited set) know to invalidate it.
+                ms.bump_gc_generation();
                 let from_start = state.active_start;
                 let from_size = state.active_size;
                 // SAFETY: from_start + from_size stays within the active GC region.

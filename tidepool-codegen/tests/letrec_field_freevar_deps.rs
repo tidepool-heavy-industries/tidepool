@@ -87,20 +87,20 @@ fn letrec_con_field_app_depends_on_deferred_simple_binder() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(y),                  // 0: g's body
+            CoreFrame::Var(y),                     // 0: g's body
             CoreFrame::Lam { binder: y, body: 0 }, // 1: g = \y -> y
-            CoreFrame::Var(g),                  // 2: ref g
-            CoreFrame::Var(k),                  // 3: ref k
-            CoreFrame::App { fun: 2, arg: 3 },  // 4: g k  (non-Var Con field)
+            CoreFrame::Var(g),                     // 2: ref g
+            CoreFrame::Var(k),                     // 3: ref k
+            CoreFrame::App { fun: 2, arg: 3 },     // 4: g k  (non-Var Con field)
             CoreFrame::Con {
                 tag: NODE_TAG,
                 fields: vec![4],
             }, // 5: node = Con_NODE(g k)
-            CoreFrame::Lit(Literal::LitInt(99)), // 6: k = 99 (deferred simple binding)
-            CoreFrame::Var(node),                // 7: outer case scrutinee
-            CoreFrame::Var(h),                   // 8: inner case scrutinee
-            CoreFrame::Lit(Literal::LitInt(1)),  // 9: matched-99 marker
-            CoreFrame::Lit(Literal::LitInt(0)),  // 10: mismatch marker
+            CoreFrame::Lit(Literal::LitInt(99)),   // 6: k = 99 (deferred simple binding)
+            CoreFrame::Var(node),                  // 7: outer case scrutinee
+            CoreFrame::Var(h),                     // 8: inner case scrutinee
+            CoreFrame::Lit(Literal::LitInt(1)),    // 9: matched-99 marker
+            CoreFrame::Lit(Literal::LitInt(0)),    // 10: mismatch marker
             CoreFrame::Case {
                 // 11: force h via a Lit dispatch (a Default-only case does NOT
                 // force its scrutinee — needs an actual LitAlt to trigger

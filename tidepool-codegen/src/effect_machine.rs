@@ -34,7 +34,13 @@ use tidepool_heap::layout as heap_layout;
 /// Rust scoping already guarantees this for plain `let` locals) — the
 /// underlying root stack is LIFO, mirroring `register_rust_root`'s own
 /// scoping contract.
-struct RootedLocal {
+///
+/// `pub(crate)`: also used by `host_fns::force::deep_force` (M3) as a
+/// per-work-item root — a stack that continuously pushes/pops (unlike this
+/// module's fixed-for-its-lifetime continuation stack) needs registration
+/// scoped to EACH item's own lifetime rather than [`RootedStack`]'s
+/// whole-vec-at-once model.
+pub(crate) struct RootedLocal {
     cell: Box<*mut u8>,
     vmctx: *mut VMContext,
     mark: usize,
@@ -46,7 +52,7 @@ impl RootedLocal {
     /// # Safety
     /// `vmctx` must be a valid, live `VMContext` for this guard's entire
     /// lifetime.
-    unsafe fn new(vmctx: *mut VMContext, ptr: *mut u8) -> Self {
+    pub(crate) unsafe fn new(vmctx: *mut VMContext, ptr: *mut u8) -> Self {
         let mark = crate::host_fns::rust_roots_mark(vmctx);
         let mut cell = Box::new(ptr);
         // SAFETY: `cell`'s heap allocation is stable regardless of where this
@@ -59,13 +65,14 @@ impl RootedLocal {
     }
 
     /// The current (GC-updated) pointer value.
-    fn get(&self) -> *mut u8 {
+    pub(crate) fn get(&self) -> *mut u8 {
         *self.cell
     }
 
     /// Overwrite the rooted value in place (e.g. after forcing to WHNF) —
     /// the root slot itself is unchanged, so no re-registration is needed.
-    fn set(&mut self, ptr: *mut u8) {
+    #[allow(dead_code)] // used by apply_cont_heap; not every caller needs it (e.g. deep_force)
+    pub(crate) fn set(&mut self, ptr: *mut u8) {
         *self.cell = ptr;
     }
 }
