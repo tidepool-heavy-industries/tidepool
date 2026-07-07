@@ -32,6 +32,51 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 
 // ---------------------------------------------------------------------------
+// GC-safe allocate-and-zero helper
+// ---------------------------------------------------------------------------
+
+/// Allocate a heap object, write its tag/size header, and zero-fill every
+/// pointer-sized slot in `[fields_offset, fields_offset + n_slots*8)` — all in
+/// one emit sequence with no GC point in between. Marks the returned pointer
+/// as needing a stack map.
+///
+/// Every allocate-then-fill emit path (Con, Closure, Thunk) must go through
+/// this so a GC triggered while filling real values into the (now zeroed)
+/// slots never scans stale bump-heap bytes as pointers. Callers still write
+/// any tag-specific metadata (con tag, field/capture count, thunk state, code
+/// ptr) themselves — plain `iconst`+`store`, not GC points — before starting
+/// whatever GC-triggering sub-emits fill the real slot values.
+#[allow(clippy::too_many_arguments)]
+fn emit_alloc_zeroed(
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    tag: u8,
+    size: u64,
+    fields_offset: i32,
+    n_slots: usize,
+) -> Value {
+    let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+
+    let tag_val = builder.ins().iconst(types::I8, tag as i64);
+    builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
+    let size_val = builder.ins().iconst(types::I32, size as i64);
+    builder.ins().store(MemFlags::trusted(), size_val, ptr, 1);
+
+    let null_val = builder.ins().iconst(types::I64, 0);
+    for i in 0..n_slots {
+        let offset = fields_offset + 8 * i as i32;
+        builder
+            .ins()
+            .store(MemFlags::trusted(), null_val, ptr, offset);
+    }
+
+    builder.declare_value_needs_stack_map(ptr);
+    ptr
+}
+
+// ---------------------------------------------------------------------------
 // EmitFrame: hylomorphism frame for stack-safe Cranelift IR emission
 // ---------------------------------------------------------------------------
 
@@ -493,22 +538,16 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             // compile non-trivial fields as thunks.
             let num_fields = field_indices.len();
             let size = 24 + 8 * num_fields as u64;
-            let ptr = emit_alloc_fast_path(
+            let ptr = emit_alloc_zeroed(
                 args.builder,
                 args.sess.vmctx,
-                size,
                 args.sess.gc_sig,
                 args.sess.oom_func,
+                layout::TAG_CON,
+                size,
+                CON_FIELDS_OFFSET,
+                num_fields,
             );
-
-            let tag_val = args.builder.ins().iconst(types::I8, layout::TAG_CON as i64);
-            args.builder
-                .ins()
-                .store(MemFlags::trusted(), tag_val, ptr, 0);
-            let size_val = args.builder.ins().iconst(types::I32, size as i64);
-            args.builder
-                .ins()
-                .store(MemFlags::trusted(), size_val, ptr, 1);
 
             let con_tag_val = args.builder.ins().iconst(types::I64, tag.0 as i64);
             args.builder
@@ -562,7 +601,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 );
             }
 
-            args.builder.declare_value_needs_stack_map(ptr);
             Ok(SsaVal::HeapPtr(ptr))
         }
         EmitFrame::PrimOp {
@@ -784,11 +822,34 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 .ins()
                 .jump(merge_block, &[BlockArg::Value(resolved_val)]);
 
-            // merge_block: result from any path
+            // merge_block: result from any path. Pair debug_app_check's
+            // increment with a decrement here — every exit from this App
+            // node (the poison short-circuit and the post-call/post-TCO-
+            // resolution path) converges here, so call_depth tracks live
+            // nesting instead of a running total (Finding 5).
             args.builder.switch_to_block(merge_block);
             args.builder.seal_block(merge_block);
             let merged_val = args.builder.block_params(merge_block)[0];
             args.builder.declare_value_needs_stack_map(merged_val);
+
+            let return_fn = args
+                .sess
+                .pipeline
+                .module
+                .declare_function("debug_app_return", Linkage::Import, &{
+                    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                    sig.params.push(AbiParam::new(types::I64)); // vmctx
+                    sig.returns.push(AbiParam::new(types::I64));
+                    sig
+                })
+                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+            let return_ref = args
+                .sess
+                .pipeline
+                .module
+                .declare_func_in_func(return_fn, args.builder.func);
+            args.builder.ins().call(return_ref, &[args.sess.vmctx]);
+
             Ok(SsaVal::HeapPtr(merged_val))
         }
         EmitFrame::Lam { binder, body_idx } => emit_lam(
@@ -1349,25 +1410,16 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 
     let num_captures = captures.len();
     let closure_size = 24 + 8 * num_captures as u64;
-    let closure_ptr = emit_alloc_fast_path(
+    let closure_ptr = emit_alloc_zeroed(
         args.builder,
         args.sess.vmctx,
-        closure_size,
         args.sess.gc_sig,
         args.sess.oom_func,
+        layout::TAG_CLOSURE,
+        closure_size,
+        CLOSURE_CAPTURED_OFFSET,
+        num_captures,
     );
-
-    let tag_val = args
-        .builder
-        .ins()
-        .iconst(types::I8, layout::TAG_CLOSURE as i64);
-    args.builder
-        .ins()
-        .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-    let size_val = args.builder.ins().iconst(types::I32, closure_size as i64);
-    args.builder
-        .ins()
-        .store(MemFlags::trusted(), size_val, closure_ptr, 1);
 
     args.builder.ins().store(
         MemFlags::trusted(),
@@ -1383,6 +1435,9 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
         CLOSURE_NUM_CAPTURED_OFFSET,
     );
 
+    // Capture slots are already zeroed (emit_alloc_zeroed above), so a GC
+    // triggered by `ensure_heap_ptr` mid-loop (e.g. a Raw capture forcing a
+    // Lit allocation) never scans an unfilled slot as a stale pointer.
     for (i, (_, ssaval)) in captures.iter().enumerate() {
         let cap_val = ensure_heap_ptr(
             args.builder,
@@ -1397,7 +1452,6 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
             .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
     }
 
-    args.builder.declare_value_needs_stack_map(closure_ptr);
     Ok(SsaVal::HeapPtr(closure_ptr))
 }
 
@@ -1576,29 +1630,21 @@ fn emit_thunk_promised(
         .declare_func_in_func(thunk_func_id, args.builder.func);
     let code_ptr = args.builder.ins().func_addr(types::I64, func_ref);
 
-    // Allocate the thunk heap object
+    // Allocate the thunk heap object, capture slots pre-zeroed so a GC
+    // triggered by `ensure_heap_ptr` mid-loop below never scans an unfilled
+    // slot as a stale pointer.
     let num_captures = captures.len();
     let thunk_size = 24 + 8 * num_captures as u64;
-    let thunk_ptr = emit_alloc_fast_path(
+    let thunk_ptr = emit_alloc_zeroed(
         args.builder,
         args.sess.vmctx,
-        thunk_size,
         args.sess.gc_sig,
         args.sess.oom_func,
+        layout::TAG_THUNK,
+        thunk_size,
+        THUNK_CAPTURED_OFFSET,
+        num_captures,
     );
-
-    // Header: tag + size
-    let tag_val = args
-        .builder
-        .ins()
-        .iconst(types::I8, layout::TAG_THUNK as i64);
-    args.builder
-        .ins()
-        .store(MemFlags::trusted(), tag_val, thunk_ptr, 0);
-    let size_val = args.builder.ins().iconst(types::I32, thunk_size as i64);
-    args.builder
-        .ins()
-        .store(MemFlags::trusted(), size_val, thunk_ptr, 1);
 
     // State = Unevaluated
     let state_val = args
@@ -1648,7 +1694,6 @@ fn emit_thunk_promised(
         }
     }
 
-    args.builder.declare_value_needs_stack_map(thunk_ptr);
     Ok((SsaVal::HeapPtr(thunk_ptr), pending_slots))
 }
 
@@ -2503,25 +2548,20 @@ impl EmitContext {
 
                     let num_captures = sorted_fvs.len();
                     let closure_size = 24 + 8 * num_captures as u64;
-                    let closure_ptr = emit_alloc_fast_path(
+                    // Capture slots pre-zeroed: the NEXT binding's pre-alloc
+                    // (or any later GC point before Phase 3a fills them) must
+                    // never see stale bump-heap bytes as pointers.
+                    let closure_ptr = emit_alloc_zeroed(
                         args.builder,
                         args.sess.vmctx,
-                        closure_size,
                         args.sess.gc_sig,
                         args.sess.oom_func,
+                        layout::TAG_CLOSURE,
+                        closure_size,
+                        CLOSURE_CAPTURED_OFFSET,
+                        num_captures,
                     );
 
-                    let tag_val = args
-                        .builder
-                        .ins()
-                        .iconst(types::I8, layout::TAG_CLOSURE as i64);
-                    args.builder
-                        .ins()
-                        .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-                    let size_val = args.builder.ins().iconst(types::I32, closure_size as i64);
-                    args.builder
-                        .ins()
-                        .store(MemFlags::trusted(), size_val, closure_ptr, 1);
                     let num_cap_val = args.builder.ins().iconst(types::I16, num_captures as i64);
                     args.builder.ins().store(
                         MemFlags::trusted(),
@@ -2530,7 +2570,6 @@ impl EmitContext {
                         CLOSURE_NUM_CAPTURED_OFFSET,
                     );
 
-                    args.builder.declare_value_needs_stack_map(closure_ptr);
                     pre_allocs.push(PreAlloc::Lam {
                         binder: *binder,
                         ptr: closure_ptr,
@@ -2541,22 +2580,17 @@ impl EmitContext {
                 CoreFrame::Con { tag, fields } => {
                     let num_fields = fields.len();
                     let size = 24 + 8 * num_fields as u64;
-                    let ptr = emit_alloc_fast_path(
+                    let ptr = emit_alloc_zeroed(
                         args.builder,
                         args.sess.vmctx,
-                        size,
                         args.sess.gc_sig,
                         args.sess.oom_func,
+                        layout::TAG_CON,
+                        size,
+                        CON_FIELDS_OFFSET,
+                        num_fields,
                     );
 
-                    let tag_val = args.builder.ins().iconst(types::I8, layout::TAG_CON as i64);
-                    args.builder
-                        .ins()
-                        .store(MemFlags::trusted(), tag_val, ptr, 0);
-                    let size_val = args.builder.ins().iconst(types::I32, size as i64);
-                    args.builder
-                        .ins()
-                        .store(MemFlags::trusted(), size_val, ptr, 1);
                     let con_tag_val = args.builder.ins().iconst(types::I64, tag.0 as i64);
                     args.builder
                         .ins()
@@ -2569,17 +2603,6 @@ impl EmitContext {
                         CON_NUM_FIELDS_OFFSET,
                     );
 
-                    // Zero-initialize Con fields so GC doesn't trace garbage
-                    // if triggered before Phase 3b/3d.
-                    let null_val = args.builder.ins().iconst(types::I64, 0);
-                    for i in 0..num_fields {
-                        let offset = CON_FIELDS_OFFSET + 8 * i as i32;
-                        args.builder
-                            .ins()
-                            .store(MemFlags::trusted(), null_val, ptr, offset);
-                    }
-
-                    args.builder.declare_value_needs_stack_map(ptr);
                     pre_allocs.push(PreAlloc::Con {
                         binder: *binder,
                         ptr,
@@ -2766,15 +2789,9 @@ impl EmitContext {
                 CLOSURE_CODE_PTR_OFFSET,
             );
 
-            // Zero-initialize capture slots so GC doesn't trace garbage
-            let null_val = args.builder.ins().iconst(types::I64, 0);
-            for i in 0..sorted_fvs.len() {
-                let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
-                args.builder
-                    .ins()
-                    .store(MemFlags::trusted(), null_val, closure_ptr, offset);
-            }
-
+            // Capture slots were already zeroed at pre-alloc time (Phase 1,
+            // via emit_alloc_zeroed) — that's what makes them GC-safe across
+            // the gap between this pre-alloc and this fill.
             // Fill captures already in env. Defer those referencing deferred simple bindings.
             for (i, var_id) in sorted_fvs.iter().enumerate() {
                 let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
