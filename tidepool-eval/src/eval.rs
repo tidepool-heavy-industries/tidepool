@@ -2174,7 +2174,7 @@ fn dispatch_primop(
         }
         PrimOpKind::Word64Shrl => {
             let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a >> (b as u32))))
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_shr(b as u32))))
         }
         PrimOpKind::Word8Ge => {
             let (a, b) = bin_op_word(op, &args, heap)?;

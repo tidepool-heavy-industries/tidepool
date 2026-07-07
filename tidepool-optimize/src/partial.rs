@@ -251,7 +251,9 @@ fn partial_eval_at(
             }
         }
         CoreFrame::Lam { binder, body } => {
-            let bi = partial_eval_at(expr, *body, env, new_nodes).idx;
+            let mut new_env = env.clone();
+            new_env.insert(*binder, PartialValue::Unknown);
+            let bi = partial_eval_at(expr, *body, &new_env, new_nodes).idx;
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Lam {
                 binder: *binder,
@@ -268,7 +270,11 @@ fn partial_eval_at(
             rhs,
             body,
         } => {
-            let ri = partial_eval_at(expr, *rhs, env, new_nodes).idx;
+            let mut rhs_env = env.clone();
+            for p in params {
+                rhs_env.insert(*p, PartialValue::Unknown);
+            }
+            let ri = partial_eval_at(expr, *rhs, &rhs_env, new_nodes).idx;
             let body_r = partial_eval_at(expr, *body, env, new_nodes);
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Join {
@@ -425,7 +431,7 @@ mod tests {
     use tidepool_eval::eval;
     use tidepool_eval::heap::VecHeap;
     use tidepool_eval::value::Value;
-    use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, VarId};
+    use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, PrimOpKind, VarId};
 
     #[test]
     fn test_partial_all_known() {
@@ -652,5 +658,92 @@ mod tests {
 
         assert_eq!(expr.nodes.len(), 1);
         assert_eq!(expr.nodes[0], CoreFrame::Lit(Literal::LitInt(6)));
+    }
+
+    /// F1 regression: `let x = 1 in ((\x -> x) 99)` must stay 99 — the
+    /// lambda's own `x` shadows the outer let's `x`. Before the fix, the
+    /// `Lam` arm evaluated its body with the incoming (outer) env, so the
+    /// inner `x` was folded to the OUTER binding's known value 1.
+    #[test]
+    fn test_partial_lam_binder_shadowing() {
+        let x = VarId(7);
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)),    // 0: outer rhs
+            CoreFrame::Var(x),                     // 1: lambda body (inner x)
+            CoreFrame::Lam { binder: x, body: 1 }, // 2: \x -> x
+            CoreFrame::Lit(Literal::LitInt(99)),   // 3
+            CoreFrame::App { fun: 2, arg: 3 },     // 4
+            CoreFrame::LetNonRec {
+                binder: x,
+                rhs: 0,
+                body: 4,
+            }, // 5
+        ];
+        let mut expr = CoreExpr { nodes };
+        let mut heap = VecHeap::new();
+        let before = eval(&expr, &Env::new(), &mut heap).unwrap();
+
+        let pass = PartialEval;
+        pass.run(&mut expr);
+
+        let mut heap2 = VecHeap::new();
+        let after = eval(&expr, &Env::new(), &mut heap2).unwrap();
+
+        let Value::Lit(Literal::LitInt(before)) = before else {
+            panic!("expected LitInt");
+        };
+        let Value::Lit(Literal::LitInt(after)) = after else {
+            panic!("expected LitInt");
+        };
+        assert_eq!(before, 99);
+        assert_eq!(after, 99);
+    }
+
+    /// F2 regression: `let x = 1 in join j(x) = x in jump j(42)` must stay
+    /// 42 — the join point's own parameter `x` shadows the outer let's `x`.
+    /// Before the fix, the `Join` arm evaluated `rhs` with the incoming
+    /// (outer) env, so the param-bound `x` in `rhs` was folded to the OUTER
+    /// binding's known value 1.
+    #[test]
+    fn test_partial_join_param_shadowing() {
+        let x = VarId(7);
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)),  // 0
+            CoreFrame::Var(x),                   // 1
+            CoreFrame::Lit(Literal::LitInt(42)), // 2
+            CoreFrame::Jump {
+                label: JoinId(1),
+                args: vec![2],
+            }, // 3
+            CoreFrame::Join {
+                label: JoinId(1),
+                params: vec![x],
+                rhs: 1,
+                body: 3,
+            }, // 4
+            CoreFrame::LetNonRec {
+                binder: x,
+                rhs: 0,
+                body: 4,
+            }, // 5
+        ];
+        let mut expr = CoreExpr { nodes };
+        let mut heap = VecHeap::new();
+        let before = eval(&expr, &Env::new(), &mut heap).unwrap();
+
+        let pass = PartialEval;
+        pass.run(&mut expr);
+
+        let mut heap2 = VecHeap::new();
+        let after = eval(&expr, &Env::new(), &mut heap2).unwrap();
+
+        let Value::Lit(Literal::LitInt(before)) = before else {
+            panic!("expected LitInt");
+        };
+        let Value::Lit(Literal::LitInt(after)) = after else {
+            panic!("expected LitInt");
+        };
+        assert_eq!(before, 42);
+        assert_eq!(after, 42);
     }
 }

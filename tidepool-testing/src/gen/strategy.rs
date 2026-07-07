@@ -70,6 +70,25 @@ pub fn arb_core_expr_weighted(
     arb_simple_type().prop_flat_map(move |ty| arb_typed_expr_weighted(ty, depth, weights))
 }
 
+/// Generate a CoreExpr at `depth` where `shadow_pct` (0..=100) percent of
+/// Lam/Let/Case/Join binders deliberately reuse an in-scope `VarId` of the
+/// same type instead of minting a fresh one — the shadowed-binder programs
+/// the default generators can never produce (they share ONE fresh-var
+/// counter across all generation contexts, so no id is ever reused).
+pub fn arb_core_expr_shadowing(
+    depth: u32,
+    shadow_pct: u32,
+) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    arb_simple_type().prop_flat_map(move |ty| arb_typed_expr_shadowing(ty, depth, shadow_pct))
+}
+
+/// A `bool` strategy weighted by `pct` (0..=100) — the proptest-controlled
+/// (reproducible/shrinkable) source of the shadow-or-fresh decision at each
+/// binder site.
+fn shadow_roll(pct: u32) -> impl Strategy<Value = bool> {
+    prop::bool::weighted((pct.min(100) as f64) / 100.0)
+}
+
 /// Ground types: no Fun at any level. Values of ground type are always
 /// structurally comparable (never closures).
 fn arb_ground_type() -> impl Strategy<Value = SimpleType> {
@@ -132,6 +151,12 @@ struct Context {
     next_var: Rc<Cell<u64>>,
     next_join: Rc<Cell<u64>>,
     weights: Weights,
+    /// 0..=100 chance (see [`shadow_roll`]) that a Lam/Let/Case/Join binder
+    /// reuses an in-scope `VarId` of the same type instead of minting a
+    /// fresh one. Zero by default, so the historical generators
+    /// (`arb_core_expr`/`arb_ground_expr`/`arb_core_expr_weighted`) are
+    /// byte-for-byte unaffected — only [`arb_core_expr_shadowing`] sets it.
+    shadow_weight: u32,
 }
 
 impl Context {
@@ -141,6 +166,7 @@ impl Context {
             next_var: Rc::new(Cell::new(0)),
             next_join: Rc::new(Cell::new(0)),
             weights: Weights::default(),
+            shadow_weight: 0,
         }
     }
 
@@ -151,12 +177,35 @@ impl Context {
         c
     }
 
+    /// A fresh context biased to reuse in-scope binder ids (see
+    /// `shadow_weight`).
+    fn with_shadow(shadow_weight: u32) -> Self {
+        let mut c = Self::new();
+        c.shadow_weight = shadow_weight;
+        c
+    }
+
     fn add_var(&mut self, ty: SimpleType) -> VarId {
         let val = self.next_var.get();
         let id = VarId(val);
         self.next_var.set(val + 1);
         self.vars.insert(id, ty);
         id
+    }
+
+    /// Bind a new occurrence of `ty`: when `want_shadow` is true AND an
+    /// in-scope `VarId` of the same type already exists, reuse it (a real
+    /// shadowing binder — the reused id keeps its original type) instead of
+    /// minting fresh. Falls back to [`Context::add_var`] otherwise, so
+    /// `shadow_weight == 0` (via `shadow_roll`, which then always draws
+    /// `false`) reproduces the old always-fresh behavior exactly.
+    fn shadow_or_fresh(&mut self, ty: SimpleType, want_shadow: bool) -> VarId {
+        if want_shadow {
+            if let Some(&existing) = self.vars_of_type(&ty).first() {
+                return existing;
+            }
+        }
+        self.add_var(ty)
     }
 
     fn add_join(&mut self) -> JoinId {
@@ -192,6 +241,16 @@ fn arb_typed_expr_weighted(
     weights: Weights,
 ) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
     gen_expr(ty, depth, Context::with_weights(weights)).prop_map(|(builder, _root)| builder.build())
+}
+
+/// Like [`arb_typed_expr`] but seeds the root context with a shadow weight.
+fn arb_typed_expr_shadowing(
+    ty: SimpleType,
+    depth: u32,
+    shadow_pct: u32,
+) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    gen_expr(ty, depth, Context::with_shadow(shadow_pct))
+        .prop_map(|(builder, _root)| builder.build())
 }
 
 fn gen_expr(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
@@ -390,12 +449,22 @@ fn gen_app(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuild
         .boxed()
 }
 
-fn gen_lam(ty: SimpleType, depth: u32, mut ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
+fn gen_lam(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
     match ty {
         SimpleType::Fun(a, b) => {
-            let binder = ctx.add_var(*a);
-            gen_expr(*b, depth.saturating_sub(1), ctx)
-                .prop_map(move |(mut builder, body)| {
+            let a = *a;
+            let b = *b;
+            let shadow_pct = ctx.shadow_weight;
+            shadow_roll(shadow_pct)
+                .prop_flat_map(move |shadow| {
+                    let mut ctx_body = ctx.clone();
+                    let binder = ctx_body.shadow_or_fresh(a.clone(), shadow);
+                    (
+                        gen_expr(b.clone(), depth.saturating_sub(1), ctx_body),
+                        Just(binder),
+                    )
+                })
+                .prop_map(move |((mut builder, body), binder)| {
                     let root = builder.push(CoreFrame::Lam { binder, body });
                     (builder, root)
                 })
@@ -410,10 +479,11 @@ fn gen_let_non_rec(
     depth: u32,
     ctx: Context,
 ) -> BoxedStrategy<(TreeBuilder, usize)> {
-    arb_simple_type()
-        .prop_flat_map(move |rhs_ty| {
+    let shadow_pct = ctx.shadow_weight;
+    (arb_simple_type(), shadow_roll(shadow_pct))
+        .prop_flat_map(move |(rhs_ty, shadow)| {
             let mut ctx_body = ctx.clone();
-            let binder = ctx_body.add_var(rhs_ty.clone());
+            let binder = ctx_body.shadow_or_fresh(rhs_ty.clone(), shadow);
             (
                 gen_expr(rhs_ty, depth, ctx.clone()),
                 gen_expr(ty.clone(), depth, ctx_body),
@@ -491,14 +561,14 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
 
     prop_oneof![
         // Case on Maybe
-        arb_simple_type()
-            .prop_flat_map(move |inner_ty| {
+        (arb_simple_type(), shadow_roll(ctx2.shadow_weight))
+            .prop_flat_map(move |(inner_ty, shadow)| {
                 let scrut_ty = SimpleType::Maybe(Box::new(inner_ty.clone()));
                 let mut ctx_alt = ctx2.clone();
-                let binder = ctx_alt.add_var(scrut_ty.clone());
+                let binder = ctx_alt.shadow_or_fresh(scrut_ty.clone(), shadow);
 
                 let mut ctx_just = ctx_alt.clone();
-                let just_binder = ctx_just.add_var(inner_ty);
+                let just_binder = ctx_just.shadow_or_fresh(inner_ty, shadow);
 
                 (
                     gen_expr(scrut_ty, depth, ctx2.clone()),
@@ -539,11 +609,11 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
                 }
             ),
         // Case on Bool
-        Just(())
-            .prop_flat_map(move |_| {
+        shadow_roll(ctx3.shadow_weight)
+            .prop_flat_map(move |shadow| {
                 let scrut_ty = SimpleType::Bool;
                 let mut ctx_alt = ctx3.clone();
-                let binder = ctx_alt.add_var(scrut_ty.clone());
+                let binder = ctx_alt.shadow_or_fresh(scrut_ty.clone(), shadow);
 
                 (
                     gen_expr(scrut_ty, depth, ctx3.clone()),
@@ -577,16 +647,20 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
                 (builder, root)
             }),
         // Case on Pair
-        (arb_simple_type(), arb_simple_type())
-            .prop_flat_map(move |(inner_a, inner_b)| {
+        (
+            arb_simple_type(),
+            arb_simple_type(),
+            shadow_roll(ctx4.shadow_weight)
+        )
+            .prop_flat_map(move |(inner_a, inner_b, shadow)| {
                 let scrut_ty =
                     SimpleType::Pair(Box::new(inner_a.clone()), Box::new(inner_b.clone()));
                 let mut ctx_alt = ctx4.clone();
-                let binder = ctx_alt.add_var(scrut_ty.clone());
+                let binder = ctx_alt.shadow_or_fresh(scrut_ty.clone(), shadow);
 
                 let mut ctx_body = ctx_alt.clone();
-                let b1 = ctx_body.add_var(inner_a);
-                let b2 = ctx_body.add_var(inner_b);
+                let b1 = ctx_body.shadow_or_fresh(inner_a, shadow);
+                let b2 = ctx_body.shadow_or_fresh(inner_b, shadow);
 
                 (
                     gen_expr(scrut_ty, depth, ctx4.clone()),
@@ -611,11 +685,11 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
                 }
             ),
         // Case on Int with DEFAULT
-        any::<i64>()
-            .prop_flat_map(move |val| {
+        (any::<i64>(), shadow_roll(ctx5.shadow_weight))
+            .prop_flat_map(move |(val, shadow)| {
                 let scrut_ty = SimpleType::Int;
                 let mut ctx_alt = ctx5.clone();
-                let binder = ctx_alt.add_var(scrut_ty.clone());
+                let binder = ctx_alt.shadow_or_fresh(scrut_ty.clone(), shadow);
 
                 (
                     gen_expr(scrut_ty, depth, ctx5.clone()),
@@ -710,12 +784,16 @@ fn gen_con(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuild
 fn gen_join_jump(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
     let ty_c = ty.clone();
     let ctx_c = ctx.clone();
-    prop::collection::vec(arb_simple_type(), 1..5)
-        .prop_flat_map(move |arg_tys| {
+    let shadow_pct = ctx.shadow_weight;
+    (
+        prop::collection::vec(arb_simple_type(), 1..5),
+        shadow_roll(shadow_pct),
+    )
+        .prop_flat_map(move |(arg_tys, shadow)| {
             let mut ctx_rhs = ctx_c.clone();
             let mut params = Vec::new();
             for aty in &arg_tys {
-                params.push(ctx_rhs.add_var(aty.clone()));
+                params.push(ctx_rhs.shadow_or_fresh(aty.clone(), shadow));
             }
 
             let mut ctx_body = ctx_c.clone();

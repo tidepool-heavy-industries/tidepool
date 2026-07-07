@@ -63,11 +63,6 @@ const PAIR: DataConId = DataConId(4);
 // ---------------------------------------------------------------------------
 static REACHED: AtomicU64 = AtomicU64::new(0);
 static TOTAL: AtomicU64 = AtomicU64::new(0);
-// Hits of the documented eval-side overflow-panic divergence (CONFIRMED-BUG
-// EVAL-1/2/3). Tolerated by the live fuzzer (the JIT side is asserted Ok and
-// the inputs are pinned by the `#[ignore]`d repros below) so the net stays
-// green and keeps hunting for OTHER divergences. NOT counted toward reach.
-static N_EVAL_PANIC: AtomicU64 = AtomicU64::new(0);
 
 fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
@@ -84,51 +79,6 @@ fn run_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
     check_jit_vs_eval(expr.clone(), 64 * 1024)?;
     check_jit_vs_eval(expr, 16 * 1024)?;
     bump(&REACHED);
-    Ok(())
-}
-
-/// Panic-tolerant oracle for the lanes that probe `Int64*`/`Word64*` shift and
-/// negate ops with out-of-range / INT_MIN operands.
-///
-/// CONFIRMED-BUG class EVAL-1/2/3: the tree-walking interpreter's `Int64Negate`
-/// / `Int64Shra` / `Word64Shl` handlers use RAW arithmetic (`-a`, `a >> b`,
-/// `a << b`) where their `IntNegate` / `IntShra` / `WordShl` siblings use
-/// `wrapping_*`. In a debug build the raw form PANICS ("negate with overflow",
-/// "shift right/left with overflow"); the JIT lowers all of them to the same
-/// wrapping Cranelift instruction (`ineg` / `sshr` / `ishl`, all mod-width) and
-/// returns a value. A `catch_unwind` here turns the eval panic into a recorded,
-/// tolerated divergence and asserts the JIT still succeeds — keeping the suite
-/// green while pinning the bug (see `evalbug*` repros below).
-fn run_oracle_eval_may_panic(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-    let table = build_table_for_expr(&expr);
-    let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut heap = VecHeap::new();
-        let env = env_from_datacon_table(&table);
-        eval(&expr, &env, &mut heap)
-    }));
-    match ev {
-        Ok(_eval_result) => {
-            // eval did NOT panic on this operand — run the strict differential.
-            check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-            check_jit_vs_eval(expr, 16 * 1024)?;
-            bump(&REACHED);
-        }
-        Err(_panic) => {
-            // Documented eval overflow panic. Assert the JIT handles it cleanly
-            // (returns a value, never a compile/codegen error) and tolerate.
-            let jit =
-                JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-            prop_assert!(
-                jit.is_ok(),
-                "EVAL-panic operand but JIT ALSO failed (this would be a new \
-                 divergence, not the documented eval-overflow bug).\nJIT: {:?}\nExpr: {:#?}",
-                jit,
-                expr
-            );
-            bump(&N_EVAL_PANIC);
-        }
-    }
     Ok(())
 }
 
@@ -494,9 +444,8 @@ proptest! {
                    PrimOpKind::Int64Shl] {
             run_oracle(prog_binary_int(op, a, sh))?;
         }
-        // Int64Shra uses a RAW `a >> b` in eval (CONFIRMED-BUG EVAL-2): panics
-        // on shift >= 64. Route through the panic-tolerant oracle.
-        run_oracle_eval_may_panic(prog_binary_int(PrimOpKind::Int64Shra, a, sh))?;
+        // Int64Shra uses wrapping_shr in eval (CONFIRMED-BUG EVAL-2, fixed) → strict.
+        run_oracle(prog_binary_int(PrimOpKind::Int64Shra, a, sh))?;
     }
 
     #[test]
@@ -510,9 +459,8 @@ proptest! {
                    PrimOpKind::Int64ToInt] {
             run_oracle(prog_unary_int(op, a))?;
         }
-        // Int64Negate uses a RAW `-a` in eval (CONFIRMED-BUG EVAL-1): panics on
-        // INT_MIN. Route through the panic-tolerant oracle.
-        run_oracle_eval_may_panic(prog_unary_int(PrimOpKind::Int64Negate, a))?;
+        // Int64Negate uses wrapping_neg in eval (CONFIRMED-BUG EVAL-1, fixed) → strict.
+        run_oracle(prog_unary_int(PrimOpKind::Int64Negate, a))?;
     }
 }
 
@@ -554,13 +502,11 @@ proptest! {
     #[test]
     #[serial]
     fn prop_word_shift(a in arb_edge_u64(), sh in arb_shift()) {
-        // WordShl/WordShrl use wrapping_* in eval → strict.
-        for op in [PrimOpKind::WordShl, PrimOpKind::WordShrl] {
+        // WordShl/WordShrl/Word64Shl/Word64Shrl all use wrapping_* in eval → strict.
+        for op in [PrimOpKind::WordShl, PrimOpKind::WordShrl,
+                   PrimOpKind::Word64Shl, PrimOpKind::Word64Shrl] {
             run_oracle(prog_word_shift(op, a, sh))?;
         }
-        // Word64Shl uses a RAW `a << b` in eval (CONFIRMED-BUG EVAL-3): panics
-        // on shift >= 64. Route through the panic-tolerant oracle.
-        run_oracle_eval_may_panic(prog_word_shift(PrimOpKind::Word64Shl, a, sh))?;
     }
 
     #[test]
@@ -817,22 +763,15 @@ proptest! {
 }
 
 // ===========================================================================
-// CONFIRMED-BUG REPROS (minimal, hand-built). Each is `#[ignore]`d so the
-// suite stays green; remove the `#[ignore]` once the eval handler is fixed to
-// use the wrapping arithmetic its non-64 sibling already uses.
-//
-// Class EVAL-1/2/3: the tree-walking interpreter's `Int64Negate` / `Int64Shra`
-// / `Word64Shl` handlers use RAW arithmetic where their `IntNegate`/`IntShra`/
-// `WordShl` siblings (and the JIT, via Cranelift `ineg`/`sshr`/`ishl`) use
-// wrapping / mod-width semantics. The JIT returns the wrapped value; eval
-// PANICS (debug overflow check). Severity: crash (eval host panic) — a release
-// build would instead diverge SILENTLY for the shift cases (raw `<<`/`>>` by
-// >= 64 is "unspecified" but in practice masks differently than the JIT's
-// guaranteed mod-64) and wrap (matching) for negate, so the negate case is
-// debug-only-loud while the shift cases are a latent silent-wrong in release.
-// Files: tidepool-eval/src/eval.rs (Int64Negate ~1441, Int64Shra ~1445,
-// Word64Shl ~1449). Fix = swap `-a`/`a >> b`/`a << b` for
-// `a.wrapping_neg()`/`a.wrapping_shr(b as u32)`/`a.wrapping_shl(b as u32)`.
+// FIXED-BUG REPROS (minimal, hand-built) for class EVAL-1/2/3: the
+// tree-walking interpreter's `Int64Negate` / `Int64Shra` / `Word64Shl`
+// handlers used RAW arithmetic where their `IntNegate`/`IntShra`/`WordShl`
+// siblings (and the JIT, via Cranelift `ineg`/`sshr`/`ishl`) use wrapping /
+// mod-width semantics — now fixed to `wrapping_neg`/`wrapping_shr`/
+// `wrapping_shl`, matching the JIT. `Word64Shrl` had the same raw-`>>` gap
+// (never had its own EVAL-N repro) and is now `wrapping_shr` too. These pin
+// the fix; the corresponding lanes above (`prop_int_shift`, `prop_int_unary`,
+// `prop_word_shift`) route all four ops through the strict `run_oracle`.
 
 /// Confirm + run one (op, args) repro: returns (eval_result_dbg_or_panic, jit_result_dbg).
 fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (String, String) {
@@ -892,6 +831,19 @@ fn evalbug3_word64_shl_shift_64() {
     assert_eq!(eval, "Ok(Lit(LitWord(1)))");
 }
 
+/// F5 regression: `Word64Shrl` with shift >= 64 (here 1 >> 64) now masks mod
+/// 64 like the JIT's Cranelift `ushr`, instead of panicking ("shift right
+/// with overflow") on the old raw `>>`.
+#[test]
+fn evalbug4_word64_shrl_shift_64() {
+    let (eval, jit) = run_one(
+        PrimOpKind::Word64Shrl,
+        vec![Literal::LitWord(1), Literal::LitInt(64)],
+    );
+    assert_eq!(jit, "Ok(Lit(LitWord(1)))");
+    assert_eq!(eval, "Ok(Lit(LitWord(1)))");
+}
+
 // ===========================================================================
 // Configs.
 //
@@ -930,10 +882,6 @@ fn zzz_reach_floor() {
         } else {
             0.0
         }
-    );
-    eprintln!(
-        "PRIMOPS-DIFF EVAL-PANIC HITS (CONFIRMED-BUG EVAL-1/2/3, tolerated): {}",
-        N_EVAL_PANIC.load(Ordering::Relaxed),
     );
     if total >= 100 {
         let ratio = reached as f64 / total as f64;
