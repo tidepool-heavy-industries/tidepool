@@ -180,9 +180,19 @@ fn max_var_id(tree: &CoreExpr) -> u64 {
     for node in &tree.nodes {
         match node {
             CoreFrame::Var(v) => max = max.max(v.0),
-            CoreFrame::Lam { binder, .. }
-            | CoreFrame::LetNonRec { binder, .. }
-            | CoreFrame::Case { binder, .. } => max = max.max(binder.0),
+            CoreFrame::Lam { binder, .. } | CoreFrame::LetNonRec { binder, .. } => {
+                max = max.max(binder.0)
+            }
+            CoreFrame::Case { binder, alts, .. } => {
+                max = max.max(binder.0);
+                // Alt pattern binders are VarIds too (M6) — omitting them let a
+                // converted Jump's fresh binder silently capture one.
+                for alt in alts {
+                    for b in &alt.binders {
+                        max = max.max(b.0);
+                    }
+                }
+            }
             CoreFrame::LetRec { bindings, .. } => {
                 for (b, _) in bindings {
                     max = max.max(b.0);
@@ -463,5 +473,89 @@ mod tests {
         b.push(CoreFrame::Lit(Literal::LitInt(1)));
         let tree = b.build();
         assert_eq!(lower_jump_crosses_lam(&tree), tree);
+    }
+
+    /// M6: `max_var_id` must scan `Case` ALT pattern binders, not just the
+    /// case's own top-level `binder`. A `Case` alt binder holding the
+    /// LARGEST `VarId` in the tree, with everything else (join label,
+    /// params, lambda binder) small, reproduces the exact undercount: if alt
+    /// binders aren't scanned, the converted join's freshly-minted binder can
+    /// come out `<=` the alt binder instead of strictly above every VarId.
+    #[test]
+    fn crossing_join_binder_is_fresh_above_case_alt_binder() {
+        // case Con_5(0#) of { Con_5 big -> big }    (big = VarId(10), the
+        // largest VarId anywhere in the tree, reachable ONLY via Alt::binders)
+        // join k(p) = p in (\x -> jump k 0) 0        (everything else small)
+        let big = VarId(10);
+        let p = VarId(1);
+        let x = VarId(2);
+        let case_scrut_binder = VarId(3);
+        let k = JoinId(0);
+        const SOME_CON: tidepool_repr::DataConId = tidepool_repr::DataConId(5);
+
+        let mut b = TreeBuilder::new();
+        let field = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let scrutinee = b.push(CoreFrame::Con {
+            tag: SOME_CON,
+            fields: vec![field],
+        });
+        // The alt binder `big` is bound but UNUSED in the body — it must
+        // still count toward `max_var_id` via `Alt::binders`, not just via a
+        // `Var(big)` reference (which would mask the M6 bug: `max_var_id`
+        // already scans every `Var` reference node, so an unused binder is
+        // the only shape that isolates "scans Alt::binders" from "scans Var
+        // references").
+        let unused_body = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let case = b.push(CoreFrame::Case {
+            scrutinee,
+            binder: case_scrut_binder,
+            alts: vec![tidepool_repr::Alt {
+                con: tidepool_repr::AltCon::DataAlt(SOME_CON),
+                binders: vec![big],
+                body: unused_body,
+            }],
+        });
+
+        let pv = b.push(CoreFrame::Var(p));
+        let l0 = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let jmp = b.push(CoreFrame::Jump {
+            label: k,
+            args: vec![l0],
+        });
+        let lam = b.push(CoreFrame::Lam {
+            binder: x,
+            body: jmp,
+        });
+        let arg = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let app = b.push(CoreFrame::App { fun: lam, arg });
+        let join = b.push(CoreFrame::Join {
+            label: k,
+            params: vec![p],
+            rhs: pv,
+            body: app,
+        });
+        // Root ties both together so the whole tree is reachable from one root.
+        b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![join, case],
+        });
+        let tree = b.build();
+
+        let lowered = lower_jump_crosses_lam(&tree);
+
+        let converted = lowered.nodes.iter().find_map(|n| match n {
+            CoreFrame::LetNonRec { binder, rhs, .. }
+                if matches!(lowered.nodes[*rhs], CoreFrame::Lam { .. }) =>
+            {
+                Some(*binder)
+            }
+            _ => None,
+        });
+        let binder = converted.expect("a converted-join LetNonRec with a Lam rhs");
+        assert!(
+            binder.0 > big.0,
+            "converted binder ({binder:?}) must be strictly fresher than the \
+             Case alt binder ({big:?}) — max_var_id must scan Alt::binders"
+        );
     }
 }
