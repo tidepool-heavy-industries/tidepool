@@ -87,8 +87,8 @@ cargo nextest run --ignore-default-filter -p <ghc-heavy-crate> -E 'test(name)'
 ```
 
 Changed `haskell/`? Follow `haskell/CLAUDE.md` rebuild + deploy steps
-(`scripts/redeploy.sh`). Note 09: `scripts/deploy.sh` is a stale shadow —
-never use it (it will be deleted as part of that tier).
+(`scripts/redeploy.sh`). `scripts/deploy.sh` was a stale shadow of it and has
+been deleted (tier 09).
 
 ### Status
 

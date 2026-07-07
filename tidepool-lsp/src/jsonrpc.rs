@@ -203,7 +203,9 @@ impl RaClient {
         }
     }
 
-    /// Block until ready or `timeout` elapses; returns whether it became ready.
+    /// Block until ready or `timeout` elapses; returns whether it became ready
+    /// on its own (as opposed to the caller having to force it via
+    /// `force_ready`).
     pub fn wait_ready(&self, timeout: Duration) -> bool {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
@@ -213,6 +215,16 @@ impl RaClient {
             thread::sleep(Duration::from_millis(100));
         }
         self.is_ready()
+    }
+
+    /// Flip the readiness gate open unconditionally, e.g. after the
+    /// `wait_ready` cap expires without a matching `$/progress` end token.
+    /// Requests are then served against whatever rust-analyzer has indexed
+    /// so far, rather than erroring forever.
+    pub fn force_ready(&self, message: impl Into<String>) {
+        let mut r = self.ready.lock().unwrap();
+        r.ready = true;
+        r.message = message.into();
     }
 
     /// Ensure the server has `didOpen` for `abs_path` (needed for diagnostics).

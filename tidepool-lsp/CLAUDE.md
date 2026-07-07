@@ -22,10 +22,14 @@ handler-side) — **the daemon and the handler must agree on `root`/
 actionable "no LSP daemon at ..." error.** There is no auto-start — if
 LSP-backed verbs (`the`/`chart`/`explore` graph verbs, or direct `Lsp*`
 effect calls) error, the daemon isn't running yet. rust-analyzer indexing
-happens in the background after startup; the daemon serves requests
-immediately but they may be slow/incomplete until it logs `ready — workspace
-indexed` (falls back to "still indexing after 10min; serving anyway" past a
-600s cap — either way requests are never blocked waiting on indexing).
+happens in the background after startup; every op except `status` is
+rejected with "rust-analyzer not ready" until the daemon logs `ready —
+workspace indexed`. If no matching `$/progress` end token ever arrives (RA
+version skew, odd workspace), the 600s cap force-opens the gate anyway and
+the daemon logs "still indexing after 10min; serving anyway" — so a stuck
+indexer degrades to serving against a partial index rather than rejecting
+forever, but there IS a real blocked window (up to 600s) before that
+fallback kicks in.
 
 **Protocol deliberately speaks only symbol names and file paths, never raw
 LSP positions** — `resolve.rs`'s module docstring: all LSP-shaped detail

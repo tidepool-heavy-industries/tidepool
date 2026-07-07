@@ -61,14 +61,24 @@ fn main() {
                 eprintln!("[tidepool-lsp] ready — workspace indexed");
             } else {
                 eprintln!("[tidepool-lsp] still indexing after 10min; serving anyway");
+                client.force_ready("serving (indexing incomplete after 600s)");
             }
         });
     }
 
-    // Bind the socket (clear any stale one first).
+    // Bind the socket. If a daemon is already live there, exit rather than
+    // stealing the path and orphaning it with a stray rust-analyzer running.
     if let Some(parent) = sock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    if UnixStream::connect(&sock_path).is_ok() {
+        eprintln!(
+            "[tidepool-lsp] daemon already serving {}",
+            sock_path.display()
+        );
+        std::process::exit(1);
+    }
+    // Connection refused (or no socket at all) means it's stale — safe to unlink.
     let _ = std::fs::remove_file(&sock_path);
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,

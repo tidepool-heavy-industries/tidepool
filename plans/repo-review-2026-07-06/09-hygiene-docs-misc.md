@@ -94,7 +94,7 @@ generated effects surface.
 
 ## DONE CRITERIA
 
-- [ ] `scripts/deploy.sh` deleted (or absorbed as a warned `redeploy.sh` flag)
-- [ ] F3 liveness probe; F4 gate-or-doc resolved
-- [ ] F5 rows added/files deleted
+- [x] `scripts/deploy.sh` deleted (or absorbed as a warned `redeploy.sh` flag)
+- [x] F3 liveness probe; F4 gate-or-doc resolved
+- [x] F5 rows added/files deleted (clippy sweep tracked in plan 07, not this tier)
 - [ ] Doc-drift index above fully swept (may land inside plans 01–08's PRs)

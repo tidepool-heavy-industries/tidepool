@@ -46,6 +46,7 @@ tidepool/
 ├── tidepool-optimize/     ← Optimization passes: beta, DCE, inline, case reduce
 ├── tidepool-bridge/       ← FromCore/ToCore traits + derive macros
 ├── tidepool-bridge-derive/← Proc-macro for bridge derives
+├── tidepool-bridge-effects/← Single-source bridged-record types shared by handlers + test mocks
 ├── tidepool-macro/        ← Proc-macro for effect stack declarations
 ├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
