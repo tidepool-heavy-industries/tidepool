@@ -1134,6 +1134,12 @@ fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
         CoreFrame::Lit(_) => true,
         CoreFrame::Lam { .. } => true, // Already WHNF (closure)
         CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
+        // A `raise#` must stay lazy even with a trivial arg: `let x = raise# e
+        // in if False then x else 0` must return 0, not raise eagerly (M2).
+        CoreFrame::PrimOp {
+            op: PrimOpKind::Raise,
+            ..
+        } => false,
         CoreFrame::PrimOp { args, .. } => args.iter().all(|&a| is_trivial_field(a, expr)),
         _ => false, // App, Case, LetNonRec, LetRec, Join, Jump
     }
@@ -2820,6 +2826,18 @@ impl EmitContext {
 
         // Phase 3b: Fill Con fields that DON'T reference deferred simple bindings.
         let simple_binder_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
+        // A field's free vars, not just a direct `Var` node, can reach a
+        // Phase-3c simple binder (e.g. `App g k` with `k` deferred) — matching
+        // only direct Var children (M1) let such a field fill eagerly in this
+        // phase, before `k` is bound, silently dropping it from the thunk's
+        // captures (`compute_captures`'s `keep` filter has no error path).
+        let tree_ref: &CoreExpr = args.sess.tree;
+        let field_deferred_deps = |f_idx: usize| -> FxHashSet<VarId> {
+            tidepool_repr::free_vars::free_vars(&tree_ref.extract_subtree(f_idx))
+                .into_iter()
+                .filter(|v| simple_binder_set.contains(v))
+                .collect()
+        };
         let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
             Vec::with_capacity(rec_bindings.len());
         for pa in &pre_allocs {
@@ -2829,9 +2847,9 @@ impl EmitContext {
                 field_indices,
             } = pa
             {
-                let needs_simple = field_indices.iter().any(|&f_idx| {
-                    matches!(&args.sess.tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(v))
-                });
+                let needs_simple = field_indices
+                    .iter()
+                    .any(|&f_idx| !field_deferred_deps(f_idx).is_empty());
                 if needs_simple {
                     deferred_cons.push((*binder, *ptr, field_indices.clone()));
                 } else {
@@ -2885,14 +2903,7 @@ impl EmitContext {
         for (_, ptr, field_indices) in &deferred_cons {
             let deps: FxHashSet<VarId> = field_indices
                 .iter()
-                .filter_map(|&f_idx| {
-                    if let CoreFrame::Var(v) = &args.sess.tree.nodes[f_idx] {
-                        if simple_binder_set.contains(v) {
-                            return Some(*v);
-                        }
-                    }
-                    None
-                })
+                .flat_map(|&f_idx| field_deferred_deps(f_idx))
                 .collect();
             deferred_con_deps.push(DeferredConDep {
                 ptr: *ptr,

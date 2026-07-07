@@ -4,8 +4,7 @@
 //! then verify the results match expected values at the language level.
 //!
 //! Note: this module no longer exercises `gc::frame_walker` root
-//! enumeration/rewriting behavior (e.g., verifying discovered roots and
-//! `rewrite_roots`) directly. Dedicated unit tests for frame-walker
+//! enumeration behavior directly. Dedicated unit tests for frame-walker
 //! internals should live in a separate test module.
 
 use tidepool_codegen::host_fns;

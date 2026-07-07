@@ -103,11 +103,18 @@ pub fn emit_case(
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Call runtime_shape_trap to handle pending errors gracefully.
+        // `runtime_shape_trap` dereferences `scrut_ptr` before its own
+        // null/validity check (M5) — only pass an actual heap pointer; an
+        // unboxed `Raw` scrutinee (no data/lit/default alt at all means we
+        // don't know its shape here) is not a pointer, so pass 0 instead of
+        // `scrut_ptr` (which for `Raw` is the unboxed bit pattern, not an
+        // address).
+        let trap_ptr = trap_scrut_ptr(args.builder, scrut);
         emit_case_trap(
             args.sess,
             args.builder,
             &args.ctx.current_fn,
-            scrut_ptr,
+            trap_ptr,
             &[],
             merge_block,
         )?;
@@ -391,6 +398,17 @@ fn emit_data_dispatch(
     Ok(())
 }
 
+/// The `scrut_ptr` arg `runtime_shape_trap` dereferences before its own
+/// null/validity check (M5): only ever pass an actual heap pointer. An
+/// unboxed `Raw` scrutinee (int/float bits, not an address) becomes 0
+/// instead, which the trap already treats as safely absent.
+fn trap_scrut_ptr(builder: &mut FunctionBuilder, scrut: SsaVal) -> Value {
+    match scrut {
+        SsaVal::HeapPtr(ptr) => ptr,
+        SsaVal::Raw(_, _) => builder.ins().iconst(types::I64, 0),
+    }
+}
+
 /// Emit a call to `runtime_shape_trap` (kind `CaseMiss`) instead of a bare
 /// `trap user2`. Passes the scrutinee pointer and expected alt tags for
 /// diagnostic output.
@@ -598,11 +616,17 @@ fn emit_lit_dispatch(
     } else {
         // No alts matched.
         // We pass empty data_alts since these are lit alts.
+        // `scrut_value` is the UNBOXED literal (int/float bits), not a
+        // pointer — `runtime_shape_trap` dereferences its `scrut_ptr` arg
+        // before checking it (M5), so passing `scrut_value` here segfaults
+        // inside the very diagnostic meant to prevent that. Pass the real
+        // heap pointer only if the (post-force) scrutinee still is one.
+        let trap_ptr = trap_scrut_ptr(args.builder, scrut);
         emit_case_trap(
             args.sess,
             args.builder,
             &args.ctx.current_fn,
-            scrut_value,
+            trap_ptr,
             &[],
             merge_block,
         )?;

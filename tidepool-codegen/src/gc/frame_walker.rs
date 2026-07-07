@@ -80,20 +80,3 @@ pub unsafe fn walk_frames(start_fp: usize, stack_maps: &StackMapRegistry) -> Vec
 
     roots
 }
-
-/// Rewrite forwarding pointers in stack slots after GC.
-///
-/// For each root, if the heap object has been moved (forwarding pointer),
-/// update the stack slot to point to the new location.
-///
-/// # Safety
-/// All roots must still be valid stack addresses.
-pub unsafe fn rewrite_roots(roots: &[StackRoot], forwarding_map: &dyn Fn(*mut u8) -> *mut u8) {
-    // SAFETY: Caller guarantees all roots contain valid stack addresses from a recent walk_frames call.
-    for root in roots {
-        let new_ptr = forwarding_map(root.heap_ptr);
-        if new_ptr != root.heap_ptr {
-            *root.stack_slot_addr = new_ptr as u64;
-        }
-    }
-}

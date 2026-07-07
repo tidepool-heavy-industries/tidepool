@@ -35,10 +35,6 @@ name = "optimize"
 harness = false
 
 [[bench]]
-name = "heap"
-harness = false
-
-[[bench]]
 name = "codegen"
 harness = false
 

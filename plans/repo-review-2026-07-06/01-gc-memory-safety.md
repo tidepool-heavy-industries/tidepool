@@ -359,12 +359,44 @@ Phase-3c simple binder is thunkified before that binder is in env;
 force time. Fix: intersect field FREE-VARS with `simple_binder_set` instead of
 matching only direct Var children.
 
+> **STATUS: FIXED** (2026-07-07). Phase 3b's `needs_simple` check and the
+> `deferred_con_deps` dependency set now both go through one closure,
+> `field_deferred_deps`, that computes `free_vars(field subtree) ∩
+> simple_binder_set` instead of a direct-`Var`-only `matches!`. A field like
+> `App g k` (App, not Var) referencing a deferred simple binder `k` is now
+> correctly deferred to the same post-step that already handled direct `Var`
+> fields, instead of thunkifying immediately (before `k` lands in env) and
+> silently dropping it from the thunk's captures.
+>
+> Verified red-then-green: `tidepool-codegen/tests/letrec_field_freevar_deps.rs`
+> (NEW) — `let rec g = \y->y; node = Con_NODE(g k); k = 99 in case node of
+> Con_NODE h -> case h of DEFAULT h' -> h'` (App-shaped field referencing a
+> deferred binder). Confirmed RED pre-fix (manually reverted): hits
+> `unresolved_var_trap` and returns the mismatch marker instead of 99; GREEN
+> post-fix.
+
 **M2. `PrimOp Raise` with a trivial arg classifies as trivial → lazy bottoming
 bindings raise eagerly** (`emit/expr.rs:1070-1079`, `is_trivial_field`).
 `let x = raise# ex in if c then use x else 0` with `c = False` raises instead
 of returning 0. The deferral promised by the comment at :1777-1785
 (`rhs_is_error_call`) is never consulted on the Let paths. Fix:
 `PrimOpKind::Raise => false` in `is_trivial_field`.
+
+> **STATUS: FIXED** (2026-07-07). Added a dedicated `CoreFrame::PrimOp { op:
+> PrimOpKind::Raise, .. } => false` arm in `is_trivial_field`, checked before
+> the general `PrimOp` arm (whose `args.iter().all(...)` would otherwise
+> vacuously return `true` for a zero-arg `raise#`). A `raise#` RHS now always
+> thunkifies regardless of its argument's own triviality, so `let x = raise#
+> e in if False then x else 0` returns 0 instead of raising at the `let`.
+>
+> Verified red-then-green:
+> `tidepool-codegen/tests/raise_lazy_trivial_guard.rs` (NEW), using the
+> `JitEffectMachine`/`run_pure` harness (not the bare-vmctx harness some other
+> emit tests use — `host_fns::take_runtime_error`/`RuntimeError` state is only
+> meaningful once `CURRENT_MACHINE` is installed, which the bare harness
+> doesn't do). Confirmed RED pre-fix (manually reverted): the eager path
+> raises unconditionally even though the taken branch never references `x`;
+> GREEN post-fix.
 
 **M3. `deep_force`: O(n²) root re-registration, no visited set, no cancel
 safepoint** (`host_fns/force.rs:206-214`). 100k-element bind ≈ 5×10⁹ root
@@ -373,6 +405,37 @@ shared DAGs); a fully-evaluated structure never reaches a safepoint so
 cancellation is unobservable → resident session wedges. The eval oracle it
 mirrors has a depth cap; this doesn't. Fix: visited set keyed by object
 address + periodic cancel check + amortized root registration.
+
+> **STATUS: FIXED** (2026-07-07). Three fixes in `host_fns::force::deep_force`:
+>
+> - **Amortized roots**: each work item now carries its own `RootedLocal`
+>   (Finding 3's RAII rooting helper, widened from private to `pub(crate)` in
+>   `effect_machine.rs` and reused here rather than inventing a parallel
+>   mechanism) — registered once at push, dropped (truncating exactly that one
+>   registration) once at pop, instead of re-registering the whole remaining
+>   work stack on every iteration. `RootedStack` (also from Finding 3) doesn't
+>   fit here: it requires a frozen `&mut Vec` for its whole lifetime, but
+>   `deep_force`'s work stack continuously pushes/pops.
+> - **Visited set**: an `FxHashSet<usize>` (object address) skips re-queuing a
+>   `Con`'s fields once already queued, fixing the exponential blowup on
+>   shared DAGs. Addresses can go stale across a GC (an object may move, or a
+>   vacated address may be reused), so a new `MachineState::gc_generation`
+>   counter (bumped once per actual collection in `perform_gc`) is snapshotted
+>   around every `heap_force` call; any change clears the visited set entirely
+>   rather than risk a false "already visited" hit.
+> - **Cancel safepoint**: an explicit check every 4096 work items (a plain
+>   counter check, no GC point, so it's cheap even at a small interval) —
+>   a fully-evaluated structure has no natural GC-adjacent safepoint to
+>   observe cancellation at otherwise.
+>
+> Verified red-then-green: `tidepool-codegen/tests/deep_force_nf.rs`'s new
+> `deep_force_shared_dag_terminates_fast` (a depth-40 `iterate (\v->(v,v))
+> x`-shaped tower, confirmed RED — times out past 10s — with the visited-set
+> dedup temporarily disabled) and `host_fns::force::tests::
+> test_deep_force_observes_cancel_with_no_gc_points` (a 12k-element
+> already-evaluated linear Con chain with a pre-set cancel flag; confirmed RED
+> with the periodic check temporarily disabled — runs to completion instead of
+> observing the cancel).
 
 **M4. RefCells vs `siglongjmp`** (`machine_state.rs`). `perform_gc` holds the
 `gc_state` `RefMut` across the Cheney copy; a fault + longjmp skips the drop,
@@ -383,11 +446,55 @@ error path instead of surfacing `YieldError::Signal` — defeating the signal
 machinery. Fix: `try_borrow`-with-fallback on all post-signal paths, or
 rebuild the cell on the signal path.
 
+> **STATUS: FIXED** (2026-07-07). Applied the same `try_borrow`/`try_borrow_mut`
+> defense `take_runtime_error` already used to all four named functions, plus
+> two siblings performing the identical unsafe pattern on the same cells
+> (`set_runtime_error_overwrite`, `install_session_buffer` — not individually
+> named by the finding, but the exact same hazard, so fixed alongside their
+> named siblings rather than left as a matching gap next to ones that were
+> fixed): `has_runtime_error` falls back to `true` (conservative — treat an
+> unreadable cell as "there might be an error"); the writers
+> (`set_first_cause`/`set_runtime_error_overwrite`/`set_gc_state`/
+> `install_session_buffer`) silently no-op on a failed borrow;
+> `reclaim_session_heap` falls back to `(None, 0)`, the same shape already
+> used for "no GcState at all". None of these can panic now regardless of
+> what state a stuck-mutably-borrowed cell (left behind by a fault +
+> `siglongjmp` mid-`perform_gc`) is in.
+>
+> Verified red-then-green: two internal unit tests in `machine_state.rs`
+> (`stuck_runtime_error_cell_does_not_panic`,
+> `stuck_gc_state_cell_does_not_panic`) that hold a live `borrow_mut()` guard
+> across the calls under test — reproducing the exact stuck-`RefCell` state a
+> signal would leave, without needing to actually raise one (signal
+> delivery/recovery itself is `signal_safety.rs`'s test's job). Confirmed RED
+> pre-fix (manually reverted each function in turn): every one panicked
+> ("already mutably borrowed"/"already borrowed") instead of returning its
+> documented fallback.
+
 **M5. Lit-dispatch case-miss trap passes the unboxed scrutinee VALUE as
 `scrut_ptr`** (`emit/case.rs:598-608` + no-alts path :104-113).
 `runtime_shape_trap` (errors.rs:967) dereferences it before its null/validity
 check → SIGSEGV inside the very diagnostic built to prevent signals. Fix: pass
 the heap pointer only when the scrutinee was `HeapPtr`, else 0.
+
+> **STATUS: FIXED** (2026-07-07). Added `trap_scrut_ptr` (`emit/case.rs`): given
+> the scrutinee `SsaVal`, returns the real pointer for `HeapPtr`, else `iconst
+> 0`. Used at both call sites the finding names — the Lit-dispatch case-miss
+> path and the fully-empty-alts no-data/no-lit/no-default path (`emit_case`'s
+> own `scrut.value()`, which for a `Raw` scrutinee is the unboxed bit pattern,
+> not an address, had the identical hazard).
+>
+> Verified red-then-green: `tidepool-codegen/tests/case_trap_scrut_ptr.rs`
+> (NEW) — `case (40# +# 2#) of { 0# -> 0# }` (no `DEFAULT`; the scrutinee is a
+> strict `PrimOp` result, kept UNBOXED as `SsaVal::Raw` by the emitter, unlike
+> a bare `Lit` node which boxes to a real heap pointer — exactly the shape
+> that fed a non-pointer value into `scrut_ptr` pre-fix). Confirmed RED
+> pre-fix (manually reverted): a REAL SIGSEGV occurs and is caught by
+> `with_signal_protection`, surfacing `Err(Yield(Signal(11)))` — i.e. the
+> crash this finding is about, just non-fatal thanks to that separate safety
+> net (the M4 class this connects to: a signal recovered via `siglongjmp` is
+> exactly the scenario those RefCell fixes guard downstream state against).
+> Post-fix: `Err(Yield(Runtime(BadPointer)))`, a clean typed error, no signal.
 
 **M6. `max_var_id` never scans Case ALT binders** (`lower.rs:178-200`), so
 "fresh above every VarId" is false; a converted Jump can silently capture a
@@ -395,39 +502,177 @@ pattern-bound variable (miscompile). Reachable only from non-GHC producers —
 exactly this pass's stated audience. Fix: scan `Alt::binders`.
 Cross-ref: same shadowing class as plan 04.
 
+> **STATUS: FIXED** (2026-07-07). `max_var_id`'s `Case` arm now also scans
+> `alt.binders` for every alt, not just the case's own top-level `binder`.
+>
+> Verified red-then-green: `lower::tests::
+> crossing_join_binder_is_fresh_above_case_alt_binder` (NEW) — a `Case` alt
+> binder holding the LARGEST `VarId` in the tree, reachable ONLY via
+> `Alt::binders` (bound but UNUSED in the alt body, so a `Var` reference to it
+> can't accidentally also make it visible via the already-correct `Var` arm —
+> that shape would have masked the exact bug this test isolates), alongside a
+> crossing join needing a freshly-minted binder. Confirmed RED pre-fix
+> (manually reverted): the converted binder comes out `<=` the alt binder
+> instead of strictly above it; GREEN post-fix.
+
 ## Low findings
 
 - **L1** `host_fns/force.rs:76-113` — `heap_force` can memoize a NULL thunk
   result as an EVALUATED indirection (null propagated by App
   `null_propagate_block` / `trampoline_resolve` error paths); segfaults on a
   LATER force. Guard null like the code-ptr==0 case.
+
+  > **STATUS: FIXED** (2026-07-07). Added a `result.is_null()` guard right
+  > after the thunk-entry call, before the `has_runtime_error()` check (a null
+  > can propagate WITHOUT setting an error). Records `RuntimeError::BadPointer`
+  > and memoizes `error_poison_ptr()` (never null) as the indirection, mirroring
+  > the existing `code_ptr == 0` guard's shape. Verified red-then-green:
+  > `force::tests::test_heap_force_thunk_null_result_is_not_memoized_as_null`
+  > (a mock thunk entry returning null) — confirmed RED pre-fix: a real
+  > SIGABRT (debug-mode null-deref panic; a true SIGSEGV in release) on the
+  > SECOND force following the memoized null indirection.
+
 - **L2** `host_fns/errors.rs:622-624` — `materialize_message` Text branch reads
   Con fields 1/2 with no null guard (every sibling access is guarded; nulls are
   legal transients per the GC verifier). SIGSEGV during error-message
   materialization.
+
+  > **STATUS: FIXED** (2026-07-07). Added `if f1.is_null() || f2.is_null() {
+  > return None; }` before reading through them, matching every sibling field
+  > access in the same function. Verified red-then-green:
+  > `errors::tests::materialize_message_text_null_offset_field_does_not_segfault`
+  > (a hand-built Text-shaped Con with a null offset field) — confirmed RED
+  > pre-fix: a real SIGABRT (null-deref panic / SIGSEGV in release).
+
 - **L3** `host_fns/errors.rs:1014-1017` — shape-trap dumps 32 bytes; a 24-byte
   Lit at the end of the nursery = 8-byte OOB read. Clamp to header size.
+
+  > **STATUS: FIXED** (2026-07-07). Clamped the diagnostic dump from a
+  > hardcoded 32 to `MIN_OBJECT_DUMP_SIZE = 24` — the size EVERY heap object
+  > (Lit's total size; Con/Closure/Thunk's fixed header before any
+  > variable-length payload) is guaranteed to have, per the existing
+  > "every heap object is always at least this size" invariant comment.
+  > Verified red-then-green: `tidepool-codegen/tests/shape_trap_dump_oob.rs`
+  > (NEW) — an `mmap` guard page (`PROT_NONE` on the second of two pages) with
+  > a 24-byte Lit placed so its last byte lands exactly on the page boundary.
+  > Confirmed RED pre-fix: a genuine SIGSEGV (caught via
+  > `signal_safety::with_signal_protection`, so the test itself doesn't crash)
+  > reading 8 bytes into the unmapped page; GREEN post-fix.
+
 - **L4** `host_fns/errors.rs:380-399` — `POISON_BUF_SIZE` guard covers Cons
   (`MAX_FIELDS=1024`) but closures/thunks have no emit-time capture cap (u16);
   >2045 captures on the OOM edge overruns the poison buffer (PR-#272 class,
   structurally unenforced). Add an emit-time capture cap or size the buffer.
+
+  > **STATUS: FIXED** (2026-07-07, sized the buffer — no emit-time cap added,
+  > per the "no otherwise-valid program should be rejected" preference).
+  > `POISON_BUF_SIZE` is now `CLOSURE_CAPTURED_OFFSET + u16::MAX * 8` (~512
+  > KiB) — the TRUE structural worst case for a capture count with no cap
+  > other than its `u16` width, not "the same count as Cons in practice" (which
+  > was never actually enforced for closures/thunks). `POISON` is a `OnceLock`
+  > allocated once per process, so the larger size costs nothing per OOM
+  > event. Added a matching compile-time assertion alongside the existing
+  > `MAX_FIELDS` one. Verified: `errors::tests::
+  > poison_buf_absorbs_max_capture_write` simulates the JIT's post-OOM write
+  > sequence for a worst-case (`u16::MAX`-capture) Closure and checks no OOB
+  > write occurs. Confirmed RED pre-fix (temporarily reverted
+  > `POISON_BUF_SIZE` to the old 16 KiB): the crate fails to COMPILE — the new
+  > compile-time assertion catches the regression before it can ship, the
+  > strongest possible form of this check.
+
 - **L5** `lower.rs:116-172` — `reaches_under_lam` is host-recursive while its
   siblings are deliberately explicit-stack; a deep tower with any Join
   overflows the COMPILER's stack, outside signal protection. Convert to
   explicit stack.
+
+  > **STATUS: FIXED** (2026-07-07). Converted to an explicit-stack DFS over
+  > `(idx, under_lam)` pairs, matching the file's sibling traversals
+  > (`postorder`, `rewrite`). The search is a pure "does any reachable
+  > `Jump{label==vid}` occur with `under_lam` true" check that doesn't depend
+  > on traversal order, so pushing every child (with its own computed
+  > `under_lam`) and returning as soon as one matches is exactly equivalent to
+  > the original short-circuiting recursion. Verified red-then-green:
+  > `lower::tests::reaches_under_lam_handles_a_deep_tower_without_host_stack_overflow`
+  > — a depth-500,000 `App` chain (the `fun` position specifically, since it
+  > sits on the LEFT of `reaches_under_lam(fun) || reaches_under_lam(arg)` and
+  > so can't be silently sibling-call-optimized into a loop by rustc/LLVM the
+  > way a `LetNonRec::body`-position chain empirically was in this dev-profile
+  > build — an earlier draft of this test using that shape passed even with
+  > the OLD recursive code, a false negative caught by manually confirming red
+  > before trusting the test). Confirmed RED pre-fix (manually reverted): a
+  > genuine stack overflow abort; GREEN post-fix.
+
 - **L6** `emit/expr.rs:190-240` — `RaiseLazy` classification is per-node-index;
   if the serializer shares an error-call node between arg and spine positions,
   the spine occurrence returns a poison closure instead of raising.
   CONDITIONAL on actual node dedup in the serializer — verify whether the
   Haskell writer ever emits shared error-call nodes before fixing.
+
+  > **STATUS: VERIFIED FALSE — NO FIX NEEDED** (2026-07-07). Investigated the
+  > Haskell CBOR writer (`haskell/src/Tidepool/Translate.hs`): `emitNode`
+  > (lines 132-137) unconditionally allocates a FRESH index via
+  > `Seq.length (tsNodes s)` on every call — no cache, no HashMap, no
+  > structural-equality interning. `TransState` (lines 115-128) carries no
+  > expression-to-index map at all. Error-call handling (lines 1188-1201)
+  > itself emits three fresh nodes (`NVar`/`NLit`/`NApp`) per occurrence, even
+  > when GHC's own optimizer has floated a single error thunk shared by
+  > multiple Core-level call sites — the serializer does not intern by `Id`
+  > identity. The serialized `RecursiveTree` is a pure tree (no DAG sharing
+  > introduced by the writer; the Rust reader's DAG-sharing support in
+  > `extract_subtree` covers sharing that could exist in principle, not
+  > sharing this writer ever produces). The precondition L6's fix depends on
+  > therefore never holds today — no code change made. Follow-up: if the
+  > Haskell writer is ever changed to intern/dedup nodes, re-open this finding.
+
 - **L7** `jit_machine.rs:100-107` — `suspended_continuation` is not a GC root
   and no run entry asserts it's `None`; safety rests on tidepool-repl's
   external discipline. One `assert!(self.suspended_continuation.is_none())`
   per run entry closes it.
+
+  > **STATUS: FIXED** (2026-07-07). Added the assert to every run entry:
+  > `run_with_entry` (shared by `run`/`run_fragment`), `run_pure_with_entry`
+  > (shared by `run_pure`/`run_fragment_pure`), `run_suspendable`,
+  > `run_pure_and_bind`, `run_fragment_and_bind`,
+  > `run_fragment_and_bind_projected`, `run_fragment_and_bind_render`.
+  > `resume_suspended` itself is unaffected — it's the intended consumer
+  > (already handles "not suspended" gracefully via `.take().ok_or_else(...)`,
+  > no assert needed or wanted there). Verified red-then-green:
+  > `jit_machine::tests::run_entries_assert_when_a_continuation_is_already_suspended`
+  > — directly sets the private field to simulate "already suspended" (driving
+  > a REAL `Ask`-boundary suspension would need heavy effect-machine setup out
+  > of proportion to what this specific invariant needs) and confirms
+  > `run_pure`/`run_fragment_pure`/`run_pure_and_bind` each panic via
+  > `std::panic::catch_unwind`. Confirmed RED pre-fix (manually reverted each
+  > assert in turn): no panic, the call proceeds silently instead.
+
 - **L8** Alignment: nursery and every GC to-space are `Vec<u8>` (align 1)
   assumed 8-aligned (`nursery.rs:73-81` test even hedges). Holds under glibc
   malloc for large allocs; not guaranteed under allocator swaps. Fix:
   `Layout::from_size_align(size, 8)` or `Vec<u64>` backing.
+
+  > **STATUS: FIXED** (2026-07-07, `Vec<u64>` backing — simpler and safer than
+  > hand-rolled `Layout`/`alloc`/`dealloc`, which risks a dealloc-layout
+  > mismatch if a `Vec<u8>` is ever constructed from an over-aligned raw
+  > allocation). Switched the backing storage to `Vec<u64>` throughout the
+  > buffer's whole lifecycle: `Nursery`, `GcState::active_buffer`,
+  > `SessionState::heap`, and the `tospace`/heap-doubling buffers inside
+  > `perform_gc` (via new `alloc_aligned_zeroed`/`as_bytes_mut` helpers — the
+  > latter reinterprets a `&mut [u64]` as `&mut [u8]` for callers like
+  > `cheney_copy` that want bytes; always sound, since `u8` has no
+  > alignment/validity requirement `u64` doesn't already satisfy). 8-byte
+  > alignment is now a structural guarantee of the type, not an accident of
+  > glibc malloc's behavior for non-tiny `Vec<u8>` allocations — holds
+  > regardless of the global allocator in use. `active_start`/`active_size`
+  > (already plain raw-pointer/`usize` fields, agnostic to the owning buffer's
+  > element type) needed no changes beyond how they're COMPUTED at each
+  > construction site. Verified: `nursery::tests::test_vmctx_alignment` (now a
+  > permanent guarantee, not a hedge) and `host_fns::gc::tests::
+  > alloc_aligned_zeroed_is_always_8_aligned` (every size in `[0, 4099]`,
+  > including non-multiples of 8). No reliable pre-fix repro exists (`Vec<u8>`
+  > already IS 8-aligned in practice under this environment's allocator) — the
+  > tests are a permanent regression lock on the now-structural guarantee,
+  > the same category as M4/L4's compile-time-style assurances rather than a
+  > crash reproduction.
 
 ## Doc drift (fix in the same PR as the code it describes)
 
@@ -460,6 +705,16 @@ Cross-ref: same shadowing class as plan 04.
 - `tidepool-heap/src/arena.rs:97` — false claim that bumpalo "always returns
   16-byte aligned" pointers (it guarantees the layout's alignment).
 
+> **STATUS: ALL 8 APPLIED** (2026-07-07). The `arena.rs:97` item is moot —
+> folded into the dead-code deletion below (the whole file is gone). The
+> other 7 were rewritten in place to describe current behavior; see each
+> file's diff for the exact wording. One extension beyond the plan's literal
+> list: `host_fns/gc.rs`'s blackhole-capture fix touched TWO sites (the
+> `verify_heap_post_gc` doc comment AND the `THUNK_BLACKHOLE` match-arm
+> comment a few lines below it — both stated the same inverted rationale;
+> the plan's line range covered the first, so the second was found and fixed
+> alongside it as the same drift).
+
 ## Dead code
 
 - **tidepool-heap's interpreter-plane GC is production-dead:** `ArenaHeap`
@@ -471,6 +726,25 @@ Cross-ref: same shadowing class as plan 04.
   bench, or move to tidepool-testing, per no-scar-tissue.
 - `gc/frame_walker.rs:91` `rewrite_roots` — no callers (one stale doc-comment
   mention); `cheney_copy` updates slots directly. Delete.
+
+> **STATUS: DELETED** (2026-07-07, per the LOCKED choice: delete, don't move
+> to tidepool-testing). Removed `tidepool-heap/src/arena.rs`, `gc/trace.rs`,
+> `gc/compact.rs`; `gc/mod.rs` now only re-exports `raw`; `lib.rs`'s crate doc
+> rewritten to describe the live surface. This also removed TWO consumers not
+> named by the plan's one-line summary, found via a full-workspace grep before
+> deleting: `tidepool-heap/tests/proptest_heap.rs` (100% `ArenaHeap` tests —
+> deleted whole-file) and `tidepool-heap/tests/gc_unit.rs`'s
+> `test_gc_thunkref_tracing` (its `ArenaHeap`-free siblings — `layout`/
+> `for_each_pointer_field` tests — are unrelated and kept). Deleted
+> `tidepool-testing/benches/heap.rs` and its now-dangling `[[bench]]` entry in
+> `tidepool-testing/Cargo.toml` (a manifest cleanup for the file this task was
+> explicitly told to delete, not a substantive edit to that crate — the
+> boundary's "nothing else in tidepool-testing" reads as scoped to test/source
+> code, and a dangling bench entry would fail `cargo build --benches`).
+> Deleted `gc/frame_walker.rs`'s `rewrite_roots` and fixed the one stale
+> doc-comment mention in `tests/gc_frame_walker.rs`. `cargo check --workspace
+> --tests --benches` and `cargo clippy --workspace --all-targets` both clean;
+> no dangling references anywhere in the workspace.
 
 ## Opportunities (non-bug, high leverage)
 
@@ -515,15 +789,25 @@ GC mid-hylo); `host_fns/streaming.rs`, `cancel.rs`, `alloc.rs` (CAS reservation
       under this codebase's always-zeroed-buffer / bounds-checked-alloc-
       fast-path design, and Finding 5's scale was 25k not 50k for Cranelift
       compile-time reasons — both fixes are correct and shipped regardless)
-- [ ] M1–M6, L1–L8 fixed or explicitly filed as issues with rationale — LATER
-      WAVE, out of this task's scope
-- [ ] Doc-drift list applied; dead code deleted — LATER WAVE, out of this
-      task's scope
+- [x] M1–M6, L1–L8 fixed or explicitly filed as issues with rationale (2026-07-07:
+      M1-M6 and L1-L5, L7-L8 fixed with red-then-green tests; L6 investigated
+      and verified the precondition doesn't hold — no fix needed, see its
+      STATUS block)
+- [x] Doc-drift list applied; dead code deleted (2026-07-07: all 8 doc-drift
+      items applied — one item moot, folded into the deletion; dead code
+      deleted with two additional consumers found and cleaned up beyond the
+      plan's one-line summary — see the STATUS blocks on both sections)
 - [x] `TIDEPOOL_HEAP_VERIFY=1` battery pass over the differential corpus green
       (`haskell_suite_differential` with a fresh extract off this branch, plus
       every new Finding 1/2 test self-forces the verifier on and asserts it
-      fired)
+      fired). Re-confirmed green (2026-07-07) after the M/L wave + dead-code
+      deletion, again with a fresh extract off this branch.
 - [ ] `scripts/battery.sh` green — NOT RUN per this task's explicit
       instructions (14 known pre-existing failures owned by a concurrent
-      worker); targeted suites (`cargo nextest run -p tidepool-codegen -p
-      tidepool-heap`, 637/637 green) substitute for it here
+      worker); targeted suites substitute for it here: `cargo nextest run -p
+      tidepool-codegen -p tidepool-heap` (591 + 26 = 617/617 green,
+      2026-07-07, includes every M/L regression test), `cargo check
+      --workspace`/`cargo clippy --workspace --all-targets` (both clean),
+      `cargo fmt` clean on every crate this task touched (tidepool-repl has
+      pre-existing, untouched-by-this-task formatting drift out of scope
+      here)
