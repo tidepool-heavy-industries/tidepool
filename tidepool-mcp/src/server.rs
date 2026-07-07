@@ -598,7 +598,7 @@ impl ServerHandler for TidepoolMcpServerImpl {
             crate::server_common::make_tool(
                 "eval",
                 &self.eval_tool_description,
-                crate::server_common::schema_to_map(schemars::schema_for!(EvalRequest))
+                crate::eval_request_input_schema()
                     .map_err(|e| McpError::internal_error(e, None))?,
             ),
             crate::server_common::make_tool(

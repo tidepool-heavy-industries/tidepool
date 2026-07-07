@@ -113,6 +113,38 @@ pub fn build_base_stack(
     tidepool_mcp::base_effects!(build_stack_rows)
 }
 
+/// Build the debug effect stack: the same base effects as [`build_base_stack`]
+/// (tags 0–8) plus `MetaHandler` appended last (tag 9) — the `--debug`-only
+/// self-mirror. Mirrors `build_base_stack`'s callback exactly, so the two
+/// stacks can never desync on order; the ONLY difference is the trailing
+/// `MetaHandler::new(effect_names, helper_sigs)` row. Callers derive
+/// `effect_names`/`helper_sigs` from the SAME `base_effects!`-ordered decl
+/// list (plus `meta_decl()` appended, matching this stack's tag order) so
+/// `metaEffects`/`metaHelp` report the actual running stack, not a
+/// hand-maintained guess.
+///
+/// **Must be called inside a tokio runtime** (see [`build_base_stack`]).
+pub fn build_debug_stack(
+    cfg: &HandlerConfig,
+    effect_names: Vec<String>,
+    helper_sigs: Vec<String>,
+) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
+       + CollectEffectDecls
+       + Clone
+       + Send
+       + Sync
+       + 'static {
+    macro_rules! build_debug_stack_rows {
+        ($(($name:ident, $decl:ident)),* $(,)?) => {
+            frunk::hlist![
+                $( handler_for!($name, cfg) ),*,
+                MetaHandler::new(effect_names, helper_sigs)
+            ]
+        };
+    }
+    tidepool_mcp::base_effects!(build_debug_stack_rows)
+}
+
 /// Build the MINIMAL effect stack (tag 0: Console only).
 ///
 /// For cheap-startup sessions and tests that exercise the session mechanism

@@ -128,14 +128,14 @@ matched. See the `qq_patch_pat_*` Suite fixtures for canonical shapes.
 
 ## Structural search
 
-- `hsDef`/`hsSig`/`rsFn` recipes find function/signature definitions by name.
-  (`hsDef` matches clauses with argument patterns — it misses point-free/nullary
-  bindings and bare type sigs.)
-- `rHas`/`rInside` are deep by default (`stopBy: end`); use `rHasChild`/
-  `rInsideParent` for direct children.
-- `grepGlob :: Text -> FilePath -> M [Hit]` — structured text-level search with
-  regex + filename globbing. Returns `[Hit]` {path, line, text} (the shared
-  record; `matchLocs` over `hsDef`/`rsFn` `[Match]` yields the same `[Hit]` shape).
+The ast-grep-backed structural combinators (`hsDef`/`hsSig`/`rsFn`/`rHas`/
+`rInside`/`rHasChild`/`rInsideParent`) were cut with the SG effect (f1a480e6).
+`grepGlob` is the only structured-search verb left:
+
+- `grepGlob :: Text -> FilePath -> M (Either FsError [Hit])` — regex-search
+  files matching a path glob (arg order: regex first, glob second). Returns
+  `[Hit]` {path, line, text} — the shared record shape other search verbs
+  (`readGlob`, etc.) also use.
 
 ---
 

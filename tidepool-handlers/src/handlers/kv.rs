@@ -19,10 +19,16 @@ tidepool_mcp::kv_effect_def!(crate::effect_glue::effect_rust_projection);
 pub struct KvHandler {
     store: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     path: PathBuf,
+    // Set when the backing file EXISTED but could not be read at construction
+    // (e.g. transient EACCES). `flush` refuses to write while this is set, so
+    // a startup read failure can never silently overwrite the unreadable file
+    // with an empty in-memory store — the old behavior of a wiped KV file.
+    read_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl KvHandler {
     pub fn new(path: PathBuf) -> Self {
+        let mut read_failed = false;
         let store = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => match serde_json::from_str(&contents) {
@@ -36,7 +42,17 @@ impl KvHandler {
                         HashMap::new()
                     }
                 },
-                Err(_) => HashMap::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        "KV store at {:?} exists but could not be read ({}); starting with an \
+                         empty in-memory store and refusing to flush until restarted, so this \
+                         session cannot overwrite the unreadable file",
+                        path,
+                        e
+                    );
+                    read_failed = true;
+                    HashMap::new()
+                }
             }
         } else {
             HashMap::new()
@@ -44,10 +60,19 @@ impl KvHandler {
         Self {
             store: Arc::new(Mutex::new(store)),
             path,
+            read_failed: Arc::new(std::sync::atomic::AtomicBool::new(read_failed)),
         }
     }
 
     fn flush(&self, store: &HashMap<String, serde_json::Value>) {
+        if self.read_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "KV flush: refusing to write {:?} — the backing file existed but could not be \
+                 read at startup; flushing now would overwrite it with an incomplete store",
+                self.path
+            );
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!("KV flush: failed to create dir {:?}: {}", parent, e);
@@ -386,6 +411,53 @@ mod tests {
             vec!["ns1/a".to_string(), "ns1/b".to_string()],
             "kvKeysP \"ns1/\" should return [\"ns1/a\", \"ns1/b\"] sorted; got {:?}",
             keys
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A backing file that EXISTS but can't be read at startup (transient
+    /// EACCES) must not have its contents wiped by the next flush: `new`
+    /// starts fresh in-memory (as before) but `flush` must refuse to write
+    /// while unreadable, so the on-disk data survives for a later restart.
+    #[cfg(unix)]
+    #[test]
+    fn kv_refuses_to_flush_over_a_file_it_could_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("tidepool_kv_unreadable_{pid}.json"));
+        let _ = std::fs::remove_file(&path);
+        let original = r#"{"marker":"original"}"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Skip in environments (e.g. root) where permission bits don't gate reads.
+        if std::fs::read_to_string(&path).is_ok() {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let _ = std::fs::remove_file(&path);
+            eprintln!("skipping: read succeeded despite 0o000 (likely running as root)");
+            return;
+        }
+
+        let mut h = frunk::hlist![KvHandler::new(path.clone())];
+        // Restore read/write so we can inspect the file afterward; flush must
+        // still refuse to write to it (the refusal is sticky for this handler).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let set_id = table.get_by_name("KvSet").unwrap();
+        let k = "x".to_string().to_value(&table).unwrap();
+        let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
+        h.dispatch(0, &Value::Con(set_id, vec![k, v]), &cx).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "flush must refuse to overwrite a file that failed to read at startup"
         );
 
         let _ = std::fs::remove_file(&path);

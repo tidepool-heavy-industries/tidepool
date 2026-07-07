@@ -15,10 +15,27 @@ tidepool_mcp::http_effect_def!(crate::effect_glue::effect_rust_projection);
 /// rejected band (bridged 90k–100k) is only genuinely-huge responses.
 const MAX_RESPONSE_NODES: usize = 90_000;
 
+/// Redirect hops a single `get`/`post` call will follow before giving up.
+/// Counts hops only (the initial request is not one) — at most
+/// `MAX_REDIRECTS + 1` requests are ever made.
+const MAX_REDIRECTS: u32 = 5;
+
 #[derive(Clone)]
 pub struct HttpHandler;
 
 impl HttpHandler {
+    /// `fc00::/7` (unique local). Checked by hand (not `Ipv6Addr::is_unique_local`,
+    /// which is unstable and varies by toolchain) via the top 7 bits of the
+    /// first hextet: the range is `fc00::` through `fdff:...`.
+    fn ipv6_is_unique_local(ip: &std::net::Ipv6Addr) -> bool {
+        (ip.segments()[0] & 0xFE00) == 0xFC00
+    }
+
+    /// `fe80::/10` (link-local unicast), checked by hand for the same reason.
+    fn ipv6_is_link_local(ip: &std::net::Ipv6Addr) -> bool {
+        (ip.segments()[0] & 0xFFC0) == 0xFE80
+    }
+
     pub fn validate_url(url_str: &str) -> Result<url::Url, HttpError> {
         let url = url::Url::parse(url_str)
             .map_err(|e| HttpError::HttpInvalidUrl(format!("Invalid URL '{}': {}", url_str, e)))?;
@@ -41,7 +58,19 @@ impl HttpHandler {
                     }
                 }
                 url::Host::Ipv6(ip) => {
-                    if ip.is_loopback() || ip.is_unspecified() {
+                    // IPv4-mapped (`::ffff:a.b.c.d`) addresses must be judged
+                    // by the embedded v4 rules — e.g. `::ffff:127.0.0.1`
+                    // reaches loopback but is neither `is_loopback()` nor
+                    // `is_unspecified()` as an Ipv6Addr.
+                    let restricted = if let Some(v4) = ip.to_ipv4_mapped() {
+                        v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                    } else {
+                        ip.is_loopback()
+                            || ip.is_unspecified()
+                            || Self::ipv6_is_unique_local(&ip)
+                            || Self::ipv6_is_link_local(&ip)
+                    };
+                    if restricted {
                         return Err(HttpError::HttpRestricted(format!(
                             "Access to internal IP '{}' is restricted.",
                             ip
@@ -59,6 +88,76 @@ impl HttpHandler {
         }
 
         Ok(url)
+    }
+
+    /// A `ureq::Agent` with automatic redirect-following DISABLED
+    /// (`redirects(0)`): a 3xx response is returned as-is instead of being
+    /// followed blind. `get`/`post` hand-roll the follow loop themselves so
+    /// every hop — not just the initial URL — passes [`Self::validate_url`].
+    fn agent() -> ureq::Agent {
+        ureq::AgentBuilder::new().redirects(0).build()
+    }
+
+    /// Resolve a redirect `Location` header (absolute OR relative) against
+    /// the URL that produced it.
+    fn resolve_redirect(base: &url::Url, location: &str) -> Result<url::Url, HttpError> {
+        base.join(location).map_err(|e| {
+            HttpError::HttpNetwork(format!(
+                "invalid redirect Location {:?} from '{}': {}",
+                location, base, e
+            ))
+        })
+    }
+
+    /// Issue `GET`/`POST` (`body = Some(_)` selects POST) and follow up to
+    /// [`MAX_REDIRECTS`] redirect hops manually, re-running
+    /// [`Self::validate_url`] on every RESOLVED absolute URL before it is
+    /// requested — including the first. This is the actual SSRF guard:
+    /// `ureq`'s built-in redirect handling validates only the URL the caller
+    /// passed in, so a public URL that 302s to `http://169.254.169.254/...`
+    /// would otherwise be followed blind. 301/302/303 downgrade POST to GET
+    /// (matching curl/browser behavior); 307/308 preserve the method and body.
+    fn request_following_redirects(
+        url_str: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(url::Url, ureq::Response), HttpError> {
+        let agent = Self::agent();
+        let mut url = Self::validate_url(url_str)?;
+        let mut use_post = body.is_some();
+        for hop in 0..=MAX_REDIRECTS {
+            let req = if use_post {
+                agent.post(url.as_str())
+            } else {
+                agent.get(url.as_str())
+            }
+            .timeout(std::time::Duration::from_secs(30));
+            let resp = match (use_post, body) {
+                (true, Some(b)) => req.send_json(b.clone()),
+                _ => req.call(),
+            }
+            .map_err(|e| Self::map_ureq_err(url.as_str(), e))?;
+
+            let status = resp.status();
+            if !(300..400).contains(&status) {
+                return Ok((url, resp));
+            }
+            if hop == MAX_REDIRECTS {
+                return Err(HttpError::HttpNetwork(format!(
+                    "too many redirects (> {MAX_REDIRECTS}) starting from '{url_str}'"
+                )));
+            }
+            let location = resp.header("Location").ok_or_else(|| {
+                HttpError::HttpNetwork(format!(
+                    "redirect ({status}) from '{url}' has no Location header"
+                ))
+            })?;
+            let next = Self::resolve_redirect(&url, location)?;
+            url = Self::validate_url(next.as_str())?;
+            if use_post && !matches!(status, 307 | 308) {
+                use_post = false;
+            }
+        }
+        unreachable!("loop always returns via the hop == MAX_REDIRECTS branch or an Ok/Err above")
     }
 
     fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, HttpError> {
@@ -92,15 +191,11 @@ impl HttpHandler {
     }
 
     pub fn get(&self, url_str: &str) -> Result<serde_json::Value, HttpError> {
-        let url = Self::validate_url(url_str)?;
-        let resp = ureq::get(url.as_str())
-            .timeout(std::time::Duration::from_secs(30))
-            .call()
-            .map_err(|e| Self::map_ureq_err(url_str, e))?;
+        let (final_url, resp) = Self::request_following_redirects(url_str, None)?;
         let body = resp.into_string().map_err(|e| {
-            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e))
+            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", final_url, e))
         })?;
-        Self::parse_response(url_str, &body)
+        Self::parse_response(final_url.as_str(), &body)
     }
 
     pub fn post(
@@ -108,15 +203,11 @@ impl HttpHandler {
         url_str: &str,
         json_body: &serde_json::Value,
     ) -> Result<serde_json::Value, HttpError> {
-        let url = Self::validate_url(url_str)?;
-        let resp = ureq::post(url.as_str())
-            .timeout(std::time::Duration::from_secs(30))
-            .send_json(json_body)
-            .map_err(|e| Self::map_ureq_err(url_str, e))?;
+        let (final_url, resp) = Self::request_following_redirects(url_str, Some(json_body))?;
         let body = resp.into_string().map_err(|e| {
-            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e))
+            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", final_url, e))
         })?;
-        Self::parse_response(url_str, &body)
+        Self::parse_response(final_url.as_str(), &body)
     }
 }
 
@@ -206,5 +297,107 @@ mod tests {
             "pure (case r of { Left (HttpRestricted _) -> (\"restricted\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
         ]);
         assert_eq!(v, serde_json::json!("restricted"));
+    }
+
+    // -------------------------------------------------------------------
+    // F3: SSRF guard bypasses — IPv6 (the exact URLs named in the plan).
+    // -------------------------------------------------------------------
+
+    /// `::ffff:127.0.0.1` is the IPv4-mapped form of loopback: an
+    /// `Ipv6Addr` fails `is_loopback()`/`is_unspecified()` (those only match
+    /// the native v6 loopback `::1`), so the old check let it straight
+    /// through to real loopback. Must normalize via `to_ipv4_mapped()` and
+    /// re-run the v4 rules.
+    #[test]
+    fn validate_url_rejects_ipv4_mapped_loopback() {
+        match HttpHandler::validate_url("http://[::ffff:127.0.0.1]/") {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted for IPv4-mapped loopback, got {other:?}"),
+        }
+    }
+
+    /// `::ffff:169.254.169.254` — the IPv4-mapped form of the cloud metadata
+    /// link-local address — must also be caught (a private/link-local v4
+    /// address behind the mapping, not just loopback).
+    #[test]
+    fn validate_url_rejects_ipv4_mapped_link_local() {
+        match HttpHandler::validate_url("http://[::ffff:169.254.169.254]/") {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted for IPv4-mapped link-local, got {other:?}"),
+        }
+    }
+
+    /// `fc00::/7` (unique local) previously sailed past the loopback/
+    /// unspecified-only v6 check entirely.
+    #[test]
+    fn validate_url_rejects_unique_local_v6() {
+        match HttpHandler::validate_url("http://[fc00::1]/") {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted for fc00::/7, got {other:?}"),
+        }
+        // fd00:: is also within fc00::/7 (the 8th bit is the only thing that varies).
+        match HttpHandler::validate_url("http://[fd12:3456::1]/") {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted for fd00::/7, got {other:?}"),
+        }
+    }
+
+    /// `fe80::/10` (link-local) previously sailed past the same gap.
+    #[test]
+    fn validate_url_rejects_link_local_v6() {
+        match HttpHandler::validate_url("http://[fe80::1]/") {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted for fe80::/10, got {other:?}"),
+        }
+    }
+
+    /// A genuinely public v6 address must still be allowed (the fix must not
+    /// over-broaden and reject the internet).
+    #[test]
+    fn validate_url_allows_public_v6() {
+        // 2001:4860:4860::8888 is a real public (Google DNS) v6 address.
+        assert!(HttpHandler::validate_url("http://[2001:4860:4860::8888]/").is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // F3: SSRF guard bypass — redirects.
+    // -------------------------------------------------------------------
+
+    /// The core of the redirect fix: every hop's RESOLVED absolute URL must
+    /// pass `validate_url` — an absolute redirect Location pointing at an
+    /// internal address (e.g. the cloud metadata endpoint) must be rejected,
+    /// exactly as if it had been the originally-requested URL.
+    #[test]
+    fn redirect_to_internal_absolute_location_is_rejected() {
+        let base = url::Url::parse("https://example.com/start").unwrap();
+        let resolved =
+            HttpHandler::resolve_redirect(&base, "http://169.254.169.254/latest/meta-data/")
+                .unwrap();
+        match HttpHandler::validate_url(resolved.as_str()) {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted, got {other:?}"),
+        }
+    }
+
+    /// A relative `Location` (common for same-host redirects) must resolve
+    /// against the URL that produced it, not error or silently drop.
+    #[test]
+    fn redirect_location_relative_resolves_against_base() {
+        let base = url::Url::parse("https://example.com/a/b").unwrap();
+        let resolved = HttpHandler::resolve_redirect(&base, "/c").unwrap();
+        assert_eq!(resolved.as_str(), "https://example.com/c");
+    }
+
+    /// A relative redirect that lands on a restricted host (e.g. `Location:
+    /// //169.254.169.254/x`, a protocol-relative reference) must also be
+    /// rejected once resolved.
+    #[test]
+    fn redirect_location_protocol_relative_to_internal_is_rejected() {
+        let base = url::Url::parse("https://example.com/start").unwrap();
+        let resolved = HttpHandler::resolve_redirect(&base, "//169.254.169.254/x").unwrap();
+        match HttpHandler::validate_url(resolved.as_str()) {
+            Err(HttpError::HttpRestricted(_)) => {}
+            other => panic!("expected HttpRestricted, got {other:?}"),
+        }
     }
 }

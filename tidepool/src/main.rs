@@ -50,12 +50,16 @@ struct Args {
 // Main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Install panic hook that writes crash dumps to ~/.tidepool/crash.log
+/// Install a panic hook that writes crash dumps to `<cwd>/.tidepool/crash.log`
+/// — the SAME path the JIT signal handler writes to
+/// (`tidepool_codegen::signal_safety::install`) and the Crashed-outcome
+/// forensics reader (`tidepool-mcp/src/server.rs`) reads from. A
+/// home-relative path here meant a Rust-side panic's forensics never
+/// surfaced unless CWD happened to equal $HOME.
+fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{}\n{:?}\n", info, std::backtrace::Backtrace::capture());
-        let path = dirs::home_dir()
+        let path = std::env::current_dir()
             .unwrap_or_default()
             .join(".tidepool/crash.log");
         if let Some(parent) = path.parent() {
@@ -68,6 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
         tracing::debug!("PANIC — see {}", path.display());
     }));
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_panic_hook();
 
     use clap::Parser;
     let args = Args::parse();
@@ -126,8 +135,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if args.debug {
-        stack::run_debug(handler_cfg, model, prelude_dir, args.help_tool, http_addr).await
+        stack::run_debug(handler_cfg, prelude_dir, args.help_tool, http_addr).await
     } else {
         stack::run_base(handler_cfg, prelude_dir, args.help_tool, http_addr).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Rust-side panic's crash log must land at `<cwd>/.tidepool/crash.log`
+    /// — the same path the JIT signal handler writes to and the forensics
+    /// reader reads from — not under `$HOME` (F4: they used to disagree, so
+    /// "Recent Crash Log Entries" silently never surfaced a Rust panic).
+    #[test]
+    fn panic_hook_writes_crash_log_relative_to_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        install_panic_hook();
+        let result = std::panic::catch_unwind(|| panic!("f4 crash-log probe"));
+        std::env::set_current_dir(&orig_cwd).unwrap();
+        assert!(result.is_err(), "the probe panic must have been caught");
+
+        let log_path = dir.path().join(".tidepool/crash.log");
+        let content = std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|e| panic!("crash log missing at cwd-relative path {log_path:?}: {e}"));
+        assert!(content.contains("f4 crash-log probe"), "{content}");
     }
 }

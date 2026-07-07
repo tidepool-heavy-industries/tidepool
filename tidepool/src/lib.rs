@@ -6,7 +6,7 @@
 //! This crate serves two roles:
 //!
 //! - **Binary** (`cargo install tidepool`): an MCP server with built-in effect handlers
-//!   for Console, KV, Fs, HTTP, Exec, Lsp, and Meta.
+//!   for Console, KV, Fs, HTTP, Exec, Lsp, Llm, Git, Time, and (debug-only) Meta.
 //! - **Library**: re-exports the main components of the Tidepool project. Start with
 //!   [`compile_haskell`] to load a compiled Haskell module, then use
 //!   [`tidepool_codegen::jit_machine::JitEffectMachine`] to JIT-compile and run it
