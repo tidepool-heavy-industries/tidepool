@@ -283,7 +283,19 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
             let req = H::Request::from_value(request, cx.table())?;
             self.head.handle(req, cx)
         } else {
-            self.tail.dispatch(tag - 1, request, cx)
+            // Restore the original tag on the way back out: each peeled layer
+            // subtracted 1 to address the tail, so an `UnhandledEffect` bubbling
+            // up from `HNil` (or a deeper layer) must have 1 added back per
+            // layer it passes through, or the diagnostic names the wrong
+            // (handled) effect for any tag beyond the first (#F2).
+            self.tail
+                .dispatch(tag - 1, request, cx)
+                .map_err(|e| match e {
+                    EffectError::UnhandledEffect { tag: t } => {
+                        EffectError::UnhandledEffect { tag: t + 1 }
+                    }
+                    other => other,
+                })
         }
     }
 }
@@ -393,9 +405,11 @@ mod tests {
         let mut handlers = hlist![AddOneHandler];
         let result = handlers.dispatch(1, &lit_int(10), &cx);
         match result {
-            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
-            // tag is decremented per HCons layer, so HNil sees 0
-            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
+            Err(EffectError::UnhandledEffect { tag: 1 }) => {}
+            // tag is decremented per HCons layer to address the tail, then
+            // restored by 1 per layer on the way back out (#F2) — the
+            // diagnostic must name the ORIGINAL out-of-range tag, 1.
+            other => panic!("expected UnhandledEffect {{ tag: 1 }}, got {other:?}"),
         }
     }
 
@@ -430,9 +444,11 @@ mod tests {
         let mut handlers = hlist![AddOneHandler, DoubleHandler];
         let result = handlers.dispatch(2, &lit_int(5), &cx);
         match result {
-            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
-            // tag decremented by 2 (one per HCons), so HNil sees 0
-            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
+            Err(EffectError::UnhandledEffect { tag: 2 }) => {}
+            // tag decremented by 2 on the way in (one per HCons layer), then
+            // restored by 2 on the way out (#F2) — the original out-of-range
+            // tag, 2, is what a version-skewed caller needs to see.
+            other => panic!("expected UnhandledEffect {{ tag: 2 }}, got {other:?}"),
         }
     }
 
