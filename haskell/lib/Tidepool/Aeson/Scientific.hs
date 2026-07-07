@@ -34,7 +34,10 @@ module Tidepool.Aeson.Scientific
   , toRealFloat
   , toBoundedInteger
   , truncateScientific
+  , floorScientific
+  , floorBoundedInteger
   , floatingOrInteger
+  , isFiniteDouble
   ) where
 
 import Prelude
@@ -144,9 +147,25 @@ intToDigitC d = chr (48 + d)
 fromFloatDigits :: RealFloat a => a -> Scientific
 fromFloatDigits = fromDouble . realToFrac
 
+-- | Is the 'Double' neither NaN nor +/-Infinity? 'fromDouble' parses the
+-- LETTERS of @show \@Double@'s "NaN"\/"Infinity" spellings as decimal digits
+-- (there is no numeric decimal form to parse), so callers that may see a
+-- non-finite value — the @'Tidepool.Aeson.Value.ToJSON' 'Double'@\/'Float'
+-- instances — must guard with this BEFORE calling 'fromFloatDigits'\/'fromDouble'
+-- and map to @Null@ instead (matching upstream aeson's non-finite encoding).
+-- Tested WITHOUT a 'RealFloat' dictionary (mirrors
+-- "Tidepool.QQ.Fmt.Runtime".'Tidepool.QQ.Fmt.Runtime.fmtFrac''s guard, which
+-- has the same JIT-safety motive): @d \/= d@ iff NaN; @|d|@ is its own fixed
+-- point under halving iff +\/-Infinity among nonzero finites.
+isFiniteDouble :: Double -> Bool
+isFiniteDouble d = d == d && not (absD > 0.0 && absD * 0.5 == absD)
+  where absD = if d < 0 then negate d else d
+
 -- Monomorphic core. Uses @show \@Double@ — which the extractor lowers to the
 -- @ShowDoubleAddr@ primop (shortest-decimal, JIT-safe) — rather than a local
 -- @showDouble@ stub, whose bottoming body GHC can collapse past the interceptor.
+-- PRECONDITION: @d@ is finite ('isFiniteDouble' d) — callers that may see a
+-- non-finite value must check first (see 'isFiniteDouble').
 fromDouble :: Double -> Scientific
 fromDouble = readDecimalToScientific . show
 
@@ -194,6 +213,27 @@ toBoundedInteger s
           hi = toInteger (maxBound :: i)
       in if i >= lo && i <= hi then Just (fromInteger i) else Nothing
   | otherwise = Nothing
+
+-- | Floor to an 'Integer' — like 'truncateScientific' but rounds DOWN (toward
+-- negative infinity) rather than toward zero, matching upstream lens-aeson's
+-- @_Int@\/@_Integer@ prisms (@\"-3.7\"@ floors to @-4@; truncation would give
+-- @-3@). Pure Integer 'div' (which floors), so it stays as JIT-safe as
+-- 'truncateScientific'.
+floorScientific :: Scientific -> Integer
+floorScientific (Scientific c e)
+  | e >= 0    = c * pow10 e
+  | otherwise = c `div` pow10 (negate e)
+
+-- | 'floorScientific', bounds-checked against a 'Bounded' 'Integral' type —
+-- @Nothing@ if the floored value doesn't fit @[minBound, maxBound]@. Unlike
+-- 'toBoundedInteger', this floors fractional inputs instead of requiring an
+-- exact integer (matching the @_Int@ prism's lens-aeson semantics).
+floorBoundedInteger :: forall i. (Integral i, Bounded i) => Scientific -> Maybe i
+floorBoundedInteger s =
+  let i  = floorScientific s
+      lo = toInteger (minBound :: i)
+      hi = toInteger (maxBound :: i)
+  in if i >= lo && i <= hi then Just (fromInteger i) else Nothing
 
 -- | @Right@ an integral value when the number is integral, else @Left@ the
 -- floating value. (No 'Bounded' constraint here, mirroring upstream: an integral

@@ -50,7 +50,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Tidepool.Aeson.Scientific
   ( Scientific, scientific, coefficient, base10Exponent
-  , fromFloatDigits, toRealFloat )
+  , fromFloatDigits, toRealFloat, isFiniteDouble )
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
@@ -190,11 +190,19 @@ instance ToJSON Text where
 instance ToJSON Int where
   toJSON n = Number (scientific (fromIntegral n) 0)
 
+-- Non-finite Doubles have no numeric JSON representation; upstream aeson
+-- encodes them as Null, so we match that instead of letting 'fromFloatDigits'
+-- parse the letters of "NaN"/"Infinity" as decimal digits (see
+-- 'Tidepool.Aeson.Scientific.isFiniteDouble').
 instance ToJSON Double where
-  toJSON = Number . fromFloatDigits
+  toJSON d
+    | isFiniteDouble d = Number (fromFloatDigits d)
+    | otherwise         = Null
 
 instance ToJSON Float where
-  toJSON = Number . fromFloatDigits
+  toJSON f
+    | isFiniteDouble (realToFrac f) = Number (fromFloatDigits f)
+    | otherwise                      = Null
 
 instance ToJSON Bool where
   toJSON = Bool
