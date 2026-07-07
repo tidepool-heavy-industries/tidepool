@@ -93,7 +93,7 @@ been deleted (tier 09).
 ### Status
 
 - [ ] 01 GC / memory safety
-- [ ] 02 Haskell stdlib + extract
+- [ ] 02 Haskell stdlib + extract — H1-H4 + M5 + M10 merged (2760024b); M1-M4/M6-M9 + LOWs remain
 - [ ] 03 Engine / runtime / macro / bridge
 - [ ] 04 Optimizer shadowing
 - [ ] 05 Repr wire + eval oracle
