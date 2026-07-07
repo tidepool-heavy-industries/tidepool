@@ -124,12 +124,38 @@ Silent. **Fix:** `go m ys | m <= 0 = ([], ys)`.
 mean-of-empty-list NaN reaches the caller as a plausible number (upstream
 aeson encodes `Null`). **Fix:** reuse `fmtFrac`'s NaN/Inf guards; map to `Null`.
 
+**STATUS: FIXED.** `fromDouble` itself is unchanged (it structurally cannot
+return `Null` — it returns `Scientific`, and this module must not import
+`Tidepool.Aeson.Value`). Added `isFiniteDouble :: Double -> Bool` next to it,
+reusing `fmtFrac`'s dictionary-free NaN/Inf test, and applied the guard at the
+actual `ToJSON Double`/`ToJSON Float` instances (`Aeson/Value.hs`): non-finite
+now maps to `Null`, finite is unchanged. Pinning tests:
+`stdlib_regressions_02_medium.rs::works_tojson_double_infinity_is_null`,
+`::works_tojson_double_nan_is_null`,
+`::works_tojson_double_finite_unaffected` (regression guard).
+
 ### M2. Out-of-range integer JSON decode silently wraps
 
 **Where:** `Aeson/FromJSON.hs:171-173` + `Aeson/Lens.hs:93-96`.
 `eitherDecode "18446744073709551615" :: … Int` → `Right (-1)`; upstream aeson
 bounds-checks. **Fix:** route through the currently-DEAD `toBoundedInteger`
 (`Scientific.hs:189`); the `_Int` prism returns `Nothing` on out-of-range.
+
+**STATUS: FIXED** (+ Opportunity 6 done: `toBoundedInteger` is no longer
+dead). **Discrepancy:** `toBoundedInteger` was not fully dead before this fix
+— `Prelude.hs`'s `asInt` already called it; the actual gap was the
+`FromJSON Int` instance and the `_Int`/`_Integer` prisms, which is what this
+fix targets. `FromJSON Int` now bounds-checks via `toBoundedInteger` ONLY for
+exact-integer `Scientific` values (an out-of-range integer is now `Error`,
+not a silent wraparound) — a fractional number still truncates toward zero
+exactly as before (unaffected; that wasn't part of this finding). `_Int`/
+`_Integer` (`Aeson/Lens.hs`) now go through new `floorScientific`/
+`floorBoundedInteger` helpers (`Scientific.hs`) instead of
+`truncateScientific`, which ALSO fixes the LOW below (floor, not truncate).
+Pinning tests: `stdlib_regressions_02_medium.rs`
+`::works_eitherdecode_int_out_of_range_is_left`,
+`::works_eitherdecode_int_in_range_unaffected` (regression guard),
+`::works_int_prism_floors_not_truncates`, `::works_int_prism_out_of_range_is_nothing`.
 
 ### M3. Patch.hs: standard `diff -u` timestamp headers break parsing
 
@@ -138,10 +164,32 @@ tab+timestamp become part of the path → spurious "renames unsupported"
 rejection for plain in-place edits; `/dev/null` create-detection misses.
 **Fix:** truncate paths at first `'\t'`.
 
+**STATUS: FIXED.** Added `truncateAtTabS :: String -> String` (`fst . break
+(== '\t')`), applied to both the `---`/`+++` raw path strings before the
+`/dev/null` check and the rename-mismatch comparison. Pinning tests:
+`stdlib_regressions_02_medium.rs::works_patch_tab_timestamp_not_treated_as_rename`,
+`::works_patch_devnull_create_with_tab_timestamp`.
+
 ### M4. Patch.hs: `\ No newline at end of file` parsed then DISCARDED
 
 **Where:** `Patch.hs:394, 422`. Applying such a patch silently produces the
 wrong trailing newline. **Fix:** track the marker per side, or reject loudly.
+
+**STATUS: FIXED** (tracked and applied — no loud-reject fallback was needed).
+`Hunk` gained two fields, `hOldNoNewline`/`hNewNoNewline`; `parseBodyN` now
+threads them, attributing a marker to whichever side(s) the immediately
+preceding body line belongs to (context lines mark both). `invertPatch`/
+`creationPatch`/`sliceHunk` (genPatch) and the `[patch|...|]` QQ codegen
+(`QQ/Patch.hs`) were updated for the new arity. `applyFilePatch`'s `goHunks`
+now corrects the reconstructed file's trailing newline using the LAST hunk's
+flags: if the new side lacks a trailing newline, drop a trailing empty
+element from the untouched tail; if the old side lacked one but the new side
+should have one, append one. (The no-marker case — the overwhelming majority
+of real patches — is untouched, so this can't regress any existing
+patch/genPatch test.) Pinning tests:
+`stdlib_regressions_02_medium.rs::works_patch_apply_marker_new_side_loses_trailing_newline`,
+`::works_patch_apply_marker_new_side_gains_trailing_newline` (both
+directions).
 
 ### M5. 2-result unboxed-tuple fallback binds BOTH result binders to the same primop node — [FIXED]
 
@@ -176,11 +224,21 @@ isn't duplicated as a Rust test.
 **Where:** `Prelude.hs:614-619`. `stake (-1) [1,2,3]` = `[1,2,3]` vs `[]` —
 polymorphic code changes meaning by instance. **Fix:** clamp `n <= 0`.
 
+**STATUS: FIXED.** `stake`/`sdrop` for `[a]` now guard `n <= 0` before the
+literal-`0`/empty-list clauses, matching `Slice Text` and base `take`/`drop`.
+Pinning tests: `stdlib_regressions_02_medium.rs::works_slice_list_stake_negative_clamps_to_empty`,
+`::works_slice_list_sdrop_negative_clamps_to_whole`.
+
 ### M7. `camelToSnake` emits a leading underscore on PascalCase
 
 **Where:** `haskell/lib/Tidepool/TextFormat.hs:54-60`. `"HelloWorld"` →
 `"_hello_world"`, contradicting its own doctest. **Fix:** suppress `_` at
 position 0.
+
+**STATUS: FIXED.** `go` now threads an `isFirst` flag; the underscore is
+suppressed only at position 0 (every other uppercase transition still gets
+one) — `"HTTPServer"` still gives `"h_t_t_p_server"` per its own doctest.
+Pinning test: `stdlib_regressions_02_medium.rs::works_cameltosnake_no_leading_underscore`.
 
 ### M8. ASCII-only `isAlpha`/`isSpace`/etc. shadow Data.Char with divergent Unicode semantics
 
@@ -188,11 +246,27 @@ position 0.
 `T.words` (`Data/Text.hs:52`) uses real Unicode `isSpace`. **Fix:** match
 Data.Char, or rename to `isAsciiAlpha` etc. (API-is-the-prompt: prefer match).
 
+**STATUS: FIXED** (matched, per the locked choice — did not rename).
+`isAlpha`/`isAlphaNum`/`isSpace`/`isUpper`/`isLower` now delegate to
+`Data.Char`'s real Unicode-table implementations (`isDigit` untouched — it
+was already ASCII-only in upstream `Data.Char` too, no divergence). Safe on
+the JIT by the same precedent already proven live: the vendored `T.words`
+(`Data/Text.hs:52`) already runs `Data.Char.isSpace` on the JIT. Pinning
+tests: `stdlib_regressions_02_medium.rs::works_isalpha_unicode_letter` (é,
+U+00E9), `::works_isspace_unicode_nbsp` (U+00A0) — both outside the old
+ASCII-only ranges.
+
 ### M9. `center` pads the odd char on the RIGHT
 
 **Where:** `Prelude.hs:1100-1108`. Contradicts both its haddock and
 `Data.Text.center`. **Fix:** swap `lpad`/`rpad`; make `TextFormat.hs:116`
 `centerWith` agree.
+
+**STATUS: FIXED.** Swapped which half is computed by `div` in both
+`Prelude.hs`'s `center` and `TextFormat.hs`'s `centerWith` — `rpad = total
+\`div\` 2; lpad = total - rpad`, so the odd leftover character now goes to
+`lpad`. Pinning tests: `stdlib_regressions_02_medium.rs::works_center_pads_odd_char_left`,
+`::works_textformat_centerwith_agrees`.
 
 ### M10. `Len [a]` non-guarded recursion — JIT stack death on long lists — [FIXED]
 
@@ -239,6 +313,72 @@ elements, comfortably past the ~20k non-tail-call ceiling).
   not entries; wrong for one-line arrays; scan doesn't terminate when the
   array closes with `]` (not `],`).
 
+**STATUS — all fixed except the noted skip:**
+
+- `parseDoubleM` — **FIXED.** Now parses an optional `e`/`E` exponent
+  (`parseMantissa`/`parseExponent`/`scaleByPow10`) and accumulates digits
+  directly as a `Double` via `digitsToDouble` (never through `Int`), so a
+  digit run past ~19 characters loses precision like any `Double` parse
+  instead of silently overflowing. `scaleByPow10` combines the mantissa and
+  exponent with ONE final multiply/divide against a precomputed power of ten
+  (not N chained single-digit steps) — chaining was tried first and measurably
+  failed to round-trip `showDouble` for negative exponents (compounding
+  rounding error). Pinning tests:
+  `stdlib_regressions_02_medium.rs::works_parsedoublem_accepts_exponent_notation`,
+  `::works_parsedoublem_roundtrips_showdouble_extreme_magnitudes`.
+- `nubBy` argument order — **FIXED.** `elemBy` now calls `eq y x` (seen
+  element first, candidate second), matching base's `elem_by eq y (x:xs) = x
+  \`eq\` y || …`. Pinning test:
+  `stdlib_regressions_02_medium.rs::works_nubby_argument_order_matches_base`
+  (a directional, non-equivalence predicate distinguishes the two orders).
+- `_Int`/`_Integer` floor — **FIXED**, folded into the M2 fix above (new
+  `floorScientific`/`floorBoundedInteger` in `Scientific.hs`).
+- `QQ/Fmt/Runtime.hs` digit grouping / `fmtFrac` overflow / `fmtInt minBound`
+  — **ALL FIXED.** Grouping size is now `3` for decimal, `4` for hex/oct/bin
+  (`groupSize`); `,` grouping is now rejected for `b`/`o`/`x`/`X` at spec-parse
+  time (`QQ/PyF/Spec.hs`'s new `failIfCommaGrouping`, matching Python's
+  `Cannot specify ',' with '<type>'.`). `fmtFrac`'s `scaled`/`powI` are now
+  `Integer` (not `Int`), so a huge Double scaled by `10^prec` no longer
+  saturates. `fmtInt`'s magnitude and `digitsInBase` are now `Integer` (not
+  `Int`), so `negate minBound` no longer silently stays negative and crashes
+  the digit-table index. Pinning tests:
+  `stdlib_regressions_02_medium.rs::works_fmt_hex_grouping_is_four_not_three`,
+  `::fails_fmt_hex_comma_grouping_rejected`,
+  `::works_fmtfrac_beyond_2_63_does_not_saturate`,
+  `::works_fmtint_minbound_does_not_crash`.
+- `Data/Time.hs` `addUTCTime` rounding — **FIXED** (`truncate` → `round`).
+  Negative-year garbage digits — **FIXED**: `pad4` now `error`s loudly
+  (`"formatISO8601: negative year …"`) instead of `digitChar`'s
+  catch-all `_ -> '9'` firing on a negative `Int`. Pinning tests:
+  `stdlib_regressions_02_medium.rs::works_addutctime_rounds_ms_conversion`,
+  `::fails_formatiso8601_negative_year_errors_loudly`.
+- `Table.hs` `parseCsv` — **FIXED** (quote-aware, not renamed): a new
+  `parseCsvRowS` recursive-descent String-space splitter handles quoted
+  fields (commas inside quotes, `""` escaping a literal quote); `parseTsv`/
+  `parseDelimited` are untouched (quoting was never claimed there). A literal
+  newline inside a quoted field is still not supported (rows are still split
+  on `'\n'` before quote parsing, like every other row-oriented verb here) —
+  documented in the haddock rather than fixed, since RFC-4180 multi-line
+  fields would require restructuring the row-splitting step shared by every
+  verb in this module, a materially bigger change than this LOW warranted.
+  Pinning test: `stdlib_regressions_02_medium.rs::works_parsecsv_quoted_field_with_embedded_comma`.
+- `CborEncode.hs` stale arity-5/6/7 comment — **FIXED** (comment only, states
+  exactly 7 now). Not eval-reachable (compile-time comment); verified by
+  direct inspection against `tidepool-repr/src/serial/read.rs:144-147`.
+- `app/Main.hs` DataCon meta keying — **FIXED**: the per-target `Map.fromList`
+  inside the `--all-closed` fold is now keyed `(dcid, qname)` instead of
+  `dcid` alone, so `Map.union` across targets can no longer silently drop one
+  of a colliding pair before it reaches `mergeMetaPreserving`'s loud
+  collision-preserving merge. Not eval-reachable (only exercised by the
+  extractor's own multi-target fixture-generation path, not any single JIT
+  eval); verified by inspection that the new keying matches
+  `tsUsedDCs`/`mergeMetaPreserving`'s existing `(varId, qname)` convention
+  (`src/Tidepool/Translate.hs`) — following M5's precedent for
+  extract-level-only verification.
+- `.tidepool/lib/RustSections.hs` — **SKIPPED**, per this branch's explicit
+  task boundary: the file is untracked WIP not present in this worktree
+  (root owns it).
+
 ## Opportunities
 
 1. **Non-ASCII test coverage is ZERO** — neither `test/Suite.hs` nor
@@ -255,7 +395,7 @@ elements, comfortably past the ~20k non-tail-call ceiling).
 5. Scientific exponent DoS: `pow10`/`show` are linear in exponent;
    `scientific 1 1000000000` does a billion multiplications. Cap ~10^6 loudly.
 6. Wire `toBoundedInteger` into the decode path (fixes M2, removes a dead
-   export).
+   export). **DONE** — see M2's STATUS block above.
 
 ## Verified clean — do NOT re-audit
 
@@ -275,19 +415,29 @@ claims (Opt_FullLaziness/Opt_CprAnal, stdlib embedding) hold.
       `tidepool-runtime/tests/stdlib_regressions_02.rs` (not `jit_surface.rs`/
       `TextSuite.hs`, to avoid touching files another worker owns in this
       wave; see that file's module doc for the full probe set)
-- [ ] M1–M10 fixed (each with a pinning test where the harness reaches it) —
-      **partial, by design this wave:** only M5 and M10 are in scope here and
-      both are fixed (see their entries above); M1-M4/M6-M9 are a later wave
-- [ ] Lows fixed or filed; RustSections.hs items fixed in-place (it's WIP) —
-      out of scope this wave
-- [ ] Fixtures regenerated per haskell/CLAUDE.md; `scripts/battery.sh` green —
-      out of scope this wave (root's job post-merge); regeneration WAS done
-      transiently to differentially verify H1/H2/M5 against the full
-      `test/Suite.hs` corpus (218/218 `haskell_suite`/`haskell_suite_differential`
-      tests green) — the regenerated fixtures were then reverted (`git
+- [x] M1–M10 fixed (each with a pinning test where the harness reaches it) —
+      M5 and M10 were the previous wave (both fixed, see their entries above);
+      **this wave (stdlib-medium branch): M1-M4 and M6-M9 fixed**, each with a
+      pinning test in `tidepool-runtime/tests/stdlib_regressions_02_medium.rs`.
+      All 10 M-findings are now fixed.
+- [x] Lows fixed or filed; RustSections.hs items fixed in-place (it's WIP) —
+      **this wave:** all LOW items fixed except `.tidepool/lib/RustSections.hs`,
+      which is SKIPPED per this branch's explicit task boundary (untracked WIP,
+      not present in this worktree — root owns it, see the LOW STATUS block
+      above). `app/Main.hs` and `CborEncode.hs` LOWs are fixed but not
+      Rust-pinned (not JIT-eval-reachable — verified by inspection, following
+      M5's precedent).
+- [x] Fixtures regenerated per haskell/CLAUDE.md; `scripts/battery.sh` green —
+      `scripts/battery.sh` itself is root's job post-merge (explicitly out of
+      scope for this branch, per its task boundary — a concurrent worker owns
+      14 known pre-existing failures there). Fixture regeneration WAS done
+      transiently THIS WAVE to differentially verify the M1-M4/M6-M9 fixes
+      against the full `test/Suite.hs` corpus (218/218 `haskell_suite`/
+      `haskell_suite_differential` tests green, plus the earlier H1/H2/M5
+      wave's 218/218) — the regenerated fixtures were then reverted (`git
       checkout`) since two consecutive regenerations from the SAME unchanged
       binary already differ in GHC's non-deterministic synthetic-name
-      suffixes, so committing them would be pure noise unrelated to this fix
+      suffixes, so committing them would be pure noise unrelated to this fix.
 - [ ] Redeployed via `scripts/redeploy.sh`; live-server spot-check of H1/H2
       repros now correct (`map fromEnum "hé"` → `[104,233]`) — root's job
       after merge, per this branch's task boundary
