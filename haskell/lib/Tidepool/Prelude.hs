@@ -443,7 +443,7 @@ splitAt :: Int -> [a] -> ([a], [a])
 splitAt n xs = go n xs
   where
     go :: Int -> [a] -> ([a], [a])
-    go 0 ys      = ([], ys)
+    go m ys | m <= 0 = ([], ys)
     go _ []      = ([], [])
     go !m (y:ys) = let (as, bs) = go (m - 1) ys in (y:as, bs)
 {-# INLINE splitAt #-}
@@ -524,8 +524,8 @@ length = go 0
 replicate :: Int -> a -> [a]
 replicate n x = go n
   where
-    go 0 = []
-    go !m = x : go (m - 1)
+    go m | m <= 0    = []
+         | otherwise = x : go (m - 1)
 {-# INLINE replicate #-}
 
 -- | Join a list of Texts with a separator. Shadows list intercalate.
@@ -581,8 +581,11 @@ instance Len Text where
   {-# INLINE len #-}
 
 instance Len [a] where
-  len [] = 0
-  len (_:xs) = 1 + len xs
+  len = go 0
+    where
+      go :: Int -> [a] -> Int
+      go !acc []     = acc
+      go !acc (_:xs) = go (acc + 1) xs
   {-# INLINE len #-}
 
 -- | Emptiness check. Works on both Text and lists.
