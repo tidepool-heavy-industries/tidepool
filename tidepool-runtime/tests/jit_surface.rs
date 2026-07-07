@@ -953,3 +953,35 @@ fn works_category_compose() {
         serde_json::json!({"gt": 40, "lt": 40}),
     );
 }
+
+/// `toGregorian` (Tidepool.Data.Time) — canonical `Data.Time` decomposition,
+/// `UTCTime -> (year, month, day)`. Pinned against the same leap-day fixture
+/// `formatISO8601`'s own haddock uses (`1709164800000` == 2024-02-29), so this
+/// probe and the doc example can't silently drift apart.
+#[test]
+fn works_to_gregorian() {
+    works(
+        "pure (toGregorian (UTCTime 1709164800000))",
+        serde_json::json!([2024, 2, 29]),
+    );
+}
+
+/// `formatDay` (Tidepool.Data.Time) — zero-padded `YYYY-MM-DD` date prefix of
+/// `formatISO8601`, same fixture as `works_to_gregorian`.
+#[test]
+fn works_format_day() {
+    works(
+        "pure (formatDay (UTCTime 1709164800000))",
+        serde_json::json!("2024-02-29"),
+    );
+}
+
+/// Round-trip `parseISO8601 -> formatDay` for a single-digit month+day date —
+/// catches a dropped zero-pad (must render "2024-03-05", not "2024-3-5").
+#[test]
+fn works_parse_iso8601_format_day_roundtrip() {
+    works(
+        r#"pure (case parseISO8601 "2024-03-05T10:00:00Z" of { Right t -> formatDay t; Left e -> e })"#,
+        serde_json::json!("2024-03-05"),
+    );
+}
