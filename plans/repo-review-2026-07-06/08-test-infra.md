@@ -155,11 +155,14 @@ epoch only while count > 0.
 **Fix:** split declaration/assignment; when pre-set, assert `[ -x ]` + run the
 same `Usage:` probe extract_env uses; print skipped-suite counts at the end.
 
-**BLOCKED (boundary conflict):** this fix touches `scripts/battery.sh`, but the
-test-infra work session fixing F1–F4 was explicitly instructed NOT to touch
-`scripts/` (owned by a different worker in the parallel review-fix pass).
-F5 is otherwise unstarted — the analysis above is still accurate as of this
-note; a worker with `scripts/` in scope should apply the fix described.
+**STATUS: FIXED (by root, post-merge)** — was BLOCKED on the `scripts/`
+boundary during the worker pass. Both halves applied to `battery.sh`:
+declaration split from export (a failed `list-bin` now aborts under
+`set -e` instead of proceeding with an empty var), and the announced binary
+— pre-set or freshly built — is probed with the same no-args `Usage:` check
+`extract_env` uses, failing loud instead of letting GHC-guarded suites skip
+into a false-green battery. Verified: success path runs, `TIDEPOOL_EXTRACT=/bin/true`
+exits 1 with a clear error.
 
 ## Discrepancy notes (from step-0 fixture work)
 
@@ -196,10 +199,11 @@ note; a worker with `scripts/` in scope should apply the fix described.
   only `nodes > 0`; asserting nonzero Join/LetRec/Case at the weighted
   depth-7 setting turns the reach report into a regression gate for "deep
   cases unreachable". **Done:** added the assertion.
-- [ ] `redeploy.sh` preflight opportunity: after `nix profile upgrade`, run
+- [x] `redeploy.sh` preflight opportunity: after `nix profile upgrade`, run
   the installed `tidepool-extract` no-args and check the `Usage:` banner —
-  catches a broken wrapper at deploy time instead of first eval. **BLOCKED**:
-  same `scripts/` boundary conflict as F5 — unstarted.
+  catches a broken wrapper at deploy time instead of first eval.
+  **Done (by root, post-merge):** probe added directly after a successful
+  `nix profile upgrade` (skipped under `--dry-run`); verified via dry-run.
 - Cross-refs into other plans' test asks: plan 04 F4 (shadowing generator
   mode), plan 04 F6 (delete `run_oracle_eval_may_panic`), plan 02
   opportunity 1 (non-ASCII lane), plan 01 (array-GC red test + heap-verify
@@ -224,9 +228,8 @@ closed issues in this slice (the stale panic-TOLERANCE is plan 04 F6).
 - [x] F2 preamble ↔ handlers ↔ production aligned; legacy preambles migrated
 - [x] F3 floor + timeout classification + 101 routing
 - [x] F4 RAII disarm
-- [ ] F5 battery hardening — BLOCKED: requires editing `scripts/`, out of
-      this worker's boundary (see F5 note above); unstarted, needs a
-      `scripts/`-scoped worker
+- [x] F5 battery hardening — fixed by root post-merge (see F5 STATUS note);
+      was BLOCKED on the worker's `scripts/` boundary
 - [x] Smaller items triaged/filed (2 fixed — `test_differential_identity`,
       `generator_reach_stats`; 1 blocked on the `scripts/` boundary —
       `redeploy.sh` preflight; cross-refs into other plans are informational)

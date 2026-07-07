@@ -17,7 +17,20 @@ fi
 if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
   echo "==> TIDEPOOL_EXTRACT not set — building the dev tidepool-extract-bin"
   ( cd haskell && cabal build tidepool-extract-bin )
-  export TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
+  # Split assignment from export: `export VAR="$(cmd)"` masks the command's
+  # exit status (SC2155), so a failed list-bin would proceed with an empty var.
+  TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
+  export TIDEPOOL_EXTRACT
+fi
+
+# The announced binary must actually run. eval_harness::extract_env silently
+# falls back to a `cabal list-bin` binary when the announced one doesn't
+# execute (so the banner below could name a binary the tests never used), and
+# when nothing resolves the GHC-guarded suites "skip cleanly" — a green
+# battery with zero GHC coverage. Same no-args `Usage:` probe extract_env uses.
+if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>/dev/null | head -c 6 | grep -q 'Usage:'; then
+  echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
+  exit 1
 fi
 echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 

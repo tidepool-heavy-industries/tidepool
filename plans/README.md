@@ -99,7 +99,7 @@ been deleted (tier 09).
 - [ ] 05 Repr wire + eval oracle
 - [x] 06 Repl session — merged (51df6121; worker died pre-commit, root verified 189/189 + committed)
 - [x] 07 MCP + handlers — merged (930b2ca4)
-- [ ] 08 Test infra
+- [x] 08 Test infra — merged (8aca76b6); F5 + redeploy preflight finished by root in scripts/; battery 2720/2720 green (worker full run; root spot-checked the 14 ex-failing)
 - [x] 09 Hygiene / docs / misc — merged (fed2a5df)
 
 Mark a file's checkbox only when its own DONE CRITERIA section is satisfied.

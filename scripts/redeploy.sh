@@ -53,6 +53,13 @@ if [ "$NO_EXTRACT" -eq 0 ]; then
       echo "  nix profile install .#tidepool-extract"
       exit 1
     fi
+    # Post-upgrade probe: a broken wrapper would otherwise surface only at
+    # first eval. Same no-args `Usage:` banner check the test harness uses.
+    if ! command -v tidepool-extract >/dev/null 2>&1 \
+       || ! tidepool-extract 2>/dev/null | head -c 6 | grep -q 'Usage:'; then
+      echo "error: installed tidepool-extract does not print the 'Usage:' banner — broken wrapper" >&2
+      exit 1
+    fi
   fi
 else
   echo; echo "(skipped: --no-extract)"
