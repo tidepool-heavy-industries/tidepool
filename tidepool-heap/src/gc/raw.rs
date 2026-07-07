@@ -103,6 +103,34 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                 _ => {}
             }
         }
+        TAG_LIT => {
+            // SAFETY: Lit layout: lit_tag byte at LIT_TAG_OFFSET. For
+            // SmallArray#/Array#, the value field (LIT_VALUE_OFFSET) holds a
+            // pointer to a malloc'd, GC-external payload buffer
+            // `[u64 len][ptr0..ptrN]` (`runtime_new_boxed_array`) — the
+            // buffer itself is stable and never evacuated (it isn't a
+            // from-space heap object), but its SLOT CONTENTS are ordinary
+            // heap pointers and must be visible to the collector exactly
+            // like a Con field or Closure capture. `cheney_copy`'s
+            // from-space range check makes tracing these slots safe even
+            // though the buffer lives outside both semispaces.
+            let lit_tag = *obj.add(LIT_TAG_OFFSET);
+            if lit_tag == LitTag::SmallArray as u8 || lit_tag == LitTag::Array as u8 {
+                // SAFETY: value field is a valid pointer into a live
+                // `runtime_new_boxed_array` allocation per the caller's
+                // contract on `obj`.
+                let payload = *(obj.add(LIT_VALUE_OFFSET) as *const *mut u8);
+                if !payload.is_null() {
+                    // SAFETY: payload's first 8 bytes are the array length,
+                    // written by `runtime_new_boxed_array` before the array
+                    // becomes reachable.
+                    let len = *(payload as *const u64) as usize;
+                    for i in 0..len {
+                        f(payload.add(8 + i * FIELD_STRIDE) as *mut *mut u8);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
