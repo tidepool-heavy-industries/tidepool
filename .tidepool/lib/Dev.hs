@@ -5,15 +5,8 @@ module Dev where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import Tidepool.Shell (sh)
 import qualified Tidepool.Data.Text as T
-
--- | Run a command; return stdout. Non-zero exit = loud error with stderr.
-sh :: Text -> M Text
-sh cmd = do
-  p <- run cmd >>= liftEither
-  if ok p
-    then pure p.stdout
-    else error ("sh: exit " <> pack (show p.exitCode) <> ": " <> cmd <> "\n" <> p.stderr)
 
 -- | sh split into lines; inherits sh's loud-error on non-zero exit.
 shLines :: Text -> M [Text]
