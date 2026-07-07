@@ -4,7 +4,7 @@ A resident-JIT session surface. One session = one long-lived JIT machine whose
 value heap and module scope persist across calls — declarations and bindings
 accumulate turn over turn. See the repo-root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the shared eval-authoring patterns (Aperture,
-`update`/`Edit`/diff verbs, structural search) that apply here too.
+`update`/`Edit`/diff verbs) that apply here too.
 
 ## The 3 MCP tools + 1 resource
 
@@ -137,9 +137,6 @@ generation counters or the raw GHC module name for a declaration.
   Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
 - **LSP graph verbs** (`the`/`chart`/`explore`) need `tidepool-lsp-daemon`
   running on the workspace socket; they error cleanly without it.
-- **`Match` records** (from `sgFind`) carry the full matched text + every
-  metavar; extract only the fields you need rather than returning whole
-  matches.
 
 ## Launcher shim (`.tidepool-repl-mcp.sh`)
 
