@@ -62,6 +62,7 @@ import Data.Int
 import Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Sequence (Seq, (|>))
@@ -148,38 +149,135 @@ recordDC :: DataCon -> TransM ()
 recordDC dc = modify' $ \s ->
   s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
--- | Emit a runtime unpackCString# loop for a non-static Addr# value.
+-- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
+-- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
+-- 'IndexCharOffAddr' result), a reference to the enclosing recursive @go@,
+-- and @combine@ — how to join "this decoded Char# box" with "the recursive
+-- call on the rest" into the caller's result shape (a cons cell for
+-- unpackCString#/unpackAppendCString#, an @f charBox goNext@ application for
+-- unpackFoldrCString#). Handles 1-4 byte UTF-8 sequences (RFC 3629); an
+-- unexpected lead byte (a stray continuation byte, or 0xF8+) falls back to
+-- treating it as one raw byte — best-effort, never traps, matching the
+-- pre-fix behavior for that byte. Shared by all three runtime Addr# loops so
+-- H1's decode fix and H2's fallback arms use exactly one decoder.
+emitUtf8DecodeStep :: Word64 -> Int -> Int -> (Int -> Int -> TransM Int) -> TransM Int
+emitUtf8DecodeStep aId goRef byte0 combine = do
+    let charId = varId (dataConWorkId charDataCon)
+    -- Shared 1-byte continuation: box byte0 as-is, advance by 1. Used both
+    -- for genuine ASCII (< 0x80) and as the malformed-lead-byte fallback.
+    rawByteBranch <- do
+      charBox <- emitNode $ NCon charId [byte0]
+      aRef <- emitNode $ NVar aId
+      lit1 <- emitNode $ NLit (LEInt 1)
+      nextAddr <- emitOp (T.pack "PlusAddr") [aRef, lit1]
+      goNext <- emitNode $ NApp goRef nextAddr
+      combine charBox goNext
+    b0Int <- emitOp (T.pack "Ord") [byte0]
+    mask80 <- emitNode $ NLit (LEInt 0x80)
+    b0High <- emitOp (T.pack "IntAnd") [b0Int, mask80]
+    litZero <- emitNode $ NLit (LEInt 0)
+    isAscii <- emitOp (T.pack "IntEq") [b0High, litZero]
+    twoByteBranch <- emitUtf8NByteBranch aId goRef b0Int 2 0x1F combine
+    threeByteBranch <- emitUtf8NByteBranch aId goRef b0Int 3 0x0F combine
+    fourByteBranch <- emitUtf8NByteBranch aId goRef b0Int 4 0x07 combine
+    multiByteIdx <- emitUtf8LeadCascade b0Int twoByteBranch threeByteBranch fourByteBranch rawByteBranch
+    let asciiDefaultAlt = FlatAlt FDefault [] multiByteIdx
+        asciiTrueAlt = FlatAlt (FLitAlt (LEInt 1)) [] rawByteBranch
+    emitNode $ NCase isAscii 0 [asciiDefaultAlt, asciiTrueAlt]
+
+-- | Dispatch on the lead byte's high bits (via AND-mask + equality test, the
+-- same idiom this file already uses for @IntLe@-style boolean primop results)
+-- to pick the 2/3/4-byte UTF-8 branch, falling back to @fallbackBranch@ if
+-- none of the standard lead-byte patterns (0xC0/0xE0/0xF0 after masking)
+-- match.
+emitUtf8LeadCascade :: Int -> Int -> Int -> Int -> Int -> TransM Int
+emitUtf8LeadCascade b0Int twoByteBranch threeByteBranch fourByteBranch fallbackBranch = do
+    maskE0 <- emitNode $ NLit (LEInt 0xE0)
+    b0E0 <- emitOp (T.pack "IntAnd") [b0Int, maskE0]
+    litC0 <- emitNode $ NLit (LEInt 0xC0)
+    isTwo <- emitOp (T.pack "IntEq") [b0E0, litC0]
+    let twoDefaultAlt = FlatAlt FDefault [] fallbackBranch
+        twoTrueAlt = FlatAlt (FLitAlt (LEInt 1)) [] twoByteBranch
+    twoTestIdx <- emitNode $ NCase isTwo 0 [twoDefaultAlt, twoTrueAlt]
+
+    maskF0 <- emitNode $ NLit (LEInt 0xF0)
+    b0F0 <- emitOp (T.pack "IntAnd") [b0Int, maskF0]
+    litE0 <- emitNode $ NLit (LEInt 0xE0)
+    isThree <- emitOp (T.pack "IntEq") [b0F0, litE0]
+    let threeDefaultAlt = FlatAlt FDefault [] twoTestIdx
+        threeTrueAlt = FlatAlt (FLitAlt (LEInt 1)) [] threeByteBranch
+    threeTestIdx <- emitNode $ NCase isThree 0 [threeDefaultAlt, threeTrueAlt]
+
+    maskF8 <- emitNode $ NLit (LEInt 0xF8)
+    b0F8 <- emitOp (T.pack "IntAnd") [b0Int, maskF8]
+    litF0 <- emitNode $ NLit (LEInt 0xF0)
+    isFour <- emitOp (T.pack "IntEq") [b0F8, litF0]
+    let fourDefaultAlt = FlatAlt FDefault [] threeTestIdx
+        fourTrueAlt = FlatAlt (FLitAlt (LEInt 1)) [] fourByteBranch
+    emitNode $ NCase isFour 0 [fourDefaultAlt, fourTrueAlt]
+
+-- | Emit the branch body for an n-byte (n = 2,3,4) UTF-8 sequence: read the
+-- (n-1) continuation bytes at offsets 1..(n-1) from @aId@ (via
+-- 'IndexCharOffAddr's own offset argument — no extra pointer arithmetic
+-- needed to peek ahead), mask+shift+OR them together with the lead byte's
+-- data bits (@leadMask@ selects how many of the lead byte's low bits carry
+-- payload), convert the combined code point back to a boxed Char#, and
+-- recurse advancing the address by n.
+emitUtf8NByteBranch :: Word64 -> Int -> Int -> Int -> Int -> (Int -> Int -> TransM Int) -> TransM Int
+emitUtf8NByteBranch aId goRef b0Int n leadMask combine = do
+    let charId = varId (dataConWorkId charDataCon)
+    leadMaskLit <- emitNode $ NLit (LEInt (fromIntegral leadMask))
+    leadBits <- emitOp (T.pack "IntAnd") [b0Int, leadMaskLit]
+    shiftAmt0 <- emitNode $ NLit (LEInt (fromIntegral (6 * (n - 1))))
+    accInit <- emitOp (T.pack "IntShl") [leadBits, shiftAmt0]
+    acc <- foldM (\accIdx k -> do
+        aRef <- emitNode $ NVar aId
+        offLit <- emitNode $ NLit (LEInt (fromIntegral k))
+        contByteChar <- emitOp (T.pack "IndexCharOffAddr") [aRef, offLit]
+        contByteInt <- emitOp (T.pack "Ord") [contByteChar]
+        contMaskLit <- emitNode $ NLit (LEInt 0x3F)
+        contBits <- emitOp (T.pack "IntAnd") [contByteInt, contMaskLit]
+        let shiftAmt = 6 * (n - 1 - k)
+        shifted <- if shiftAmt == 0
+                     then pure contBits
+                     else do
+                       shiftLit <- emitNode $ NLit (LEInt (fromIntegral shiftAmt))
+                       emitOp (T.pack "IntShl") [contBits, shiftLit]
+        emitOp (T.pack "IntOr") [accIdx, shifted]
+      ) accInit [1 .. n - 1]
+    cpChar <- emitOp (T.pack "Chr") [acc]
+    charBox <- emitNode $ NCon charId [cpChar]
+    aRef2 <- emitNode $ NVar aId
+    lenLit <- emitNode $ NLit (LEInt (fromIntegral n))
+    nextAddr <- emitOp (T.pack "PlusAddr") [aRef2, lenLit]
+    goNext <- emitNode $ NApp goRef nextAddr
+    combine charBox goNext
+
+-- | Emit a runtime unpackCString# loop for a non-static Addr# value,
+-- UTF-8-decoding multi-byte sequences (not one byte per Char# — see H1).
 -- Produces: letrec go = \a -> case indexCharOffAddr# a 0# of
---             { '\0'# -> []; c -> C# c : go (plusAddr# a 1#) }
+--             { '\0'# -> []; _ -> <decode step> }
 --           in go addrIdx
 emitRuntimeUnpackCString :: Int -> TransM Int
 emitRuntimeUnpackCString addrIdx = do
     goId <- freshSynthVarId
     aId <- freshSynthVarId
-    let consId = varId (dataConWorkId consDataCon)
-        nilId  = varId (dataConWorkId nilDataCon)
-        charId = varId (dataConWorkId charDataCon)
+    let nilId  = varId (dataConWorkId nilDataCon)
+        consId = varId (dataConWorkId consDataCon)
     recordDC consDataCon
     recordDC nilDataCon
     recordDC charDataCon
-    -- Body: indexCharOffAddr# a 0#
+    nilIdx <- emitNode $ NCon nilId []
+    goRef <- emitNode $ NVar goId
     aRef <- emitNode $ NVar aId
     lit0 <- emitNode $ NLit (LEInt 0)
-    charAt <- emitNode $ NPrimOp (T.pack "IndexCharOffAddr") [aRef, lit0]
-    -- [] (nil result)
-    nilIdx <- emitNode $ NCon nilId []
-    -- C# charAt : go (plusAddr# a 1#)
-    charBox <- emitNode $ NCon charId [charAt]
-    lit1 <- emitNode $ NLit (LEInt 1)
-    aRef2 <- emitNode $ NVar aId
-    nextAddr <- emitNode $ NPrimOp (T.pack "PlusAddr") [aRef2, lit1]
-    goRef <- emitNode $ NVar goId
-    goNext <- emitNode $ NApp goRef nextAddr
-    consResult <- emitNode $ NCon consId [charBox, goNext]
-    -- case charAt of { '\0'# -> []; DEFAULT -> consResult }
+    byte0 <- emitOp (T.pack "IndexCharOffAddr") [aRef, lit0]
+    decodeIdx <- emitUtf8DecodeStep aId goRef byte0 $ \charBox goNext ->
+      emitNode $ NCon consId [charBox, goNext]
+    -- case byte0 of { '\0'# -> []; DEFAULT -> decodeIdx }
     let nullAlt = FlatAlt (FLitAlt (LEChar 0)) [] nilIdx
-        defaultAlt = FlatAlt FDefault [] consResult
-    caseIdx <- emitNode $ NCase charAt 0 [nullAlt, defaultAlt]
+        defaultAlt = FlatAlt FDefault [] decodeIdx
+    caseIdx <- emitNode $ NCase byte0 0 [nullAlt, defaultAlt]
     -- \a -> case ...
     lamA <- emitNode $ NLam aId caseIdx
     -- go addrIdx
@@ -191,38 +289,57 @@ emitRuntimeUnpackCString addrIdx = do
 -- | Emit a runtime unpackAppendCString# loop for a non-static Addr# value.
 -- Like emitRuntimeUnpackCString but appends suffix instead of []:
 -- letrec go = \a -> case indexCharOffAddr# a 0# of
---           { '\0'# -> suffix; c -> C# c : go (plusAddr# a 1#) }
+--           { '\0'# -> suffix; _ -> <decode step> }
 --         in go addrIdx
 emitRuntimeUnpackAppendCString :: Int -> Int -> TransM Int
 emitRuntimeUnpackAppendCString addrIdx suffixIdx = do
     goId <- freshSynthVarId
     aId <- freshSynthVarId
     let consId = varId (dataConWorkId consDataCon)
-        charId = varId (dataConWorkId charDataCon)
     recordDC consDataCon
     recordDC charDataCon
-    -- Body: indexCharOffAddr# a 0#
+    goRef <- emitNode $ NVar goId
     aRef <- emitNode $ NVar aId
     lit0 <- emitNode $ NLit (LEInt 0)
-    charAt <- emitNode $ NPrimOp (T.pack "IndexCharOffAddr") [aRef, lit0]
-    -- C# charAt : go (plusAddr# a 1#)
-    charBox <- emitNode $ NCon charId [charAt]
-    lit1 <- emitNode $ NLit (LEInt 1)
-    aRef2 <- emitNode $ NVar aId
-    nextAddr <- emitNode $ NPrimOp (T.pack "PlusAddr") [aRef2, lit1]
-    goRef <- emitNode $ NVar goId
-    goNext <- emitNode $ NApp goRef nextAddr
-    consResult <- emitNode $ NCon consId [charBox, goNext]
-    -- case charAt of { '\0'# -> suffix; DEFAULT -> consResult }
+    byte0 <- emitOp (T.pack "IndexCharOffAddr") [aRef, lit0]
+    decodeIdx <- emitUtf8DecodeStep aId goRef byte0 $ \charBox goNext ->
+      emitNode $ NCon consId [charBox, goNext]
+    -- case byte0 of { '\0'# -> suffix; DEFAULT -> decodeIdx }
     let nullAlt = FlatAlt (FLitAlt (LEChar 0)) [] suffixIdx
-        defaultAlt = FlatAlt FDefault [] consResult
-    caseIdx <- emitNode $ NCase charAt 0 [nullAlt, defaultAlt]
+        defaultAlt = FlatAlt FDefault [] decodeIdx
+    caseIdx <- emitNode $ NCase byte0 0 [nullAlt, defaultAlt]
     -- \a -> case ...
     lamA <- emitNode $ NLam aId caseIdx
     -- go addrIdx
     goRef2 <- emitNode $ NVar goId
     appIdx <- emitNode $ NApp goRef2 addrIdx
     -- letrec go = \a -> ... in go addrIdx
+    emitNode $ NLetRec [(goId, lamA)] appIdx
+
+-- | Emit a runtime unpackFoldrCString# loop for a non-static Addr# value.
+-- Mirrors emitRuntimeUnpackAppendCString but folds via (f, z) instead of
+-- appending a fixed suffix:
+-- letrec go = \a -> case indexCharOffAddr# a 0# of
+--           { '\0'# -> z; _ -> f (C# cp) (go (plusAddr# a n)) }
+--         in go addrIdx
+emitRuntimeUnpackFoldrCString :: Int -> Int -> Int -> TransM Int
+emitRuntimeUnpackFoldrCString addrIdx fIdx zIdx = do
+    goId <- freshSynthVarId
+    aId <- freshSynthVarId
+    recordDC charDataCon
+    goRef <- emitNode $ NVar goId
+    aRef <- emitNode $ NVar aId
+    lit0 <- emitNode $ NLit (LEInt 0)
+    byte0 <- emitOp (T.pack "IndexCharOffAddr") [aRef, lit0]
+    decodeIdx <- emitUtf8DecodeStep aId goRef byte0 $ \charBox goNext -> do
+      fCharIdx <- emitNode $ NApp fIdx charBox
+      emitNode $ NApp fCharIdx goNext
+    let nullAlt = FlatAlt (FLitAlt (LEChar 0)) [] zIdx
+        defaultAlt = FlatAlt FDefault [] decodeIdx
+    caseIdx <- emitNode $ NCase byte0 0 [nullAlt, defaultAlt]
+    lamA <- emitNode $ NLam aId caseIdx
+    goRef2 <- emitNode $ NVar goId
+    appIdx <- emitNode $ NApp goRef2 addrIdx
     emitNode $ NLetRec [(goId, lamA)] appIdx
 
 -- | Emit a safe replacement body for $fShowDouble_$sshowSignedFloat.
@@ -986,11 +1103,11 @@ translate expr =
         recordDC nilDataCon
         recordDC charDataCon
         nilIdx <- emitNode $ NCon nilId []
-        foldM (\acc byte -> do
-            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+        foldM (\acc cp -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             emitNode $ NCon consId [charIdx, acc]
-          ) nilIdx (reverse bytes)
+          ) nilIdx (reverse (utf8CodepointsOf bytes))
 
     -- Fallback: unpackCString# with non-static Addr# (e.g., computed via plusAddr#).
     -- Desugar to runtime iteration using IndexCharOffAddr/PlusAddr primops.
@@ -1025,11 +1142,11 @@ translate expr =
                 charId = varId (dataConWorkId charDataCon)
             recordDC consDataCon
             recordDC charDataCon
-            bodyIdx <- foldM (\acc byte -> do
-                unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            bodyIdx <- foldM (\acc cp -> do
+                unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
                 charIdx <- emitNode $ NCon charId [unboxedCharIdx]
                 emitNode $ NCon consId [charIdx, acc]
-              ) sufRef (reverse bytes)
+              ) sufRef (reverse (utf8CodepointsOf bytes))
             emitNode $ NLam sufId bodyIdx
           Nothing -> do
             -- Dynamic: build \suffix -> runtime unpackAppend
@@ -1061,11 +1178,11 @@ translate expr =
             charId = varId (dataConWorkId charDataCon)
         recordDC consDataCon
         recordDC charDataCon
-        foldM (\acc byte -> do
-            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+        foldM (\acc cp -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             emitNode $ NCon consId [charIdx, acc]
-          ) suffixIdx (reverse bytes)
+          ) suffixIdx (reverse (utf8CodepointsOf bytes))
 
     -- Intercept error calls to preserve message string
     Var v | isErrorVar v -> do
@@ -1087,19 +1204,31 @@ translate expr =
     -- GHC's build/foldr fusion rewrites foldr/build pairs into unpackFoldrCString#,
     -- whose unfolding uses plusAddr#/indexCharOffAddr# (Addr# pointer arithmetic).
     -- We intercept and expand statically to avoid needing Addr# primops.
+    --
+    -- `extraArgs`: some fusion instantiations (e.g. length's `a ~ Int -> Int`
+    -- continuation-accumulator trick) apply the (lit, f, z) result to further
+    -- value args beyond the syntactic triple (REPRODUCED: `T.length "héllo"`
+    -- lowers to `unpackFoldrCStringUtf8# lit lengthFB (id \@Int) (I# 0#)` — 4
+    -- value args, not 3). An exact-length `[litArg, fArg, zArg]` match misses
+    -- this and falls through to a dangling NVar (H2). Re-apply any such extras
+    -- to the expanded result.
     Var v | isUnpackFoldrCStringVar v
-          , [litArg, fArg, zArg] <- args
+          , (litArg : fArg : zArg : extraArgs) <- args
           , Just bytes <- extractAddrLitBytes litArg -> do
         zIdx <- translate zArg
         fIdx <- translate fArg
         let charId = varId (dataConWorkId charDataCon)
         recordDC charDataCon
-        foldM (\acc byte -> do
-            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+        resultIdx <- foldM (\acc cp -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             fCharIdx <- emitNode $ NApp fIdx charIdx
             emitNode $ NApp fCharIdx acc
-          ) zIdx (reverse bytes)
+          ) zIdx (reverse (utf8CodepointsOf bytes))
+        foldM (\fnIdx extraArg -> do
+            extraIdx <- translate extraArg
+            emitNode $ NApp fnIdx extraIdx
+          ) resultIdx extraArgs
 
     -- Partial application of unpackFoldrCString# (2 args: lit + f).
     -- GHC.CString's rules produce these under build/augment
@@ -1117,12 +1246,12 @@ translate expr =
         zRef <- emitNode $ NVar zId
         let charId = varId (dataConWorkId charDataCon)
         recordDC charDataCon
-        bodyIdx <- foldM (\acc byte -> do
-            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+        bodyIdx <- foldM (\acc cp -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             fCharIdx <- emitNode $ NApp fIdx charIdx
             emitNode $ NApp fCharIdx acc
-          ) zRef (reverse bytes)
+          ) zRef (reverse (utf8CodepointsOf bytes))
         emitNode $ NLam zId bodyIdx
 
     -- Partial application of unpackFoldrCString# (1 arg: lit only, the
@@ -1136,14 +1265,45 @@ translate expr =
         zRef <- emitNode $ NVar zId
         let charId = varId (dataConWorkId charDataCon)
         recordDC charDataCon
-        bodyIdx <- foldM (\acc byte -> do
-            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+        bodyIdx <- foldM (\acc cp -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral cp))
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             fCharIdx <- emitNode $ NApp fRef charIdx
             emitNode $ NApp fCharIdx acc
-          ) zRef (reverse bytes)
+          ) zRef (reverse (utf8CodepointsOf bytes))
         lamZ <- emitNode $ NLam zId bodyIdx
         emitNode $ NLam fId lamZ
+
+    -- Fallback: unpackFoldrCString# with non-static addr (e.g. a computed
+    -- Addr#, mirroring unpackAppendCString#'s non-literal fallback above).
+    -- Any extra trailing args (see the over-saturated static arm above) are
+    -- re-applied to the runtime-loop result.
+    Var v | isUnpackFoldrCStringVar v
+          , (litArg : fArg : zArg : extraArgs) <- args
+          , Nothing <- extractAddrLitBytes litArg -> do
+        litIdx <- translate litArg
+        fIdx <- translate fArg
+        zIdx <- translate zArg
+        resultIdx <- emitRuntimeUnpackFoldrCString litIdx fIdx zIdx
+        foldM (\fnIdx extraArg -> do
+            extraIdx <- translate extraArg
+            emitNode $ NApp fnIdx extraIdx
+          ) resultIdx extraArgs
+
+    -- Zero-arg unpackFoldrCString# (eta-reduced): emit as \addr -> \f -> \z -> go addr f z
+    -- (mirroring unpackAppendCString#'s zero-arg fallback above).
+    Var v | isUnpackFoldrCStringVar v
+          , null args -> do
+        adrId <- freshSynthVarId
+        fId <- freshSynthVarId
+        zId <- freshSynthVarId
+        adrRef <- emitNode $ NVar adrId
+        fRef <- emitNode $ NVar fId
+        zRef <- emitNode $ NVar zId
+        bodyIdx <- emitRuntimeUnpackFoldrCString adrRef fRef zRef
+        lamZ <- emitNode $ NLam zId bodyIdx
+        lamF <- emitNode $ NLam fId lamZ
+        emitNode $ NLam adrId lamF
 
     -- Desugar (++) xs ys → letrec go = \a -> case a of { [] -> ys; (:) x rest -> (:) x (go rest) } in go xs
     -- GHC.Internal.Base.++ has no unfolding available from the .hi file.
@@ -1547,11 +1707,17 @@ translateHead = \case
               bodyIdx <- translate body
               inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
-            [s', r1, r2]   -> do
-              bodyIdx <- translate body
-              c2 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
-              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            [_, _, _]   ->
+              -- M5: this generic fallback can't split a real 2-result unboxed
+              -- tuple — both binders would bind to the SAME primop node
+              -- (aliasing, not the distinct old-value/flag fields a real op
+              -- like casSmallArray# returns), and re-casing primIdx per
+              -- binder risks running a stateful primop twice. Fail loud at
+              -- extract time instead of silently miscompiling; a real 2-result
+              -- stateful op needs a dedicated split (see splitMultiReturnPrimOp).
+              error $ "Unsupported 2-result stateful unboxed-tuple primop/FFI call: "
+                ++ showPprUnsafe v
+                ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
             [s', r1, r2, r3] -> do
               bodyIdx <- translate body
               c3 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
@@ -1566,11 +1732,12 @@ translateHead = \case
             [result] -> do
               bodyIdx <- translate body
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] bodyIdx]
-            [r1, r2] -> do
-              -- Pure 2-result primop (e.g. decodeDouble_Int64#, casSmallArray#)
-              bodyIdx <- translate body
-              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] bodyIdx]
-              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            [_, _] ->
+              -- M5: same landmine as the stateful 2-result arm above — both
+              -- binders would alias the same primop node. Fail loud.
+              error $ "Unsupported 2-result pure unboxed-tuple primop: "
+                ++ showPprUnsafe v
+                ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
             _ -> error $ "Unsupported pure unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
   Case scrut b _alts_ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc -> do
@@ -2385,6 +2552,14 @@ extractAddrLitBytes (Var v) =
       Just (Lit (LitString bs)) -> Just (BS.unpack bs)
       _ -> Nothing
 extractAddrLitBytes _ = Nothing
+
+-- | Decode the raw bytes GHC embeds for a String literal's Addr# (always
+-- well-formed UTF-8, whatever the unpackCString#/unpackCStringUtf8# variant)
+-- into Unicode code points. One entry per 'Char', not one per byte — feeding
+-- raw bytes straight into 'LEChar' (as the pre-fix code did) corrupts any
+-- literal with a non-ASCII character (H1/H2).
+utf8CodepointsOf :: [Word8] -> [Int]
+utf8CodepointsOf = map ord . T.unpack . TE.decodeUtf8 . BS.pack
 
 primOpArity :: PrimOp -> Int
 primOpArity op = let (_, _, _, a, _) = primOpSig op in a

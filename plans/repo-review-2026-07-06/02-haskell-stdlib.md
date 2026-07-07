@@ -25,7 +25,7 @@ style question: models type canonical Haskell and trust canonical semantics.
 
 ## HIGH — reproduced or trivially reachable
 
-### H1. Non-ASCII `String` literals silently corrupted (REPRODUCED LIVE)
+### H1. Non-ASCII `String` literals silently corrupted (REPRODUCED LIVE) — [FIXED]
 
 **Where:** `haskell/src/Tidepool/Translate.hs:979-993` (+
 `emitRuntimeUnpackCString` at :155-189).
@@ -40,7 +40,24 @@ literal gives wrong answers with no error. `Text` literals are unaffected
 static arm; give the runtime `Addr#` loop (`emitRuntimeUnpackCString`) a
 decoding variant.
 
-### H2. Non-ASCII literals in fusion contexts abort extraction with a misleading error (REPRODUCED LIVE)
+**Done:** added a shared `utf8CodepointsOf :: [Word8] -> [Int]` decode helper
+(`Translate.hs`, next to `extractAddrLitBytes`) and applied it at every
+literal-unpack cons-cell site (`unpackCString#`, `unpackAppendCString#`
+static+partial, `unpackFoldrCString#` static+partial — not just the one arm
+named above, since all of them shared the identical byte-per-`LEChar` bug).
+Also gave the runtime (non-literal) `Addr#` loops a real UTF-8 decoding
+variant (`emitUtf8DecodeStep`/`emitUtf8LeadCascade`/`emitUtf8NByteBranch`,
+hand-built primop IR: mask+`IntEq`-cascade on the lead byte's high bits,
+shift+OR the continuation bytes' data bits, `Chr`/`Ord` to convert), shared
+by all three `emitRuntimeUnpackCString`/`AppendCString`/`FoldrCString` loops
+— not reachable by either live repro (both go through the static-literal
+arms) but asked for explicitly since ASCII-only coverage there was equally a
+landmine for any future non-literal non-ASCII Addr#. Malformed/unexpected
+lead bytes fall back to treating the byte as-is (best effort, never traps).
+Regression tests: `stdlib_regressions_02.rs` `works_nonascii_*` (2-byte é,
+3-byte — and €, both `\NNNN`-escaped and raw UTF-8 source bytes).
+
+### H2. Non-ASCII literals in fusion contexts abort extraction with a misleading error (REPRODUCED LIVE) — [FIXED, discrepancy noted]
 
 **Where:** `Translate.hs:1090-1146` — `unpackFoldrCStringUtf8#` has no
 non-static/zero-arg fallback arms.
@@ -53,7 +70,29 @@ while the ASCII version works (falls through to bare `NVar`;
 **Fix:** add the fallback arms `unpackAppendCString#` already has
 (Translate.hs:1003-1052), folding in the decode from H1.
 
-### H3. `replicate` with negative n never terminates
+**Discrepancy:** the root cause is NOT missing non-static/zero-arg fallback
+arms (that part of the finding doesn't hold against the code — the "Just
+bytes" static arm's 3-element list pattern DOES match for the héllo literal;
+`extractAddrLitBytes` is content-agnostic). Confirmed via
+`TIDEPOOL_DUMP_CLOSED=y`: `T.length "héllo"` lowers to
+`unpackFoldrCStringUtf8# lit lengthFB (id @Int) (I# 0#)` — the length-fusion
+`foldr`/`build` instantiates the folded type `a` as `Int -> Int` (the
+strictness-accumulator trick), so the fully-fused call carries a FOURTH value
+arg beyond the syntactic `(lit, f, z)` triple. An exact-length
+`[litArg, fArg, zArg]` pattern silently misses this over-saturated
+application and falls through to a dangling `NVar` — under-saturation was
+never the issue; the ASCII control case (`T.length "hello"`) doesn't even
+reach `unpackFoldrCString#` at all (GHC worker/wraps it into a self-contained
+specialized loop over the raw Addr#), so it was never a fair comparison.
+**Actual fix:** generalized the static arm's guard to
+`(litArg:fArg:zArg:extraArgs) <- args`, re-applying `extraArgs` to the
+expanded result. The (still-worth-having) non-static/zero-arg fallback arms
+were added too, mirroring `unpackAppendCString#`'s shape, reusing
+`emitRuntimeUnpackFoldrCString` (now UTF-8-decoding, see H1) — genuinely
+unreachable by any live repro but no longer missing.
+Regression test: `stdlib_regressions_02.rs::works_nonascii_fusion_context_length`.
+
+### H3. `replicate` with negative n never terminates — [FIXED]
 
 **Where:** `haskell/lib/Tidepool/Prelude.hs:524-529`.
 `go 0 = []; go !m = x : go (m-1)` skips the base case for negative `m` →
@@ -61,10 +100,19 @@ infinite list; the file's own comment (:930-933) says infinite lists SIGSEGV
 the JIT. Trivially reachable: `replicate (n - length xs) pad` when `xs` is
 longer. Base returns `[]`. **Fix:** `go m | m <= 0 = []`.
 
-### H4. `splitAt` with negative n returns components exactly swapped
+**Done:** applied exactly as prescribed. Regression test:
+`stdlib_regressions_02.rs::works_replicate_negative_n_terminates` (run with a
+generous `recv_timeout` — a cold per-eval GHC compile alone regularly takes
+20-70s in this suite, so the timeout window has to comfortably exceed that or
+it reads as "still hanging" regardless of the fix).
+
+### H4. `splitAt` with negative n returns components exactly swapped — [FIXED]
 
 **Where:** `Prelude.hs:442-449`. Returns `(xs, [])`; base returns `([], xs)`.
 Silent. **Fix:** `go m ys | m <= 0 = ([], ys)`.
+
+**Done:** applied exactly as prescribed. Regression test:
+`stdlib_regressions_02.rs::works_splitat_negative_n_matches_base`.
 
 ## MEDIUM
 
@@ -95,13 +143,33 @@ rejection for plain in-place edits; `/dev/null` create-detection misses.
 **Where:** `Patch.hs:394, 422`. Applying such a patch silently produces the
 wrong trailing newline. **Fix:** track the marker per side, or reject loudly.
 
-### M5. 2-result unboxed-tuple fallback binds BOTH result binders to the same primop node
+### M5. 2-result unboxed-tuple fallback binds BOTH result binders to the same primop node — [FIXED]
 
 **Where:** `Translate.hs:1550-1574`. E.g. `casSmallArray#`'s `flag` binder
 would receive a heap pointer (JIT returns only the old value); stateful
 primops risk double execution. No reachable stdlib path today — a landmine.
 **Fix:** hard `error` naming the op on the 2-result arms (fail loud at extract
 time instead of silently miscompiling).
+
+**Done:** both the pure and the stateful 2-result arms now `error` naming the
+offending primop/FFI call (via `showPprUnsafe v`), instead of aliasing both
+result binders to the same primop node. No correct 2-result split was
+attempted — fail-loud is the locked scope. Since this has no reachable
+stdlib path (confirmed: every multi-result primop the stdlib actually calls —
+`quotRem`, `addC`/`subC`, `decodeDouble_Int64#` — already goes through the
+dedicated `splitMultiReturnPrimOp`/`splitUnaryMultiReturnPrimOp` split, never
+this generic fallback), it can't be pinned as a `code: &str` JIT probe (the
+MCP preamble's fixed pragma set doesn't include `MagicHash`/`UnboxedTuples`).
+Verified directly against the extract binary instead, with hand-written
+`MagicHash`/`UnboxedTuples` source hitting both now-error'd arms:
+- pure: `case decodeFloat_Int# f of (# m, e #) -> ...` →
+  `"Unsupported 2-result pure unboxed-tuple primop: decodeFloat_Int#"`
+- stateful: `case casArray# arr 0# old new s of (# s', flag, oldVal #) -> ...`
+  → `"Unsupported 2-result stateful unboxed-tuple primop/FFI call: casArray#"`
+
+Both abort extraction with the named marker (`SKIPPED`, not a crash or a
+silent miscompile) — see the note in `stdlib_regressions_02.rs` for why this
+isn't duplicated as a Rust test.
 
 ### M6. `Slice [a]` negative-n semantics diverge from base AND from `Slice Text`
 
@@ -126,12 +194,17 @@ Data.Char, or rename to `isAsciiAlpha` etc. (API-is-the-prompt: prefer match).
 `Data.Text.center`. **Fix:** swap `lpad`/`rpad`; make `TextFormat.hs:116`
 `centerWith` agree.
 
-### M10. `Len [a]` non-guarded recursion — JIT stack death on long lists
+### M10. `Len [a]` non-guarded recursion — JIT stack death on long lists — [FIXED]
 
 **Where:** `Prelude.hs:583-586`. `1 + len xs`; the repo's own evidence
 (`Data/Text.hs:273-282`) is ~20k depth kills the JIT stack; the adjacent
 `length` was deliberately accumulator-strict. **Fix:** same accumulator shape.
 (Note: plan 01 finding 5 may raise the real ceiling — this fix is still right.)
+
+**Done:** `Len [a]`'s instance now shares `length`'s accumulator-strict `go`
+shape (`go !acc [] = acc; go !acc (_:xs) = go (acc+1) xs`). Regression test:
+`stdlib_regressions_02.rs::works_len_class_long_list_no_stack_death` (50k
+elements, comfortably past the ~20k non-tail-call ceiling).
 
 ## LOW
 
@@ -198,9 +271,23 @@ claims (Opt_FullLaziness/Opt_CprAnal, stdlib embedding) hold.
 
 ## DONE CRITERIA
 
-- [ ] H1–H4 fixed; non-ASCII lane added (TextSuite + jit_surface.rs) and green
-- [ ] M1–M10 fixed (each with a pinning test where the harness reaches it)
-- [ ] Lows fixed or filed; RustSections.hs items fixed in-place (it's WIP)
-- [ ] Fixtures regenerated per haskell/CLAUDE.md; `scripts/battery.sh` green
+- [x] H1–H4 fixed; non-ASCII lane added and green — landed in a NEW file,
+      `tidepool-runtime/tests/stdlib_regressions_02.rs` (not `jit_surface.rs`/
+      `TextSuite.hs`, to avoid touching files another worker owns in this
+      wave; see that file's module doc for the full probe set)
+- [ ] M1–M10 fixed (each with a pinning test where the harness reaches it) —
+      **partial, by design this wave:** only M5 and M10 are in scope here and
+      both are fixed (see their entries above); M1-M4/M6-M9 are a later wave
+- [ ] Lows fixed or filed; RustSections.hs items fixed in-place (it's WIP) —
+      out of scope this wave
+- [ ] Fixtures regenerated per haskell/CLAUDE.md; `scripts/battery.sh` green —
+      out of scope this wave (root's job post-merge); regeneration WAS done
+      transiently to differentially verify H1/H2/M5 against the full
+      `test/Suite.hs` corpus (218/218 `haskell_suite`/`haskell_suite_differential`
+      tests green) — the regenerated fixtures were then reverted (`git
+      checkout`) since two consecutive regenerations from the SAME unchanged
+      binary already differ in GHC's non-deterministic synthetic-name
+      suffixes, so committing them would be pure noise unrelated to this fix
 - [ ] Redeployed via `scripts/redeploy.sh`; live-server spot-check of H1/H2
-      repros now correct (`map fromEnum "hé"` → `[104,233]`)
+      repros now correct (`map fromEnum "hé"` → `[104,233]`) — root's job
+      after merge, per this branch's task boundary
