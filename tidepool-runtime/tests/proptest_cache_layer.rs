@@ -826,16 +826,20 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
 }
 
 // ---------------------------------------------------------------------------
-// F7 (REFUTED — verified negative): symlink cycle in an include dir
+// F7 / repo-review-2026-07-06 plan 03 cache edge: symlink cycle in an include dir
 // ---------------------------------------------------------------------------
 
-/// VERIFIED NEGATIVE F7: `fingerprint_dir` recurses via `path.is_dir()`,
-/// which follows symlinks, so a self-referencing symlink (`inc/loop -> inc`)
-/// LOOKS like unbounded recursion. In practice the kernel bounds it: each
-/// recursion level adds a symlink component to the path, and path resolution
-/// fails with ELOOP after ~40 symlink traversals (and PATH_MAX bounds
-/// physical nesting), so `read_dir` errors and the walker unwinds gracefully.
-/// This test pins that accidental safety net as a regression guard.
+/// `fingerprint_dir` recurses via `path.is_dir()`, which follows symlinks, so
+/// a self-referencing symlink (`inc/loop -> inc`) LOOKS like unbounded
+/// recursion. Historically the kernel bounded it by accident (each recursion
+/// level adds a symlink component to the path, and path resolution fails with
+/// ELOOP after ~40 symlink traversals, so `read_dir` errors and the walker
+/// unwinds) — but that safety net is an incidental property of path-length
+/// limits, not a guarantee (filesystem/OS-dependent, and ~40 stack frames +
+/// syscalls deep before it kicks in). `fingerprint_dir` now tracks visited
+/// CANONICALIZED directories explicitly and skips a repeat, so the cycle is
+/// broken in O(1) instead of relying on ELOOP. This test pins the (now
+/// deliberate) termination as a regression guard.
 #[test]
 #[serial]
 fn symlink_cycle_in_include_dir_terminates_gracefully() {
