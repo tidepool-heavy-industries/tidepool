@@ -234,6 +234,16 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
 /// targets — `exec "/path/to/bin" "$@"` (the shellcheck-recommended form,
 /// proptest_cache_layer F5): an unfollowed wrapper target means delegate
 /// binary upgrades silently serve stale Core.
+///
+/// KNOWN GAP (repo-review-2026-07-06 plan 03, filed not fixed): a target
+/// spelled via a shell variable or relative path (`exec "$DIR/bin"`,
+/// `exec ./bin`) is NOT resolved — only a literal absolute path is followed.
+/// Fixing this in general requires interpreting shell variable assignment
+/// (`DIR=$(dirname "$0")` and its many variants), which is unbounded — a
+/// small text scanner cannot soundly evaluate arbitrary shell. Direct-path
+/// wrappers (the common case for nix/cargo-installed binaries) ARE followed;
+/// only the variable/relative-path spelling silently misses a delegate-only
+/// upgrade.
 fn extract_exec_target(line: &str) -> Option<&str> {
     let line = line.strip_prefix("exec ").unwrap_or(line);
     if line.is_empty() || line.starts_with('#') {
@@ -259,8 +269,30 @@ fn extract_exec_target(line: &str) -> Option<&str> {
 }
 
 /// Recursively walks a directory to fingerprint its contents.
-/// Considers file paths, sizes, and modification times of `.hs` and `.hs-boot` files.
+/// Hashes the CONTENT (not size/mtime — see the content-hash note below) of
+/// every `.hs` and `.hs-boot` file, keyed by path.
 fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
+    let mut visited = std::collections::HashSet::new();
+    fingerprint_dir_inner(dir, hasher, &mut visited);
+}
+
+/// `visited` holds the CANONICALIZED path of every directory already walked:
+/// `path.is_dir()` follows symlinks, so a directory symlink under an include
+/// dir that (directly or transitively) points back at an ancestor would
+/// otherwise recurse forever. Canonicalizing and checking membership before
+/// descending breaks the cycle (and, as a side effect, a diamond of two
+/// symlinks to the same real directory is only hashed once).
+fn fingerprint_dir_inner(
+    dir: &Path,
+    hasher: &mut blake3::Hasher,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    if let Ok(canon) = fs::canonicalize(dir) {
+        if !visited.insert(canon) {
+            return;
+        }
+    }
+
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -270,7 +302,7 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
     for entry in paths {
         let path = entry.path();
         if path.is_dir() {
-            fingerprint_dir(&path, hasher);
+            fingerprint_dir_inner(&path, hasher, visited);
             continue;
         }
         let Some(ext) = path.extension() else {
@@ -505,6 +537,32 @@ mod tests {
             k1, k2,
             "Cache key should change when dependency file changes"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cache_key_handles_symlink_cycle_in_include_dir() {
+        use std::os::unix::fs::symlink;
+
+        let include_dir = TempDir::new().unwrap();
+        let hs_file = include_dir.path().join("Lib.hs");
+        fs::write(&hs_file, "module Lib where").unwrap();
+
+        // A cyclic directory symlink: `include_dir/loop` points straight back
+        // at `include_dir` itself. `path.is_dir()` follows symlinks, so a
+        // naive recursive walk would descend into `loop`, find `loop` again
+        // inside it, and never terminate.
+        let loop_link = include_dir.path().join("loop");
+        symlink(include_dir.path(), &loop_link).unwrap();
+
+        let source = "import Lib\nmain = print 42";
+        let target = "main";
+        let includes = [include_dir.path()];
+
+        // Must return promptly (the cycle guard breaks the recursion) rather
+        // than hang the process.
+        let _key = cache_key(source, target, &includes);
     }
 
     #[cfg(unix)]

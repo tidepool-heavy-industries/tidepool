@@ -50,7 +50,10 @@ proptest! {
     }
 
     /// Test that dispatching with a tag beyond the HList length returns an error.
-    /// The error tag should be relative to the point of failure (HNil).
+    /// The error tag is the ORIGINAL out-of-range tag (#F2): each HCons layer
+    /// decrements on the way in to address the tail, then restores by 1 on the
+    /// way back out, so a caller sees the tag it actually dispatched with —
+    /// not the point-of-failure index relative to HNil.
     #[test]
     fn unknown_tag_returns_error(tag in 3u64..100u64) {
         let mut h3 = hlist![
@@ -67,8 +70,7 @@ proptest! {
         prop_assert!(res.is_err());
         match res {
             Err(EffectError::UnhandledEffect { tag: actual_tag }) => {
-                // Each HCons decrements the tag. After 3 handlers, tag becomes tag - 3.
-                prop_assert_eq!(actual_tag, tag - 3);
+                prop_assert_eq!(actual_tag, tag);
             }
             other => panic!("Expected UnhandledEffect, got {:?}", other),
         }

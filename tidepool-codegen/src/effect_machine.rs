@@ -205,19 +205,43 @@ impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
         // such collisions, and arity does not disambiguate). Fall back to the
         // unqualified lookup only when the qualified name is absent, preserving
         // the no-collision behaviour for any producer that omits qualified names.
-        let resolve = |kind: EffContKind| -> Result<u64, EffContKind> {
-            table
-                .get_by_qualified_name(kind.qualified_name())
-                .or_else(|| table.get_by_name(kind.name()))
-                .map(|t| t.0)
-                .ok_or(kind)
-        };
+        //
+        // The (qualified, bare) pairs are the SAME toolchain-pinned names the
+        // oracle resolves against (`tidepool_effect::machine::EffectMachine::new`)
+        // — hoisted as shared `pub` consts in `tidepool_effect::freer_names` so
+        // the two resolution schemes cannot drift apart (#F5).
+        let resolve =
+            |kind: EffContKind, qualified: &str, bare: &str| -> Result<u64, EffContKind> {
+                tidepool_effect::freer_names::resolve(table, qualified, bare)
+                    .map(|t| t.0)
+                    .ok_or(kind)
+            };
         Ok(ConTags {
-            val: resolve(EffContKind::Val)?,
-            e: resolve(EffContKind::E)?,
-            union: resolve(EffContKind::Union)?,
-            leaf: resolve(EffContKind::Leaf)?,
-            node: resolve(EffContKind::Node)?,
+            val: resolve(
+                EffContKind::Val,
+                tidepool_effect::freer_names::VAL_QUALIFIED,
+                tidepool_effect::freer_names::VAL,
+            )?,
+            e: resolve(
+                EffContKind::E,
+                tidepool_effect::freer_names::E_QUALIFIED,
+                tidepool_effect::freer_names::E,
+            )?,
+            union: resolve(
+                EffContKind::Union,
+                tidepool_effect::freer_names::UNION_QUALIFIED,
+                tidepool_effect::freer_names::UNION,
+            )?,
+            leaf: resolve(
+                EffContKind::Leaf,
+                tidepool_effect::freer_names::LEAF_QUALIFIED,
+                tidepool_effect::freer_names::LEAF,
+            )?,
+            node: resolve(
+                EffContKind::Node,
+                tidepool_effect::freer_names::NODE_QUALIFIED,
+                tidepool_effect::freer_names::NODE,
+            )?,
         })
     }
 }

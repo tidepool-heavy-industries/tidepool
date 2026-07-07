@@ -19,21 +19,26 @@ pub struct EffectMachine<'a> {
 
 impl<'a> EffectMachine<'a> {
     /// Create a new effect machine.
+    ///
+    /// Resolves each freer continuation constructor qualified-name-first
+    /// (mirroring the JIT sibling, `tidepool-codegen`'s
+    /// `effect_machine::ConTags::try_from`): a bare `get_by_name` returns
+    /// `None` on ambiguity, so any effectful program defining/importing a
+    /// colliding `Node`/`Leaf`/`Val`/`E`/`Union` (e.g. `data Tree = Node Tree
+    /// Tree | Leaf Int`) previously made the oracle misreport
+    /// `MissingConstructor` for a constructor that was merely AMBIGUOUS, not
+    /// absent (#F5).
     pub fn new(table: &'a DataConTable, heap: &'a mut dyn Heap) -> Result<Self, EffectError> {
-        let val_id = table
-            .get_by_name("Val")
+        use crate::freer_names as names;
+        let val_id = names::resolve(table, names::VAL_QUALIFIED, names::VAL)
             .ok_or(EffectError::MissingConstructor { name: "Val" })?;
-        let e_id = table
-            .get_by_name("E")
+        let e_id = names::resolve(table, names::E_QUALIFIED, names::E)
             .ok_or(EffectError::MissingConstructor { name: "E" })?;
-        let leaf_id = table
-            .get_by_name("Leaf")
+        let leaf_id = names::resolve(table, names::LEAF_QUALIFIED, names::LEAF)
             .ok_or(EffectError::MissingConstructor { name: "Leaf" })?;
-        let node_id = table
-            .get_by_name("Node")
+        let node_id = names::resolve(table, names::NODE_QUALIFIED, names::NODE)
             .ok_or(EffectError::MissingConstructor { name: "Node" })?;
-        let union_id = table
-            .get_by_name("Union")
+        let union_id = names::resolve(table, names::UNION_QUALIFIED, names::UNION)
             .ok_or(EffectError::MissingConstructor { name: "Union" })?;
         Ok(Self {
             table,
@@ -115,7 +120,9 @@ impl<'a> EffectMachine<'a> {
                                     })
                                 }
                             };
-                            // deep_force the request so FromCore never sees ThunkRef
+                            // Invariant: `req` is already deep-forced here — it
+                            // came out of `union_val`, which was deep-forced
+                            // above — so `FromCore` never sees a `ThunkRef`.
                             let req = ufields[1].clone();
                             (tag, req)
                         }
@@ -356,6 +363,97 @@ mod tests {
             qualified_name: None,
         });
         table
+    }
+
+    /// #F5: a user program defining/importing its own `Node`/`Leaf` (e.g.
+    /// `data Tree = Node Tree Tree | Leaf Int`, colliding on the bare name
+    /// with the freer continuation constructors) must not make the oracle
+    /// misreport `MissingConstructor` — `EffectMachine::new` must resolve the
+    /// freer `Node`/`Leaf` via their qualified names, exactly like the JIT's
+    /// `ConTags::try_from`.
+    #[test]
+    fn effect_machine_new_resolves_colliding_node_and_leaf_via_qualified_name() {
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(1),
+            name: "Val".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        table.insert(DataCon {
+            id: DataConId(2),
+            name: "E".to_string(),
+            tag: 2,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        table.insert(DataCon {
+            id: DataConId(5),
+            name: "Union".to_string(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        // The user's own `data Tree = Node Tree Tree | Leaf Int`, colliding on
+        // the bare name with the freer continuation constructors (same arity
+        // for Node: 2).
+        table.insert(DataCon {
+            id: DataConId(6),
+            name: "Node".to_string(),
+            tag: 0,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Tree.Node".to_string()),
+        });
+        table.insert(DataCon {
+            id: DataConId(7),
+            name: "Leaf".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Tree.Leaf".to_string()),
+        });
+        // The real freer continuation constructors, qualified.
+        table.insert(DataCon {
+            id: DataConId(3),
+            name: "Leaf".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some(crate::freer_names::LEAF_QUALIFIED.to_string()),
+        });
+        table.insert(DataCon {
+            id: DataConId(4),
+            name: "Node".to_string(),
+            tag: 2,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some(crate::freer_names::NODE_QUALIFIED.to_string()),
+        });
+
+        assert_eq!(
+            table.get_by_name("Node"),
+            None,
+            "bare name must be ambiguous (test setup sanity)"
+        );
+        assert_eq!(
+            table.get_by_name("Leaf"),
+            None,
+            "bare name must be ambiguous (test setup sanity)"
+        );
+
+        let mut heap = VecHeap::new();
+        let machine = EffectMachine::new(&table, &mut heap);
+        assert!(
+            machine.is_ok(),
+            "qualified-first resolution must resolve the freer Node/Leaf \
+             despite the bare-name collision, got {:?}",
+            machine.err()
+        );
     }
 
     #[test]
