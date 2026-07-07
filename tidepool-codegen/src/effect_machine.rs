@@ -5,6 +5,126 @@ use crate::machine_state::machine_state;
 use crate::yield_type::{Yield, YieldError};
 use tidepool_heap::layout as heap_layout;
 
+// ---------------------------------------------------------------------------
+// GC-safe local roots (Finding 3 fix, repo-review-2026-07-06/01-gc-memory-safety.md)
+// ---------------------------------------------------------------------------
+//
+// `parse_result`'s E arm used to hold `result`/`continuation`/`union_ptr`/
+// `tag_ptr`/`request` as bare `*mut u8` locals across multiple `force_ptr`
+// calls (each a GC point via `heap_force`) with zero `register_rust_root`
+// calls — a GC landing between two of those forces could relocate an
+// already-resolved pointer this function was still holding, and the stale
+// value would later be dereferenced (or handed out in `Yield::Request` and
+// resumed against, live in the hot effect-dispatch path). `apply_cont_heap`
+// already had the right discipline (mark → register → force → truncate) but
+// as hand-rolled boilerplate at every call site. These two guards make that
+// discipline the default instead of a per-site ritual — used in both.
+
+/// A single heap pointer kept live across GC-capable operations (`force_ptr`,
+/// closure calls) for as long as this guard is alive.
+///
+/// The registered root slot is a stable heap cell (`Box<*mut u8>`), NOT this
+/// guard's own stack address — the guard itself may be moved (e.g. returned
+/// by value) after construction, which would strand a root registered
+/// against its stack address. `get`/`set` always go through the cell, so a
+/// GC that relocates the pointee is visible immediately, never a stale
+/// snapshot.
+///
+/// Guards must be dropped in the reverse of their creation order (ordinary
+/// Rust scoping already guarantees this for plain `let` locals) — the
+/// underlying root stack is LIFO, mirroring `register_rust_root`'s own
+/// scoping contract.
+struct RootedLocal {
+    cell: Box<*mut u8>,
+    vmctx: *mut VMContext,
+    mark: usize,
+}
+
+impl RootedLocal {
+    /// Register `ptr` as a Rust GC root.
+    ///
+    /// # Safety
+    /// `vmctx` must be a valid, live `VMContext` for this guard's entire
+    /// lifetime.
+    unsafe fn new(vmctx: *mut VMContext, ptr: *mut u8) -> Self {
+        let mark = crate::host_fns::rust_roots_mark(vmctx);
+        let mut cell = Box::new(ptr);
+        // SAFETY: `cell`'s heap allocation is stable regardless of where this
+        // `RootedLocal` itself ends up (moved, returned, etc.) — only the
+        // `Box` handle moves, never its target.
+        unsafe {
+            crate::host_fns::register_rust_root(vmctx, &mut *cell as *mut *mut u8);
+        }
+        RootedLocal { cell, vmctx, mark }
+    }
+
+    /// The current (GC-updated) pointer value.
+    fn get(&self) -> *mut u8 {
+        *self.cell
+    }
+
+    /// Overwrite the rooted value in place (e.g. after forcing to WHNF) —
+    /// the root slot itself is unchanged, so no re-registration is needed.
+    fn set(&mut self, ptr: *mut u8) {
+        *self.cell = ptr;
+    }
+}
+
+impl Drop for RootedLocal {
+    fn drop(&mut self) {
+        // SAFETY: `vmctx` is the live machine this guard was created against
+        // (constructor contract); truncating to `mark` is safe as long as
+        // guards drop in reverse creation order (type-level doc contract).
+        unsafe {
+            crate::host_fns::truncate_rust_roots(self.vmctx, self.mark);
+        }
+    }
+}
+
+/// Registers every currently-live entry of a `Vec<*mut u8>` (e.g. the pending
+/// k2-continuation stack) as a GC root for this guard's lifetime.
+///
+/// Holds `&mut Vec` for that lifetime: the borrow checker itself then forbids
+/// any push/pop on the stack while the guard is alive, which is exactly the
+/// "not pushed/popped while registered" invariant the manual mark/register/
+/// truncate blocks this replaces used to rely on hand-audited sequencing for
+/// — reallocating the Vec while its element addresses are registered as root
+/// slots would strand those roots.
+struct RootedStack<'a> {
+    vmctx: *mut VMContext,
+    mark: usize,
+    /// Never read — its sole job is holding the exclusive borrow that makes
+    /// concurrent push/pop a compile error for as long as this guard lives.
+    #[allow(dead_code)]
+    stack: &'a mut Vec<*mut u8>,
+}
+
+impl<'a> RootedStack<'a> {
+    /// # Safety
+    /// `vmctx` must be a valid, live `VMContext` for this guard's entire
+    /// lifetime.
+    unsafe fn new(vmctx: *mut VMContext, stack: &'a mut Vec<*mut u8>) -> Self {
+        let mark = crate::host_fns::rust_roots_mark(vmctx);
+        for slot in stack.iter_mut() {
+            // SAFETY: slot is a valid, non-moving address for this guard's
+            // lifetime (the borrow above prevents reallocation).
+            unsafe {
+                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
+            }
+        }
+        RootedStack { vmctx, mark, stack }
+    }
+}
+
+impl Drop for RootedStack<'_> {
+    fn drop(&mut self) {
+        // SAFETY: same contract as `RootedLocal::drop`.
+        unsafe {
+            crate::host_fns::truncate_rust_roots(self.vmctx, self.mark);
+        }
+    }
+}
+
 /// The five freer-simple continuation constructors that the effect machine must resolve.
 #[derive(Debug, Clone, Copy)]
 pub enum EffContKind {
@@ -249,32 +369,39 @@ impl CompiledEffectMachine {
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
             }
-            let mut union_ptr = unsafe { Self::read_con_field(result, 0) };
-            let mut continuation = unsafe { Self::read_con_field(result, 1) };
+            let vmctx = &mut self.vmctx as *mut VMContext;
+            let union_field = unsafe { Self::read_con_field(result, 0) };
+            let cont_field = unsafe { Self::read_con_field(result, 1) };
+            // Root BOTH before forcing either: `heap_force` can GC, and an
+            // unrooted bare local sitting in this host frame is invisible to
+            // the frame walker — forcing one could relocate the other.
+            let mut union_ptr = unsafe { RootedLocal::new(vmctx, union_field) };
+            let mut continuation = unsafe { RootedLocal::new(vmctx, cont_field) };
 
             // Force all field pointers — they may be thunks from lazy Con fields
-            union_ptr = self.force_ptr(union_ptr);
-            if union_ptr.is_null() {
+            union_ptr.set(self.force_ptr(union_ptr.get()));
+            if union_ptr.get().is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
-            continuation = self.force_ptr(continuation);
-            if continuation.is_null() {
+            continuation.set(self.force_ptr(continuation.get()));
+            if continuation.get().is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
 
-            let union_tag = unsafe { *union_ptr };
+            let union_tag = unsafe { *union_ptr.get() };
             if union_tag != layout::TAG_CON {
                 return Yield::Error(YieldError::UnexpectedTag(union_tag));
             }
 
-            let union_num_fields = unsafe { Self::read_con_num_fields(union_ptr) };
+            let union_num_fields = unsafe { Self::read_con_num_fields(union_ptr.get()) };
             if union_num_fields != 2 {
                 return Yield::Error(YieldError::BadUnionFields(union_num_fields));
             }
 
-            let tag_ptr = unsafe { Self::read_con_field(union_ptr, 0) };
-            let tag_ptr = self.force_ptr(tag_ptr);
-            if tag_ptr.is_null() {
+            let tag_field = unsafe { Self::read_con_field(union_ptr.get(), 0) };
+            let mut tag_ptr = unsafe { RootedLocal::new(vmctx, tag_field) };
+            tag_ptr.set(self.force_ptr(tag_ptr.get()));
+            if tag_ptr.get().is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
             // Read the actual effect tag value. The Union's first field is the
@@ -282,7 +409,7 @@ impl CompiledEffectMachine {
             // this is ideally an unboxed Lit(Word, N). However, we maintain
             // a fallback for boxed W# to handle cross-module variables that
             // normalization cannot safely unbox.
-            let tag_ptr_tag = unsafe { *tag_ptr };
+            let tag_ptr_tag = unsafe { *tag_ptr.get() };
             // core-shapes.md §7: effect tag should be unboxed Lit after normalization,
             // but we must handle boxed W# for cross-module variables Rule 2 can't see.
             if tag_ptr_tag != layout::TAG_LIT && tag_ptr_tag != layout::TAG_CON {
@@ -290,50 +417,56 @@ impl CompiledEffectMachine {
             }
 
             let effect_tag = if tag_ptr_tag == layout::TAG_LIT {
-                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+                unsafe { *(tag_ptr.get().add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
             } else {
                 // Fallback for boxed W#: Read the LitWord from field 0.
                 // Harden: verify it's a TAG_CON and has at least one field.
                 if tag_ptr_tag != layout::TAG_CON {
                     return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
                 }
-                let num_fields = unsafe { Self::read_con_num_fields(tag_ptr) };
+                let num_fields = unsafe { Self::read_con_num_fields(tag_ptr.get()) };
                 if num_fields == 0 {
                     return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
                 }
 
-                let lit_ptr = unsafe { Self::read_con_field(tag_ptr, 0) };
-                let lit_ptr = self.force_ptr(lit_ptr);
-                if lit_ptr.is_null() {
+                let lit_field = unsafe { Self::read_con_field(tag_ptr.get(), 0) };
+                let mut lit_ptr = unsafe { RootedLocal::new(vmctx, lit_field) };
+                lit_ptr.set(self.force_ptr(lit_ptr.get()));
+                if lit_ptr.get().is_null() {
                     return Yield::Error(YieldError::NullPointer);
                 }
-                let lit_ptr_tag = unsafe { *lit_ptr };
+                let lit_ptr_tag = unsafe { *lit_ptr.get() };
                 if lit_ptr_tag != layout::TAG_LIT {
                     return Yield::Error(YieldError::UnexpectedTag(lit_ptr_tag));
                 }
-                unsafe { *(lit_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+                unsafe { *(lit_ptr.get().add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+                // lit_ptr drops here — innermost guard, created last, freed first.
             };
-            let mut request = unsafe { Self::read_con_field(union_ptr, 1) };
-            request = self.force_ptr(request);
+            let request_field = unsafe { Self::read_con_field(union_ptr.get(), 1) };
+            let mut request = unsafe { RootedLocal::new(vmctx, request_field) };
+            request.set(self.force_ptr(request.get()));
 
             log::debug!(
                 target: "tidepool::effects",
                 "effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
                 effect_tag,
                 tag_ptr_tag,
-                unsafe { Self::read_con_tag(union_ptr) },
-                if request.is_null() {
+                unsafe { Self::read_con_tag(union_ptr.get()) },
+                if request.get().is_null() {
                     255
                 } else {
-                    unsafe { *request }
+                    unsafe { *request.get() }
                 }
             );
 
             Yield::Request {
                 tag: effect_tag,
-                request,
-                continuation,
+                request: request.get(),
+                continuation: continuation.get(),
             }
+            // Guards drop here in reverse creation order: request, tag_ptr,
+            // continuation, union_ptr — matching the root stack's LIFO
+            // discipline.
         } else {
             Yield::Error(YieldError::UnexpectedConTag(con_tag))
         }
@@ -387,103 +520,75 @@ impl CompiledEffectMachine {
             return std::ptr::null_mut();
         }
 
-        // Entry forces can trigger GC (e.g. a lazy effect-result tail thunk
-        // materializing its first chunk). `k` and `arg` live in this host
-        // frame, invisible to the frame walker — register them as roots or
-        // the continuation tree is collected out from under the loop below.
-        let mut k = k;
-        let mut arg = arg;
         // GC-cluster reach (leaf 3): all rust-root register/mark/truncate
         // calls in this function key on this machine's own vmctx.
         let vmctx = &mut self.vmctx as *mut VMContext;
-        let entry_mark = crate::host_fns::rust_roots_mark(vmctx);
-        // SAFETY: slots remain valid until the truncate below.
-        unsafe {
-            crate::host_fns::register_rust_root(vmctx, &mut k as *mut *mut u8);
-            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
-        }
-        k = self.force_ptr(k);
-        let entry_err = k.is_null() || crate::host_fns::has_runtime_error();
+
+        // `k`/`arg` are reassigned across loop iterations (Node descent,
+        // Val/k2 resumption) but never need re-registration: `RootedLocal`'s
+        // cell is a stable heap slot, so `.set()` on reassignment keeps the
+        // SAME root live for the whole call — rooted unconditionally in
+        // every branch below rather than per-site as the manual discipline
+        // this replaces required.
+        let mut k = unsafe { RootedLocal::new(vmctx, k) };
+        let mut arg = unsafe { RootedLocal::new(vmctx, arg) };
+
+        k.set(self.force_ptr(k.get()));
+        let entry_err = k.get().is_null() || crate::host_fns::has_runtime_error();
         if !entry_err {
-            arg = self.force_ptr(arg);
+            arg.set(self.force_ptr(arg.get()));
         }
-        crate::host_fns::truncate_rust_roots(vmctx, entry_mark);
         if entry_err || crate::host_fns::has_runtime_error() {
             return std::ptr::null_mut();
         }
 
-        // Stack of pending k2 continuations from Node decomposition.
-        // Lives on the Rust heap, not the GC nursery. Entries are heap pointers
-        // that must be registered as GC roots before any call_closure.
+        // Stack of pending k2 continuations from Node decomposition. Lives on
+        // the Rust heap, not the GC nursery. `RootedStack` (created fresh
+        // around each risk point below) roots every CURRENT entry; holding
+        // `&mut k2_stack` for its lifetime makes "not pushed/popped while
+        // registered" a borrow-checker guarantee instead of a hand-audited
+        // invariant.
         let mut k2_stack: Vec<*mut u8> = Vec::new();
 
         loop {
-            if k.is_null() {
+            if k.get().is_null() {
                 return std::ptr::null_mut();
             }
 
-            let tag = *k;
-            let result = match tag {
+            let tag = *k.get();
+            let result_raw = match tag {
                 t if t == layout::TAG_CON => {
-                    let con_tag = Self::read_con_tag(k);
+                    let con_tag = Self::read_con_tag(k.get());
 
                     if con_tag == self.tags.leaf {
-                        // Leaf(f): call f(arg) — terminal for this continuation
-                        // Forcing and calling run JIT code that can GC; `arg` and
-                        // the k2_stack slots live in host frames the frame walker
-                        // skips, so they must be registered as explicit roots
-                        // BEFORE the first force — a GC during `force f` would
-                        // otherwise leave every pending k2 dangling.
-                        let mark = crate::host_fns::rust_roots_mark(vmctx);
-                        // SAFETY: slots remain valid until truncate below;
-                        // k2_stack is not pushed/popped while registered.
-                        unsafe {
-                            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
-                        }
-                        for slot in k2_stack.iter_mut() {
-                            // SAFETY: as above.
-                            unsafe {
-                                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                            }
-                        }
-                        let f = self.force_ptr(Self::read_con_field(k, 0));
+                        // Leaf(f): call f(arg) — terminal for this continuation.
+                        // Forcing f and calling it can both GC; k2_stack (and
+                        // arg, always rooted above) must stay visible through
+                        // both.
+                        let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                        let f = self.force_ptr(Self::read_con_field(k.get(), 0));
                         if crate::host_fns::has_runtime_error() {
-                            crate::host_fns::truncate_rust_roots(vmctx, mark);
                             return std::ptr::null_mut();
                         }
-                        let res = self.call_closure(f, arg);
-                        crate::host_fns::truncate_rust_roots(vmctx, mark);
-                        res
+                        self.call_closure(f, arg.get())
                     } else if con_tag == self.tags.node {
-                        // Node(k1, k2): push k2 for later, loop on k1.
-                        // The first force can GC and move `k`/`arg`; the second can
-                        // move `k1`. Register all three — and every pending k2 —
-                        // across the forces.
-                        let mark = crate::host_fns::rust_roots_mark(vmctx);
-                        // SAFETY: slots remain valid until truncate below;
-                        // k2_stack is not pushed/popped while registered.
-                        unsafe {
-                            crate::host_fns::register_rust_root(vmctx, &mut k as *mut *mut u8);
-                            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
-                        }
-                        for slot in k2_stack.iter_mut() {
-                            // SAFETY: as above.
-                            unsafe {
-                                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                            }
-                        }
-                        let mut k1 = self.force_ptr(Self::read_con_field(k, 0));
-                        // SAFETY: as above.
-                        unsafe {
-                            crate::host_fns::register_rust_root(vmctx, &mut k1 as *mut *mut u8);
-                        }
-                        let k2 = self.force_ptr(Self::read_con_field(k, 1));
-                        crate::host_fns::truncate_rust_roots(vmctx, mark);
+                        // Node(k1, k2): push k2 for later, loop on k1. The
+                        // first force can GC and move `k`/`arg` (always
+                        // rooted); the second can move `k1`.
+                        let (k1_val, k2_val) = {
+                            let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                            let mut k1 = unsafe {
+                                RootedLocal::new(vmctx, Self::read_con_field(k.get(), 0))
+                            };
+                            k1.set(self.force_ptr(k1.get()));
+                            let k2_val = self.force_ptr(Self::read_con_field(k.get(), 1));
+                            (k1.get(), k2_val)
+                        };
                         if crate::host_fns::has_runtime_error() {
                             return std::ptr::null_mut();
                         }
-                        k2_stack.push(k2);
-                        k = k1;
+                        k2_stack.push(k2_val);
+                        k.set(k1_val);
                         continue;
                     } else {
                         // core-shapes.md §7: continuation must be Leaf or Node
@@ -497,17 +602,10 @@ impl CompiledEffectMachine {
                     }
                 }
                 t if t == layout::TAG_CLOSURE => {
-                    // Raw closure (degenerate continuation fallback)
-                    let mark = crate::host_fns::rust_roots_mark(vmctx);
-                    for slot in k2_stack.iter_mut() {
-                        // SAFETY: k2_stack is not pushed/popped during call_closure.
-                        unsafe {
-                            crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                        }
-                    }
-                    let res = self.call_closure(k, arg);
-                    crate::host_fns::truncate_rust_roots(vmctx, mark);
-                    res
+                    // Raw closure (degenerate continuation fallback). `arg` is
+                    // always rooted above.
+                    let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                    self.call_closure(k.get(), arg.get())
                 }
                 _ => {
                     let msg = format!(
@@ -521,7 +619,7 @@ impl CompiledEffectMachine {
             };
 
             // We have a result from call_closure. Compose with pending k2s.
-            if result.is_null() {
+            if result_raw.is_null() {
                 // core-shapes.md §7: closure application must return a valid result
                 let msg =
                     "apply_cont_heap: closure application returned null (expected Eff result)";
@@ -529,21 +627,17 @@ impl CompiledEffectMachine {
                 crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64); // 2 = UserError
                 return std::ptr::null_mut();
             }
-            // Forcing the Eff result can GC: protect the pending k2s.
-            let mut result = {
-                let mark = crate::host_fns::rust_roots_mark(vmctx);
-                for slot in k2_stack.iter_mut() {
-                    // SAFETY: slots remain valid until truncate below;
-                    // k2_stack is not pushed/popped while registered.
-                    unsafe {
-                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                    }
-                }
-                let r = self.force_ptr(result);
-                crate::host_fns::truncate_rust_roots(vmctx, mark);
-                r
-            };
-            if result.is_null() || crate::host_fns::has_runtime_error() {
+            // `result` persists (rooted) for the rest of this iteration: the
+            // Val branch reads its field AFTER forcing y, and the E branch
+            // reads field 1 AFTER forcing field 0 — both need `result` itself
+            // kept live and up to date across an intervening GC.
+            let mut result = unsafe { RootedLocal::new(vmctx, result_raw) };
+            {
+                // Forcing the Eff result can GC: protect the pending k2s too.
+                let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                result.set(self.force_ptr(result.get()));
+            }
+            if result.get().is_null() || crate::host_fns::has_runtime_error() {
                 // core-shapes.md §7: forced result must be non-null (unless error set)
                 if !crate::host_fns::has_runtime_error() {
                     let msg = "apply_cont_heap: forced result is null (expected Eff result)";
@@ -554,7 +648,7 @@ impl CompiledEffectMachine {
                 return std::ptr::null_mut();
             }
 
-            let result_tag = *result;
+            let result_tag = *result.get();
             if result_tag != layout::TAG_CON {
                 // core-shapes.md §7: Eff result must be TAG_CON
                 let msg = format!(
@@ -566,62 +660,42 @@ impl CompiledEffectMachine {
                 return std::ptr::null_mut();
             }
 
-            let result_con_tag = Self::read_con_tag(result);
+            let result_con_tag = Self::read_con_tag(result.get());
 
             if result_con_tag == self.tags.val {
                 // Val(y): if k2_stack is empty, we're done; otherwise apply next k2.
                 // Forcing y can GC (e.g. it is a lazy effect-result tail thunk
-                // materializing a chunk): protect `result` (returned below) and
-                // the pending k2s.
-                let mark = crate::host_fns::rust_roots_mark(vmctx);
-                // SAFETY: slots remain valid until truncate below;
-                // k2_stack is not pushed/popped while registered.
-                unsafe {
-                    crate::host_fns::register_rust_root(vmctx, &mut result as *mut *mut u8);
-                }
-                for slot in k2_stack.iter_mut() {
-                    // SAFETY: as above.
-                    unsafe {
-                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                    }
-                }
-                let y = self.force_ptr(Self::read_con_field(result, 0));
-                crate::host_fns::truncate_rust_roots(vmctx, mark);
+                // materializing a chunk): `result` (returned below) and the
+                // pending k2s must stay visible across it.
+                let y = {
+                    let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                    self.force_ptr(Self::read_con_field(result.get(), 0))
+                };
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
                 if let Some(k2) = k2_stack.pop() {
-                    k = k2;
-                    arg = y;
+                    k.set(k2);
+                    arg.set(y);
                     continue;
                 } else {
-                    return result;
+                    return result.get();
                 }
             } else if result_con_tag == self.tags.e {
-                // E(union, k'): compose ALL remaining k2s into k'.
-                // Both forces can GC: protect `result` (field 1 is read after
-                // the first force), `union_val` across the second force, and
-                // the pending k2s. The alloc_con composition below is bump-only
-                // (null on exhaustion), so no protection is needed past here.
-                let mark = crate::host_fns::rust_roots_mark(vmctx);
-                // SAFETY: slots remain valid until truncate below;
-                // k2_stack is not pushed/popped while registered.
-                unsafe {
-                    crate::host_fns::register_rust_root(vmctx, &mut result as *mut *mut u8);
-                }
-                for slot in k2_stack.iter_mut() {
-                    // SAFETY: as above.
-                    unsafe {
-                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
-                    }
-                }
-                let mut union_val = self.force_ptr(Self::read_con_field(result, 0));
-                // SAFETY: as above.
-                unsafe {
-                    crate::host_fns::register_rust_root(vmctx, &mut union_val as *mut *mut u8);
-                }
-                let mut k_prime = self.force_ptr(Self::read_con_field(result, 1));
-                crate::host_fns::truncate_rust_roots(vmctx, mark);
+                // E(union, k'): compose ALL remaining k2s into k'. Both forces
+                // can GC: `result` (field 1 is read after the first force),
+                // `union_val` across the second force, and the pending k2s
+                // all need protecting. The alloc_con composition below is
+                // bump-only (null on exhaustion), so no protection is needed
+                // past here.
+                let (union_val, mut k_prime) = {
+                    let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                    let mut union_val =
+                        unsafe { RootedLocal::new(vmctx, Self::read_con_field(result.get(), 0)) };
+                    union_val.set(self.force_ptr(union_val.get()));
+                    let k_prime = self.force_ptr(Self::read_con_field(result.get(), 1));
+                    (union_val.get(), k_prime)
+                };
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }

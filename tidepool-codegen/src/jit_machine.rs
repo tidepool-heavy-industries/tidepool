@@ -934,66 +934,80 @@ impl JitEffectMachine {
 
         self.machine_state.reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation (bind)");
-        // SAFETY: calling the JIT function through a valid pointer, signal-protected.
-        let result_ptr: *mut u8 =
-            unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
-                .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
-        // SAFETY: resolves pending tail calls (vmctx tail slots are valid).
-        let result_ptr = unsafe { resolve_tail_calls_protected(&mut vmctx, result_ptr)? };
 
-        if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-        }
-        if result_ptr.is_null() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-        }
+        // All fallible steps live in this closure so `arm_reclaim` below runs
+        // unconditionally on every exit, success OR error (mirrors
+        // `run_fragment_and_bind`'s `drive_to_done(..).and_then(..)` shape).
+        // Skipping arm_reclaim on an error path used to leave `session.cursor`
+        // stale: `RegistryGuard::drop`'s `clear_run_scratch` frees the active
+        // buffer (possibly GC-grown up to 1 GiB) regardless of whether reclaim
+        // ran, but only reclaim writes back the buffer + correct high-water
+        // cursor. The next run would then compute `alloc_ptr` from the stale
+        // cursor against a fresh, smaller nursery — an out-of-bounds pointer.
+        let result = (|| -> Result<crate::old_space::RootSlot, JitError> {
+            // SAFETY: calling the JIT function through a valid pointer, signal-protected.
+            let result_ptr: *mut u8 =
+                unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
+                    .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
+            // SAFETY: resolves pending tail calls (vmctx tail slots are valid).
+            let result_ptr = unsafe { resolve_tail_calls_protected(&mut vmctx, result_ptr)? };
 
-        // K — deep-force the result to NF before tenuring (no thunks survive into
-        // old-space; the no-write-barrier tenuring invariant assumes NF data).
-        // SAFETY: result_ptr is a valid heap object; vmctx is the active context.
-        let nf_ptr = unsafe {
-            crate::signal_safety::with_signal_protection(|| {
-                crate::host_fns::deep_force(&mut vmctx as *mut VMContext, result_ptr)
-            })
-        }
-        .map_err(JitError::Signal)?;
-        if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-        }
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+            }
+            if result_ptr.is_null() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+            }
 
-        // E/D — tenure the NF closure out of the nursery into old-space and
-        // register its persistent root. gc_active_range is the nursery from-range
-        // (still installed; the guard has not dropped). The tenured copy lives in
-        // old-space arenas, independent of the buffer the guard reclaims.
-        let from = self
-            .machine_state
-            .gc_active_range()
-            .expect("GC state installed for the bind run");
-        let from_range = (from.0 as *const u8, unsafe {
-            from.0.add(from.1) as *const u8
-        });
-        let vmctx_ptr = &mut vmctx as *mut VMContext;
-        // SAFETY: nf_ptr is a live heap object inside the nursery from-range;
-        // tenure evacuates its closure and registers the returned slot (via
-        // vmctx_ptr's machine_state) as a persistent root valid for the
-        // machine's life.
-        let slot = unsafe {
-            self.session
-                .as_mut()
-                .expect("session machine")
-                .old_space
-                .tenure(vmctx_ptr, nf_ptr, from_range)
-        };
+            // K — deep-force the result to NF before tenuring (no thunks survive into
+            // old-space; the no-write-barrier tenuring invariant assumes NF data).
+            // SAFETY: result_ptr is a valid heap object; vmctx is the active context.
+            let nf_ptr = unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    crate::host_fns::deep_force(&mut vmctx as *mut VMContext, result_ptr)
+                })
+            }
+            .map_err(JitError::Signal)?;
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+            }
+
+            // E/D — tenure the NF closure out of the nursery into old-space and
+            // register its persistent root. gc_active_range is the nursery from-range
+            // (still installed; the guard has not dropped). The tenured copy lives in
+            // old-space arenas, independent of the buffer the guard reclaims.
+            let from = self
+                .machine_state
+                .gc_active_range()
+                .expect("GC state installed for the bind run");
+            let from_range = (from.0 as *const u8, unsafe {
+                from.0.add(from.1) as *const u8
+            });
+            let vmctx_ptr = &mut vmctx as *mut VMContext;
+            // SAFETY: nf_ptr is a live heap object inside the nursery from-range;
+            // tenure evacuates its closure and registers the returned slot (via
+            // vmctx_ptr's machine_state) as a persistent root valid for the
+            // machine's life.
+            let slot = unsafe {
+                self.session
+                    .as_mut()
+                    .expect("session machine")
+                    .old_space
+                    .tenure(vmctx_ptr, nf_ptr, from_range)
+            };
+            Ok(slot)
+        })();
 
         // Arm reclaim LAST (after all `self.session` access) so the guard's raw
         // pointer to `self.session` is not aliased by an intervening `&mut`
-        // borrow. On drop the guard recovers the live buffer + high-water cursor
-        // → session.heap/cursor for the next run. SAFETY: &vmctx lives on this
-        // frame; VMContext has no custom Drop so its bytes are valid at drop.
+        // borrow — and unconditionally on both Ok and Err (Finding 4). On drop
+        // the guard recovers the live buffer + high-water cursor → session.
+        // heap/cursor for the next run. SAFETY: &vmctx lives on this frame;
+        // VMContext has no custom Drop so its bytes are valid at drop.
         unsafe {
             _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
         }
-        Ok(slot)
+        result
     }
 
     /// The effectful value-plane **bind primitive**: run `func_id` through the

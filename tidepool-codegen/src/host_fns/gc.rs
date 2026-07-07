@@ -353,6 +353,44 @@ unsafe fn verify_heap_post_gc(
                         obj,
                     );
                 }
+                // SmallArray#/Array#: the value field points at a malloc'd,
+                // GC-external payload `[u64 len][ptr0..ptrN]` (never itself
+                // evacuated — see `for_each_pointer_field`'s TAG_LIT arm), but
+                // its SLOT CONTENTS are ordinary heap pointers that must obey
+                // the same from/to-space invariants as any other field.
+                if lt == l::LIT_TAG_SMALLARRAY as u8 || lt == l::LIT_TAG_ARRAY as u8 {
+                    let payload = *(obj.add(l::LIT_VALUE_OFFSET as usize) as *const *const u8);
+                    if !payload.is_null() {
+                        let len = *(payload as *const u64) as usize;
+                        for i in 0..len {
+                            let slot_addr = payload.add(8 + i * 8);
+                            let p = *(slot_addr as *const *const u8);
+                            if p.is_null() {
+                                continue;
+                            }
+                            if in_from(p) {
+                                fail(
+                                    off,
+                                    idx,
+                                    &format!(
+                                        "array elem[{i}] holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
+                                    ),
+                                    obj,
+                                );
+                            }
+                            if in_to(p) && !(p as usize).is_multiple_of(8) {
+                                fail(
+                                    off,
+                                    idx,
+                                    &format!(
+                                        "array elem[{i}] holds a misaligned to-space pointer {p:p}"
+                                    ),
+                                    obj,
+                                );
+                            }
+                        }
+                    }
+                }
             }
             l::TAG_CLOSURE => {
                 let nc = *(obj.add(l::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) as usize;
