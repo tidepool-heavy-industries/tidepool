@@ -290,23 +290,23 @@ fn works_map_fromlistwith_default_resolves() {
     );
 }
 
-/// FOOTGUN (ledger #34): `Map.fromList` on a LARGE ASCENDING list hits GHC's
-/// `fromDistinctAscList` fast-path — a non-tail balanced-tree build that
-/// overflows the JIT's ~10-20k non-tail limit. Counterintuitive: the sorted
-/// case (GHC's *fast* path) is the one that breaks. Must fail CLEAN (a named
-/// yield), never a silent SIGSEGV. Unsorted input takes the tail-safe
-/// `foldl' insert` path — covered by the WORKS probe below.
+/// Ledger #34 is DEAD, re-pinned after the call-depth fix (plan 01 finding
+/// 5): the old counter tripped at ~20k TOTAL calls, so a 12k sorted build
+/// "overflowed" falsely. `fromDistinctAscList` builds by halving — real
+/// depth is O(log n) — so with depth counted properly the sorted fast-path
+/// is fine at any practical scale (verified to 200k). Genuine deep recursion
+/// still failing CLEAN is pinned in tidepool-codegen's call-depth tests.
 #[test]
-fn map_fromlist_large_sorted_fails_loudly() {
-    fails_loudly(
+fn works_map_fromlist_large_sorted_after_depth_fix() {
+    works(
         "pure (Map.size (Map.fromList [(i, i) | i <- [1..12000 :: Int]]))",
-        "stack overflow",
+        serde_json::json!(12000),
     );
 }
 
-/// The #34 WORKAROUND is safe at scale: `Map.fromListWith` uses an `insertWith`
-/// fold (no ascending fast-path), so a large SORTED input is fine — and
-/// `Map.fromList` on UNSORTED input takes the same tail-safe path.
+/// `Map.fromListWith` at scale: an `insertWith` fold (no ascending
+/// fast-path), safe on large sorted input — historically the #34 workaround,
+/// now just the natural spelling for combining duplicates.
 #[test]
 fn works_map_fromlistwith_large_sorted_safe() {
     works(
