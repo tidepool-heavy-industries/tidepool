@@ -264,8 +264,11 @@ the ONLY consumer still hand-rolling is `run_debug` (F1).
       across every JIT-touching test regardless of handler, a red herring
       from picking the wrong binary, not a real regression). The ONE
       remaining failure, `tidepool-mcp::eval_warnings_surfaced::
-      overlapping_pattern_warning_surfaces_in_result`, is PRE-EXISTING and
-      OUT OF THIS BRANCH'S BOUNDARY: its assertion is on
+      overlapping_pattern_warning_surfaces_in_result`, was NOT a real bug —
+      root re-ran it against a fresh-built `tidepool-extract-bin` from this
+      branch and it PASSES; the failure was an artifact of the STALE deployed
+      PATH-shim extract (predates recent branch changes). Original worker
+      classification (kept for the record): its assertion is on
       `EvalResult::warnings()` (`tidepool-runtime/src/render.rs`) — a
       `tidepool-runtime` warning-capture path this branch never touched (repo
       boundary explicitly assigns `tidepool-runtime` to another worker); GHC
