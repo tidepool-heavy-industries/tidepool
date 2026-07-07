@@ -59,6 +59,15 @@ const ENV_CASE: &str = "TP_DEEP_DIFF_CASE";
 const ENV_NURSERY: &str = "TP_DEEP_DIFF_NURSERY";
 /// Env var carrying "1" to optimize the expr before comparing.
 const ENV_OPT: &str = "TP_DEEP_DIFF_OPT";
+/// Env var carrying the path to the eval-phase-complete marker file (plan 08
+/// F3): the worker touches this file the instant `eval()` returns, before
+/// starting the JIT compile/run. If a timeout fires and the marker exists,
+/// eval finished and the JIT itself hung — a reportable divergence, not the
+/// benign "synthetic program loops in eval" skip.
+const ENV_PHASE: &str = "TP_DEEP_DIFF_PHASE";
+/// Worker exit code for an uncaught Rust panic (the `#[test]` harness's own
+/// convention) — routed to a reportable failure, not silently skipped.
+const EXIT_CODE_PANIC: i32 = 101;
 
 /// Worker exit codes (0 = ok/skip).
 /// Both backends produced equal ground values (a real comparison happened).
@@ -190,7 +199,12 @@ fn jit_compile_and_run(
 /// and classifies synthetic-IR garbage as a whitelisted `HeapBridge` error —
 /// avoiding the false positives the raw `compile_expr` + `heap_to_value` path
 /// produces on unreduced synthetic expressions.
-fn run_one_case(expr: &CoreExpr, nursery_size: usize, optimize_first: bool) -> i32 {
+fn run_one_case(
+    expr: &CoreExpr,
+    nursery_size: usize,
+    optimize_first: bool,
+    phase_path: Option<&std::path::Path>,
+) -> i32 {
     // Skip the synthetic-LetRec known-divergence class (see
     // `has_synthetic_letrec`): a bare-Var rec RHS is ill-defined and the
     // backends legitimately disagree on its value.
@@ -209,6 +223,13 @@ fn run_one_case(expr: &CoreExpr, nursery_size: usize, optimize_first: bool) -> i
     let mut heap = VecHeap::new();
     let env = env_from_datacon_table(&table);
     let eval_result = eval(&expr, &env, &mut heap);
+
+    // Mark eval-phase-complete BEFORE starting the JIT (plan 08 F3): if the
+    // parent's wall-clock deadline fires after this point, it knows eval
+    // terminated and the JIT itself is the one hanging.
+    if let Some(p) = phase_path {
+        let _ = std::fs::write(p, b"");
+    }
 
     let jit_result = match JitEffectMachine::compile(&expr, &table, nursery_size) {
         Ok(mut m) => m.run_pure(),
@@ -272,9 +293,10 @@ fn deep_diff_worker() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(64 * 1024);
     let opt = std::env::var(ENV_OPT).map(|s| s == "1").unwrap_or(false);
+    let phase_path = std::env::var(ENV_PHASE).ok().map(std::path::PathBuf::from);
 
     // Force a flush of any diagnostics before exiting.
-    let code = run_one_case(&expr, nursery, opt);
+    let code = run_one_case(&expr, nursery, opt, phase_path.as_deref());
     std::process::exit(code);
 }
 
@@ -291,8 +313,14 @@ enum Outcome {
     B2,
     /// B3: child died by a fatal signal.
     B3(i32),
-    /// Child exceeded the per-case wall-clock budget (likely a runaway loop).
+    /// Child exceeded the per-case wall-clock budget while still in the eval
+    /// phase (likely a runaway synthetic-IR loop in the interpreter) — benign.
     Timeout,
+    /// Child exceeded the wall-clock budget AFTER `eval()` returned — the JIT
+    /// itself hung. A real divergence (eval terminates, JIT doesn't).
+    JitNonTermination,
+    /// Worker exited via an uncaught Rust panic — a real bug, not skipped.
+    Panic,
     /// Infrastructure error spawning/awaiting the child.
     Infra,
 }
@@ -317,6 +345,12 @@ fn drive_subprocess(expr: &CoreExpr, nursery: usize, opt: bool) -> Outcome {
     if std::fs::write(&path, &cbor).is_err() {
         return Outcome::Infra;
     }
+    let phase_path = std::env::temp_dir().join(format!(
+        "tp_deepdiff_{}_{}.evalphase",
+        std::process::id(),
+        idx
+    ));
+    let _ = std::fs::remove_file(&phase_path); // stale marker from a reused idx, if any
 
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -331,6 +365,7 @@ fn drive_subprocess(expr: &CoreExpr, nursery: usize, opt: bool) -> Outcome {
         .env(ENV_CASE, &path)
         .env(ENV_NURSERY, nursery.to_string())
         .env(ENV_OPT, if opt { "1" } else { "0" })
+        .env(ENV_PHASE, &phase_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -340,6 +375,7 @@ fn drive_subprocess(expr: &CoreExpr, nursery: usize, opt: bool) -> Outcome {
         Ok(c) => c,
         Err(_) => {
             let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&phase_path);
             return Outcome::Infra;
         }
     };
@@ -363,15 +399,26 @@ fn drive_subprocess(expr: &CoreExpr, nursery: usize, opt: bool) -> Outcome {
                     Some(EXIT_B2) => Outcome::B2,
                     // In-process caught signal (run_pure protection).
                     Some(EXIT_B3) => Outcome::B3(0),
-                    // Any other code (e.g. 101 panic) — synthetic-IR infra, skip.
+                    // Uncaught panic in the worker — a real harness/eval bug,
+                    // not synthetic-IR noise. Report it, don't swallow it.
+                    Some(EXIT_CODE_PANIC) => Outcome::Panic,
+                    // Any other code — synthetic-IR infra, skip.
                     _ => Outcome::Skipped,
                 };
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    // eval() already returned (the phase marker exists) but the
+                    // process never exited — the JIT itself hung. That's a real
+                    // divergence, not "the synthetic program looped in eval".
+                    let jit_hung = phase_path.exists();
                     let _ = child.kill();
                     let _ = child.wait();
-                    break Outcome::Timeout;
+                    break if jit_hung {
+                        Outcome::JitNonTermination
+                    } else {
+                        Outcome::Timeout
+                    };
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -380,6 +427,7 @@ fn drive_subprocess(expr: &CoreExpr, nursery: usize, opt: bool) -> Outcome {
     };
 
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&phase_path);
     outcome
 }
 
@@ -429,6 +477,18 @@ where
                             "B3 fatal signal {sig} in JIT child.\nseed-hex: {hex}\nexpr: {expr:#?}"
                         )));
                     }
+                    Outcome::JitNonTermination => {
+                        let hex = hex_of(&expr);
+                        return Err(TestCaseError::fail(format!(
+                            "JIT non-termination: eval() returned but the JIT child never exited within the 20s deadline.\nseed-hex: {hex}\nexpr: {expr:#?}"
+                        )));
+                    }
+                    Outcome::Panic => {
+                        let hex = hex_of(&expr);
+                        return Err(TestCaseError::fail(format!(
+                            "worker panicked (exit {EXIT_CODE_PANIC}, see worker stderr above).\nseed-hex: {hex}\nexpr: {expr:#?}"
+                        )));
+                    }
                 }
                 Ok(())
             });
@@ -441,6 +501,22 @@ where
                 infra.get()
             );
             result.unwrap();
+
+            // No-comparison-floor (plan 08 F3): a generator/whitelist
+            // regression that pushes every case into Skipped would otherwise
+            // report this suite green with zero actual JIT-vs-eval
+            // comparisons. Mirrors `cbor_roundtrip_preserves_eval`'s
+            // `compared >= 25` floor (gen/strategy.rs).
+            assert!(
+                compared.get() >= 25,
+                "[deep-diff {label}] only {} of {} cases were actually compared (skipped={}, timeout={}, infra={}) — \
+                 suite is not exercising the JIT-vs-eval comparison; check the generator/whitelist for regressions",
+                compared.get(),
+                cases,
+                skipped.get(),
+                timeout.get(),
+                infra.get()
+            );
         })
         .unwrap()
         .join()
@@ -718,6 +794,16 @@ fn generator_reach_stats() {
 
             // Sanity: deep generation must actually produce nodes.
             assert!(n5 > 0 && n7 > 0, "generators produced empty trees");
+            // Regression gate (plan 08, "Smaller items"): the weighted
+            // depth-7 generator exists specifically to reach Join/LetRec/Case
+            // shapes; a regression that stops it reaching them would
+            // otherwise only show up as a quieter reach report, not a
+            // failure. Require all three actually appear.
+            assert!(
+                j7 > 0 && lr7 > 0 && c7 > 0,
+                "weighted(7,5,4,4) generator failed to reach Join/LetRec/Case \
+                 (Join={j7}, LetRec={lr7}, Case={c7}) — deep cases have become unreachable"
+            );
         })
         .unwrap()
         .join()

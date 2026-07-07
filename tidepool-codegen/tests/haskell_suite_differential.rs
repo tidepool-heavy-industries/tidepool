@@ -69,7 +69,7 @@ fn haskell_suite_differential() {
                     continue;
                 }
 
-                tidepool_testing::watchdog::begin(&name);
+                let _guard = tidepool_testing::watchdog::begin(&name);
 
                 let bytes = std::fs::read(&path).unwrap();
                 // One current format: an unreadable fixture is corpus rot,

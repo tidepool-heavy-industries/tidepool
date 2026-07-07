@@ -800,22 +800,35 @@ mod tests {
 
     #[test]
     fn test_differential_identity() {
-        // Rust-constructed identity
+        // Rust-constructed `(\x -> x) 42` — applied, ground-typed, so the two
+        // engines' RESULTS are comparable (a bare `\x -> x` only proves both
+        // sides produce *some* Closure, never comparing what the function
+        // actually does — differential in name only).
         let nodes = vec![
-            CoreFrame::Var(VarId(1)),
+            CoreFrame::Var(VarId(1)), // 0: x
             CoreFrame::Lam {
                 binder: VarId(1),
                 body: 0,
-            },
+            }, // 1: \x -> x
+            CoreFrame::Lit(Literal::LitInt(42)), // 2: 42
+            CoreFrame::App { fun: 1, arg: 2 }, // 3: (\x -> x) 42
         ];
         let rust_res = eval_expr(nodes).unwrap();
+        assert!(matches!(rust_res, Value::Lit(Literal::LitInt(42))));
 
-        // Haskell-compiled identity from CBOR
-        let cbor_res = eval_cbor("../haskell/test/Identity_cbor/identity.cbor").unwrap();
-
-        // Both should be Closures
-        assert!(matches!(rust_res, Value::Closure { .. }));
-        assert!(matches!(cbor_res, Value::Closure { .. }));
+        // Haskell-compiled `app_identity = (\x -> x) 42` from CBOR — same
+        // ground-typed shape, so this is a REAL cross-engine comparison.
+        // GHC boxes Int as a single-field `I#` constructor; unwrap it.
+        let cbor_res = eval_cbor("../haskell/test/suite_cbor/app_identity.cbor").unwrap();
+        let unboxed = match &cbor_res {
+            Value::Con(_, fields) if fields.len() == 1 => fields[0].clone(),
+            other => other.clone(),
+        };
+        assert!(
+            matches!(unboxed, Value::Lit(Literal::LitInt(42))),
+            "expected boxed Int 42, got {:?}",
+            cbor_res
+        );
     }
 
     #[test]

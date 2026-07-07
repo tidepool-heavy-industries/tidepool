@@ -33,7 +33,7 @@ fn test_numeric_min_bound() {
 
 #[test]
 fn test_numeric_abs_min_bound() {
-    let json = run_plain("abs' (minBound :: Int)");
+    let json = run_plain("abs (minBound :: Int)");
     assert_eq!(json, serde_json::json!(i64::MIN));
 }
 

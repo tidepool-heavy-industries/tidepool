@@ -248,7 +248,7 @@ fn corpus_report() {
 
     println!("\n=== REAL-CORE CORPUS ===");
     for (name, path) in &entries {
-        tidepool_testing::watchdog::begin(name);
+        let _guard = tidepool_testing::watchdog::begin(name);
         let node = std::fs::read(path).unwrap();
         let (is_fn, tag, detail, cov) = run_one(&node, &meta);
         coverage.extend(cov);

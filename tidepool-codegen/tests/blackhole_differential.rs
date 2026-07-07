@@ -45,7 +45,7 @@ fn mutual_alias_letrec() -> tidepool_repr::CoreExpr {
 #[test]
 fn mutual_alias_letrec_errors_both_engines() {
     tidepool_testing::watchdog::arm();
-    tidepool_testing::watchdog::begin("blackhole: let x = y; y = x in x");
+    let _guard = tidepool_testing::watchdog::begin("blackhole: let x = y; y = x in x");
 
     let expr = mutual_alias_letrec();
     let table = DataConTable::new();
@@ -76,12 +76,12 @@ fn self_referential_letrec_errors_both_engines() {
     let table = DataConTable::new();
 
     // Eval: must error (BlackHole / unresolved), not spin.
-    tidepool_testing::watchdog::begin("blackhole EVAL stage: let x = x in x");
+    let _guard = tidepool_testing::watchdog::begin("blackhole EVAL stage: let x = x in x");
     let mut heap = VecHeap::new();
     let env = env_from_datacon_table(&table);
     let eval_res = eval(&expr, &env, &mut heap);
     eprintln!("eval stage done: {:?}", eval_res.as_ref().map(|_| "Ok"));
-    tidepool_testing::watchdog::begin("blackhole JIT stage: let x = x in x");
+    let _guard = tidepool_testing::watchdog::begin("blackhole JIT stage: let x = x in x");
     assert!(
         eval_res.is_err(),
         "eval must reject let x = x in x, got {eval_res:?}"
@@ -92,7 +92,8 @@ fn self_referential_letrec_errors_both_engines() {
     let jit_res = match JitEffectMachine::compile(&expr, &table, 1 << 20) {
         Ok(mut machine) => {
             eprintln!("jit compile done");
-            tidepool_testing::watchdog::begin("blackhole JIT RUN stage: let x = x in x");
+            let _guard =
+                tidepool_testing::watchdog::begin("blackhole JIT RUN stage: let x = x in x");
             machine
                 .run_pure()
                 .map(|v| format!("{v:?}"))

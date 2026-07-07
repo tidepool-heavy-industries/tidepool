@@ -107,10 +107,11 @@ pub fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
 /// with a truncated dump of the offending expression — enough to reconstruct
 /// the case, which a killed proptest run otherwise loses (the seed dies with
 /// the process).
-fn watchdog_this_case(expr: &CoreExpr) {
+#[must_use = "hold the returned guard for the duration of this case's processing"]
+fn watchdog_this_case(expr: &CoreExpr) -> crate::watchdog::Guard {
     crate::watchdog::arm();
     let label: String = format!("{expr:?}").chars().take(2000).collect();
-    crate::watchdog::begin(&label);
+    crate::watchdog::begin(&label)
 }
 
 /// Compare JIT and interpreter results for a given expression.
@@ -120,7 +121,7 @@ fn watchdog_this_case(expr: &CoreExpr) {
 /// failures (HeapOverflow, UnresolvedVar, HeapBridge) are skipped via
 /// `prop_assume!`.
 pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCaseError> {
-    watchdog_this_case(&expr);
+    let _guard = watchdog_this_case(&expr);
     let table = build_table_for_expr(&expr);
 
     // Tree-walking evaluation, deep-forced to NF: the JIT's result conversion
@@ -242,11 +243,18 @@ pub fn check_jit_vs_eval_captured(
 
 /// Verify an optimization pass preserves evaluation results.
 ///
-/// Evaluates the expression before and after the pass, then structurally
-/// compares results. If the original evaluation fails, the test case is
-/// skipped (passes only preserve behavior of well-defined programs).
+/// Evaluates the expression before and after the pass, deep-forces both
+/// results to normal form, then structurally compares them. Deep-forcing
+/// matters here: a pass bug that corrupts a value under a lazy constructor
+/// field (e.g. a let-bound `Just x` thunk) is invisible to a WHNF-only
+/// comparison — `check_jit_vs_eval` deep-forces for exactly this reason
+/// (#336); this oracle needs the same treatment (plan 08 F1). If the original
+/// evaluation fails, the test case is skipped (passes only preserve behavior
+/// of well-defined programs). Same policy as `cbor_roundtrip_preserves_eval`
+/// (`gen/strategy.rs`): skip when BOTH deep-forces fail (e.g. a non-terminating
+/// lazy field neither side can force), fail when only one does.
 pub fn check_pass_preserves_eval(pass: &dyn Pass, expr: CoreExpr) -> Result<(), TestCaseError> {
-    watchdog_this_case(&expr);
+    let _guard = watchdog_this_case(&expr);
     let mut heap1 = VecHeap::new();
     let env = Env::new();
 
@@ -263,19 +271,57 @@ pub fn check_pass_preserves_eval(pass: &dyn Pass, expr: CoreExpr) -> Result<(), 
 
     match (original_res, optimized_res) {
         (Ok(v1), Ok(v2)) => {
-            prop_assert!(
-                values_equal(&v1, &v2),
-                "Evaluation results differ after pass {}.
+            let f1 = deep_force(v1, &mut heap1);
+            let f2 = deep_force(v2, &mut heap2);
+            match (f1, f2) {
+                (Ok(fv1), Ok(fv2)) => {
+                    prop_assert!(
+                        values_equal(&fv1, &fv2),
+                        "Evaluation results differ after pass {}.
 Original: {:?}
 Optimized: {:?}
 Expr: {:#?}
 Optimized Expr: {:#?}",
-                pass.name(),
-                v1,
-                v2,
-                expr,
-                optimized
-            );
+                        pass.name(),
+                        fv1,
+                        fv2,
+                        expr,
+                        optimized
+                    );
+                }
+                (Err(_), Err(_)) => {
+                    // Both sides bottom under deep_force (e.g. a lazy field
+                    // neither program forces to a value) — skip.
+                }
+                (Ok(_), Err(e)) => {
+                    prop_assert!(
+                        false,
+                        "Optimized result deep_force failed but original succeeded.
+Pass: {}
+Error: {:?}
+Expr: {:#?}
+Optimized Expr: {:#?}",
+                        pass.name(),
+                        e,
+                        expr,
+                        optimized
+                    );
+                }
+                (Err(e), Ok(_)) => {
+                    prop_assert!(
+                        false,
+                        "Original result deep_force failed but optimized succeeded.
+Pass: {}
+Error: {:?}
+Expr: {:#?}
+Optimized Expr: {:#?}",
+                        pass.name(),
+                        e,
+                        expr,
+                        optimized
+                    );
+                }
+            }
         }
         (Err(_), _) => {
             // If original eval fails, we skip this case.

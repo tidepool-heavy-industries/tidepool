@@ -95,7 +95,7 @@ module Test where
 import Tidepool.Aeson.Value
 
 result :: Int
-result = case Number 3.14 of
+result = case Number (scientific 314 (-2)) of
   Object _ -> 1
   Array _  -> 2
   String _ -> 3
@@ -309,7 +309,7 @@ module Test where
 import Tidepool.Aeson.Value
 
 result :: Int
-result = case Number 1.0 of
+result = case Number 1 of
   Array _  -> 1
   Object _ -> 2
   _        -> 99
@@ -344,7 +344,7 @@ classify v = case v of
   _        -> 30
 
 result :: Int
-result = classify (Array [Number 42.0])
+result = classify (Array [Number 42])
 "#;
     let val = run(src, "result");
     assert_eq!(
@@ -656,7 +656,7 @@ module Test where
 import Tidepool.Prelude hiding (error)
 
 result :: Int
-result = len (sort [Null, Bool True, Number 1.0, Bool False, Null])
+result = len (sort [Null, Bool True, Number 1, Bool False, Null])
 "#;
     let val = run(src, "result");
     assert_eq!(
@@ -674,7 +674,7 @@ module Test where
 import Tidepool.Prelude hiding (error)
 
 result :: Int
-result = len (nub [Null, Null, Bool True, Bool True, Number 1.0])
+result = len (nub [Null, Null, Bool True, Bool True, Number 1])
 "#;
     let val = run(src, "result");
     assert_eq!(
@@ -798,7 +798,7 @@ go n = go (n - 1)
 result :: Int
 result =
   let d = fromIntegral (go 3) :: Double
-      v = Number d
+      v = Number (fromFloatDigits d)
   in T.length (show v)
 "#;
     let val = run(src, "result");
@@ -905,63 +905,13 @@ fn show_double_mcp_preamble_context() {
     //
     // The key insight: when result :: Eff '[...] Value, the showDouble call
     // is inside a continuation closure, and GHC may optimize differently.
-    let src = r#"
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
-module Expr where
-import Tidepool.Prelude hiding (error)
-import qualified Data.Text as T
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
-import qualified Tidepool.Aeson.KeyMap as KM
-import qualified Data.List as L
-import qualified Tidepool.TextFormat as TF
-import qualified Tidepool.Table as Tab
-import Control.Monad.Freer hiding (run)
-import qualified Prelude as P
-default (Int, Text)
-error :: Text -> a
-error = P.error . T.unpack
-
-data Console a where
-  Print :: Text -> Console ()
-
-data KV a where
-  KvGet :: Text -> KV (Maybe Value)
-  KvSet :: Text -> Value -> KV ()
-  KvDelete :: Text -> KV ()
-  KvKeys :: KV [Text]
-
-data Fs a where
-  FsRead :: Text -> Fs Text
-  FsWrite :: Text -> Text -> Fs ()
-  FsListDir :: Text -> Fs [Text]
-  FsGlob :: Text -> Fs [Text]
-  FsExists :: Text -> Fs Bool
-  FsMetadata :: Text -> Fs (Int, Bool, Bool)
-
-data SG a where
-  SgFind :: Text -> Text -> [Text] -> SG [Value]
-
-data Http a where
-  HttpGet :: Text -> Http Value
-
-data Exec a where
-  Run :: Text -> Exec (Int, Text, Text)
-
-data Meta a where
-  MetaVersion :: Meta Text
-
-data Git a where
-  GitLog :: Text -> Int -> Git [Value]
-
-data Llm a where
-  LlmChat :: Text -> Llm Text
-
-data Ask a where
-  Ask :: Text -> Ask Value
-
-type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
-
+    // Uses the canonical MCP_PREAMBLE (10-effect GADT stack, kept in lockstep
+    // with production in eval_harness.rs) instead of a hand-duplicated copy
+    // (plan 08 F2). `result :: Text` never invokes the effects — only the
+    // Eff-wrapped compilation SHAPE matters here — so the preamble's declared
+    // types are inert for this test.
+    let src = tidepool_testing::eval_harness::mock::mcp_module(
+        r#"
 showI :: Int -> Text
 showI n = show n
 
@@ -992,8 +942,9 @@ result =
       stubs = [(0 :: Int, val)]
       stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> showI sid), "size" .= toJSON (valSize sv)]) stubs)
   in show stubInfo
-"#;
-    let val = run(src, "result");
+"#,
+    );
+    let val = run(&src, "result");
     if let Value::Con(_, fields) = &val {
         assert!(
             !fields.is_empty(),
@@ -1006,87 +957,11 @@ result =
 /// effect handlers — this is the MCP execution path.
 #[test]
 fn show_double_effectful_paginate() {
-    use tidepool_bridge_derive::FromCore;
-    use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-
-    #[derive(FromCore)]
-    enum ConsoleReq {
-        #[core(name = "Print")]
-        Print(String),
-    }
-
-    struct MockConsole;
-    impl EffectHandler for MockConsole {
-        type Request = ConsoleReq;
-        fn handle(
-            &mut self,
-            req: ConsoleReq,
-            cx: &EffectContext,
-        ) -> Result<tidepool_effect::Response, EffectError> {
-            match req {
-                ConsoleReq::Print(_) => cx.respond(()),
-            }
-        }
-    }
-
-    #[derive(FromCore)]
-    enum KvReq {
-        #[core(name = "KvGet")]
-        KvGet(String),
-        #[core(name = "KvSet")]
-        KvSet(String, Value),
-        #[core(name = "KvDelete")]
-        KvDelete(String),
-        #[core(name = "KvKeys")]
-        KvKeys,
-    }
-
-    struct MockKv;
-    impl EffectHandler for MockKv {
-        type Request = KvReq;
-        fn handle(
-            &mut self,
-            req: KvReq,
-            cx: &EffectContext,
-        ) -> Result<tidepool_effect::Response, EffectError> {
-            match req {
-                KvReq::KvGet(_) => {
-                    // Return Nothing (tag 0 with no fields)
-                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]).into())
-                }
-                KvReq::KvSet(_, _) => cx.respond(()),
-                KvReq::KvDelete(_) => cx.respond(()),
-                KvReq::KvKeys => {
-                    // Return empty list
-                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]).into())
-                }
-            }
-        }
-    }
-
-    let src = r#"
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
-module Expr where
-import Tidepool.Prelude hiding (error)
-import qualified Data.Text as T
-import qualified Tidepool.Aeson.KeyMap as KM
-import Control.Monad.Freer hiding (run)
-import qualified Prelude as P
-default (Int, Text)
-error :: Text -> a
-error = P.error . T.unpack
-
-data Console a where
-  Print :: Text -> Console ()
-
-data KV a where
-  KvGet :: Text -> KV (Maybe Value)
-  KvSet :: Text -> Value -> KV ()
-  KvDelete :: Text -> KV ()
-  KvKeys :: KV [Text]
-
-type M = Eff '[Console, KV]
-
+    // Uses the canonical MCP_PREAMBLE + min_stack() (plan 08 F2) instead of a
+    // hand-duplicated 2-effect (Console, KV) preamble/mocks — `result` only
+    // ever sends `KvSet`, so the extra declared-but-unused effects are inert.
+    let src = tidepool_testing::eval_harness::mock::mcp_module(
+        r#"
 showI :: Int -> Text
 showI n = show n
 
@@ -1109,9 +984,14 @@ result = do
     pure (pack (showDouble d))
   let sz = valSize (toJSON _r)
   pure (toJSON sz)
-"#;
+"#,
+    );
     let result = harness()
-        .run(src, "result", frunk::hlist![MockConsole, MockKv])
+        .run(
+            &src,
+            "result",
+            tidepool_testing::eval_harness::mock::min_stack(),
+        )
         .expect("compile_and_run with effects failed");
     // Just verify it doesn't crash
     let _ = result.to_json();

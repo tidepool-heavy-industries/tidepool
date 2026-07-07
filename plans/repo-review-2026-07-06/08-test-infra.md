@@ -73,6 +73,38 @@ migrate the legacy 10-effect preamble copies (`show_double_10effect.rs`,
 `value_case_match.rs`, `text_spliton.rs`, `fixtures/mcp_showdouble_repro.hs`)
 onto the fixed harness — removes four more drift copies.
 
+**Done:** preamble now declares `ExecError`/`HttpError`/`GitError`/`LlmError`
+inline (production generates these via codegen; this static preamble has no
+codegen step, so they're hand-declared to match the exact generated strings
+verified by `effect_defs.rs`'s own tests) and fixes `Run`/`RunIn` (`Either
+ExecError Proc`), `FsMetadata` (`Maybe FileMeta`), `HttpGet`/`HttpPost`
+(`Either HttpError Value`), `GitShow` (`Either GitError Commit` — NOT `Either
+GitError Value`; production's `GitShow` returns the typed `Commit` record,
+which is already in scope via `Tidepool.Prelude` → `Tidepool.Records` →
+`Tidepool.Records.Bridged`), `LlmStructured` (`Either LlmError Value`).
+MockHttp/MockGit/MockAsk/MockLlm updated to respond the matching shapes
+(`Ok::<_, String>(_)`, following the same `String`-as-stand-in-Left-type
+convention already used by MockExec). Migrated all four named legacy
+preamble copies onto the corrected types (`show_double_10effect.rs` already
+used `mock::mcp_module`/`min_stack()` for most tests per its own header
+comment — only its one Library-import special case had a stale inline
+preamble, now fixed; same for `value_case_match.rs`'s two non-Library tests,
+fully swapped to `mock::mcp_module`; `text_spliton.rs`'s `FsMetadata` type
+fixed in place — none of these fixtures actually dispatch the effects whose
+types were wrong, so this was a landmine-defusal, not a live-bug fix).
+
+**Discrepancy note:** production's effect surface has drifted further than
+this finding described since the 2026-07-06 review: the `Ask` verb was
+renamed to `AskWith :: Text -> Value -> Ask Value` (the `schema` object is
+now a second argument, wrapped by a Haskell-level `ask` helper), the `SG`
+effect was removed/replaced by `Lsp`, and a `Time` effect was added — none
+present in this mock preamble. Left out of this fix: renaming `Ask`→`AskWith`
+or adding `Lsp`/`Time` would be a full effect-stack redesign of the mock
+harness, not the bounded type-signature fix this finding asked for, and nothing
+currently depends on it (same "landmine, not live fire" status). A future
+pass reconciling the mock preamble's effect *set* (not just existing verbs'
+types) with `effect_defs.rs` would need to touch this.
+
 ## F3 (MEDIUM-LOW): deep-diff harness can't fail on JIT non-termination and has no comparison floor
 
 **Where:** `tidepool-testing/tests/proptest_deep_differential.rs:347-376,
@@ -123,22 +155,55 @@ epoch only while count > 0.
 **Fix:** split declaration/assignment; when pre-set, assert `[ -x ]` + run the
 same `Usage:` probe extract_env uses; print skipped-suite counts at the end.
 
+**BLOCKED (boundary conflict):** this fix touches `scripts/battery.sh`, but the
+test-infra work session fixing F1–F4 was explicitly instructed NOT to touch
+`scripts/` (owned by a different worker in the parallel review-fix pass).
+F5 is otherwise unstarted — the analysis above is still accurate as of this
+note; a worker with `scripts/` in scope should apply the fix described.
+
+## Discrepancy notes (from step-0 fixture work)
+
+- `cross_mode_existing::pure_nested_value_case_cross_mode_equivalent` — after
+  fixing the `Number 42.0` fixture-drift (Scientific has no `Fractional`
+  instance, `Number 42.0` → `Number 42`), the test still failed the *structural*
+  half of `assert_cross_mode_equivalent` with `LetRec binding index mismatch`
+  deep in the shared top-level letrec (~57 bindings). Root-caused: importing
+  `Tidepool.Aeson.Value` pulls in `Scientific`'s hand-written `Eq`/`Ord`/`Num`/
+  `Show` instances; GHC's cross-module SCC tie-breaking (Unique-order
+  dependent) reorders that region of the letrec differently between the
+  single-module and split-module compiles. Confirmed via
+  `structural_eq::assert_value_equivalent` alone (bypassing the structural
+  check): the two modes' **runtime values agree** — this is a benign Core-shape
+  difference, not an observable-behavior bug. Already-established precedent in
+  the same file: `pure_typeclass_dispatch_ord`/`pure_primitive_boxing_*` use
+  `assert_cross_mode_pure_equivalent` (runtime-only) for the same reason
+  (typeclass-dictionary shape sensitivity across module boundaries). Switched
+  this fixture to the same runtime-only check; not a fixture bug, not fixed at
+  the harness level (would need `tidepool-codegen`/extractor work, out of
+  test-infra's remit).
+
 ## Smaller items
 
-- `oracle.rs` `test_differential_identity` asserts only "both sides are
+- [x] `oracle.rs` `test_differential_identity` asserts only "both sides are
   closures" — differential in name only; compare via CBOR-eval on a
   ground-typed fixture or rename to the smoke test it is.
-- `generator_reach_stats` prints Join/LetRec/Case frequencies but asserts only
-  `nodes > 0`; asserting nonzero Join/LetRec/Case at the weighted depth-7
-  setting turns the reach report into a regression gate for "deep cases
-  unreachable".
-- `redeploy.sh` preflight opportunity: after `nix profile upgrade`, run the
-  installed `tidepool-extract` no-args and check the `Usage:` banner —
-  catches a broken wrapper at deploy time instead of first eval.
+  **Done:** switched to `(\x -> x) 42` on both sides (Rust-constructed vs
+  `haskell/test/suite_cbor/app_identity.cbor`, an existing tracked fixture
+  compiled from `Suite.hs`'s `app_identity = (\x -> x) 42`) and compare the
+  actual ground result (42), unboxing GHC's `I#` wrapper — a real
+  cross-engine comparison instead of a shape-only smoke check.
+- [x] `generator_reach_stats` prints Join/LetRec/Case frequencies but asserts
+  only `nodes > 0`; asserting nonzero Join/LetRec/Case at the weighted
+  depth-7 setting turns the reach report into a regression gate for "deep
+  cases unreachable". **Done:** added the assertion.
+- [ ] `redeploy.sh` preflight opportunity: after `nix profile upgrade`, run
+  the installed `tidepool-extract` no-args and check the `Usage:` banner —
+  catches a broken wrapper at deploy time instead of first eval. **BLOCKED**:
+  same `scripts/` boundary conflict as F5 — unstarted.
 - Cross-refs into other plans' test asks: plan 04 F4 (shadowing generator
   mode), plan 04 F6 (delete `run_oracle_eval_may_panic`), plan 02
   opportunity 1 (non-ASCII lane), plan 01 (array-GC red test + heap-verify
-  corpus).
+  corpus). Informational only — not actionable from this file.
 
 ## Verified clean — do NOT re-audit
 
@@ -155,9 +220,15 @@ closed issues in this slice (the stale panic-TOLERANCE is plan 04 F6).
 
 ## DONE CRITERIA
 
-- [ ] F1 deep-force landed; local bug-reinjection goes red
-- [ ] F2 preamble ↔ handlers ↔ production aligned; legacy preambles migrated
-- [ ] F3 floor + timeout classification + 101 routing
-- [ ] F4 RAII disarm; F5 battery hardening
-- [ ] Smaller items triaged/filed
-- [ ] `scripts/battery.sh` green end-to-end
+- [x] F1 deep-force landed; local bug-reinjection goes red
+- [x] F2 preamble ↔ handlers ↔ production aligned; legacy preambles migrated
+- [x] F3 floor + timeout classification + 101 routing
+- [x] F4 RAII disarm
+- [ ] F5 battery hardening — BLOCKED: requires editing `scripts/`, out of
+      this worker's boundary (see F5 note above); unstarted, needs a
+      `scripts/`-scoped worker
+- [x] Smaller items triaged/filed (2 fixed — `test_differential_identity`,
+      `generator_reach_stats`; 1 blocked on the `scripts/` boundary —
+      `redeploy.sh` preflight; cross-refs into other plans are informational)
+- [x] `scripts/battery.sh` green end-to-end — full run: 2720 passed, 0 failed,
+      31 skipped (expected `#[ignore]`d tests), ~124 min wall-clock
