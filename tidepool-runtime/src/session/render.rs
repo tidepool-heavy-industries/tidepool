@@ -385,11 +385,15 @@ fn extract_user_imports(src: &str) -> (String, Vec<String>) {
     (kept.join("\n"), imports)
 }
 
-/// Rewrite one `env.imports` line so it also hides every name in
-/// `all_session_heads`, merging into any `hiding (…)` clause the line already
-/// carries (e.g. `import Tidepool.Prelude hiding (error)`) rather than
-/// duplicating the clause (GHC allows only one `hiding` per import). A
-/// `import qualified …` line is returned unchanged — qualified names can
+/// Rewrite one `env.imports` line so no name in `all_session_heads` reaches
+/// scope through it. Three shapes, because GHC allows at most one of an
+/// explicit import list and a `hiding` clause per import:
+/// - `import M hiding (…)` — merge the heads into the existing clause.
+/// - `import M (a, b)` — SUBTRACT colliding entries from the list (appending
+///   `hiding` here would be a parse error); an emptied list stays as
+///   `import M ()`, which is valid and imports nothing but instances.
+/// - `import M` — append a `hiding (…)` clause.
+/// A `import qualified …` line is returned unchanged — qualified names can
 /// never collide with an unqualified session decl. Empty `all_session_heads`
 /// also returns the line unchanged (no session decls yet to guard against).
 fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
@@ -411,12 +415,52 @@ fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
             );
         }
         prefix.to_string()
+    } else if let (Some(open), Some(close)) = (imp.find('('), imp.rfind(')')) {
+        // Explicit import list. An entry collides when its head identifier
+        // (the text before any `(..)` suffix; the whole `(op)` for an
+        // operator entry) matches a session head.
+        let kept: Vec<&str> = split_top_level_commas(&imp[open + 1..close])
+            .into_iter()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .filter(|e| {
+                let head = match e.split('(').next().map(str::trim) {
+                    Some("") | None => *e, // operator entry like `(<+>)`
+                    Some(h) => h,
+                };
+                !all_session_heads
+                    .iter()
+                    .any(|p| p.head_name() == head || op_wrap(p.head_name()) == head)
+            })
+            .collect();
+        return format!("{}({}){}", &imp[..open], kept.join(", "), &imp[close + 1..]);
     } else {
         imp.to_string()
     };
     hides.sort();
     hides.dedup();
     format!("{base} hiding ({})", hides.join(", "))
+}
+
+/// Split an import/export list on commas at paren depth 0, so entries like
+/// `Foo(A, B)` survive intact.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 /// The export items in scope (and re-exported) by `Lib.G<g-1>`, i.e. after
@@ -648,6 +692,43 @@ mod tests {
             items: Vec::new(),
             retracts: names.iter().map(|s| (*s).into()).collect(),
         }
+    }
+
+    #[test]
+    fn explicit_import_list_subtracts_colliding_head() {
+        // `import M (a, b) hiding (x)` is a GHC parse error — a colliding name
+        // must be SUBTRACTED from an explicit list, never `hiding`-appended.
+        // The live case: the eval preamble's `import Tidepool.Shell (sh)` vs a
+        // session decl named `sh`.
+        let sh = val("sh");
+        let heads = [&sh];
+        assert_eq!(
+            hide_session_heads("import Tidepool.Shell (sh)", &heads),
+            "import Tidepool.Shell ()"
+        );
+        let who = val("who");
+        let heads = [&who];
+        assert_eq!(
+            hide_session_heads("import Tidepool.Shell (sh)", &heads),
+            "import Tidepool.Shell (sh)"
+        );
+    }
+
+    #[test]
+    fn explicit_import_list_keeps_noncolliding_entries_and_nested_commas() {
+        let empty = val("empty");
+        let heads = [&empty];
+        assert_eq!(
+            hide_session_heads("import Data.Map (Map(Bin, Tip), empty, lookup)", &heads),
+            "import Data.Map (Map(Bin, Tip), lookup)"
+        );
+        // Operator entries match through op_wrap.
+        let op = val("<+>");
+        let heads = [&op];
+        assert_eq!(
+            hide_session_heads("import M ((<+>), pure)", &heads),
+            "import M (pure)"
+        );
     }
 
     #[test]
