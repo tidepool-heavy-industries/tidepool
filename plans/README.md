@@ -93,7 +93,7 @@ been deleted (tier 09).
 ### Status
 
 - [ ] 01 GC / memory safety
-- [ ] 02 Haskell stdlib + extract — H1-H4 + M5 + M10 merged (2760024b); M1-M4/M6-M9 + LOWs remain
+- [ ] 02 Haskell stdlib + extract — all findings merged (H tier 2760024b; M/LOW tier 7d5cba1e); remaining: root close-out only (final battery, redeploy, live H1/H2 spot-check) + RustSections.hs LOWs (untracked WIP, root-owned)
 - [ ] 03 Engine / runtime / macro / bridge
 - [ ] 04 Optimizer shadowing
 - [ ] 05 Repr wire + eval oracle
