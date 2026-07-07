@@ -161,7 +161,7 @@ module Tidepool.Prelude
   , fromFloatDigits, toRealFloat
   , Key, object, (.=), toJSON
   , ToJSON
-  , FromJSON(..), Result(..), fromJSON, resultToEither, eitherDecode
+  , FromJSON(..), Result(..), fromJSON, resultToEither, eitherDecode, decode
   , (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble
     -- * JSON lenses (Tidepool.Aeson.Lens + Control.Lens)
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double
@@ -296,7 +296,7 @@ import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, daysFromCiv
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
-import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
+import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, decode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
 import Tidepool.Aeson.Scientific (toBoundedInteger)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's

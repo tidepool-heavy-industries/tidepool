@@ -31,6 +31,7 @@ module Tidepool.Aeson
   , fromJSON
   , resultToEither
   , eitherDecode
+  , decode
   , (.:)
   , (.:?)
   , (.!=)

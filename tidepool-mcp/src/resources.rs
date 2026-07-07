@@ -212,7 +212,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "## Returning results\n",
         "The final value renders to JSON for the caller — Int → number, [Char] → string, ",
         "Bool → true/false, lists → arrays, and a `Value` → that JSON directly. Return a `Value` ",
-        "for structured output (`object`/`toJSON`/`parseJson`/`llm`/`httpGet`); `putStrLn`/`say` ",
+        "for structured output (`object`/`toJSON`/`eitherDecode`/`llm`/`httpGet`); `putStrLn`/`say` ",
         "carry human-readable debug traces, and `pure x` returns a value directly. Extract from a `Value` with ",
         "optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, `_Bool`, `_Array`); ",
         "`renderJson :: Value -> Text` renders one to compact JSON.\n\n",

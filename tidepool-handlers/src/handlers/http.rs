@@ -7,10 +7,6 @@
 // bodies below are hand-written.
 tidepool_mcp::http_effect_def!(crate::effect_glue::effect_rust_projection);
 
-pub fn parse_json_str(s: &str) -> Result<serde_json::Value, HttpError> {
-    serde_json::from_str(s).map_err(|e| HttpError::HttpBadJson(format!("invalid JSON: {e}")))
-}
-
 /// Headroom below the machine's `MAX_EFFECT_RESPONSE_NODES` (100_000, in
 /// `tidepool_codegen::jit_machine`). The count from `bridged_node_count` is the
 /// exact size of the response `Value`; the machine additionally counts the
@@ -137,10 +133,6 @@ impl HttpHandler {
         body: crate::effect_glue::JsonArg,
     ) -> Result<serde_json::Value, HttpError> {
         self.post(&url, &body.0)
-    }
-
-    fn http_parse_json(&mut self, s: String) -> Result<serde_json::Value, HttpError> {
-        parse_json_str(&s)
     }
 }
 

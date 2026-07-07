@@ -138,12 +138,10 @@ fn works_error_worker_folds() {
 }
 
 /// `FromJSON` — the pure `Value -> a` structural-decode layer that backs
-/// `parseJson`. Typeclass-dictionary dispatch over `Value` constructor matches,
-/// running on the JIT: `[a]` traverses, `Int` reads a `Number`, the polymorphic
-/// `fromJSON` round-trips a `toJSON`-built `Value`. (The `ParseJson` *effect*
-/// half — serde_json text→Value — is exercised by live eval + the FromCore
-/// roundtrip; the `NullDispatcher` here returns `0` for all effects, so only the
-/// pure layer is probeable.)
+/// `eitherDecode`. Typeclass-dictionary dispatch over `Value` constructor
+/// matches, running on the JIT: `[a]` traverses, `Int` reads a `Number`, the
+/// polymorphic `fromJSON` round-trips a `toJSON`-built `Value`. (The text→Value
+/// half is the `JsonDecode` primop — see `works_either_decode` below.)
 #[test]
 fn works_from_json() {
     // FromJSON [Int]: build an Array via toJSON, decode it back, sum it.
@@ -174,6 +172,19 @@ fn works_either_decode() {
     works(
         r#"pure (case (eitherDecode "{oops" :: Either Text Value) of { Left e -> Bool (T.length e > 0); Right _ -> Bool False })"#,
         serde_json::json!(true),
+    );
+}
+
+/// `decode` — the Maybe-flavored aeson decode over the same primop path.
+#[test]
+fn works_decode() {
+    works(
+        r#"pure (case (decode "{\"a\":1}" :: Maybe Value) of { Just v -> v; Nothing -> Null })"#,
+        serde_json::json!({"a": 1}),
+    );
+    works(
+        r#"pure (case (decode "nope" :: Maybe Value) of { Nothing -> "rejected"::Text; Just _ -> "wat" })"#,
+        serde_json::json!("rejected"),
     );
 }
 

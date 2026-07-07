@@ -321,10 +321,13 @@ mod tests {
             .is_ok()
     }
 
-    /// #335 end-to-end acceptance: with no `tidepool-lsp-daemon` running, the
+    /// #335 end-to-end acceptance: with no `tidepool-lsp-daemon` reachable, the
     /// socket connect fails immediately (cheap, no live dependency), so
     /// `lspWhere` is a typed `Left (LspDaemonDown _)` the eval pattern-matches
     /// — never an abort. Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
+    /// The Lsp handler gets an ISOLATED cwd (no `.tidepool/lsp.sock`) so a dev
+    /// daemon legitimately running at the repo root can't turn this into a
+    /// live query.
     #[tokio::test]
     async fn lsp_where_no_daemon_is_typed_left_lspdaemondown() {
         if !extract_available() {
@@ -341,6 +344,8 @@ mod tests {
         let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
         let kv_path = std::env::temp_dir().join("tidepool_lsp_jit_kv_nodaemon.json");
         let cwd = repo_root();
+        let lsp_cwd = std::env::temp_dir().join("tidepool_lsp_nodaemon_cwd");
+        std::fs::create_dir_all(&lsp_cwd).unwrap();
         let captured = CapturedOutput::new();
         let mut handlers = frunk::hlist![
             crate::ConsoleHandler,
@@ -348,7 +353,7 @@ mod tests {
             crate::FsHandler::new(cwd.clone()),
             crate::HttpHandler,
             crate::ExecHandler::new(cwd.clone()),
-            LspHandler::new(cwd.clone()),
+            LspHandler::new(lsp_cwd),
             crate::LlmHandler::new("ollama:llama3.2".to_string()),
             crate::GitHandler::new(cwd.clone()),
             crate::TimeHandler,

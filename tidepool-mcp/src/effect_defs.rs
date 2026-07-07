@@ -427,9 +427,9 @@ macro_rules! http_effect_def {
             req HttpReq,
             decl_fn http_decl,
             description [
-                "JSON I/O. Fetch JSON from HTTP endpoints (returns Value), or ",
-                "parse a JSON Text into a Value with `parseJson` ",
-                "(spec-compliant, parsed Rust-side via serde_json).",
+                "JSON I/O. Fetch JSON from HTTP endpoints (returns Value). ",
+                "Parsing JSON Text is PURE — `eitherDecode` (aeson-style, ",
+                "serde_json underneath), no effect involved.",
             ],
             type_defs [],
             // #335 typed-failure ADT. The HTTP status code is a FIELD on
@@ -440,7 +440,6 @@ macro_rules! http_effect_def {
                 { ctor HttpRestricted, fields { detail: "Text" as String },              doc "the URL targets a sandboxed/internal address" },
                 { ctor HttpNetwork,    fields { detail: "Text" as String },              doc "a network-level failure (connect/timeout/read)" },
                 { ctor HttpStatus,     fields { code: "Int" as i64, body: "Text" as String }, doc "a non-2xx HTTP response" },
-                { ctor HttpBadJson,    fields { detail: "Text" as String },              doc "the body is not valid JSON" },
                 { ctor HttpTooLarge,   fields { nodes: "Int" as i64 },                   doc "the JSON response exceeds the materialization cap (node count); narrow the query" },
             ],
             verbs [
@@ -449,10 +448,6 @@ macro_rules! http_effect_def {
                   ret "Value", errors HttpError },
                 { ctor HttpPost, method http_post,
                   args { url: "Text" as String, body: "Value" as crate::effect_glue::JsonArg },
-                  ret "Value", errors HttpError },
-                // Parse a JSON string Rust-side (serde_json) into a Value.
-                { ctor ParseJson, method http_parse_json,
-                  args { s: "Text" as String },
                   ret "Value", errors HttpError },
             ],
             helpers [
@@ -465,13 +460,6 @@ macro_rules! http_effect_def {
                   doc ["POST a JSON body; returns the response Value (see `httpGet` for the",
                        "failure shape)."],
                   body applied HttpPost(url, body) },
-                // Parse JSON Text into ANY FromJSON type: the result type drives the
-                // decode (`FromJSON Value` is identity, so `parseJson t :: M Value`
-                // gives the raw value; `:: M Cfg` decodes a record). A parse failure
-                // is `Left (HttpBadJson _)`; a DECODE failure (valid JSON, wrong shape)
-                // still aborts the eval (it isn't representable in `HttpError`).
-                { raw ["parseJson :: FromJSON a => Text -> M (Either HttpError a)",
-                       "parseJson t = send (ParseJson t) >>= \\r -> case r of { Left e -> pure (Left e); Right v -> case fromJSON v of { Success a -> pure (Right a); Error e -> error (T.pack e) } }"] },
             ],
         }
     };
@@ -1114,8 +1102,10 @@ mod tests {
                 == "data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)"));
     }
 
-    /// #335 Http wave: HttpGet/HttpPost/ParseJson thread `Either HttpError`,
+    /// #335 Http wave: HttpGet/HttpPost thread `Either HttpError`,
     /// `HttpStatus` carries the status CODE as a field, and Try* is gone.
+    /// JSON parsing is pure (`eitherDecode` over the JsonDecode primop) — the
+    /// Http effect carries no parse verb and no bad-JSON error.
     #[test]
     fn generated_http_decl_threads_either_and_emits_error_adt() {
         let d = crate::http_decl();
@@ -1125,13 +1115,11 @@ mod tests {
         assert!(d
             .constructors
             .contains(&"HttpPost :: Text -> Value -> Http (Either HttpError Value)"));
-        assert!(d
-            .constructors
-            .contains(&"ParseJson :: Text -> Http (Either HttpError Value)"));
+        assert!(!d.constructors.iter().any(|c| c.contains("ParseJson")));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
         assert!(d.type_defs.iter().any(|t| *t
             == "data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | \
-                HttpStatus Int Text | HttpBadJson Text | HttpTooLarge Int deriving (Show, Eq)"));
+                HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)"));
     }
 
     /// #335 Llm wave: LlmStructured threads `Either LlmError`, `LlmBudget` is

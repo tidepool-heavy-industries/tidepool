@@ -15,7 +15,7 @@ One module per effect under `src/handlers/`:
 - `src/handlers/kv.rs` — `KvReq`/`KvHandler` (JSON-file-backed store)
 - `src/handlers/fs.rs` — `FsReq`/`FsHandler` + the shared glob/sandbox helpers
   (`expand_glob`, `component_filter`, `pattern_mentions`, `is_glob`, `blake3_hex`)
-- `src/handlers/http.rs` — `HttpReq`/`HttpHandler` + `parse_json_str`
+- `src/handlers/http.rs` — `HttpReq`/`HttpHandler`
 - `src/handlers/exec.rs` — `ExecReq`/`ExecHandler`
 - `src/handlers/lsp.rs` — `LspReq`/`LspHandler` + the `LspNode`/`LspPosition`/`LspDiag`
   wire types + `json_str`/`json_line`

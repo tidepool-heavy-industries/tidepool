@@ -22,8 +22,9 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
+import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc(..), ok)
-import Tidepool.Effects (M, runArgv, parseJson, liftEither)
+import Tidepool.Effects (M, runArgv, liftEither)
 
 -- | Run a command (argv, no shell), strip stdout, throw on nonzero exit.
 -- `runArgv` is typed (#335): a spawn failure aborts via `liftEither`, same as
@@ -42,10 +43,10 @@ shLines argv = do
   let ls = T.lines out
   pure (filter (not . T.null) ls)
 
--- | Run and parse stdout as JSON via 'parseJson'. Throws on parse error
--- (`parseJson`'s `Left (HttpBadJson _)` aborts via `liftEither`).
+-- | Run and parse stdout as JSON via the pure 'eitherDecode'. Throws on parse
+-- error (the `Left msg` aborts via `liftEither`).
 shJson :: [Text] -> M Value
-shJson argv = sh1 argv >>= parseJson >>= liftEither
+shJson argv = sh1 argv >>= liftEither . eitherDecode
 
 -- | Run; return @Right stdout@ on zero exit, @Left stderr@ on nonzero. A
 -- spawn failure still aborts (via `liftEither`) — this @Either@ is purely the

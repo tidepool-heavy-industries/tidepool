@@ -77,10 +77,11 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
         "import qualified Tidepool.TextFormat as TF",
         "import qualified Tidepool.Table as Tab",
         "import qualified Tidepool.Patch as Patch",
-        // NOTE: Tidepool.Shell/Git/Cargo are NOT here — they depend on the Exec
-        // (`runArgv`) + Http (`parseJson`) effect helpers, so they're imported
-        // conditionally in `pragmas_and_imports` only when those effects are in
-        // the stack (else they fail to load on a minimal/Console-only stack).
+        // NOTE: Tidepool.Shell/Git/Cargo are NOT here — Shell/Cargo depend on
+        // the Exec (`runArgv`) effect helper and Git on the Git verbs, so
+        // they're imported conditionally in `pragmas_and_imports` only when
+        // those effects are in the stack (else they fail to load on a
+        // minimal/Console-only stack).
         "import Control.Monad.Freer hiding (run)",
     ];
     if user_library {
@@ -99,10 +100,10 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 ///
 /// `effects`: the session's actual effect stack — gates the Git/Shell/Cargo
-/// imports exactly like the eval preamble's `pragmas_and_imports` does (only
-/// when both Exec and Http are present; those stdlib modules reference
-/// `runArgv`/`parseJson` helpers that don't exist in a generated
-/// `Tidepool.Effects` built from a smaller stack). Passing the wrong (e.g.
+/// imports exactly like the eval preamble's `pragmas_and_imports` does
+/// (Shell/Cargo need Exec's `runArgv`, Git needs the Git verbs; those helpers
+/// don't exist in a generated `Tidepool.Effects` built from a smaller stack).
+/// Passing the wrong (e.g.
 /// empty/minimal) effect set here used to be masked by callers reaching for
 /// the lens-free `ModuleEnv::standalone_default` instead — but that surface
 /// also drops Prelude/Aeson, so a decl-plane pure bind (`v = object [...]`,
@@ -132,16 +133,18 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
         .into_iter()
         .map(String::from)
         .collect();
-    // Shell-effect stdlib modules depend on the Exec (`runArgv`) + Http
-    // (`parseJson`) helpers in the generated Tidepool.Effects — import them
-    // only when both effects are present, mirroring `pragmas_and_imports`
-    // exactly so the decl and stmt/eval planes never diverge on this gate.
+    // Shell/Cargo depend on the Exec (`runArgv`) helper and Git on the Git
+    // verbs in the generated Tidepool.Effects — import each only when its
+    // effect is present, mirroring `pragmas_and_imports` exactly so the decl
+    // and stmt/eval planes never diverge on this gate.
     let has_exec = effects.iter().any(|e| e.type_name == "Exec");
-    let has_http = effects.iter().any(|e| e.type_name == "Http");
-    if has_exec && has_http {
+    let has_git = effects.iter().any(|e| e.type_name == "Git");
+    if has_exec {
         imports.push("import qualified Tidepool.Shell as Shell".into());
-        imports.push("import qualified Tidepool.Git as Git".into());
         imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    }
+    if has_git {
+        imports.push("import qualified Tidepool.Git as Git".into());
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
@@ -182,16 +185,18 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
         out.push_str(imp);
         out.push('\n');
     }
-    // Shell-effect stdlib modules depend on the Exec (`runArgv`) + Http
-    // (`parseJson`) helpers in the generated Tidepool.Effects — import them only
-    // when both effects are present, else they fail to load (e.g. on a minimal
+    // Shell/Cargo depend on the Exec (`runArgv`) helper and Git on the Git
+    // verbs in the generated Tidepool.Effects — import each only when its
+    // effect is present, else they fail to load (e.g. on a minimal
     // Console-only stack).
     let has_exec = effects.iter().any(|e| e.type_name == "Exec");
-    let has_http = effects.iter().any(|e| e.type_name == "Http");
-    if has_exec && has_http {
+    let has_git = effects.iter().any(|e| e.type_name == "Git");
+    if has_exec {
         out.push_str("import qualified Tidepool.Shell as Shell\n");
-        out.push_str("import qualified Tidepool.Git as Git\n");
         out.push_str("import qualified Tidepool.Cargo as Cargo\n");
+    }
+    if has_git {
+        out.push_str("import qualified Tidepool.Git as Git\n");
     }
     // The pagination / orchestration helper DEFINITIONS live in the generated
     // Tidepool.Orchestrate module (always written by `ensure_effects_module`,
@@ -652,7 +657,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "`Value` → that JSON directly. In the REPL (`session_run`), results render ",
         "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
         "For structured output return a `Value` (via ",
-        "`object`/`toJSON`/`parseJson`/`llm`/`httpGet`, …), e.g. ",
+        "`object`/`toJSON`/`eitherDecode`/`llm`/`httpGet`, …), e.g. ",
         "`Right v <- httpGet \"https://api.github.com/repos/o/r\"`; reserve `putStrLn`/`say` for ",
         "human-readable debug traces, and return `pure x` in place of ",
         "`send (Print (show x))`. Extract from a ",

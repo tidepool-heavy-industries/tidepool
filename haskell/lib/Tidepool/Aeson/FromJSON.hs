@@ -9,9 +9,9 @@
 --
 -- This is PURE Haskell over the vendored Double-based 'Value' — it carries none
 -- of upstream aeson's @unsafePerformIO@ / exception / text-parser machinery.
--- The text→'Value' step happens Rust-side (the @ParseJson@ effect, serde_json);
--- this module is only the @Value -> a@ half, which runs cleanly on the JIT
--- (typeclass-dictionary dispatch over constructor pattern-matches).
+-- The text→'Value' step happens Rust-side (the 'eitherDecodeValue' primop,
+-- serde_json); this module adds the @Value -> a@ half, which runs cleanly on
+-- the JIT (typeclass-dictionary dispatch over constructor pattern-matches).
 module Tidepool.Aeson.FromJSON
   ( FromJSON(..)
   , GFromJSON(..)
@@ -20,6 +20,7 @@ module Tidepool.Aeson.FromJSON
   , fromJSON
   , resultToEither
   , eitherDecode
+  , decode
     -- * Object field accessors (aeson-style)
   , (.:)
   , (.:?)
@@ -132,11 +133,14 @@ resultToEither (Error e)   = Left (T.pack e)
 
 -- | Decode a JSON document straight into a typed value, aeson-style: @Right a@
 -- on success, @Left msg@ on a parse error (from serde_json) or a shape mismatch
--- (from 'fromJSON'). PURE — no effect and no abort, unlike the HTTP @parseJson@
--- verb. Because 'Value' has an identity 'FromJSON' instance,
--- @eitherDecode \@Value@ is the raw parse.
+-- (from 'fromJSON'). PURE — no effect and no abort. Because 'Value' has an
+-- identity 'FromJSON' instance, @eitherDecode \@Value@ is the raw parse.
 eitherDecode :: FromJSON a => Text -> Either Text a
 eitherDecode t = eitherDecodeValue t >>= resultToEither . fromJSON
+
+-- | 'eitherDecode' with the error dropped, aeson-style.
+decode :: FromJSON a => Text -> Maybe a
+decode = either (const Nothing) Just . eitherDecode
 
 mismatch :: String -> Value -> Result a
 mismatch want v = Error ("expected " ++ want ++ ", got " ++ kindOf v)
@@ -150,7 +154,7 @@ kindOf v = case v of
   Bool _   -> "bool"
   Null     -> "null"
 
--- Raw passthrough: lets `parseJson t :: M Value` fall out of the polymorphic helper.
+-- Raw passthrough: lets `eitherDecode t :: Either Text Value` be the raw parse.
 instance FromJSON Value where
   parseJSON = Success
 

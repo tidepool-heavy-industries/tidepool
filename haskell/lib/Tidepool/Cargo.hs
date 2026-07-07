@@ -20,8 +20,9 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
+import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc(..))
-import Tidepool.Effects (M, runArgv, parseJson, liftEither)
+import Tidepool.Effects (M, runArgv, liftEither)
 import qualified Tidepool.Shell as Shell
 
 -- | Run @cargo check --message-format=json [extras]@ and return each JSON
@@ -59,12 +60,4 @@ runCargoJson :: [Text] -> M [Value]
 runCargoJson subArgs = do
   p <- runArgv ("cargo" : subArgs) >>= liftEither
   let ls = filter (not . T.null) (T.lines p.stdout)
-  vs <- mapM parseLine ls
-  pure (concat vs)
-  where
-    parseLine :: Text -> M [Value]
-    parseLine l = do
-      r <- parseJson l
-      case r of
-        Right v -> pure [v]
-        Left _  -> pure []
+  pure [ v | l <- ls, Right v <- [eitherDecode l :: Either Text Value] ]
