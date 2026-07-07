@@ -30,7 +30,7 @@ import Prelude
   ( Int, Char, Bool(..), Maybe(..), String
   , Eq(..), Ord(..), Num(..), Integral(..)
   , Semigroup(..), Monoid(..)
-  , ($), (.), otherwise, not, (&&), (||), negate, fst
+  , ($), (.), id, otherwise, not, (&&), (||), negate, fst
   , map, filter, foldl, foldr, foldl'
   , null, error, fromIntegral, reverse, concatMap
   )
@@ -52,12 +52,12 @@ import Tidepool.Prelude
 -- >>> camelToSnake "HTTPServer"
 -- "h_t_t_p_server"
 camelToSnake :: Text -> Text
-camelToSnake = T.pack . go . T.unpack
+camelToSnake = T.pack . go True . T.unpack
   where
-    go [] = []
-    go (c:cs)
-      | isUpper c = '_' : toLowerChar c : go cs
-      | otherwise = c : go cs
+    go _ [] = []
+    go isFirst (c:cs)
+      | isUpper c = (if isFirst then id else ('_' :)) (toLowerChar c : go False cs)
+      | otherwise = c : go False cs
 
 -- | Convert snake_case to camelCase.
 --
@@ -118,8 +118,8 @@ centerWith w pad t
   | T.length t >= w = t
   | otherwise =
       let total = w - T.length t
-          lpad  = total `div` 2
-          rpad  = total - lpad
+          rpad  = total `div` 2
+          lpad  = total - rpad
       in  T.replicate lpad (T.singleton pad) <> t <> T.replicate rpad (T.singleton pad)
 
 -- | Indent every line of text by n spaces.

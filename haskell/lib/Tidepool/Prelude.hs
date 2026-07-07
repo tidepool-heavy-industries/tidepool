@@ -272,6 +272,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
 import Tidepool.FilePath
 import Data.Char (ord, chr)
+import qualified Data.Char as C
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
 import GHC.TypeError (Unsatisfiable, unsatisfiable, ErrorMessage(..))
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy, inits, group, scanl')
@@ -614,11 +615,11 @@ instance Slice Text where
   {-# INLINE sdrop #-}
 
 instance Slice [a] where
-  stake 0 _  = []
-  stake _ [] = []
+  stake n _      | n <= 0 = []
+  stake _ []     = []
   stake n (x:xs) = x : stake (n-1) xs
-  sdrop 0 xs = xs
-  sdrop _ [] = []
+  sdrop n xs     | n <= 0 = xs
+  sdrop _ []     = []
   sdrop n (_:xs) = sdrop (n-1) xs
   {-# INLINE stake #-}
   {-# INLINE sdrop #-}
@@ -733,37 +734,77 @@ parseIntM t = case T.uncons t of
 parseInt :: Unsatisfiable ('Text "parseInt is partial — use parseIntM :: Text -> Maybe Int." ':$$: 'Text "Then handle the Nothing (fromMaybe def, a case, or liftMaybe).") => Text -> Int
 parseInt = unsatisfiable
 
--- | Parse a Double from Text, returning Nothing on failure.
--- Handles optional sign, integer part, optional decimal part.
+-- | Parse a Double from Text, returning Nothing on failure. Handles optional
+-- sign, integer part, optional decimal part, and an optional @e@\/@E@
+-- exponent (so it round-trips 'showDouble', which emits scientific notation
+-- for very small\/large magnitudes). Digits accumulate directly as a
+-- 'Double' rather than an 'Int', so a digit run longer than ~19 characters
+-- loses precision the way any Double parse would instead of silently
+-- overflowing to garbage.
 parseDoubleM :: Text -> Maybe Double
 parseDoubleM t = case T.uncons t of
   Nothing -> Nothing
-  Just ('-', rest) -> negate <$> parsePos rest
-  Just ('+', rest) -> parsePos rest
-  Just _           -> parsePos t
+  Just ('-', rest) -> negate <$> parseSigned rest
+  Just ('+', rest) -> parseSigned rest
+  Just _           -> parseSigned t
   where
-    parsePos :: Text -> Maybe Double
-    parsePos s = case T.break (== '.') s of
+    parseSigned :: Text -> Maybe Double
+    parseSigned s =
+      let (mant, expPart) = T.break (\c -> c == 'e' || c == 'E') s
+      in case parseMantissa mant of
+           Nothing -> Nothing
+           Just m  -> case T.uncons expPart of
+             Nothing      -> Just m
+             Just (_, er) -> scaleByPow10 m <$> parseExponent er
+
+    parseMantissa :: Text -> Maybe Double
+    parseMantissa s = case T.break (== '.') s of
       (intPart, rest)
         | T.null intPart -> Nothing
         | not (T.all isDigitC intPart) -> Nothing
-        | T.null rest ->
-            Just (fromIntegral (parseDigits intPart))
+        | T.null rest -> Just (digitsToDouble intPart)
         | otherwise -> case T.uncons rest of
             Just ('.', fracPart)
-              | T.null fracPart -> Just (fromIntegral (parseDigits intPart))
+              | T.null fracPart -> Just (digitsToDouble intPart)
               | T.all isDigitC fracPart ->
-                  let whole = fromIntegral (parseDigits intPart) :: Double
-                      frac  = fromIntegral (parseDigits fracPart) :: Double
-                      denom = fromIntegral (pow10 (T.length fracPart)) :: Double
-                  in  Just (whole + frac / denom)
+                  Just (digitsToDouble intPart + digitsToDouble fracPart / pow10D (T.length fracPart))
               | otherwise -> Nothing
             _ -> Nothing
-    parseDigits :: Text -> Int
-    parseDigits = T.foldl' (\acc c -> acc * 10 + (ord c - ord '0')) 0
-    pow10 :: Int -> Int
-    pow10 0 = 1
-    pow10 !n = 10 * pow10 (n - 1)
+
+    parseExponent :: Text -> Maybe Int
+    parseExponent e = case T.uncons e of
+      Nothing       -> Nothing
+      Just ('-', r) -> negate <$> parseNatInt r
+      Just ('+', r) -> parseNatInt r
+      Just _        -> parseNatInt e
+
+    parseNatInt :: Text -> Maybe Int
+    parseNatInt s
+      | T.null s          = Nothing
+      | T.all isDigitC s  = Just (T.foldl' (\acc c -> acc * 10 + (ord c - ord '0')) 0 s)
+      | otherwise         = Nothing
+
+    digitsToDouble :: Text -> Double
+    digitsToDouble = T.foldl' (\acc c -> acc * 10 + fromIntegral (ord c - ord '0')) 0
+
+    pow10D :: Int -> Double
+    pow10D 0 = 1
+    pow10D !n = 10 * pow10D (n - 1)
+
+    -- ONE final multiplication/division against a precomputed power of ten
+    -- (not N chained single-digit steps): 'pow10D' itself is exact for the
+    -- exponents 'showDouble' ever emits (powers of ten up to 10^22 are
+    -- exactly representable as 'Double'), and IEEE-754 division/
+    -- multiplication is correctly-rounded, so this gives the same result a
+    -- correctly-rounded decimal parser would -- chaining @/10@ or @*10@ once
+    -- per exponent step instead compounds a rounding error at every step
+    -- (measurably wrong for negative exponents, e.g. @parseDoubleM
+    -- (showT (1.5e-10 :: Double))@ no longer round-tripped).
+    scaleByPow10 :: Double -> Int -> Double
+    scaleByPow10 x e
+      | e >= 0    = x * pow10D e
+      | otherwise = x / pow10D (negate e)
+
     isDigitC :: Char -> Bool
     isDigitC c = c >= '0' && c <= '9'
 
@@ -826,37 +867,47 @@ asObject _          = Nothing
 {-# INLINE asObject #-}
 
 -- ---------------------------------------------------------------------------
--- Char predicates (monomorphic, range-based — avoids Data.Char dictionaries)
+-- Char predicates
 -- ---------------------------------------------------------------------------
 
--- | Is the character a decimal digit (0-9)?
+-- | Is the character a decimal digit (0-9)? ASCII-only, matching
+-- @Data.Char.isDigit@ exactly (upstream is also ASCII-only here — Unicode
+-- digits outside 0-9 are @isNumber@, not @isDigit@).
 isDigit :: Char -> Bool
 isDigit c = c >= '0' && c <= '9'
 {-# INLINE isDigit #-}
 
--- | Is the character an ASCII letter?
+-- | Is the character alphabetic, per full Unicode semantics (delegates to
+-- @Data.Char.isAlpha@ — proven JIT-safe: the vendored 'Tidepool.Data.Text'
+-- @T.words@ already runs the same Unicode @isSpace@ table on the JIT). An
+-- ASCII-only range check here would silently diverge from @Data.Char@ on any
+-- accented/non-Latin letter, contradicting the API-is-the-prompt rule.
 isAlpha :: Char -> Bool
-isAlpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+isAlpha = C.isAlpha
 {-# INLINE isAlpha #-}
 
--- | Is the character an ASCII letter or digit?
+-- | Is the character alphabetic or a decimal digit, per full Unicode
+-- semantics (delegates to @Data.Char.isAlphaNum@; see 'isAlpha').
 isAlphaNum :: Char -> Bool
-isAlphaNum c = isAlpha c || isDigit c
+isAlphaNum = C.isAlphaNum
 {-# INLINE isAlphaNum #-}
 
--- | Is the character ASCII whitespace?
+-- | Is the character whitespace, per full Unicode semantics (delegates to
+-- @Data.Char.isSpace@; see 'isAlpha').
 isSpace :: Char -> Bool
-isSpace c = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+isSpace = C.isSpace
 {-# INLINE isSpace #-}
 
--- | Is the character an ASCII uppercase letter?
+-- | Is the character uppercase, per full Unicode semantics (delegates to
+-- @Data.Char.isUpper@; see 'isAlpha').
 isUpper :: Char -> Bool
-isUpper c = c >= 'A' && c <= 'Z'
+isUpper = C.isUpper
 {-# INLINE isUpper #-}
 
--- | Is the character an ASCII lowercase letter?
+-- | Is the character lowercase, per full Unicode semantics (delegates to
+-- @Data.Char.isLower@; see 'isAlpha').
 isLower :: Char -> Bool
-isLower c = c >= 'a' && c <= 'z'
+isLower = C.isLower
 {-# INLINE isLower #-}
 
 -- | Convert a digit character to its numeric value.
@@ -1006,6 +1057,9 @@ filter p (x:xs)
 {-# INLINE filter #-}
 
 -- | Lazy nubBy (emits matches immediately, keeps seen-accumulator).
+-- @eq@ is applied as @eq seenElem candidate@ (the already-kept element
+-- first), matching base's argument order — matters when @eq@ is not a true
+-- equivalence relation (e.g. a directional "subsumes" predicate).
 nubBy :: (a -> a -> Bool) -> [a] -> [a]
 nubBy eq = go []
   where
@@ -1015,7 +1069,7 @@ nubBy eq = go []
       | otherwise     = x : go (x : seen) rest
     elemBy _ []     = False
     elemBy x (y:ys)
-      | eq x y    = True
+      | eq y x    = True
       | otherwise = elemBy x ys
 {-# INLINE nubBy #-}
 
@@ -1105,8 +1159,8 @@ center w c t =
   let !l     = T.length t
   in if l >= w then t
      else let !total = w - l
-              !lpad  = total `div` 2
-              !rpad  = total - lpad
+              !rpad  = total `div` 2
+              !lpad  = total - rpad
           in T.replicate lpad (T.singleton c) <> t <> T.replicate rpad (T.singleton c)
 {-# INLINE center #-}
 
