@@ -644,6 +644,10 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "pipelines; attach a trailing `where` for local bindings. For step-by-step ",
         "sequencing write an explicit `do` block. Invoke effects with the helper ",
         "verbs. First call is ~2s; subsequent calls are cached.\n",
+        "One eval = one snapshot: batch CORRELATED reads (the files + status + ",
+        "log that answer one question) into a single eval \u{2014} reads split across ",
+        "separate evals interleave with concurrent writers, and a join over them ",
+        "silently drops keys.\n",
         "The unqualified `Tidepool.Prelude` is the recommended surface: a Text-first, ",
         "effect-aware standard library that resolves cleanly on the JIT. Qualified ",
         "namespaces reach the wider ecosystem \u{2014} among them T. (Data.Text), ",
@@ -683,7 +687,9 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             "specific `Left` to recover:\n",
             "  do { Right p <- run \"git status --short\"; pure (T.lines p.stdout) }\n",
             "  readFile \"notes.md\" >>= \\case { Right body -> pure (T.length body); Left (FsNotFound _) -> pure 0 }\n",
-            "`liftEither` unwraps a `Right` or aborts the eval on the `Left`.\n",
+            "`liftEither` unwraps a `Right` or aborts the eval on the `Left`. In a fold ",
+            "over many items, keep per-item failures as DATA and return both sides ",
+            "(`partitionEithers`) \u{2014} an abort mid-batch discards the completed work.\n",
             "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
         ));
         // DERIVED from the decls (crate::describe): one entry per effect —
