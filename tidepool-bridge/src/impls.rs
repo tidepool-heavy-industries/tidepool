@@ -134,9 +134,16 @@ impl ToCore for () {
 }
 
 impl FromCore for () {
-    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
-            Value::Con(_, fields) if fields.is_empty() => Ok(()),
+            // Mirror `to_value`: only the `()` constructor decodes to unit.
+            // Accepting ANY nullary con (`Nothing`, `False`, `[]`, a user
+            // nullary constructor, ...) silently corrupts downstream decode —
+            // exactly the failure mode `to_value`'s own comment warns about
+            // for the encode direction (#F6).
+            Value::Con(id, fields) if fields.is_empty() && table.name_of(*id) == Some("()") => {
+                Ok(())
+            }
             _ => Err(type_mismatch("()", value)),
         }
     }
@@ -550,9 +557,14 @@ impl<A, B> ToCoreSealed for (A, B) {}
 
 impl<A: FromCore, B: FromCore> FromCore for (A, B) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        let pair_id = get_resilient(table, "(,)", 2);
+        // Missing-constructor is a DIFFERENT failure than "this value isn't a
+        // pair": the old `pair_id == Some(*id)` fell through to the same
+        // `TypeMismatch("(,)", ...)` in both cases, masking a table that
+        // simply never registered `(,)` (#F6).
+        let pair_id = get_resilient(table, "(,)", 2)
+            .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
         match value {
-            Value::Con(id, fields) if pair_id == Some(*id) => {
+            Value::Con(id, fields) if *id == pair_id => {
                 if fields.len() == 2 {
                     Ok((
                         A::from_value(&fields[0], table)?,
@@ -587,9 +599,12 @@ impl<A, B, C> ToCoreSealed for (A, B, C) {}
 
 impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        let triple_id = get_resilient(table, "(,,)", 3);
+        // See the 2-tuple impl above: missing-constructor is split out of the
+        // type-mismatch arm (#F6).
+        let triple_id = get_resilient(table, "(,,)", 3)
+            .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
         match value {
-            Value::Con(id, fields) if triple_id == Some(*id) => {
+            Value::Con(id, fields) if *id == triple_id => {
                 if fields.len() == 3 {
                     Ok((
                         A::from_value(&fields[0], table)?,
@@ -975,5 +990,68 @@ mod tests {
         let table = test_table();
         roundtrip(Ok::<Vec<i64>, String>(vec![1, 2]), &table);
         roundtrip(Err::<Vec<i64>, String>("error".to_string()), &table);
+    }
+
+    // === F6/F7 round-trip asymmetry regression tests ===
+
+    /// `to_value`/`from_value` for `()` must be symmetric: only the `()`
+    /// constructor decodes to unit. Before the fix, `from_value` accepted ANY
+    /// nullary constructor (`False` here), silently masking an upstream
+    /// encoding bug that produced the wrong nullary con.
+    #[test]
+    fn unit_from_value_rejects_other_nullary_constructors() {
+        let table = test_table();
+        let false_id = table.get_by_name("False").unwrap();
+        let wrong_nullary = Value::Con(false_id, vec![]);
+        let result = <()>::from_value(&wrong_nullary, &table);
+        assert!(
+            result.is_err(),
+            "from_value(()) must reject a non-`()` nullary constructor (False), got Ok"
+        );
+    }
+
+    #[test]
+    fn unit_roundtrips() {
+        let table = test_table();
+        roundtrip((), &table);
+    }
+
+    /// A `DataConTable` missing `(,)` entirely must report `UnknownDataConName`
+    /// from `from_value`, not the same `TypeMismatch` a genuinely-wrong-shaped
+    /// value gets — the two failures have different fixes (register the
+    /// constructor vs. fix the caller's data).
+    #[test]
+    fn pair_from_value_missing_constructor_is_unknown_dataconname_not_type_mismatch() {
+        let table = DataConTable::new(); // no "(,)" registered
+        let some_other_con = Value::Con(DataConId(0), vec![]);
+        let err = <(i64, i64)>::from_value(&some_other_con, &table).unwrap_err();
+        assert!(
+            matches!(err, BridgeError::UnknownDataConName(ref n) if n == "(,)"),
+            "expected UnknownDataConName(\"(,)\"), got {err:?}"
+        );
+    }
+
+    /// With `(,)` registered, a value that just isn't a pair still reports the
+    /// ORIGINAL type-mismatch shape (only the missing-constructor case moved).
+    #[test]
+    fn pair_from_value_wrong_shape_is_still_type_mismatch() {
+        let table = test_table();
+        let not_a_pair = Value::Con(table.get_by_name("Nothing").unwrap(), vec![]);
+        let err = <(i64, i64)>::from_value(&not_a_pair, &table).unwrap_err();
+        assert!(
+            matches!(err, BridgeError::TypeMismatch { .. }),
+            "expected TypeMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn triple_from_value_missing_constructor_is_unknown_dataconname() {
+        let table = DataConTable::new(); // no "(,,)" registered
+        let some_other_con = Value::Con(DataConId(0), vec![]);
+        let err = <(i64, i64, i64)>::from_value(&some_other_con, &table).unwrap_err();
+        assert!(
+            matches!(err, BridgeError::UnknownDataConName(ref n) if n == "(,,)"),
+            "expected UnknownDataConName(\"(,,)\"), got {err:?}"
+        );
     }
 }
