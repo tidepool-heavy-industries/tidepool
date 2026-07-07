@@ -650,6 +650,104 @@ mod tests {
         ));
     }
 
+    // ---- F1: cyclic/forward-referencing node graphs must be rejected loudly ----
+
+    #[test]
+    fn test_read_one_node_self_cycle_rejected() {
+        // A single "App" node whose fun/arg both point at itself (index 0).
+        // Before the F1 fix this passed `validate_indices` (0 < len == 1) and
+        // would send `extract_subtree`'s Enter/Exit walk into an infinite
+        // re-push loop on first use — a hang/OOM, not a loud error.
+        let nodes = ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("App".to_string()),
+            ciborium::value::Value::Integer(0.into()),
+            ciborium::value::Value::Integer(0.into()),
+        ])]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(0.into())]);
+        let bytes = cbor_bytes(root);
+        match read_cbor(&bytes) {
+            Err(ReadError::InvalidStructure(_)) => {}
+            other => panic!("expected InvalidStructure for a self-cyclic node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_forward_reference_rejected() {
+        // Node 0 ("App") references node 1, which does not exist yet at node
+        // 0's position in the strict post-order the encoders emit — a forward
+        // reference, not merely out-of-bounds (both nodes exist; the array is
+        // 2 long), so the old `child >= len` bounds check would have missed it.
+        let nodes = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("App".to_string()),
+                ciborium::value::Value::Integer(1.into()),
+                ciborium::value::Value::Integer(1.into()),
+            ]),
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("Var".to_string()),
+                ciborium::value::Value::Integer(0.into()),
+            ]),
+        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(1.into())]);
+        let bytes = cbor_bytes(root);
+        match read_cbor(&bytes) {
+            Err(ReadError::InvalidStructure(_)) => {}
+            other => panic!("expected InvalidStructure for a forward reference, got {other:?}"),
+        }
+    }
+
+    /// Pins the strict post-order invariant `child < parent` across a
+    /// round-trip through both writer and reader — the property F1's fix
+    /// relies on (verified independently against `TreeBuilder::push` and
+    /// `Tidepool.CborEncode.emitNode`, which both append children before the
+    /// parent that references them).
+    #[test]
+    fn test_post_order_invariant_round_trips() {
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(VarId(1)),            // 0
+                CoreFrame::Lit(Literal::LitInt(42)), // 1
+                CoreFrame::App { fun: 0, arg: 1 },   // 2
+                CoreFrame::Var(VarId(2)),            // 3
+                CoreFrame::LetNonRec {
+                    binder: VarId(3),
+                    rhs: 2,
+                    body: 3,
+                }, // 4
+                CoreFrame::Case {
+                    scrutinee: 4,
+                    binder: VarId(4),
+                    alts: vec![
+                        Alt {
+                            con: AltCon::LitAlt(Literal::LitInt(0)),
+                            binders: vec![],
+                            body: 3,
+                        },
+                        Alt {
+                            con: AltCon::Default,
+                            binders: vec![],
+                            body: 4,
+                        },
+                    ],
+                }, // 5
+            ],
+        };
+        let bytes = write_cbor(&expr).expect("write failed");
+        let recovered = read_cbor(&bytes).expect("read failed — post-order invariant broken");
+        assert_eq!(expr, recovered);
+
+        for (my_idx, node) in recovered.nodes.iter().enumerate() {
+            for child in crate::tree::get_children(node) {
+                assert!(
+                    child < my_idx,
+                    "node {my_idx} has child {child} which is not strictly earlier"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_read_metadata_not_array() {
         let bytes = cbor_bytes(ciborium::value::Value::Integer(99.into()));

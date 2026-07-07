@@ -185,8 +185,13 @@ pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
 /// Other value forms (such as captured environments inside closures or
 /// continuations) are treated as opaque and returned unchanged.
 ///
-/// Uses an explicit work stack instead of recursion to handle deep
-/// structures (e.g., long lists) without overflowing the Rust stack.
+/// Uses an explicit work stack instead of recursion so the HOST stack never
+/// grows with structure depth. `MAX_DEPTH` bounds the WORK STACK's length
+/// (one live `Work` item per pending `Con`/`ConFun` field, not the value's
+/// true nesting depth), as a guard against unbounded growth on a pathological
+/// input — a ~50k-element list already carries that many pending fields and
+/// trips `DepthLimit`, well short of anything that would actually threaten
+/// the host stack (this Vec lives on the heap).
 pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     use tidepool_repr::DataConId;
 
@@ -1559,7 +1564,7 @@ fn dispatch_primop(
             } else {
                 Err(EvalError::TypeMismatch {
                     expected: "Data constructor",
-                    got: crate::error::ValueKind::Other(format!("{:?}", args[0])),
+                    got: crate::error::ValueKind::Other(crate::value::render_capped(&args[0], 64)),
                 })
             }
         }
@@ -1624,7 +1629,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -1647,7 +1652,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -1679,9 +1684,15 @@ fn dispatch_primop(
 
         // --- ByteArray# / MutableByteArray# ---
         PrimOpKind::NewByteArray => {
-            let size = expect_int(&args[0], heap)? as usize;
+            let size = expect_int(&args[0], heap)?;
+            if size < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array size",
+                    got: crate::error::ValueKind::Other(format!("negative size: {}", size)),
+                });
+            }
             Ok(Value::ByteArray(std::sync::Arc::new(
-                std::sync::Mutex::new(vec![0u8; size]),
+                std::sync::Mutex::new(vec![0u8; size as usize]),
             )))
         }
         PrimOpKind::ReadWord8Array => {
@@ -1770,7 +1781,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -1807,11 +1818,17 @@ fn dispatch_primop(
         }
         PrimOpKind::ResizeMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
-            let new_size = expect_int(&args[1], heap)? as usize;
+            let new_size = expect_int(&args[1], heap)?;
+            if new_size < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array size",
+                    got: crate::error::ValueKind::Other(format!("negative size: {}", new_size)),
+                });
+            }
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            bytes.resize(new_size, 0);
+            bytes.resize(new_size as usize, 0);
             drop(bytes);
             Ok(Value::ByteArray(ba.clone()))
         }
@@ -1874,7 +1891,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -1977,7 +1994,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Word64#",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -2099,7 +2116,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -2114,7 +2131,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -2133,7 +2150,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -2481,7 +2498,7 @@ fn dispatch_primop(
                 other => {
                     return Err(EvalError::TypeMismatch {
                         expected: "Addr# (LitString)",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
                     })
                 }
             };
@@ -2765,13 +2782,15 @@ fn force_text_arg(val: Value, heap: &mut dyn Heap, i_hash: DataConId) -> Result<
                 crate::shapes::text_bytes_clamped_with(&forced, |_| false, |id| id == i_hash)
                     .ok_or_else(|| EvalError::TypeMismatch {
                         expected: "Text backing: ByteArray# or LitString",
-                        got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
+                        got: crate::error::ValueKind::Other(crate::value::render_capped(
+                            &forced[0], 64,
+                        )),
                     })?;
             Ok(String::from_utf8_lossy(&bytes).into_owned())
         }
         other => Err(EvalError::TypeMismatch {
             expected: "Text (Con with 3 fields)",
-            got: crate::error::ValueKind::Other(format!("{:?}", other)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(other, 64)),
         }),
     }
 }
@@ -2782,7 +2801,7 @@ fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalEr
     } else {
         Err(EvalError::TypeMismatch {
             expected: "ByteArray#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(v, 64)),
         })
     }
 }
@@ -2818,7 +2837,7 @@ fn expect_int_like(v: &Value, heap: &mut dyn Heap) -> Result<i64, EvalError> {
         Value::Lit(Literal::LitWord(n)) => Ok(n as i64),
         _ => Err(EvalError::TypeMismatch {
             expected: "Int# or Word#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         }),
     }
 }
@@ -2830,7 +2849,7 @@ fn expect_int(v: &Value, heap: &mut dyn Heap) -> Result<i64, EvalError> {
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Int#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         })
     }
 }
@@ -2842,7 +2861,7 @@ fn expect_word(v: &Value, heap: &mut dyn Heap) -> Result<u64, EvalError> {
         Value::Lit(Literal::LitInt(n)) => Ok(n as u64),
         _ => Err(EvalError::TypeMismatch {
             expected: "Word#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         }),
     }
 }
@@ -2854,7 +2873,7 @@ fn expect_double(v: &Value, heap: &mut dyn Heap) -> Result<f64, EvalError> {
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Double#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         })
     }
 }
@@ -2866,7 +2885,7 @@ fn expect_float(v: &Value, heap: &mut dyn Heap) -> Result<f32, EvalError> {
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Float#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         })
     }
 }
@@ -2878,7 +2897,7 @@ fn expect_char(v: &Value, heap: &mut dyn Heap) -> Result<char, EvalError> {
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Char#",
-            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+            got: crate::error::ValueKind::Other(crate::value::render_capped(&v, 64)),
         })
     }
 }
@@ -4265,5 +4284,50 @@ mod tests {
             panic!("expected LitInt, got {:?}", res);
         };
         assert_eq!(n, 15);
+    }
+
+    /// F3: `newByteArray# (-1)` must not be allowed through to `vec![0u8;
+    /// size]` — casting a negative `Int#` to `usize` turns -1 into ~2^64,
+    /// which aborts the process on allocation (capacity overflow) rather than
+    /// producing a typed error.
+    #[test]
+    fn new_byte_array_negative_size_is_typed_error() {
+        let mut b = TreeBuilder::new();
+        let neg_one = b.push(CoreFrame::Lit(Literal::LitInt(-1)));
+        let _root = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::NewByteArray,
+            args: vec![neg_one],
+        });
+        let expr = b.build();
+        let mut heap = crate::heap::VecHeap::new();
+        match eval(&expr, &Env::new(), &mut heap) {
+            Err(EvalError::TypeMismatch { .. }) => {}
+            other => panic!("expected TypeMismatch for negative newByteArray# size, got {other:?}"),
+        }
+    }
+
+    /// F3: `resizeMutableByteArray# arr (-1)` — same negative-size hazard as
+    /// `newByteArray#`, on the resize path (`bytes.resize(size as usize, 0)`).
+    #[test]
+    fn resize_mutable_byte_array_negative_size_is_typed_error() {
+        let mut b = TreeBuilder::new();
+        let four = b.push(CoreFrame::Lit(Literal::LitInt(4)));
+        let ba = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::NewByteArray,
+            args: vec![four],
+        });
+        let neg_one = b.push(CoreFrame::Lit(Literal::LitInt(-1)));
+        let _root = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::ResizeMutableByteArray,
+            args: vec![ba, neg_one],
+        });
+        let expr = b.build();
+        let mut heap = crate::heap::VecHeap::new();
+        match eval(&expr, &Env::new(), &mut heap) {
+            Err(EvalError::TypeMismatch { .. }) => {}
+            other => panic!(
+                "expected TypeMismatch for negative resizeMutableByteArray# size, got {other:?}"
+            ),
+        }
     }
 }

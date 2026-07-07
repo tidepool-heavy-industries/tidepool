@@ -158,8 +158,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
                 ))
             }
         };
-        let tag = as_u64(&arr[2])? as u32;
-        let arity = as_u64(&arr[3])? as u32;
+        let tag = u32::try_from(as_u64(&arr[2])?)
+            .map_err(|_| ReadError::InvalidStructure("DataCon tag exceeds u32".to_string()))?;
+        let arity = u32::try_from(as_u64(&arr[3])?)
+            .map_err(|_| ReadError::InvalidStructure("DataCon arity exceeds u32".to_string()))?;
         let bangs_arr = match &arr[4] {
             Value::Array(a) => a,
             _ => {
@@ -199,11 +201,13 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
         let field_labels: Vec<String> = match &arr[6] {
             Value::Array(labels) => labels
                 .iter()
-                .filter_map(|l| match l {
-                    Value::Text(t) => Some(t.clone()),
-                    _ => None,
+                .map(|l| match l {
+                    Value::Text(t) => Ok(t.clone()),
+                    _ => Err(ReadError::InvalidStructure(
+                        "Field label must be text".to_string(),
+                    )),
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, ReadError>>()?,
             _ => Vec::new(),
         };
 
@@ -270,93 +274,69 @@ fn parse_warnings(val: &Value) -> MetaWarnings {
     warnings
 }
 
+/// A child index must reference a strictly EARLIER node than its parent.
+/// Both writers (`Tidepool.CborEncode.emitNode`, `TreeBuilder::push`) append a
+/// node's children before the node itself, so `child < my_idx` always holds
+/// for well-formed input — this also subsumes the old `child >= len` bounds
+/// check (`my_idx < len`, so `child < my_idx` implies `child < len`) and, as a
+/// side effect, rejects self-loops and forward/cyclic references that would
+/// otherwise hang the unbounded whole-tree walks (`extract_subtree` et al.).
+fn check_child(what: &str, my_idx: usize, child: usize) -> Result<(), ReadError> {
+    if child >= my_idx {
+        return Err(ReadError::InvalidStructure(format!(
+            "{what} at node {my_idx} references child index {child}, which is not \
+             strictly earlier than its parent (violates strict post-order; \
+             cyclic or forward-referencing payload)"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_indices(nodes: &[CoreFrame<usize>]) -> Result<(), ReadError> {
-    let len = nodes.len();
-    for node in nodes {
+    for (my_idx, node) in nodes.iter().enumerate() {
         match node {
             CoreFrame::App { fun, arg } => {
-                if *fun >= len || *arg >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "App index out of bounds".to_string(),
-                    ));
-                }
+                check_child("App fun", my_idx, *fun)?;
+                check_child("App arg", my_idx, *arg)?;
             }
             CoreFrame::Lam { body, .. } => {
-                if *body >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "Lam index out of bounds".to_string(),
-                    ));
-                }
+                check_child("Lam body", my_idx, *body)?;
             }
             CoreFrame::LetNonRec { rhs, body, .. } => {
-                if *rhs >= len || *body >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "LetNonRec index out of bounds".to_string(),
-                    ));
-                }
+                check_child("LetNonRec rhs", my_idx, *rhs)?;
+                check_child("LetNonRec body", my_idx, *body)?;
             }
             CoreFrame::LetRec { bindings, body } => {
-                if *body >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "LetRec body index out of bounds".to_string(),
-                    ));
-                }
+                check_child("LetRec body", my_idx, *body)?;
                 for (_, rhs) in bindings {
-                    if *rhs >= len {
-                        return Err(ReadError::InvalidStructure(
-                            "LetRec binding index out of bounds".to_string(),
-                        ));
-                    }
+                    check_child("LetRec binding", my_idx, *rhs)?;
                 }
             }
             CoreFrame::Case {
                 scrutinee, alts, ..
             } => {
-                if *scrutinee >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "Case scrutinee index out of bounds".to_string(),
-                    ));
-                }
+                check_child("Case scrutinee", my_idx, *scrutinee)?;
                 for alt in alts {
-                    if alt.body >= len {
-                        return Err(ReadError::InvalidStructure(
-                            "Case alt body index out of bounds".to_string(),
-                        ));
-                    }
+                    check_child("Case alt body", my_idx, alt.body)?;
                 }
             }
             CoreFrame::Con { fields, .. } => {
                 for f in fields {
-                    if *f >= len {
-                        return Err(ReadError::InvalidStructure(
-                            "Con field index out of bounds".to_string(),
-                        ));
-                    }
+                    check_child("Con field", my_idx, *f)?;
                 }
             }
             CoreFrame::Join { rhs, body, .. } => {
-                if *rhs >= len || *body >= len {
-                    return Err(ReadError::InvalidStructure(
-                        "Join index out of bounds".to_string(),
-                    ));
-                }
+                check_child("Join rhs", my_idx, *rhs)?;
+                check_child("Join body", my_idx, *body)?;
             }
             CoreFrame::Jump { args, .. } => {
                 for a in args {
-                    if *a >= len {
-                        return Err(ReadError::InvalidStructure(
-                            "Jump argument index out of bounds".to_string(),
-                        ));
-                    }
+                    check_child("Jump argument", my_idx, *a)?;
                 }
             }
             CoreFrame::PrimOp { args, .. } => {
                 for a in args {
-                    if *a >= len {
-                        return Err(ReadError::InvalidStructure(
-                            "PrimOp argument index out of bounds".to_string(),
-                        ));
-                    }
+                    check_child("PrimOp argument", my_idx, *a)?;
                 }
             }
             CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
@@ -493,7 +473,10 @@ fn decode_literal(val: &Value) -> Result<Literal, ReadError> {
         "LitInt" => Ok(Literal::LitInt(as_i64(&arr[1])?)),
         "LitWord" => Ok(Literal::LitWord(as_u64(&arr[1])?)),
         "LitChar" => {
-            let cp = as_u64(&arr[1])? as u32;
+            let raw = as_u64(&arr[1])?;
+            let cp = u32::try_from(raw).map_err(|_| {
+                ReadError::InvalidLiteral(format!("char codepoint exceeds u32: {raw}"))
+            })?;
             std::char::from_u32(cp)
                 .ok_or_else(|| ReadError::InvalidLiteral(format!("Invalid char codepoint: {}", cp)))
                 .map(Literal::LitChar)
@@ -730,6 +713,108 @@ mod tests {
         ]);
         let (table, _) = read_metadata(&bytes).expect("distinct ids load cleanly");
         assert_eq!(table.len(), 2);
+    }
+
+    // ---- F4: truncating `as u32` casts must become typed errors ----
+
+    /// An arity of 2^32 must not silently truncate to 0 (`as u32` wraps) — it
+    /// must be a decode error.
+    #[test]
+    fn read_metadata_rejects_arity_exceeding_u32() {
+        use ciborium::value::Value as Cbor;
+        let entry = Cbor::Array(vec![
+            Cbor::Integer(1u64.into()),
+            Cbor::Text("Huge".to_string()),
+            Cbor::Integer(1u64.into()),
+            Cbor::Integer((1u64 << 32).into()), // arity 2^32
+            Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
+            Cbor::Array(vec![]),
+        ]);
+        let bytes = meta_bytes(vec![entry]);
+        match read_metadata(&bytes) {
+            Err(ReadError::InvalidStructure(_)) => {}
+            other => panic!("expected InvalidStructure for arity 2^32, got {other:?}"),
+        }
+    }
+
+    /// A tag of 2^32 must likewise error rather than silently truncate to 0.
+    #[test]
+    fn read_metadata_rejects_tag_exceeding_u32() {
+        use ciborium::value::Value as Cbor;
+        let entry = Cbor::Array(vec![
+            Cbor::Integer(1u64.into()),
+            Cbor::Text("Huge".to_string()),
+            Cbor::Integer((1u64 << 32).into()), // tag 2^32
+            Cbor::Integer(1u64.into()),
+            Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
+            Cbor::Array(vec![]),
+        ]);
+        let bytes = meta_bytes(vec![entry]);
+        match read_metadata(&bytes) {
+            Err(ReadError::InvalidStructure(_)) => {}
+            other => panic!("expected InvalidStructure for tag 2^32, got {other:?}"),
+        }
+    }
+
+    /// A `LitChar` codepoint of `0x1_0000_0041` must not silently truncate to
+    /// `'A'` (`0x41`) via `as u32` before the validity check — it must error.
+    #[test]
+    fn decode_lit_char_rejects_codepoint_exceeding_u32() {
+        use ciborium::value::Value as Cbor;
+        let node = Cbor::Array(vec![
+            Cbor::Text("Lit".to_string()),
+            Cbor::Array(vec![
+                Cbor::Text("LitChar".to_string()),
+                Cbor::Integer(0x1_0000_0041_u64.into()),
+            ]),
+        ]);
+        let nodes = Cbor::Array(vec![node]);
+        let root = Cbor::Array(vec![nodes, Cbor::Integer(0.into())]);
+        let bytes = cbor_bytes_tree(root);
+        match read_cbor(&bytes) {
+            Err(ReadError::InvalidLiteral(_)) => {}
+            other => {
+                panic!("expected InvalidLiteral for an out-of-range char codepoint, got {other:?}")
+            }
+        }
+    }
+
+    fn cbor_bytes_tree(val: ciborium::value::Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        ciborium::ser::into_writer(&val, &mut bytes).unwrap();
+        bytes
+    }
+
+    // ---- F5: a non-Text field label must be a hard decode error ----
+
+    /// `read_metadata`'s field-label decode previously used `filter_map`, which
+    /// silently dropped a non-Text label and mis-zipped the remaining labels
+    /// onto fields. A non-Text label must now be a typed error.
+    #[test]
+    fn read_metadata_rejects_non_text_field_label() {
+        use ciborium::value::Value as Cbor;
+        let entry = Cbor::Array(vec![
+            Cbor::Integer(1u64.into()),
+            Cbor::Text("Rec".to_string()),
+            Cbor::Integer(1u64.into()),
+            Cbor::Integer(2u64.into()),
+            Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
+            Cbor::Array(vec![
+                Cbor::Text("good_label".to_string()),
+                Cbor::Integer(7.into()), // corrupt: not text
+            ]),
+        ]);
+        let bytes = meta_bytes(vec![entry]);
+        match read_metadata(&bytes) {
+            Err(ReadError::InvalidStructure(_)) => {}
+            other => panic!("expected InvalidStructure for a non-Text field label, got {other:?}"),
+        }
     }
 
     /// The optional `var_names` warnings key decodes into
