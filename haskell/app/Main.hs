@@ -179,7 +179,12 @@ processFile args path = do
               BS.writeFile outFile cbor
               putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
               let usedMeta = map dcToMeta (Map.elems usedDCs)
-              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _, _) <- usedMeta], reachBinds))
+              -- Keyed by (dcid, qname), matching 'tsUsedDCs' and
+              -- 'mergeMetaPreserving': a dcid-alone key would let this
+              -- cross-target Map.union silently drop one of a colliding pair
+              -- (same varId, different qualified name) before it ever reaches
+              -- the loud collision-preserving merge below.
+              return (Just (Map.fromList [((dcid, qname), entry) | entry@(dcid, _, _, _, _, qname, _) <- usedMeta], reachBinds))
           case result of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e

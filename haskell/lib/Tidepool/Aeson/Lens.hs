@@ -31,7 +31,8 @@ import Control.Lens (Traversal', Prism', prism')
 
 import Tidepool.Aeson.Value (Value(..), KeyMap, fromText)
 import Tidepool.Aeson.Scientific
-  ( Scientific, scientific, toRealFloat, fromFloatDigits, truncateScientific )
+  ( Scientific, scientific, toRealFloat, fromFloatDigits
+  , floorScientific, floorBoundedInteger )
 
 -- | Access a value at a given key in a JSON object.
 key :: Text -> Traversal' Value Value
@@ -89,19 +90,22 @@ _Object = prism' Object $ \v -> case v of
   _        -> Nothing
 
 -- | Prism that extracts an Int from a Number value: exact for integral
--- numbers, truncating toward zero otherwise.
+-- numbers, FLOORED for fractional ones (@\"-3.7\"@ -> @-4@), matching
+-- upstream lens-aeson; @Nothing@ if the (floored) value is out of 'Int'
+-- range rather than silently wrapping.
 _Int :: Prism' Value Int
 _Int = prism' (\i -> Number (scientific (fromIntegral i) 0)) $ \v -> case v of
-  Number s -> Just (fromInteger (truncateScientific s))
+  Number s -> floorBoundedInteger s
   _        -> Nothing
 
 -- | Prism that extracts an Integer from a Number value. Mirrors
 -- @Data.Aeson.Lens._Integer@: an integral 'Scientific' yields its exact
--- 'Integer' coefficient (any magnitude); a fractional number truncates toward
--- zero.
+-- 'Integer' coefficient (any magnitude); a fractional number FLOORS (matching
+-- upstream lens-aeson, e.g. @\"-3.7\"@ -> @-4@). 'Integer' is unbounded, so
+-- there is no out-of-range case here (unlike '_Int').
 _Integer :: Prism' Value Integer
 _Integer = prism' (\i -> Number (scientific i 0)) $ \v -> case v of
-  Number s -> Just (truncateScientific s)
+  Number s -> Just (floorScientific s)
   _        -> Nothing
 
 -- | Prism that extracts a Double from a Number value.

@@ -38,8 +38,9 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Data.Char (chr)
 import Prelude
-  ( Int, Double, Char, Bool (..), Maybe (..), String
+  ( Int, Integer, Double, Char, Bool (..), Maybe (..), String
   , (+), (-), (*), negate, div, mod, quotRem, round, show
+  , toInteger, fromInteger
   , (<), (<=), (==), (>), (&&), otherwise, replicate, length, (++), (!!), reverse, take
   )
 
@@ -61,14 +62,21 @@ data FAlign = FLeft | FRight | FCenter | FInside
 fmtInt :: FSign -> Int -> Bool -> Bool -> Maybe Char -> Int -> Char -> FAlign -> Int -> Text
 fmtInt sgn base upper alt grp width fill align n =
   let neg   = n < 0
-      mag   = if neg then negate n else n
+      -- Integer (not Int) magnitude: 'negate' on 'Int' 'minBound' overflows
+      -- (stays negative), which would otherwise crash 'digitsInBase' on
+      -- @tbl !! r@ with a negative index for @fmtInt minBound@.
+      mag   = if neg then negate (toInteger n) else toInteger n
       digs0 = digitsInBase base upper mag
       digs  = case grp of
         Nothing -> digs0
-        Just c  -> groupDigits c digs0
+        Just c  -> groupDigits (groupSize base) c digs0
       prefix = if alt then basePrefix base upper else ""
       pre    = (if neg then "-" else signStr sgn) ++ prefix
    in T.pack (fpad align width fill pre digs)
+
+-- | Python's grouping width: 3 for decimal, 4 for hex\/octal\/binary.
+groupSize :: Int -> Int
+groupSize base = if base == 10 then 3 else 4
 
 -- | Fractional types: fixed-point (@f@\/@F@) and percent (@%@), via the
 -- @round@ primop.  @percent@ pre-multiplies by 100 and appends @%@; @prec@ is
@@ -91,7 +99,10 @@ fmtFrac sgn percent prec width fill align d0
       let d      = if percent then d0 * 100.0 else d0
           neg    = d < 0.0
           a      = if neg then negate d else d
-          scaled = round (a * powD prec) :: Int
+          -- Integer (not Int): a huge Double (e.g. 1.0e19) scaled by 10^prec
+          -- can exceed Int's +/-2^63 range, which 'round' would silently
+          -- saturate/wrap into garbage. 'Integer' has no such ceiling.
+          scaled = round (a * powD prec) :: Integer
           pI     = powI prec
           ip     = scaled `div` pI
           fp     = scaled `mod` pI
@@ -162,28 +173,32 @@ basePrefix 8  _     = "0o"
 basePrefix 2  _     = "0b"
 basePrefix _  _     = ""
 
--- | Digits of a non-negative 'Int' in the given base, most significant first.
-digitsInBase :: Int -> Bool -> Int -> String
+-- | Digits of a non-negative 'Integer' in the given base, most significant
+-- first. 'Integer' (not 'Int'): the magnitude of 'Int' 'minBound' cannot be
+-- represented as a non-negative 'Int' (negating it overflows), but 'Integer'
+-- has no such bound.
+digitsInBase :: Int -> Bool -> Integer -> String
 digitsInBase base upper = go []
   where
     tbl = if upper then "0123456789ABCDEF" else "0123456789abcdef"
+    baseI = toInteger base
     go acc x =
-      let (q, r) = x `quotRem` base
-          acc'   = (tbl !! r) : acc
+      let (q, r) = x `quotRem` baseI
+          acc'   = (tbl !! fromInteger r) : acc
        in if q == 0 then acc' else go acc' q
 
 -- | Left-pad a fractional digit string with zeros to @n@ characters.
 padZeros :: Int -> String -> String
 padZeros n s = replicate (n - length s) '0' ++ s
 
--- | Insert @c@ between every group of three digits (from the right).
-groupDigits :: Char -> String -> String
-groupDigits c s = reverse (go (0 :: Int) (reverse s))
+-- | Insert @c@ between every group of @sz@ digits (from the right).
+groupDigits :: Int -> Char -> String -> String
+groupDigits sz c s = reverse (go (0 :: Int) (reverse s))
   where
     go _ [] = []
     go k (x : xs)
-      | k > 0 && k `mod` 3 == 0 = c : x : go (k + 1) xs
-      | otherwise               = x : go (k + 1) xs
+      | k > 0 && k `mod` sz == 0 = c : x : go (k + 1) xs
+      | otherwise                = x : go (k + 1) xs
 
 -- | @10 ^ n@ as a 'Double' via repeated multiplication (avoids @fromIntegral@,
 -- which routes through 'Integer').
@@ -192,8 +207,8 @@ powD = go 1.0
   where
     go acc k = if k <= 0 then acc else go (acc * 10.0) (k - 1)
 
--- | @10 ^ n@ as an 'Int'.
-powI :: Int -> Int
+-- | @10 ^ n@ as an 'Integer' (see 'fmtFrac''s @scaled@: must match its width).
+powI :: Int -> Integer
 powI = go 1
   where
     go acc k = if k <= 0 then acc else go (acc * 10) (k - 1)

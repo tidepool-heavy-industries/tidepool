@@ -116,8 +116,8 @@ fileCodegen (FilePatch path create hunks) =
   [| FilePatch (T.pack $(strE path)) $(boolE create) $(listE (map hunkCodegen hunks)) |]
 
 hunkCodegen :: Hunk -> Q Exp
-hunkCodegen (Hunk os ns body) =
-  [| Hunk $(intE os) $(intE ns) $(listE (map lineCodegen body)) |]
+hunkCodegen (Hunk os ns body oldNoNL newNoNL) =
+  [| Hunk $(intE os) $(intE ns) $(listE (map lineCodegen body)) $(boolE oldNoNL) $(boolE newNoNL) |]
 
 lineCodegen :: HunkLine -> Q Exp
 lineCodegen (Ctx t) = [| Ctx (T.pack $(strE t)) |]

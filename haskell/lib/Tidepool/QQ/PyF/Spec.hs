@@ -210,21 +210,21 @@ overrideAlignmentIfZero _    v                   = v
 evalFlag
   :: Char -> Padding -> Maybe Char -> Precision -> AlternateForm -> Maybe SignMode
   -> Either String TypeFormat
-evalFlag 'b' _ _ prec alt s = failIfPrec prec (BinaryF alt (defSign s))
-evalFlag 'c' _ _ prec alt s = failIfS s =<< failIfPrec prec =<< failIfAlt alt CharacterF
-evalFlag 'd' _ _ prec alt s = failIfPrec prec =<< failIfAlt alt (DecimalF (defSign s))
-evalFlag 'e' _ _ prec alt s = Right (ExponentialF prec alt (defSign s))
-evalFlag 'E' _ _ prec alt s = Right (ExponentialCapsF prec alt (defSign s))
-evalFlag 'f' _ _ prec alt s = Right (FixedF prec alt (defSign s))
-evalFlag 'F' _ _ prec alt s = Right (FixedCapsF prec alt (defSign s))
-evalFlag 'g' _ _ prec alt s = Right (GeneralF prec alt (defSign s))
-evalFlag 'G' _ _ prec alt s = Right (GeneralCapsF prec alt (defSign s))
-evalFlag 'n' _ _ _ _ _      = Left ("format type 'n' (locale-aware number) is not supported. " ++ errgGn)
-evalFlag 'o' _ _ prec alt s = failIfPrec prec (OctalF alt (defSign s))
+evalFlag 'b' _ grp prec alt s = failIfCommaGrouping 'b' grp =<< failIfPrec prec (BinaryF alt (defSign s))
+evalFlag 'c' _ _   prec alt s = failIfS s =<< failIfPrec prec =<< failIfAlt alt CharacterF
+evalFlag 'd' _ _   prec alt s = failIfPrec prec =<< failIfAlt alt (DecimalF (defSign s))
+evalFlag 'e' _ _   prec alt s = Right (ExponentialF prec alt (defSign s))
+evalFlag 'E' _ _   prec alt s = Right (ExponentialCapsF prec alt (defSign s))
+evalFlag 'f' _ _   prec alt s = Right (FixedF prec alt (defSign s))
+evalFlag 'F' _ _   prec alt s = Right (FixedCapsF prec alt (defSign s))
+evalFlag 'g' _ _   prec alt s = Right (GeneralF prec alt (defSign s))
+evalFlag 'G' _ _   prec alt s = Right (GeneralCapsF prec alt (defSign s))
+evalFlag 'n' _ _   _    _   _ = Left ("format type 'n' (locale-aware number) is not supported. " ++ errgGn)
+evalFlag 'o' _ grp prec alt s = failIfCommaGrouping 'o' grp =<< failIfPrec prec (OctalF alt (defSign s))
 evalFlag 's' pad grp prec alt s =
   failIfGrouping grp =<< failIfInsidePadding pad =<< failIfS s =<< failIfAlt alt (StringF prec)
-evalFlag 'x' _ _ prec alt s = failIfPrec prec (HexF alt (defSign s))
-evalFlag 'X' _ _ prec alt s = failIfPrec prec (HexCapsF alt (defSign s))
+evalFlag 'x' _ grp prec alt s = failIfCommaGrouping 'x' grp =<< failIfPrec prec (HexF alt (defSign s))
+evalFlag 'X' _ grp prec alt s = failIfCommaGrouping 'X' grp =<< failIfPrec prec (HexCapsF alt (defSign s))
 evalFlag '%' _ _ prec alt s = Right (PercentF prec alt (defSign s))
 evalFlag c   _ _ _    _   _ = Left ("unknown format type " ++ show c ++ ". " ++ errgGn)
 
@@ -249,6 +249,13 @@ failIfS (Just _) _ =
 failIfGrouping :: Maybe Char -> TypeFormat -> Either String TypeFormat
 failIfGrouping Nothing t  = Right t
 failIfGrouping (Just _) _ = Left "the string type ('s') is incompatible with grouping (_ or ,)"
+
+-- | Binary\/octal\/hex only accept @_@ as a grouping char, never @,@
+-- (Python: @Cannot specify ',' with '<type>'.@) — comma-grouping is
+-- decimal-only, matching @{n,d}@ vs @{n:#_x}@.
+failIfCommaGrouping :: Char -> Maybe Char -> TypeFormat -> Either String TypeFormat
+failIfCommaGrouping ty (Just ',') _ = Left ("Cannot specify ',' with '" ++ [ty] ++ "'.")
+failIfCommaGrouping _  _          t = Right t
 
 failIfInsidePadding :: Padding -> TypeFormat -> Either String TypeFormat
 failIfInsidePadding (Padding _ (Just (_, AlignInside))) _ =

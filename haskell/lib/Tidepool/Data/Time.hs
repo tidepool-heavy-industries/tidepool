@@ -20,9 +20,9 @@ import Prelude
   ( Int, Double, Bool(..), Show(..), Char, String
   , Maybe(..), Either(..)
   , Fractional(..), Semigroup(..)
-  , (+), (-), (*), div, mod, fromIntegral, truncate
+  , (+), (-), (*), negate, div, mod, fromIntegral, round, error
   , (>), (>=), (<), (<=), otherwise
-  , ($), (.)
+  , ($), (.), (++)
   )
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
@@ -77,6 +77,7 @@ pad2 n
 
 pad4 :: Int -> Text
 pad4 n
+  | n < 0     = error ("formatISO8601: negative year " ++ showInt (negate n) "" ++ " (pre-1-CE dates are not representable in ISO-8601)")
   | n < 10    = T.pack ('0' : '0' : '0' : showInt n "")
   | n < 100   = T.pack ('0' : '0' : showInt n "")
   | n < 1000  = T.pack ('0' : showInt n "")
@@ -145,10 +146,13 @@ diffUTCTime :: UTCTime -> UTCTime -> Double
 diffUTCTime (UTCTime a) (UTCTime b) =
   fromIntegral (a - b) / 1000.0
 
--- | Add a number of seconds (may be fractional) to a 'UTCTime'.
+-- | Add a number of seconds (may be fractional) to a 'UTCTime'. Rounds
+-- (rather than truncates) the seconds->milliseconds conversion, so e.g.
+-- adding @1.005@s lands exactly 1005ms later instead of 1ms short — otherwise
+-- 'diffUTCTime' does not round-trip 'addUTCTime'.
 addUTCTime :: Double -> UTCTime -> UTCTime
 addUTCTime secs (UTCTime ms) =
-  UTCTime (ms + (truncate (secs * 1000.0) :: Int))
+  UTCTime (ms + (round (secs * 1000.0) :: Int))
 
 -- | Extract the raw epoch milliseconds.
 epochMillis :: UTCTime -> Int

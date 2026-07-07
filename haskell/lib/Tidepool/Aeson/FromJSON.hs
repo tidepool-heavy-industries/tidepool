@@ -38,7 +38,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
-import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific)
+import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific, toBoundedInteger)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
@@ -170,11 +170,18 @@ instance FromJSON Double where
   parseJSON (Number s) = Success (toRealFloat s)
   parseJSON v          = mismatch "number" v
 
--- Integral values decode exactly; non-integral ones truncate toward zero,
--- matching the `_Int` prism (Tidepool.Aeson.Lens).
+-- Integral values decode exactly (bounds-checked via 'toBoundedInteger' — an
+-- out-of-'Int'-range integer is an 'Error', not a silent wraparound);
+-- non-integral ones still truncate toward zero (unaffected by the bounds
+-- check, which only applies to exact integers).
 instance FromJSON Int where
-  parseJSON (Number s) = Success (fromInteger (truncateScientific s))
-  parseJSON v          = mismatch "number" v
+  parseJSON (Number s)
+    | s == fromInteger (truncateScientific s) =
+        case toBoundedInteger s of
+          Just i  -> Success i
+          Nothing -> Error ("Int out of range: " ++ show s)
+    | otherwise = Success (fromInteger (truncateScientific s))
+  parseJSON v = mismatch "number" v
 
 instance FromJSON a => FromJSON [a] where
   parseJSON (Array xs) = traverse parseJSON xs

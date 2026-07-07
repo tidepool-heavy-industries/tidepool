@@ -69,9 +69,12 @@ data HunkLine
 -- truth; line counts are DERIVED ('hunkOldLen'\/'hunkNewLen'), and the header
 -- counts are CHECKED against the body at parse time, then discarded.
 data Hunk = Hunk
-  { hOldStart :: Int
-  , hNewStart :: Int
-  , hBody     :: [HunkLine]
+  { hOldStart     :: Int
+  , hNewStart     :: Int
+  , hBody         :: [HunkLine]
+  , hOldNoNewline :: Bool  -- ^ the old side's last line has no trailing newline
+                           --   (a @\\ No newline at end of file@ marker followed it)
+  , hNewNoNewline :: Bool  -- ^ likewise, for the new side
   } deriving Eq
 
 -- | All hunks for one file.  @fpCreate@ marks a @--- \/dev\/null@ creation
@@ -186,6 +189,13 @@ isToleratedS l =
   || "rename "       `isPrefixOf` l
   || "copy "         `isPrefixOf` l
 
+-- | Truncate a @---@\/@+++@ path at the first tab: a standard @diff -u@
+-- header is @path\\t<timestamp>@ (e.g. @--- a/foo.txt\\t2026-01-01 12:00:00@),
+-- and without this the timestamp becomes part of the path — corrupting
+-- rename-detection and the @\/dev\/null@ creation check alike.
+truncateAtTabS :: String -> String
+truncateAtTabS = fst . break (== '\t')
+
 -- | Strip a leading @a\/@ or @.\/@ from a @---@ path.
 stripMinusS :: String -> String
 stripMinusS p = case stripPrefix "a/" p of
@@ -269,13 +279,13 @@ parseFiles = go []
 -- | Parse one file section: the @---@ line is given; consume @+++@ then hunks.
 parseFile :: Int -> String -> [(Int, String)] -> Either Text (FilePatch, [(Int, String)])
 parseFile nMinus lMinus rest =
-  let oldRaw = drop 4 lMinus               -- after "--- "
+  let oldRaw = truncateAtTabS (drop 4 lMinus)   -- after "--- ", sans a 'diff -u' timestamp
       create = oldRaw == "/dev/null"
   in case rest of
        [] -> Left (perr nMinus "expected a '+++' line after '---'")
        ((nPlus, lPlus) : rest1)
          | "+++ " `isPrefixOf` lPlus || lPlus == "+++" ->
-             let newRaw = drop 4 lPlus
+             let newRaw = truncateAtTabS (drop 4 lPlus)
              in if newRaw == "/dev/null"
                   then Left (perr nPlus "file deletion unsupported (Fs has no delete op)")
                   else
@@ -311,9 +321,9 @@ parseHunkHeader :: Int -> String -> [(Int, String)] -> Either Text (Hunk, [(Int,
 parseHunkHeader n l rest = case parseAtAt n l of
   Left e -> Left e
   Right (os, oc, ns, nc) ->
-    case parseBodyN n oc nc rest [] of
-      Left e           -> Left e
-      Right (body, r') -> Right (Hunk os ns body, r')
+    case parseBodyN n oc nc rest [] False False of
+      Left e                                  -> Left e
+      Right (body, r', oldNoNL, newNoNL) -> Right (Hunk os ns body oldNoNL newNoNL, r')
 
 -- | Parse @\@\@ -A +B \@\@ section@ into (oldStart, oldCount, newStart,
 -- newCount).  Counts default to 1 when omitted; the trailing section is
@@ -382,30 +392,49 @@ parseNat n s
 -- | Consume exactly @oldRem@ old-side and @newRem@ new-side body lines, by
 -- count.  The header counts are the truth for how many lines to read; reaching
 -- a non-body line (or EOF) before the counts are met is a LOUD mismatch.  A
--- bare empty line is @Ctx ""@; a @\\ No newline@ marker is skipped.  When both
--- counts hit zero, the remaining lines (including the trailing split phantom)
--- are handed back untouched.
-parseBodyN :: Int -> Int -> Int -> [(Int, String)] -> [HunkLine] -> Either Text ([HunkLine], [(Int, String)])
-parseBodyN n oldRem newRem ls acc
-  | oldRem == 0 && newRem == 0 = Right (reverse acc, dropNoNewline ls)
+-- bare empty line is @Ctx ""@.  A @\\ No newline at end of file@ marker is
+-- consumed (never counted against @oldRem@\/@newRem@) and recorded against
+-- whichever side the immediately preceding body line belongs to (context
+-- lines mark both sides).  Returns the body plus, per side, whether its last
+-- line lacks a trailing newline.
+parseBodyN
+  :: Int -> Int -> Int -> [(Int, String)] -> [HunkLine] -> Bool -> Bool
+  -> Either Text ([HunkLine], [(Int, String)], Bool, Bool)
+parseBodyN n oldRem newRem ls acc oldNoNL newNoNL
+  | oldRem == 0 && newRem == 0 = case ls of
+      ((_, l) : rest) | not (null l) && "\\" `isPrefixOf` l ->
+        let (oldNoNL', newNoNL') = markNoNewline acc oldNoNL newNoNL
+        in Right (reverse acc, rest, oldNoNL', newNoNL')
+      _ -> Right (reverse acc, ls, oldNoNL, newNoNL)
   | otherwise = case ls of
       [] -> Left (perr n "hunk body ended early (header line counts exceed the body)")
       ((ln, l) : rest)
-        | not (null l) && "\\" `isPrefixOf` l -> parseBodyN n oldRem newRem rest acc  -- "\ No newline at end of file"
+        | not (null l) && "\\" `isPrefixOf` l ->  -- "\ No newline at end of file"
+            let (oldNoNL', newNoNL') = markNoNewline acc oldNoNL newNoNL
+            in parseBodyN n oldRem newRem rest acc oldNoNL' newNoNL'
         | otherwise -> case classify l of
             Right (CCtx, c) ->
               if oldRem > 0 && newRem > 0
-                then parseBodyN n (oldRem - 1) (newRem - 1) rest (Ctx (T.pack c) : acc)
+                then parseBodyN n (oldRem - 1) (newRem - 1) rest (Ctx (T.pack c) : acc) oldNoNL newNoNL
                 else Left (perr ln "context line exceeds the hunk's line counts")
             Right (CDel, c) ->
               if oldRem > 0
-                then parseBodyN n (oldRem - 1) newRem rest (Del (T.pack c) : acc)
+                then parseBodyN n (oldRem - 1) newRem rest (Del (T.pack c) : acc) oldNoNL newNoNL
                 else Left (perr ln "deletion line exceeds the hunk's old line count")
             Right (CIns, c) ->
               if newRem > 0
-                then parseBodyN n oldRem (newRem - 1) rest (Ins (T.pack c) : acc)
+                then parseBodyN n oldRem (newRem - 1) rest (Ins (T.pack c) : acc) oldNoNL newNoNL
                 else Left (perr ln "insertion line exceeds the hunk's new line count")
             Left _ -> Left (perr ln "hunk body ended early (header line counts exceed the body)")
+
+-- | Which side(s) a @\\ No newline@ marker pertains to: the side(s) of the
+-- most-recently-consumed body line (the head of the reversed accumulator).  A
+-- marker with no preceding body line is malformed; leave the flags untouched.
+markNoNewline :: [HunkLine] -> Bool -> Bool -> (Bool, Bool)
+markNoNewline (Ctx _ : _) _ _ = (True, True)
+markNoNewline (Del _ : _) _ n = (True, n)
+markNoNewline (Ins _ : _) o _ = (o, True)
+markNoNewline []          o n = (o, n)
 
 data Side = CCtx | CDel | CIns
 
@@ -418,10 +447,6 @@ classify (c : r) = case c of
   '-' -> Right (CDel, r)
   '+' -> Right (CIns, r)
   _   -> Left ()
-
-dropNoNewline :: [(Int, String)] -> [(Int, String)]
-dropNoNewline ((_, l) : rest) | not (null l) && "\\" `isPrefixOf` l = rest
-dropNoNewline ls = ls
 
 -- ---------------------------------------------------------------------------
 -- Validation
@@ -553,6 +578,7 @@ invertPatch fps
   where
     invFile fp = FilePatch (fpPath fp) (fpCreate fp) (map invHunk (fpHunks fp))
     invHunk h  = Hunk (hNewStart h) (hOldStart h) (map invLine (hBody h))
+                       (hNewNoNewline h) (hOldNoNewline h)
     invLine (Ctx t) = Ctx t
     invLine (Del t) = Ins t
     invLine (Ins t) = Del t
@@ -606,8 +632,20 @@ goHunks path origLines remaining pos ((ix, h) : hs) outAcc resAcc =
       newSide = hunkNewSide h
   in case sublistOffsets oldSide remaining of
        [k] ->
-         let before    = take k remaining
-             after     = drop (k + length oldSide) remaining
+         let before      = take k remaining
+             afterRaw     = drop (k + length oldSide) remaining
+             -- Only the LAST hunk can carry an end-of-file no-newline marker
+             -- (that's the only place one can occur). The parser never
+             -- represents the file's trailing-newline phantom as part of a
+             -- hunk's old/new side (diff -u uses the marker instead), so
+             -- without this correction a marked hunk that reaches EOF would
+             -- silently keep (or lose) the ORIGINAL file's trailing newline
+             -- regardless of what the patch says the new file should have.
+             after
+               | not (null hs)                    = afterRaw
+               | hNewNoNewline h                   = dropTrailingEmptyOnce afterRaw
+               | hOldNoNewline h && null afterRaw  = afterRaw ++ [T.empty]
+               | otherwise                         = afterRaw
              startLine = pos + k
              hr        = HunkResult startLine (startLine - hOldStart h)
              outAcc'   = revOnto newSide (revOnto before outAcc)
@@ -618,6 +656,13 @@ goHunks path origLines remaining pos ((ix, h) : hs) outAcc resAcc =
            (k' : _) -> Left [Conflict path ix (AlreadyApplied (pos + k'))]
            []       -> Left [Conflict path ix (NoMatch oldSide (windowAt (hOldStart h) (length oldSide) origLines))]
        ks -> Left [Conflict path ix (Ambiguous (map (\k -> pos + k) ks))]
+
+-- | Drop exactly one trailing empty 'Text' (the phantom that represents "the
+-- file ends with a newline") if present at the very end of the list.
+dropTrailingEmptyOnce :: [Text] -> [Text]
+dropTrailingEmptyOnce xs = case reverse xs of
+  (t : rs) | T.null t -> reverse rs
+  _                   -> xs
 
 -- | Prepend @xs@ (in order) onto a reversed accumulator.
 revOnto :: [a] -> [a] -> [a]
@@ -699,7 +744,7 @@ creationPatch :: Text -> Text -> FilePatch
 creationPatch path new =
   let ls   = dropTrailingEmpty (splitLinesS (T.unpack new))
       body = map (Ins . T.pack) ls
-  in FilePatch path True [Hunk 0 1 body]
+  in FilePatch path True [Hunk 0 1 body False False]
   where
     dropTrailingEmpty xs = case reverse xs of
       ("" : rs) -> reverse rs
@@ -893,7 +938,7 @@ sliceHunk annotated (lo, hi) =
         ((p, _) : _) -> p
         []           -> (1, 1)   -- unreachable: ranges come from real indices
       body = map (editToHunkLine . snd) slice
-  in Hunk oStart nStart body
+  in Hunk oStart nStart body False False
 
 editToHunkLine :: Edit -> HunkLine
 editToHunkLine (EKeep s) = Ctx (T.pack s)
