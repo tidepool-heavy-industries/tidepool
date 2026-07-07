@@ -158,12 +158,16 @@ impl CancelHandle {
 /// Session-level heap + cursor retained across runs (Wave 1.A).
 ///
 /// `heap` is `None` until the first GC fires and migrates the live set off
-/// the machine's `Nursery` into a `Vec<u8>` owned here. `cursor` is the
-/// bump high-water mark (bytes from the start of `heap`, or from
-/// `nursery.start()` when `heap` is None) at the end of the last run —
-/// the next run resumes allocation from there.
+/// the machine's `Nursery` into a `Vec<u64>` owned here — `Vec<u64>`, not
+/// `Vec<u8>` (L8, repo-review-2026-07-06/01-gc-memory-safety.md): heap
+/// objects are read/written assuming 8-byte alignment, which `Vec<u64>`
+/// guarantees structurally (unlike `Vec<u8>`, whose element alignment is 1
+/// — any alignment it happens to have is an allocator implementation
+/// detail). `cursor` is the bump high-water mark (bytes from the start of
+/// `heap`, or from `nursery.start()` when `heap` is None) at the end of the
+/// last run — the next run resumes allocation from there.
 struct SessionState {
-    heap: Option<Vec<u8>>,
+    heap: Option<Vec<u64>>,
     cursor: usize,
     // Wave 1.A (Worker-Tenure): populated at bind time; scaffold only until tenure lands.
     #[allow(dead_code)]
@@ -495,6 +499,16 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
+        // L7 (repo-review-2026-07-06/01-gc-memory-safety.md): starting a new
+        // turn while a prior one is still parked at `resume_suspended` isn't
+        // a GC-rooted invariant anything else enforces — closing over it
+        // here instead of relying on tidepool-repl's external discipline.
+        // Shared by `run` and `run_fragment`.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run/run_fragment called while a continuation is suspended — \
+             resume_suspended it first"
+        );
         let tags = self.tags.map_err(JitError::MissingConTags)?;
 
         // Ensure signal handlers + this thread's alternate stack are installed:
@@ -580,6 +594,12 @@ impl JitEffectMachine {
         assert!(
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
+        );
+        // L7: see run_with_entry's doc.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_suspendable called while a continuation is already suspended — \
+             resume_suspended it first"
         );
         let func_id = self.func_id;
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -748,6 +768,12 @@ impl JitEffectMachine {
     /// uses the machine's original entry; [`Self::run_fragment_pure`] passes an
     /// [`Self::add_function`]-minted fragment id. Same session lifecycle either way.
     fn run_pure_with_entry(&mut self, func_id: FuncId) -> Result<Value, JitError> {
+        // L7: see run_with_entry's doc. Shared by `run_pure` and `run_fragment_pure`.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_pure/run_fragment_pure called while a continuation is suspended — \
+             resume_suspended it first"
+        );
         // Per-thread signal handler + altstack; see `run`. Idempotent.
         crate::signal_safety::install();
 
@@ -920,6 +946,12 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_pure_and_bind requires a session machine (compile_session)"
         );
+        // L7: see run_with_entry's doc.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_pure_and_bind called while a continuation is suspended — \
+             resume_suspended it first"
+        );
         // Per-thread signal handler + altstack; see `run`. Idempotent.
         crate::signal_safety::install();
 
@@ -1046,6 +1078,12 @@ impl JitEffectMachine {
         assert!(
             self.session.is_some(),
             "run_fragment_and_bind requires a session machine (compile_session)"
+        );
+        // L7: see run_with_entry's doc.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_fragment_and_bind called while a continuation is suspended — \
+             resume_suspended it first"
         );
 
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -1185,6 +1223,12 @@ impl JitEffectMachine {
         assert!(
             n_fields > 0,
             "run_fragment_and_bind_projected requires at least one field"
+        );
+        // L7: see run_with_entry's doc.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_fragment_and_bind_projected called while a continuation is \
+             suspended — resume_suspended it first"
         );
 
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -1334,6 +1378,12 @@ impl JitEffectMachine {
         assert!(
             self.session.is_some(),
             "run_fragment_and_bind_render requires a session machine"
+        );
+        // L7: see run_with_entry's doc.
+        assert!(
+            self.suspended_continuation.is_none(),
+            "run_fragment_and_bind_render called while a continuation is \
+             suspended — resume_suspended it first"
         );
 
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -2179,6 +2229,53 @@ mod tests {
         );
     }
 
+    /// L7 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
+    /// `suspended_continuation` is not a GC root and, before this fix, no
+    /// run entry asserted it was `None` — safety rested entirely on
+    /// tidepool-repl's external discipline never calling a fresh run entry
+    /// on a machine parked at `resume_suspended`. Rather than drive a real
+    /// `Ask`-boundary suspension (heavy effect-machine setup), this directly
+    /// sets the private field to simulate "already suspended" and confirms
+    /// each entry's new `assert!` fires — a clean panic, not silent
+    /// corruption of a live continuation.
+    #[test]
+    fn run_entries_assert_when_a_continuation_is_already_suspended() {
+        use tidepool_repr::tree::RecursiveTree;
+        use tidepool_repr::types::Literal;
+        use tidepool_repr::CoreFrame;
+
+        let expr = RecursiveTree {
+            nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
+        };
+        let table = DataConTable::new();
+        let mut machine = JitEffectMachine::compile_session(&expr, &table, 1 << 16)
+            .expect("compile_session failed");
+        let func_id = machine.func_id;
+
+        macro_rules! assert_panics_while_suspended {
+            ($name:expr, $call:expr) => {
+                machine.suspended_continuation = Some(std::ptr::null_mut());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe($call));
+                assert!(
+                    result.is_err(),
+                    "{} must panic while a continuation is suspended (L7)",
+                    $name
+                );
+                machine.suspended_continuation = None;
+            };
+        }
+
+        assert_panics_while_suspended!("run_pure", || {
+            let _ = machine.run_pure();
+        });
+        assert_panics_while_suspended!("run_fragment_pure", || {
+            let _ = machine.run_fragment_pure(func_id);
+        });
+        assert_panics_while_suspended!("run_pure_and_bind", || {
+            let _ = machine.run_pure_and_bind(func_id);
+        });
+    }
+
     // ---------------------------------------------------------------------------
     // Wave 1.A seam tests
     // ---------------------------------------------------------------------------
@@ -2369,7 +2466,7 @@ mod tests {
                     .heap
                     .as_ref()
                     .unwrap()
-                    .as_ptr();
+                    .as_ptr() as *const u8;
 
                 // install_registries must RE-POINT at the retained buffer (not nursery.start())
                 let guard = machine.install_registries();

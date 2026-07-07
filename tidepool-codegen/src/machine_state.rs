@@ -343,9 +343,9 @@ impl MachineState {
     /// the free-fn doc this replaces, `host_fns::gc::install_session_buffer`).
     ///
     /// Same `try_borrow_mut` defense as [`Self::set_gc_state`] (M4).
-    pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u8>) {
-        let start = buffer.as_mut_ptr();
-        let size = buffer.len();
+    pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u64>) {
+        let start = buffer.as_mut_ptr() as *mut u8;
+        let size = buffer.len() * 8;
         if let Ok(mut slot) = self.gc_state.try_borrow_mut() {
             *slot = Some(GcState {
                 active_start: start,
@@ -367,7 +367,7 @@ impl MachineState {
     /// during unwind aborts the whole process instead of surfacing
     /// `YieldError::Signal`. Falls back to `(None, 0)`, the same shape
     /// already used when there's no `GcState` at all.
-    pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u8>>, usize) {
+    pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u64>>, usize) {
         match self.gc_state.try_borrow_mut() {
             Ok(mut guard) => match guard.as_mut() {
                 Some(state) => {
@@ -639,7 +639,7 @@ mod tests {
 
         // set_gc_state / install_session_buffer: silently no-op, not a panic.
         ms.set_gc_state(std::ptr::dangling_mut(), 128);
-        ms.install_session_buffer(vec![0u8; 8]);
+        ms.install_session_buffer(vec![0u64; 1]);
         // reclaim_session_heap: (None, 0) fallback, not a panic (this is the
         // one the plan calls out as running from `RegistryGuard::drop` —
         // panicking here is a panic-inside-Drop, which during unwind

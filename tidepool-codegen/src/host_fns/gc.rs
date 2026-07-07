@@ -109,7 +109,28 @@ pub unsafe fn persistent_roots_count(vmctx: *mut VMContext) -> usize {
 pub(crate) struct GcState {
     pub active_start: *mut u8,
     pub active_size: usize,
-    pub active_buffer: Option<Vec<u8>>,
+    /// `Vec<u64>`, not `Vec<u8>` (L8, repo-review-2026-07-06/01-gc-memory-
+    /// safety.md) — see `SessionState::heap`'s doc (jit_machine.rs) for why.
+    pub active_buffer: Option<Vec<u64>>,
+}
+
+/// A zeroed byte buffer at least `size` bytes, 8-byte aligned by
+/// construction (L8: backed by `Vec<u64>`, not `Vec<u8>` — see
+/// `GcState::active_buffer`'s doc for why).
+fn alloc_aligned_zeroed(size: usize) -> Vec<u64> {
+    vec![0u64; size.div_ceil(8)]
+}
+
+/// Byte-slice view over a `Vec<u64>` buffer, for callers (like
+/// `cheney_copy`) that want `&mut [u8]`. Always sound: `u8` has no
+/// alignment/validity requirements a `u64` buffer doesn't already satisfy.
+fn as_bytes_mut(words: &mut [u64]) -> &mut [u8] {
+    // SAFETY: `words` is a valid, initialized `&mut [u64]` for its full
+    // byte length; reinterpreting as `&mut [u8]` only weakens alignment
+    // requirements and every `u64` is already a valid sequence of 8 `u8`s.
+    unsafe {
+        std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, std::mem::size_of_val(words))
+    }
 }
 
 // SAFETY: GcState contains raw pointers but is only accessed from the thread
@@ -492,7 +513,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 // SAFETY: from_start + from_size stays within the active GC region.
                 let from_end = unsafe { from_start.add(from_size) };
 
-                let mut tospace = vec![0u8; from_size];
+                let mut tospace = alloc_aligned_zeroed(from_size);
 
                 // Convert StackRoot to raw slot pointers
                 let mut root_slots: Vec<*mut *mut u8> = roots
@@ -529,7 +550,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                         &root_slots,
                         from_start as *const u8,
                         from_end as *const u8,
-                        &mut tospace,
+                        as_bytes_mut(&mut tospace),
                     )
                 };
 
@@ -545,15 +566,16 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 let mut new_size = from_size;
                 if live_bytes * 4 > from_size * 3 && from_size < max_heap {
                     new_size = (from_size * 2).min(max_heap);
-                    let mut bigger = vec![0u8; new_size];
+                    let mut bigger = alloc_aligned_zeroed(new_size);
                     // SAFETY: same contract as above; from-space is the live
                     // prefix of `active`, disjoint from `bigger`.
                     let second = unsafe {
+                        let active_start = active.as_ptr() as *const u8;
                         tidepool_heap::gc::raw::cheney_copy(
                             &root_slots,
-                            active.as_ptr(),
-                            active.as_ptr().add(live_bytes),
-                            &mut bigger,
+                            active_start,
+                            active_start.add(live_bytes),
+                            as_bytes_mut(&mut bigger),
                         )
                     };
                     live_bytes = second.bytes_copied;
@@ -561,7 +583,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 }
 
                 // Update GcState: swap to the surviving space
-                let to_start = active.as_mut_ptr();
+                let to_start = active.as_mut_ptr() as *mut u8;
                 state.active_start = to_start;
                 state.active_size = new_size;
                 state.active_buffer = Some(active); // drops old buffer if any
@@ -690,6 +712,31 @@ mod tests {
                 verify_heap_post_gc(base, 56, fake_from, fake_from_end)
             });
             assert!(r.is_err(), "verifier must fire on unknown lit tag");
+        }
+    }
+
+    /// L8 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
+    /// `alloc_aligned_zeroed`'s buffer must be 8-byte aligned regardless of
+    /// size (including a size that ISN'T already a multiple of 8 — the
+    /// rounding-up path), and `as_bytes_mut`'s byte view must cover the
+    /// full requested length, zeroed.
+    #[test]
+    fn alloc_aligned_zeroed_is_always_8_aligned() {
+        for size in [0usize, 1, 7, 8, 9, 63, 64, 65, 4096, 4099] {
+            let mut words = alloc_aligned_zeroed(size);
+            let ptr = words.as_mut_ptr() as usize;
+            assert_eq!(
+                ptr % 8,
+                0,
+                "size {size}: buffer base must be 8-aligned, got {ptr:#x}"
+            );
+            let bytes = as_bytes_mut(&mut words);
+            assert!(
+                bytes.len() >= size,
+                "size {size}: byte view ({} bytes) must cover the requested size",
+                bytes.len()
+            );
+            assert!(bytes.iter().all(|&b| b == 0), "size {size}: must be zeroed");
         }
     }
 }

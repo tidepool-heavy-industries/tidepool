@@ -113,6 +113,16 @@ fn postorder(tree: &CoreExpr, root: usize) -> Vec<usize> {
 /// joins (postorder guarantees they were computed first), so a nested join
 /// that itself converts is treated as a `Lam` boundary without a fresh
 /// recursive re-scan of its body.
+///
+/// Explicit-stack DFS (L5, repo-review-2026-07-06/01-gc-memory-safety.md):
+/// every sibling traversal in this file (`postorder`, `rewrite`) already uses
+/// an explicit stack for deep-tower safety; this one was still host-
+/// recursive — a deep tower with any `Join` in it could overflow the
+/// COMPILER's own stack, outside any signal protection. A pure "does any
+/// reachable `Jump{label==vid}` occur with `under_lam` true" search doesn't
+/// depend on traversal order, so pushing every child (with its own computed
+/// `under_lam`) and returning as soon as one matches is exactly equivalent
+/// to the original short-circuiting recursion.
 fn reaches_under_lam(
     tree: &CoreExpr,
     under_lam: bool,
@@ -120,55 +130,65 @@ fn reaches_under_lam(
     vid: JoinId,
     crosses: &FxHashMap<JoinId, bool>,
 ) -> bool {
-    match &tree.nodes[idx] {
-        CoreFrame::Var(_) | CoreFrame::Lit(_) => false,
-        CoreFrame::App { fun, arg } => {
-            reaches_under_lam(tree, under_lam, *fun, vid, crosses)
-                || reaches_under_lam(tree, under_lam, *arg, vid, crosses)
+    let mut stack = vec![(idx, under_lam)];
+    while let Some((idx, under_lam)) = stack.pop() {
+        match &tree.nodes[idx] {
+            CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
+            CoreFrame::App { fun, arg } => {
+                stack.push((*fun, under_lam));
+                stack.push((*arg, under_lam));
+            }
+            CoreFrame::Lam { body, .. } => stack.push((*body, true)),
+            CoreFrame::LetNonRec { rhs, body, .. } => {
+                stack.push((*rhs, under_lam));
+                stack.push((*body, under_lam));
+            }
+            CoreFrame::LetRec { bindings, body } => {
+                for (_, r) in bindings {
+                    stack.push((*r, under_lam));
+                }
+                stack.push((*body, under_lam));
+            }
+            CoreFrame::Case {
+                scrutinee, alts, ..
+            } => {
+                stack.push((*scrutinee, under_lam));
+                for a in alts {
+                    stack.push((a.body, under_lam));
+                }
+            }
+            CoreFrame::Con { fields, .. } => {
+                for &f in fields {
+                    stack.push((f, under_lam));
+                }
+            }
+            CoreFrame::Join {
+                label: inner_label,
+                rhs,
+                body,
+                ..
+            } => {
+                let inner_crosses = crosses.get(inner_label).copied().unwrap_or(false);
+                let rhs_under_lam = under_lam || inner_crosses;
+                stack.push((*rhs, rhs_under_lam));
+                stack.push((*body, under_lam));
+            }
+            CoreFrame::Jump { label, args } => {
+                if under_lam && *label == vid {
+                    return true;
+                }
+                for &a in args {
+                    stack.push((a, under_lam));
+                }
+            }
+            CoreFrame::PrimOp { args, .. } => {
+                for &a in args {
+                    stack.push((a, under_lam));
+                }
+            }
         }
-        CoreFrame::Lam { body, .. } => reaches_under_lam(tree, true, *body, vid, crosses),
-        CoreFrame::LetNonRec { rhs, body, .. } => {
-            reaches_under_lam(tree, under_lam, *rhs, vid, crosses)
-                || reaches_under_lam(tree, under_lam, *body, vid, crosses)
-        }
-        CoreFrame::LetRec { bindings, body } => {
-            bindings
-                .iter()
-                .any(|(_, r)| reaches_under_lam(tree, under_lam, *r, vid, crosses))
-                || reaches_under_lam(tree, under_lam, *body, vid, crosses)
-        }
-        CoreFrame::Case {
-            scrutinee, alts, ..
-        } => {
-            reaches_under_lam(tree, under_lam, *scrutinee, vid, crosses)
-                || alts
-                    .iter()
-                    .any(|a| reaches_under_lam(tree, under_lam, a.body, vid, crosses))
-        }
-        CoreFrame::Con { fields, .. } => fields
-            .iter()
-            .any(|&f| reaches_under_lam(tree, under_lam, f, vid, crosses)),
-        CoreFrame::Join {
-            label: inner_label,
-            rhs,
-            body,
-            ..
-        } => {
-            let inner_crosses = crosses.get(inner_label).copied().unwrap_or(false);
-            let rhs_under_lam = under_lam || inner_crosses;
-            reaches_under_lam(tree, rhs_under_lam, *rhs, vid, crosses)
-                || reaches_under_lam(tree, under_lam, *body, vid, crosses)
-        }
-        CoreFrame::Jump { label, args } => {
-            (under_lam && *label == vid)
-                || args
-                    .iter()
-                    .any(|&a| reaches_under_lam(tree, under_lam, a, vid, crosses))
-        }
-        CoreFrame::PrimOp { args, .. } => args
-            .iter()
-            .any(|&a| reaches_under_lam(tree, under_lam, a, vid, crosses)),
     }
+    false
 }
 
 /// Largest `VarId.0` mentioned anywhere in the tree (0 if none), scanning both
@@ -557,5 +577,48 @@ mod tests {
             "converted binder ({binder:?}) must be strictly fresher than the \
              Case alt binder ({big:?}) — max_var_id must scan Alt::binders"
         );
+    }
+
+    /// L5: `reaches_under_lam` was host-recursive while its siblings
+    /// (`postorder`, `rewrite`) already use an explicit stack — a deep tower
+    /// with a `Join` in it could overflow the COMPILER's own stack, outside
+    /// any signal protection. A `Join` whose `body` is a very deep `App`
+    /// chain (`App{fun: <deeper App>, arg: ...}`) exercises this: `fun` sits
+    /// on the LEFT of the `reaches_under_lam(fun) || reaches_under_lam(arg)`
+    /// short-circuit, so — unlike a chain built through a position that's
+    /// effectively in tail position (e.g. `LetNonRec::body`, which rustc/LLVM
+    /// can and does turn into a loop even in a dev build) — each level's
+    /// stack frame must stay live while the `fun` side resolves, forcing
+    /// genuine non-tail recursion in the old implementation.
+    #[test]
+    fn reaches_under_lam_handles_a_deep_tower_without_host_stack_overflow() {
+        const DEPTH: usize = 500_000;
+        let k = JoinId(0);
+        let p = VarId(0);
+
+        let mut b = TreeBuilder::new();
+        let rhs = b.push(CoreFrame::Var(p)); // join k(p) = p
+
+        // Deep App chain: (...((p 0) 0) ... 0) — DEPTH nested applications,
+        // no actual Jump anywhere, so the search must walk the whole chain.
+        let mut fun = b.push(CoreFrame::Var(p));
+        for _ in 0..DEPTH {
+            let arg = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+            fun = b.push(CoreFrame::App { fun, arg });
+        }
+
+        b.push(CoreFrame::Join {
+            label: k,
+            params: vec![p],
+            rhs,
+            body: fun,
+        });
+        let tree = b.build();
+
+        // No Jump anywhere in `body`, so nothing crosses — the whole DEPTH
+        // must be walked (not short-circuited) to determine that, and the
+        // tree comes back unchanged.
+        let lowered = lower_jump_crosses_lam(&tree);
+        assert_eq!(lowered, tree);
     }
 }
