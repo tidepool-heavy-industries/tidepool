@@ -356,7 +356,18 @@ pub fn drop_scaffold_relevant_binds(err: &str) -> String {
 pub fn collapse_scaffold_fallout(err: &str) -> String {
     let blocks = split_diag_blocks(err);
     let is_fallout = |block: &[&str]| -> bool {
-        let text = block.join("\n");
+        // Only the diagnostic MESSAGE lines are examined — not the gutter/caret
+        // quoted-source lines that follow. GHC echoes the user's full source line
+        // for every error on that line, so a `toWire`/`ToWire` substring appearing
+        // only in the quoted source (e.g. the user wrote `toWire x` elsewhere in
+        // the same expression) must never make an unrelated diagnostic on that
+        // same line (e.g. an ambiguous `mempty`) look like wrapper fallout.
+        let message_lines: Vec<&str> = block
+            .iter()
+            .take_while(|l| l.trim_start() != "|")
+            .copied()
+            .collect();
+        let text = message_lines.join("\n");
         let mentions_towire = text.contains("toWire") || text.contains("ToWire");
         let arising_from_scaffold = text.contains("arising from a use of")
             && (text.contains("__user") || text.contains("__b"));
@@ -569,6 +580,23 @@ mod tests {
             ),
             "{got}"
         );
+    }
+
+    /// Found live 2026-07-07: GHC echoes the full user source line in every
+    /// diagnostic's gutter/caret quote. When the user's line itself contains
+    /// the literal text `toWire` (e.g. `pure (toWire x, x.files)`), an
+    /// UNRELATED ambiguity on that same line (e.g. an ambiguous `mempty`
+    /// earlier in the expression) must not be misclassified as toWire
+    /// fallout just because its quoted-source line happens to mention
+    /// `toWire` — only the diagnostic MESSAGE may be examined.
+    #[test]
+    fn collapse_scaffold_fallout_ignores_towire_in_quoted_source_line() {
+        let mempty_ambiguous = "Expr.hs:1:6: error: [GHC-39999]\n    Ambiguous type variable \u{2019}r0\u{2019} arising from a use of \u{2019}mempty\u{2019}\n   |\n1 | pure mempty >>= \\x -> pure (toWire x, x.files)\n   |      ^^^^^^\n";
+        let towire_fallout = "Expr.hs:1:29: error: [GHC-43085]\n    Overlapping instances for ToWire r0 arising from a use of `toWire'\n   |\n1 | pure mempty >>= \\x -> pure (toWire x, x.files)\n   |                             ^^^^^^\n";
+        let err = format!("{mempty_ambiguous}\n{towire_fallout}");
+        let got = collapse_scaffold_fallout(&err);
+        assert!(got.contains("Ambiguous type variable"), "{got}");
+        assert!(!got.contains("Overlapping instances for ToWire"), "{got}");
     }
 
     #[test]
