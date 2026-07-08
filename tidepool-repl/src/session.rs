@@ -669,7 +669,7 @@ impl Session {
         let eval_input = self.eval_input.clone();
         let src = wrap_pure_ref_source(&preamble, &imports, name, eval_input.as_ref());
         let include = self.turn_include();
-        compile_session_turn(&src, &include, self.session_root(), &inject, None)
+        compile_session_turn(&src, &include, self.session_root(), &inject, None, None)
             .ok()
             .and_then(|turn| turn.warnings.captured_type)
     }
@@ -986,6 +986,7 @@ impl Session {
         let include = self.turn_include();
 
         let single = vec![name.clone()];
+        let user_lines = user_code_line_range(&wrapped, turn_text);
         let turn = match compile_session_turn(
             &wrapped,
             &include,
@@ -995,6 +996,7 @@ impl Session {
                 names: &single,
                 gen: g.0,
             }),
+            user_lines,
         ) {
             Ok(t) => t,
             Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
@@ -1103,6 +1105,7 @@ impl Session {
 
         let include = self.turn_include();
 
+        let user_lines = user_code_line_range(&wrapped, turn_text);
         let turn = match compile_session_turn(
             &wrapped,
             &include,
@@ -1112,6 +1115,7 @@ impl Session {
                 names: &names,
                 gen: g.0,
             }),
+            user_lines,
         ) {
             Ok(t) => t,
             Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
@@ -1225,7 +1229,15 @@ impl Session {
         // released before we call `query_inner_type` (which needs `&mut self`).
         let eff_result = {
             let include = self.turn_include();
-            compile_session_turn(&eff_src, &include, self.session_root(), &inject, None)
+            let user_lines = user_code_line_range(&eff_src, expr_text);
+            compile_session_turn(
+                &eff_src,
+                &include,
+                self.session_root(),
+                &inject,
+                None,
+                user_lines,
+            )
         };
         match eff_result {
             Ok(turn) => {
@@ -1254,7 +1266,15 @@ impl Session {
                     wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
                 let pure_result = {
                     let include = self.turn_include();
-                    compile_session_turn(&pure_src, &include, self.session_root(), &inject, None)
+                    let user_lines = user_code_line_range(&pure_src, expr_text);
+                    compile_session_turn(
+                        &pure_src,
+                        &include,
+                        self.session_root(),
+                        &inject,
+                        None,
+                        user_lines,
+                    )
                 };
                 match pure_result {
                     Ok(turn) => {
@@ -1379,6 +1399,7 @@ impl Session {
         );
         let monadic_result = {
             let include = self.turn_include();
+            let user_lines = user_code_line_range(&monadic_src, expr_text);
             compile_session_turn(
                 &monadic_src,
                 &include,
@@ -1388,6 +1409,7 @@ impl Session {
                     names: &it_names,
                     gen: g.0,
                 }),
+                user_lines,
             )
         };
 
@@ -1402,6 +1424,7 @@ impl Session {
                     eval_input.as_ref(),
                 );
                 let include = self.turn_include();
+                let user_lines = user_code_line_range(&pure_src, expr_text);
                 match compile_session_turn(
                     &pure_src,
                     &include,
@@ -1411,6 +1434,7 @@ impl Session {
                         names: &it_names,
                         gen: g.0,
                     }),
+                    user_lines,
                 ) {
                     Ok(t) => t,
                     Err(pure_err) => return TurnOutcome::Error(compile_fail(&pure_err, &pure_src)),
@@ -1515,6 +1539,7 @@ impl Session {
         );
         let include = self.turn_include();
         let names = vec!["__t".to_string()];
+        let user_lines = user_code_line_range(&wrapped, expr_text);
         compile_session_turn(
             &wrapped,
             &include,
@@ -1524,6 +1549,7 @@ impl Session {
                 names: &names,
                 gen: g.0,
             }),
+            user_lines,
         )
         .ok()
         .and_then(|turn| turn.binders.into_iter().next())
@@ -1626,6 +1652,7 @@ impl Session {
                 );
                 let include = self.turn_include();
                 let names: Vec<String> = vec!["__t".to_string()];
+                let user_lines = user_code_line_range(&wrapped, &turn_text);
                 let turn = match compile_session_turn(
                     &wrapped,
                     &include,
@@ -1635,6 +1662,7 @@ impl Session {
                         names: &names,
                         gen: throwaway_gen.0,
                     }),
+                    user_lines,
                 ) {
                     Ok(t) => t,
                     Err(e) => {
@@ -1947,7 +1975,7 @@ impl Session {
         );
         let compiled = {
             let include = self.turn_include();
-            compile_session_turn(&src, &include, self.session_root(), &inject, None)
+            compile_session_turn(&src, &include, self.session_root(), &inject, None, None)
         };
         if let Ok(turn) = compiled {
             let _ = self.merge_table(&turn.table);
@@ -2203,6 +2231,32 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
     source
         .find(RESULT_DO)
         .map(|pos| (source[..pos + RESULT_DO.len()].matches('\n').count(), 0))
+}
+
+/// 1-based inclusive line count of `text` as it lands in an assembled module:
+/// every wrap_* shape embeds the caller's text verbatim, forcing at most one
+/// trailing `\n` if it's missing (see `push_verbatim_binding`/`push_braced_stmt`),
+/// and inserts no other line before the closing scaffold — so this count, paired
+/// with `user_code_offset`'s start line, gives the exact end line without
+/// re-scanning the assembled source.
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        1
+    } else if text.ends_with('\n') {
+        text.matches('\n').count()
+    } else {
+        text.matches('\n').count() + 1
+    }
+}
+
+/// The 1-based inclusive `(start, end)` line range of `text` within `wrapped`
+/// (a module assembled by one of the `wrap_*` builders below), for the
+/// `--user-code-lines` extract flag. `None` when `wrapped` carries none of the
+/// markers `user_code_offset` recognizes.
+fn user_code_line_range(wrapped: &str, text: &str) -> Option<(usize, usize)> {
+    let (offset, _indent) = user_code_offset(wrapped)?;
+    let start = offset + 1;
+    Some((start, start + text_line_count(text) - 1))
 }
 
 /// Remap `Expr.hs:<L>:<C>` GHC coordinates in a compile error to item-relative
