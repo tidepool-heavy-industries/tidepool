@@ -32,7 +32,8 @@ import qualified Data.Text as T
 import Tidepool.Binders (emitBinders, emitStmtBinders)
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
-  , stripMonadHead, isClosureType, renderType, splitTupleType )
+  , stripMonadHead, isClosureType, renderType, splitTupleType
+  , PreRenderedCompileError )
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
@@ -80,11 +81,16 @@ data Args = Args
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
   , argEmitBoundBinders :: Maybe FilePath
+  -- | @--user-code-lines start:end@: the caller's own 1-based inclusive line
+  -- range in the target file, used to filter scaffold-fallout compile
+  -- diagnostics by 'SrcSpan' (see 'Tidepool.GhcPipeline.filterScaffoldFallout').
+  -- Absent, or an unparseable value, both mean no filtering.
+  , argUserCodeLines :: Maybe (Int, Int)
   }
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False Nothing [] []
-                     Nothing False [] Nothing Nothing [] Nothing)
+                     Nothing False [] Nothing Nothing [] Nothing Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -100,8 +106,15 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
     go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
+    go a ("--user-code-lines" : r : rest) = go a { argUserCodeLines = parseLineRange r } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
+
+    parseLineRange :: String -> Maybe (Int, Int)
+    parseLineRange s = case break (== ':') s of
+      (a, ':' : b) | all isDigit a, all isDigit b, not (null a), not (null b) ->
+        Just (read a, read b)
+      _ -> Nothing
 
 processFile :: Args -> FilePath -> IO ()
 processFile args path = do
@@ -109,7 +122,7 @@ processFile args path = do
       mTarget = argTarget args
   putStrLn $ "Processing: " ++ path
   res <- try $ do
-    result <- runPipeline path (argIncludes args)
+    result <- runPipeline path (argIncludes args) (argUserCodeLines args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -261,8 +274,16 @@ processFile args path = do
         -- invisible ("Compilation failed." with no detail). The duplication
         -- for logger-printed classes is collapsed Rust-side
         -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+        --
+        -- Checked FIRST: 'PreRenderedCompileError' is what
+        -- 'GhcPipeline.filterScaffoldFallout' throws once @--user-code-lines@
+        -- drops scaffold-fallout diagnostics — it already carries the fully
+        -- formatted (GHC-formatter-rendered) text, so no live GHC session is
+        -- needed here to show it.
+        Just (pre :: PreRenderedCompileError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show pre)
+        Nothing -> case fromException e of
+          Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+          Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
 
@@ -317,7 +338,7 @@ processSessionFile args path = do
         }
       targetName = fromMaybe "result" (argTarget args)
   res <- try $ do
-    result <- runPipelineSession (Just scope) path (argIncludes args)
+    result <- runPipelineSession (Just scope) path (argIncludes args) (argUserCodeLines args)
     let binds  = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -342,8 +363,12 @@ processSessionFile args path = do
         -- invisible ("Compilation failed." with no detail). The duplication
         -- for logger-printed classes is collapsed Rust-side
         -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+        --
+        -- Checked FIRST — see the identical branch in 'processFile'.
+        Just (pre :: PreRenderedCompileError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show pre)
+        Nothing -> case fromException e of
+          Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+          Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
 
