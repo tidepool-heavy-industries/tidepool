@@ -71,7 +71,6 @@ impl RootedLocal {
 
     /// Overwrite the rooted value in place (e.g. after forcing to WHNF) —
     /// the root slot itself is unchanged, so no re-registration is needed.
-    #[allow(dead_code)] // used by apply_cont_heap; not every caller needs it (e.g. deep_force)
     pub(crate) fn set(&mut self, ptr: *mut u8) {
         *self.cell = ptr;
     }
