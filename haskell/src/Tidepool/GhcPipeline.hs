@@ -468,6 +468,18 @@ renderType ty = renderWithContext defaultSDocContext (ppr ty)
 --     not exist. Disabling Opt_WorkerWrapper was tried and did NOT fix
 --     #313 (the bug is join-closure wiring in translation, not w/w), so
 --     it stays enabled.
+--   * Opt_ShowErrorContext / maxRelevantBinds (this change): every repl/eval
+--     turn typechecks the user's expression inside harness scaffolding
+--     (@__user@, @__b@, @it@, @toWire@ wrapper bindings). An ambiguity in
+--     user code cascades into fallout against that wrapper, and GHC's
+--     default renderer appends "In the expression: toWire it / In a stmt
+--     of a 'do' block: …" context trails and "Relevant bindings include
+--     __b :: f0 (Text, Int) …" lists that name scaffold identifiers the
+--     caller never wrote and never asked about — pure noise, unlike
+--     hole-fits below (which the caller DID ask about, via a literal `_`).
+--     Opt_ShowErrorContext off drops the context trail entirely;
+--     maxRelevantBinds = Just 0 drops (or minimizes, GHC may print a
+--     "(Some bindings suppressed …)" stub) the relevant-bindings list.
 canonicalizeDFlags :: DynFlags -> DynFlags
 canonicalizeDFlags dflags =
   -- Trim machine-channel noise: typed-hole "Valid hole fits include …" lists
@@ -489,9 +501,11 @@ canonicalizeDFlags dflags =
   -- on a typed hole is the interface's vocabulary-discovery engine (an LLM
   -- writes `_` to ask "what goes here"). The search only runs on hole
   -- errors, never on clean compiles.
+  (`gopt_unset` Opt_ShowErrorContext) $
   gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
         { backend = noBackend
         , ghcLink = NoLink
+        , maxRelevantBinds = Just 0
         }) Opt_FullLaziness) Opt_CprAnal)
         Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
 
