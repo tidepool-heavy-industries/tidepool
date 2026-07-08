@@ -267,7 +267,9 @@ pub fn drop_foreign_gen_warnings(err: &str, keep_rel: Option<&str>) -> String {
 /// it) }`, plus the `:t`/probe helpers' `__t`/`__probe`). A GHC "Relevant
 /// bindings include" list or diagnostic block that cites ONLY these names is
 /// plumbing, not the user's own code.
-const SCAFFOLD_BINDERS: &[&str] = &["__user", "__b", "it", "__t", "__probe", "result"];
+const SCAFFOLD_BINDERS: &[&str] = &[
+    "__user", "__b", "it", "__t", "__probe", "result", "_r", "_scV", "_sayC",
+];
 
 /// Drop scaffold-named entries (`__user`, `__b`, `it`, `__t`, `__probe`,
 /// `result`) from GHC's "Relevant bindings include" lists. These bindings are
@@ -371,7 +373,46 @@ pub fn collapse_scaffold_fallout(err: &str) -> String {
         let mentions_towire = text.contains("toWire") || text.contains("ToWire");
         let arising_from_scaffold = text.contains("arising from a use of")
             && (text.contains("__user") || text.contains("__b"));
-        mentions_towire || arising_from_scaffold
+        // The stateless-eval wrapper (`_r <- __user; paginateResult N (toJSON
+        // _r)`) has its own ambiguity shape: the "Relevant bindings include"
+        // list names only the scaffold binding itself (e.g. `_r :: (Value,
+        // b0)`), never any user identifier. That's a reliable fallout signal
+        // distinct from the toWire/__user/__b wrapper shape above.
+        let relevant_bindings_all_scaffold = {
+            let mut found_any = false;
+            let mut all_scaffold = true;
+            let mut in_region = false;
+            let mut header_indent = 0usize;
+            for l in &message_lines {
+                let t = l.trim_start();
+                if t.starts_with("Relevant bindings include") {
+                    in_region = true;
+                    header_indent = l.len() - t.len();
+                    continue;
+                }
+                if !in_region {
+                    continue;
+                }
+                if t.is_empty() {
+                    break;
+                }
+                let indent = l.len() - t.len();
+                if indent <= header_indent {
+                    break;
+                }
+                if t.starts_with("(Some bindings suppressed") {
+                    break;
+                }
+                if let Some((name, _)) = t.split_once(" :: ") {
+                    found_any = true;
+                    if !SCAFFOLD_BINDERS.contains(&name.trim()) {
+                        all_scaffold = false;
+                    }
+                }
+            }
+            found_any && all_scaffold
+        };
+        mentions_towire || arising_from_scaffold || relevant_bindings_all_scaffold
     };
     let flags: Vec<bool> = blocks.iter().map(|b| is_fallout(b)).collect();
     if flags.iter().all(|f| *f) {
@@ -597,6 +638,25 @@ mod tests {
         let got = collapse_scaffold_fallout(&err);
         assert!(got.contains("Ambiguous type variable"), "{got}");
         assert!(!got.contains("Overlapping instances for ToWire"), "{got}");
+    }
+
+    /// Found live 2026-07-07: the stateless-eval wrapper (`_r <- __user;
+    /// paginateResult N (toJSON _r)`) has its own fallout shape, distinct
+    /// from the repl's toWire wrapper — an ambiguous-`toJSON` diagnostic
+    /// whose ONLY "Relevant bindings include" entry names the scaffold `_r`
+    /// binding itself, never anything from the user's own code.
+    #[test]
+    fn collapse_scaffold_fallout_collapses_paginate_result_block() {
+        let ambiguous = "Expr.hs:1:6: error: [GHC-39999]\n    Ambiguous type variable \u{2019}r0\u{2019} arising from a use of \u{2019}mempty\u{2019}\n   |\n1 | pure mempty\n   |      ^^^^^^\n";
+        let paginate_fallout = "Expr.hs:10:44: error: [GHC-39999]\n    Ambiguous type variable \u{2019}b0\u{2019} arising from a use of \u{2019}toJSON\u{2019}\n    Relevant bindings include\n      _r :: (Value, b0) (bound at Expr.hs:7:3)\n    Probable fix: use a type annotation\n   |\n42 |   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)\n   |                                            ^^^^^^\n";
+        let err = format!("{ambiguous}\n{paginate_fallout}");
+        let got = collapse_scaffold_fallout(&err);
+        assert!(got.contains("Ambiguous type variable \u{2019}r0\u{2019}"), "{got}");
+        assert!(!got.contains("_r :: (Value, b0)"), "{got}");
+        assert!(
+            got.contains("further error(s) suppressed"),
+            "{got}"
+        );
     }
 
     #[test]
