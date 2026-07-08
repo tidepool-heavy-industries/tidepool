@@ -29,7 +29,8 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::errmap::{
-    dedupe_diagnostics, drop_foreign_gen_warnings, remap_generated_coords,
+    collapse_scaffold_fallout, dedupe_diagnostics, drop_foreign_gen_warnings,
+    drop_scaffold_relevant_binds, remap_generated_coords,
 };
 use tidepool_runtime::session::{
     classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, SessionBind,
@@ -2265,6 +2266,7 @@ fn remap_item_err(err: &str, source: &str) -> String {
     // Session-lib generation warnings are dependency noise on the stmt plane
     // (a gen-25 -Wx-partial otherwise rides every later item's errors).
     let deduped = drop_foreign_gen_warnings(&dedupe_diagnostics(err), None);
+    let deduped = collapse_scaffold_fallout(&drop_scaffold_relevant_binds(&deduped));
     let remapped = match user_code_offset(source) {
         Some((offset, indent)) => {
             remap_generated_coords(&deduped, "Expr.hs", "<item>", offset, indent)

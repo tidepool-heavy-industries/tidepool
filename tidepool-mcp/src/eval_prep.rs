@@ -397,6 +397,9 @@ pub(crate) fn format_error_with_source(
     // Collapse the logger/`show se` double-print server-side (the extract must
     // keep printing `show se`: parse errors reach stderr ONLY through it).
     let deduped = tidepool_runtime::session::errmap::dedupe_diagnostics(error);
+    let deduped = tidepool_runtime::session::errmap::collapse_scaffold_fallout(
+        &tidepool_runtime::session::errmap::drop_scaffold_relevant_binds(&deduped),
+    );
     let remapped = remap_expr_lines(&deduped, offset);
     let mut out = format!(
         "## {}\n**failure-class:** `{}`  **phase:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
