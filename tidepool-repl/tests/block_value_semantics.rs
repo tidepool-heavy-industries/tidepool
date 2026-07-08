@@ -93,8 +93,16 @@ async fn block_ending_in_bind_leaves_top_level_value_null_no_duplication() {
     );
     // The non-final expression keeps its OWN inline value exactly once (the
     // documented "non-final expression" shape) — not duplicated anywhere else.
-    assert_eq!(env["items"][0]["value"], serde_json::json!(4), "envelope: {env}");
-    assert_eq!(env["items"][1]["bound"], serde_json::json!("x"), "envelope: {env}");
+    assert_eq!(
+        env["items"][0]["value"],
+        serde_json::json!(4),
+        "envelope: {env}"
+    );
+    assert_eq!(
+        env["items"][1]["bound"],
+        serde_json::json!("x"),
+        "envelope: {env}"
+    );
 }
 
 /// Control: a block ending in a bare expression still populates the top-level
