@@ -157,7 +157,11 @@ fn sum_type_rejected_at_compile_time() {
     match EvalHarness::new().with_stdlib().compile(&src, "result") {
         Ok(_) => panic!("sum type deriving FromJSON must not compile"),
         Err(e) => {
-            let msg = e.to_string();
+            // `Display` on `CompileError::Diagnostics` is a terse structural
+            // summary now (structured spans, not rendered text) — the
+            // classifier's message is the joined diagnostic text that
+            // actually carries GHC's TypeError.
+            let msg = tidepool_runtime::classify_compile(&e).message;
             assert!(
                 msg.contains("single-constructor records only"),
                 "expected the generic sum-rejection TypeError, got:\n{msg}"

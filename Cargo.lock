@@ -3713,6 +3713,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
  "tidepool-bridge",
  "tidepool-eval",
@@ -3812,6 +3813,7 @@ dependencies = [
  "log",
  "parking_lot",
  "proptest",
+ "serde",
  "serde_json",
  "serial_test",
  "tempfile",

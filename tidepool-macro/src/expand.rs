@@ -578,10 +578,10 @@ fn run_tidepool_extract(
             // The binary ran and failed — this IS the diagnostic (a GHC type
             // error, a missing binding, ...). Surface it verbatim; falling
             // back to nix here would only re-run the SAME failing compile.
-            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
                 "tidepool-extract failed (exit {}):\n{}",
-                output.status, stderr
+                output.status,
+                extract_failure_text(&output.stdout, &output.stderr)
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -613,15 +613,35 @@ fn run_tidepool_extract(
 
     match cmd.output() {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!(
-                "nix run tidepool-extract failed (exit {}):\n{}",
-                output.status, stderr
-            ))
-        }
+        Ok(output) => Err(format!(
+            "nix run tidepool-extract failed (exit {}):\n{}",
+            output.status,
+            extract_failure_text(&output.stdout, &output.stderr)
+        )),
         Err(e) => Err(format!("Failed to run nix: {}. Is nix installed?", e)),
     }
+}
+
+/// Render a failed extract invocation's diagnostic text: parse `stdout` as the
+/// structured diagnostics report (`{"version":1,"diagnostics":[...]}`) and
+/// join the messages when it parses; otherwise (an older `tidepool-extract`
+/// predating the structured contract, or any other malformed stdout) fall
+/// back to the raw stderr text. This is the ONE call site in the workspace
+/// allowed that graceful fallback — a dev-convenience macro-expansion tool
+/// talking to whatever `tidepool-extract` happens to be on a user's PATH,
+/// potentially a much older build.
+fn extract_failure_text(stdout: &[u8], stderr: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| {
+            let diags = v.get("diagnostics")?.as_array()?;
+            let messages: Vec<String> = diags
+                .iter()
+                .filter_map(|d| d.get("message")?.as_str().map(str::to_string))
+                .collect();
+            (!messages.is_empty()).then(|| messages.join("\n\n"))
+        });
+    parsed.unwrap_or_else(|| String::from_utf8_lossy(stderr).into_owned())
 }
 
 fn find_flake_root(start: &Path) -> Option<PathBuf> {

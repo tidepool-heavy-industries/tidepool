@@ -28,10 +28,6 @@ use tidepool_mcp::{
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
-use tidepool_runtime::session::errmap::{
-    collapse_scaffold_fallout, dedupe_diagnostics, drop_foreign_gen_warnings,
-    drop_scaffold_relevant_binds, remap_generated_coords,
-};
 use tidepool_runtime::session::{
     classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, SessionBind,
     SessionError, SessionLib, TurnKind, ValueTier,
@@ -669,7 +665,7 @@ impl Session {
         let eval_input = self.eval_input.clone();
         let src = wrap_pure_ref_source(&preamble, &imports, name, eval_input.as_ref());
         let include = self.turn_include();
-        compile_session_turn(&src, &include, self.session_root(), &inject, None, None)
+        compile_session_turn(&src, &include, self.session_root(), &inject, None)
             .ok()
             .and_then(|turn| turn.warnings.captured_type)
     }
@@ -869,7 +865,10 @@ impl Session {
             warnings,
         } = match compile_result {
             Ok(r) => r,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &source)),
+            // No `user_lines` computed here (this is the plain-eval path, not a
+            // session-turn compile) — same default the removed `--user-code-lines`
+            // flag would have been skipped with for this site.
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &source, None)),
         };
         if warnings.has_io {
             return io_type_fail();
@@ -996,10 +995,9 @@ impl Session {
                 names: &single,
                 gen: g.0,
             }),
-            user_lines,
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(tag_failure(
@@ -1115,10 +1113,9 @@ impl Session {
                 names: &names,
                 gen: g.0,
             }),
-            user_lines,
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(tag_failure(
@@ -1229,15 +1226,7 @@ impl Session {
         // released before we call `query_inner_type` (which needs `&mut self`).
         let eff_result = {
             let include = self.turn_include();
-            let user_lines = user_code_line_range(&eff_src, expr_text);
-            compile_session_turn(
-                &eff_src,
-                &include,
-                self.session_root(),
-                &inject,
-                None,
-                user_lines,
-            )
+            compile_session_turn(&eff_src, &include, self.session_root(), &inject, None)
         };
         match eff_result {
             Ok(turn) => {
@@ -1264,17 +1253,10 @@ impl Session {
                 // suffix (which itself leaked the dual-wrap detail).
                 let pure_src =
                     wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
+                let user_lines = user_code_line_range(&pure_src, expr_text);
                 let pure_result = {
                     let include = self.turn_include();
-                    let user_lines = user_code_line_range(&pure_src, expr_text);
-                    compile_session_turn(
-                        &pure_src,
-                        &include,
-                        self.session_root(),
-                        &inject,
-                        None,
-                        user_lines,
-                    )
+                    compile_session_turn(&pure_src, &include, self.session_root(), &inject, None)
                 };
                 match pure_result {
                     Ok(turn) => {
@@ -1289,7 +1271,9 @@ impl Session {
                             captured,
                         )
                     }
-                    Err(pure_err) => TurnOutcome::Error(compile_fail(&pure_err, &pure_src)),
+                    Err(pure_err) => {
+                        TurnOutcome::Error(compile_fail(&pure_err, &pure_src, user_lines))
+                    }
                 }
             }
         }
@@ -1399,7 +1383,6 @@ impl Session {
         );
         let monadic_result = {
             let include = self.turn_include();
-            let user_lines = user_code_line_range(&monadic_src, expr_text);
             compile_session_turn(
                 &monadic_src,
                 &include,
@@ -1409,7 +1392,6 @@ impl Session {
                     names: &it_names,
                     gen: g.0,
                 }),
-                user_lines,
             )
         };
 
@@ -1434,10 +1416,11 @@ impl Session {
                         names: &it_names,
                         gen: g.0,
                     }),
-                    user_lines,
                 ) {
                     Ok(t) => t,
-                    Err(pure_err) => return TurnOutcome::Error(compile_fail(&pure_err, &pure_src)),
+                    Err(pure_err) => {
+                        return TurnOutcome::Error(compile_fail(&pure_err, &pure_src, user_lines))
+                    }
                 }
             }
         };
@@ -1539,7 +1522,6 @@ impl Session {
         );
         let include = self.turn_include();
         let names = vec!["__t".to_string()];
-        let user_lines = user_code_line_range(&wrapped, expr_text);
         compile_session_turn(
             &wrapped,
             &include,
@@ -1549,7 +1531,6 @@ impl Session {
                 names: &names,
                 gen: g.0,
             }),
-            user_lines,
         )
         .ok()
         .and_then(|turn| turn.binders.into_iter().next())
@@ -1662,14 +1643,13 @@ impl Session {
                         names: &names,
                         gen: throwaway_gen.0,
                     }),
-                    user_lines,
                 ) {
                     Ok(t) => t,
                     Err(e) => {
                         return TurnOutcome::Meta(serde_json::json!({
                             "error": format!(
                                 "compile error: {}",
-                                remap_item_err(&e.to_string(), &wrapped)
+                                render_compile_fail_body(&e, &wrapped, user_lines)
                             )
                         }))
                     }
@@ -1912,9 +1892,7 @@ impl Session {
         // instead SUBTRACTED from the list. Shape-detected per line, so no
         // module enumeration to keep in sync with the preamble.
         p.split('\n')
-            .map(|line| {
-                subtract_import_list_names(line, &refs).unwrap_or_else(|| line.to_string())
-            })
+            .map(|line| subtract_import_list_names(line, &refs).unwrap_or_else(|| line.to_string()))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1975,7 +1953,7 @@ impl Session {
         );
         let compiled = {
             let include = self.turn_include();
-            compile_session_turn(&src, &include, self.session_root(), &inject, None, None)
+            compile_session_turn(&src, &include, self.session_root(), &inject, None)
         };
         if let Ok(turn) = compiled {
             let _ = self.merge_table(&turn.table);
@@ -2276,14 +2254,47 @@ fn tag_failure(class: FailureClass, phase: Phase, body: String) -> String {
     )
 }
 
+/// Render a structured [`CompileError`] to plain text: when it carries
+/// structured diagnostics, render them item-relative via
+/// [`tidepool_runtime::diag::render_diagnostics`] using `source`'s own wrapper
+/// markers (`user_code_offset`) and `user_lines` (the caller-computed `(start,
+/// end)` range of the user's own submitted text, or `None` for an internal
+/// probe with nothing to partition against). Any OTHER `CompileError` variant
+/// (version-skew, infra, IO) carries no `Expr.hs:N:M` coordinates, so
+/// `classify_compile`'s message is used as-is.
+fn render_compile_fail_body(
+    err: &CompileError,
+    source: &str,
+    user_lines: Option<(usize, usize)>,
+) -> String {
+    match err {
+        CompileError::Diagnostics(diags) => {
+            let (line_offset, col_indent) = user_code_offset(source).unwrap_or((0, 0));
+            let rendered = tidepool_runtime::diag::render_diagnostics(
+                diags,
+                &tidepool_runtime::diag::RenderOpts {
+                    anchor: "Expr.hs",
+                    label: "<item>",
+                    user_lines,
+                    line_offset,
+                    col_indent,
+                    drop_foreign_gen_warnings_except: None,
+                    source,
+                },
+            );
+            prepend_lib_brick_hint(rendered)
+        }
+        _ => classify_compile(err).message,
+    }
+}
+
 /// A compile-phase failure envelope from a structured [`CompileError`] (the
-/// eval/bind/reference path): classify it and remap GHC coords in the message
-/// onto the user's item. A wire-format skew (`CompileError::ReadError`) becomes
-/// version-skew/compile here; skew/infra messages carry no coords, so the remap
-/// is a passthrough for them.
-fn compile_fail(err: &CompileError, source: &str) -> String {
+/// eval/bind/reference path): classify it and render the body via
+/// [`render_compile_fail_body`].
+fn compile_fail(err: &CompileError, source: &str, user_lines: Option<(usize, usize)>) -> String {
     let env = classify_compile(err);
-    tag_failure(env.class, env.phase, remap_item_err(&env.message, source))
+    let body = render_compile_fail_body(err, source, user_lines);
+    tag_failure(env.class, env.phase, body)
 }
 
 /// A compile-phase failure envelope from the declaration path's [`SessionError`].
@@ -2314,20 +2325,6 @@ fn io_type_fail() -> TurnOutcome {
         Phase::Compile,
         "IO type detected in result binding. IO operations are not supported.".into(),
     ))
-}
-
-fn remap_item_err(err: &str, source: &str) -> String {
-    // Session-lib generation warnings are dependency noise on the stmt plane
-    // (a gen-25 -Wx-partial otherwise rides every later item's errors).
-    let deduped = drop_foreign_gen_warnings(&dedupe_diagnostics(err), None);
-    let deduped = collapse_scaffold_fallout(&drop_scaffold_relevant_binds(&deduped));
-    let remapped = match user_code_offset(source) {
-        Some((offset, indent)) => {
-            remap_generated_coords(&deduped, "Expr.hs", "<item>", offset, indent)
-        }
-        None => deduped,
-    };
-    prepend_lib_brick_hint(remapped)
 }
 
 /// If EVERY error location in a failed compile points at a project-lib module
@@ -2923,8 +2920,7 @@ mod slim_tests {
     use super::self_referential_monadic_pure_bind;
     use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
     use super::{
-        decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind,
-        strip_leading_comments,
+        decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind, strip_leading_comments,
     };
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed

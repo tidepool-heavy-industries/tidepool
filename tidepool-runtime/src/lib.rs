@@ -17,6 +17,7 @@ use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 mod cache;
+pub mod diag;
 pub mod failclass;
 pub mod paths;
 mod render;
@@ -45,8 +46,19 @@ pub enum CompileError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     /// The `tidepool-extract` process failed (e.g., GHC parse/type error).
+    /// Still used for the synthetic shape-validation errors in the session
+    /// turn/binder-extraction lanes (unrelated to the diagnostics contract).
     #[error("Haskell compilation failed:\n{0}")]
     ExtractFailed(String),
+    /// The extractor ran, exited non-zero, and its stdout parsed as a valid
+    /// diagnostics report — this is a real GHC compile failure with real spans.
+    #[error("Haskell compilation failed ({} diagnostic(s))", .0.len())]
+    Diagnostics(Vec<crate::diag::ExtractDiag>),
+    /// The extractor's stdout did not parse as the diagnostics report (a
+    /// stale binary predating the contract, or a genuine wire mismatch) — an
+    /// infra/toolchain problem, not the user's Haskell.
+    #[error("malformed extract diagnostics: {0}")]
+    MalformedDiagnostics(String),
     /// Failed to deserialize the CBOR output from `tidepool-extract`.
     #[error("CBOR deserialization error: {0}")]
     ReadError(#[from] ReadError),
@@ -67,23 +79,6 @@ pub enum RuntimeError {
     /// Error during JIT execution.
     #[error(transparent)]
     Jit(#[from] JitError),
-}
-
-/// Extract the 1-based inclusive `(start, end)` line range of the user's own
-/// submitted code from a generated module's `-- [user-lines] <start>:<end>`
-/// marker (emitted by `tidepool_mcp::eval_prep::template_haskell_impl` on the
-/// `__user` binding's closing-bracket line). Absent for sources that don't
-/// carry the marker (e.g. session-lib declaration compiles) — callers must not
-/// fabricate a range when this returns `None`.
-fn extract_user_code_lines(source: &str) -> Option<(usize, usize)> {
-    const NEEDLE: &str = "-- [user-lines] ";
-    let pos = source.find(NEEDLE)?;
-    let rest = &source[pos + NEEDLE.len()..];
-    let range: &str = rest.lines().next()?;
-    let (start_s, end_s) = range.split_once(':')?;
-    let start = start_s.trim().parse::<usize>().ok()?;
-    let end = end_s.trim().parse::<usize>().ok()?;
-    Some((start, end))
 }
 
 /// Extract module name from Haskell source (e.g. "module Expr where" -> "Expr").
@@ -180,10 +175,6 @@ pub fn compile_haskell_salted(
         cmd.arg("--include").arg(path);
     }
 
-    if let Some((start, end)) = extract_user_code_lines(source) {
-        cmd.arg("--user-code-lines").arg(format!("{start}:{end}"));
-    }
-
     let output = cmd.output().map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             io::Error::new(
@@ -195,14 +186,20 @@ pub fn compile_haskell_salted(
         }
     })?;
 
-    // Always print stderr for diagnostics (trace output from Haskell)
+    // Always print stderr for diagnostics (trace output from Haskell); purely
+    // a human debug channel now — stdout is the authoritative contract.
     let stderr_str = String::from_utf8_lossy(&output.stderr);
     if !stderr_str.is_empty() {
         eprintln!("[tidepool-extract stderr]\n{}", stderr_str);
     }
 
     if !output.status.success() {
-        return Err(CompileError::ExtractFailed(stderr_str.into_owned()));
+        return Err(
+            match diag::parse_diag_report(&output.stdout, &output.stderr) {
+                Ok(report) => CompileError::Diagnostics(report.diagnostics),
+                Err(msg) => CompileError::MalformedDiagnostics(msg),
+            },
+        );
     }
 
     // 3. Read and deserialize outputs
@@ -580,13 +577,12 @@ mod tests {
         let source = "module Test where\nfoo = garbage";
         let res = compile_haskell(source, "foo", &[]);
         assert!(res.is_err());
-        if let Err(CompileError::ExtractFailed(msg)) = res {
-            assert!(
-                msg.contains("Variable not in scope: garbage")
-                    || msg.contains("not in scope: garbage")
-            );
+        if let Err(CompileError::Diagnostics(diags)) = res {
+            assert!(diags
+                .iter()
+                .any(|d| d.message.contains("not in scope: garbage")));
         } else {
-            panic!("Expected ExtractFailed error, got {:?}", res);
+            panic!("Expected Diagnostics error, got {:?}", res);
         }
     }
 

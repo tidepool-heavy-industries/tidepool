@@ -76,8 +76,8 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::pause::PauseGate;
 
 use crate::{
-    classify, value_to_json, CancelHandle, DispatchEffect, FailureClass, JitError, Phase,
-    ResumeInput, ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
+    classify, value_to_json, CancelHandle, CompileError, DispatchEffect, FailureClass, JitError,
+    Phase, ResumeInput, ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -167,10 +167,14 @@ enum EngineMessage<O: OutputSink> {
     /// The program failed, pre-classified on the eval thread (which still holds
     /// the structured [`RuntimeError`]) so a wire-format skew stays
     /// `version-skew`/`compile` instead of being re-guessed from text.
+    /// `diagnostics` carries the structured GHC diagnostics when the failure
+    /// was a real compile error (`RuntimeError::Compile(CompileError::Diagnostics(_))`);
+    /// `None` for every other failure (runtime/panic/ask-protocol).
     Error {
         error: String,
         class: FailureClass,
         phase: Phase,
+        diagnostics: Option<Vec<crate::diag::ExtractDiag>>,
     },
 }
 
@@ -238,12 +242,15 @@ pub enum TurnOutcome {
     },
     /// The program failed. `class`/`phase` were stamped from the structured
     /// error on the eval thread; `source` is the wrapped module for echoing.
+    /// `diagnostics` carries the structured GHC diagnostics for a real compile
+    /// failure (see [`EngineMessage::Error`]); `None` otherwise.
     Error {
         class: FailureClass,
         phase: Phase,
         detail: String,
         output: Vec<String>,
         source: Arc<str>,
+        diagnostics: Option<Vec<crate::diag::ExtractDiag>>,
     },
     /// The window expired with no yield point; the thread was detached.
     /// `compiling` distinguishes a slow-GHC compile (`Infra`/`Compile`) from a
@@ -579,11 +586,12 @@ impl<O: OutputSink> SessionEngine<O> {
                 ),
                 Ok(Err(e)) => {
                     drop(permit);
-                    let (error, class, phase) = describe_run_error(&e, &effect_names);
+                    let (error, class, phase, diagnostics) = describe_run_error(&e, &effect_names);
                     EngineMessage::Error {
                         error,
                         class,
                         phase,
+                        diagnostics,
                     }
                 }
                 Err(panic_payload) => {
@@ -593,6 +601,7 @@ impl<O: OutputSink> SessionEngine<O> {
                         error,
                         class,
                         phase,
+                        diagnostics: None,
                     }
                 }
             };
@@ -936,12 +945,14 @@ impl<O: OutputSink> SessionEngine<O> {
                         error,
                         class,
                         phase,
+                        diagnostics,
                     } => TurnOutcome::Error {
                         class,
                         phase,
                         detail: error,
                         output,
                         source,
+                        diagnostics,
                     },
                 }
             }
@@ -992,6 +1003,7 @@ where
                 error: format!("ask request malformed: {e}"),
                 class: FailureClass::Runtime,
                 phase: Phase::Run,
+                diagnostics: None,
             };
         }
     };
@@ -1039,6 +1051,7 @@ where
                         error: format!("ask answer could not be bridged to a value: {e}"),
                         class: FailureClass::Runtime,
                         phase: Phase::Run,
+                        diagnostics: None,
                     });
                     return;
                 }
@@ -1083,11 +1096,12 @@ where
             ),
             Ok(Err(e)) => {
                 drop(permit);
-                let (error, class, phase) = describe_run_error(&e, &effect_names);
+                let (error, class, phase, diagnostics) = describe_run_error(&e, &effect_names);
                 EngineMessage::Error {
                     error,
                     class,
                     phase,
+                    diagnostics,
                 }
             }
             Err(panic_payload) => {
@@ -1097,6 +1111,7 @@ where
                     error,
                     class,
                     phase,
+                    diagnostics: None,
                 }
             }
         };
@@ -1104,13 +1119,29 @@ where
     })
 }
 
-/// Classify a run error into `(detail, class, phase)` for an
+/// Classify a run error into `(detail, class, phase, diagnostics)` for an
 /// [`EngineMessage::Error`], annotating an `UnhandledEffect` with the effect
-/// name + roster and appending any JIT diagnostics. Byte-identical to the E1
+/// name + roster and appending any JIT diagnostics. `diagnostics` (the 4th
+/// element) is `Some` only for a real compile failure
+/// (`RuntimeError::Compile(CompileError::Diagnostics(_))`) — the structured
+/// GHC diagnostics, cloned out before `env.message` (a flattened string)
+/// is all that survives past this point. Byte-identical detail text to the E1
 /// eval-thread error arm.
-fn describe_run_error(e: &RuntimeError, effect_names: &[String]) -> (String, FailureClass, Phase) {
+fn describe_run_error(
+    e: &RuntimeError,
+    effect_names: &[String],
+) -> (
+    String,
+    FailureClass,
+    Phase,
+    Option<Vec<crate::diag::ExtractDiag>>,
+) {
     let env = classify(e);
-    let diagnostics = crate::drain_diagnostics();
+    let struct_diags = match e {
+        RuntimeError::Compile(CompileError::Diagnostics(diags)) => Some(diags.clone()),
+        _ => None,
+    };
+    let jit_diagnostics = crate::drain_diagnostics();
     let mut detail = env.message;
     // Annotate UnhandledEffect with the effect name + roster. Classified
     // STRUCTURALLY from the typed error (in hand here), not by string-matching
@@ -1131,14 +1162,14 @@ fn describe_run_error(e: &RuntimeError, effect_names: &[String]) -> (String, Fai
             .join("\n");
         detail.push_str(&format!("\n\nRegistered effects:\n{roster}"));
     }
-    if !diagnostics.is_empty() {
+    if !jit_diagnostics.is_empty() {
         detail.push_str("\n\n## JIT Diagnostics\n");
-        for d in &diagnostics {
+        for d in &jit_diagnostics {
             detail.push_str(d);
             detail.push('\n');
         }
     }
-    (detail, env.class, env.phase)
+    (detail, env.class, env.phase, struct_diags)
 }
 
 /// Classify a caught panic (a signal that still took the eval frame down) as a
@@ -1262,10 +1293,14 @@ mod tests {
     fn describe_run_error_annotates_unhandled_effect_with_name_and_roster() {
         let effect_names = vec!["Console".to_string(), "Kv".to_string(), "Fs".to_string()];
         let err = RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag: 2 }));
-        let (detail, class, phase) = describe_run_error(&err, &effect_names);
+        let (detail, class, phase, diagnostics) = describe_run_error(&err, &effect_names);
 
         assert_eq!(class, FailureClass::Runtime);
         assert_eq!(phase, Phase::Run);
+        assert!(
+            diagnostics.is_none(),
+            "a JIT error carries no GHC diagnostics"
+        );
         assert!(
             detail.contains("(effect: Fs)"),
             "expected tag 2's effect name (Fs) annotated, got: {detail}"
@@ -1442,6 +1477,7 @@ mod tests {
                 error: "boom".into(),
                 class: FailureClass::Runtime,
                 phase: Phase::Run,
+                diagnostics: None,
             },
         )
         .await;

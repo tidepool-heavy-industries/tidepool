@@ -52,7 +52,11 @@ fn try_compile(hole: &str) -> Result<(), String> {
         .run(&src, "result", NullDispatcher)
         .into_result()
         .map(|_| ())
-        .map_err(|e| format!("{e}"))
+        // `Display` on `RuntimeError`/`CompileError::Diagnostics` is a terse
+        // structural summary now (structured spans, not rendered text) — the
+        // classifier's message is the joined diagnostic text carrying the
+        // splice-rejection wording this test asserts against.
+        .map_err(|e| tidepool_runtime::classify(&e).message)
 }
 
 #[test]

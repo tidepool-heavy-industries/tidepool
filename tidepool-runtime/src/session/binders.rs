@@ -63,9 +63,16 @@ pub fn extract_binders(
     })?;
 
     if !output.status.success() {
-        return Err(SessionError::BinderExtraction(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
+        let text = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => report
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Err(msg) => msg,
+        };
+        return Err(SessionError::BinderExtraction(text));
     }
 
     let json_text = std::fs::read_to_string(&out_path).map_err(|e| {

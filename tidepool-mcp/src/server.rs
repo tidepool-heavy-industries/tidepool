@@ -335,9 +335,16 @@ impl TidepoolMcpServerImpl {
                 detail,
                 output,
                 source,
+                diagnostics,
             } => {
-                let mut error_msg =
-                    format_error_with_source(class, phase, "Error", &detail, &source);
+                let mut error_msg = format_error_with_source(
+                    class,
+                    phase,
+                    "Error",
+                    &detail,
+                    diagnostics.as_deref(),
+                    &source,
+                );
                 if !output.is_empty() {
                     error_msg.push_str("\n\n## Output So Far\n");
                     for line in &output {
@@ -384,7 +391,8 @@ impl TidepoolMcpServerImpl {
                         detail.push('\n');
                     }
                 }
-                let error_msg = format_error_with_source(class, phase, "Timeout", &detail, &source);
+                let error_msg =
+                    format_error_with_source(class, phase, "Timeout", &detail, None, &source);
                 CallToolResult::error(vec![Content::text(error_msg)])
             }
             TurnOutcome::Crashed {
@@ -447,6 +455,7 @@ impl TidepoolMcpServerImpl {
                         "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
                         op, crash_info
                     ),
+                    None,
                     &source,
                 );
                 CallToolResult::error(vec![Content::text(error_msg)])

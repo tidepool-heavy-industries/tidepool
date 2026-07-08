@@ -118,6 +118,25 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::ExtractFailed(_) => {
             FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, err.to_string())
         }
+        // The extractor ran, exited non-zero, and its stdout parsed as a valid
+        // diagnostics report — a real GHC compile failure with real spans. The
+        // message here is a plain-text fallback (no source/anchor context) for
+        // callers that only ever see `env.message`; richer callers render the
+        // structured diagnostics themselves via `crate::diag::render_diagnostics`.
+        CompileError::Diagnostics(diags) => FailureEnvelope::new(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        // The extractor's stdout did not parse as the diagnostics report — a
+        // toolchain/version problem, not the user's code.
+        CompileError::MalformedDiagnostics(msg) => {
+            FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, msg.clone())
+        }
         // The user's result binding has IO type — a source-level constraint.
         CompileError::IOTypeDetected => {
             FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, err.to_string())

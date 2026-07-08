@@ -122,9 +122,20 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
         .output()
         .map_err(map_notfound)?;
     if !output.status.success() {
-        return Err(CompileError::ExtractFailed(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
+        // This lane never has a live GHC session distinguishing multiple
+        // diagnostics, so joining is realistically a single message; keep the
+        // lane's error TYPE as plain `ExtractFailed` (a parse-classification
+        // lane, not a compile-diagnostics lane).
+        let text = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => report
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Err(msg) => msg,
+        };
+        return Err(CompileError::ExtractFailed(text));
     }
     let json = std::fs::read_to_string(&out).map_err(CompileError::Io)?;
     parse_stmt_json(&json)
@@ -161,17 +172,12 @@ fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
 /// inject so the turn can reference earlier bindings. `session_root` is where
 /// the `Val` ifaces are written/read. `bind` carries the new binder's name+gen
 /// on a BIND turn (and triggers the thin-iface write + sidecar emission).
-/// `user_code_lines` is the 1-based inclusive `(start, end)` line range of the
-/// user's own submitted text within `wrapped_source` (the caller computes this
-/// per wrapper shape — see `session.rs`'s `user_code_offset`/wrap_* callers);
-/// `None` when no such range applies (e.g. an internal probe compile).
 pub fn compile_session_turn(
     wrapped_source: &str,
     include: &[&Path],
     session_root: &Path,
     inject_modules: &[String],
     bind: Option<SessionBind<'_>>,
-    user_code_lines: Option<(usize, usize)>,
 ) -> Result<SessionTurnResult, CompileError> {
     let temp = TempDir::new()?;
     let filename = extract_module_name(wrapped_source)
@@ -194,9 +200,6 @@ pub fn compile_session_turn(
     for p in include {
         cmd.arg("--include").arg(p);
     }
-    if let Some((start, end)) = user_code_lines {
-        cmd.arg("--user-code-lines").arg(format!("{start}:{end}"));
-    }
     let is_bind = bind.is_some();
     if let Some(ref b) = bind {
         cmd.arg("--session-bind")
@@ -215,7 +218,12 @@ pub fn compile_session_turn(
         eprintln!("[tidepool-extract stderr]\n{stderr}");
     }
     if !output.status.success() {
-        return Err(CompileError::ExtractFailed(stderr.into_owned()));
+        return Err(
+            match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+                Ok(report) => CompileError::Diagnostics(report.diagnostics),
+                Err(msg) => CompileError::MalformedDiagnostics(msg),
+            },
+        );
     }
 
     let expr_path = temp.path().join("result.cbor");

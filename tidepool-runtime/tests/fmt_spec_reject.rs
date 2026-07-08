@@ -49,7 +49,11 @@ fn try_compile(hole: &str) -> Result<(), String> {
         .into_result()
     {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("{e}")),
+        // `Display` on `RuntimeError`/`CompileError::Diagnostics` is a terse
+        // structural summary now (structured spans, not rendered text) — the
+        // classifier's message is the joined diagnostic text callers actually
+        // want to assert on.
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
     }
 }
 

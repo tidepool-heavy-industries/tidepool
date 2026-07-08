@@ -107,7 +107,11 @@ fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let mut d = NullDispatcher;
     match compile_and_run(&src, "result", &include, &mut d, &()) {
         Ok(v) => Ok(v.to_json()),
-        Err(e) => Err(format!("{e}")),
+        // `Display` on `RuntimeError`/`CompileError::Diagnostics` is a terse
+        // structural summary now (structured spans, not rendered text) — the
+        // classifier's message is the joined diagnostic text these probes
+        // actually assert markers against.
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
     }
 }
 

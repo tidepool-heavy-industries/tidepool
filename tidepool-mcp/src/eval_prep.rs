@@ -391,6 +391,7 @@ pub(crate) fn format_error_with_source(
     phase: Phase,
     title: &str,
     error: &str,
+    diagnostics: Option<&[tidepool_runtime::diag::ExtractDiag]>,
     source: &str,
 ) -> String {
     // Anchor on the verbatim-embedding bracket — the user's `code` starts on
@@ -411,19 +412,34 @@ pub(crate) fn format_error_with_source(
     let offset = marker_pos
         .map(|pos| source[..pos + MARKER.len()].matches('\n').count())
         .unwrap_or(0);
-    // Collapse the logger/`show se` double-print server-side (the extract must
-    // keep printing `show se`: parse errors reach stderr ONLY through it).
-    let deduped = tidepool_runtime::session::errmap::dedupe_diagnostics(error);
-    let deduped = tidepool_runtime::session::errmap::collapse_scaffold_fallout(
-        &tidepool_runtime::session::errmap::drop_scaffold_relevant_binds(&deduped),
-    );
-    let remapped = remap_expr_lines(&deduped, offset);
+    // When the caller has structured diagnostics (a real GHC compile failure),
+    // render them item-relative via span arithmetic. Otherwise (timeout/crash/
+    // a non-Diagnostics CompileError path) there are no GHC coordinates to
+    // remap — use `error` verbatim.
+    let body = match diagnostics {
+        Some(diags) => {
+            let user_lines = tidepool_runtime::diag::extract_user_code_lines(source);
+            tidepool_runtime::diag::render_diagnostics(
+                diags,
+                &tidepool_runtime::diag::RenderOpts {
+                    anchor: "Expr.hs",
+                    label: "<expr>",
+                    user_lines,
+                    line_offset: offset,
+                    col_indent: 0,
+                    drop_foreign_gen_warnings_except: None,
+                    source,
+                },
+            )
+        }
+        None => error.to_string(),
+    };
     let mut out = format!(
         "## {}\n**failure-class:** `{}`  **phase:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
         title,
         class.tag(),
         phase.tag(),
-        remapped,
+        body,
         user_section
     );
     // When GHC can't infer the concrete type of the eval result (e.g. `pure 42`
@@ -478,32 +494,6 @@ fn scope_reach_hints(error: &str) -> Vec<String> {
 fn ambiguous_tojson_result(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("ambiguous type") && lower.contains("tojson")
-}
-
-/// Subtract `offset` from each `Expr.hs:<n>` line number in a GHC diagnostic so
-/// reported lines count from the user-code section rather than the generated
-/// preamble. Numbers `<= offset` (inside the preamble) are left untouched.
-fn remap_expr_lines(error: &str, offset: usize) -> String {
-    const NEEDLE: &str = "Expr.hs:";
-    if offset == 0 || !error.contains(NEEDLE) {
-        return error.to_string();
-    }
-    let mut out = String::with_capacity(error.len());
-    let mut rest = error;
-    while let Some(idx) = rest.find(NEEDLE) {
-        out.push_str(&rest[..idx + NEEDLE.len()]);
-        rest = &rest[idx + NEEDLE.len()..];
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            rest = &rest[digits.len()..];
-            match digits.parse::<usize>() {
-                Ok(n) if n > offset => out.push_str(&(n - offset).to_string()),
-                _ => out.push_str(&digits),
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -706,6 +696,7 @@ mod tests {
             Phase::Compile,
             title,
             error,
+            None,
             source,
         );
 
@@ -731,6 +722,7 @@ mod tests {
             Phase::Compile,
             "Error",
             "oops",
+            None,
             "full source",
         );
         assert!(formatted.contains("full source"));
@@ -746,6 +738,7 @@ mod tests {
             Phase::Compile,
             title,
             error,
+            None,
             source,
         );
 
@@ -766,6 +759,7 @@ mod tests {
             Phase::Compile,
             "Error",
             "msg",
+            None,
             "",
         );
         assert!(formatted.contains("## Error"));
@@ -785,6 +779,7 @@ mod tests {
             Phase::Compile,
             "Compile Error",
             ghc_error,
+            None,
             "",
         );
         assert!(
@@ -804,6 +799,7 @@ mod tests {
             Phase::Compile,
             "Compile Error",
             ghc_error,
+            None,
             "",
         );
         assert!(
@@ -888,9 +884,9 @@ mod tests {
     /// A REAL compile error, through the REAL `template_haskell` wrapping (the
     /// preamble + effects module + a multi-line `helpers`/`code` payload), must
     /// have its `Expr.hs:<n>` line rebased onto the caller's own source — this
-    /// is the eval/repl feedback-loop guarantee (`format_error_with_source` /
-    /// `remap_expr_lines`), not just a property of the synthetic strings the
-    /// other tests in this module use.
+    /// is the eval/repl feedback-loop guarantee (`format_error_with_source` +
+    /// `tidepool_runtime::diag::render_diagnostics`), not just a property of
+    /// the synthetic strings the other tests in this module use.
     #[test]
     fn format_error_with_source_rebases_real_compile_error_line() {
         if !ghc_available() {
@@ -921,58 +917,56 @@ mod tests {
 
         let err = tidepool_runtime::compile_haskell(&source, "result", &include)
             .expect_err("expected a type error for `ok + True`");
-        let raw = match err {
-            tidepool_runtime::CompileError::ExtractFailed(msg) => msg,
-            other => panic!("expected ExtractFailed, got: {other:?}"),
+        let diags = match err {
+            tidepool_runtime::CompileError::Diagnostics(diags) => diags,
+            other => panic!("expected Diagnostics, got: {other:?}"),
         };
         // Sanity check the fixture actually reproduces the intended failure
         // (guards against a future GHC/Prelude change silently no-oping it).
         assert!(
-            raw.contains("Expr.hs:"),
-            "expected a located GHC diagnostic, got: {raw}"
+            diags
+                .iter()
+                .any(|d| d.span.as_ref().is_some_and(|s| s.file.ends_with("Expr.hs"))),
+            "expected a located GHC diagnostic, got: {diags:?}"
+        );
+        let raw_line = diags
+            .iter()
+            .find_map(|d| d.span.as_ref())
+            .map(|s| s.start_line)
+            .expect("a diagnostic span");
+        // The snippet is only 3 lines; the wrapper preamble is far larger, so
+        // the raw line number is necessarily > 2.
+        assert!(
+            raw_line > 2,
+            "expected a wrapper-shifted raw line, got {raw_line}"
         );
 
+        let error_text: String = diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let formatted = format_error_with_source(
             FailureClass::UserHaskell,
             Phase::Compile,
             "Compile Error",
-            &raw,
+            &error_text,
+            Some(&diags),
             &source,
         );
 
         // Rebased: line 2 of the snippet (`bad = ok + True`), NOT the raw
         // ~150+ line offset into the generated wrapper module.
         assert!(
-            formatted.contains("Expr.hs:2:"),
-            "expected the error rebased to Expr.hs:2 (the snippet's own line \
+            formatted.contains("<expr>:2:"),
+            "expected the error rebased to <expr>:2 (the snippet's own line \
              2), got:\n{formatted}"
         );
         assert!(
-            !raw_offset_line_survives(&raw, &formatted),
+            !formatted.contains(&format!("Expr.hs:{raw_line}:")),
             "the wrapper's raw (un-rebased) line number leaked into the \
              formatted output:\n{formatted}"
         );
         assert!(formatted.contains("bad = ok + True"));
-    }
-
-    /// True if `formatted` still contains the (necessarily larger) raw
-    /// `Expr.hs:<n>` line number(s) that `raw` reports — i.e. rebasing didn't
-    /// actually happen.
-    fn raw_offset_line_survives(raw: &str, formatted: &str) -> bool {
-        const NEEDLE: &str = "Expr.hs:";
-        let mut rest = raw;
-        while let Some(idx) = rest.find(NEEDLE) {
-            rest = &rest[idx + NEEDLE.len()..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = digits.parse::<usize>() {
-                // The snippet is only 3 lines; any raw line able to survive
-                // rebasing unchanged would have to already be tiny (<=2),
-                // which the generated preamble never is.
-                if n > 2 && formatted.contains(&format!("Expr.hs:{n}:")) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 }

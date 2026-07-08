@@ -304,7 +304,7 @@ pub struct RenderedModule {
     pub source: String,
     /// Number of generated lines (pragmas, header, imports) before the user's
     /// declaration text — the offset for mapping GHC's line numbers back to
-    /// item-relative ones (see [`super::errmap`]).
+    /// item-relative ones (see [`crate::diag::render_diagnostics`]).
     pub body_line: usize,
     /// True when pragma/import hoisting REMOVED lines from the user's source,
     /// making the offset mapping inexact — coordinate remapping is skipped.
@@ -459,9 +459,7 @@ pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> 
                 Some("") | None => *e, // operator entry like `(<+>)`
                 Some(h) => h,
             };
-            !names
-                .iter()
-                .any(|n| *n == head || format!("({n})") == head)
+            !names.iter().any(|n| *n == head || format!("({n})") == head)
         })
         .collect();
     Some(format!(
@@ -761,7 +759,10 @@ mod tests {
             subtract_import_list_names("import Tidepool.Effects", &names),
             None
         );
-        assert_eq!(subtract_import_list_names("default (Int, Text)", &names), None);
+        assert_eq!(
+            subtract_import_list_names("default (Int, Text)", &names),
+            None
+        );
     }
 
     #[test]

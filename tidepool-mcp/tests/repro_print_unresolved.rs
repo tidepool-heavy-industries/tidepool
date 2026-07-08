@@ -77,7 +77,13 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
     let mut handlers = frunk::hlist![ConsoleHandler];
     let out = match compile_and_run(&source, "result", &include, &mut handlers, &captured) {
         Ok(r) => Ok(format!("{r:?}")),
-        Err(e) => Err(e.to_string()),
+        // `Display` on `RuntimeError`/`CompileError::Diagnostics` is a terse
+        // structural summary now (structured spans, not rendered text) — use
+        // the classifier's message so an assertion on the ABSENCE of a GHC
+        // marker (e.g. "unresolved variable") stays a real regression guard
+        // instead of trivially passing because the raw text never carries
+        // GHC's wording at all.
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
     };
     (captured.drain(), out)
 }

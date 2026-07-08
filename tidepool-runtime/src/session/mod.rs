@@ -18,7 +18,6 @@
 
 pub mod binders;
 pub mod engine;
-pub mod errmap;
 pub mod render;
 pub mod turn;
 
@@ -435,27 +434,33 @@ impl SessionLib {
         })?;
 
         if !output.status.success() {
+            let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+                Ok(r) => r,
+                Err(msg) => return Err(SessionError::ValidationFailed(msg)),
+            };
             let rel = rendered.module.relative_hs_path();
-            let raw = errmap::drop_foreign_gen_warnings(
-                &errmap::dedupe_diagnostics(&String::from_utf8_lossy(&output.stderr)),
-                Some(&rel),
-            );
             // Speak item-relative coordinates: GHC's line numbers point into
             // the rendered G<g>.hs (header + imports before the user's text).
             // Anchored to the generated module's own path suffix only, so
             // foreign .hs:L:C tokens (panic backtraces) pass through.
-            let stderr = if rendered.body_line > 0 && !rendered.hoisted_lines {
-                errmap::remap_generated_coords(
-                    &raw,
-                    &rendered.module.relative_hs_path(),
-                    "<decl>",
-                    rendered.body_line,
-                    0,
-                )
+            let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
+                rendered.body_line
             } else {
-                raw
+                0
             };
-            return Err(SessionError::ValidationFailed(stderr));
+            let rendered_text = crate::diag::render_diagnostics(
+                &report.diagnostics,
+                &crate::diag::RenderOpts {
+                    anchor: &rel,
+                    label: "<decl>",
+                    user_lines: None,
+                    line_offset,
+                    col_indent: 0,
+                    drop_foreign_gen_warnings_except: Some(&rel),
+                    source: &rendered.source,
+                },
+            );
+            return Err(SessionError::ValidationFailed(rendered_text));
         }
 
         Ok(())
