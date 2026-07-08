@@ -86,13 +86,15 @@ pub fn effects_include() -> PathBuf {
 ///
 /// Returns `true` iff the resolved binary runs and prints its usage banner
 /// (a no-args invocation — the extract binary has no version flag; any flag it
-/// doesn't recognize is treated as an input file and fails).
+/// doesn't recognize is treated as an input file and fails). The banner is on
+/// stderr — stdout always carries the fixed-shape diagnostics JSON, even for
+/// this no-args case (`{"version":1,"diagnostics":[]}`).
 pub fn extract_env() -> bool {
     fn runs(bin: &str) -> bool {
         std::process::Command::new(bin)
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
             .output()
-            .map(|out| out.status.success() && out.stdout.starts_with(b"Usage:"))
+            .map(|out| out.status.success() && out.stderr.starts_with(b"Usage:"))
             .unwrap_or(false)
     }
 

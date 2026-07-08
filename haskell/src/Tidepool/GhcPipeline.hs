@@ -2,9 +2,7 @@ module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
     -- * Bound-value type analysis (Wave 3b BIND mode)
   , stripMonadHead, isClosureType, renderType
-  , splitTupleType
-    -- * Structural scaffold-fallout filtering (SrcSpan-based)
-  , PreRenderedCompileError(..) ) where
+  , splitTupleType ) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
@@ -12,14 +10,7 @@ import GHC.Driver.Env (hscUpdateFlags)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Driver.Make (load')
-import GHC.Driver.Monad (reflectGhc, reifyGhc)
-import GHC.Types.Error
-  ( mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage
-  , filterMessages, getMessages, MsgEnvelope(..) )
-import GHC.Types.SourceError (SourceError, srcErrorMessages)
-import GHC.Driver.Errors.Types (GhcMessage)
-import GHC.Utils.Error (pprMsgEnvelopeBagWithLocDefault)
-import GHC.Data.Bag (Bag, isEmptyBag, lengthBag)
+import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage)
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
@@ -31,7 +22,7 @@ import GHC.Driver.Session
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
-import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr, vcat)
+import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
 import GHC.Core.Type (Type, splitAppTy_maybe, splitTyConApp_maybe, isFunTy)
 import GHC.Core.TyCon (isTupleTyCon)
@@ -51,8 +42,6 @@ import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
-import Control.Exception (Exception, throwIO)
-import qualified Control.Exception as CE (catch)
 import Data.Char (toUpper)
 import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule )
@@ -91,7 +80,7 @@ data PipelineResult = PipelineResult
 -- | The normal one-shot eval extraction. Byte-identical to its historical
 -- behaviour: it is exactly @runPipelineSession Nothing@, so no session
 -- machinery (iface injection, source-less home modules) ever touches this path.
-runPipeline :: FilePath -> [FilePath] -> Maybe (Int, Int) -> IO PipelineResult
+runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
 runPipeline = runPipelineSession Nothing
 
 -- | Extraction with optional tidepool-repl SESSION scope (Option-C type plane).
@@ -105,19 +94,14 @@ runPipeline = runPipelineSession Nothing
 -- (plans/ghci-implementation-plan.md §2 step 4 / §5.3 "C GATE").
 --
 -- The gate is the @case@ below: the session arm runs ONLY for an active scope.
---
--- @mUserCodeLines@ (1-based, inclusive @(start, end)@) is the caller's own
--- source region in @path@, used to filter scaffold-fallout diagnostics off a
--- 'SourceError' — see 'filterScaffoldFallout'. @Nothing@ means no filtering:
--- byte-identical to pre-filtering behaviour.
-runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe (Int, Int) -> IO PipelineResult
-runPipelineSession mscope path includes mUserCodeLines
+runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
+runPipelineSession mscope path includes
   | Just scope <- mscope, isSessionScopeActive scope =
-      runSessionPipeline scope path includes mUserCodeLines
-  | otherwise = runNormalPipeline path includes mUserCodeLines
+      runSessionPipeline scope path includes
+  | otherwise = runNormalPipeline path includes
 
-runNormalPipeline :: FilePath -> [FilePath] -> Maybe (Int, Int) -> IO PipelineResult
-runNormalPipeline path includes mUserCodeLines = do
+runNormalPipeline :: FilePath -> [FilePath] -> IO PipelineResult
+runNormalPipeline path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
@@ -178,7 +162,6 @@ runNormalPipeline path includes mUserCodeLines = do
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
     _ <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
                (mapMG unpoison modGraphRaw)
-         `catchGhc` (liftIO . filterScaffoldFallout path mUserCodeLines)
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
     when (null summaries) $
@@ -189,7 +172,7 @@ runNormalPipeline path includes mUserCodeLines = do
     results <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
       parsed <- parseModule modSum
-      typechecked <- typecheckModule parsed `catchGhc` (liftIO . filterScaffoldFallout path mUserCodeLines)
+      typechecked <- typecheckModule parsed
       hscEnv0 <- getSession
       let hscEnv = hscUpdateFlags canonicalizeDFlags hscEnv0
       let tcGblEnv = fst (tm_internals_ typechecked)
@@ -249,80 +232,6 @@ warnCollectorHook targetPath ref fallback flags msgClass srcSpan msg = do
     inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
     inTarget _ = False
 
--- | A pre-rendered compile-error message, produced by 'filterScaffoldFallout'
--- while the GHC session that owns the diagnostics' 'SrcSpan's is still live.
--- Carries a plain 'String' upward past the point where that session goes out
--- of scope, so @app/Main.hs@'s outer @try@/@catch@ (no live 'HscEnv' at that
--- point) can just print it — see the module-level Exception instance.
-newtype PreRenderedCompileError = PreRenderedCompileError String
-
-instance Show PreRenderedCompileError where
-  show (PreRenderedCompileError s) = s
-
-instance Exception PreRenderedCompileError
-
--- | Filter a caught 'SourceError''s diagnostics down to those the caller can't
--- attribute to harness scaffolding, using GHC's own structured 'SrcSpan' data
--- (NOT string-matching rendered text). @targetPath@ is the file being
--- compiled (the same path passed to @guessTarget@); @mUserCodeLines@ is the
--- caller's own 1-based inclusive line range within it.
---
--- * 'Nothing' (flag absent) — re-throw @se@ completely unchanged. This is the
---   steady-state fallback for every caller not yet passing
---   @--user-code-lines@; it must stay byte-identical to pre-filtering
---   behaviour forever.
--- * 'Just' a range — KEEP a diagnostic unless its 'errMsgSpan' is a
---   'RealSrcSpan' in @targetPath@ whose start line falls OUTSIDE the range.
---   Anything in a different file, or with no real span at all
---   ('UnhelpfulSpan'), always survives.
--- * If filtering would drop EVERY diagnostic, re-throw the ORIGINAL,
---   unfiltered @se@ instead — an eval whose whole error is "scaffold" by this
---   heuristic must never collapse to showing nothing.
--- * If nothing was dropped, also re-throw @se@ unchanged (no filtering to
---   report) rather than paying the risk of a re-rendering drifting from
---   @show se@ for no reason.
--- * Otherwise render the survivors with GHC's OWN formatter —
---   'pprMsgEnvelopeBagWithLocDefault', the exact function 'SourceError''s
---   'Show' instance uses — so the caret/gutter shape 'remap_generated_coords'
---   (Rust side) depends on is unchanged, append the summary line, and
---   propagate it as a 'PreRenderedCompileError'.
-filterScaffoldFallout :: FilePath -> Maybe (Int, Int) -> SourceError -> IO a
-filterScaffoldFallout _ Nothing se = throwIO se
-filterScaffoldFallout targetPath (Just (startLine, endLine)) se
-  | isEmptyBag survivors || droppedCount == 0 = throwIO se
-  | otherwise = throwIO (PreRenderedCompileError (renderSurvivors survivors droppedCount))
-  where
-    original     = getMessages (srcErrorMessages se)
-    survivors    = getMessages (filterMessages (not . isScaffoldFallout) (srcErrorMessages se))
-    droppedCount = lengthBag original - lengthBag survivors
-    isScaffoldFallout envelope = case errMsgSpan envelope of
-      RealSrcSpan rss _ ->
-        unpackFS (srcSpanFile rss) == targetPath
-          && (srcSpanStartLine rss < startLine || srcSpanStartLine rss > endLine)
-      UnhelpfulSpan _ -> False
-
--- | Render surviving diagnostics exactly as @show se@ would (same formatter,
--- same 'defaultSDocContext'), then append the one-line scaffold-fallout
--- summary using the wording the Rust side's prior round already established.
-renderSurvivors :: Bag (MsgEnvelope GhcMessage) -> Int -> String
-renderSurvivors survivors droppedCount =
-  renderWithContext defaultSDocContext (vcat (pprMsgEnvelopeBagWithLocDefault survivors))
-    ++ "\n(" ++ show droppedCount
-    ++ " further error(s) suppressed: fallout in the result-display wrapper from the error(s) above)"
-
--- | Catch an exception thrown by a 'Ghc' action. 'Ghc' has no exposed
--- 'Control.Monad.Catch.MonadCatch' instance we can import directly (its
--- underlying @exceptions@ dependency is a hidden package from this
--- executable's point of view), but 'Ghc' is representationally @Session ->
--- IO a@ ('reflectGhc'/'reifyGhc' witness this), so round-tripping through
--- plain base 'Control.Exception.catch' works: reflect both the action and the
--- handler against the SAME live 'Session' so GHC session state seen by the
--- handler (needed to build a 'PreRenderedCompileError' while it's still
--- alive) is identical to the action's.
-catchGhc :: Exception e => Ghc a -> (e -> Ghc a) -> Ghc a
-catchGhc action handler = reifyGhc $ \session ->
-  reflectGhc action session `CE.catch` \e -> reflectGhc (handler e) session
-
 -- | The session-setup DynFlags transform shared by BOTH the normal and the
 -- session paths, so the extracted Core is identical regardless of which entry
 -- point is used: 'canonicalizeDFlags' + the genericPlatform spoof + exposing
@@ -365,8 +274,8 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
 -- ErrorSentinels. A reference turn imports @Tidepool.Prelude@ via the eval
 -- preamble; the phase-1 @load'@ also keeps those source deps "loaded"
 -- (GHC-58427).
-runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> Maybe (Int, Int) -> IO PipelineResult
-runSessionPipeline scope path includes mUserCodeLines = do
+runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
+runSessionPipeline scope path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
@@ -407,7 +316,6 @@ runSessionPipeline scope path includes mUserCodeLines = do
     -- old @LoadDependenciesOf@ but without compiling the target prematurely.
     _ <- load' Nothing LoadAllTargets
                mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
-         `catchGhc` (liftIO . filterScaffoldFallout path mUserCodeLines)
     -- Restore the FULL module graph (target included) so PHASE 3's typecheck can
     -- see HPT instances from dep modules: @hptSomeThingsBelowUs@ walks
     -- @moduleGraphModulesBelow (hsc_mod_graph) target@, and @load'@ left
@@ -439,7 +347,7 @@ runSessionPipeline scope path includes mUserCodeLines = do
     results <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
       parsed      <- parseModule modSum
-      typechecked <- typecheckModule parsed `catchGhc` (liftIO . filterScaffoldFallout path mUserCodeLines)
+      typechecked <- typecheckModule parsed
       hscEnv0     <- getSession
       let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
           tcGblEnv = fst (tm_internals_ typechecked)

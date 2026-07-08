@@ -27,8 +27,15 @@ fi
 # falls back to a `cabal list-bin` binary when the announced one doesn't
 # execute (so the banner below could name a binary the tests never used), and
 # when nothing resolves the GHC-guarded suites "skip cleanly" — a green
-# battery with zero GHC coverage. Same no-args `Usage:` probe extract_env uses.
-if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>/dev/null | head -c 6 | grep -q 'Usage:'; then
+# battery with zero GHC coverage. Same no-args `Usage:` probe extract_env uses
+# — the banner is on stderr, written before stdout's diagnostics JSON, so a
+# plain merged `2>&1` (not a stdout/stderr swap) sees it first either way.
+# The swap idiom (`2>&1 1>/dev/null`) is unreliable here: when THIS script's
+# own stdout+stderr are already redirected to one file by the caller (e.g. a
+# backgrounded `battery.sh >log 2>&1`), re-swapping them for a nested pipeline
+# can silently misroute the child's output — reproduces with plain `echo`,
+# nothing GHC-specific. Merging avoids the swap entirely.
+if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>&1 | head -c 6 | grep -q 'Usage:'; then
   echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
   exit 1
 fi

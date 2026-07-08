@@ -13,7 +13,7 @@ import Data.List (isPrefixOf, stripPrefix, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Control.Monad (foldM, when, forM_)
 import System.Exit (exitFailure)
-import System.IO (hPutStrLn, stderr)
+import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
 import GHC (moduleName, moduleNameString, TyCon)
@@ -32,8 +32,8 @@ import qualified Data.Text as T
 import Tidepool.Binders (emitBinders, emitStmtBinders)
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
-  , stripMonadHead, isClosureType, renderType, splitTupleType
-  , PreRenderedCompileError )
+  , stripMonadHead, isClosureType, renderType, splitTupleType )
+import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
@@ -41,23 +41,46 @@ import Tidepool.Session
 import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
+-- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
+-- stdout before exiting (see 'Tidepool.DiagJson') — empty @diagnostics@ on
+-- success, one entry per compile diagnostic on failure. stderr carries the
+-- historical human-readable debug copy only; the Rust side still parses it
+-- until the Phase-2 consumer migration lands.
 main :: IO ()
 main = do
+  hSetEncoding stdout utf8
   rawArgs <- getArgs
   let args = parseArgs rawArgs
   case argFiles args of
-    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] <file.hs> ..."
+    [] -> do
+      hPutStrLn stderr "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] <file.hs> ..."
+      putStrLn (renderDiagsJson [])
     (file : _)
       -- Statement binder extraction (parse-only): bind-vs-expr + bound names
       -- for one session-eval turn. Fast path, no Core pipeline.
-      | Just out <- argEmitStmtBinders args -> emitStmtBinders file out
+      | Just out <- argEmitStmtBinders args -> runReportingDiags (emitStmtBinders file out)
       -- Lane A: parse-only declaration binder extraction for the FIRST file.
-      | Just out <- argEmitBinders args     -> emitBinders file (argIncludes args) out
+      | Just out <- argEmitBinders args     -> runReportingDiags (emitBinders file (argIncludes args) out)
       -- Session mode (Wave 3b): bind/reference turn with iface injection +
       -- (for binds) thin-iface write + BoundBinder sidecar.
       | isSessionMode args                  -> mapM_ (processSessionFile args) (argFiles args)
       -- Normal one-shot extraction (byte-identical to historical behaviour).
       | otherwise                           -> mapM_ (processFile args) (argFiles args)
+
+-- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
+-- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
+-- stdout either way. A caught exception always yields 'diagFromException' (no
+-- live GHC session exists at these call sites, so there is never a
+-- 'SourceError' to distinguish).
+runReportingDiags :: IO () -> IO ()
+runReportingDiags act = do
+  res <- try act
+  case res of
+    Left (e :: SomeException) -> do
+      putStrLn (renderDiagsJson [diagFromException e])
+      hPutStrLn stderr ("Error: " ++ show e)
+      exitFailure
+    Right () -> putStrLn (renderDiagsJson [])
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
@@ -81,16 +104,11 @@ data Args = Args
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
   , argEmitBoundBinders :: Maybe FilePath
-  -- | @--user-code-lines start:end@: the caller's own 1-based inclusive line
-  -- range in the target file, used to filter scaffold-fallout compile
-  -- diagnostics by 'SrcSpan' (see 'Tidepool.GhcPipeline.filterScaffoldFallout').
-  -- Absent, or an unparseable value, both mean no filtering.
-  , argUserCodeLines :: Maybe (Int, Int)
   }
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False Nothing [] []
-                     Nothing False [] Nothing Nothing [] Nothing Nothing)
+                     Nothing False [] Nothing Nothing [] Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -106,23 +124,16 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
     go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
-    go a ("--user-code-lines" : r : rest) = go a { argUserCodeLines = parseLineRange r } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
-
-    parseLineRange :: String -> Maybe (Int, Int)
-    parseLineRange s = case break (== ':') s of
-      (a, ':' : b) | all isDigit a, all isDigit b, not (null a), not (null b) ->
-        Just (read a, read b)
-      _ -> Nothing
 
 processFile :: Args -> FilePath -> IO ()
 processFile args path = do
   let mOutDir = argOutDir args
       mTarget = argTarget args
-  putStrLn $ "Processing: " ++ path
+  hPutStrLn stderr $ "Processing: " ++ path
   res <- try $ do
-    result <- runPipeline path (argIncludes args) (argUserCodeLines args)
+    result <- runPipeline path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -133,10 +144,10 @@ processFile args path = do
         -- Success-path GHC warnings for the target module (empty on a clean
         -- compile). See GhcPipeline.prWarnings.
         warnTexts = map T.pack (prWarnings result)
-    putStrLn $ "  Top-level bindings: " ++ show (length binds)
+    hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
 
     if argDumpCore args
-      then putStrLn (dumpCore binds)
+      then hPutStrLn stderr (dumpCore binds)
       else return ()
 
     let outDir = case mOutDir of
@@ -182,7 +193,7 @@ processFile args path = do
                          } <- translateModuleClosed hscEnv binds name
             if not (null unresolved) then do
               let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
-              putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
+              hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
               return Nothing
             else do
               let cbor = encodeTree nodes
@@ -190,7 +201,7 @@ processFile args path = do
               _ <- evaluate (BS.length cbor)
               let outFile = outDir </> name ++ ".cbor"
               BS.writeFile outFile cbor
-              putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+              hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
               let usedMeta = map dcToMeta (Map.elems usedDCs)
               -- Keyed by (dcid, qname), matching 'tsUsedDCs' and
               -- 'mergeMetaPreserving': a dcid-alone key would let this
@@ -226,7 +237,7 @@ processFile args path = do
         let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
-        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+        hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
       (Just targetName, False) ->
         -- Whole-module mode: serialize all bindings as nested lets around the
@@ -241,7 +252,7 @@ processFile args path = do
           let cbor = encodeTree nodes
           let outFile = outDir </> name ++ ".cbor"
           BS.writeFile outFile cbor
-          putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+          hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
           ) dedupd
 
         -- Write DataCon metadata: merge TyCon-derived + usage-derived + transitive + wired-in
@@ -257,35 +268,21 @@ processFile args path = do
         let metaCbor = encodeMetadata allMeta False mCapturedTy [] warnTexts
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
-        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+        hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
   case res of
     Left (e :: SomeException) -> do
+      let diags = case fromException e of
+            Just (se :: SourceError) -> diagsFromSourceError se
+            Nothing                  -> [diagFromException e]
+      putStrLn (renderDiagsJson diags)
+      -- Debug copy, byte-identical to the historical stderr contract: the Rust
+      -- side still parses stderr until the Phase-2 consumer migration lands.
       case fromException e of
-        -- GHC's default logger ALREADY prints the diagnostics (formatted, with
-        -- caret lines) to stderr during `load`, so re-printing `show se` here
-        -- just doubled every compile error on the wire — expensive on a channel
-        -- whose whole point is token economy. Emit only a terse marker; the
-        -- formatted diagnostics above are what callers (tidepool-runtime
-        -- ExtractFailed) surface.
-        -- Print `show se` even though GHC's logger usually already printed the
-        -- diagnostics during `load`: PARSE errors (raised before the logger
-        -- runs) reach stderr ONLY through this line — dropping it made them
-        -- invisible ("Compilation failed." with no detail). The duplication
-        -- for logger-printed classes is collapsed Rust-side
-        -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
-        --
-        -- Checked FIRST: 'PreRenderedCompileError' is what
-        -- 'GhcPipeline.filterScaffoldFallout' throws once @--user-code-lines@
-        -- drops scaffold-fallout diagnostics — it already carries the fully
-        -- formatted (GHC-formatter-rendered) text, so no live GHC session is
-        -- needed here to show it.
-        Just (pre :: PreRenderedCompileError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show pre)
-        Nothing -> case fromException e of
-          Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-          Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
-    Right () -> return ()
+    Right () -> putStrLn (renderDiagsJson [])
 
 -- | Whole-module closed emission: translate all bindings as nested lets around
 -- @targetName@, write its CBOR + the merged DataCon meta. Shared by the normal
@@ -305,7 +302,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
   let cbor = encodeTree nodes
   let outFile = outDir </> targetName ++ ".cbor"
   BS.writeFile outFile cbor
-  putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+  hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
 
   -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
   let tyconMeta = collectDataCons tycons
@@ -322,7 +319,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
   let metaCbor = encodeMetadata allMeta hasIO mCapturedTy varNames warnTexts
   let metaFile = outDir </> "meta.cbor"
   BS.writeFile metaFile metaCbor
-  putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+  hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
@@ -331,21 +328,21 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
 processSessionFile :: Args -> FilePath -> IO ()
 processSessionFile args path = do
-  putStrLn $ "Processing (session): " ++ path
+  hPutStrLn stderr $ "Processing (session): " ++ path
   let scope = SessionScope
         { ssRoot      = fromMaybe "" (argSessionRoot args)
         , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
         }
       targetName = fromMaybe "result" (argTarget args)
   res <- try $ do
-    result <- runPipelineSession (Just scope) path (argIncludes args) (argUserCodeLines args)
+    result <- runPipelineSession (Just scope) path (argIncludes args)
     let binds  = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
         warnTexts = map T.pack (prWarnings result)
-    putStrLn $ "  Top-level bindings: " ++ show (length binds)
-    if argDumpCore args then putStrLn (dumpCore binds) else return ()
+    hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
+    if argDumpCore args then hPutStrLn stderr (dumpCore binds) else return ()
     let outDir = case argOutDir args of
           Just dir -> dir
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
@@ -356,21 +353,18 @@ processSessionFile args path = do
     when (argSessionBind args) (emitBindArtifacts args result)
   case res of
     Left (e :: SomeException) -> do
+      let diags = case fromException e of
+            Just (se :: SourceError) -> diagsFromSourceError se
+            Nothing                  -> [diagFromException e]
+      putStrLn (renderDiagsJson diags)
+      -- Debug copy, byte-identical to the historical stderr contract — see the
+      -- identical branch in 'processFile' for why @show se@ is printed even
+      -- though GHC's logger usually already did.
       case fromException e of
-        -- Print `show se` even though GHC's logger usually already printed the
-        -- diagnostics during `load`: PARSE errors (raised before the logger
-        -- runs) reach stderr ONLY through this line — dropping it made them
-        -- invisible ("Compilation failed." with no detail). The duplication
-        -- for logger-printed classes is collapsed Rust-side
-        -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
-        --
-        -- Checked FIRST — see the identical branch in 'processFile'.
-        Just (pre :: PreRenderedCompileError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show pre)
-        Nothing -> case fromException e of
-          Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-          Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
-    Right () -> return ()
+    Right () -> putStrLn (renderDiagsJson [])
 
 -- | The BIND-turn artifacts: the bound value's type @T@ (stripped from
 -- @result :: Eff stack T@), the thin @Tidepool.Session.Val.G<g>@ iface carrying
@@ -413,12 +407,12 @@ emitBindArtifacts args result = do
   iface <- mkThinSessionIface hsc sm [(occ, cty) | (_, _, _, _, _, occ, cty) <- binders]
   writeSessionIface hsc root sm iface
   forM_ binders $ \(name, varid, modStr, tier, tdisp, _, _) ->
-    putStrLn $ "  Wrote session iface: " ++ modStr ++ " (" ++ name
+    hPutStrLn stderr $ "  Wrote session iface: " ++ modStr ++ " (" ++ name
              ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
   case argEmitBoundBinders args of
     Just out -> do
       writeFile out (renderBoundBindersJson binders)
-      putStrLn $ "  Wrote bound-binder sidecar: " ++ out
+      hPutStrLn stderr $ "  Wrote bound-binder sidecar: " ++ out
     Nothing -> return ()
 
 -- | Parse a @--inject-val@ module name (@Tidepool.Session.Val.G<n>@) back into a
