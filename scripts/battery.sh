@@ -30,12 +30,13 @@ fi
 # battery with zero GHC coverage. Same no-args `Usage:` probe extract_env uses
 # — the banner is on stderr, written before stdout's diagnostics JSON, so a
 # plain merged `2>&1` (not a stdout/stderr swap) sees it first either way.
-# The swap idiom (`2>&1 1>/dev/null`) is unreliable here: when THIS script's
-# own stdout+stderr are already redirected to one file by the caller (e.g. a
-# backgrounded `battery.sh >log 2>&1`), re-swapping them for a nested pipeline
-# can silently misroute the child's output — reproduces with plain `echo`,
-# nothing GHC-specific. Merging avoids the swap entirely.
-if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>&1 | head -c 6 | grep -q 'Usage:'; then
+# Do NOT truncate the read with `head -c N`: the extract binary ALWAYS writes
+# a second thing after the banner (the diagnostics JSON, to stdout) — `head`
+# closing the pipe the instant it has its N bytes races that second write,
+# and an EPIPE there is an uncaught exception that fails the process (an
+# intermittent nonzero exit with no other symptom). `grep` alone drains the
+# pipe to EOF, so the writer never gets closed out from under it.
+if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>&1 | grep -q '^Usage:'; then
   echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
   exit 1
 fi
