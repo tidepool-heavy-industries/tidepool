@@ -54,9 +54,13 @@ if [ "$NO_EXTRACT" -eq 0 ]; then
       exit 1
     fi
     # Post-upgrade probe: a broken wrapper would otherwise surface only at
-    # first eval. Same no-args `Usage:` banner check the test harness uses.
+    # first eval. Same no-args `Usage:` banner check the test harness uses —
+    # the banner is on stderr (stdout always carries the diagnostics JSON);
+    # merge streams and let grep drain to EOF rather than truncating with
+    # `head -c N` (a truncated read races the binary's second write, an EPIPE
+    # there is an uncaught exception that fails the probe intermittently).
     if ! command -v tidepool-extract >/dev/null 2>&1 \
-       || ! tidepool-extract 2>/dev/null | head -c 6 | grep -q 'Usage:'; then
+       || ! tidepool-extract 2>&1 | grep -q '^Usage:'; then
       echo "error: installed tidepool-extract does not print the 'Usage:' banner — broken wrapper" >&2
       exit 1
     fi
