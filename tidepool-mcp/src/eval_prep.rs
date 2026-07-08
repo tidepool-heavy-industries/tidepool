@@ -278,11 +278,28 @@ fn template_haskell_impl(
     // and quasiquote payloads keep byte-exact fidelity (indenting them was
     // the "+2 corrupts multi-line QQ" bug class). `__b` is local to this RHS.
     out.push_str("__user = let {\n __b =\n");
+    // 1-based inclusive line range of the user's own `code` text within this
+    // module: `start` is the line right after this bracket (where `code`'s
+    // first line lands); `end` follows from `code`'s own newline count. Riding
+    // this on the closing-bracket line (rather than a standalone comment line)
+    // keeps every downstream line number byte-identical to before this range
+    // was computed — no line is inserted, only appended text on an existing one.
+    let start_line = out.matches('\n').count() + 1;
     out.push_str(code);
     if !code.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(" } in __b\n");
+    let content_lines = if code.is_empty() {
+        1
+    } else if code.ends_with('\n') {
+        code.matches('\n').count()
+    } else {
+        code.matches('\n').count() + 1
+    };
+    let end_line = start_line + content_lines - 1;
+    out.push_str(&format!(
+        " }} in __b  -- [user-lines] {start_line}:{end_line}\n"
+    ));
     out.push('\n');
 
     // render_call: toWire in REPL (Show-default), toJSON in stateless server.

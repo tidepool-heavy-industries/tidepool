@@ -161,12 +161,17 @@ fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
 /// inject so the turn can reference earlier bindings. `session_root` is where
 /// the `Val` ifaces are written/read. `bind` carries the new binder's name+gen
 /// on a BIND turn (and triggers the thin-iface write + sidecar emission).
+/// `user_code_lines` is the 1-based inclusive `(start, end)` line range of the
+/// user's own submitted text within `wrapped_source` (the caller computes this
+/// per wrapper shape — see `session.rs`'s `user_code_offset`/wrap_* callers);
+/// `None` when no such range applies (e.g. an internal probe compile).
 pub fn compile_session_turn(
     wrapped_source: &str,
     include: &[&Path],
     session_root: &Path,
     inject_modules: &[String],
     bind: Option<SessionBind<'_>>,
+    user_code_lines: Option<(usize, usize)>,
 ) -> Result<SessionTurnResult, CompileError> {
     let temp = TempDir::new()?;
     let filename = extract_module_name(wrapped_source)
@@ -188,6 +193,9 @@ pub fn compile_session_turn(
     }
     for p in include {
         cmd.arg("--include").arg(p);
+    }
+    if let Some((start, end)) = user_code_lines {
+        cmd.arg("--user-code-lines").arg(format!("{start}:{end}"));
     }
     let is_bind = bind.is_some();
     if let Some(ref b) = bind {

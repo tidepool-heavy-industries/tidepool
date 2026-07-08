@@ -69,6 +69,23 @@ pub enum RuntimeError {
     Jit(#[from] JitError),
 }
 
+/// Extract the 1-based inclusive `(start, end)` line range of the user's own
+/// submitted code from a generated module's `-- [user-lines] <start>:<end>`
+/// marker (emitted by `tidepool_mcp::eval_prep::template_haskell_impl` on the
+/// `__user` binding's closing-bracket line). Absent for sources that don't
+/// carry the marker (e.g. session-lib declaration compiles) — callers must not
+/// fabricate a range when this returns `None`.
+fn extract_user_code_lines(source: &str) -> Option<(usize, usize)> {
+    const NEEDLE: &str = "-- [user-lines] ";
+    let pos = source.find(NEEDLE)?;
+    let rest = &source[pos + NEEDLE.len()..];
+    let range: &str = rest.lines().next()?;
+    let (start_s, end_s) = range.split_once(':')?;
+    let start = start_s.trim().parse::<usize>().ok()?;
+    let end = end_s.trim().parse::<usize>().ok()?;
+    Some((start, end))
+}
+
 /// Extract module name from Haskell source (e.g. "module Expr where" -> "Expr").
 pub(crate) fn extract_module_name(source: &str) -> Option<String> {
     for line in source.lines() {
@@ -161,6 +178,10 @@ pub fn compile_haskell_salted(
 
     for path in include {
         cmd.arg("--include").arg(path);
+    }
+
+    if let Some((start, end)) = extract_user_code_lines(source) {
+        cmd.arg("--user-code-lines").arg(format!("{start}:{end}"));
     }
 
     let output = cmd.output().map_err(|e| {
