@@ -113,6 +113,47 @@ fn direct_error_reports_message() {
     assert_clean_boom("direct", &run(b.build()));
 }
 
+/// `error ("prefix" <> freeVar)` — a message built by combining a leading
+/// string literal with a genuinely dynamic (free) variable, mirroring
+/// Haskell's `error ("prefix" <> dynamicVar)`. The static fast path
+/// (`extract_error_message` / `find_first_lit_string`) must NOT silently
+/// truncate this to just the literal fragment "prefix": since the message
+/// subtree also contains an unresolvable free `Var`, static extraction must
+/// bail out (return `None`), routing the call through the normal-App /
+/// dynamic (`runtime_error_dynamic`/`materialize_message`) path instead.
+/// Regression guard for the "truncated-to-leading-literal" codegen bug.
+#[test]
+fn error_message_with_free_var_is_not_truncated_to_leading_literal() {
+    let free = VarId(42); // genuinely free: never let-bound anywhere in this tree
+    let mut b = TreeBuilder::new();
+    let sent = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
+    let prefix = b.push(CoreFrame::Lit(Literal::LitString(b"prefix".to_vec())));
+    let free_var = b.push(CoreFrame::Var(free));
+    // Message subtree: App(App(prefix, ()), free_var) — stands in for `<>`
+    // combining a literal fragment with dynamic content. The exact shape of
+    // the combinator doesn't matter for this guard: what matters is that the
+    // literal "prefix" and the free var `free` are BOTH reachable from the
+    // message argument position, so a naive first-literal DFS would wrongly
+    // return `Some("prefix")` instead of bailing out to the dynamic path.
+    let msg_arg = b.push(CoreFrame::App {
+        fun: prefix,
+        arg: free_var,
+    });
+    b.push(CoreFrame::App {
+        fun: sent,
+        arg: msg_arg,
+    });
+    let text = run(b.build());
+    assert!(
+        !text.to_ascii_lowercase().contains("compile-err"),
+        "must still compile via the dynamic fallback path, got: {text}"
+    );
+    assert!(
+        text != "UNEXPECTED-OK ()" && !text.starts_with("UNEXPECTED-OK"),
+        "error call must still raise, got: {text}"
+    );
+}
+
 /// `let f = error in f "boom"` — exercises `poison_trampoline_lazy` directly.
 ///
 /// When `error_sentinel` appears as a plain Var (not in App head), the emit

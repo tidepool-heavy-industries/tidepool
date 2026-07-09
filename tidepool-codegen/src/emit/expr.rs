@@ -1915,6 +1915,17 @@ impl EmitContext {
                     });
                     if let Some(rhs) = map.get(v) {
                         stack.push(*rhs);
+                    } else {
+                        // A genuinely free/dynamic variable reachable in the
+                        // message subtree (not resolvable to a literal-producing
+                        // let-binding) means this is NOT a pure-literal message
+                        // — e.g. `error ("prefix" <> dynamicVar)`. Abort the
+                        // whole search rather than silently skipping it, so the
+                        // caller falls through to the dynamic
+                        // (runtime_error_dynamic/materialize_message) path
+                        // instead of truncating the message to a leading
+                        // literal fragment.
+                        return None;
                     }
                 }
                 CoreFrame::Lit(_) => {}
