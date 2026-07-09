@@ -763,7 +763,11 @@ fn sig_start(line: &str) -> bool {
 
 /// Extract top-level type signatures (joining indented continuation
 /// lines) plus `data`/`type` heads from Haskell source.
-pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
+///
+/// `pub` (not `pub(crate)`): reused cross-crate by `tidepool-repl`'s `:i`
+/// value-signature lane (`introspect::stdlib_value_info`), which needs the
+/// same lowercase-signature scan `:vocab` already relies on here.
+pub fn extract_sigs(src: &str) -> Vec<String> {
     let mut sigs: Vec<String> = Vec::new();
     let mut cur: Option<String> = None;
     for line in src.lines() {

@@ -31,6 +31,12 @@ use std::path::{Path, PathBuf};
 ///   — fields WITH types, verbatim from the source.
 /// - Constructor that is not also a type head (e.g. a variant of a sum type):
 ///   the ENCLOSING data declaration, same shape, plus `"constructor": <name>`.
+/// - Ambiguous: more than one include dir has a DISTINCT-file hit for `name`
+///   (e.g. stdlib's `Tidepool/Patch.hs` and a project `.tidepool/lib/Edit.hs`
+///   both declare `data Edit`). Rather than silently returning the first
+///   dir's hit (masking the collision), returns
+///   `{"name", "ambiguous": [{"module","file","source":"stdlib"}, …]}` in
+///   `include_dirs` order.
 ///
 /// `None` on a miss (the caller falls through to its total-miss error).
 ///
@@ -40,16 +46,130 @@ use std::path::{Path, PathBuf};
 ///   sanity).
 /// - A declaration ends where the next line is blank or starts at column 0
 ///   (standard layout — continuation lines are indented).
-/// - First hit wins in `include_dirs` order (matches GHC include-path
+/// - ALL dirs are scanned (not first-hit-wins): a single hit renders the
+///   usual shape; two or more DISTINCT-file hits render the ambiguity
+///   response instead, in `include_dirs` order (matches GHC include-path
 ///   precedence: effects dir, stdlib, project lib, global lib).
 pub fn stdlib_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::Value> {
     if name.is_empty() || !name.starts_with(|c: char| c.is_uppercase()) {
         return None; // types/classes/constructors are always uppercase
     }
     let mut visited = HashSet::new();
-    include_dirs
-        .iter()
-        .find_map(|dir| scan_dir(dir, name, &mut visited))
+    let mut hits: Vec<serde_json::Value> = Vec::new();
+    let mut seen_files = HashSet::new();
+    for dir in include_dirs {
+        if let Some(hit) = scan_dir(dir, name, &mut visited) {
+            if let Some(file) = hit.get("file").and_then(|f| f.as_str()) {
+                if seen_files.insert(file.to_string()) {
+                    hits.push(hit);
+                }
+            }
+        }
+    }
+    match hits.len() {
+        0 => None,
+        1 => hits.pop(),
+        _ => Some(serde_json::json!({
+            "name": name,
+            "ambiguous": hits
+                .into_iter()
+                .map(|h| serde_json::json!({
+                    "module": h.get("module").cloned().unwrap_or(serde_json::Value::Null),
+                    "file": h.get("file").cloned().unwrap_or(serde_json::Value::Null),
+                    "source": h.get("source").cloned().unwrap_or(serde_json::Value::Null),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    }
+}
+
+/// Resolve a lowercase VALUE/function name (`findDef`, not a type/class/
+/// constructor) against the include-dir sources' top-level signatures —
+/// the `:i findDef` lane. Reuses `tidepool_mcp::extract_sigs`, the same
+/// lowercase-signature scanner `:vocab` already relies on
+/// (`tidepool-mcp/src/preamble.rs`), so a name `:vocab` lists is guaranteed
+/// resolvable here too.
+///
+/// Returns the same `{"name","shape","module","file","source":"stdlib"}`
+/// shape as a type hit (`shape` is the joined signature text, e.g.
+/// `findDef :: Text -> Text -> M LspNode`). `None` on a miss.
+///
+/// Like `stdlib_info`, scans every dir (not first-hit-wins) and reports an
+/// ambiguity if the same name has a signature in more than one distinct
+/// file: `{"name","ambiguous":[{...}, ...]}`.
+pub fn stdlib_value_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::Value> {
+    if name.is_empty() || !name.starts_with(|c: char| c.is_lowercase() || c == '_') {
+        return None; // values/functions are always lowercase-leading
+    }
+    let mut hits: Vec<serde_json::Value> = Vec::new();
+    let mut seen_files = HashSet::new();
+    for dir in include_dirs {
+        collect_value_hits(dir, name, &mut hits, &mut seen_files);
+    }
+    match hits.len() {
+        0 => None,
+        1 => hits.pop(),
+        _ => Some(serde_json::json!({
+            "name": name,
+            "ambiguous": hits
+                .into_iter()
+                .map(|h| serde_json::json!({
+                    "module": h.get("module").cloned().unwrap_or(serde_json::Value::Null),
+                    "file": h.get("file").cloned().unwrap_or(serde_json::Value::Null),
+                    "source": h.get("source").cloned().unwrap_or(serde_json::Value::Null),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    }
+}
+
+/// Recursively walk `dir` for `*.hs` files, appending a value-signature hit
+/// for `name` (if any, first match within a file wins) to `hits`, deduped by
+/// canonical file path via `seen_files`.
+fn collect_value_hits(
+    dir: &Path,
+    name: &str,
+    hits: &mut Vec<serde_json::Value>,
+    seen_files: &mut HashSet<String>,
+) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in &entries {
+        if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("hs") {
+            if let Some(hit) = scan_file_for_value(p, name) {
+                if let Some(file) = hit.get("file").and_then(|f| f.as_str()) {
+                    if seen_files.insert(file.to_string()) {
+                        hits.push(hit);
+                    }
+                }
+            }
+        }
+    }
+    for p in &entries {
+        if p.is_dir() {
+            collect_value_hits(p, name, hits, seen_files);
+        }
+    }
+}
+
+/// Scan one source file's top-level signatures (via `extract_sigs`) for a
+/// signature whose head identifier matches `name`.
+fn scan_file_for_value(path: &Path, name: &str) -> Option<serde_json::Value> {
+    let src = fs::read_to_string(path).ok()?;
+    let sigs = tidepool_mcp::extract_sigs(&src);
+    let sig = sigs.into_iter().find(|s| {
+        s.split_once("::")
+            .map(|(head, _)| head.trim() == name)
+            .unwrap_or(false)
+    })?;
+    Some(serde_json::json!({
+        "name": name,
+        "shape": sig,
+        "module": module_name(&src),
+        "file": path.display().to_string(),
+        "source": "stdlib",
+    }))
 }
 
 /// Recursively scan one dir for `.hs` files, files before subdirs, both in
@@ -379,13 +499,37 @@ data Gadt where
     }
 
     #[test]
-    fn include_dir_precedence_first_hit_wins() {
+    fn include_dir_collision_reports_ambiguous_in_dir_order() {
+        // Two distinct files across two include dirs both declare `Foo` —
+        // this used to silently return the first dir's hit (masking the
+        // collision); it must now report ambiguity, in `include_dirs` order.
         let d1 = dir_with(&[("A.hs", "module A where\n\ndata Foo = FooA Int\n")]);
         let d2 = dir_with(&[("B.hs", "module B where\n\ndata Foo = FooB Int\n")]);
         let v = lookup(&[&d1, &d2], "Foo").unwrap();
-        assert_eq!(v["module"], "A", "first include dir wins");
+        assert!(
+            v.get("ambiguous").is_some(),
+            "collision must be reported: {v}"
+        );
+        let ambiguous = v["ambiguous"].as_array().unwrap();
+        assert_eq!(ambiguous.len(), 2);
+        assert_eq!(ambiguous[0]["module"], "A", "dir order preserved");
+        assert_eq!(ambiguous[1]["module"], "B");
+
         let v = lookup(&[&d2, &d1], "Foo").unwrap();
-        assert_eq!(v["module"], "B", "order reversed → other dir wins");
+        let ambiguous = v["ambiguous"].as_array().unwrap();
+        assert_eq!(ambiguous[0]["module"], "B", "order reversed → B first");
+        assert_eq!(ambiguous[1]["module"], "A");
+    }
+
+    #[test]
+    fn single_dir_hit_is_unaffected_by_ambiguity_handling() {
+        // The non-colliding case (only one dir has the name) must still
+        // return the plain single-hit shape, not an ambiguity wrapper.
+        let d1 = dir_with(&[("A.hs", "module A where\n\ndata Foo = FooA Int\n")]);
+        let d2 = dir_with(&[("B.hs", "module B where\n\ndata Bar = BarB Int\n")]);
+        let v = lookup(&[&d1, &d2], "Foo").unwrap();
+        assert_eq!(v["module"], "A");
+        assert!(v.get("ambiguous").is_none());
     }
 
     #[test]
@@ -410,6 +554,44 @@ data Gadt where
         assert_eq!(lookup(&[&d], "Fam"), None, "data instance is not a head");
         // `classify` starts with the letters of `class` but not the keyword.
         assert_eq!(lookup(&[&d], "Int"), None);
+    }
+
+    #[test]
+    fn value_signature_hit() {
+        let d = dir_with(&[(
+            "Lsp.hs",
+            "module Lsp where\n\nfindDef :: Text -> Text -> M LspNode\nfindDef a b = undefined\n",
+        )]);
+        let dirs: Vec<PathBuf> = vec![d.path().to_path_buf()];
+        let v = stdlib_value_info(&dirs, "findDef").expect("findDef is a value hit");
+        assert_eq!(v["name"], "findDef");
+        assert_eq!(v["shape"], "findDef :: Text -> Text -> M LspNode");
+        assert_eq!(v["module"], "Lsp");
+        assert_eq!(v["source"], "stdlib");
+    }
+
+    #[test]
+    fn value_signature_miss_and_uppercase_rejected() {
+        let d = dir_with(&[(
+            "Lsp.hs",
+            "module Lsp where\n\nfindDef :: Text -> Text -> M LspNode\n",
+        )]);
+        let dirs: Vec<PathBuf> = vec![d.path().to_path_buf()];
+        assert_eq!(stdlib_value_info(&dirs, "nonexistent"), None);
+        // Uppercase names are never value hits (that's stdlib_info's job).
+        assert_eq!(stdlib_value_info(&dirs, "FindDef"), None);
+    }
+
+    #[test]
+    fn value_signature_collision_reports_ambiguous() {
+        let d1 = dir_with(&[("A.hs", "module A where\n\nfoo :: Int -> Int\n")]);
+        let d2 = dir_with(&[("B.hs", "module B where\n\nfoo :: Text -> Text\n")]);
+        let dirs: Vec<PathBuf> = vec![d1.path().to_path_buf(), d2.path().to_path_buf()];
+        let v = stdlib_value_info(&dirs, "foo").unwrap();
+        let ambiguous = v["ambiguous"].as_array().expect("ambiguous array");
+        assert_eq!(ambiguous.len(), 2);
+        assert_eq!(ambiguous[0]["module"], "A");
+        assert_eq!(ambiguous[1]["module"], "B");
     }
 
     #[cfg(unix)]

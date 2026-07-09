@@ -1723,6 +1723,15 @@ impl Session {
                 if let Some(info) = crate::introspect::stdlib_info(&self.cfg.base_include, name) {
                     return TurnOutcome::Meta(info);
                 }
+                // 4b. Stdlib/library VALUES (`findDef`, … — lowercase names
+                // `:vocab` already lists via the same signature scanner, but
+                // step 4 above is type-only and bails immediately on a
+                // lowercase name).
+                if let Some(info) =
+                    crate::introspect::stdlib_value_info(&self.cfg.base_include, name)
+                {
+                    return TurnOutcome::Meta(info);
+                }
                 // 5. Total miss.
                 TurnOutcome::Meta(serde_json::json!({
                     "error": "not a bound value or known type",
