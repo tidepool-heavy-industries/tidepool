@@ -34,6 +34,7 @@ import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import GHC.Types.Unique (getKey)
+import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import Data.List (nub)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
@@ -180,7 +181,14 @@ runNormalPipeline path includes = do
       -- optimization can inline/rename @__user@ away. Types live on the Id in
       -- the typechecked type env; our CBOR drops them downstream (Translate.hs).
       let mCapturedTy = capturedUserType tcGblEnv
+          -- This path is shared by 'runPipeline' (single-shot eval, whose
+          -- wrapper always compiles a target named @result@) AND a repl
+          -- session's FIRST turn (no prior bindings yet to inject, so
+          -- 'isSessionScopeActive' is still False and 'runSessionPipeline'
+          -- below is never reached — its wrapper compiles @__result@, the
+          -- scaffold-reserved name; see 'processSessionFile'). Try both.
           mResultTy   = capturedBindingType "result" tcGblEnv
+                          <|> capturedBindingType "__result" tcGblEnv
       desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
       return (externalizeInternalTops simplified, mCapturedTy, mResultTy)
@@ -352,7 +360,11 @@ runSessionPipeline scope path includes = do
       let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
           tcGblEnv = fst (tm_internals_ typechecked)
           mCapTy   = capturedUserType tcGblEnv
-          mResTy   = capturedBindingType "result" tcGblEnv
+          -- Reached only once a session has a prior binding to inject
+          -- ('isSessionScopeActive'); every such turn's wrapper compiles a
+          -- target literally named @__result@ (scaffold-reserved, never
+          -- @result@ — see 'processSessionFile').
+          mResTy   = capturedBindingType "__result" tcGblEnv
       desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
       return (externalizeInternalTops simplified, mCapTy, mResTy)

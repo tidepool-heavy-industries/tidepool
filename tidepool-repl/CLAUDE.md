@@ -138,27 +138,17 @@ generation counters or the raw GHC module name for a declaration.
 - **LSP graph verbs** (`the`/`chart`/`explore`) need `tidepool-lsp-daemon`
   running on the workspace socket; they error cleanly without it.
 
-## Launcher shim (`.tidepool-repl-mcp.sh`)
+## Launcher (MCP config)
 
 The MCP client (`~/.claude.json` project section — NOT `.mcp.json`, which is
-inert here) launches the repl via a **dev-tracking wrapper** at repo root,
-`.tidepool-repl-mcp.sh`. It is **untracked (gitignored) and easily lost** — an
-ENOENT "failed to reconnect" for `tidepool-repl` means it's gone. It does three
-things a bare `exec tidepool-repl` cannot:
-
-1. Prepends the with-packages GHC to `PATH` (reused from the nix-profile
-   `tidepool-extract` wrapper) — the extract shells out to `ghc` and needs
-   `lens` on the DB.
-2. Sets `TIDEPOOL_EXTRACT` to the latest `haskell/dist-newstyle` cabal build,
-   so the bind classifier (`x <- e` → `tidepool-extract --emit-stmt-binders`,
-   a working-tree flag) tracks your build instead of the lagging nix profile.
-   **Without this, every bind fails** with `parse error on input '<-'` (classify
-   errors → `run_eval` falls back to the bare-expression path).
-3. `exec`s `~/.cargo/bin/tidepool-repl` (re-`cargo install --path tidepool-repl`
-   to update the server itself).
-
-Recreate it if lost; then `cargo build tidepool-extract-bin` in `haskell/` so a
-dev extract exists to point at.
+inert here) launches `~/.cargo/bin/tidepool-repl` directly
+(re-`cargo install --path tidepool-repl` to update). The extract is resolved
+via `TIDEPOOL_EXTRACT` or, when unset, `tidepool-extract` on PATH — normally
+the nix-profile wrapper, which supplies its own with-packages GHC. To test a
+working-tree extract change before `scripts/redeploy.sh`, set
+`TIDEPOOL_EXTRACT` in the server's `env` block to the cabal-built
+`tidepool-extract-bin` and make sure the with-packages GHC is on `PATH`
+(the extract shells out to `ghc` and needs `lens` on the DB).
 
 ## Env knobs
 

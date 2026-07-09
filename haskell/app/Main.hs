@@ -43,9 +43,9 @@ import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 -- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
 -- stdout before exiting (see 'Tidepool.DiagJson') — empty @diagnostics@ on
--- success, one entry per compile diagnostic on failure. stderr carries the
--- historical human-readable debug copy only; the Rust side still parses it
--- until the Phase-2 consumer migration lands.
+-- success, one entry per compile diagnostic on failure. stdout is the
+-- authoritative machine contract; stderr carries a human-readable debug copy
+-- only.
 main :: IO ()
 main = do
   hSetEncoding stdout utf8
@@ -62,10 +62,12 @@ main = do
       -- Lane A: parse-only declaration binder extraction for the FIRST file.
       | Just out <- argEmitBinders args     -> runReportingDiags (emitBinders file (argIncludes args) out)
       -- Session mode (Wave 3b): bind/reference turn with iface injection +
-      -- (for binds) thin-iface write + BoundBinder sidecar.
-      | isSessionMode args                  -> mapM_ (processSessionFile args) (argFiles args)
+      -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
+      -- file is processed (matching the two guards above) — one invocation,
+      -- one stdout report, per the module doc.
+      | isSessionMode args                  -> processSessionFile args file
       -- Normal one-shot extraction (byte-identical to historical behaviour).
-      | otherwise                           -> mapM_ (processFile args) (argFiles args)
+      | otherwise                           -> processFile args file
 
 -- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
 -- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
@@ -242,7 +244,9 @@ processFile args path = do
       (Just targetName, False) ->
         -- Whole-module mode: serialize all bindings as nested lets around the
         -- target (shared with the session path; see 'writeWholeModuleClosed').
-        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName
+        -- File base name matches the lookup name here (the general CLI
+        -- contract: --target foo produces foo.cbor).
+        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior)
@@ -276,8 +280,8 @@ processFile args path = do
             Just (se :: SourceError) -> diagsFromSourceError se
             Nothing                  -> [diagFromException e]
       putStrLn (renderDiagsJson diags)
-      -- Debug copy, byte-identical to the historical stderr contract: the Rust
-      -- side still parses stderr until the Phase-2 consumer migration lands.
+      -- Debug copy for humans only; stdout (above) is the authoritative
+      -- machine contract.
       case fromException e of
         Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
@@ -285,11 +289,17 @@ processFile args path = do
     Right () -> putStrLn (renderDiagsJson [])
 
 -- | Whole-module closed emission: translate all bindings as nested lets around
--- @targetName@, write its CBOR + the merged DataCon meta. Shared by the normal
--- whole-module mode ('processFile') and the Wave-3b session modes
--- ('processSessionFile') so the runtime gets identical JIT-able Core either way.
-writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> IO ()
-writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName = do
+-- @targetName@ (the Core-level binding to look up), write its CBOR under
+-- @outFileBase@.cbor + the merged DataCon meta. @targetName@ and
+-- @outFileBase@ are DELIBERATELY separate parameters: the session path
+-- (session-eval wrapper) may compile a binding under a scaffold-reserved
+-- name that differs from the file every Rust caller expects (see
+-- 'processSessionFile'), while the general whole-module CLI path
+-- ('processFile') passes the same string for both, preserving its existing
+-- @--target foo@ → @foo.cbor@ contract. Shared by both so the runtime gets
+-- identical JIT-able Core either way.
+writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO ()
+writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
                , cmReachBinds = reachBinds, cmVarNames = varNames
                } <- translateModuleClosed hscEnv binds targetName
@@ -300,7 +310,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
       ++ "\nDefine them in your source or use equivalent inline definitions."
   else return ()
   let cbor = encodeTree nodes
-  let outFile = outDir </> targetName ++ ".cbor"
+  let outFile = outDir </> outFileBase ++ ".cbor"
   BS.writeFile outFile cbor
   hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
 
@@ -323,7 +333,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
--- earlier bindings resolve), emit the JIT-able Core for @result@, and — on a
+-- earlier bindings resolve), emit the JIT-able Core for @__result@, and — on a
 -- bind turn — capture the bound value's type, write the thin session iface, and
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
 processSessionFile :: Args -> FilePath -> IO ()
@@ -333,7 +343,12 @@ processSessionFile args path = do
         { ssRoot      = fromMaybe "" (argSessionRoot args)
         , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
         }
-      targetName = fromMaybe "result" (argTarget args)
+      -- The repl wrapper's own compile-target binding is scaffold-reserved
+      -- (@__result@, not @result@) so it can never collide with a user's own
+      -- chosen bind name promoted into a later turn's session-lib import —
+      -- see 'writeWholeModuleClosed''s doc for why the CBOR file it's
+      -- written to stays named @result.cbor@ regardless.
+      targetName = fromMaybe "__result" (argTarget args)
   res <- try $ do
     result <- runPipelineSession (Just scope) path (argIncludes args)
     let binds  = prBinds result
@@ -348,7 +363,9 @@ processSessionFile args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
     -- The JIT-able Core for the target (same emission as whole-module mode).
-    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName
+    -- File base name is always "result" — every Rust session-turn caller
+    -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
+    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
   case res of
@@ -357,9 +374,9 @@ processSessionFile args path = do
             Just (se :: SourceError) -> diagsFromSourceError se
             Nothing                  -> [diagFromException e]
       putStrLn (renderDiagsJson diags)
-      -- Debug copy, byte-identical to the historical stderr contract — see the
-      -- identical branch in 'processFile' for why @show se@ is printed even
-      -- though GHC's logger usually already did.
+      -- Debug copy for humans only — see the identical branch in 'processFile'
+      -- for why @show se@ is printed even though GHC's logger usually already
+      -- did.
       case fromException e of
         Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e

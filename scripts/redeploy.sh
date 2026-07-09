@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Always operate from the repo root — every path below (git status haskell/,
-# the shim check, cargo --path) assumes it.
+# cargo --path) assumes it.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DRY=0
@@ -29,16 +29,6 @@ haskell_dirty=$(git status --porcelain haskell/ 2>/dev/null | grep -vE '^[?!]{2}
 if [ -n "$haskell_dirty" ]; then
   echo "WARN: haskell/ has uncommitted tracked changes — nix flake build sees only"
   echo "      tracked files; uncommitted edits will NOT ship until committed."
-fi
-
-if [ ! -f .tidepool-repl-mcp.sh ]; then
-  echo "WARN: .tidepool-repl-mcp.sh missing from repo root — tidepool-repl MCP will"
-  echo "      ENOENT on connect. See tidepool-repl/CLAUDE.md (Launcher shim section)"
-  echo "      for what it must contain. In brief, the shim must:"
-  echo "        1. Prepend <nix-ghc-with-packages>/bin to PATH"
-  echo "        2. Set TIDEPOOL_EXTRACT to the haskell/dist-newstyle cabal build output"
-  echo "        3. exec ~/.cargo/bin/tidepool-repl \"\$@\""
-  echo "      Then: cd haskell && cabal build tidepool-extract-bin"
 fi
 
 # Step 2: rebuild + install the GHC→Core extractor via nix profile.

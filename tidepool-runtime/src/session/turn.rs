@@ -190,8 +190,12 @@ pub fn compile_session_turn(
     cmd.arg(&input)
         .arg("--output-dir")
         .arg(temp.path())
+        // Scaffold-reserved binding name (never a plain user-choosable
+        // identifier like "result") — Main.hs's session path always compiles
+        // this exact target but still writes the output as result.cbor
+        // below, so this rename needs no change to the read-back path.
         .arg("--target")
-        .arg("result")
+        .arg("__result")
         .arg("--session-root")
         .arg(session_root);
     for m in inject_modules {

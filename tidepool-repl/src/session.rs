@@ -955,7 +955,7 @@ impl Session {
     }
 
     /// BIND path (`x <- action` / `let x = e`): wrap into an `Eff`-typed
-    /// `result = do { <stmt>; pure x }`, compile through the session extract
+    /// `__result = do { <stmt>; pure x }`, compile through the session extract
     /// (earlier bindings injected so `action` may reference them), then
     /// `run_fragment_and_bind` to reduce the effect tree, strict-force (Tier-0)
     /// or store-as-is (Tier-1), tenure + root the value, and record it in the
@@ -1075,7 +1075,7 @@ impl Session {
     }
 
     /// MULTI-BIND path: `(a, b) <- action` / `let (x, y) = e`. Wraps the turn as
-    /// `result = do { <stmt>; pure (a, b, …) }` so the fragment yields ONE tuple
+    /// `__result = do { <stmt>; pure (a, b, …) }` so the fragment yields ONE tuple
     /// Con, then projects each field individually, tenures each as a separate root,
     /// and records one `BindingEntry` per component. The extract validates that the
     /// result type is an N-tuple (via `splitTupleType`); non-tuple patterns (e.g.
@@ -1213,14 +1213,12 @@ impl Session {
         let eval_input = self.eval_input.clone();
 
         // Eff-first (show-default: REPL renders via Show/toWire, not toJSON).
-        let eff_src = template_haskell_show_default(
+        let eff_src = wrap_eff_reference_source(
             &preamble,
             &self.cfg.effect_stack,
-            expr_text,
             &imports,
-            "",
+            expr_text,
             eval_input.as_ref(),
-            None,
         );
         // Block-scope `include` so the borrow on `self.cfg.base_include` is
         // released before we call `query_inner_type` (which needs `&mut self`).
@@ -1942,14 +1940,21 @@ impl Session {
         let imports = self.session_imports();
         let inject = self.live_val_modules();
         let eval_input = self.eval_input.clone();
-        let src = template_haskell_show_default(
+        // `template_haskell_show_default` (the non-session `eval`-tool
+        // template, target `result`) is the WRONG shape here — it's compiled
+        // via `compile_session_turn`, whose extractor invocation always
+        // targets the scaffold-reserved `__result` (see `turn.rs`). Reuse
+        // `wrap_probe_source` instead: it already compiles to a properly
+        // `Eff`-typed `__result :: Eff {effect_stack} _` binding (forcing the
+        // same freer-simple constructor requirement this bootstrap exists
+        // for), just via an extra `__probe`/`__t` monadic peel we don't need
+        // the result of — only `turn.table`/`turn.expr` are read below.
+        let src = wrap_probe_source(
             &preamble,
             &self.cfg.effect_stack,
-            "pure ()",
             &imports,
-            "",
+            "pure ()",
             eval_input.as_ref(),
-            None,
         );
         let compiled = {
             let include = self.turn_include();
@@ -2191,9 +2196,9 @@ fn hide_module_names(preamble: &str, module: &str, extra: &[&str]) -> String {
 /// Locate the user's code inside a wrapped module source by the markers the
 /// wrappers emit, returning `(line_offset, col_indent)` for coordinate remap.
 /// `__user =` (pure-ref / shared eval template, optionally `do`-wrapped) is
-/// checked FIRST — those templates also contain a `result` binding, but the
+/// checked FIRST — those templates also contain a `__result` binding, but the
 /// user text lives under `__user`. Bind wrappers emit no `__user`, so their
-/// `result = do` is the marker.
+/// `__result = do` is the marker.
 fn user_code_offset(source: &str) -> Option<(usize, usize)> {
     // Verbatim embeddings (pure-ref / probe / shared eval template): user
     // text starts right after the bracket, at its ORIGINAL columns — line
@@ -2203,9 +2208,9 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
             return Some((source[..pos + marker.len()].matches('\n').count(), 0));
         }
     }
-    // Bind wrappers: verbatim inside `result = do {`. (A `let` bind's first
+    // Bind wrappers: verbatim inside `__result = do {`. (A `let` bind's first
     // line gains 2 columns from the decl-brace boundary edit — accepted.)
-    const RESULT_DO: &str = "\nresult = do {\n";
+    const RESULT_DO: &str = "\n__result = do {\n";
     source
         .find(RESULT_DO)
         .map(|pos| (source[..pos + RESULT_DO.len()].matches('\n').count(), 0))
@@ -2432,8 +2437,8 @@ fn wrap_bind_source(
     input: Option<&serde_json::Value>,
 ) -> String {
     let mut out = begin_user_module(preamble, imports, input);
-    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n");
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do {\n");
     push_braced_stmt(&mut out, turn_text);
     // Column-1 closer: closes any user implicit contexts (n < m) down to the
     // explicit brace context. (Edge: a user inner block aligned at exactly
@@ -2442,12 +2447,12 @@ fn wrap_bind_source(
     out
 }
 
-/// Wrap a MULTI-BIND turn into an `Eff`-typed module whose `result` runs the
+/// Wrap a MULTI-BIND turn into an `Eff`-typed module whose `__result` runs the
 /// bind statement and yields a tuple of all bound names. For `(a, b) <- action`
 /// with `names = ["a", "b"]` this emits:
 /// ```haskell
-/// result :: Eff <stack> _
-/// result = do
+/// __result :: Eff <stack> _
+/// __result = do
 ///   (a, b) <- action
 ///   pure (a, b)
 /// ```
@@ -2462,8 +2467,8 @@ fn wrap_multi_bind_source(
 ) -> String {
     let tuple_expr = format!("({})", names.join(", "));
     let mut out = begin_user_module(preamble, imports, input);
-    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n");
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do {\n");
     push_braced_stmt(&mut out, turn_text);
     out.push_str(&format!(" ; pure {tuple_expr}\n }}\n"));
     out
@@ -2493,8 +2498,8 @@ fn wrap_bare_it_monadic(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n it <- __user ; pure (it, toWire it)\n }\n");
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do {\n it <- __user ; pure (it, toWire it)\n }\n");
     out
 }
 
@@ -2514,8 +2519,8 @@ fn wrap_bare_it_pure(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n let { it = __user } ; pure (it, toWire it)\n }\n");
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do {\n let { it = __user } ; pure (it, toWire it)\n }\n");
     out
 }
 
@@ -2552,7 +2557,32 @@ fn wrap_pure_ref_source(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    push_verbatim_binding(&mut out, "result", expr_text);
+    push_verbatim_binding(&mut out, "__result", expr_text);
+    out
+}
+
+/// Wrap an expression for `run_session_reference`'s "Eff-first" attempt: the
+/// same `__user`/`toWire`/`paginateResult`-`Value` shape as
+/// `tidepool_mcp::template_haskell_show_default`'s Eff-typed target, but
+/// naming the compile target `__result`. Deliberately NOT that shared
+/// function — it always compiles its target as literally `result`, matching
+/// its OTHER callers (`run_plain_eval`, the stateless `eval` tool), which go
+/// through the plain `compile_haskell_salted` path; THIS call compiles via
+/// `compile_session_turn`, whose extractor invocation always targets
+/// `__result` (see `turn.rs`) so a later turn's own wrapper can never collide
+/// with a user's own binding of that name promoted into a session-lib import.
+fn wrap_eff_reference_source(
+    preamble: &str,
+    effect_stack: &str,
+    imports: &str,
+    expr_text: &str,
+    input: Option<&serde_json::Value>,
+) -> String {
+    let mut out = begin_user_module(preamble, imports, input);
+    push_verbatim_binding(&mut out, "__user", expr_text);
+    out.push('\n');
+    out.push_str(&format!("__result :: Eff {effect_stack} Value\n"));
+    out.push_str("__result = do {\n _r <- __user ;\n paginateResult 4096 (toWire _r)\n }\n");
     out
 }
 
@@ -2562,7 +2592,7 @@ fn wrap_pure_ref_source(
 /// `__t <- __probe` so GHC's monadic bind peels `Eff es a` to the inner `a`. That
 /// is the same type-directed peel the `x <- e` bind path uses — no TyCon
 /// name-matching. `__probe` is typecheck scaffolding only: the compile targets
-/// `result`, so it is never serialized into the turn.
+/// `__result`, so it is never serialized into the turn.
 fn wrap_probe_source(
     preamble: &str,
     effect_stack: &str,
@@ -2573,8 +2603,8 @@ fn wrap_probe_source(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__probe", expr_text);
     out.push('\n');
-    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do\n");
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do\n");
     out.push_str("  __t <- __probe\n");
     out.push_str("  pure __t\n");
     out

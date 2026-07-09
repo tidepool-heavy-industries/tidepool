@@ -1,4 +1,3 @@
-{-# LANGUAGE TypeApplications #-}
 -- | Fixed-shape JSON diagnostics report emitted on stdout by
 -- @tidepool-extract-bin@ for EVERY invocation (success or failure) — see
 -- @app/Main.hs@. Hand-rolled serializer (no @aeson@ dependency): the shape is
@@ -17,11 +16,11 @@ import Data.List (intercalate)
 import Numeric (showHex)
 
 import GHC (SrcSpan(..), srcSpanFile, srcSpanStartLine, srcSpanStartCol, srcSpanEndLine, srcSpanEndCol)
-import GHC.Types.Error
-  ( MsgEnvelope(..), Severity(..), diagnosticMessage, defaultDiagnosticOpts
-  , getMessages )
+import GHC.Types.Error (MsgEnvelope(..), Severity(..), diagnosticMessage, getMessages, NoDiagnosticOpts(..))
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
-import GHC.Driver.Errors.Types (GhcMessage)
+import GHC.Driver.Errors.Types (GhcMessage, GhcMessageOpts(..), DriverMessageOpts(..))
+import GHC.Tc.Errors.Types (TcRnMessageOpts(..))
+import GHC.Iface.Errors.Types (IfaceMessageOpts(..), BuildingCabalPackage(..))
 import GHC.Utils.Error (formatBulleted)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(..), mkErrStyle)
 import GHC.Data.FastString (unpackFS)
@@ -47,10 +46,40 @@ envelopeToDiag env = Diag
   { dFile     = spanOf (errMsgSpan env)
   , dSeverity = severityOf (errMsgSeverity env)
   , dMessage  = renderWithContext ctx
-                  (formatBulleted (diagnosticMessage (defaultDiagnosticOpts @GhcMessage) (errMsgDiagnostic env)))
+                  (formatBulleted (diagnosticMessage diagOpts (errMsgDiagnostic env)))
   }
   where
     ctx = defaultSDocContext { sdocStyle = mkErrStyle (errMsgContext env) }
+
+-- | The rendering options a caught diagnostic is formatted with. GHC's own
+-- 'GHC.Types.Error.defaultDiagnosticOpts' hardcodes @tcOptsShowContext =
+-- True@ — using it here would silently ignore 'canonicalizeDFlags''s
+-- unconditional @gopt_unset Opt_ShowErrorContext@ and re-admit the
+-- \"In the expression: …\" / \"In an equation for `__b'\" context trails
+-- that flag exists to drop. The live session's real 'DynFlags' aren't
+-- reachable here (the catch happens in @app/Main.hs@, after 'runGhc' has
+-- already exited), but 'canonicalizeDFlags' applies unconditionally in every
+-- pipeline path — 'Opt_ShowErrorContext' is never session-dependent — so
+-- mirroring its always-off value directly is a faithful implementation of
+-- the same policy, not a value derived from a stale or guessed session.
+diagOpts :: GhcMessageOpts
+diagOpts = GhcMessageOpts
+  { psMessageOpts     = NoDiagnosticOpts
+  , tcMessageOpts     = TcRnMessageOpts
+      { tcOptsShowContext = False
+      , tcOptsIfaceOpts   = ifaceOpts
+      }
+  , dsMessageOpts     = NoDiagnosticOpts
+  , driverMessageOpts = DriverMessageOpts
+      { psDiagnosticOpts    = NoDiagnosticOpts
+      , ifaceDiagnosticOpts = ifaceOpts
+      }
+  }
+  where
+    ifaceOpts = IfaceMessageOpts
+      { ifaceShowTriedFiles       = False
+      , ifaceBuildingCabalPackage = NoBuildingCabalPackage
+      }
 
 spanOf :: SrcSpan -> Maybe (String, Int, Int, Int, Int)
 spanOf (RealSrcSpan rss _) =
