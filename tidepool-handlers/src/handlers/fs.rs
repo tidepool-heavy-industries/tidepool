@@ -298,9 +298,10 @@ impl std::fmt::Display for FsError {
 }
 
 /// Forward a typed `FsError` to the eval-abort channel, for the untagged verbs
-/// (`FsMetadata`/`FsReadGlob`/`FsWriteCas`) whose method still returns
+/// (`FsReadGlob`/`FsWriteCas`) whose method still returns
 /// `Result<Response, EffectError>`. Their shared-helper (`resolve`/`expand_glob`)
 /// failures are genuine aborts (a sandbox escape is not per-item data).
+/// `FsMetadata` is NOT in this set: a metadata query is total (`None`).
 fn fs_err_to_effect(e: FsError) -> EffectError {
     EffectError::Handler(e.to_string())
 }
@@ -418,7 +419,13 @@ impl FsHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         path: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
+        // Metadata is a total QUERY: a path that cannot resolve inside the
+        // sandbox does not exist from the sandbox's point of view, so it is
+        // `None` — never an abort. Writes/reads keep the loud `FsSandbox`;
+        // the total-query contract applies to predicates only.
+        let Ok(resolved) = self.resolve(&path) else {
+            return cx.respond(None::<FileMeta>);
+        };
         match std::fs::metadata(&resolved) {
             Ok(meta) => cx.respond(Some(FileMeta {
                 size: meta.len() as i64,
@@ -1017,6 +1024,48 @@ mod tests {
             }
             other => panic!("expected Left (FsSandbox _), got {other:?}"),
         }
+    }
+
+    /// Metadata is a total QUERY: a sandbox escape is `Nothing`, never an
+    /// abort — `doesFileExist`/`doesDirectoryExist`/`fsMeta`/`getFileSize`
+    /// are all predicates over this response and must be total.
+    #[test]
+    fn test_fs_metadata_out_of_sandbox_is_none() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let mut handler = FsHandler::new(dir.path().to_path_buf());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        for escape in ["/etc/passwd", "../../escape.txt"] {
+            let req = FsReq::FsMetadata(escape.into());
+            let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+            let decoded: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+            assert_eq!(decoded, None, "escape path {escape} must be None");
+        }
+    }
+
+    /// The write path keeps its LOUD typed sandbox error — the total-query
+    /// contract is for predicates only, pinned here against the query test
+    /// above so the asymmetry is deliberate, not drift.
+    #[test]
+    fn test_fs_metadata_in_sandbox_still_answers() {
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = FsHandler::new(repo_root());
+        // A file: is_file, not is_dir.
+        let req = FsReq::FsMetadata("Cargo.toml".into());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+        let meta = meta.expect("Cargo.toml has metadata");
+        assert!(meta.is_file && !meta.is_dir);
+        // A directory: is_dir, not is_file (doesFileExist folds this to False).
+        let req = FsReq::FsMetadata("tidepool-handlers".into());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+        let meta = meta.expect("tidepool-handlers/ has metadata");
+        assert!(meta.is_dir && !meta.is_file);
     }
 
     /// #335 end-to-end through the REAL pipeline (extract → generated

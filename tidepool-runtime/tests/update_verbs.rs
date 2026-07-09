@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use tidepool_bridge::FromCore;
+use tidepool_bridge_effects::FileMeta;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
@@ -42,9 +43,14 @@ impl DispatchEffect<()> for FsDispatcher {
         let table = cx.table();
         if let Value::Con(con_id, fields) = request {
             match table.name_of(*con_id) {
-                Some("FsExists") => {
+                Some("FsMetadata") => {
                     let path = String::from_value(&fields[0], table).unwrap();
-                    return cx.respond(Ok::<bool, String>(self.files.contains_key(&path)));
+                    let meta = self.files.get(&path).map(|c| FileMeta {
+                        size: c.len() as i64,
+                        is_file: true,
+                        is_dir: false,
+                    });
+                    return cx.respond(meta);
                 }
                 Some("FsRead") => {
                     let path = String::from_value(&fields[0], table).unwrap();
