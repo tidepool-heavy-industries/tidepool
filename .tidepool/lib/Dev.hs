@@ -16,13 +16,17 @@ shLines cmd = lines <$> sh cmd
 shProc :: Text -> M Proc
 shProc cmd = run cmd >>= liftEither
 
--- | grep -rn equivalent: search all files under a directory for a regex.
--- @grepIn pat dir@ — content regex FIRST, directory path SECOND (same order as grepGlob).
--- Returns "path:line| text" lines. Searches recursively via dir\/\*\*.
--- Example: grepIn "unresolved variable" "tidepool-codegen\/src"
+-- | grep -rn equivalent: search for a regex, formatting hits as "path:line| text".
+-- @grepIn pat glob@ — content regex FIRST, glob pattern SECOND (same order as grepGlob).
+-- The second argument is a real glob pattern passed straight to grepGlob, NOT a
+-- bare directory — grepGlob itself already recurses a directory (@dir\/**\/*@) and
+-- matches a literal file path as-is, so no "\/\*\*" is appended here.
+-- Examples: grepIn "unresolved variable" "tidepool-codegen\/src"  (directory, recurses)
+--           grepIn "unresolved variable" "tidepool-codegen\/src\/effect_machine.rs"  (single file)
+--           grepIn "unresolved variable" "**\/*.rs"  (explicit recursive glob)
 grepIn :: Text -> Text -> M [Text]
-grepIn pat dir = do
-  hits <- grepGlob pat (dir <> "/**") >>= liftEither
+grepIn pat g = do
+  hits <- grepGlob pat g >>= liftEither
   pure (map (\h -> h.path <> ":" <> pack (show h.line) <> "| " <> strip h.text) hits)
 
 -- | sed -n 'lo,hi p' equivalent with line numbers.
