@@ -60,6 +60,64 @@ topoOrder = go []
 buildOrder :: M [Text]
 buildOrder = topoOrder <$> crateGraph
 
+-- | External (dep, version-spec) pairs from a Cargo.toml body. Section-aware
+-- over ALL dep tables ([dependencies], [dev-], [build-], [workspace.deps]);
+-- path-only and workspace=true entries carry no version and are skipped.
+depSpecs :: Text -> [(Text, Text)]
+depSpecs body = go False (T.lines body)
+  where
+    isDepHeader l = any (`T.isPrefixOf` l)
+      ["[dependencies", "[dev-dependencies", "[build-dependencies", "[workspace.dependencies"]
+    go _ [] = []
+    go inDep (l : ls)
+      | T.isPrefixOf "[" (T.strip l) = go (isDepHeader (T.strip l)) ls
+      | inDep = maybe id (:) (entry l) (go inDep ls)
+      | otherwise = go inDep ls
+    entry l = case T.splitOn "=" (T.strip l) of
+      (name : rest@(_ : _))
+        | not (T.null (T.strip name)), not (T.isPrefixOf "#" (T.strip l)) ->
+            let rhs = T.strip (T.intercalate "=" rest)
+                nm  = T.strip (T.takeWhile (/= '.') name)
+                ver | T.isPrefixOf "{" rhs = case T.splitOn "version" rhs of
+                        (_ : v : _) -> quoted v
+                        _           -> ""
+                    | T.isInfixOf "workspace" name = ""
+                    | otherwise = quoted rhs
+            in if T.null ver then Nothing else Just (nm, ver)
+      _ -> Nothing
+    quoted t = T.takeWhile (/= '"') (T.drop 1 (T.dropWhile (/= '"') t))
+
+-- | Version-spec skew across the workspace's Cargo.toml files, split by
+-- caret-semver severity: realSkew = specs disagree on MAJOR (duplicate
+-- compiled copies); cosmetic = spellings differ but unify to one version.
+-- Internal tidepool-* crates are excluded (path deps, versions vestigial).
+depSkew :: M Value
+depSkew = do
+  rs <- readGlob "**/Cargo.toml"
+  let entries = [ (n, v, r.path) | r <- rs, Right c <- [r.contents]
+                , (n, v) <- depSpecs c, not (T.isPrefixOf "tidepool" n) ]
+      byDep   = Map.toList (Map.fromListWith (<>) [ (n, Set.singleton v) | (n, v, _) <- entries ])
+      major   = T.takeWhile (/= '.')
+      report sel = object
+        [ (n, toJSON (L.sort (L.nub [ (v, p) | (n', v, p) <- entries, n' == n ])))
+        | (n, vs) <- byDep, Set.size vs > 1, sel (Set.size (Set.map major vs) > 1) ]
+  pure (object [("realSkew", report id), ("cosmetic", report not)])
+
+-- | Self-test: depSpecs reads inline, table, and brace-form specs; skips
+-- path-only, workspace=true, and non-dep sections.
+depSpecsT :: Bool
+depSpecsT =
+  depSpecs (T.unlines
+    [ "[package]", "name = \"x\"", "version = \"0.1\""
+    , "[dependencies]"
+    , "serde = \"1\""
+    , "clap = { version = \"4.4\", features = [\"derive\"] }"
+    , "tidepool-repr = { path = \"../tidepool-repr\" }"
+    , "anyhow.workspace = true"
+    , "[dev-dependencies]"
+    , "proptest = \"1\""
+    ]) == [("serde", "1"), ("clap", "4.4"), ("proptest", "1")]
+
 -- | Self-test: topoOrder places deps before dependents on a known graph.
 buildOrderT :: Bool
 buildOrderT =
