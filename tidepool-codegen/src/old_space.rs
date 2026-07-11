@@ -9,18 +9,30 @@
 //!   nursery once at bind time so a later run can resolve them through a stable
 //!   [`RootSlot`].
 //!
-//! ## Why no write barrier
+//! ## The write barrier (static remembered set)
 //!
 //! A generational collector normally needs a write barrier to catch gen-1 →
-//! gen-0 pointers (old objects mutated to point at young ones). We need none:
-//! tenured values are **strict-forced to normal form** (Wave 1.B component K)
+//! gen-0 pointers (old objects mutated to point at young ones). Tier0 data
+//! needs none: it is **strict-forced to normal form** (Wave 1.B component K)
 //! and **immutable**, and [`OldSpace::tenure`] copies the value's *entire*
-//! transitive closure into old-space at once — so a tenured object graph holds
-//! NO pointers back into the nursery. The minor GC's from-range is the nursery
-//! ONLY (`raw::cheney_copy`'s `is_in_range` excludes old-space addresses), so
-//! tenured objects are never scanned, moved, or evacuated by a minor collection.
-//! Their addresses are therefore stable for the session's life. This invariant
-//! is load-bearing; document any future mutation path that would break it.
+//! transitive closure into old-space at once — so its tenured graph holds NO
+//! pointers back into the nursery. But Tier1 closures tenure UNFORCED, so
+//! live (unevaluated/blackhole) thunks reach old-space, and forcing one later
+//! MUTATES it: the update writes an indirection to a result allocated in the
+//! nursery. Those indirection cells are the ONLY post-tenure-writable slots
+//! in old-space, and all of them are enumerable at tenure time — so `tenure`
+//! registers each as a persistent GC root. That registration IS the write
+//! barrier: every minor GC traces the cell, evacuates its (post-force)
+//! nursery target, and rewrites the cell in place. (Field bug 2026-07-10:
+//! before this, a forced tenured thunk's result was collected out from under
+//! it — a timing-dependent SIGSEGV.)
+//!
+//! The minor GC's from-range is the nursery ONLY (`raw::cheney_copy`'s
+//! `is_in_range` excludes old-space addresses), so tenured objects are never
+//! scanned, moved, or evacuated by a minor collection. Their addresses are
+//! therefore stable for the session's life. Any OTHER future mutation path
+//! into old-space (e.g. `writeSmallArray#` on a tenured array) breaks this
+//! model and must add its own remembered-set entry; document it here.
 //!
 //! Old-space is compacted only on an explicit *major* pass (when a binding
 //! generation dies) — never during a minor GC.
@@ -211,6 +223,31 @@ impl OldSpace {
                 "tenure: measure_closure_bytes({needed}) ≠ cheney_copy bytes_copied({})",
                 res.bytes_copied
             );
+
+            // The write barrier (see the module doc): any live thunk in the
+            // graph just copied gets its indirection cell registered as a
+            // persistent root, here — the only point where every such cell
+            // in this tenure is enumerable at once.
+            let base = to_slice.as_mut_ptr();
+            let mut off = 0usize;
+            while off < res.bytes_copied {
+                let obj = base.add(off);
+                let sz = read_size(obj) as usize;
+                if read_tag(obj) == tidepool_heap::layout::TAG_THUNK {
+                    let state = *obj.add(tidepool_heap::layout::THUNK_STATE_OFFSET);
+                    if state == tidepool_heap::layout::THUNK_UNEVALUATED
+                        || state == tidepool_heap::layout::THUNK_BLACKHOLE
+                    {
+                        crate::host_fns::register_persistent_root(
+                            vmctx,
+                            obj.add(tidepool_heap::layout::THUNK_INDIRECTION_OFFSET)
+                                as *mut *mut u8,
+                        );
+                    }
+                }
+                off += (sz + 7) & !7;
+            }
+
             self.cursor += res.bytes_copied;
             self.used += res.bytes_copied;
         }

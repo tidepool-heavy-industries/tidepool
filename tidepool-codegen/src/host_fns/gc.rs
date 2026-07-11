@@ -238,6 +238,33 @@ fn heap_verify_enabled() -> bool {
         || HEAP_VERIFY_FORCE.load(Ordering::Relaxed)
 }
 
+/// Process-global test override for `gc_poison_enabled` (same rationale as
+/// `HEAP_VERIFY_FORCE`: `env::set_var` is racy against the `OnceLock` cache).
+static GC_POISON_FORCE: AtomicBool = AtomicBool::new(false);
+
+/// Test-only: force from-space poisoning on (or back off), independent of
+/// `TIDEPOOL_GC_POISON`. Not part of the public API.
+#[doc(hidden)]
+pub fn set_gc_poison(on: bool) {
+    GC_POISON_FORCE.store(on, Ordering::Relaxed);
+}
+
+/// Kill-switched fail-loud mode: `TIDEPOOL_GC_POISON=1` (or `set_gc_poison`)
+/// fills from-space with 0xDD after every collection, before the buffer is
+/// freed. The post-GC verifier walks TO-SPACE, so it cannot see the missed-
+/// stack-root class: an object whose only reference was skipped by the frame
+/// walk is never evacuated, and the stale slot keeps pointing into freed
+/// from-space — crashing only IF the allocator reuses those pages (the
+/// timing-dependent-SIGSEGV signature). Poisoning makes any read through such
+/// a slot deterministic: tag 0xDD is unknown, so it fails loudly at the next
+/// dereference or the next verified GC instead of sometimes working.
+fn gc_poison_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TIDEPOOL_GC_POISON").is_ok_and(|v| v == "1"))
+        || GC_POISON_FORCE.load(Ordering::Relaxed)
+}
+
 /// Count of completed `verify_heap_post_gc` runs, process-wide. Lets a test
 /// prove the verifier actually fired rather than silently no-op'ing.
 static HEAP_VERIFY_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -427,10 +454,13 @@ unsafe fn verify_heap_post_gc(
                         obj,
                     );
                 }
-                let code = *(obj.add(l::CLOSURE_CODE_PTR_OFFSET as usize) as *const *const u8);
-                if code.is_null() {
-                    fail(off, idx, "Closure with null code pointer", obj);
-                }
+                // A null code pointer is LEGAL mid-LetRec: Phase 1 pre-allocs
+                // every closure in the group (header + num_captured, slots
+                // zeroed) and Phase 3a fills code pointers — any GC point
+                // between (the next binding's pre-alloc, a capture's
+                // ensure_heap_ptr) sees this state. Same allowance as null Con
+                // fields below. (Was a fail — it made HEAP_VERIFY false-positive
+                // on any letrec caught mid-construction, field-hit 2026-07-10.)
                 for i in 0..nc {
                     check_field(
                         off,
@@ -584,7 +614,23 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                         )
                     };
                     live_bytes = second.bytes_copied;
+                    if gc_poison_enabled() {
+                        // The intermediate to-space is a second (untracked)
+                        // from-space; poison it so anything left dangling into
+                        // it fails loudly (see `gc_poison_enabled`).
+                        active.iter_mut().for_each(|w| *w = 0xDDDD_DDDD_DDDD_DDDD);
+                    }
                     active = bigger; // drops the intermediate tospace
+                }
+
+                if gc_poison_enabled() {
+                    // SAFETY: from_start..from_size is the pre-collection
+                    // nursery — still allocated here (the buffer is freed only
+                    // when `state.active_buffer` is replaced below, or is the
+                    // machine-owned initial nursery). All live data has been
+                    // evacuated; any pointer still aimed here is a GC bug this
+                    // poison makes deterministic.
+                    unsafe { std::ptr::write_bytes(from_start, 0xDD, from_size) };
                 }
 
                 // Update GcState: swap to the surviving space

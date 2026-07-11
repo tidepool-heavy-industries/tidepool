@@ -29,7 +29,10 @@ pub enum JitError {
     Yield(#[from] crate::yield_type::YieldError),
     #[error("heap bridge error: {0}")]
     HeapBridge(#[from] crate::heap_bridge::BridgeError),
-    #[error("JIT signal during heap bridge: {0}")]
+    // Transparent: this variant wraps signals from EVERY protected JIT call
+    // site (step/resume/apply/bridge), so a site-specific prefix here would
+    // lie about the phase (it used to say "during heap bridge" everywhere).
+    #[error(transparent)]
     Signal(#[from] crate::signal_safety::SignalError),
     #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
     EffectResponseTooLarge { nodes: usize, limit: usize },
