@@ -358,8 +358,6 @@ impl FsHandler {
         let re = regex::Regex::new(&pattern).map_err(|e| grep_regex_error(&pattern, &e))?;
         let paths = self.expand_glob(&file_glob)?;
         let mut results: Vec<Hit> = Vec::new();
-        let mut more_matches = 0;
-        let cap = 2000;
 
         for path in paths {
             if !path.is_file() {
@@ -385,10 +383,6 @@ impl FsHandler {
 
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
-                    if results.len() >= cap {
-                        more_matches += 1;
-                        continue;
-                    }
                     results.push(Hit {
                         path: rel_path.clone(),
                         line: (i + 1) as i64,
@@ -396,14 +390,6 @@ impl FsHandler {
                     });
                 }
             }
-        }
-
-        if more_matches > 0 {
-            results.push(Hit {
-                path: "...".to_string(),
-                line: 0,
-                text: format!("truncated: {} more matches", more_matches),
-            });
         }
 
         Ok(results)
@@ -857,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_grep_truncation() {
+    fn test_grep_uncapped() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -878,10 +864,8 @@ mod tests {
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
 
-        assert_eq!(results.len(), 2001);
-        assert_eq!(results[2000].path, "...");
-        assert_eq!(results[2000].line, 0);
-        assert_eq!(results[2000].text, "truncated: 5 more matches");
+        assert_eq!(results.len(), 2005);
+        assert!(results.iter().all(|h| h.path == "large.txt"));
     }
 
     #[test]
