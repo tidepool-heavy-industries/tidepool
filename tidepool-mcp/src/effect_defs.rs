@@ -446,6 +446,11 @@ macro_rules! exec_effect_def {
 }
 
 /// Http effect — single definition.
+// `crate::effect_glue::JsonArg` is resolved at the EXPANSION site
+// (tidepool-handlers' `effect_rust_projection!`), which is the only consumer
+// of the Rust arg types — `$crate` (= tidepool_mcp, no `effect_glue`) would
+// not compile there.
+#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! http_effect_def {
     ($project:path) => {
@@ -618,6 +623,8 @@ macro_rules! ask_effect_def {
 }
 
 /// Llm effect — single definition.
+// See `http_effect_def!` on why `crate::` (not `$crate`) is correct here.
+#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! llm_effect_def {
     ($project:path) => {
@@ -1015,10 +1022,7 @@ mod tests {
         );
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryRun")));
         assert!(
-            d.type_defs
-                .iter()
-                .any(|t| *t
-                    == "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n")
+            d.type_defs.contains(&"data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n")
         );
         assert_eq!(d.helpers.len(), 3);
         assert_eq!(
@@ -1101,8 +1105,7 @@ mod tests {
         assert!(d.type_defs.contains(
             &"data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)"
         ));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)\ninstance ToJSON FsError where\n  toJSON e = case e of\n    FsNotFound path -> object [\"tag\" .= (\"FsNotFound\" :: Text), \"path\" .= path]\n    FsNotUtf8 path -> object [\"tag\" .= (\"FsNotUtf8\" :: Text), \"path\" .= path]\n    FsSandbox detail -> object [\"tag\" .= (\"FsSandbox\" :: Text), \"detail\" .= detail]\n    FsBadRegex detail -> object [\"tag\" .= (\"FsBadRegex\" :: Text), \"detail\" .= detail]\n    FsIo detail -> object [\"tag\" .= (\"FsIo\" :: Text), \"detail\" .= detail]\n"));
+        assert!(d.type_defs.contains(&"data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)\ninstance ToJSON FsError where\n  toJSON e = case e of\n    FsNotFound path -> object [\"tag\" .= (\"FsNotFound\" :: Text), \"path\" .= path]\n    FsNotUtf8 path -> object [\"tag\" .= (\"FsNotUtf8\" :: Text), \"path\" .= path]\n    FsSandbox detail -> object [\"tag\" .= (\"FsSandbox\" :: Text), \"detail\" .= detail]\n    FsBadRegex detail -> object [\"tag\" .= (\"FsBadRegex\" :: Text), \"detail\" .= detail]\n    FsIo detail -> object [\"tag\" .= (\"FsIo\" :: Text), \"detail\" .= detail]\n"));
     }
 
     /// #335 Git wave: every verb threads `Either GitError`, and the error ADT
@@ -1123,10 +1126,7 @@ mod tests {
             .constructors
             .contains(&"GitShow :: Text -> Git (Either GitError Commit)"));
         assert!(d
-            .type_defs
-            .iter()
-            .any(|t| *t
-                == "data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)\ninstance ToJSON GitError where\n  toJSON e = case e of\n    GitBadRevspec detail -> object [\"tag\" .= (\"GitBadRevspec\" :: Text), \"detail\" .= detail]\n    GitFailed code detail -> object [\"tag\" .= (\"GitFailed\" :: Text), \"code\" .= code, \"detail\" .= detail]\n"));
+            .type_defs.contains(&"data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)\ninstance ToJSON GitError where\n  toJSON e = case e of\n    GitBadRevspec detail -> object [\"tag\" .= (\"GitBadRevspec\" :: Text), \"detail\" .= detail]\n    GitFailed code detail -> object [\"tag\" .= (\"GitFailed\" :: Text), \"code\" .= code, \"detail\" .= detail]\n"));
     }
 
     /// #335 Http wave: HttpGet/HttpPost thread `Either HttpError`,
@@ -1144,8 +1144,7 @@ mod tests {
             .contains(&"HttpPost :: Text -> Value -> Http (Either HttpError Value)"));
         assert!(!d.constructors.iter().any(|c| c.contains("ParseJson")));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)\ninstance ToJSON HttpError where\n  toJSON e = case e of\n    HttpInvalidUrl detail -> object [\"tag\" .= (\"HttpInvalidUrl\" :: Text), \"detail\" .= detail]\n    HttpRestricted detail -> object [\"tag\" .= (\"HttpRestricted\" :: Text), \"detail\" .= detail]\n    HttpNetwork detail -> object [\"tag\" .= (\"HttpNetwork\" :: Text), \"detail\" .= detail]\n    HttpStatus code body -> object [\"tag\" .= (\"HttpStatus\" :: Text), \"code\" .= code, \"body\" .= body]\n    HttpTooLarge nodes -> object [\"tag\" .= (\"HttpTooLarge\" :: Text), \"nodes\" .= nodes]\n"));
+        assert!(d.type_defs.contains(&"data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)\ninstance ToJSON HttpError where\n  toJSON e = case e of\n    HttpInvalidUrl detail -> object [\"tag\" .= (\"HttpInvalidUrl\" :: Text), \"detail\" .= detail]\n    HttpRestricted detail -> object [\"tag\" .= (\"HttpRestricted\" :: Text), \"detail\" .= detail]\n    HttpNetwork detail -> object [\"tag\" .= (\"HttpNetwork\" :: Text), \"detail\" .= detail]\n    HttpStatus code body -> object [\"tag\" .= (\"HttpStatus\" :: Text), \"code\" .= code, \"body\" .= body]\n    HttpTooLarge nodes -> object [\"tag\" .= (\"HttpTooLarge\" :: Text), \"nodes\" .= nodes]\n"));
     }
 
     /// #335 Llm wave: LlmStructured threads `Either LlmError`, `LlmBudget` is
@@ -1158,8 +1157,7 @@ mod tests {
             .constructors
             .contains(&"LlmStructured :: Text -> Value -> Llm (Either LlmError Value)"));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)\ninstance ToJSON LlmError where\n  toJSON e = case e of\n    LlmApi detail -> object [\"tag\" .= (\"LlmApi\" :: Text), \"detail\" .= detail]\n    LlmRefusal detail -> object [\"tag\" .= (\"LlmRefusal\" :: Text), \"detail\" .= detail]\n    LlmBudget -> object [\"tag\" .= (\"LlmBudget\" :: Text)]\n"));
+        assert!(d.type_defs.contains(&"data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)\ninstance ToJSON LlmError where\n  toJSON e = case e of\n    LlmApi detail -> object [\"tag\" .= (\"LlmApi\" :: Text), \"detail\" .= detail]\n    LlmRefusal detail -> object [\"tag\" .= (\"LlmRefusal\" :: Text), \"detail\" .= detail]\n    LlmBudget -> object [\"tag\" .= (\"LlmBudget\" :: Text)]\n"));
     }
 
     /// #335 Lsp wave: MINIMAL tagging — only the seed (`lspWhere`) and the
@@ -1191,9 +1189,7 @@ mod tests {
             .constructors
             .contains(&"LspDef :: LspNode -> Lsp (Maybe LspNode)"));
         assert!(d
-            .type_defs
-            .iter()
-            .any(|t| *t == "data LspError = LspDaemonDown Text deriving (Show, Eq)\ninstance ToJSON LspError where\n  toJSON e = case e of\n    LspDaemonDown detail -> object [\"tag\" .= (\"LspDaemonDown\" :: Text), \"detail\" .= detail]\n"));
+            .type_defs.contains(&"data LspError = LspDaemonDown Text deriving (Show, Eq)\ninstance ToJSON LspError where\n  toJSON e = case e of\n    LspDaemonDown detail -> object [\"tag\" .= (\"LspDaemonDown\" :: Text), \"detail\" .= detail]\n"));
     }
 
     #[test]

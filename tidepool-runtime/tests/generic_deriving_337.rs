@@ -52,9 +52,8 @@ fn repro_337_fields_sum_to_7() {
          \x20   Error _ -> -1\n\
          \x20 Left _ -> -2\n"
     );
-    match run(&src, "result") {
-        Some(v) => assert_eq!(v, json!(7), "#337 repro must decode fields summing to 7"),
-        None => {}
+    if let Some(v) = run(&src, "result") {
+        assert_eq!(v, json!(7), "#337 repro must decode fields summing to 7")
     }
 }
 
@@ -73,9 +72,8 @@ fn nested_record_decodes() {
          \x20   Error _ -> -1\n\
          \x20 Left _ -> -2\n"
     );
-    match run(&src, "result") {
-        Some(v) => assert_eq!(v, json!(12), "nested record fields sum to 12"),
-        None => {}
+    if let Some(v) = run(&src, "result") {
+        assert_eq!(v, json!(12), "nested record fields sum to 12")
     }
 }
 
@@ -88,13 +86,12 @@ fn generic_tojson_builds_object() {
          result :: Value\n\
          result = toJSON (Rec 3 4)\n"
     );
-    match run(&src, "result") {
-        Some(v) => assert_eq!(
+    if let Some(v) = run(&src, "result") {
+        assert_eq!(
             v,
             json!({"rx": 3, "ry": 4}),
             "toJSON emits field-keyed object"
-        ),
-        None => {}
+        )
     }
 }
 
@@ -109,9 +106,8 @@ fn round_trip_to_from_json() {
          \x20 Success r -> rx r + ry r\n\
          \x20 Error _ -> -1\n"
     );
-    match run(&src, "result") {
-        Some(v) => assert_eq!(v, json!(7), "round trip recovers fields summing to 7"),
-        None => {}
+    if let Some(v) = run(&src, "result") {
+        assert_eq!(v, json!(7), "round trip recovers fields summing to 7")
     }
 }
 
@@ -129,13 +125,12 @@ fn missing_field_returns_error() {
          \x20   Error _ -> 0\n\
          \x20 Left _ -> -2\n"
     );
-    match run(&src, "result") {
-        Some(v) => assert_eq!(
+    if let Some(v) = run(&src, "result") {
+        assert_eq!(
             v,
             json!(0),
             "missing field decodes to Error (0), not a crash"
-        ),
-        None => {}
+        )
     }
 }
 

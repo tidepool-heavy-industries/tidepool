@@ -112,10 +112,10 @@ fn run_with_either_big_list(code: &str, n: usize) -> Result<serde_json::Value, S
 /// `Right(big list)` EAGERLY (no lazy park — `probe_list_spine` doesn't peek
 /// inside the `Right`), so a >2000-element result must still complete without a
 /// stack overflow. Safety here comes NOT from the park guard but from
-/// `value_to_heap` being a stack-safe hylomorphism + `Value`'s iterative `Drop`
-/// + the 100k-node `Eager` cap — all of which apply to the `Right`-wrapped
-/// shape. 12k elements (~48k nodes) is well over the 2k park threshold and
-/// under the 100k cap.
+/// `value_to_heap` being a stack-safe hylomorphism + `Value`'s iterative
+/// `Drop` + the 100k-node `Eager` cap — all of which apply to the
+/// `Right`-wrapped shape. 12k elements (~48k nodes) is well over the 2k park
+/// threshold and under the 100k cap.
 #[test]
 fn errors_tagged_right_wrapped_big_list_is_stack_safe() {
     let r = run_with_either_big_list("Right xs <- glob \"**\"\npure (length xs)", 12_000);

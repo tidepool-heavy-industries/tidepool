@@ -136,7 +136,7 @@ fn broken_lib_module_is_contained_and_healthy_eval_still_runs() {
 
     // 2. Fault-isolate: the facade is broken, so we get a sanitized Library +
     //    a note naming the culprit.
-    let layer = tidepool_mcp::isolate_lib_layer(&[lib_dir.clone()], &base_include);
+    let layer = tidepool_mcp::isolate_lib_layer(std::slice::from_ref(&lib_dir), &base_include);
     assert!(
         !layer.prepend_include.is_empty(),
         "a broken lib module must yield a sanitized-facade include prefix"
@@ -201,7 +201,7 @@ fn healthy_lib_layer_is_a_noop() {
         tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).expect("effects");
     let base_include: Vec<PathBuf> = vec![prelude, effects_dir, dir.clone()];
 
-    let layer = tidepool_mcp::isolate_lib_layer(&[dir.clone()], &base_include);
+    let layer = tidepool_mcp::isolate_lib_layer(std::slice::from_ref(&dir), &base_include);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(

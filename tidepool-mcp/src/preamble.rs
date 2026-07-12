@@ -1063,7 +1063,7 @@ import Lsp
 
         // Beta is not re-exported, so the in-scope gate hides it from the
         // unscoped digest; Alpha is tagged as a bare re-export.
-        let all = super::library_vocab(&std::slice::from_ref(&dir), None);
+        let all = super::library_vocab(std::slice::from_ref(&dir), None);
         assert!(
             all.contains("Alpha:  -- bare (Library re-export)"),
             "Alpha should be tagged bare: {all}"
@@ -1071,7 +1071,7 @@ import Lsp
         assert!(!all.contains("Beta:"), "Beta is not re-exported: {all}");
 
         // An explicit `:vocab Beta` bypasses the gate and marks it needs-import.
-        let beta = super::library_vocab(&std::slice::from_ref(&dir), Some("Beta"));
+        let beta = super::library_vocab(std::slice::from_ref(&dir), Some("Beta"));
         assert!(
             beta.contains("Beta:  -- needs: import Beta"),
             "explicit Beta should be tagged needs-import: {beta}"

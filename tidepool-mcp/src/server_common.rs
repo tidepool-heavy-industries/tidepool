@@ -248,9 +248,9 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&tmp);
-        assert!(!has_library_facade(&[tmp.clone()]));
+        assert!(!has_library_facade(std::slice::from_ref(&tmp)));
         std::fs::write(tmp.join("Library.hs"), "module Library where").unwrap();
-        assert!(has_library_facade(&[tmp.clone()]));
+        assert!(has_library_facade(std::slice::from_ref(&tmp)));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

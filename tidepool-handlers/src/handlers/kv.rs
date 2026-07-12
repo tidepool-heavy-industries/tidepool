@@ -336,17 +336,14 @@ mod tests {
         let mut surviving: Vec<String> = Vec::new();
         fn collect_list(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
             use tidepool_bridge::FromCore;
-            match v {
-                Value::Con(id, fields) => {
-                    let name = table.name_of(*id).unwrap();
-                    if name == ":" {
-                        if let Ok(s) = String::from_value(&fields[0], table) {
-                            out.push(s);
-                        }
-                        collect_list(&fields[1], table, out);
+            if let Value::Con(id, fields) = v {
+                let name = table.name_of(*id).unwrap();
+                if name == ":" {
+                    if let Ok(s) = String::from_value(&fields[0], table) {
+                        out.push(s);
                     }
+                    collect_list(&fields[1], table, out);
                 }
-                _ => {}
             }
         }
         collect_list(&all_keys, &table, &mut surviving);
@@ -392,17 +389,14 @@ mod tests {
         let mut keys: Vec<String> = Vec::new();
         fn collect_strs(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
             use tidepool_bridge::FromCore;
-            match v {
-                Value::Con(id, fields) => {
-                    let name = table.name_of(*id).unwrap();
-                    if name == ":" {
-                        if let Ok(s) = String::from_value(&fields[0], table) {
-                            out.push(s);
-                        }
-                        collect_strs(&fields[1], table, out);
+            if let Value::Con(id, fields) = v {
+                let name = table.name_of(*id).unwrap();
+                if name == ":" {
+                    if let Ok(s) = String::from_value(&fields[0], table) {
+                        out.push(s);
                     }
+                    collect_strs(&fields[1], table, out);
                 }
-                _ => {}
             }
         }
         collect_strs(&result, &table, &mut keys);

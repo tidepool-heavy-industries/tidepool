@@ -152,21 +152,23 @@ fn classify_jit_error(err: &JitError) -> JitErrClass {
     }
 }
 
-/// Compile and run an expression through the JIT with a custom nursery size.
-/// Returns `None` if compilation fails (a synthetic-IR limitation, not a bug).
-///
-/// The returned `Vec<u8>` is the live nursery backing `vmctx`'s pointers and
-/// must be kept alive by the caller until reconstruction finishes.
-fn jit_compile_and_run(
-    tree: &CoreExpr,
-    nursery_size: usize,
-) -> Option<(
+/// Everything a JIT run leaves alive for value reconstruction: the result
+/// pointer, the `VMContext`, the nursery bytes it points into, and the
+/// pipeline + machine state whose lifetimes the pointer borrows from.
+type JitRun = (
     *const u8,
     VMContext,
     Vec<u8>,
     CodegenPipeline,
     Box<MachineState>,
-)> {
+);
+
+/// Compile and run an expression through the JIT with a custom nursery size.
+/// Returns `None` if compilation fails (a synthetic-IR limitation, not a bug).
+///
+/// The returned `Vec<u8>` is the live nursery backing `vmctx`'s pointers and
+/// must be kept alive by the caller until reconstruction finishes.
+fn jit_compile_and_run(tree: &CoreExpr, nursery_size: usize) -> Option<JitRun> {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
     let func_id = compile_expr(&mut pipeline, tree, "deep_diff", &ExternalEnv::new()).ok()?;
     pipeline.finalize().ok()?;
