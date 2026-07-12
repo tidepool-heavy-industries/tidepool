@@ -383,7 +383,7 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, St
         }
     }
 
-    out.sort_by(|a, b| node_sort_key(a).cmp(&node_sort_key(b)));
+    out.sort_by_key(node_sort_key);
     Ok(Some(out))
 }
 
