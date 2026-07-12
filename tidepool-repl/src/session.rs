@@ -556,9 +556,19 @@ impl Session {
 
     /// Declaration handler: append the declaration to the Lane-A log + regenerate
     /// the gen-versioned `Lib.G<g>` module.
+    ///
+    /// Scoped against live session values (`current_val_modules` imported
+    /// unqualified, `live_val_modules` injected for validation) so a decl like
+    /// `f x = … g …` can reference a prior `x <- e`/`let x = e` session value —
+    /// GHCi parity: a top-level definition at the prompt sees earlier bindings.
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
         let head = decl_head(decl_text).to_string();
-        match self.lib.define(decl_text) {
+        let import_modules = self.current_val_modules();
+        let inject_modules = self.live_val_modules();
+        match self
+            .lib
+            .define_with_vals(decl_text, &import_modules, &inject_modules)
+        {
             Ok(gen) => self.defined_outcome(decl_text, head, gen),
             Err(e) => TurnOutcome::Error(session_fail(&e, "declaration failed")),
         }

@@ -535,6 +535,23 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
 /// binds stay interchangeable.
 #[must_use]
 pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> RenderedModule {
+    render_module_with_vals(log, gen, env, &[])
+}
+
+/// [`render_module`] plus `import`ing each of `val_modules` unqualified —
+/// the live `Tidepool.Session.Val.G<g>` value-plane bindings (one per still-live
+/// name, newest gen only) — so a decl can reference a prior `x <- e`/`let x = e`
+/// session value the same way a genuine GHCi top-level definition would. The
+/// caller must ALSO pass the same module names as `--inject-val` to the extract
+/// invocation that validates this module (see `SessionLib::validate_candidate`)
+/// — the import line alone doesn't make GHC able to find the `.hi`.
+#[must_use]
+pub fn render_module_with_vals(
+    log: &DeclLog,
+    gen: Generation,
+    env: &ModuleEnv,
+    val_modules: &[String],
+) -> RenderedModule {
     let g = gen.0 as usize;
     assert!(
         g >= 1 && g <= log.turns.len(),
@@ -663,6 +680,9 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
             out.push_str(imp);
             out.push('\n');
         }
+    }
+    for m in val_modules {
+        out.push_str(&format!("import {m}\n"));
     }
     out.push('\n');
 

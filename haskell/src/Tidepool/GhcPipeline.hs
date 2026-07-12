@@ -5,22 +5,28 @@ module Tidepool.GhcPipeline
   , splitTupleType ) where
 
 import GHC
-import GHC.Driver.Main (hscDesugar, batchMsg)
-import GHC.Driver.Env (hscUpdateFlags)
+import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
+import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Unit.Home (homeUnitId)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHpt)
 import GHC.Driver.Make (load')
+import GHC.Iface.Make (mkIfaceTc)
+import GHC.Types.SafeHaskell (SafeHaskellMode(Sf_None))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage)
+import GHC.Types.SrcLoc (unLoc)
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
+import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset
   , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
-import GHC.Unit.Module.ModGuts (ModGuts(..))
+import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
+import qualified Data.Set as Set
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
@@ -296,25 +302,46 @@ runSessionPipeline scope path includes = do
     pushLogHookM (warnCollectorHook path warnRef)
     let targetModName = capitalize (takeBaseName path)
         -- The injected source-less @Val.G<g>@ modules: exclude from the
-        -- downsweep (no source to summarise) — the target's @import@ of them
-        -- resolves from the HPT entry the injection registers in phase 2.
+        -- downsweep (no source to summarise) — a deferred module's @import@ of
+        -- them resolves from the HPT entry the injection registers in phase 2.
         excludedVal = map renderSessionModule (ssValIfaces scope)
     modGraphRaw <- depanal excludedVal False
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
         targetModName' = mkModuleName targetModName
-        -- Exclude the target from the load' graph. A @load'@ that reaches the
-        -- target (e.g. @LoadDependenciesOf targetHUM@, whose @createBuildPlan@
-        -- includes ALL modules reachable from the root — INCLUDING the target)
-        -- compiles the target BEFORE the Val iface is injected (PHASE 2), so its
-        -- @import Tidepool.Session.Val.G<g>@ fails → GHC error-recovery emits
-        -- "Could not find module" AND inserts a FAKE empty iface into the EPS
-        -- PIT for the Val module. Filtering the target out makes @load'@ compile
-        -- ONLY the source deps; the target is compiled in PHASE 3 post-injection.
+        directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
+        importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
+        -- Everything that (directly or transitively) imports an injected
+        -- Val module can't go through phase-1's @load'@ — its import can only
+        -- resolve once phase 2's injection has happened. This generalizes the
+        -- old "just exclude the target" rule: a decl module (@Lib.G<g>@) that
+        -- itself imports a Val module is ALSO a dependency needing deferral,
+        -- not just the ultimate leaf target. Plain forward fixpoint over the
+        -- (small, per-turn) module graph — no existing GHC utility does this
+        -- specific reverse-reachability query, so this is a self-contained
+        -- graph closure over data already on each 'ModSummary'.
+        closure seed =
+          let grown = seed `Set.union` Set.fromList
+                [ ms_mod_name ms
+                | ms <- directSummaries
+                , any (`Set.member` seed) (importsOf ms)
+                ]
+          in if grown == seed then seed else closure grown
+        deferredMods = closure (Set.fromList (targetModName' : excludedVal))
+        -- Exclude every deferred module (target ∪ transitive Val-importers)
+        -- from the load' graph. A @load'@ that reaches one of them (e.g.
+        -- @LoadDependenciesOf targetHUM@, whose @createBuildPlan@ includes ALL
+        -- modules reachable from the root) compiles it BEFORE the Val iface is
+        -- injected (PHASE 2), so its @import Tidepool.Session.Val.G<g>@ fails →
+        -- GHC error-recovery emits "Could not find module" AND inserts a FAKE
+        -- empty iface into the EPS PIT for the Val module. Filtering deferred
+        -- modules out makes @load'@ compile ONLY the untouched source deps;
+        -- each deferred module is compiled AND its interface registered back
+        -- into the HPT in PHASE 3, post-injection, in dependency order.
         depGraph = mkModuleGraph
           [ node | node <- mgModSummaries' modGraphRaw
                  , case node of
-                     ModuleNode _ ms -> ms_mod_name ms /= targetModName'
+                     ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
                      _               -> True ]
     -- PHASE 1 — compile the turn's home-package SOURCE dependencies
     -- (@Tidepool.Prelude@, @Tidepool.Effects@, @Lib.G<g>@) into the HPT, but NOT
@@ -349,7 +376,17 @@ runSessionPipeline scope path includes = do
     -- the deps here as full guts (the normal path's approach) gives their bodies
     -- directly, so no library function is ever left unresolved. The target's
     -- @import Val.G<g>@ resolves from the PHASE-2 injection.
-    let summaries = mgModSummaries modGraphRaw
+    -- Dependency order matters now that MULTIPLE modules (not just one leaf
+    -- target) may need deferred, post-injection compilation: a deferred
+    -- module that itself depends on another deferred module (e.g. the target
+    -- importing a Val-referencing @Lib.G<g>@) must see the latter ALREADY
+    -- reinserted into the HPT by the time its own turn in this loop comes up.
+    -- @mgModSummaries@/@mg_mss@ is not guaranteed topologically ordered (see
+    -- its haddock); @topSortModuleGraph@ + @flattenSCCs@ (both re-exported by
+    -- the umbrella 'GHC' module already imported here) give a real
+    -- deps-before-dependents order.
+    let summaries =
+          [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
     when (null summaries) $
       liftIO $ ioError (userError "runSessionPipeline: empty module graph")
     results <- forM summaries $ \modSum0 -> do
@@ -367,6 +404,28 @@ runSessionPipeline scope path includes = do
           mResTy   = capturedBindingType "__result" tcGblEnv
       desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
+      -- A deferred module (target ∪ transitive Val-importers, computed above)
+      -- was deliberately excluded from PHASE 1's @load'@, so nothing has
+      -- registered it in the HPT yet — do that here, now that PHASE 2's Val
+      -- injection has happened, so a LATER module in this same loop that
+      -- imports this one (e.g. the leaf importing a Val-referencing
+      -- @Lib.G<g>@) can resolve it. Real 'ModIface'/'ModDetails' via the same
+      -- tidy→iface pipeline GHC's own batch compiler uses internally
+      -- ('hscTidy' wraps 'initTidyOpts'+'tidyProgram'; 'mkIfaceTc' is what
+      -- 'hscSimpleIface'' uses for "a stripped down interface... where we
+      -- aren't generating any object code at all" — precisely this case,
+      -- since Core is extracted separately for the Cranelift JIT and nothing
+      -- here ever executes via GHC's own bytecode interpreter, hence no real
+      -- linkable is ever needed — 'emptyHomeModInfoLinkable' is the same
+      -- legitimate "no linkable" value GHC itself uses for @.hs-boot@
+      -- modules). Mirrors 'upsweep_mod's own @addToHpt@ call.
+      when (ms_mod_name modSum `Set.member` deferredMods) $ do
+        (cgGuts, modDetails) <- liftIO $ hscTidy hscEnv simplified
+        iface <- liftIO $
+          mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+        let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
+        hscEnvNow <- getSession
+        setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
       return (externalizeInternalTops simplified, mCapTy, mResTy)
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g

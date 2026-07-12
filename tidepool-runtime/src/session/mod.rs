@@ -296,6 +296,22 @@ impl SessionLib {
         self.define_batch(&[decl_text])
     }
 
+    /// [`Self::define`] plus scoping the declaration against live session
+    /// values: `import_modules` (current `Val.G<g>` per still-live name) are
+    /// imported unqualified into the rendered decl module; `inject_modules`
+    /// (every still-live `Val.G<g>`, including shadowed gens) are passed to the
+    /// extract as `--inject-val` so their `.hi` ifaces resolve at validation
+    /// time. Lets a decl (`f x = … g …`) reference a prior session value `g`
+    /// the way a genuine GHCi top-level definition would.
+    pub fn define_with_vals(
+        &mut self,
+        decl_text: &str,
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<Generation, SessionError> {
+        self.define_batch_with_vals(&[decl_text], import_modules, inject_modules)
+    }
+
     /// Define SEVERAL declarations as ONE generation — they land in one module
     /// and GHC typechecks them together, so a type signature and its binding,
     /// or a mutual-recursion SCC, split across separate block items still work
@@ -314,6 +330,17 @@ impl SessionLib {
     /// decl (`tidepool-repl`'s `try_pure_bind_as_decl`) shadows exactly the
     /// same way, so pure and effectful binds stay interchangeable.
     pub fn define_batch(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
+        self.define_batch_with_vals(decl_texts, &[], &[])
+    }
+
+    /// [`Self::define_batch`] plus session-value scoping — see
+    /// [`Self::define_with_vals`] for what `import_modules`/`inject_modules` do.
+    pub fn define_batch_with_vals(
+        &mut self,
+        decl_texts: &[&str],
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<Generation, SessionError> {
         let sources: Vec<String> = decl_texts
             .iter()
             .filter(|s| !s.trim().is_empty())
@@ -334,12 +361,12 @@ impl SessionLib {
             retracts: Vec::new(),
         });
         let gen = self.log.generation();
-        let rendered = render::render_module(&self.log, gen, &self.env);
+        let rendered = render::render_module_with_vals(&self.log, gen, &self.env, import_modules);
         self.write_module(&rendered)?;
 
         // Validate ALL turns via GHC. On failure, roll back the log and delete
         // the gen module file so later turns don't import a poisoned module.
-        if let Err(e) = self.validate_candidate(&rendered) {
+        if let Err(e) = self.validate_candidate(&rendered, inject_modules) {
             self.log.turns.pop();
             let gen_path = self.root.join(rendered.module.relative_hs_path());
             let _ = std::fs::remove_file(&gen_path);
@@ -384,7 +411,13 @@ impl SessionLib {
     /// the extract in full-compile mode on a thin wrapper that imports it. The
     /// candidate is already written on disk at this point; this just drives GHC on
     /// it and surfaces any scope / type errors as a clean `SessionError`.
-    fn validate_candidate(&self, rendered: &RenderedModule) -> Result<(), SessionError> {
+    /// `inject_modules` are passed through as `--inject-val` so a decl
+    /// referencing a live session value resolves its `.hi` at validation time.
+    fn validate_candidate(
+        &self,
+        rendered: &RenderedModule,
+        inject_modules: &[String],
+    ) -> Result<(), SessionError> {
         let temp = tempfile::TempDir::new()?;
 
         // Thin wrapper: importing the candidate forces GHC to compile it and
@@ -421,6 +454,16 @@ impl SessionLib {
         // them without any extra configuration.
         for dir in derive_stdlib_include() {
             cmd.arg("--include").arg(dir);
+        }
+
+        if !inject_modules.is_empty() {
+            // `--inject-val` ifaces are looked up under `--session-root`
+            // (`Tidepool.Session.ssRoot`) — required whenever we inject any,
+            // same as a stmt turn's `compile_session_turn` call.
+            cmd.arg("--session-root").arg(&self.root);
+            for m in inject_modules {
+                cmd.arg("--inject-val").arg(m);
+            }
         }
 
         let output = cmd.output().map_err(|e| {
