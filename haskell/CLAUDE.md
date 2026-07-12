@@ -130,3 +130,33 @@ version. A few functions carry monomorphic shadows in the Prelude only for
 genuine FFI gaps (`round`, `showDouble`); `Opt_FullLaziness` and `Opt_CprAnal`
 are disabled in `GhcPipeline.hs`. The JIT-safe surface is enforced end-to-end by
 `tidepool-runtime/tests/jit_surface.rs` — add a `works_*` probe when you add a function.
+
+## Known Limits / Gotchas
+
+**`Map.` (`Data.Map.Strict`) breaks knot-tied self-referential folds.**
+`Data.Map.Strict.mapWithKey` forces each value into WHNF *during construction*,
+which blackholes (infinite loop / "thunk forces itself") a lazy fixed point
+like `memo = Map.mapWithKey (\_ deps -> 1 + sum [Map.findWithDefault 0 d memo |
+d <- deps]) g` — even on fully acyclic input. This is not a cycle-detection
+issue; it happens regardless of whether `g` is a DAG. Fix: `import qualified
+Data.Map.Lazy as ML` and use `ML.mapWithKey` for that specific call — lazy Map
+preserves the thunk chain so the self-reference can resolve once, on demand.
+`Map.` stays strict by default for the usual reason (predictable space
+behavior on ordinary lookups/inserts); reach for `Data.Map.Lazy` specifically
+for knot-tying, not as a general substitute.
+
+**Call-graph walks need workspace scoping.** An unscoped `LspGraph.walk`/
+`transitiveCallers`/`transitiveCallees` over `lspCallers`/`lspCallees` follows
+real calls straight into external dependency/stdlib files (`~/.cargo/registry`,
+the rustup toolchain sources), which floods any blast-radius or call-graph
+question with noise unrelated to the workspace. `.tidepool/lib/Lsp.hs` already
+has the fix — `isLocal`/`localCallees`/`localCallers` (filtering on whether
+`nodeFile` is workspace-relative vs. absolute-external) — and
+`.tidepool/lib/LspGraph.hs` has `transitiveLocalCallers`/`transitiveLocalCallees`
+composing that filter with the cycle-safe `walk` engine. **Default to the
+`transitiveLocal*` variants for any call-graph question** — the unscoped ones
+are for when external call sites are genuinely part of the question. (This
+scoping was already solved once, dated "2026-07-01, from the chart-noise
+finding" in `Lsp.hs`, and got silently re-derived from scratch in a later
+session purely because it wasn't written down anywhere a fresh session would
+see it before diving in — that's the reason this note exists.)

@@ -13,6 +13,7 @@ module LspGraph where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import Lsp (localCallers, localCallees)
 import qualified Data.Set as Set
 
 -- | Identity key for a `LspNode`: file + name + line. A graph walk revisits
@@ -76,3 +77,14 @@ transitiveCallers = walk lspCallers maxBound
 -- | Full transitive-callee closure: `walk lspCallees` to fixpoint.
 transitiveCallees :: LspNode -> M [LspNode]
 transitiveCallees = walk lspCallees maxBound
+
+-- | Workspace-scoped transitive closures: same as 'transitiveCallers'/
+-- 'transitiveCallees' but via `Lsp.localCallers`/`localCallees`, which
+-- filter to in-workspace nodes before returning each hop. Since the
+-- frontier never contains an external node to recurse from, 'walk' stays
+-- inside the workspace at every depth -- the right default for any
+-- blast-radius/call-graph question, since an unscoped walk floods with
+-- stdlib/dependency noise (see haskell/CLAUDE.md's "Known Limits" section).
+transitiveLocalCallers, transitiveLocalCallees :: LspNode -> M [LspNode]
+transitiveLocalCallers = walk localCallers maxBound
+transitiveLocalCallees = walk localCallees maxBound
