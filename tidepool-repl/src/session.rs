@@ -422,7 +422,7 @@ impl Session {
                 // and falls to the per-item path for a precise, per-item message.
                 let batched = if texts.len() >= 2 {
                     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                    self.lib.define_batch(&refs).ok()
+                    self.define_scoped(&refs).ok()
                 } else {
                     None
                 };
@@ -554,21 +554,25 @@ impl Session {
         }
     }
 
-    /// Declaration handler: append the declaration to the Lane-A log + regenerate
-    /// the gen-versioned `Lib.G<g>` module.
-    ///
-    /// Scoped against live session values (`current_val_modules` imported
-    /// unqualified, `live_val_modules` injected for validation) so a decl like
-    /// `f x = … g …` can reference a prior `x <- e`/`let x = e` session value —
-    /// GHCi parity: a top-level definition at the prompt sees earlier bindings.
-    fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
-        let head = decl_head(decl_text).to_string();
+    /// Define decl text(s) scoped against live session values
+    /// (`current_val_modules` imported unqualified, `live_val_modules` injected
+    /// for validation) so a decl like `f x = … g …` can reference a prior
+    /// `x <- e`/`let x = e` session value — GHCi parity: a top-level definition
+    /// at the prompt sees earlier bindings. EVERY decl-plane route goes through
+    /// here (`run_def`, the whole-block decl batch, `try_pure_bind_as_decl`);
+    /// an unscoped `SessionLib::define*` call from the repl is a bug.
+    fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
         let import_modules = self.current_val_modules();
         let inject_modules = self.live_val_modules();
-        match self
-            .lib
-            .define_with_vals(decl_text, &import_modules, &inject_modules)
-        {
+        self.lib
+            .define_batch_with_vals(decl_texts, &import_modules, &inject_modules)
+    }
+
+    /// Declaration handler: append the declaration to the Lane-A log + regenerate
+    /// the gen-versioned `Lib.G<g>` module.
+    fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
+        let head = decl_head(decl_text).to_string();
+        match self.define_scoped(&[decl_text]) {
             Ok(gen) => self.defined_outcome(decl_text, head, gen),
             Err(e) => TurnOutcome::Error(session_fail(&e, "declaration failed")),
         }
@@ -576,9 +580,13 @@ impl Session {
 
     /// If `expr_text` is a PURE bind of `name`, route it as the top-level decl
     /// `name = <rhs>` (so GHC generalizes it — GHCi parity) and return a `Bound`
-    /// outcome. Returns `None` when it is not a pure bind, or when the decl
-    /// route fails BECAUSE the RHS references a materialized/effectful value
-    /// (out of decl scope) — the caller then falls back to the materialize path.
+    /// outcome. The decl route is val-scoped (`define_scoped`), so an RHS
+    /// referencing a materialized session value normally compiles here and
+    /// keeps its generalized type. Returns `None` when it is not a pure bind,
+    /// or when the decl route still fails because the RHS needs the value
+    /// plane — a reference the val imports don't cover (e.g. the `input`
+    /// payload lane, or self-reference `let x = … x …`, which is ambiguous on
+    /// the decl plane) — the caller then falls back to the materialize path.
     ///
     /// When the decl route fails for ANY OTHER reason (a plain type error), we
     /// return that error as `Some(Error)` instead of `None`, so the caller does
@@ -597,7 +605,7 @@ impl Session {
     /// an "Ambiguous occurrence" that a bare `f x = …` decl would never hit.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
-        match self.lib.define_batch(&[decl.as_str()]) {
+        match self.define_scoped(&[decl.as_str()]) {
             Ok(gen) => {
                 let type_display = self.probe_pure_type(name).unwrap_or_default();
                 // Register in the environment (decl plane) so :bindings/stale/etc.

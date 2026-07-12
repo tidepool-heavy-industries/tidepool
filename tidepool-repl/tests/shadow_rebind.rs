@@ -385,12 +385,14 @@ async fn accumulate_then_let_fold() {
     );
 }
 
-/// CASE 8 — a function `def` referencing a migrated name fails CLEANLY (not a
-/// silent stale read), and the session survives. The decl plane genuinely
-/// cannot reference a materialized heap value; after retraction that surfaces as
-/// an honest "not in scope" rather than compiling against a stale `x`.
+/// CASE 8 — a function `def` referencing a migrated name CLOSES OVER the live
+/// value (GHCi parity: a top-level definition at the prompt sees earlier
+/// bindings). Decl turns are val-scoped (`Session::define_scoped`), so the
+/// decl plane resolves a materialized heap value through its injected
+/// `Val.G<g>` iface. Capture is at DEFINITION time: a later rebind of `x`
+/// must not retro-change `g`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn def_referencing_migrated_name_errors_cleanly() {
+async fn def_referencing_migrated_name_closes_over_value() {
     if !extract_available() {
         return;
     }
@@ -403,15 +405,20 @@ async fn def_referencing_migrated_name_errors_cleanly() {
         .await
         .expect_ok("migrate x to value plane");
 
-    // A function def cannot close over a value-plane binding on the decl plane.
     repl.eval("g y = y + x")
         .await
-        .expect_err("def referencing a migrated value must fail cleanly, not read stale");
-    // Session survives; the value binding still resolves.
-    let out = repl.eval_ok("x").await;
+        .expect_ok("def referencing a migrated value closes over it");
+    let out = repl.eval_ok("g 1").await;
+    assert!(out.contains('3'), "g 1 == 1 + x(=2), got: {out}");
+
+    // Capture-at-definition: rebinding x must not retro-change g.
+    repl.eval("x <- pure (100 :: Int)")
+        .await
+        .expect_ok("rebind x after g captured it");
+    let out = repl.eval_ok("g 1").await;
     assert!(
-        out.contains('2'),
-        "session survives def error; x==2, got: {out}"
+        out.contains('3'),
+        "g keeps the x it captured at definition, got: {out}"
     );
 }
 
