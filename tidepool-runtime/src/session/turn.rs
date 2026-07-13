@@ -96,14 +96,7 @@ fn extract_bin() -> String {
 }
 
 fn map_notfound(e: std::io::Error) -> CompileError {
-    if e.kind() == std::io::ErrorKind::NotFound {
-        CompileError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT).",
-        ))
-    } else {
-        CompileError::Io(e)
-    }
+    CompileError::Io(crate::extract_spawn_error(e))
 }
 
 /// Classify a raw turn (`x <- e` / `let x = e` / a bare expression) via the
@@ -122,19 +115,23 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
         .output()
         .map_err(map_notfound)?;
     if !output.status.success() {
-        // This lane never has a live GHC session distinguishing multiple
-        // diagnostics, so joining is realistically a single message; keep the
-        // lane's error TYPE as plain `ExtractFailed` (a parse-classification
-        // lane, not a compile-diagnostics lane).
-        let text = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-            Ok(report) => report
-                .diagnostics
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            Err(msg) => msg,
+        // A parsed report is a real GHC rejection of the turn text; this lane
+        // never has a live GHC session distinguishing multiple diagnostics, so
+        // joining is realistically a single message, kept as plain
+        // `ExtractFailed` (a parse-classification lane, not a
+        // compile-diagnostics lane). An UNPARSEABLE report is a stale/skewed
+        // extractor — `MalformedDiagnostics` (→ VersionSkew), same as every
+        // other extract call site.
+        let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => report,
+            Err(msg) => return Err(CompileError::MalformedDiagnostics(msg)),
         };
+        let text = report
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         return Err(CompileError::ExtractFailed(text));
     }
     let json = std::fs::read_to_string(&out).map_err(CompileError::Io)?;
@@ -305,6 +302,26 @@ fn parse_one_binder(v: &serde_json::Value) -> Result<BoundBinder, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An extractor whose non-zero-exit stdout does not parse as the
+    /// diagnostics report is a stale/skewed build: `MalformedDiagnostics`
+    /// (→ VersionSkew), never `ExtractFailed` (→ UserHaskell) — same contract
+    /// as `compile_session_turn` and `lib.rs::compile_haskell`. Env mutation is
+    /// safe: nextest runs each test in its own process.
+    #[test]
+    fn classify_turn_unparseable_report_is_malformed_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let err = classify_turn("x <- pure 1").unwrap_err();
+        assert!(
+            matches!(err, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics, got {err:?}"
+        );
+    }
 
     #[test]
     fn parses_bind_classification() {

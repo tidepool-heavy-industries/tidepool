@@ -10,7 +10,7 @@
 //! hover `contents`, `WorkspaceEdit`) are union-typed in the spec and easier to
 //! hand-parse than to thread through evolving typed structs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -30,12 +30,25 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 type Pending = Arc<Mutex<HashMap<i64, Sender<Result<Value, String>>>>>;
 
 /// Readiness state, updated by the reader thread from `$/progress` traffic.
+///
+/// rust-analyzer emits several independently-lifecycled index-phase tokens
+/// during startup (`Roots Scanned`, `Building`, `Indexing`, `cachePriming`),
+/// and the quick precursors end long before the heavy phases do — so the gate
+/// opens only once an indexing-proper token (`Indexing`/`cachePriming`) has
+/// ended AND no index-phase token is still open. Once open it stays open
+/// (rust-analyzer re-indexes incrementally on edits; re-closing would re-block
+/// every op mid-session). The 600s `force_ready` cap still covers servers
+/// that never emit an indexing-proper token.
 #[derive(Default)]
 struct Ready {
-    /// True once indexing/cache-priming has reported completion.
+    /// True once indexing/cache-priming has reported completion (latched).
     ready: bool,
     /// Human-readable progress note, e.g. "indexing (37%)".
     message: String,
+    /// Index-phase progress tokens that have begun/reported but not yet ended.
+    open_index_tokens: HashSet<String>,
+    /// Whether an indexing-proper token (`Indexing`/`cachePriming`) has ended.
+    indexing_ended: bool,
 }
 
 /// A live connection to a language server subprocess.
@@ -331,44 +344,61 @@ fn reply_to_server_request(id: i64, msg: &Value, stdin: &Arc<Mutex<ChildStdin>>)
     }
 }
 
-/// Track indexing/cache-priming progress to drive the readiness gate.
+/// Track indexing/cache-priming progress to drive the readiness gate (see
+/// [`Ready`] for the open-when semantics).
 fn update_progress(params: Option<&Value>, ready: &Arc<Mutex<Ready>>) {
     let Some(params) = params else { return };
-    let token = params
-        .get("token")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    // A token is a string or a number per the LSP spec; stringify numbers
+    // rather than collapsing them all to one key.
+    let token = match params.get("token") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
     let Some(value) = params.get("value") else {
         return;
     };
     let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
 
-    // Tokens that indicate the workspace is becoming queryable.
+    // Tokens that hold the gate while running…
     let is_index_token = token.contains("Indexing")
         || token.contains("cachePriming")
         || token.contains("Roots Scanned")
         || token.contains("Building");
+    // …and the subset whose completion means "the workspace is indexed"
+    // (the precursors above end long before these finish).
+    let is_indexing_proper = token.contains("Indexing") || token.contains("cachePriming");
+    if !is_index_token {
+        return;
+    }
 
     let mut r = ready.lock().unwrap();
     match kind {
+        // `report` also opens: a phase observed mid-flight (begin missed)
+        // must still hold the gate until its end arrives.
         "begin" | "report" => {
-            if is_index_token {
-                let pct = value.get("percentage").and_then(Value::as_u64);
-                let title = value
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("indexing");
-                r.message = match pct {
-                    Some(p) => format!("{} ({}%)", title, p),
-                    None => title.to_string(),
-                };
-            }
+            r.open_index_tokens.insert(token);
+            let pct = value.get("percentage").and_then(Value::as_u64);
+            let title = value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("indexing");
+            r.message = match pct {
+                Some(p) => format!("{} ({}%)", title, p),
+                None => title.to_string(),
+            };
         }
         "end" => {
-            if is_index_token {
+            r.open_index_tokens.remove(&token);
+            r.indexing_ended |= is_indexing_proper;
+            if r.indexing_ended && r.open_index_tokens.is_empty() {
                 r.ready = true;
                 r.message = "ready".to_string();
+            } else if !r.ready {
+                r.message = format!(
+                    "waiting on {} index phase(s)",
+                    r.open_index_tokens.len().max(1)
+                );
             }
         }
         _ => {}
@@ -429,5 +459,65 @@ fn language_id(path: &Path) -> &'static str {
         Some("js") => "javascript",
         Some("go") => "go",
         _ => "plaintext",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(kind: &str, token: &str) -> Value {
+        json!({"token": token, "value": {"kind": kind, "title": "t"}})
+    }
+
+    /// The rust-analyzer startup interleaving: quick precursor phases end long
+    /// before indexing-proper does. The gate must wait for an
+    /// `Indexing`/`cachePriming` end with no index phase still open — not flip
+    /// on the first index-phase end.
+    #[test]
+    fn readiness_waits_for_all_index_phases() {
+        let ready = Arc::new(Mutex::new(Ready::default()));
+        update_progress(Some(&ev("begin", "rustAnalyzer/Roots Scanned")), &ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/Roots Scanned")), &ready);
+        assert!(
+            !ready.lock().unwrap().ready,
+            "precursor end must not open the gate"
+        );
+        update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
+        update_progress(Some(&ev("report", "rustAnalyzer/Indexing")), &ready);
+        update_progress(Some(&ev("begin", "rustAnalyzer/cachePriming")), &ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/Indexing")), &ready);
+        assert!(
+            !ready.lock().unwrap().ready,
+            "cachePriming still open — gate must stay shut"
+        );
+        update_progress(Some(&ev("end", "rustAnalyzer/cachePriming")), &ready);
+        assert!(ready.lock().unwrap().ready);
+    }
+
+    /// A phase first observed via `report` (begin missed) still holds the gate
+    /// until its end; unrelated non-index tokens never touch the state.
+    #[test]
+    fn readiness_mid_flight_report_holds_gate() {
+        let ready = Arc::new(Mutex::new(Ready::default()));
+        update_progress(Some(&ev("report", "rustAnalyzer/cachePriming")), &ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/Fetching")), &ready);
+        assert!(!ready.lock().unwrap().ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/cachePriming")), &ready);
+        assert!(ready.lock().unwrap().ready);
+    }
+
+    /// Once open, the gate stays open across incremental re-index cycles.
+    #[test]
+    fn readiness_latches_across_reindex() {
+        let ready = Arc::new(Mutex::new(Ready::default()));
+        update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/Indexing")), &ready);
+        assert!(ready.lock().unwrap().ready);
+        update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
+        assert!(
+            ready.lock().unwrap().ready,
+            "re-index must not re-block ops"
+        );
     }
 }

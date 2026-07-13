@@ -81,6 +81,22 @@ pub enum RuntimeError {
     Jit(#[from] JitError),
 }
 
+/// Rewrite an extractor spawn failure into a self-explaining `io::Error`:
+/// `NotFound` means the `tidepool-extract` binary is missing or misconfigured —
+/// an environment problem ([`FailureClass::Infra`](failclass::FailureClass)),
+/// never the user's Haskell. Every extractor spawn site maps through here so
+/// the message and classification stay uniform.
+pub(crate) fn extract_spawn_error(e: io::Error) -> io::Error {
+    if e.kind() == io::ErrorKind::NotFound {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT or install the Tidepool harness).",
+        )
+    } else {
+        e
+    }
+}
+
 /// Extract module name from Haskell source (e.g. "module Expr where" -> "Expr").
 pub(crate) fn extract_module_name(source: &str) -> Option<String> {
     for line in source.lines() {
@@ -175,16 +191,7 @@ pub fn compile_haskell_salted(
         cmd.arg("--include").arg(path);
     }
 
-    let output = cmd.output().map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "tidepool-extract not found on PATH. Ensure the Tidepool harness is installed.",
-            )
-        } else {
-            e
-        }
-    })?;
+    let output = cmd.output().map_err(extract_spawn_error)?;
 
     // Always print stderr for diagnostics (trace output from Haskell); purely
     // a human debug channel now — stdout is the authoritative contract.

@@ -12,7 +12,6 @@
 //!           {"kind":"type","name":"Foo","cons":["A","B"]}]}
 //! ```
 
-use std::io;
 use std::path::Path;
 use std::process::Command;
 
@@ -52,15 +51,11 @@ pub fn extract_binders(
         cmd.arg("--include").arg(path);
     }
 
-    let output = cmd.output().map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            SessionError::BinderExtraction(
-                "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT)".to_string(),
-            )
-        } else {
-            SessionError::Io(e)
-        }
-    })?;
+    // Spawn failure is an environment problem (`Io` → Infra), never
+    // `BinderExtraction` (which classifies as the user's Haskell).
+    let output = cmd
+        .output()
+        .map_err(|e| SessionError::Io(crate::extract_spawn_error(e)))?;
 
     if !output.status.success() {
         let text = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
@@ -114,5 +109,18 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_binders_json("not json").is_err());
         assert!(parse_binders_json(r#"{"nope":1}"#).is_err());
+    }
+
+    /// A missing extractor binary is an environment problem: `SessionError::Io`
+    /// (→ Infra), not `BinderExtraction` (→ UserHaskell). Safe to mutate the
+    /// env var: nextest runs each test in its own process.
+    #[test]
+    fn missing_extractor_is_io_not_binder_extraction() {
+        std::env::set_var("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
+        let err = extract_binders("x = 1", &[]).unwrap_err();
+        assert!(
+            matches!(&err, SessionError::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "expected Io(NotFound), got {err:?}"
+        );
     }
 }

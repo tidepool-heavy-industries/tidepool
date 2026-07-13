@@ -466,15 +466,11 @@ impl SessionLib {
             }
         }
 
-        let output = cmd.output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                SessionError::BinderExtraction(
-                    "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT)".to_string(),
-                )
-            } else {
-                SessionError::Io(e)
-            }
-        })?;
+        // Spawn failure is an environment problem (`Io` → Infra), never
+        // `BinderExtraction` (which classifies as the user's Haskell).
+        let output = cmd
+            .output()
+            .map_err(|e| SessionError::Io(crate::extract_spawn_error(e)))?;
 
         if !output.status.success() {
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {

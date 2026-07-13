@@ -25,7 +25,14 @@ pub fn encode_double_word(mantissa: u64, exp: i64) -> f64 {
 /// `x * 2^e`, scaling the exponent in same-sign chunks so each factor stays
 /// finite — reproduces `ldexp` over/underflow (→ ±inf / 0) without premature
 /// overflow. Power-of-two scaling is exact, so the only rounding is `x`'s.
-fn scale_pow2(mut x: f64, mut e: i64) -> f64 {
+///
+/// `e` is clamped to ±2200 first: the finite `f64` range spans 2^-1074 ..=
+/// ~2^1024, so |e| ≥ 2200 already saturates to ±inf / ±0 for every finite `x`.
+/// The clamp bounds the chunked loops to O(1) — the exponent arrives straight
+/// from a user-supplied `Int#` (`encodeFloat`/`encodeDouble#`), and a value
+/// near `i64::MAX` would otherwise iterate ~9e15 times.
+fn scale_pow2(mut x: f64, e: i64) -> f64 {
+    let mut e = e.clamp(-2200, 2200);
     while e > 1000 {
         x *= 2f64.powi(1000);
         e -= 1000;
@@ -53,6 +60,18 @@ mod tests {
         assert!(encode_double(5, 1000).is_finite());
         // Mantissa wider than 53 bits rounds to nearest f64 (2^53 + 1 -> 2^53).
         assert_eq!(encode_double((1i64 << 53) + 1, 0), (1u64 << 53) as f64);
+    }
+
+    #[test]
+    fn encode_double_extreme_exponents_saturate_promptly() {
+        // A legal Int-typed exponent can be any i64; these must saturate in
+        // O(1), not iterate |e|/1000 times.
+        assert_eq!(encode_double(1, i64::MAX), f64::INFINITY);
+        assert_eq!(encode_double(-1, i64::MAX), f64::NEG_INFINITY);
+        assert_eq!(encode_double(1, i64::MIN), 0.0);
+        assert_eq!(encode_double(0, i64::MAX), 0.0);
+        assert_eq!(encode_double_word(u64::MAX, i64::MIN), 0.0);
+        assert_eq!(encode_double_word(u64::MAX, i64::MAX), f64::INFINITY);
     }
 
     #[test]

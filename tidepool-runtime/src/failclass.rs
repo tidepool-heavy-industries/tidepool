@@ -239,6 +239,19 @@ mod tests {
         assert_eq!(env.phase, Phase::Compile);
     }
 
+    /// The session decl lane agrees with the eval lane: a spawn failure
+    /// (`SessionError::Io(NotFound)`) is Infra — "install/point at the
+    /// extractor", never "rewrite your Haskell".
+    #[test]
+    fn session_spawn_io_is_infra_compile() {
+        let env = classify_session(&SessionError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "tidepool-extract not found on PATH",
+        )));
+        assert_eq!(env.class, FailureClass::Infra);
+        assert_eq!(env.phase, Phase::Compile);
+    }
+
     #[test]
     fn missing_output_is_infra_compile() {
         let env = classify_compile(&CompileError::MissingOutput(PathBuf::from("result.cbor")));

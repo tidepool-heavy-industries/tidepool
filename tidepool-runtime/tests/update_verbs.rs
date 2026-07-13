@@ -254,3 +254,44 @@ fn insertafter_batch_completes_past_a_missing_anchor_no_partial_mutation() {
     );
     assert_eq!(d.writes, 1, "only the matching file was written");
 }
+
+#[test]
+fn updatej_malformed_payload_is_rejected_data_not_a_throw() {
+    // Same #344 contract as its siblings: a malformed input-lane payload
+    // (missing `old`/`new` keys) is `UpdateOneRejected` DATA — the eval (and
+    // any batch it is part of) completes instead of aborting on `error`.
+    let mut d = preload(&[("f.txt", "foo bar")]);
+    let json = run_eval(
+        "toJSON <$> updateJ (object [\"file\" .= (\"f.txt\" :: Text)])",
+        &mut d,
+    );
+    assert_eq!(json["ok"], serde_json::json!(false), "got {json}");
+    assert!(
+        json["reason"]
+            .as_str()
+            .map(|s| s.contains("need {file, old, new}"))
+            == Some(true),
+        "got {json}"
+    );
+    assert_eq!(d.writes, 0, "no write on a rejected updateJ");
+}
+
+#[test]
+fn updatej_batch_completes_past_a_malformed_item() {
+    // One malformed payload among well-formed ones: every item gets its own
+    // outcome, the good edits still apply.
+    let mut d = preload(&[("a.txt", "foo bar"), ("b.txt", "foo baz")]);
+    let code = "toJSON <$> mapM updateJ\n\
+                \x20 [ object [\"file\" .= (\"a.txt\" :: Text), \"old\" .= (\"foo\" :: Text), \"new\" .= (\"FOO\" :: Text)]\n\
+                \x20 , object [\"file\" .= (\"b.txt\" :: Text)]\n\
+                \x20 , object [\"file\" .= (\"b.txt\" :: Text), \"old\" .= (\"baz\" :: Text), \"new\" .= (\"BAZ\" :: Text)]\n\
+                \x20 ]";
+    let json = run_eval(code, &mut d);
+    let arr = json.as_array().expect("array of outcomes");
+    assert_eq!(arr[0]["ok"], serde_json::json!(true), "got {json}");
+    assert_eq!(arr[1]["ok"], serde_json::json!(false), "got {json}");
+    assert_eq!(arr[2]["ok"], serde_json::json!(true), "got {json}");
+    assert_eq!(d.files.get("a.txt").map(String::as_str), Some("FOO bar"));
+    assert_eq!(d.files.get("b.txt").map(String::as_str), Some("foo BAZ"));
+    assert_eq!(d.writes, 2, "both well-formed edits applied");
+}
