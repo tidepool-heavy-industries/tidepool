@@ -86,21 +86,18 @@ splitDirectories p =
   let parts = filter (not . T.null) (T.splitOn "/" p)
   in if isAbsolute p then "/" : parts else parts
 
--- | Normalise a path: collapse @.@ and empty segments, resolve @..@ against
--- preceding components (leading @..@s are preserved), keep absolute-ness.
--- Mirrors the System.FilePath name (the kata link-checker reached for it and
--- found it missing — friction #26).
+-- | Normalise a path: collapse @.@ and redundant empty segments, keep
+-- absolute-ness. Like @System.FilePath.normalise@, @..@ segments are PRESERVED,
+-- not resolved — resolving @..@ lexically is unsound when the path crosses a
+-- symlink (the lexical parent is not the real parent), so the canonical
+-- function deliberately leaves @..@ for the OS. Do NOT use this for sandbox
+-- containment checks; it is a lexical tidy-up, not a safe-path oracle.
 --
--- >>> normalise "a/./b/../c" == "a/c"
+-- >>> normalise "a/./b/../c" == "a/b/../c"
+-- >>> normalise "/test/./file" == "/test/file"
 normalise :: FilePath -> FilePath
 normalise p =
-  let go acc seg
-        | seg == "."  = acc
-        | seg == ".." = case acc of
-            (top : rest) | top /= ".." -> rest
-            _                          -> ".." : acc
-        | otherwise   = seg : acc
-      parts = reverse (foldl go [] (filter (not . T.null) (T.splitOn "/" p)))
+  let parts = filter (\s -> not (T.null s) && s /= ".") (T.splitOn "/" p)
       body  = T.intercalate "/" parts
   in if isAbsolute p then "/" <> body else if T.null body then "." else body
 

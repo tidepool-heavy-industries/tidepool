@@ -368,7 +368,14 @@ impl SessionLib {
         });
         let gen = self.log.generation();
         let rendered = render::render_module_with_vals(&self.log, gen, &self.env, import_modules);
-        self.write_module(&rendered)?;
+        // Roll the just-pushed turn back on a write failure, exactly as the
+        // validation-failure path below does — a bare `?` here would bump the
+        // generation permanently while leaving no on-disk module, poisoning
+        // every later turn that imports the (missing) gen module.
+        if let Err(e) = self.write_module(&rendered) {
+            self.log.turns.pop();
+            return Err(e);
+        }
 
         // Validate ALL turns via GHC. On failure, roll back the log and delete
         // the gen module file so later turns don't import a poisoned module.

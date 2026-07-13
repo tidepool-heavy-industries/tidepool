@@ -117,21 +117,35 @@ impl DataConTable {
         let name = dc.name.clone();
         let qualified_name = dc.qualified_name.clone();
 
-        // If we're overwriting an existing entry for this id, remove its old name mappings.
+        // If we're overwriting an existing entry for this id, remove its old
+        // name mappings — but ONLY the ones that actually changed. Re-pushing an
+        // unchanged name would move `id` to the end of its `by_name` Vec, and
+        // `get_by_name_arity` treats that Vec's order as a load-bearing
+        // insertion-order tie-break between two ids sharing a name+arity. A
+        // genuine re-encounter of the same constructor (identical name) must
+        // keep its position, so skip the retain/re-push when the name is equal.
+        let mut name_unchanged = false;
         if let Some(old_dc) = self.by_id.insert(id, dc) {
-            if let Some(vec) = self.by_name.get_mut(&old_dc.name) {
+            if old_dc.name == name {
+                name_unchanged = true;
+            } else if let Some(vec) = self.by_name.get_mut(&old_dc.name) {
                 vec.retain(|&existing| existing != id);
                 if vec.is_empty() {
                     self.by_name.remove(&old_dc.name);
                 }
             }
-            if let Some(ref old_qn) = old_dc.qualified_name {
-                self.by_qualified_name.remove(old_qn);
+            if old_dc.qualified_name != qualified_name {
+                if let Some(ref old_qn) = old_dc.qualified_name {
+                    self.by_qualified_name.remove(old_qn);
+                }
             }
         }
 
-        // Now insert the mappings for the new name.
-        self.by_name.entry(name).or_default().push(id);
+        // Insert the mappings for the new name (skipping an unchanged name so
+        // its existing Vec position — and thus tie-break order — is preserved).
+        if !name_unchanged {
+            self.by_name.entry(name).or_default().push(id);
+        }
         if let Some(qn) = qualified_name {
             self.by_qualified_name.insert(qn, id);
         }

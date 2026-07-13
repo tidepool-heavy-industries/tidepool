@@ -298,3 +298,112 @@ fn small_array_element_survives_gc_under_tiny_nursery() {
          the verifier never ran, so this test guarded nothing"
     );
 }
+
+/// Build `let x = I# 999 in let arr = newSmallArray# len# x
+///        in case indexSmallArray# arr idx# of I# n -> n`.
+/// A length-`len` array indexed at `idx`. Used to drive an OOB access through
+/// the real CoreExpr -> JIT path.
+fn build_index_at(len: i64, idx: i64) -> CoreExpr {
+    reset_ctr();
+    let mut b = TreeBuilder::new();
+
+    let x = fresh_var();
+    let lit999 = b.push(CoreFrame::Lit(Literal::LitInt(999)));
+    let x_con = b.push(CoreFrame::Con {
+        tag: I_HASH,
+        fields: vec![lit999],
+    });
+
+    let arr = fresh_var();
+    let len_lit = b.push(CoreFrame::Lit(Literal::LitInt(len)));
+    let x_var = b.push(CoreFrame::Var(x));
+    let arr_rhs = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::NewSmallArray,
+        args: vec![len_lit, x_var],
+    });
+
+    let arr_v = b.push(CoreFrame::Var(arr));
+    let idx_lit = b.push(CoreFrame::Lit(Literal::LitInt(idx)));
+    let idx_read = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IndexSmallArray,
+        args: vec![arr_v, idx_lit],
+    });
+    let n = fresh_var();
+    let n_v = b.push(CoreFrame::Var(n));
+    let case_binder = fresh_var();
+    let done = b.push(CoreFrame::Case {
+        scrutinee: idx_read,
+        binder: case_binder,
+        alts: vec![Alt {
+            con: AltCon::DataAlt(I_HASH),
+            binders: vec![n],
+            body: n_v,
+        }],
+    });
+
+    let let_arr = b.push(CoreFrame::LetNonRec {
+        binder: arr,
+        rhs: arr_rhs,
+        body: done,
+    });
+    let let_x = b.push(CoreFrame::LetNonRec {
+        binder: x,
+        rhs: x_con,
+        body: let_arr,
+    });
+
+    let mut tree = b.build();
+    fixup_root(&mut tree, let_x)
+}
+
+/// In-bounds control: `indexSmallArray#` of a length-1 array at index 0 returns
+/// the stored element — the bounds check must not break valid access.
+#[test]
+fn index_in_bounds_returns_element() {
+    let expr = build_index_at(1, 0);
+    let table = build_table_for_expr(&expr);
+    let mut machine = JitEffectMachine::compile(&expr, &table, 64 * 1024)
+        .unwrap_or_else(|e| panic!("compile failed: {e:?}"));
+    let result = machine
+        .run_pure()
+        .unwrap_or_else(|e| panic!("in-bounds run failed: {e:?}"));
+    assert!(
+        matches!(result, Value::Lit(Literal::LitInt(999))),
+        "in-bounds index must return the element, got {result:?}"
+    );
+}
+
+/// The bounds-check fix: an out-of-bounds `indexSmallArray#` (index far past a
+/// length-1 array) raises a clean runtime error instead of doing an unchecked
+/// `arr_ptr + 8 + idx*8` load into arbitrary heap memory. Before the fix this
+/// was an OOB read (garbage element, or SIGSEGV on an unmapped page); after it,
+/// `run_pure` returns `Err`, never a valid `Value` and never a crash.
+#[test]
+fn index_out_of_bounds_is_clean_error_not_oob_read() {
+    let expr = build_index_at(1, 1_000_000);
+    let table = build_table_for_expr(&expr);
+    let mut machine = JitEffectMachine::compile(&expr, &table, 64 * 1024)
+        .unwrap_or_else(|e| panic!("compile failed: {e:?}"));
+    let result = machine.run_pure();
+    assert!(
+        result.is_err(),
+        "out-of-bounds index must raise a clean error, got Ok({result:?}) \
+         (an OOB heap read that happened to survive)"
+    );
+}
+
+/// A negative index must also be rejected (the unsigned bounds compare treats
+/// it as a huge value), not turned into a negative byte offset that reads
+/// BEFORE the array's length prefix.
+#[test]
+fn index_negative_is_clean_error() {
+    let expr = build_index_at(4, -1);
+    let table = build_table_for_expr(&expr);
+    let mut machine = JitEffectMachine::compile(&expr, &table, 64 * 1024)
+        .unwrap_or_else(|e| panic!("compile failed: {e:?}"));
+    let result = machine.run_pure();
+    assert!(
+        result.is_err(),
+        "negative index must raise a clean error, got Ok({result:?})"
+    );
+}

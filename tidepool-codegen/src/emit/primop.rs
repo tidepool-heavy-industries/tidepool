@@ -76,6 +76,35 @@ fn emit_div_zero_check(
     Ok(builder.block_params(cont_block)[0])
 }
 
+/// Raise a clean `array index out of range` domain error (poison + pending-error
+/// flag, surfaced by the effect machine) for an out-of-bounds boxed-array
+/// access, and return the GC-safe poison heap pointer. Mirrors the div-by-zero /
+/// `chr` guards — routed through `runtime_error_with_msg`, never a bare
+/// Cranelift `trap`.
+fn emit_array_oob_error(
+    sess: &mut EmitSession,
+    builder: &mut FunctionBuilder,
+) -> Result<Value, EmitError> {
+    const OOB_MSG: &str = "array index out of range";
+    let msg_ptr = builder.ins().iconst(types::I64, OOB_MSG.as_ptr() as i64);
+    let msg_len = builder.ins().iconst(types::I64, OOB_MSG.len() as i64);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::RuntimeErrorKind::UserError as i64);
+    emit_runtime_call(
+        sess.pipeline,
+        builder,
+        "runtime_error_with_msg",
+        &[
+            AbiParam::new(types::I64),
+            AbiParam::new(types::I64),
+            AbiParam::new(types::I64),
+        ],
+        &[AbiParam::new(types::I64)],
+        &[kind, msg_ptr, msg_len],
+    )
+}
+
 /// Emit a primitive operation. Unboxes HeapPtr args, performs the op, returns Raw.
 /// `n` i64 ABI params, for the uniform-i64 host-fn signatures of the bignum
 /// (`__gmpn_*` / `integer_gmp_*`) intercepts.
@@ -2173,14 +2202,44 @@ pub fn emit_primop(
             }
             let arr_ptr = unbox_bytearray(sess.pipeline, builder, args[0]);
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            // Bounds check before the load. `len` is the i64 at offset 0; an
+            // UNSIGNED compare rejects both `idx >= len` and negative `idx`
+            // (huge as unsigned) in one test. Out of bounds raises a clean
+            // "array index out of range" domain error and merges the GC-safe
+            // poison pointer instead of loading past the buffer (was an
+            // unchecked `arr_ptr + 8 + idx*8` read — arbitrary heap OOB).
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+            let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+            let load_block = builder.create_block();
+            let oob_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::I64);
+            builder
+                .ins()
+                .brif(in_bounds, load_block, &[], oob_block, &[]);
+
+            builder.switch_to_block(load_block);
+            builder.seal_block(load_block);
             let base = builder.ins().iadd_imm(arr_ptr, 8);
             let byte_offset = builder.ins().imul_imm(idx, 8);
             let effective = builder.ins().iadd(base, byte_offset);
             let loaded = builder
                 .ins()
                 .load(types::I64, MemFlags::new(), effective, 0);
-            builder.declare_value_needs_stack_map(loaded);
-            Ok(SsaVal::HeapPtr(loaded))
+            builder.ins().jump(merge_block, &[BlockArg::Value(loaded)]);
+
+            builder.switch_to_block(oob_block);
+            builder.seal_block(oob_block);
+            let poison = emit_array_oob_error(sess, builder)?;
+            builder.ins().jump(merge_block, &[BlockArg::Value(poison)]);
+
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let result = builder.block_params(merge_block)[0];
+            builder.declare_value_needs_stack_map(result);
+            Ok(SsaVal::HeapPtr(result))
         }
 
         PrimOpKind::WriteSmallArray | PrimOpKind::WriteArray => {
@@ -2188,10 +2247,34 @@ pub fn emit_primop(
             let arr_ptr = unbox_bytearray(sess.pipeline, builder, args[0]);
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let val = args[2].value();
+            // Same bounds check as the read arm; an OOB write is SKIPPED (never
+            // stores past the buffer) and raises the clean domain error.
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+            let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+            let store_block = builder.create_block();
+            let oob_block = builder.create_block();
+            let cont_block = builder.create_block();
+            builder
+                .ins()
+                .brif(in_bounds, store_block, &[], oob_block, &[]);
+
+            builder.switch_to_block(store_block);
+            builder.seal_block(store_block);
             let base = builder.ins().iadd_imm(arr_ptr, 8);
             let byte_offset = builder.ins().imul_imm(idx, 8);
             let effective = builder.ins().iadd(base, byte_offset);
             builder.ins().store(MemFlags::new(), val, effective, 0);
+            builder.ins().jump(cont_block, &[]);
+
+            builder.switch_to_block(oob_block);
+            builder.seal_block(oob_block);
+            let _ = emit_array_oob_error(sess, builder)?;
+            builder.ins().jump(cont_block, &[]);
+
+            builder.switch_to_block(cont_block);
+            builder.seal_block(cont_block);
             Ok(SsaVal::Raw(
                 builder.ins().iconst(types::I64, 0),
                 LIT_TAG_INT,
