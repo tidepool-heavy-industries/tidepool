@@ -83,8 +83,9 @@ DATA value (`UpdateOneApplied` on the single-match success, `UpdateOneRejected
 reason mCount` otherwise) — mirroring `UpdateAllOutcome`/`InsertAfterOutcome`
 (`{ok,count}`/`{ok}` on success, `{ok:false,reason,...}` on rejection), so a batch
 over many files can't half-apply mid-loop; `planUpdate ::
-M Value` is the dry-run that returns `{changed,diff}` as DATA (never throws — the
-branch-before-commit path); `updateJ` rides the input lane; `writeChecked` also lives here.
+M UpdateOutcome` is the dry-run that returns `{changed,diff}` as DATA (never throws — the
+branch-before-commit path, `UpdateDiff`/`UpdateNoChange`/`UpdateRejected`);
+`updateJ` rides the input lane; `writeChecked` also lives here.
 The tiers below (`Edit` DSL, `[patch|]`/Diff, ast-grep) are power tools for
 batch / diff-shaped / syntax-aware work; `tidepool://edits` documents all four,
 common-case first.

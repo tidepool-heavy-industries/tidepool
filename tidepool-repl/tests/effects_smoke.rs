@@ -3,10 +3,12 @@
 //!
 //! Exercises the always-available effects — Exec (`run`), Fs (`writeFile`/
 //! `readFile`), and KV (`kvSet`/`kvGet` across turns) — to prove the wider stack
-//! (Console, KV, Fs, SG, Http, Exec, Lsp, Llm + Ask) wires through the session
-//! worker. The cwd/KV sandbox is a fresh tempdir so the effects are isolated.
+//! (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time + Ask) wires through the
+//! session worker. The cwd/KV sandbox is a fresh tempdir so the effects are isolated.
 //! Skips cleanly when the extract isn't available. (LSP is daemon-gated and Llm
 //! needs API creds, so those are smoke-tested live, not here.)
+
+mod common;
 
 use std::path::PathBuf;
 
@@ -16,13 +18,7 @@ use tidepool_handlers::{
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-fn extract_available() -> bool {
-    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
-    std::process::Command::new(bin)
-        .arg("--numeric-version")
-        .output()
-        .is_ok()
-}
+use common::extract_available;
 
 fn text_of(res: &CallToolResult) -> String {
     match &res.content[0].raw {

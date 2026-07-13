@@ -231,15 +231,6 @@ pub fn bridged_node_count(j: &serde_json::Value) -> usize {
     json_to_value(j, &ids).node_count()
 }
 
-/// Parse a JSON document and wrap the result: `Right v` on success, `Left <err>`
-/// (the serde_json error message as a `Text`) on any parse error. This is the
-/// semantics of the internal `eitherDecodeValue :: Text -> Either Text Value`
-/// primop that the public `eitherDecode` is derived from.
-///
-/// Returns `None` (rather than panicking) when `ids.left` or `ids.right` are
-/// absent, so callers can surface a clean error. In practice this only happens
-/// when the `DataConTable` lacks `Either` in scope — programs that reach the
-/// JSON-decode primop always have it in scope.
 /// First JSON number token (in document order) whose exponent
 /// [`crate::shapes::decimal_token_exponent_overflows`] flags, if any.
 /// Recursion depth is bounded by serde_json's own nesting limit (128 by
@@ -257,6 +248,15 @@ fn find_exponent_overflow(j: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Parse a JSON document and wrap the result: `Right v` on success, `Left <err>`
+/// (the serde_json error message as a `Text`) on any parse error. This is the
+/// semantics of the internal `eitherDecodeValue :: Text -> Either Text Value`
+/// primop that the public `eitherDecode` is derived from.
+///
+/// Returns `None` (rather than panicking) when `ids.left` or `ids.right` are
+/// absent, so callers can surface a clean error. In practice this only happens
+/// when the `DataConTable` lacks `Either` in scope — programs that reach the
+/// JSON-decode primop always have it in scope.
 pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
     let left = ids.left?;
     let right = ids.right?;

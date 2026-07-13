@@ -524,6 +524,17 @@ pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<Str
     Ok(Some(diff_out))
 }
 
+/// Sleep for RA to push its own diagnostics, then read the last-pushed cache
+/// (empty if none). Shared fallback for both the pull-failure and
+/// pull-succeeded-but-shapeless branches of `diagnostics`.
+fn fallback_diagnostics(client: &RaClient, uri: &str) -> Vec<Value> {
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    client
+        .cached_diagnostics(uri)
+        .and_then(|d| d.as_array().cloned())
+        .unwrap_or_default()
+}
+
 /// Diagnostics for `file` (pull request, falling back to pushed cache).
 pub fn diagnostics(client: &RaClient, file: &str) -> Result<Vec<Value>, String> {
     let root = client.root().to_path_buf();
@@ -539,20 +550,8 @@ pub fn diagnostics(client: &RaClient, file: &str) -> Result<Vec<Value>, String> 
             .get("items")
             .and_then(Value::as_array)
             .cloned()
-            .or_else(|| {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                client
-                    .cached_diagnostics(&uri)
-                    .and_then(|d| d.as_array().cloned())
-            })
-            .unwrap_or_default(),
-        Err(_) => {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            client
-                .cached_diagnostics(&uri)
-                .and_then(|d| d.as_array().cloned())
-                .unwrap_or_default()
-        }
+            .unwrap_or_else(|| fallback_diagnostics(client, &uri)),
+        Err(_) => fallback_diagnostics(client, &uri),
     };
 
     let mut out = Vec::new();
@@ -707,4 +706,203 @@ fn utf16_to_byte(line: &str, utf16_off: usize) -> usize {
         units += ch.len_utf16();
     }
     line.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- abs_of: sandbox containment ---------------------------------
+
+    #[test]
+    fn abs_of_rejects_absolute_path_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let err = abs_of(root.path(), "/etc/passwd").unwrap_err();
+        assert!(
+            err.contains("escapes the workspace root"),
+            "expected escape error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn abs_of_rejects_dotdot_escape() {
+        let root = tempfile::tempdir().unwrap();
+        // A sibling file outside root, reached via `../`.
+        let outside = root
+            .path()
+            .parent()
+            .unwrap()
+            .join("tidepool_lsp_test_escape.rs");
+        std::fs::write(&outside, "").unwrap();
+        let err = abs_of(root.path(), "../tidepool_lsp_test_escape.rs").unwrap_err();
+        std::fs::remove_file(&outside).ok();
+        assert!(
+            err.contains("escapes the workspace root"),
+            "expected escape error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn abs_of_accepts_in_root_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("lib.rs"), "fn main() {}").unwrap();
+        let resolved = abs_of(root.path(), "lib.rs").unwrap();
+        assert_eq!(resolved, root.path().canonicalize().unwrap().join("lib.rs"));
+    }
+
+    #[test]
+    fn abs_of_accepts_nested_in_root_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "fn main() {}").unwrap();
+        let resolved = abs_of(root.path(), "src/lib.rs").unwrap();
+        assert_eq!(
+            resolved,
+            root.path().canonicalize().unwrap().join("src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn abs_of_errors_on_nonexistent_path() {
+        let root = tempfile::tempdir().unwrap();
+        let err = abs_of(root.path(), "missing.rs").unwrap_err();
+        assert!(
+            err.contains("resolve"),
+            "expected resolve error, got: {err}"
+        );
+    }
+
+    // --- utf16_to_byte: multibyte / surrogate-pair conversion ---------
+
+    #[test]
+    fn utf16_to_byte_ascii() {
+        let line = "hello world";
+        // Offset 5 lands right after "hello".
+        assert_eq!(utf16_to_byte(line, 5), 5);
+    }
+
+    #[test]
+    fn utf16_to_byte_two_byte_char() {
+        // 'é' is U+00E9: 1 UTF-16 code unit, 2 UTF-8 bytes.
+        let line = "caf\u{e9}_x";
+        // Offset 3 is right before 'é' — byte offset 3 (c,a,f are 1 byte each).
+        assert_eq!(utf16_to_byte(line, 3), 3);
+        // Offset 4 is right after 'é' — byte offset 5 (3 + 2 bytes for é).
+        assert_eq!(utf16_to_byte(line, 4), 5);
+        // Offset 5 is right after '_' — byte offset 6.
+        assert_eq!(utf16_to_byte(line, 5), 6);
+    }
+
+    #[test]
+    fn utf16_to_byte_surrogate_pair_emoji() {
+        // U+1F600 (grinning face) is 2 UTF-16 code units (surrogate pair), 4 UTF-8 bytes.
+        let line = "x\u{1F600}y";
+        // Offset 1 is right before the emoji.
+        assert_eq!(utf16_to_byte(line, 1), 1);
+        // Offset 3 is right after the emoji (1 unit for 'x' + 2 units for the emoji).
+        assert_eq!(utf16_to_byte(line, 3), 5);
+        // Offset 4 is right after 'y'.
+        assert_eq!(utf16_to_byte(line, 4), 6);
+    }
+
+    #[test]
+    fn utf16_to_byte_at_eol() {
+        let line = "abc";
+        assert_eq!(utf16_to_byte(line, 3), 3);
+    }
+
+    #[test]
+    fn utf16_to_byte_past_eof_clamps_to_line_len() {
+        let line = "abc";
+        // Offset beyond the line's length falls through to `line.len()`.
+        assert_eq!(utf16_to_byte(line, 100), 3);
+    }
+
+    // --- apply_edits: multi-edit, out-of-order application ------------
+
+    #[test]
+    fn apply_edits_out_of_order_multi_edit() {
+        let content = "line one\nline two\nline three\n";
+        // Edits deliberately listed out of source order (line 2 before line 0).
+        let edits = vec![
+            json!({
+                "range": {
+                    "start": { "line": 2, "character": 5 },
+                    "end": { "line": 2, "character": 10 }
+                },
+                "newText": "3"
+            }),
+            json!({
+                "range": {
+                    "start": { "line": 0, "character": 5 },
+                    "end": { "line": 0, "character": 8 }
+                },
+                "newText": "1"
+            }),
+        ];
+        let out = apply_edits(content, &edits);
+        assert_eq!(out, "line 1\nline two\nline 3\n");
+    }
+
+    #[test]
+    fn apply_edits_no_edits_is_identity() {
+        let content = "unchanged\ntext\n";
+        assert_eq!(apply_edits(content, &[]), content);
+    }
+
+    #[test]
+    fn apply_edits_multibyte_line() {
+        // Replace the accented character on a line with an ASCII one.
+        let content = "caf\u{e9}_x\nsecond\n";
+        let edits = vec![json!({
+            "range": {
+                "start": { "line": 0, "character": 3 },
+                "end": { "line": 0, "character": 4 }
+            },
+            "newText": "e"
+        })];
+        let out = apply_edits(content, &edits);
+        assert_eq!(out, "cafe_x\nsecond\n");
+    }
+
+    // --- node_sort_key / edit_touch_points: deterministic ordering ----
+
+    #[test]
+    fn node_sort_key_orders_by_file_then_line_then_char() {
+        let a = node("f", "", "reference", "b.rs", 1, 0, "");
+        let b = node("f", "", "reference", "a.rs", 5, 2, "");
+        let c = node("f", "", "reference", "a.rs", 1, 9, "");
+        let mut nodes = vec![a.clone(), b.clone(), c.clone()];
+        nodes.sort_by_key(node_sort_key);
+        assert_eq!(nodes, vec![c, b, a]);
+    }
+
+    #[test]
+    fn edit_touch_points_from_changes_map() {
+        let edit = json!({
+            "changes": {
+                "file:///a.rs": [
+                    { "range": { "start": { "line": 2, "character": 4 }, "end": { "line": 2, "character": 4 } } }
+                ]
+            }
+        });
+        let points = edit_touch_points(&edit);
+        assert_eq!(points, vec![("file:///a.rs".to_string(), 2, 4)]);
+    }
+
+    #[test]
+    fn edit_touch_points_from_document_changes() {
+        let edit = json!({
+            "documentChanges": [
+                {
+                    "textDocument": { "uri": "file:///b.rs" },
+                    "edits": [
+                        { "range": { "start": { "line": 7, "character": 1 }, "end": { "line": 7, "character": 1 } } }
+                    ]
+                }
+            ]
+        });
+        let points = edit_touch_points(&edit);
+        assert_eq!(points, vec![("file:///b.rs".to_string(), 7, 1)]);
+    }
 }

@@ -49,7 +49,14 @@ impl ExecHandler {
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| ExecError::ExecSpawn(format!("exec failed: {}", e)))?;
+        Ok(Self::finish_output(output))
+    }
 
+    /// Truncate stdout/stderr to `MAX_EXEC_OUTPUT_BYTES` (char-boundary safe)
+    /// and build the resulting `Proc`. Shared by every spawn path so the cap,
+    /// the truncation marker, and the char-boundary walk can't drift between
+    /// call sites.
+    fn finish_output(output: std::process::Output) -> Proc {
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
@@ -69,11 +76,11 @@ impl ExecHandler {
             stderr.push_str("\n...[truncated at 2MB]");
         }
         let exit_code = output.status.code().unwrap_or(-1) as i64;
-        Ok(Proc {
+        Proc {
             exit_code,
             stdout,
             stderr,
-        })
+        }
     }
 }
 
@@ -102,30 +109,7 @@ impl ExecHandler {
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| ExecError::ExecSpawn(format!("runArgv exec failed: {}", e)))?;
-        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
-            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-            while !stdout.is_char_boundary(end) {
-                end -= 1;
-            }
-            stdout.truncate(end);
-            stdout.push_str("\n...[truncated at 2MB]");
-        }
-        if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
-            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-            while !stderr.is_char_boundary(end) {
-                end -= 1;
-            }
-            stderr.truncate(end);
-            stderr.push_str("\n...[truncated at 2MB]");
-        }
-        let exit_code = output.status.code().unwrap_or(-1) as i64;
-        Ok(Proc {
-            exit_code,
-            stdout,
-            stderr,
-        })
+        Ok(Self::finish_output(output))
     }
 }
 

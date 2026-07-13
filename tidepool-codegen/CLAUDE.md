@@ -58,10 +58,17 @@ surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
 SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine
 language-level error reaches a signal.) Two variants are NOT emitted:
 `TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2124`).
-`TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs:1300`),
+`TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs`, grep the
+`pop == TagToEnumOp` guard; ~L1463),
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
 handled by the eval oracle (`tidepool-eval/src/eval.rs:1539`) but NOT the JIT.
 The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
 (checked 2026-07-07), so this gap isn't exercised today; if the generator is
 extended to cover it, either implement `SeqOp` in the JIT or exclude it from
 generation explicitly.
+
+The boxed-array primops (`IndexArray`/`ReadArray`/`IndexSmallArray`/etc.) are
+the same status class as `SeqOp`: JIT-real (`emit/primop.rs` implements them)
+but eval-unsupported (`tidepool-eval/src/eval.rs`'s tree-walker has no boxed-
+array `Value` variant — only the unboxed `ByteArray`). Also unexercised by the
+proptest generator today, so likewise latent rather than firing.

@@ -1,6 +1,6 @@
 {-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}
 
--- | GENERATED from the Rust bridged-record structs in tidepool-handlers
+-- | GENERATED from the Rust bridged-record structs in tidepool-bridge-effects
 -- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust
 -- struct is the single source of truth for field order / name / type, and
 -- this file is regenerated + verified by the `bridged_records` test

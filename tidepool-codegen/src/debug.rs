@@ -4,7 +4,6 @@
 //! - **LambdaRegistry**: maps code pointers back to lambda names
 //! - **heap_describe**: human-readable description of heap objects
 //! - **heap_validate**: structural integrity checks for heap objects
-//! - **TracingClosureCaller**: wraps closure calls with logging
 //!
 //! Diagnostic tracing is routed through the `log` crate with per-subsystem
 //! targets and controlled by `RUST_LOG` (standard) or the legacy
@@ -280,64 +279,6 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
     }
 
     Ok(())
-}
-
-/// A closure caller that validates both closure and argument before each call.
-pub struct TracingClosureCaller {
-    pub vmctx: *mut crate::context::VMContext,
-}
-
-impl TracingClosureCaller {
-    /// # Safety
-    /// Caller must ensure callee and arg are valid heap object pointers.
-    pub unsafe fn call(&self, callee: *mut u8, arg: *mut u8) -> Result<*mut u8, String> {
-        // SAFETY: callee and arg must point to valid HeapObjects.
-        // Validation is gated on the `tidepool::heap` log target.
-        if log::log_enabled!(target: "tidepool::heap", log::Level::Trace) {
-            heap_validate(callee).map_err(|e| format!("Closure validation failed: {}", e))?;
-            heap_validate(arg).map_err(|e| format!("Arg validation failed: {}", e))?;
-        }
-
-        let tag_byte = *callee.add(heap_layout::OFFSET_TAG);
-        if tag_byte != layout::TAG_CLOSURE {
-            return Err(format!("Not a closure: tag={}", tag_byte));
-        }
-
-        let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
-        let num_captured =
-            *(callee.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
-        let name = lookup_lambda(code_ptr);
-
-        log::trace!(
-            target: "tidepool::calls",
-            "CALL {} callee={:?} arg={:?} ({} captures)",
-            name.as_deref().unwrap_or("unknown"),
-            callee,
-            arg,
-            num_captured
-        );
-
-        // Call the closure
-        let func: unsafe extern "C" fn(
-            *mut crate::context::VMContext,
-            *mut u8,
-            *mut u8,
-        ) -> *mut u8 = std::mem::transmute(code_ptr);
-        let result = func(self.vmctx, callee, arg);
-
-        log::trace!(
-            target: "tidepool::calls",
-            "RET  {} result={:?}",
-            name.as_deref().unwrap_or("unknown"),
-            result
-        );
-
-        if !result.is_null() && log::log_enabled!(target: "tidepool::heap", log::Level::Trace) {
-            heap_validate(result).map_err(|e| format!("Result validation failed: {}", e))?;
-        }
-
-        Ok(result)
-    }
 }
 
 /// Validate a heap object and all its pointer fields (one level deep).

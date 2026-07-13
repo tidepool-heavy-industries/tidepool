@@ -152,9 +152,6 @@ pub enum EvalError {
     /// Unsupported primop
     #[error("unsupported primop: {0:?}")]
     UnsupportedPrimOp(PrimOpKind),
-    /// Heap exhausted
-    #[error("heap exhausted")]
-    HeapExhausted,
     /// Application of non-function value
     #[error("application of non-function value")]
     NotAFunction,
@@ -202,7 +199,6 @@ mod tests {
             EvalError::NoMatchingAlt,
             EvalError::InfiniteLoop(ThunkId(0)),
             EvalError::UnsupportedPrimOp(PrimOpKind::IntAdd),
-            EvalError::HeapExhausted,
             EvalError::NotAFunction,
             EvalError::UnboundJoin(JoinId(7)),
         ];

@@ -33,15 +33,7 @@ impl DispatchEffect<()> for MockDispatcher {
     }
 }
 
-/// True if `tidepool-extract` is resolvable (env override or on `PATH`).
-fn extract_available() -> bool {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_some() {
-        return true;
-    }
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("tidepool-extract").exists()))
-        .unwrap_or(false)
-}
+use tidepool_testing::eval_harness::extract_available;
 
 fn prelude_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

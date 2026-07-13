@@ -303,16 +303,17 @@ fn edits_md() -> String {
         "Mirrors the Edit tool you already know: name the file, the exact `old` text (with enough ",
         "surrounding context to name it uniquely), and the `new` text.\n",
         "```haskell\n",
-        "update      :: FilePath -> Text -> Text -> M ()               -- applies the one unique `old` → `new` match\n",
+        "update      :: FilePath -> Text -> Text -> M UpdateOneOutcome  -- applies the one unique `old` → `new` match; {ok} | {ok:false,reason,matches?}\n",
         "updateAll   :: FilePath -> Text -> Text -> M UpdateAllOutcome  -- replace every occurrence; {ok,count} | {ok:false,reason}\n",
-        "planUpdate  :: FilePath -> Text -> Text -> M Value             -- dry-run: {changed,diff} | {ok:false,reason,count}; writes nothing\n",
-        "updateJ     :: Value -> M ()                                   -- input lane: {file, old, new} for big/quote-heavy fragments\n",
+        "planUpdate  :: FilePath -> Text -> Text -> M UpdateOutcome     -- dry-run: {changed,diff} | {ok:false,reason,matches?}; writes nothing\n",
+        "updateJ     :: Value -> M UpdateOneOutcome                     -- input lane: {file, old, new} for big/quote-heavy fragments\n",
         "insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome -- insert a block after the unique anchor line; {ok} | {ok:false,reason,matches?}\n",
         "```\n",
         "`update` applies the single unique occurrence of `old`; `planUpdate` returns the diff as data ",
-        "when you want to inspect or branch before committing. `updateAll`/`insertAfter` never throw — a ",
+        "when you want to inspect or branch before committing. `update`/`updateAll`/`insertAfter` never throw — a ",
         "missing file, absent pattern, or ambiguous anchor comes back as `{ok:false,...}` DATA, so a batch ",
-        "over many files can't half-apply mid-loop; match on the outcome (`UpdateAllApplied`/`UpdateAllRejected`, ",
+        "over many files can't half-apply mid-loop; match on the outcome (`UpdateOneApplied`/`UpdateOneRejected`, ",
+        "`UpdateAllApplied`/`UpdateAllRejected`, ",
         "`InsertAfterApplied`/`InsertAfterRejected`) to branch. Fragments are plain `Text`, so compute ",
         "them: `update p old (TF.camelToSnake x)` — no quoter, no escaping. Big fragments ride `input` via `updateJ`.\n\n",
         "## 2. `Edit` DSL — line/anchor batch (project library)\n",
@@ -657,6 +658,20 @@ mod tests {
         // Empty / unknown fall back to the index.
         assert!(help(&ctx, "").contains("help topics"));
         assert!(help(&ctx, "nope").contains("Unknown help topic"));
+    }
+
+    /// `update`/`updateJ`/`planUpdate` are single-sourced in `effect_defs.rs`
+    /// as `M UpdateOneOutcome`/`M UpdateOutcome` (never a throwing `M ()` or a
+    /// bare `M Value`) — pins `edits_md()`'s doc text to that signature so it
+    /// can't drift silently again (it did once, see #344 / 1f1bc221).
+    #[test]
+    fn edits_md_documents_typed_update_outcomes() {
+        let md = edits_md();
+        assert!(md.contains("M UpdateOneOutcome"));
+        assert!(md.contains("M UpdateOutcome"));
+        assert!(!md.contains("Text -> Text -> M ()"));
+        assert!(!md.contains("Value -> M ()"));
+        assert!(!md.contains("Text -> Text -> M Value"));
     }
 
     #[test]

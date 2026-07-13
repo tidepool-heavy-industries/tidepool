@@ -145,6 +145,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("HttpRestricted", 1),
         ("HttpNetwork", 1),
         ("HttpStatus", 2),
+        ("HttpTooLarge", 1),
         ("GitBadRevspec", 1),
         ("GitFailed", 2),
         ("LlmApi", 1),

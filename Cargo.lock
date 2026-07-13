@@ -3705,6 +3705,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3740,6 +3741,7 @@ dependencies = [
  "tidepool-eval",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-testing",
  "tokio",
  "tracing",
  "tracing-subscriber",

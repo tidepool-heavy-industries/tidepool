@@ -1680,7 +1680,8 @@ fn dispatch_primop(
         PrimOpKind::RaiseUnderflow => Err(EvalError::InternalError(
             "arithmetic underflow (raiseUnderflow#)".into(),
         )),
-        PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
+        // Desugared upstream in Translate.hs, never emitted — unreachable backstop.
+        PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
 
         // --- ByteArray# / MutableByteArray# ---
         PrimOpKind::NewByteArray => {
@@ -2720,6 +2721,7 @@ fn dispatch_primop(
         | PrimOpKind::ReadSmallArray
         | PrimOpKind::WriteSmallArray
         | PrimOpKind::IndexSmallArray
+        | PrimOpKind::IndexArray
         | PrimOpKind::SizeofSmallArray
         | PrimOpKind::SizeofSmallMutableArray
         | PrimOpKind::UnsafeFreezeSmallArray

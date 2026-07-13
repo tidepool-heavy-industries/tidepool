@@ -169,7 +169,6 @@ impl<'a> EffectMachine<'a> {
         }
     }
 
-    /// Apply a Leaf/Node continuation tree to a value.
     /// Apply a continuation tree to a value.
     ///
     /// ITERATIVE (S2-B3): the old version recursed both down `Node`'s left

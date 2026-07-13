@@ -2,9 +2,9 @@
 //!
 //! Defines [`EffectDecl`] (static Haskell-side metadata for an effect type),
 //! the [`DescribeEffect`] / [`CollectEffectDecls`] traits used to gather
-//! declarations from an HList of handlers, and the nine standard `*_decl()`
-//! builders. These mostly assemble Haskell-source strings consumed by the
-//! preamble/tool-description assembly.
+//! declarations from an HList of handlers, and the standard `*_decl()`
+//! builders, one per effect type. These mostly assemble Haskell-source strings
+//! consumed by the preamble/tool-description assembly.
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait

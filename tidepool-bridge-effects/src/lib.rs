@@ -107,7 +107,9 @@ pub fn bridged_records_module() -> String {
         .join(", ");
     let mut out = String::new();
     out.push_str("{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}\n\n");
-    out.push_str("-- | GENERATED from the Rust bridged-record structs in tidepool-handlers\n");
+    out.push_str(
+        "-- | GENERATED from the Rust bridged-record structs in tidepool-bridge-effects\n",
+    );
     out.push_str("-- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust\n");
     out.push_str("-- struct is the single source of truth for field order / name / type, and\n");
     out.push_str("-- this file is regenerated + verified by the `bridged_records` test\n");

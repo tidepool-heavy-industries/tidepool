@@ -18,15 +18,7 @@ use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-/// True if the extract binary can be spawned (exit code irrelevant — the nix
-/// wrapper supplies GHC internally, so we must NOT gate on `ghc --version`).
-fn extract_available() -> bool {
-    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
-    std::process::Command::new(bin)
-        .arg("--numeric-version")
-        .output()
-        .is_ok()
-}
+use common::extract_available;
 
 fn text_of(res: &CallToolResult) -> String {
     match &res.content[0].raw {

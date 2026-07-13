@@ -61,7 +61,7 @@ fn generated_decls_match_expected_exactly() {
     );
 }
 
-// --- 2. Tie the in-place SG/Lsp decls to the generated ones. -----------------
+// --- 2. Tie the in-place Lsp decls to the generated ones. --------------------
 
 /// Concatenate every effect decl's `type_defs` into one searchable corpus.
 fn effect_type_defs_corpus() -> String {

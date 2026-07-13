@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tidepool_runtime::{compile_and_run_cancellable, DEFAULT_NURSERY_SIZE};
+use tidepool_testing::eval_harness;
 
 /// `boom` forces a non-terminating tail loop INSIDE the Eff computation (via
 /// `$!`), so the runaway executes during `machine.run` — where the cancel flag
@@ -28,17 +29,9 @@ boom = pure $! go (0 :: Int)
   where go n = go (n + 1)
 "#;
 
-fn extract_available() -> bool {
-    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
-    std::process::Command::new(bin)
-        .arg("--numeric-version")
-        .output()
-        .is_ok()
-}
-
 #[test]
 fn watchdog_cancels_pure_runaway_via_on_ready_handle() {
-    if !extract_available() {
+    if !eval_harness::extract_available() {
         eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }

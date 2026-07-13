@@ -60,37 +60,6 @@ pub fn haskell_eval(input: TokenStream) -> TokenStream {
     expand::expand(input.into()).into()
 }
 
-/// Embeds a Haskell Core expression and its DataConTable without evaluating.
-///
-/// Unlike `haskell_eval!`, this macro does NOT evaluate the expression. It
-/// returns `(CoreExpr, DataConTable)` — suitable for effect-driven execution
-/// via `EffectMachine` where the caller controls evaluation.
-///
-/// Accepts the same path formats as `haskell_eval!`:
-/// - `.cbor` path (pre-compiled CBOR, requires a sibling `meta.cbor`)
-/// - `.hs` path (compiled on-demand via `nix run .#tidepool-extract`)
-/// - `.hs::binding` syntax for multi-binding modules
-///
-/// # Returns
-///
-/// Returns `(tidepool_repr::CoreExpr, tidepool_repr::DataConTable)`.
-///
-/// # Examples
-///
-/// ```no_run
-/// use tidepool_macro::haskell_expr;
-///
-/// // Pre-compiled CBOR path with sibling meta.cbor
-/// let (expr, table) = haskell_expr!("../../haskell/test/suite_cbor/lit_42.cbor");
-/// ```
-///
-/// `.hs` paths are also accepted (compiled on-demand via
-/// `nix run .#tidepool-extract`) — see the crate README.
-#[proc_macro]
-pub fn haskell_expr(input: TokenStream) -> TokenStream {
-    expand::expand_expr(input.into()).into()
-}
-
 /// Embeds inline Haskell source as a Core expression with its DataConTable.
 ///
 /// Writes the Haskell source to a temporary file, compiles it via

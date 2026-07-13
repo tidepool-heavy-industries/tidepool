@@ -72,6 +72,7 @@ pub const TARGETS: &[&str] = &[
     "frame:LetNonRec",
     "frame:LetRec",
     "frame:Raise",
+    "frame:RaiseLazy",
     // case-dispatch shape
     "case:1alt",
     "case:2alt",
@@ -82,4 +83,6 @@ pub const TARGETS: &[&str] = &[
     // constructor-repr
     "con:nullary",
     "con:nonnullary",
+    // var resolution
+    "var:external_env",
 ];

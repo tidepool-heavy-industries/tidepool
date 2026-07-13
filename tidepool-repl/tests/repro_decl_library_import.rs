@@ -23,6 +23,8 @@
 //! most repl tests, since the whole point is exercising the real project
 //! Library facade.
 
+mod common;
+
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolResult, RawContent};
@@ -31,13 +33,7 @@ use tidepool_handlers::{
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-fn extract_available() -> bool {
-    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
-    std::process::Command::new(bin)
-        .arg("--numeric-version")
-        .output()
-        .is_ok()
-}
+use common::extract_available;
 
 fn text_of(res: &CallToolResult) -> String {
     match &res.content[0].raw {

@@ -13,8 +13,8 @@ use tidepool_repr::{CoreExpr, CoreFrame, JoinId, MapLayer, TreeBuilder, VarId};
 /// body hits a label unregistered in THAT function and codegen aborts
 /// (`emit::JoinPointRegistry::get`'s "Jump to unregistered join").
 ///
-/// Mirrors `Translate.jumpCrossesLam` (`haskell/src/Tidepool/Translate.hs:2427`,
-/// applied at `:1385`): the real GHC→Core pipeline never emits this shape
+/// Mirrors `Translate.jumpCrossesLam` (`haskell/src/Tidepool/Translate.hs`, grep
+/// `jumpCrossesLam`; def ~L2602, applied ~L1545): the real GHC→Core pipeline never emits this shape
 /// because Translate.hs performs the same rewrite before the `Join`/`Jump`
 /// nodes are built. This pass exists for `CoreExpr` producers that skip that
 /// step — hand-built IR (fuzzer/proptest regressions) and any future non-GHC

@@ -34,3 +34,5 @@ tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest = "1"
+# Canonical extract_available()/prelude_path() guard for GHC-dependent tests.
+tidepool-testing = { path = "../tidepool-testing" }

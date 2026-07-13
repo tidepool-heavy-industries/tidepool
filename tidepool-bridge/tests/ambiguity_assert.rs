@@ -1,17 +1,21 @@
-//! Cross-module unqualified-name ambiguity must fire the dossier-cited
-//! debug_assert in dev/test builds.
+//! Cross-module unqualified-name ambiguity must be handled resiliently
+//! (diagnostic + deterministic fallback) rather than silently, in the
+//! hand-written `FromCore`/`ToCore` impls.
 //!
-//! The hand-written `FromCore`/`ToCore` impls in `tidepool-bridge/src/impls.rs`
-//! still call `table.get_by_name("I#")` (and similar) without arity or module
-//! qualification. PR #291 added `cfg(debug_assertions)` blocks that scan
-//! `get_all_by_name` and panic when more than one constructor shares the
-//! unqualified name — a guard against the cross-module collision class fixed
-//! in PR #272's derive but not yet migrated in the hand-written impls.
+//! The hand-written impls in `tidepool-bridge/src/impls.rs` resolve
+//! unqualified constructor names (e.g. "I#") via `get_resilient(table, name,
+//! arity)`, which tries the arity-qualified `get_by_name_arity` first and
+//! only falls back to the first `get_all_by_name` match (with a
+//! `cfg(debug_assertions)` diagnostic) when arity resolution also fails to
+//! disambiguate. As of PR #293 (`45516fe8`, softening PR #291's over-strict
+//! debug_asserts), an ambiguous match no longer panics — it returns the
+//! fallback match deterministically. The fallback path still isn't module-
+//! qualified and should eventually migrate to a `get_by_qualified_name`.
 //!
-//! Without this regression test the assertions could be silently weakened
-//! (e.g. by replacing `get_all_by_name` with `get_by_name` in the matches
-//! check) and the existing roundtrip / proptest suites would not notice —
-//! they all build tables with unique names.
+//! Without this regression test the fallback behavior could be silently
+//! changed (e.g. picking a different match, or reintroducing a panic) and
+//! the existing roundtrip / proptest suites would not notice — they all
+//! build tables with unique names.
 
 use tidepool_bridge::ToCore;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
