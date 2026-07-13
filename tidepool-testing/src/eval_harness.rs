@@ -451,12 +451,10 @@ data Lsp a where
   LspRename :: Value -> Text -> Lsp (Maybe Text)
   LspDiagnostics :: Text -> Lsp (Either LspError [Value])
 data Git a where
-  GitLog :: Text -> Int -> Git [Value]
+  GitLog :: Int -> Git (Either GitError [Value])
+  GitStatus :: Git (Either GitError [Value])
+  GitDiffStat :: Text -> Git (Either GitError [Value])
   GitShow :: Text -> Git (Either GitError Commit)
-  GitDiff :: Text -> Git [Value]
-  GitBlame :: Text -> Int -> Int -> Git [Value]
-  GitTree :: Text -> Text -> Git [Value]
-  GitBranches :: Git [Value]
 data Llm a where
   LlmChat :: Text -> Llm Text
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
@@ -676,30 +674,22 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
     #[allow(dead_code)]
     pub enum GitReq {
         #[core(name = "GitLog")]
-        GitLog(String, i64),
+        GitLog(i64),
+        #[core(name = "GitStatus")]
+        GitStatus,
+        #[core(name = "GitDiffStat")]
+        GitDiffStat(String),
         #[core(name = "GitShow")]
         GitShow(String),
-        #[core(name = "GitDiff")]
-        GitDiff(String),
-        #[core(name = "GitBlame")]
-        GitBlame(String, i64, i64),
-        #[core(name = "GitTree")]
-        GitTree(String, String),
-        #[core(name = "GitBranches")]
-        GitBranches,
     }
     pub struct MockGit;
     impl EffectHandler for MockGit {
         type Request = GitReq;
         fn handle(&mut self, req: GitReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
-                GitReq::GitLog(_, _)
-                | GitReq::GitDiff(_)
-                | GitReq::GitBlame(_, _, _)
-                | GitReq::GitTree(_, _)
-                | GitReq::GitBranches => {
+                GitReq::GitLog(_) | GitReq::GitStatus | GitReq::GitDiffStat(_) => {
                     let empty: Vec<Value> = vec![];
-                    cx.respond(empty)
+                    cx.respond(Ok::<Vec<Value>, String>(empty))
                 }
                 GitReq::GitShow(_) => cx.respond(Ok::<tidepool_bridge_effects::GitCommit, String>(
                     tidepool_bridge_effects::GitCommit {

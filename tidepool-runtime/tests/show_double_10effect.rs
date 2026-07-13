@@ -253,12 +253,10 @@ data Lsp a where
   LspRename :: Value -> Text -> Lsp (Maybe Text)
   LspDiagnostics :: Text -> Lsp (Either LspError [Value])
 data Git a where
-  GitLog :: Text -> Int -> Git [Value]
+  GitLog :: Int -> Git (Either GitError [Value])
+  GitStatus :: Git (Either GitError [Value])
+  GitDiffStat :: Text -> Git (Either GitError [Value])
   GitShow :: Text -> Git (Either GitError Commit)
-  GitDiff :: Text -> Git [Value]
-  GitBlame :: Text -> Int -> Int -> Git [Value]
-  GitTree :: Text -> Text -> Git [Value]
-  GitBranches :: Git [Value]
 data Llm a where
   LlmChat :: Text -> Llm Text
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)

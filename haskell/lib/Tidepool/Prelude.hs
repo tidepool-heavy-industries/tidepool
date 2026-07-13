@@ -1084,7 +1084,9 @@ nub = nubBy (==)
 -- | @alter f k m@ — apply @f@ to the current value at @k@ (Nothing if absent),
 -- then insert (Just v) or delete (Nothing) based on the result.
 -- Implemented via Map.lookup/insert/delete to avoid GHC's complex internal
--- alter unfoldings (same safety rationale as local 'insertWith').
+-- alter unfoldings (same safety rationale as local 'insertWith'; both are
+-- pinned polymorphic-at-Int-keys on the JIT by the haskell_verified
+-- @prelude_insertwith_alter_int_keys@ template).
 alter :: Ord k => (Maybe a -> Maybe a) -> k -> Map k a -> Map k a
 alter f k m = case f (Map.lookup k m) of
   Nothing -> Map.delete k m
@@ -1180,7 +1182,8 @@ commonPrefixes = T.commonPrefixes
 -- | @insertWith f key new m@ — if @key@ exists with value @old@, store @f new old@;
 -- otherwise insert @new@. Implemented via Map.lookup/insert to avoid GHC's
 -- internal Data.Map.Strict.insertWith unfoldings (same safety rationale as
--- local 'alter').
+-- local 'alter'; both are pinned polymorphic-at-Int-keys on the JIT by the
+-- haskell_verified @prelude_insertwith_alter_int_keys@ template).
 insertWith :: Ord k => (a -> a -> a) -> k -> a -> Map k a -> Map k a
 insertWith f k v m = case Map.lookup k m of
   Just old -> let !combined = f v old in Map.insert k combined m

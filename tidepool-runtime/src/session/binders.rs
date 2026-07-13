@@ -58,15 +58,18 @@ pub fn extract_binders(
         .map_err(|e| SessionError::Io(crate::extract_spawn_error(e)))?;
 
     if !output.status.success() {
-        let text = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-            Ok(report) => report
-                .diagnostics
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            Err(msg) => msg,
+        // An unparseable report is a stale/skewed extractor, not the user's
+        // declaration — same split as `classify_turn`.
+        let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => report,
+            Err(msg) => return Err(SessionError::MalformedDiagnostics(msg)),
         };
+        let text = report
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         return Err(SessionError::BinderExtraction(text));
     }
 
@@ -109,6 +112,26 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_binders_json("not json").is_err());
         assert!(parse_binders_json(r#"{"nope":1}"#).is_err());
+    }
+
+    /// An extractor whose non-zero-exit stdout does not parse as the
+    /// diagnostics report is a stale/skewed build: `MalformedDiagnostics`
+    /// (→ VersionSkew), never `BinderExtraction` (→ UserHaskell) — same
+    /// contract as `classify_turn`. Env mutation is safe: nextest runs each
+    /// test in its own process.
+    #[test]
+    fn unparseable_report_is_malformed_diagnostics_not_binder_extraction() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let err = extract_binders("x = 1", &[]).unwrap_err();
+        assert!(
+            matches!(err, SessionError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics, got {err:?}"
+        );
     }
 
     /// A missing extractor binary is an environment problem: `SessionError::Io`

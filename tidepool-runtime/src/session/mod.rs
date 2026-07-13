@@ -81,6 +81,12 @@ pub enum SessionError {
     /// log has been rolled back; the session remains usable.
     #[error("declaration type-check failed: {0}")]
     ValidationFailed(String),
+    /// The extractor exited non-zero and its stdout did not parse as the
+    /// diagnostics report — a stale/skewed extractor build, not the user's
+    /// declaration (mirrors `CompileError::MalformedDiagnostics` →
+    /// `FailureClass::VersionSkew`).
+    #[error("malformed extract diagnostics: {0}")]
+    MalformedDiagnostics(String),
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -473,9 +479,11 @@ impl SessionLib {
             .map_err(|e| SessionError::Io(crate::extract_spawn_error(e)))?;
 
         if !output.status.success() {
+            // An unparseable report is a stale/skewed extractor, not the
+            // user's declaration — same split as `classify_turn`.
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(r) => r,
-                Err(msg) => return Err(SessionError::ValidationFailed(msg)),
+                Err(msg) => return Err(SessionError::MalformedDiagnostics(msg)),
             };
             let rel = rendered.module.relative_hs_path();
             // Speak item-relative coordinates: GHC's line numbers point into

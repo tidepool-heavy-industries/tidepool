@@ -174,8 +174,9 @@ pub fn classify(err: &RuntimeError) -> FailureEnvelope {
 /// The repl's declaration-accumulation path fails with a [`SessionError`] rather
 /// than a [`CompileError`]; map it onto the equivalent compile error and defer
 /// to the ONE classifier so the decl and eval paths agree. (A `SessionError`
-/// stringifies its causes, so a wire skew reaching the decl path can only
-/// surface as extract-failed text here, never a structured `ReadError`.)
+/// stringifies its causes, so a CBOR wire skew reaching the decl path never
+/// surfaces as a structured `ReadError` — but an unparseable diagnostics
+/// report does surface typed, as `MalformedDiagnostics` → VersionSkew.)
 #[must_use]
 pub fn classify_session(err: &SessionError) -> FailureEnvelope {
     match err {
@@ -185,6 +186,9 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         ))),
         SessionError::BinderExtraction(s) | SessionError::ValidationFailed(s) => {
             classify_compile(&CompileError::ExtractFailed(s.clone()))
+        }
+        SessionError::MalformedDiagnostics(s) => {
+            classify_compile(&CompileError::MalformedDiagnostics(s.clone()))
         }
     }
 }
@@ -236,6 +240,18 @@ mod tests {
             "tidepool-extract not found on PATH",
         )));
         assert_eq!(env.class, FailureClass::Infra);
+        assert_eq!(env.phase, Phase::Compile);
+    }
+
+    /// The session decl lane agrees with the eval lane: an unparseable
+    /// diagnostics report is a stale/skewed extractor build — VersionSkew,
+    /// never "rewrite your Haskell".
+    #[test]
+    fn session_malformed_diagnostics_is_version_skew_compile() {
+        let env = classify_session(&SessionError::MalformedDiagnostics(
+            "stdout did not parse as a diagnostics report".into(),
+        ));
+        assert_eq!(env.class, FailureClass::VersionSkew);
         assert_eq!(env.phase, Phase::Compile);
     }
 

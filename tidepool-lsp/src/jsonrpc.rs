@@ -49,6 +49,33 @@ struct Ready {
     open_index_tokens: HashSet<String>,
     /// Whether an indexing-proper token (`Indexing`/`cachePriming`) has ended.
     indexing_ended: bool,
+    /// Instant of the most recent index-phase progress event of any kind.
+    /// The gate opens only after [`READY_DEBOUNCE`] of index-phase silence, so
+    /// a precursor whose `begin` arrives just AFTER indexing-proper's `end`
+    /// (rust-analyzer re-emits `Building` on crate-graph rebuilds, and token
+    /// ordering across phases is not guaranteed) still holds the gate.
+    last_index_event: Option<std::time::Instant>,
+}
+
+/// Index-phase quiet period required before the gate opens (see
+/// [`Ready::last_index_event`]).
+const READY_DEBOUNCE: Duration = Duration::from_millis(400);
+
+/// Latch `ready` once the gate condition holds: an indexing-proper token has
+/// ended, no index-phase token is open, and the index-phase stream has been
+/// quiet for [`READY_DEBOUNCE`]. Evaluated lazily by the readers (`is_ready`/
+/// `status_message`) rather than eagerly in `update_progress`, so the debounce
+/// needs no timer thread.
+fn check_ready(r: &mut Ready) {
+    if !r.ready
+        && r.indexing_ended
+        && r.open_index_tokens.is_empty()
+        && r.last_index_event
+            .is_none_or(|t| t.elapsed() >= READY_DEBOUNCE)
+    {
+        r.ready = true;
+        r.message = "ready".to_string();
+    }
 }
 
 /// A live connection to a language server subprocess.
@@ -201,12 +228,15 @@ impl RaClient {
 
     /// True once indexing has reported completion.
     pub fn is_ready(&self) -> bool {
-        self.ready.lock().unwrap().ready
+        let mut r = self.ready.lock().unwrap();
+        check_ready(&mut r);
+        r.ready
     }
 
     /// Current progress note (e.g. "indexing (37%)").
     pub fn status_message(&self) -> String {
-        let r = self.ready.lock().unwrap();
+        let mut r = self.ready.lock().unwrap();
+        check_ready(&mut r);
         if r.ready {
             "ready".to_string()
         } else if r.message.is_empty() {
@@ -373,6 +403,7 @@ fn update_progress(params: Option<&Value>, ready: &Arc<Mutex<Ready>>) {
     }
 
     let mut r = ready.lock().unwrap();
+    r.last_index_event = Some(std::time::Instant::now());
     match kind {
         // `report` also opens: a phase observed mid-flight (begin missed)
         // must still hold the gate until its end arrives.
@@ -388,13 +419,12 @@ fn update_progress(params: Option<&Value>, ready: &Arc<Mutex<Ready>>) {
                 None => title.to_string(),
             };
         }
+        // The latch itself happens in `check_ready` (reader-side), after the
+        // debounce window — never synchronously here.
         "end" => {
             r.open_index_tokens.remove(&token);
             r.indexing_ended |= is_indexing_proper;
-            if r.indexing_ended && r.open_index_tokens.is_empty() {
-                r.ready = true;
-                r.message = "ready".to_string();
-            } else if !r.ready {
+            if !r.ready {
                 r.message = format!(
                     "waiting on {} index phase(s)",
                     r.open_index_tokens.len().max(1)
@@ -470,6 +500,17 @@ mod tests {
         json!({"token": token, "value": {"kind": kind, "title": "t"}})
     }
 
+    /// Reader-side view of the gate (what `is_ready` computes).
+    fn gate_open(ready: &Arc<Mutex<Ready>>) -> bool {
+        let mut r = ready.lock().unwrap();
+        check_ready(&mut r);
+        r.ready
+    }
+
+    fn past_debounce() {
+        thread::sleep(READY_DEBOUNCE + Duration::from_millis(50));
+    }
+
     /// The rust-analyzer startup interleaving: quick precursor phases end long
     /// before indexing-proper does. The gate must wait for an
     /// `Indexing`/`cachePriming` end with no index phase still open — not flip
@@ -479,20 +520,20 @@ mod tests {
         let ready = Arc::new(Mutex::new(Ready::default()));
         update_progress(Some(&ev("begin", "rustAnalyzer/Roots Scanned")), &ready);
         update_progress(Some(&ev("end", "rustAnalyzer/Roots Scanned")), &ready);
-        assert!(
-            !ready.lock().unwrap().ready,
-            "precursor end must not open the gate"
-        );
+        past_debounce();
+        assert!(!gate_open(&ready), "precursor end must not open the gate");
         update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
         update_progress(Some(&ev("report", "rustAnalyzer/Indexing")), &ready);
         update_progress(Some(&ev("begin", "rustAnalyzer/cachePriming")), &ready);
         update_progress(Some(&ev("end", "rustAnalyzer/Indexing")), &ready);
+        past_debounce();
         assert!(
-            !ready.lock().unwrap().ready,
+            !gate_open(&ready),
             "cachePriming still open — gate must stay shut"
         );
         update_progress(Some(&ev("end", "rustAnalyzer/cachePriming")), &ready);
-        assert!(ready.lock().unwrap().ready);
+        past_debounce();
+        assert!(gate_open(&ready));
     }
 
     /// A phase first observed via `report` (begin missed) still holds the gate
@@ -502,9 +543,33 @@ mod tests {
         let ready = Arc::new(Mutex::new(Ready::default()));
         update_progress(Some(&ev("report", "rustAnalyzer/cachePriming")), &ready);
         update_progress(Some(&ev("end", "rustAnalyzer/Fetching")), &ready);
-        assert!(!ready.lock().unwrap().ready);
+        past_debounce();
+        assert!(!gate_open(&ready));
         update_progress(Some(&ev("end", "rustAnalyzer/cachePriming")), &ready);
-        assert!(ready.lock().unwrap().ready);
+        past_debounce();
+        assert!(gate_open(&ready));
+    }
+
+    /// A precursor whose `begin` arrives just AFTER indexing-proper's `end`
+    /// (out-of-order phases, or a `Building` re-emit) must still hold the
+    /// gate — this is what the debounce window buys.
+    #[test]
+    fn readiness_debounces_late_precursor_begin() {
+        let ready = Arc::new(Mutex::new(Ready::default()));
+        update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
+        update_progress(Some(&ev("end", "rustAnalyzer/Indexing")), &ready);
+        // Inside the debounce window: the gate has not opened yet…
+        assert!(!gate_open(&ready), "gate must not open inside the debounce");
+        // …and a late precursor begin re-closes the condition entirely.
+        update_progress(Some(&ev("begin", "rustAnalyzer/Building")), &ready);
+        past_debounce();
+        assert!(
+            !gate_open(&ready),
+            "late precursor begin must hold the gate"
+        );
+        update_progress(Some(&ev("end", "rustAnalyzer/Building")), &ready);
+        past_debounce();
+        assert!(gate_open(&ready));
     }
 
     /// Once open, the gate stays open across incremental re-index cycles.
@@ -513,11 +578,9 @@ mod tests {
         let ready = Arc::new(Mutex::new(Ready::default()));
         update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
         update_progress(Some(&ev("end", "rustAnalyzer/Indexing")), &ready);
-        assert!(ready.lock().unwrap().ready);
+        past_debounce();
+        assert!(gate_open(&ready));
         update_progress(Some(&ev("begin", "rustAnalyzer/Indexing")), &ready);
-        assert!(
-            ready.lock().unwrap().ready,
-            "re-index must not re-block ops"
-        );
+        assert!(gate_open(&ready), "re-index must not re-block ops");
     }
 }

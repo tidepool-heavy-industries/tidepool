@@ -118,3 +118,26 @@ fn set_union() {
     });
     run_template_with_imports(50, strat, &["import qualified Data.Set as Set"]);
 }
+
+/// Pins the POLYMORPHIC (non-Text-key) dimension of the `Tidepool.Prelude`
+/// shadows `insertWith` and `alter` on the JIT (both are unqualified here —
+/// the template imports `Tidepool.Prelude`, so these are the shadows, not
+/// `Map.*`). This is the shared "Map.lookup/insert instead of GHC's internal
+/// insertWith unfoldings" safety rationale their doc comments cite.
+#[test]
+fn prelude_insertwith_alter_int_keys() {
+    let strat = (arb_int(), arb_int(), arb_map_kvs()).prop_map(|(k, v, kvs)| {
+        let pairs: Vec<_> = kvs
+            .iter()
+            .map(|(key, val)| format!("({}, {})", key, val))
+            .collect();
+        let pairs_str = pairs.join(", ");
+        let src = format!(
+            "Map.lookup ({k}) (alter (fmap (+ 1)) ({k}) (insertWith (+) ({k}) ({v}) (Map.fromList [{pairs_str}] :: Map Int Int))) :: Maybe Int",
+        );
+        // insertWith (+) k v: v + old when present, else v; alter (fmap (+1)): +1.
+        let expected = json!(v + kvs.get(&k).copied().unwrap_or(0) + 1);
+        (src, expected)
+    });
+    run_template_with_imports(50, strat, &["import qualified Data.Map.Strict as Map"]);
+}
