@@ -31,7 +31,8 @@
 -- batch). After a clean resolution the patch flows through 'Diff.apply', so the
 -- apply-phase conflict vocabulary ('Tidepool.Patch.Conflict') applies as usual.
 -- Only a malformed @editsJ@ payload (missing\/ill-typed fields) is loud — that
--- is a caller bug, mirroring @patchJ@.
+-- is a caller bug, mirroring 'Diff.applyDiff'\/'planDiff's handling of a
+-- raw-text parse failure (@Left e -> error e@).
 --
 -- FOLLOW-UP (not in v1): the older "Patch" surgery verbs (@patchFile@,
 -- @insertAfter@) could be re-expressed as 'Edit' producers to collapse the two

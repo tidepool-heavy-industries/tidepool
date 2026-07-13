@@ -1178,11 +1178,10 @@ commonPrefixes = T.commonPrefixes
 {-# INLINE commonPrefixes #-}
 
 -- | @insertWith f key new m@ — if @key@ exists with value @old@, store @f new old@;
--- otherwise insert @new@. Monomorphic on Text keys to avoid pulling in GHC's
--- internal Data.Map.Strict.insertWith which causes timeout under the JIT
--- (complex balance/rotation unfoldings + Ord dictionary re-evaluation).
--- Uses Map.lookup + Map.insert which are known working.
-insertWith :: (a -> a -> a) -> Text -> a -> Map Text a -> Map Text a
+-- otherwise insert @new@. Implemented via Map.lookup/insert to avoid GHC's
+-- internal Data.Map.Strict.insertWith unfoldings (same safety rationale as
+-- local 'alter').
+insertWith :: Ord k => (a -> a -> a) -> k -> a -> Map k a -> Map k a
 insertWith f k v m = case Map.lookup k m of
   Just old -> let !combined = f v old in Map.insert k combined m
   Nothing  -> Map.insert k v m

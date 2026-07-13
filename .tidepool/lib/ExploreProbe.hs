@@ -1,7 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 module ExploreProbe where
 
-import Tidepool.Prelude
+import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 
 biggestRs :: Int -> M [(Text, Int)]

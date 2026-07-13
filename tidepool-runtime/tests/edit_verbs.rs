@@ -261,7 +261,7 @@ fn planedits_then_applydiff_roundtrips() {
 }
 
 // The JSON front door: {file, edits:[{op,…}]} on the input lane (the quote-heavy
-// / batch primary, mirroring patchJ/applyDiff).
+// / batch primary, mirroring applyDiff).
 const EDITSJ: &str = "editsJ (case input of { Object _ -> input; _ -> error \"no input\" })";
 
 #[test]

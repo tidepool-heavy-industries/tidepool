@@ -12,6 +12,7 @@
 module Library
   ( module Schemes
   , module Explore
+  , module ExploreProbe
   , module Dev
   , module Tables
   , module Diff
@@ -22,10 +23,13 @@ module Library
   , module LspGraph
   , module Churn
   , module Repo
+  , module RustAudit
+  , module RustSections
   ) where
 
 import Schemes
 import Explore
+import ExploreProbe
 import Dev
 import Tables
 import Diff
@@ -36,3 +40,8 @@ import Lsp
 import LspGraph
 import Churn
 import Repo
+-- RustAudit's own 'tally'/'crateOf' collide with Schemes.tally and
+-- Lsp.crateOf (both already in the facade); hidden here so RustAudit's
+-- internal uses are untouched but the facade keeps one owner per name.
+import RustAudit hiding (tally, crateOf)
+import RustSections
