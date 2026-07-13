@@ -488,13 +488,19 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "    Just v  -> pure v\n",
             "    Nothing -> do { v <- compute; kvSet k v; pure v }\n",
         ));
+        // kvModify/kvIncr/kvAppend are lost-update-free: each is an optimistic
+        // compare-and-swap RETRY loop over `kvCas`, not a racy kvGet-then-kvSet.
+        // Two agent processes incrementing the same key both converge instead of
+        // one silently clobbering the other (the FsWriteCas #330 guarantee, for
+        // KV). On a conflict `kvCas` refreshes the store, so the retry's kvGet
+        // reads the fresh value.
         out.push_str(concat!(
             "kvModify :: Text -> (Maybe Value -> Value) -> M Value\n",
             "kvModify k f = do\n",
             "  old <- kvGet k\n",
             "  let new = f old\n",
-            "  kvSet k new\n",
-            "  pure new\n",
+            "  r <- kvCas k old new\n",
+            "  case r of { Right () -> pure new; Left _ -> kvModify k f }\n",
         ));
         out.push_str(concat!(
             "kvIncr :: Text -> M Int\n",
@@ -502,8 +508,8 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "  old <- kvGet k\n",
             "  let n = case old >>= (^? _Int) of { Just i -> i; _ -> 0 }\n",
             "  let n' = n + 1\n",
-            "  kvSet k (toJSON n')\n",
-            "  pure n'\n",
+            "  r <- kvCas k old (toJSON n')\n",
+            "  case r of { Right () -> pure n'; Left _ -> kvIncr k }\n",
         ));
         out.push_str(concat!(
             "kvAppend :: Text -> Value -> M [Value]\n",
@@ -511,8 +517,8 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "  old <- kvGet k\n",
             "  let xs = case old >>= (^? _Array) of { Just arr -> arr; _ -> [] }\n",
             "  let xs' = xs ++ [v]\n",
-            "  kvSet k (toJSON xs')\n",
-            "  pure xs'\n",
+            "  r <- kvCas k old (toJSON xs')\n",
+            "  case r of { Right () -> pure xs'; Left _ -> kvAppend k v }\n",
         ));
         out.push_str(concat!(
             "kvAll :: M [(Text, Value)]\n",

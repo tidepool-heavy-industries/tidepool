@@ -1,8 +1,43 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tidepool_bridge_effects::{FileMeta, Hit};
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
+
+/// Run `f` while holding an exclusive advisory lock (`flock(LOCK_EX)`) on
+/// `lock_dir`, serializing a compare-and-swap across PROCESSES. The resident
+/// eval worker is single-threaded (`tidepool-repl/src/worker.rs`), so within
+/// one server there is no eval-vs-eval race; the only real contention is
+/// between separate agent processes sharing a repo's `.tidepool/` or files.
+/// Locking the parent directory (not a per-file sidecar) avoids littering the
+/// sandbox with lock files a glob could sweep up; it is coarse but CAS is never
+/// a hot path. The lock releases when the directory handle drops. `lock_dir`
+/// must already exist.
+pub(crate) fn with_dir_flock<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
+    use std::os::unix::io::AsRawFd;
+    let dir = std::fs::File::open(lock_dir)?;
+    let fd = dir.as_raw_fd();
+    loop {
+        // SAFETY: `fd` is a valid open directory descriptor owned by `dir` for
+        // the duration of this call.
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue; // EINTR: retry the blocking lock
+        }
+        return Err(err);
+    }
+    let out = f();
+    // SAFETY: same valid descriptor; closing `dir` would also release, but be
+    // explicit so the unlock is visible before `f`'s side effects are observed.
+    unsafe {
+        libc::flock(fd, libc::LOCK_UN);
+    }
+    Ok(out)
+}
 
 // ============================================================================
 // Tag 2: File I/O (sandboxed to working directory)
@@ -475,28 +510,43 @@ impl FsHandler {
         expected: Option<String>,
         contents: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        // Compare-and-swap write (#330): snapshot the current content
-        // hash (None = absent), and write ONLY if it equals `expected`
-        // (None expected = require the file absent, i.e. create-only).
-        // The compare-and-write is one handler call, so the lost-update
-        // race between parallel agents shrinks from an agent's
-        // think-time to a few syscalls. On a precondition miss nothing
-        // is written and the ACTUAL hash comes back as `Left actual`
-        // (conflicts-as-data, matching Diff/Edit philosophy + #335).
+        // Compare-and-swap write (#330): snapshot the current content hash
+        // (None = absent) and write ONLY if it equals `expected` (None expected
+        // = require the file absent, i.e. create-only). The read-compare-write
+        // runs while holding an exclusive `flock` on the parent directory, so
+        // two agent PROCESSES racing on the same file cannot both pass the
+        // compare and clobber each other — one blocks until the other's write
+        // is durable, then sees the new hash and gets `Left actual`. On a
+        // precondition miss nothing is written and the ACTUAL hash comes back
+        // as `Left actual` (conflicts-as-data, matching Diff/Edit + #335).
         let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
-        let actual: Option<String> = match std::fs::read(&resolved) {
-            Ok(bytes) => Some(blake3_hex(&bytes)),
-            Err(_) => None,
-        };
-        if actual == expected {
-            if let Some(parent) = resolved.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| EffectError::Handler(e.to_string()))?;
-            }
-            std::fs::write(&resolved, &contents)
-                .map_err(|e| EffectError::Handler(e.to_string()))?;
-            cx.respond(Ok::<(), Option<String>>(()))
-        } else {
-            cx.respond(Err::<(), Option<String>>(actual))
+        let parent = resolved
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        std::fs::create_dir_all(&parent).map_err(|e| EffectError::Handler(e.to_string()))?;
+
+        let outcome = with_dir_flock(
+            &parent,
+            || -> std::io::Result<Result<(), Option<String>>> {
+                let actual: Option<String> = match std::fs::read(&resolved) {
+                    Ok(bytes) => Some(blake3_hex(&bytes)),
+                    Err(_) => None,
+                };
+                if actual == expected {
+                    std::fs::write(&resolved, &contents)?;
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(actual))
+                }
+            },
+        )
+        .map_err(|e| EffectError::Handler(e.to_string()))?
+        .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+        match outcome {
+            Ok(()) => cx.respond(Ok::<(), Option<String>>(())),
+            Err(actual) => cx.respond(Err::<(), Option<String>>(actual)),
         }
     }
 }
@@ -1121,5 +1171,57 @@ mod tests {
             "{:?}",
             out.err()
         );
+    }
+
+    /// `with_dir_flock` serializes a read-modify-write across concurrent
+    /// openers. flock contends between distinct open file descriptions even in
+    /// one process, so 8 threads each incrementing a shared counter file 50
+    /// times under the lock must land on exactly 400 — no lost updates. Without
+    /// the lock the final count would be well under 400. This is the primitive
+    /// underneath the cross-process FsWriteCas (#330) guarantee.
+    #[test]
+    fn dir_flock_serializes_concurrent_read_modify_write() {
+        let dir = std::env::temp_dir().join(format!("tp_flock_rmw_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("counter");
+        std::fs::write(&counter, "0").unwrap();
+
+        const THREADS: usize = 8;
+        const ITERS: usize = 50;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let dir = dir.clone();
+                let counter = counter.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        super::with_dir_flock(&dir, || {
+                            let n: u64 = std::fs::read_to_string(&counter)
+                                .unwrap()
+                                .trim()
+                                .parse()
+                                .unwrap();
+                            std::thread::yield_now(); // widen the race window
+                            std::fs::write(&counter, (n + 1).to_string()).unwrap();
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_n: u64 = std::fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            final_n,
+            (THREADS * ITERS) as u64,
+            "flock did not serialize the read-modify-write — updates were lost"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

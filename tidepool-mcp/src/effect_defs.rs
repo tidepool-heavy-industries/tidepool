@@ -829,6 +829,14 @@ macro_rules! kv_effect_def {
                 { ctor KvInfo, method kv_info,
                   args { },
                   ret "Value" },
+                // Cross-process compare-and-swap: set key=new only if its
+                // current value equals `expected` (Nothing = require absent).
+                // `Left actual` on a mismatch — the lost-update-free primitive.
+                { ctor KvCas, method kv_cas,
+                  args { key: "Text" as String,
+                         expected: "Maybe Value" as Option<tidepool_eval::value::Value>,
+                         new: "Value" as tidepool_eval::value::Value },
+                  ret "(Either Value ())" },
             ],
             helpers [
                 { name kvGet, sig "Text -> M (Maybe Value)",
@@ -862,6 +870,16 @@ macro_rules! kv_effect_def {
                        "Use to inspect junk-drawer accumulation without listing all keys.",
                        "Extract fields with optics: @i <- kvInfo; i ^? key \"count\" . _Int@"],
                   body nullary KvInfo },
+                { name kvCas, sig "Text -> Maybe Value -> Value -> M (Either Value ())",
+                  doc ["Atomic compare-and-swap: set @key@ to @new@ only if its current",
+                       "value equals @expected@ (Nothing = require the key ABSENT).",
+                       "@Right ()@ on success; @Left actual@ (the current value) on a",
+                       "mismatch, with nothing written. Cross-process safe (the store",
+                       "file is flocked), so it is the lost-update-free primitive that",
+                       "kvModify\\/kvIncr\\/kvAppend retry over — prefer those for the",
+                       "common read-modify-write; reach for kvCas directly for a custom",
+                       "conflict policy."],
+                  body applied KvCas(k, e, n) },
             ],
         }
     };

@@ -183,6 +183,81 @@ impl KvHandler {
         cx.respond(keys)
     }
 
+    fn kv_cas(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        key: String,
+        expected: Option<Value>,
+        new: Value,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        // Cross-process compare-and-swap (#330-for-KV). The resident worker is
+        // single-threaded, so the only real race is between separate agent
+        // processes sharing this backing file — so the compare-and-write runs
+        // under an flock on the file's parent dir, and RE-READS the file from
+        // disk (authoritative), not the possibly-stale in-memory copy another
+        // process may have superseded. On success both disk and the in-memory
+        // store are updated; on a mismatch nothing is written and the ACTUAL
+        // current value comes back as `Left actual` (conflicts-as-data).
+        let expected_json: Option<serde_json::Value> =
+            expected.map(|v| tidepool_runtime::value_to_json(&v, cx.table(), 0));
+        let new_json = tidepool_runtime::value_to_json(&new, cx.table(), 0);
+
+        let path = self.path.clone();
+        let parent = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::fs::create_dir_all(&parent).map_err(|e| EffectError::Handler(e.to_string()))?;
+
+        // Under the lock: read disk (authoritative), compare, write if match.
+        // Returns (fresh disk map, CAS outcome) — the map is used to refresh the
+        // in-memory store on BOTH outcomes, so a caller retrying after a
+        // conflict reads the up-to-date value (and can tell absent from null,
+        // which the `Left` wire value alone cannot).
+        type Outcome = Result<(), Option<serde_json::Value>>;
+        let (disk, outcome): (HashMap<String, serde_json::Value>, Outcome) =
+            crate::handlers::fs::with_dir_flock(
+                &parent,
+                || -> Result<(HashMap<String, serde_json::Value>, Outcome), EffectError> {
+                    let mut disk: HashMap<String, serde_json::Value> = match std::fs::read(&path) {
+                        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                            // Exists but unparseable — refuse to clobber it
+                            // (matches `flush`'s read-failed refusal).
+                            EffectError::Handler(format!(
+                                "KV CAS: backing file {path:?} is unreadable JSON ({e}); \
+                                 refusing to overwrite"
+                            ))
+                        })?,
+                        Err(_) => HashMap::new(), // absent = empty store
+                    };
+                    let actual = disk.get(&key).cloned();
+                    if actual == expected_json {
+                        disk.insert(key.clone(), new_json.clone());
+                        let json = serde_json::to_string_pretty(&disk)
+                            .map_err(|e| EffectError::Handler(e.to_string()))?;
+                        std::fs::write(&path, json)
+                            .map_err(|e| EffectError::Handler(e.to_string()))?;
+                        Ok((disk, Ok(())))
+                    } else {
+                        Ok((disk, Err(actual)))
+                    }
+                },
+            )
+            .map_err(|e| EffectError::Handler(e.to_string()))??;
+
+        // Refresh the in-memory store to the disk state we read under the lock,
+        // on success AND conflict, so subsequent in-process reads (incl. a
+        // caller's retry `kvGet`) see the committed value.
+        *self.locked()? = disk;
+
+        match outcome {
+            Ok(()) => cx.respond(Ok::<(), serde_json::Value>(())),
+            Err(actual) => cx.respond(Err::<(), serde_json::Value>(
+                actual.unwrap_or(serde_json::Value::Null),
+            )),
+        }
+    }
+
     fn kv_info(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
@@ -452,6 +527,65 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             original,
             "flush must refuse to overwrite a file that failed to read at startup"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Cross-process compare-and-swap: two handlers over the SAME backing file
+    /// (standing in for two agent processes) both CAS the same key from
+    /// "expected absent". The first commits; the second, re-reading disk under
+    /// the flock, sees the now-present value and gets `Left actual` — no lost
+    /// update, the conflict comes back as data. This is the KV analogue of the
+    /// FsWriteCas #330 guarantee the kvIncr/kvModify/kvAppend loops rely on.
+    #[test]
+    fn kv_cas_two_handlers_same_file_no_lost_update() {
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("tidepool_kv_cas_{pid}.json"));
+        let _ = std::fs::remove_file(&path);
+
+        let mut ha = frunk::hlist![KvHandler::new(path.clone())];
+        let mut hb = frunk::hlist![KvHandler::new(path.clone())];
+
+        let cas_id = table.get_by_name("KvCas").unwrap();
+        let nothing = Value::Con(table.get_by_name("Nothing").unwrap(), vec![]);
+        let key = "shared/counter".to_string().to_value(&table).unwrap();
+
+        // Handler A: CAS from absent -> 1. Commits (Right ()).
+        let a_new = Value::Lit(tidepool_repr::Literal::LitInt(1));
+        let a_req = Value::Con(cas_id, vec![key.clone(), nothing.clone(), a_new]);
+        let a_res = response_value(ha.dispatch(0, &a_req, &cx).unwrap(), &table);
+        let a_name = match &a_res {
+            Value::Con(id, _) => table.name_of(*id).unwrap(),
+            other => panic!("expected Con from kvCas, got {other:?}"),
+        };
+        assert_eq!(a_name, "Right", "handler A's CAS from absent should commit");
+
+        // Handler B: CAS from absent -> 2, but the key now exists (A wrote 1).
+        // Must be Left (conflict), NOT a silent clobber.
+        let b_new = Value::Lit(tidepool_repr::Literal::LitInt(2));
+        let b_req = Value::Con(cas_id, vec![key, nothing, b_new]);
+        let b_res = response_value(hb.dispatch(0, &b_req, &cx).unwrap(), &table);
+        let b_name = match &b_res {
+            Value::Con(id, _) => table.name_of(*id).unwrap(),
+            other => panic!("expected Con from kvCas, got {other:?}"),
+        };
+        assert_eq!(
+            b_name, "Left",
+            "handler B's stale CAS must conflict (Left), not clobber A's write"
+        );
+
+        // The file must hold A's value (1), not B's (2).
+        let on_disk: std::collections::HashMap<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk.get("shared/counter"),
+            Some(&serde_json::json!(1)),
+            "the committed value must survive; B must not have clobbered it"
         );
 
         let _ = std::fs::remove_file(&path);
