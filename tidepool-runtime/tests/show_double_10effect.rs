@@ -1,6 +1,6 @@
 //! Reproduction test for SIGILL on showDouble through the full 10-effect dispatch path.
 //!
-//! The MCP server uses `Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]`.
+//! The MCP server uses `Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]`.
 //! The bug only manifests through `compile_and_run` (effect dispatch loop), not
 //! through `compile_and_run_pure` (direct heap read).
 //!
@@ -219,6 +219,7 @@ data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
 data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
 data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
 data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
+data LspError = LspDaemonDown Text deriving (Show, Eq)
 
 data Console a where
   Print :: Text -> Console ()
@@ -234,12 +235,6 @@ data Fs a where
   FsGlob :: Text -> Fs [Text]
   FsExists :: Text -> Fs Bool
   FsMetadata :: Text -> Fs (Maybe FileMeta)
-data SG a where
-  SgFind :: Text -> Text -> Text -> [Text] -> SG [Value]
-  SgPreview :: Text -> Text -> Text -> [Text] -> SG [Value]
-  SgReplace :: Text -> Text -> Text -> [Text] -> SG Int
-  SgRuleFind :: Text -> Value -> [Text] -> SG [Value]
-  SgRuleReplace :: Text -> Value -> Text -> [Text] -> SG Int
 data Http a where
   HttpGet :: Text -> Http (Either HttpError Value)
   HttpPost :: Text -> Value -> Http (Either HttpError Value)
@@ -248,14 +243,15 @@ data Exec a where
   Run :: Text -> Exec (Either ExecError Proc)
   RunIn :: Text -> Text -> Exec (Either ExecError Proc)
   RunJson :: Text -> Exec Value
-data Meta a where
-  MetaConstructors :: Meta [(Text, Int)]
-  MetaLookupCon :: Text -> Meta (Maybe (Int, Int))
-  MetaPrimOps :: Meta [Text]
-  MetaEffects :: Meta [Text]
-  MetaDiagnostics :: Meta [Text]
-  MetaVersion :: Meta Text
-  MetaHelp :: Meta [Text]
+data Lsp a where
+  LspWhere :: Text -> Lsp (Either LspError [Value])
+  LspCallers :: Value -> Lsp [Value]
+  LspCallees :: Value -> Lsp [Value]
+  LspRefs :: Value -> Lsp [Value]
+  LspDef :: Value -> Lsp (Maybe Value)
+  LspHover :: Value -> Lsp (Maybe Text)
+  LspRename :: Value -> Text -> Lsp (Maybe Text)
+  LspDiagnostics :: Text -> Lsp (Either LspError [Value])
 data Git a where
   GitLog :: Text -> Int -> Git [Value]
   GitShow :: Text -> Git (Either GitError Commit)
@@ -266,10 +262,12 @@ data Git a where
 data Llm a where
   LlmChat :: Text -> Llm Text
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
+data Time a where
+  TimeNow :: Time Int
 data Ask a where
   Ask :: Text -> Ask Value
 
-type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
+type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
 
 say :: Text -> M ()
 say t = do

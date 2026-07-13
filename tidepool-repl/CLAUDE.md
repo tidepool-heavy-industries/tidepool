@@ -194,6 +194,8 @@ drives only its abort surface (`request_abort` on timeout, `is_in_effect` at the
 grace deadline); the gate's pause states + grace machinery go unused here.
 
 **Effects are handled in `tidepool-handlers/src/lib.rs`**, not
-`tidepool/src/main.rs` — main.rs only wires the handler stack via
-`build_base_stack`. Live stack: Console, KV, Fs, SG, Http, Exec, Lsp, Llm,
-Ask (Meta is `--debug`-gated).
+`tidepool-repl/src/main.rs` — main.rs only wires the handler stack via
+`build_base_stack` (see the `use tidepool_handlers::{build_base_stack,
+HandlerConfig}` import and the `build_base_stack(&hcfg)` call there). Live
+stack: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time (Ask is interposed
+separately by the `AskDispatcher` wrapper; Meta is `--debug`-gated).

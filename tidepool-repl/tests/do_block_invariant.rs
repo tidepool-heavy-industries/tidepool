@@ -396,24 +396,3 @@ async fn plane_opacity_open_hasfield_helper_binds_cold() {
         "open record-dot helper should show its constrained type, got: {text}"
     );
 }
-
-/// OPACITY LEAK (ledger #31) — Record field naming is inconsistent across effect
-/// records (`Hit` uses bare `text`/`path`/`line`; `Match` from `sgFind` uses
-/// `match`-prefixed `matchText`/`matchFile`/`matchLine`), so the same record-dot
-/// idiom leaks WHICH record (and thus which producing plane/effect) a value came
-/// from. Proving opacity requires exercising both `Hit` (Fs) and `Match` (SG)
-/// records — but the MINIMAL test stack (`build_minimal_stack`) has neither the
-/// `Fs` nor the `SG` effect, so this facet CANNOT be encoded in-harness. Left as
-/// a documented placeholder; the real proof must run against the full server
-/// stack once field naming is unified (bridge-generator work).
-#[ignore = "do-block: Match/Hit field-name divergence — needs Fs+SG effects (absent from minimal stack), ledger #31"]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plane_opacity_match_hit_field_naming_uniform() {
-    // Cannot be exercised: the minimal test stack has no Fs (`grepGlob`→Hit) or
-    // SG (`sgFind`→Match) effect. Encoded as an ignored placeholder so the
-    // work-list carries it; see the report for why it is un-encodable here.
-    if !extract_available() {
-        return;
-    }
-    unreachable!("placeholder — see #[ignore] reason; not runnable on the minimal stack");
-}

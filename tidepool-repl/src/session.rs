@@ -370,7 +370,7 @@ impl Session {
         // Process items, batching maximal runs of consecutive decl-shaped
         // items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC
         // split across items typecheck TOGETHER (whole-block decl elaboration).
-        // Optimistic: try `define_batch` on the whole run; on success emit a
+        // Optimistic: try `define_scoped` on the whole run; on success emit a
         // per-source decl result, else fall back to processing each item
         // individually (the exact prior behavior — a stmt-shaped Auto item, or
         // a genuinely broken decl, lands here). Stmt/Meta items are singletons.

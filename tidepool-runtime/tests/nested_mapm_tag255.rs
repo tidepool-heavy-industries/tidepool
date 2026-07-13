@@ -8,7 +8,7 @@
 //! the tidepool-extract binary in the cache key.
 //!
 //! This test remains as a stress test: nested effectful mapM with real filesystem
-//! reads through the full 8-effect stack + Library.hs preamble.
+//! reads through the full 10-effect stack + Library.hs preamble.
 
 // Effect request enums mirror Haskell GADT constructors by name.
 #![allow(dead_code, clippy::enum_variant_names)]
@@ -166,26 +166,6 @@ impl EffectHandler for RealFs {
 }
 
 #[derive(FromCore)]
-enum SgReq {
-    #[core(name = "SgFind")]
-    SgFind(String, String, String, Vec<String>),
-    #[core(name = "SgRuleFind")]
-    SgRuleFind(String, Value, Vec<String>),
-}
-struct StubSg;
-impl EffectHandler for StubSg {
-    type Request = SgReq;
-    fn handle(
-        &mut self,
-        _req: SgReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let empty: Vec<Value> = vec![];
-        cx.respond(empty)
-    }
-}
-
-#[derive(FromCore)]
 enum HttpReq {
     #[core(name = "HttpGet")]
     HttpGet(String),
@@ -228,6 +208,53 @@ impl EffectHandler for StubExec {
 }
 
 #[derive(FromCore)]
+enum LspReq {
+    #[core(name = "LspWhere")]
+    LspWhere(String),
+    #[core(name = "LspCallers")]
+    LspCallers(Value),
+    #[core(name = "LspCallees")]
+    LspCallees(Value),
+    #[core(name = "LspRefs")]
+    LspRefs(Value),
+    #[core(name = "LspDef")]
+    LspDef(Value),
+    #[core(name = "LspHover")]
+    LspHover(Value),
+    #[core(name = "LspRename")]
+    LspRename(Value, String),
+    #[core(name = "LspDiagnostics")]
+    LspDiagnostics(String),
+}
+struct StubLsp;
+impl EffectHandler for StubLsp {
+    type Request = LspReq;
+    fn handle(
+        &mut self,
+        req: LspReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match req {
+            LspReq::LspWhere(_) => {
+                let empty: Vec<Value> = vec![];
+                cx.respond(Ok::<Vec<Value>, String>(empty))
+            }
+            LspReq::LspCallers(_) | LspReq::LspCallees(_) | LspReq::LspRefs(_) => {
+                let empty: Vec<Value> = vec![];
+                cx.respond(empty)
+            }
+            LspReq::LspDef(_) => cx.respond(None::<Value>),
+            LspReq::LspHover(_) => cx.respond(None::<String>),
+            LspReq::LspRename(_, _) => cx.respond(None::<String>),
+            LspReq::LspDiagnostics(_) => {
+                let empty: Vec<Value> = vec![];
+                cx.respond(Ok::<Vec<Value>, String>(empty))
+            }
+        }
+    }
+}
+
+#[derive(FromCore)]
 enum LlmReq {
     #[core(name = "LlmChat")]
     LlmChat(String),
@@ -243,6 +270,60 @@ impl EffectHandler for StubLlm {
         cx: &EffectContext,
     ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond(String::from("stub"))
+    }
+}
+
+#[derive(FromCore)]
+enum GitReq {
+    #[core(name = "GitLog")]
+    GitLog(i64),
+    #[core(name = "GitStatus")]
+    GitStatus,
+    #[core(name = "GitDiffStat")]
+    GitDiffStat(String),
+    #[core(name = "GitShow")]
+    GitShow(String),
+}
+struct StubGit;
+impl EffectHandler for StubGit {
+    type Request = GitReq;
+    fn handle(
+        &mut self,
+        req: GitReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match req {
+            GitReq::GitLog(_) | GitReq::GitStatus | GitReq::GitDiffStat(_) => {
+                let empty: Vec<Value> = vec![];
+                cx.respond(Ok::<Vec<Value>, String>(empty))
+            }
+            GitReq::GitShow(_) => cx.respond(Ok::<tidepool_bridge_effects::GitCommit, String>(
+                tidepool_bridge_effects::GitCommit {
+                    sha: String::new(),
+                    subject: String::new(),
+                    author: String::new(),
+                    date: String::new(),
+                    files: vec![],
+                },
+            )),
+        }
+    }
+}
+
+#[derive(FromCore)]
+enum TimeReq {
+    #[core(name = "TimeNow")]
+    TimeNow,
+}
+struct StubTime;
+impl EffectHandler for StubTime {
+    type Request = TimeReq;
+    fn handle(
+        &mut self,
+        _req: TimeReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond(0i64)
     }
 }
 
@@ -316,10 +397,12 @@ pure stats
         StubConsole,
         StubKv,
         RealFs::new(),
-        StubSg,
         StubHttp,
         StubExec,
+        StubLsp,
         StubLlm,
+        StubGit,
+        StubTime,
         StubAsk
     ];
     let result = harness.run(&full_module, "result", handlers).into_result();

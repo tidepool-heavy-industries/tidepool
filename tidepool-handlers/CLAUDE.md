@@ -74,7 +74,7 @@ locked decision on union tags).
 
 ## Sandboxing
 
-Fs/Sg/Exec are rooted at `HandlerConfig.cwd` (the workspace/session sandbox).
+Fs/Exec are rooted at `HandlerConfig.cwd` (the workspace/session sandbox).
 Path resolution canonicalizes both the sandbox root and the target path, then
 checks `starts_with` — any path resolving outside the root is a loud
 `"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`

@@ -7,8 +7,8 @@
 //! stack thread (deep [`Value`] spines overflow the default 2 MiB test-thread
 //! stack — see the "Host stack-overflow class" note), call one of
 //! `compile_and_run` / `compile_and_run_pure` / `compile_haskell`, then unwrap
-//! the [`EvalResult`]. Effectful tests additionally re-declare the full 10-effect
-//! MCP GADT stack verbatim (~60 lines each) and re-implement ten mock handlers.
+//! the [`EvalResult`]. Effectful tests additionally re-declare the base MCP
+//! GADT stack verbatim (~60 lines each) and re-implement mock handlers.
 //!
 //! [`EvalHarness`] centralizes all of that behind a builder while still driving
 //! the REAL `tidepool_runtime` entry points (it *wraps*, never reimplements —
@@ -26,7 +26,7 @@
 //! );
 //! assert_eq!(out.json(), serde_json::json!(5));
 //!
-//! // Effectful, against the canonical 10-effect MCP stack + mock handlers:
+//! // Effectful, against the base MCP stack + mock handlers:
 //! use tidepool_testing::eval_harness::mock;
 //! let src = mock::mcp_module("result :: M Value\nresult = pure (toJSON (1 :: Int))");
 //! let out = EvalHarness::new()
@@ -368,12 +368,19 @@ impl EvalHarness {
     }
 }
 
-/// The canonical MCP effect stack: the 10-effect GADT preamble every effectful
-/// runtime test used to re-declare verbatim, plus ten stub handlers and a
+/// The base MCP effect stack (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
+/// Ask — matching `tidepool_mcp::base_effects!` + the interposed Ask effect)
+/// as a hand-maintained GADT preamble, plus matching stub handlers and a
 /// ready-made [`mock::min_stack`] `frunk` HList.
 ///
-/// The GADT declarations here and the handler `enum` arities are kept in lockstep
-/// on purpose — owning both in one place is what keeps them from drifting.
+/// This is a STATIC mirror of the real stack, not a derivation — it exists so
+/// callers can compile a self-contained module without wiring
+/// `with_effects_module()`/`Tidepool.Orchestrate`. Because it's hand-maintained,
+/// it CAN drift from `tidepool_mcp::base_effects!` (that's exactly what
+/// happened when the SG effect was cut and Lsp/Time were added — see f1a480e6).
+/// `mock_stack_matches_production` (this crate's test suite, `tests/` dir)
+/// pins [`EFFECT_NAMES`] against `tidepool_mcp::standard_decls()` so a future
+/// cut/add/reorder fails loud here instead of silently going stale again.
 pub mod mock {
     use std::collections::HashMap;
 
@@ -382,8 +389,15 @@ pub mod mock {
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
     use tidepool_eval::value::Value;
 
+    /// The base MCP effect names, in stack order, as mirrored by this module.
+    /// `mock_stack_matches_production` asserts this equals
+    /// `tidepool_mcp::standard_decls()`'s type names.
+    pub const EFFECT_NAMES: &[&str] = &[
+        "Console", "KV", "Fs", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
+    ];
+
     /// The standard MCP module preamble: LANGUAGE pragmas, `module Expr`, the
-    /// common imports, the 10-effect GADT declarations, and `type M = Eff '[…]`.
+    /// common imports, the base-stack GADT declarations, and `type M = Eff '[…]`.
     /// Concatenate your helper defs + `result` after it, or use [`mcp_module`].
     pub const MCP_PREAMBLE: &str = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
 module Expr where
@@ -403,6 +417,7 @@ data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
 data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
 data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
 data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
+data LspError = LspDaemonDown Text deriving (Show, Eq)
 
 data Console a where
   Print :: Text -> Console ()
@@ -418,12 +433,6 @@ data Fs a where
   FsGlob :: Text -> Fs [Text]
   FsExists :: Text -> Fs Bool
   FsMetadata :: Text -> Fs (Maybe FileMeta)
-data SG a where
-  SgFind :: Text -> Text -> Text -> [Text] -> SG [Value]
-  SgPreview :: Text -> Text -> Text -> [Text] -> SG [Value]
-  SgReplace :: Text -> Text -> Text -> [Text] -> SG Int
-  SgRuleFind :: Text -> Value -> [Text] -> SG [Value]
-  SgRuleReplace :: Text -> Value -> Text -> [Text] -> SG Int
 data Http a where
   HttpGet :: Text -> Http (Either HttpError Value)
   HttpPost :: Text -> Value -> Http (Either HttpError Value)
@@ -432,14 +441,15 @@ data Exec a where
   Run :: Text -> Exec (Either ExecError Proc)
   RunIn :: Text -> Text -> Exec (Either ExecError Proc)
   RunJson :: Text -> Exec Value
-data Meta a where
-  MetaConstructors :: Meta [(Text, Int)]
-  MetaLookupCon :: Text -> Meta (Maybe (Int, Int))
-  MetaPrimOps :: Meta [Text]
-  MetaEffects :: Meta [Text]
-  MetaDiagnostics :: Meta [Text]
-  MetaVersion :: Meta Text
-  MetaHelp :: Meta [Text]
+data Lsp a where
+  LspWhere :: Text -> Lsp (Either LspError [Value])
+  LspCallers :: Value -> Lsp [Value]
+  LspCallees :: Value -> Lsp [Value]
+  LspRefs :: Value -> Lsp [Value]
+  LspDef :: Value -> Lsp (Maybe Value)
+  LspHover :: Value -> Lsp (Maybe Text)
+  LspRename :: Value -> Text -> Lsp (Maybe Text)
+  LspDiagnostics :: Text -> Lsp (Either LspError [Value])
 data Git a where
   GitLog :: Text -> Int -> Git [Value]
   GitShow :: Text -> Git (Either GitError Commit)
@@ -450,10 +460,12 @@ data Git a where
 data Llm a where
   LlmChat :: Text -> Llm Text
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
+data Time a where
+  TimeNow :: Time Int
 data Ask a where
   Ask :: Text -> Ask Value
 
-type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
+type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
@@ -564,38 +576,7 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
-    // 3: SG (stub)
-    #[derive(FromCore)]
-    #[allow(dead_code)]
-    pub enum SgReq {
-        #[core(name = "SgFind")]
-        SgFind(String, String, String, Vec<String>),
-        #[core(name = "SgPreview")]
-        SgPreview(String, String, String, Vec<String>),
-        #[core(name = "SgReplace")]
-        SgReplace(String, String, String, Vec<String>),
-        #[core(name = "SgRuleFind")]
-        SgRuleFind(String, Value, Vec<String>),
-        #[core(name = "SgRuleReplace")]
-        SgRuleReplace(String, Value, String, Vec<String>),
-    }
-    pub struct MockSg;
-    impl EffectHandler for MockSg {
-        type Request = SgReq;
-        fn handle(&mut self, req: SgReq, cx: &EffectContext) -> Result<Response, EffectError> {
-            match req {
-                SgReq::SgFind(_, _, _, _)
-                | SgReq::SgPreview(_, _, _, _)
-                | SgReq::SgRuleFind(_, _, _) => {
-                    let empty: Vec<Value> = vec![];
-                    cx.respond(empty)
-                }
-                SgReq::SgReplace(_, _, _, _) | SgReq::SgRuleReplace(_, _, _, _) => cx.respond(0i64),
-            }
-        }
-    }
-
-    // 4: Http (stub)
+    // 3: Http (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum HttpReq {
@@ -619,7 +600,7 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
-    // 5: Exec (stub)
+    // 4: Exec (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum ExecReq {
@@ -645,51 +626,52 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
-    // 6: Meta (stub)
+    // 5: Lsp (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
-    pub enum MetaReq {
-        #[core(name = "MetaConstructors")]
-        MetaConstructors,
-        #[core(name = "MetaLookupCon")]
-        MetaLookupCon(String),
-        #[core(name = "MetaPrimOps")]
-        MetaPrimOps,
-        #[core(name = "MetaEffects")]
-        MetaEffects,
-        #[core(name = "MetaDiagnostics")]
-        MetaDiagnostics,
-        #[core(name = "MetaVersion")]
-        MetaVersion,
-        #[core(name = "MetaHelp")]
-        MetaHelp,
+    pub enum LspReq {
+        #[core(name = "LspWhere")]
+        LspWhere(String),
+        #[core(name = "LspCallers")]
+        LspCallers(Value),
+        #[core(name = "LspCallees")]
+        LspCallees(Value),
+        #[core(name = "LspRefs")]
+        LspRefs(Value),
+        #[core(name = "LspDef")]
+        LspDef(Value),
+        #[core(name = "LspHover")]
+        LspHover(Value),
+        #[core(name = "LspRename")]
+        LspRename(Value, String),
+        #[core(name = "LspDiagnostics")]
+        LspDiagnostics(String),
     }
-    pub struct MockMeta;
-    impl EffectHandler for MockMeta {
-        type Request = MetaReq;
-        fn handle(&mut self, req: MetaReq, cx: &EffectContext) -> Result<Response, EffectError> {
+    pub struct MockLsp;
+    impl EffectHandler for MockLsp {
+        type Request = LspReq;
+        fn handle(&mut self, req: LspReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
-                MetaReq::MetaConstructors => {
-                    let empty: Vec<(String, i64)> = vec![];
+                LspReq::LspWhere(_) => {
+                    let empty: Vec<Value> = vec![];
+                    cx.respond(Ok::<Vec<Value>, String>(empty))
+                }
+                LspReq::LspCallers(_) | LspReq::LspCallees(_) | LspReq::LspRefs(_) => {
+                    let empty: Vec<Value> = vec![];
                     cx.respond(empty)
                 }
-                MetaReq::MetaPrimOps
-                | MetaReq::MetaEffects
-                | MetaReq::MetaDiagnostics
-                | MetaReq::MetaHelp => {
-                    let empty: Vec<String> = vec![];
-                    cx.respond(empty)
+                LspReq::LspDef(_) => cx.respond(None::<Value>),
+                LspReq::LspHover(_) => cx.respond(None::<String>),
+                LspReq::LspRename(_, _) => cx.respond(None::<String>),
+                LspReq::LspDiagnostics(_) => {
+                    let empty: Vec<Value> = vec![];
+                    cx.respond(Ok::<Vec<Value>, String>(empty))
                 }
-                MetaReq::MetaLookupCon(_) => {
-                    let nothing: Option<(i64, i64)> = None;
-                    cx.respond(nothing)
-                }
-                MetaReq::MetaVersion => cx.respond(String::from("test")),
             }
         }
     }
 
-    // 7: Git (stub)
+    // 6: Git (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum GitReq {
@@ -732,7 +714,7 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
-    // 8: Llm (stub)
+    // 7: Llm (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum LlmReq {
@@ -754,6 +736,23 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
+    // 8: Time (stub)
+    #[derive(FromCore)]
+    #[allow(dead_code)]
+    pub enum TimeReq {
+        #[core(name = "TimeNow")]
+        TimeNow,
+    }
+    pub struct MockTime;
+    impl EffectHandler for MockTime {
+        type Request = TimeReq;
+        fn handle(&mut self, req: TimeReq, cx: &EffectContext) -> Result<Response, EffectError> {
+            match req {
+                TimeReq::TimeNow => cx.respond(0i64),
+            }
+        }
+    }
+
     // 9: Ask (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
@@ -769,31 +768,31 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         }
     }
 
-    /// The canonical 10-effect mock handler HList, in stack order
-    /// `[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]` — pass straight
-    /// to [`super::EvalHarness::run`].
+    /// The base-stack mock handler HList, in stack order (matches
+    /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
+    /// Ask]` — pass straight to [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
         MockKv,
         MockFs,
-        MockSg,
         MockHttp,
         MockExec,
-        MockMeta,
-        MockGit,
+        MockLsp,
         MockLlm,
+        MockGit,
+        MockTime,
         MockAsk
     ) {
         frunk::hlist![
             MockConsole,
             MockKv::new(),
             MockFs,
-            MockSg,
             MockHttp,
             MockExec,
-            MockMeta,
-            MockGit,
+            MockLsp,
             MockLlm,
+            MockGit,
+            MockTime,
             MockAsk
         ]
     }
