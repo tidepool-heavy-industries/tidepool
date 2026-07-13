@@ -88,9 +88,10 @@ fn emit_array_oob_error(
     const OOB_MSG: &str = "array index out of range";
     let msg_ptr = builder.ins().iconst(types::I64, OOB_MSG.as_ptr() as i64);
     let msg_len = builder.ins().iconst(types::I64, OOB_MSG.len() as i64);
-    let kind = builder
-        .ins()
-        .iconst(types::I64, crate::host_fns::RuntimeErrorKind::UserError as i64);
+    let kind = builder.ins().iconst(
+        types::I64,
+        crate::host_fns::RuntimeErrorKind::UserError as i64,
+    );
     emit_runtime_call(
         sess.pipeline,
         builder,
