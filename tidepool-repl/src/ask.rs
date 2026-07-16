@@ -1,20 +1,26 @@
 //! Parked-thread Ask suspend/resume for the resident session worker.
 //!
-//! This is the same mechanism the `tidepool` eval server uses (`tidepool-mcp`'s
-//! `ask.rs`), reused here against the RESIDENT worker thread instead of a
-//! spawned-per-eval one: when an `M a` turn hits the `Ask` effect the
-//! [`ReplAskDispatcher`] parks the worker thread on `response_rx` and emits a
+//! When an `M a` turn hits the `Ask` effect the [`ReplAskDispatcher`] parks the
+//! RESIDENT worker thread on `response_rx` — native stack intact — and emits a
 //! [`WorkerMessage::Suspended`]; the server resumes it by sending a
-//! [`ResumeMsg`] back. The orthogonal timeout-as-yield-point latch is the SHARED
-//! [`tidepool_effect::pause::PauseGate`] — one gate, unified with the eval
-//! server's copy; the repl worker drives only its abort surface.
+//! [`ResumeMsg`] back, waking the same thread. This is dictated by the repl's
+//! model: one long-lived JIT machine whose value heap persists across turns, so
+//! the suspension holds the thread rather than tearing it down.
 //!
-//! Only the gate is shared. The DISPATCHER/worker-parking mechanics are
-//! deliberately NOT: the eval server's `ask.rs` dispatcher items are
-//! `pub(crate)` and park a spawned-per-eval thread, whereas this
-//! [`ReplAskDispatcher`] parks the RESIDENT worker thread. Rather than widen
-//! that crate's visibility (and couple to its struct layout) the small
-//! dispatcher is mirrored here; `tidepool-mcp` is left untouched.
+//! This is a DIFFERENT mechanism from the `tidepool` eval server's. That server
+//! (`tidepool_runtime::session::engine`, since `ed9588ec`) suspends threadlessly:
+//! the JIT codegen effect loop catches the ask tag, the machine is stowed as
+//! DATA, the eval thread exits, and resume re-enters the stowed machine on any
+//! fresh thread. It has no `DispatchEffect`-level ask dispatcher to share — its
+//! `GateDispatcher` does the timeout-yield checkpoint only. Because a resident
+//! machine cannot be stowed-and-dropped, the repl keeps the parked-thread
+//! mechanism here.
+//!
+//! What the two DO share is [`tidepool_effect::pause::PauseGate`], the
+//! timeout-as-yield-point latch — one gate type, consumed by both dispatchers.
+//! The repl worker drives only its abort surface (`request_abort` on timeout,
+//! `is_in_effect` at the grace deadline); the gate's pause states + grace
+//! machinery go unused here.
 
 use std::sync::Arc;
 
