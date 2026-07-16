@@ -26,20 +26,13 @@ use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::{classify, compile_and_run, FailureClass, FailureEnvelope, Phase};
+use tidepool_testing::eval_harness::user_lib_dir;
 
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("haskell/lib")
-        .leak()
-}
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
         .leak()
 }
 
@@ -118,7 +111,7 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, FailureE
             // live server too. They are stderr-only and do not affect the
             // returned error (which is the clean StackOverflow yield).
             tidepool_codegen::signal_safety::install();
-            let include = [pp, ulp, eff];
+            let include = [pp, ulp.as_path(), eff];
             let mut handlers = frunk::hlist![ConsoleHandler];
             let env = match compile_and_run(
                 &source,

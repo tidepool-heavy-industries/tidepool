@@ -15,20 +15,13 @@ use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::user_lib_dir;
 
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("haskell/lib")
-        .leak()
-}
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
         .leak()
 }
 
@@ -71,7 +64,7 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
     let eff = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
-    let include = [pp, ulp, eff];
+    let include = [pp, ulp.as_path(), eff];
 
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];
