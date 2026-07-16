@@ -46,7 +46,7 @@ use tidepool_runtime::{
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).
-fn repo_root() -> PathBuf {
+pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("tidepool-testing has a parent (repo root)")
@@ -59,6 +59,14 @@ fn repo_root() -> PathBuf {
 /// previously re-derived by a local `prelude_path()` in a dozen files.
 pub fn prelude_path() -> PathBuf {
     repo_root().join("haskell").join("lib")
+}
+
+/// The user verb-library dir (`<root>/.tidepool/lib`).
+///
+/// Tests that exercise `.tidepool/lib` modules need this on the include path;
+/// it was previously re-derived by a local `user_lib_dir()` in eleven files.
+pub fn user_lib_dir() -> PathBuf {
+    repo_root().join(".tidepool").join("lib")
 }
 
 /// The generated `Tidepool.Effects` module dir for the standard MCP effect set.

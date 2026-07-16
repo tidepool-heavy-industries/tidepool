@@ -19,3 +19,6 @@ inventory = "0.3"
 [dev-dependencies]
 proptest = "1"
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+# Dev-dep cycle (tidepool-testing depends on this crate) — legal in Cargo;
+# gives the roundtrip tests the shared standard_datacon_table.
+tidepool-testing = { path = "../tidepool-testing" }

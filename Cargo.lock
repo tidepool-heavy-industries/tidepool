@@ -3564,6 +3564,7 @@ dependencies = [
  "tidepool-bridge-derive",
  "tidepool-eval",
  "tidepool-repr",
+ "tidepool-testing",
 ]
 
 [[package]]
@@ -3643,6 +3644,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tidepool-bignum",
  "tidepool-repr",
+ "tidepool-testing",
 ]
 
 [[package]]

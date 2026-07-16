@@ -15,8 +15,13 @@
 //! for the pure / effectful / compile-only recipes.
 
 pub mod compare;
+pub mod dispatch;
 pub mod eval_harness;
 pub mod gen;
+pub mod haskell_suite;
+pub mod jit_run;
 pub mod oracle;
 pub mod proptest;
 pub mod watchdog;
+
+pub use dispatch::NullDispatcher;

@@ -18,3 +18,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 # ISO-8601/RFC-3339 timestamp parsing for the `ParseISO8601` primop. No default
 # features (no clock/tz — we only parse), just `alloc` for error strings.
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Dev-dep cycle (tidepool-testing depends on this crate) — legal in Cargo;
+# gives the suite tests the shared fixture loader.
+tidepool-testing = { path = "../tidepool-testing" }
