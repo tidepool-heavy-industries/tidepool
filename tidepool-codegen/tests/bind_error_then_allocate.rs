@@ -34,8 +34,11 @@ use tidepool_repr::datacon::DataCon;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
-/// Payload constructor `C1 :: Int -> T` (arity 1), as in `converge_proof.rs`.
-const C1: DataConId = DataConId(1);
+#[path = "support/session_scaffold.rs"]
+mod session_scaffold;
+use session_scaffold::{build_gc_forcing_fragment, build_reference_fragment, build_value_fragment};
+use session_scaffold::{expect_int, C1};
+
 /// The value actually constructed by the error fragment's scrutinee (arity 0).
 const ERR_SCRUT: DataConId = DataConId(60);
 /// The case's lone alternative — deliberately a DIFFERENT tag than `ERR_SCRUT`,
@@ -72,18 +75,6 @@ fn table() -> DataConTable {
     table
 }
 
-/// `C1 n` — a plain bindable value fragment (identical shape to
-/// `converge_proof.rs::build_value_fragment`).
-fn build_value_fragment(n: i64) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let lit = b.push(CoreFrame::Lit(Literal::LitInt(n)));
-    b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![lit],
-    });
-    b.build()
-}
-
 /// `case ErrScrut of { ErrAlt -> 0 }` — the scrutinee's tag matches no
 /// alternative: a genuine runtime case-miss trap (`RuntimeError::CaseTrap`),
 /// not a compile-time or test-construction error. Mirrors the `head []`
@@ -105,84 +96,6 @@ fn build_error_fragment() -> CoreExpr {
         }],
     });
     b.build()
-}
-
-/// `case x of C1 n -> n` — resolves a tenured session value via the seeded
-/// external binder `x` (identical shape to `converge_proof.rs`).
-fn build_reference_fragment(x: VarId) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let body = b.push(CoreFrame::Var(VarId(11)));
-    let scrut = b.push(CoreFrame::Var(x));
-    b.push(CoreFrame::Case {
-        scrutinee: scrut,
-        binder: VarId(10),
-        alts: vec![Alt {
-            con: AltCon::DataAlt(C1),
-            binders: vec![VarId(11)],
-            body,
-        }],
-    });
-    b.build()
-}
-
-/// A heavy allocator that overflows a tiny nursery, forcing a real GC (and
-/// likely heap growth) — identical shape to
-/// `converge_proof.rs::build_gc_forcing_fragment`. Used to push
-/// `session.cursor` to a high-water mark relative to a GROWN buffer BEFORE
-/// the error turn, so a stale-cursor-against-the-original-small-nursery bug
-/// would be observable rather than coincidentally in-bounds.
-fn build_gc_forcing_fragment(depth: usize) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let var_x = b.push(CoreFrame::Var(VarId(0)));
-    let g1_rhs = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_x],
-    });
-    let var_g1 = b.push(CoreFrame::Var(VarId(1)));
-    let g2_rhs = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_g1],
-    });
-    let final_con = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_x],
-    });
-    let let_g2 = b.push(CoreFrame::LetNonRec {
-        binder: VarId(2),
-        rhs: g2_rhs,
-        body: final_con,
-    });
-    let let_g1 = b.push(CoreFrame::LetNonRec {
-        binder: VarId(1),
-        rhs: g1_rhs,
-        body: let_g2,
-    });
-    let lam_x = b.push(CoreFrame::Lam {
-        binder: VarId(0),
-        body: let_g1,
-    });
-    let mut current = b.push(CoreFrame::Lit(Literal::LitInt(42)));
-    for _ in 0..depth {
-        let f_var = b.push(CoreFrame::Var(VarId(99)));
-        current = b.push(CoreFrame::App {
-            fun: f_var,
-            arg: current,
-        });
-    }
-    b.push(CoreFrame::LetRec {
-        bindings: vec![(VarId(99), lam_x)],
-        body: current,
-    });
-    b.build()
-}
-
-fn expect_int(v: &tidepool_eval::value::Value) -> i64 {
-    use tidepool_eval::value::Value;
-    match v {
-        Value::Lit(Literal::LitInt(n)) => *n,
-        Value::Con(_, fields) if fields.len() == 1 => expect_int(&fields[0]),
-        other => panic!("expected an Int result, got {other:?}"),
-    }
 }
 
 /// `x <- pure (head ([] :: [Int]))` (error turn) followed by an allocating

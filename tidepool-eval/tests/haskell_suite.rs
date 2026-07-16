@@ -11,14 +11,9 @@
 #![allow(clippy::approx_constant)]
 
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, Value, VecHeap};
-use tidepool_repr::serial::read::{read_cbor, read_metadata};
+use tidepool_repr::serial::read::read_cbor;
 use tidepool_repr::{DataConTable, Literal};
-
-static META: &[u8] = include_bytes!("../../haskell/test/suite_cbor/meta.cbor");
-
-fn table() -> DataConTable {
-    read_metadata(META).unwrap().0
-}
+use tidepool_testing::haskell_suite::suite_table as table;
 
 fn eval_fixture(cbor: &[u8]) -> Value {
     let expr = read_cbor(cbor).unwrap();

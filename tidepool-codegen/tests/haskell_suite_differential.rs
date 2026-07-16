@@ -11,15 +11,9 @@ use tidepool_codegen::host_fns;
 use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
-use tidepool_repr::serial::read::{read_cbor, read_metadata};
-use tidepool_repr::*;
+use tidepool_repr::serial::read::read_cbor;
 use tidepool_testing::compare;
-
-static META: &[u8] = include_bytes!("../../haskell/test/suite_cbor/meta.cbor");
-
-fn table() -> DataConTable {
-    read_metadata(META).unwrap().0
-}
+use tidepool_testing::haskell_suite::suite_table as table;
 
 /// Fixtures to skip — known to use features the JIT doesn't support for
 /// standalone execution (e.g., unresolved external bindings, string ops).

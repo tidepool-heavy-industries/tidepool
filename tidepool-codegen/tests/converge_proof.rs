@@ -23,10 +23,15 @@
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::datacon::DataCon;
-use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, VarId};
+use tidepool_repr::types::{DataConId, Literal, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
 use serial_test::serial;
+
+#[path = "support/session_scaffold.rs"]
+mod session_scaffold;
+use session_scaffold::{build_gc_forcing_fragment, build_reference_fragment, build_value_fragment};
+use session_scaffold::{expect_int, C1};
 
 // ─── freer-simple constructor IDs for effectful-bind tests ──────────────────
 // These must match the qualified names that ConTags::from_table looks up.
@@ -144,9 +149,6 @@ fn external_var_id(key: u64) -> VarId {
     VarId((EXTERNAL_TAG << 56) | (key & ((1u64 << 56) - 1)))
 }
 
-/// The data constructor `C1 :: Int -> T` (arity 1) shared by all fragments.
-const C1: DataConId = DataConId(1);
-
 /// A DataConTable with `C1`. (ConTags/EffCont entries are unnecessary — every
 /// fragment here runs through the *pure* path, which never consults them.)
 fn table_with_c1() -> DataConTable {
@@ -160,94 +162,6 @@ fn table_with_c1() -> DataConTable {
         qualified_name: None,
     });
     table
-}
-
-/// fragment-1: `C1 n` — builds the bound value (a Con wrapping a boxed Int).
-fn build_value_fragment(n: i64) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let lit = b.push(CoreFrame::Lit(Literal::LitInt(n)));
-    b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![lit],
-    });
-    b.build()
-}
-
-/// fragment-2: `case x of C1 n -> n` — x is the seeded external session binder.
-/// Resolves the tenured value built by fragment-1 and projects its field.
-fn build_reference_fragment(x: VarId) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let body = b.push(CoreFrame::Var(VarId(11))); // the bound field `n`
-    let scrut = b.push(CoreFrame::Var(x)); // the session binder `x`
-    b.push(CoreFrame::Case {
-        scrutinee: scrut,
-        binder: VarId(10), // case-scrutinee binder (unused)
-        alts: vec![Alt {
-            con: AltCon::DataAlt(C1),
-            binders: vec![VarId(11)],
-            body,
-        }],
-    });
-    b.build()
-}
-
-/// A heavy allocator: `let rec f = \x -> let g1 = C1 x; g2 = C1 g1 in C1 x
-/// in f (f (… (42)))` applied `depth` times — eagerly builds ~3·depth Cons,
-/// overflowing a small session nursery and forcing a real minor GC. (Mirrors
-/// the `make_gc_forcing_setup` helper used by the 1.A seam test.)
-fn build_gc_forcing_fragment(depth: usize) -> CoreExpr {
-    let mut b = TreeBuilder::new();
-    let var_x = b.push(CoreFrame::Var(VarId(0)));
-    let g1_rhs = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_x],
-    });
-    let var_g1 = b.push(CoreFrame::Var(VarId(1)));
-    let g2_rhs = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_g1],
-    });
-    let final_con = b.push(CoreFrame::Con {
-        tag: C1,
-        fields: vec![var_x],
-    });
-    let let_g2 = b.push(CoreFrame::LetNonRec {
-        binder: VarId(2),
-        rhs: g2_rhs,
-        body: final_con,
-    });
-    let let_g1 = b.push(CoreFrame::LetNonRec {
-        binder: VarId(1),
-        rhs: g1_rhs,
-        body: let_g2,
-    });
-    let lam_x = b.push(CoreFrame::Lam {
-        binder: VarId(0),
-        body: let_g1,
-    });
-    let mut current = b.push(CoreFrame::Lit(Literal::LitInt(42)));
-    for _ in 0..depth {
-        let f_var = b.push(CoreFrame::Var(VarId(99)));
-        current = b.push(CoreFrame::App {
-            fun: f_var,
-            arg: current,
-        });
-    }
-    b.push(CoreFrame::LetRec {
-        bindings: vec![(VarId(99), lam_x)],
-        body: current,
-    });
-    b.build()
-}
-
-/// Extract an `Int` from a pure-run result Value (Lit or 1-arg Con wrapping one).
-fn expect_int(v: &tidepool_eval::value::Value) -> i64 {
-    use tidepool_eval::value::Value;
-    match v {
-        Value::Lit(Literal::LitInt(n)) => *n,
-        Value::Con(_, fields) if fields.len() == 1 => expect_int(&fields[0]),
-        other => panic!("expected an Int result, got {other:?}"),
-    }
 }
 
 /// Basic converge proof: a second fragment JITed into a live session machine

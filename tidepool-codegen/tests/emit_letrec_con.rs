@@ -5,50 +5,16 @@
 //! The codegen must pre-allocate both Con and Lam objects, bind them in env,
 //! then fill fields/code-ptrs in a second pass.
 
-use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
-use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
+use tidepool_testing::jit_run::JitRun;
 
-struct TestResult {
-    result_ptr: *const u8,
-    _nursery: Vec<u8>,
-    _pipeline: CodegenPipeline,
-    // Boxed so its address stays stable across the move out of
-    // `compile_and_run` — `vmctx.machine_state` points at its heap allocation.
-    _machine_state: Box<MachineState>,
-}
-
-fn compile_and_run(tree: &CoreExpr) -> TestResult {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new())
-        .expect("compile_expr failed");
-    pipeline.finalize().expect("failed to finalize");
-
-    let mut nursery = vec![0u8; 65536];
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(nursery.len()) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-    let machine_state = Box::new(MachineState::new());
-    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
-
-    machine_state.set_gc_state(start, nursery.len());
-    machine_state.set_stack_map_registry(&pipeline.stack_maps);
-
-    let ptr = pipeline.get_function_ptr(func_id);
-    let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
-    let result = unsafe { func(&mut vmctx as *mut VMContext) };
-
-    TestResult {
-        result_ptr: result as *const u8,
-        _nursery: nursery,
-        _pipeline: pipeline,
-        _machine_state: machine_state,
-    }
+fn compile_and_run(tree: &CoreExpr) -> JitRun {
+    tidepool_testing::jit_run::compile_and_run(tree, 65536)
 }
 
 unsafe fn read_lit_int(ptr: *const u8) -> i64 {

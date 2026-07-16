@@ -2,76 +2,36 @@
 // not as math constants.
 #![allow(clippy::approx_constant)]
 
-use tidepool_codegen::context::VMContext;
-use tidepool_codegen::emit::expr::compile_expr;
-use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::host_fns;
-use tidepool_codegen::machine_state::MachineState;
-use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
+use tidepool_testing::jit_run::{read_lit_double, read_lit_float, read_lit_int, JitRun};
 
+/// Wraps the shared `JitRun` to add teardown of the process-global GC/stack-map
+/// state on drop — this file's `test_emit_primop_*` functions run in bulk in one
+/// process and previously left `machine_state` (and the vmctx pointer into it)
+/// dangling after each test's nursery `Vec` was freed, unlike the other
+/// `emit_*` lanes which never explicitly cleared it.
 struct TestResult {
     result_ptr: *const u8,
-    _vmctx: VMContext,
-    _nursery: Vec<u8>,
-    _pipeline: CodegenPipeline,
-    // Boxed so its address stays stable across the move out of
-    // `compile_and_run` — `_vmctx.machine_state` points at its heap allocation.
-    machine_state: Box<MachineState>,
+    run: JitRun,
 }
 
 impl Drop for TestResult {
     fn drop(&mut self) {
-        self.machine_state.clear_gc_state();
-        self.machine_state.clear_stack_map_registry();
+        unsafe {
+            (*self.run.vmctx.machine_state).clear_gc_state();
+            (*self.run.vmctx.machine_state).clear_stack_map_registry();
+        }
     }
 }
 
 /// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new())
-        .expect("compile_expr failed");
-    pipeline.finalize().expect("failed to finalize");
-
-    let mut nursery = vec![0u8; 65536]; // 64KB nursery
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(nursery.len()) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-    let machine_state = Box::new(MachineState::new());
-    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
-
-    machine_state.set_gc_state(start, nursery.len());
-    machine_state.set_stack_map_registry(&pipeline.stack_maps);
-
-    let ptr = pipeline.get_function_ptr(func_id);
-    let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
-    let result = unsafe { func(&mut vmctx as *mut VMContext) };
-
+    let run = tidepool_testing::jit_run::compile_and_run(tree, 65536);
     TestResult {
-        result_ptr: result as *const u8,
-        _vmctx: vmctx,
-        _nursery: nursery,
-        _pipeline: pipeline,
-        machine_state,
+        result_ptr: run.result_ptr,
+        run,
     }
-}
-
-/// Helper: read i64 value from a LitObject.
-unsafe fn read_lit_int(ptr: *const u8) -> i64 {
-    assert_eq!(layout::read_tag(ptr), layout::TAG_LIT);
-    *(ptr.add(16) as *const i64)
-}
-
-unsafe fn read_lit_double(ptr: *const u8) -> f64 {
-    assert_eq!(layout::read_tag(ptr), layout::TAG_LIT);
-    f64::from_bits(*(ptr.add(16) as *const u64))
-}
-
-unsafe fn read_lit_float(ptr: *const u8) -> f32 {
-    assert_eq!(layout::read_tag(ptr), layout::TAG_LIT);
-    f32::from_bits(*(ptr.add(16) as *const u32))
 }
 
 unsafe fn read_lit_word(ptr: *const u8) -> u64 {

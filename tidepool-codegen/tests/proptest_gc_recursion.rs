@@ -41,7 +41,6 @@
 //! from `tidepool_testing::proptest` as the differential oracle and only adds
 //! its own allocation-shape generators (no edits to shared `strategy.rs`).
 
-use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use proptest::prelude::*;
@@ -79,14 +78,15 @@ use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval, values_equal};
 
+#[path = "support/gc_scaffold.rs"]
+mod gc_scaffold;
+use gc_scaffold::{fixup_root, fresh_var, push_pairtree, push_pairtree_sum, push_spine};
+use gc_scaffold::{reset_ctr as reset_ctrs, CONS, I_HASH, NIL, PAIR};
+
 // ---------------------------------------------------------------------------
 // Standard DataCon tags (must match `standard_datacon_table` in tidepool-testing).
 // ---------------------------------------------------------------------------
 const JUST: DataConId = DataConId(1);
-const PAIR: DataConId = DataConId(4);
-const NIL: DataConId = DataConId(5); // []
-const CONS: DataConId = DataConId(6); // :
-const I_HASH: DataConId = DataConId(7); // I# single-field Int box wrapper
 
 // ---------------------------------------------------------------------------
 // Nursery ladder.
@@ -118,7 +118,7 @@ fn bump(c: &AtomicU64) {
 }
 
 // ---------------------------------------------------------------------------
-// Fresh VarId supply (per-program, thread-local).
+// Fresh VarId supply (per-program, thread-local; shared via `gc_scaffold`).
 //
 // All recursion in this lane is expressed via self-recursive `LetRec` lambdas
 // (NOT join points): the tree-walking interpreter — the differential oracle —
@@ -127,40 +127,11 @@ fn bump(c: &AtomicU64) {
 // so a join-based loop would be silently SKIPPED by `check_jit_vs_eval` rather
 // than compared. A `LetRec` of a curried lambda is run by BOTH engines (the JIT
 // still tail-call-optimizes it, PR #154), keeping the differential live.
-// ---------------------------------------------------------------------------
-thread_local! {
-    static VAR_CTR: Cell<u64> = const { Cell::new(0) };
-}
-fn reset_ctrs() {
-    VAR_CTR.with(|c| c.set(1000));
-}
-fn fresh_var() -> VarId {
-    VAR_CTR.with(|c| {
-        let v = c.get();
-        c.set(v + 1);
-        VarId(v)
-    })
-}
-
-// ---------------------------------------------------------------------------
+//
 // Root fixup: eval/compile treat the LAST node as the root. Nested helpers can
 // append children after the structural parent, so guarantee the root is last by
 // wrapping it in `let v = <root> in v` when needed.
 // ---------------------------------------------------------------------------
-fn fixup_root(tree: &mut CoreExpr, root: usize) -> CoreExpr {
-    if root == tree.nodes.len() - 1 {
-        return tree.clone();
-    }
-    let binder = fresh_var();
-    let var_idx = tree.nodes.len();
-    tree.nodes.push(CoreFrame::Var(binder));
-    tree.nodes.push(CoreFrame::LetNonRec {
-        binder,
-        rhs: root,
-        body: var_idx,
-    });
-    tree.clone()
-}
 
 // ---------------------------------------------------------------------------
 // Shared GC-pressure oracle.
@@ -260,22 +231,6 @@ fn arb_consspine() -> impl Strategy<Value = ConsSpineSpec> {
         ],
     )
         .prop_map(|(elems, consumer)| ConsSpineSpec { elems, consumer })
-}
-
-/// Build a literal cons-spine `e0 : e1 : ... : []`, return its root index.
-fn push_spine(b: &mut TreeBuilder, elems: &[i64]) -> usize {
-    let mut tail = b.push(CoreFrame::Con {
-        tag: NIL,
-        fields: vec![],
-    });
-    for &e in elems.iter().rev() {
-        let head = b.push(CoreFrame::Lit(Literal::LitInt(e)));
-        tail = b.push(CoreFrame::Con {
-            tag: CONS,
-            fields: vec![head, tail],
-        });
-    }
-    tail
 }
 
 /// How the cons-arm combines the accumulator with the head element.
@@ -579,50 +534,6 @@ fn arb_bigcon() -> impl Strategy<Value = BigConSpec> {
         prop::collection::vec(-1000i64..1000, 4..300)
             .prop_map(|elems| BigConSpec::LongSpine { elems }),
     ]
-}
-
-/// Build a balanced Pair-tree of `depth` over `leaves` (must be 2^depth long).
-/// Returns the root index of the tree.
-fn push_pairtree(b: &mut TreeBuilder, depth: u32, leaves: &[i64]) -> usize {
-    if depth == 0 {
-        return b.push(CoreFrame::Lit(Literal::LitInt(leaves[0])));
-    }
-    let half = leaves.len() / 2;
-    let l = push_pairtree(b, depth - 1, &leaves[..half]);
-    let r = push_pairtree(b, depth - 1, &leaves[half..]);
-    b.push(CoreFrame::Con {
-        tag: PAIR,
-        fields: vec![l, r],
-    })
-}
-
-/// Build a checksum walk over a balanced Pair-tree of `depth` rooted at `tree`,
-/// folding all leaves into a single Int# sum. Unrolled (depth small) so it stays
-/// total and ground without recursion.
-fn push_pairtree_sum(b: &mut TreeBuilder, depth: u32, tree: usize) -> usize {
-    if depth == 0 {
-        return tree;
-    }
-    let case_binder = fresh_var();
-    let l = fresh_var();
-    let r = fresh_var();
-    let l_v = b.push(CoreFrame::Var(l));
-    let l_sum = push_pairtree_sum(b, depth - 1, l_v);
-    let r_v = b.push(CoreFrame::Var(r));
-    let r_sum = push_pairtree_sum(b, depth - 1, r_v);
-    let sum = b.push(CoreFrame::PrimOp {
-        op: PrimOpKind::IntAdd,
-        args: vec![l_sum, r_sum],
-    });
-    b.push(CoreFrame::Case {
-        scrutinee: tree,
-        binder: case_binder,
-        alts: vec![Alt {
-            con: AltCon::DataAlt(PAIR),
-            binders: vec![l, r],
-            body: sum,
-        }],
-    })
 }
 
 fn build_bigcon(spec: &BigConSpec) -> CoreExpr {
