@@ -8,8 +8,6 @@
 //!
 //! Requires `TIDEPOOL_EXTRACT` (GHC→Core extractor); skips cleanly otherwise.
 
-mod common;
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -35,7 +33,7 @@ fn watchdog_cancels_pure_runaway_via_on_ready_handle() {
         eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
-    let pp = common::prelude_path();
+    let pp = tidepool_testing::eval_harness::prelude_path();
     let include: Vec<&Path> = vec![pp.as_path()];
     let mut handlers = frunk::hlist![];
 

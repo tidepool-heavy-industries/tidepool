@@ -17,30 +17,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tidepool_effect::dispatch::EffectContext;
-use tidepool_effect::error::EffectError;
-use tidepool_effect::{DispatchEffect, Response};
-use tidepool_eval::value::Value;
 use tidepool_runtime::session::{
     EngineConfig, OutputSink, RenderPolicy, Retention, SessionEngine, StartTurn, TurnOutcome,
 };
 use tidepool_runtime::FailureClass;
-
-/// Never invoked — the fixture program raises no effects. Present only so the
-/// full effectful preamble type-checks (mirrors `jit_surface.rs`'s `NullDispatcher`).
-#[derive(Clone)]
-struct NullDispatcher;
-
-impl DispatchEffect<TestSink> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
+use tidepool_testing::NullDispatcher;
 
 #[derive(Clone, Default)]
 struct TestSink {

@@ -3,17 +3,10 @@
 //! tail thunks, instead of eagerly converting (and previously, dying on the
 //! response node cap).
 
-use std::path::PathBuf;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
+use tidepool_testing::eval_harness::user_lib_dir;
 use tidepool_testing::eval_harness::EvalHarness;
-
-fn user_lib_dir() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
-}
 
 /// Responds to EVERY effect with a large list of strings — stands in for a
 /// handler returning tens of thousands of items (the eval calls `kvKeys`, an

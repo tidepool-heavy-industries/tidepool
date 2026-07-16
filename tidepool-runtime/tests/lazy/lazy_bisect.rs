@@ -10,17 +10,10 @@
 //!   B: toJSON (take 3 xs)         → partial consumption, no paginateResult
 //!   C: paginateResult (template)  → the full MCP template shape
 
-use std::path::PathBuf;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
+use tidepool_testing::eval_harness::user_lib_dir;
 use tidepool_testing::eval_harness::EvalHarness;
-
-fn user_lib_dir() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
-}
 
 struct BigListDispatcher {
     n: usize,
