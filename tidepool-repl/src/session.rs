@@ -3456,8 +3456,10 @@ mod reset_tests {
             tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
         let prelude_dir = tidepool_testing::eval_harness::prelude_path();
         let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
-        let preamble = crate::truncate::passthrough_paginate(
-            &tidepool_mcp::build_preamble_non_interactive(&decls, false),
+        let preamble = tidepool_mcp::build_preamble_non_interactive_mode(
+            &decls,
+            false,
+            tidepool_mcp::PaginateMode::Passthrough,
         );
         let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
 

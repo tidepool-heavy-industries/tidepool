@@ -590,25 +590,51 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out
 }
 
+/// Result-pagination mode selecting which `paginateResult` alias body a
+/// preamble emits — see [`build_preamble_non_interactive_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginateMode {
+    /// Ask-suspend on an oversized result (`paginateInteractive`) when the
+    /// stack carries `Ask`; falls back to the `Truncate` target otherwise.
+    /// Used by [`build_preamble`] (interactive eval).
+    Interactive,
+    /// Haskell-side truncation (`paginateTrunc`) — the non-interactive
+    /// default. Used by [`build_preamble_non_interactive`].
+    Truncate,
+    /// No Haskell-side truncation (`paginateResult _ v = pure v`): the full
+    /// value reaches Rust untouched. Used by `tidepool-repl` via
+    /// [`build_preamble_non_interactive_mode`] — its Rust-side truncation
+    /// (`truncate::truncate_result`) can stash the elided subtrees for
+    /// `:stub <n>`, which Haskell-side truncation discards.
+    Passthrough,
+}
+
 /// Emit the mode-selected `paginateResult` alias into the eval expr module.
 /// `Tidepool.Orchestrate` exports `paginateInteractive` and/or `paginateTrunc`;
 /// the result wrapper in `eval_prep.rs` calls `paginateResult`, so the expr
-/// module aliases one of them by mode. Interactive eval with an `Ask` effect
-/// suspends (`paginateInteractive`); the repl + every Ask-less stack truncates
-/// (`paginateTrunc`, always emitted for a non-empty stack). Emitted only when
-/// the stack has effects — `M`/`paginateResult` are otherwise unused.
-fn paginate_alias(out: &mut String, effects: &[EffectDecl], interactive: bool) {
+/// module aliases one of them by mode (or, for [`PaginateMode::Passthrough`],
+/// binds a local pass-through instead of aliasing an `Orchestrate` export).
+/// Emitted only when the stack has effects — `M`/`paginateResult` are
+/// otherwise unused.
+fn paginate_alias(out: &mut String, effects: &[EffectDecl], mode: PaginateMode) {
     if effects.is_empty() {
         return;
     }
-    let has_ask = effects.iter().any(|e| e.type_name == "Ask");
-    let target = if interactive && has_ask {
-        "paginateInteractive"
-    } else {
-        "paginateTrunc"
-    };
     out.push_str("paginateResult :: Int -> Value -> M Value\n");
-    out.push_str(&format!("paginateResult = {target}\n"));
+    match mode {
+        PaginateMode::Passthrough => {
+            out.push_str("paginateResult _ v = pure v\n");
+        }
+        PaginateMode::Interactive | PaginateMode::Truncate => {
+            let has_ask = effects.iter().any(|e| e.type_name == "Ask");
+            let target = if mode == PaginateMode::Interactive && has_ask {
+                "paginateInteractive"
+            } else {
+                "paginateTrunc"
+            };
+            out.push_str(&format!("paginateResult = {target}\n"));
+        }
+    }
     out.push('\n');
 }
 
@@ -619,18 +645,31 @@ fn paginate_alias(out: &mut String, effects: &[EffectDecl], interactive: bool) {
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
     pragmas_and_imports(&mut out, effects, user_library);
-    paginate_alias(&mut out, effects, true);
+    paginate_alias(&mut out, effects, PaginateMode::Interactive);
     out
 }
 
 /// Like [`build_preamble`] but with non-interactive (truncate-only) pagination:
 /// oversized results are truncated in-place with a marker instead of suspending
-/// via `ask`. Used by `tidepool-repl` where bindings persist across turns and
-/// the caller can re-query a truncated result by its bound name.
+/// via `ask`. Used where bindings persist across turns and the caller can
+/// re-query a truncated result by its bound name. Always [`PaginateMode::Truncate`]
+/// — see [`build_preamble_non_interactive_mode`] for other modes.
 pub fn build_preamble_non_interactive(effects: &[EffectDecl], user_library: bool) -> String {
+    build_preamble_non_interactive_mode(effects, user_library, PaginateMode::Truncate)
+}
+
+/// Like [`build_preamble_non_interactive`], with an explicit [`PaginateMode`].
+/// `tidepool-repl` calls this directly with [`PaginateMode::Passthrough`] so the
+/// full result reaches Rust, instead of string-patching the `Truncate`-mode
+/// output after the fact.
+pub fn build_preamble_non_interactive_mode(
+    effects: &[EffectDecl],
+    user_library: bool,
+    mode: PaginateMode,
+) -> String {
     let mut out = String::new();
     pragmas_and_imports(&mut out, effects, user_library);
-    paginate_alias(&mut out, effects, false);
+    paginate_alias(&mut out, effects, mode);
     out
 }
 

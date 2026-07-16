@@ -20,19 +20,11 @@ use common::*;
 use tidepool_handlers::{base_decls_with_ask, build_base_stack, HandlerConfig};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-/// Repo root (the workspace directory readGlob/gitLog run against).
-fn repo_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 /// Build a repl server over the FULL base handler stack (Fs/Git/Exec/…),
 /// sandboxed at the repo root, with the harness's small 2 MiB nursery.
 /// Must be called inside a tokio runtime (LlmHandler captures the handle).
 fn build_full_stack_repl() -> Repl {
-    let root = repo_root();
+    let root = tidepool_testing::eval_harness::repo_root();
     let scratch = std::env::temp_dir().join(format!(
         "tidepool-gc-field-replay-{}-{}",
         std::process::id(),

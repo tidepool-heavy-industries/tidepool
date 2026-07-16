@@ -12,57 +12,7 @@
 
 mod common;
 
-use std::path::PathBuf;
-
-use rmcp::model::{CallToolResult, RawContent};
-use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
-use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-
-use common::extract_available;
-
-fn text_of(res: &CallToolResult) -> String {
-    match &res.content[0].raw {
-        RawContent::Text(t) => t.text.clone(),
-        other => panic!("expected text content, got {other:?}"),
-    }
-}
-
-fn build_server() -> TidepoolReplServer {
-    let stack = build_minimal_stack();
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
-    let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
-    let prelude_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .join("haskell")
-        .join("lib");
-    let session_root_base = std::env::temp_dir().join(format!(
-        "tidepool-repl-test-{}-{}",
-        std::process::id(),
-        // a per-test-run nonce so reruns don't collide on stale Lib.G<g> files
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    // NOT `ModuleEnv::standalone_default()` (see tests/common/mod.rs): decl-plane
-    // pure binds need the same Prelude/Aeson surface production always has,
-    // even under this minimal (Console-only) stack.
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
-    let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
-        base_include: vec![effects_dir, prelude_dir],
-        module_env,
-        session_root_base,
-        nursery_size: None,
-        continuation_ttl: None,
-        wedged_ttl: None,
-        turn_timeout: None,
-    };
-    TidepoolReplServer::new(stack, cfg)
-}
+use common::{build_server_with_nursery, extract_available, text_of};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_multi_turn_real_path() {
@@ -73,7 +23,7 @@ async fn session_multi_turn_real_path() {
         return;
     }
     let repl = common::Repl {
-        server: build_server(),
+        server: build_server_with_nursery(None, None, None),
     };
 
     // 1. define `slug` (Lane A → Tidepool.Session.Lib.G1) — auto-opens the session.
@@ -120,7 +70,7 @@ async fn reset_from_cold_start_then_run() {
         return;
     }
     let repl = common::Repl {
-        server: build_server(),
+        server: build_server_with_nursery(None, None, None),
     };
     // reset as the FIRST call (no session yet) must succeed and leave a fresh,
     // runnable session behind.

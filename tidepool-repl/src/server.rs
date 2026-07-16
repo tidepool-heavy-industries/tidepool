@@ -204,16 +204,17 @@ fn has_user_library(cfg: &ReplServerConfig) -> bool {
         .any(|d| d.join("Library.hs").exists())
 }
 
-/// The repl's eval preamble: non-interactive pagination, with the Haskell-side
-/// `paginateResult` truncation patched to a pass-through so oversized results
-/// reach Rust in full and are truncated by [`crate::truncate::truncate_result`]
-/// instead — which can stash the elided subtrees for `:stub <n>` (the Haskell
-/// truncation discarded them, leaving `stub_N` markers nothing could fetch).
+/// The repl's eval preamble: non-interactive pagination in
+/// [`tidepool_mcp::PaginateMode::Passthrough`], so oversized results reach
+/// Rust in full and are truncated by [`crate::truncate::truncate_result`]
+/// instead — which can stash the elided subtrees for `:stub <n>` (Haskell-side
+/// truncation discards them, leaving `stub_N` markers nothing could fetch).
 fn repl_preamble(cfg: &ReplServerConfig) -> String {
-    crate::truncate::passthrough_paginate(&tidepool_mcp::build_preamble_non_interactive(
+    tidepool_mcp::build_preamble_non_interactive_mode(
         &cfg.decls,
         has_user_library(cfg),
-    ))
+        tidepool_mcp::PaginateMode::Passthrough,
+    )
 }
 
 /// The non-generic server core (H is erased into the `spawn` closure).
@@ -1232,3 +1233,53 @@ impl ServerHandler for TidepoolReplServer {
 /// An empty request schema — `session_reset` takes no arguments.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct EmptyRequest {}
+
+#[cfg(test)]
+mod tests {
+    /// Byte-identity check for the `Passthrough`-mode builder against the OLD
+    /// technique it replaces (string-patching the `Truncate`-mode preamble's
+    /// `paginateResult = paginateTrunc` binding line to a pass-through) — the
+    /// generated Haskell text must be identical either way.
+    #[test]
+    fn passthrough_mode_matches_the_old_string_patch() {
+        let stack = tidepool_handlers::build_minimal_stack();
+        let (decls, _ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
+
+        let truncate_mode = tidepool_mcp::build_preamble_non_interactive(&decls, false);
+        let old_style_patch = truncate_mode.replacen(
+            "paginateResult = paginateTrunc\n",
+            "paginateResult _ v = pure v\n",
+            1,
+        );
+
+        let passthrough_mode = tidepool_mcp::build_preamble_non_interactive_mode(
+            &decls,
+            false,
+            tidepool_mcp::PaginateMode::Passthrough,
+        );
+
+        assert_ne!(
+            old_style_patch, truncate_mode,
+            "sanity: the patch must actually have changed something"
+        );
+        assert_eq!(
+            old_style_patch, passthrough_mode,
+            "PaginateMode::Passthrough must produce byte-identical output to the \
+             old post-hoc string patch"
+        );
+    }
+
+    /// Empty effect stack ⇒ no `paginateResult` alias emitted in EITHER mode
+    /// (mirrors the old `passthrough_is_noop_without_alias` coverage).
+    #[test]
+    fn passthrough_mode_is_noop_without_alias() {
+        let truncate_mode = tidepool_mcp::build_preamble_non_interactive(&[], false);
+        assert!(!truncate_mode.contains("paginateResult"));
+        let passthrough_mode = tidepool_mcp::build_preamble_non_interactive_mode(
+            &[],
+            false,
+            tidepool_mcp::PaginateMode::Passthrough,
+        );
+        assert_eq!(passthrough_mode, truncate_mode);
+    }
+}

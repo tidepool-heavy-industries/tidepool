@@ -8,7 +8,9 @@
 #![allow(dead_code)]
 
 use rmcp::model::{CallToolResult, RawContent};
-use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
+use tidepool_handlers::{
+    base_decls_with_ask, build_base_stack, build_minimal_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
+};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 /// True if the session-aware `tidepool-extract` is reachable (else the suite
@@ -56,6 +58,18 @@ pub fn build_server_full(
     continuation_ttl: Option<std::time::Duration>,
     turn_timeout: Option<std::time::Duration>,
 ) -> TidepoolReplServer {
+    build_server_with_nursery(Some(1 << 21), continuation_ttl, turn_timeout)
+}
+
+/// As [`build_server_full`], with an explicit nursery size override (`None` ⇒
+/// the session's default/unbounded nursery — no forced organic GC). Used by
+/// the wave-2 multi-turn acceptance suite, which isn't exercising GC stress
+/// and wants the default nursery instead of the 2 MiB hardening size.
+pub fn build_server_with_nursery(
+    nursery_size: Option<usize>,
+    continuation_ttl: Option<std::time::Duration>,
+    turn_timeout: Option<std::time::Duration>,
+) -> TidepoolReplServer {
     let stack = build_minimal_stack();
     let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
@@ -85,7 +99,7 @@ pub fn build_server_full(
         base_include: vec![effects_dir, prelude_dir],
         module_env,
         session_root_base,
-        nursery_size: Some(1 << 21), // 2 MiB
+        nursery_size,
         continuation_ttl,
         // Mirror the suspended TTL so tests exercising either reap arm (H2
         // suspended, H3 wedged) keep the historical one-knob behavior.
@@ -93,6 +107,120 @@ pub fn build_server_full(
         turn_timeout,
     };
     TidepoolReplServer::new(stack, cfg)
+}
+
+/// Build a server with the FULL effect stack (Fs/Git/Exec/KV/Http/Llm/…),
+/// rooted at `cwd` so Fs/Exec/KV operate in an isolated sandbox.
+/// `session_root_label` distinguishes the tempdir prefix per calling suite
+/// (`tidepool-repl-<label>-<pid>-<nonce>`, purely cosmetic). `include_project_lib`
+/// mirrors production (`.tidepool/lib` on the include path, `Library`
+/// auto-imported) when true and the dir exists; the `it`-binding suite doesn't
+/// need it.
+pub fn build_full_server(
+    cwd: std::path::PathBuf,
+    session_root_label: &str,
+    include_project_lib: bool,
+) -> TidepoolReplServer {
+    let kv_path = cwd.join("kv.json");
+    let handler_cfg = HandlerConfig {
+        cwd,
+        kv_path,
+        llm_model: DEFAULT_OPENAI_MODEL.to_string(),
+    };
+    let stack = build_base_stack(&handler_cfg);
+    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let effects_dir =
+        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+    let repo_root = tidepool_testing::eval_harness::repo_root();
+    let prelude_dir = repo_root.join("haskell").join("lib");
+    let mut base_include = vec![effects_dir, prelude_dir];
+    if include_project_lib {
+        let project_lib = repo_root.join(".tidepool").join("lib");
+        if project_lib.is_dir() {
+            base_include.push(project_lib);
+        }
+    }
+    let session_root_base = std::env::temp_dir().join(format!(
+        "tidepool-repl-{session_root_label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+    let cfg = ReplServerConfig {
+        decls,
+        ask_tag,
+        base_include,
+        module_env,
+        session_root_base,
+        nursery_size: None,
+        continuation_ttl: None,
+        wedged_ttl: None,
+        turn_timeout: None,
+    };
+    TidepoolReplServer::new(stack, cfg)
+}
+
+/// Dispatch a 1-item `session_run` block and unwrap `items[0]` from the slim
+/// block envelope. Returns `(is_error, result_text)`, where `result_text` is
+/// the item's inline result fields (excluding `kind`/`ok`) merged with the
+/// top-level `value`/`type`/`truncated` from the slim shape.
+pub async fn run_single(
+    server: &TidepoolReplServer,
+    item: &str,
+    input: Option<serde_json::Value>,
+) -> (bool, String) {
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "items".into(),
+        serde_json::Value::Array(vec![serde_json::Value::String(item.to_string())]),
+    );
+    if let Some(inp) = input {
+        args.insert("input".into(), inp);
+    }
+    let r = server
+        .dispatch_tool("session_run", args)
+        .await
+        .expect("session_run dispatch");
+    let raw = text_of(&r);
+    let raw_is_error = r.is_error == Some(true);
+    let json_part = if let Some(pos) = raw.rfind("\n## Result\n") {
+        &raw[pos + "\n## Result\n".len()..]
+    } else {
+        &raw
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
+        if let Some(item0) = v.get("items").and_then(|arr| arr.get(0)) {
+            let ok = item0
+                .get("ok")
+                .and_then(|o| o.as_bool())
+                .unwrap_or(!raw_is_error);
+            let mut result = serde_json::Map::new();
+            if let Some(obj) = item0.as_object() {
+                for (k, val) in obj {
+                    if k != "kind" && k != "ok" {
+                        result.insert(k.clone(), val.clone());
+                    }
+                }
+            }
+            for key in &["value", "type", "truncated"] {
+                if let Some(val) = v.get(*key) {
+                    if !val.is_null() && !result.contains_key(*key) {
+                        result.insert(key.to_string(), val.clone());
+                    }
+                }
+            }
+            let text = if result.is_empty() {
+                raw.clone()
+            } else {
+                serde_json::Value::Object(result).to_string()
+            };
+            return (!ok, text);
+        }
+    }
+    (raw_is_error, raw)
 }
 
 /// One turn's result: the rendered text + whether it surfaced as an MCP error.

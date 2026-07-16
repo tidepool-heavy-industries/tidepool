@@ -10,136 +10,8 @@
 
 mod common;
 
-use std::path::PathBuf;
-
-use rmcp::model::{CallToolResult, RawContent};
-use tidepool_handlers::{
-    base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
-};
-use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-
-use common::extract_available;
-
-fn text_of(res: &CallToolResult) -> String {
-    match &res.content[0].raw {
-        RawContent::Text(t) => t.text.clone(),
-        other => panic!("expected text content, got {other:?}"),
-    }
-}
-
-/// Build a server with the FULL effect stack (the Wave-B default), rooted at
-/// `cwd` so Fs/Exec/KV operate in an isolated sandbox.
-fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
-    let kv_path = cwd.join("kv.json");
-    let handler_cfg = HandlerConfig {
-        cwd,
-        kv_path,
-        llm_model: DEFAULT_OPENAI_MODEL.to_string(),
-    };
-    let stack = build_base_stack(&handler_cfg);
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
-    let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .to_path_buf();
-    let prelude_dir = repo_root.join("haskell").join("lib");
-    // Project verb library (parity with production): puts `Library` on the
-    // include path so the preamble auto-imports it and `.tidepool/lib` verbs are
-    // in scope.
-    let project_lib = repo_root.join(".tidepool").join("lib");
-    let mut base_include = vec![effects_dir, prelude_dir];
-    if project_lib.is_dir() {
-        base_include.push(project_lib);
-    }
-    let session_root_base = std::env::temp_dir().join(format!(
-        "tidepool-repl-fx-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    // Match production (`main.rs`): the full-stack server gives Lane-A decls
-    // the eval pragmas+imports, so `session_def` helpers share the eval
-    // vocabulary (`M`, the effect verbs, `L.`/`Set.`, the Prelude shadows).
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
-    let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
-        base_include,
-        module_env,
-        session_root_base,
-        nursery_size: None,
-        continuation_ttl: None,
-        wedged_ttl: None,
-        turn_timeout: None,
-    };
-    TidepoolReplServer::new(stack, cfg)
-}
-
-/// Dispatch a 1-item `session_run` block and unwrap `items[0]`.
-/// Returns `(is_error, result_text)` after stripping the block envelope.
-/// `result_text` is the inline item fields (excluding `kind`/`ok`) merged
-/// with the top-level `value`/`type`/`truncated` from the slim shape.
-async fn run_single(
-    server: &TidepoolReplServer,
-    item: &str,
-    input: Option<serde_json::Value>,
-) -> (bool, String) {
-    let mut args = serde_json::Map::new();
-    args.insert(
-        "items".into(),
-        serde_json::Value::Array(vec![serde_json::Value::String(item.to_string())]),
-    );
-    if let Some(inp) = input {
-        args.insert("input".into(), inp);
-    }
-    let r = server
-        .dispatch_tool("session_run", args)
-        .await
-        .expect("session_run dispatch");
-    let raw = text_of(&r);
-    let raw_is_error = r.is_error == Some(true);
-    let json_part = if let Some(pos) = raw.rfind("\n## Result\n") {
-        &raw[pos + "\n## Result\n".len()..]
-    } else {
-        &raw
-    };
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
-        if let Some(item0) = v.get("items").and_then(|arr| arr.get(0)) {
-            let ok = item0
-                .get("ok")
-                .and_then(|o| o.as_bool())
-                .unwrap_or(!raw_is_error);
-            // Assemble result from inline item fields (excluding kind/ok)
-            // merged with top-level value/type/truncated.
-            let mut result = serde_json::Map::new();
-            if let Some(obj) = item0.as_object() {
-                for (k, val) in obj {
-                    if k != "kind" && k != "ok" {
-                        result.insert(k.clone(), val.clone());
-                    }
-                }
-            }
-            for key in &["value", "type", "truncated"] {
-                if let Some(val) = v.get(*key) {
-                    if !val.is_null() && !result.contains_key(*key) {
-                        result.insert(key.to_string(), val.clone());
-                    }
-                }
-            }
-            let text = if result.is_empty() {
-                raw.clone()
-            } else {
-                serde_json::Value::Object(result).to_string()
-            };
-            return (!ok, text);
-        }
-    }
-    (raw_is_error, raw)
-}
+use common::{build_full_server, extract_available, run_single, text_of};
+use tidepool_repl::TidepoolReplServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_stack_effects_reachable_through_session() {
@@ -148,7 +20,7 @@ async fn full_stack_effects_reachable_through_session() {
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
-    let server = build_full_server(tmp.path().to_path_buf());
+    let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
     async fn eval(server: &TidepoolReplServer, code: &str) -> String {
         let (is_error, text) = run_single(server, code, None).await;
@@ -218,7 +90,7 @@ async fn session_def_sees_full_eval_vocabulary() {
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
-    let server = build_full_server(tmp.path().to_path_buf());
+    let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
     // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
     // `L.`/`Set.` qualified namespaces — all out of scope under the old
@@ -301,7 +173,7 @@ async fn block_runner_input_and_type_cleanups() {
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
-    let server = build_full_server(tmp.path().to_path_buf());
+    let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
     // (1)+(2): input arrives DOUBLE-ENCODED as a JSON string (the MCP-client
     // shape); it must decode to a structured Value AND be visible to a `let`

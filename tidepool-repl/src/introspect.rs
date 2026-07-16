@@ -55,9 +55,7 @@ pub fn stdlib_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::V
         return None; // types/classes/constructors are always uppercase
     }
     let mut visited = HashSet::new();
-    let mut hits: Vec<serde_json::Value> = Vec::new();
-    let mut seen_files = HashSet::new();
-    for dir in include_dirs {
+    walk_and_classify(include_dirs, name, |dir, hits, seen_files| {
         if let Some(hit) = scan_dir(dir, name, &mut visited) {
             if let Some(file) = hit.get("file").and_then(|f| f.as_str()) {
                 if seen_files.insert(file.to_string()) {
@@ -65,22 +63,7 @@ pub fn stdlib_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::V
                 }
             }
         }
-    }
-    match hits.len() {
-        0 => None,
-        1 => hits.pop(),
-        _ => Some(serde_json::json!({
-            "name": name,
-            "ambiguous": hits
-                .into_iter()
-                .map(|h| serde_json::json!({
-                    "module": h.get("module").cloned().unwrap_or(serde_json::Value::Null),
-                    "file": h.get("file").cloned().unwrap_or(serde_json::Value::Null),
-                    "source": h.get("source").cloned().unwrap_or(serde_json::Value::Null),
-                }))
-                .collect::<Vec<_>>(),
-        })),
-    }
+    })
 }
 
 /// Resolve a lowercase VALUE/function name (`findDef`, not a type/class/
@@ -101,10 +84,29 @@ pub fn stdlib_value_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_j
     if name.is_empty() || !name.starts_with(|c: char| c.is_lowercase() || c == '_') {
         return None; // values/functions are always lowercase-leading
     }
+    walk_and_classify(include_dirs, name, |dir, hits, seen_files| {
+        collect_value_hits(dir, name, hits, seen_files);
+    })
+}
+
+/// Shared walk-and-filter tail of [`stdlib_info`] / [`stdlib_value_info`]:
+/// runs `scan_one_dir` over every dir in `include_dirs` (accumulating hits +
+/// the file-path dedup set it threads through), then classifies the result —
+/// `None` (no hits), `Some(hit)` (exactly one), or the ambiguity-report shape
+/// (two or more distinct-file hits, in `include_dirs` order — matches GHC
+/// include-path precedence). `scan_one_dir` owns the per-dir scan STRATEGY
+/// (`stdlib_info`'s `scan_dir` returns at most one hit per dir tree;
+/// `stdlib_value_info`'s `collect_value_hits` collects every file's hit) — only
+/// the accumulate-then-classify shell is shared.
+fn walk_and_classify(
+    include_dirs: &[PathBuf],
+    name: &str,
+    mut scan_one_dir: impl FnMut(&Path, &mut Vec<serde_json::Value>, &mut HashSet<String>),
+) -> Option<serde_json::Value> {
     let mut hits: Vec<serde_json::Value> = Vec::new();
     let mut seen_files = HashSet::new();
     for dir in include_dirs {
-        collect_value_hits(dir, name, &mut hits, &mut seen_files);
+        scan_one_dir(dir, &mut hits, &mut seen_files);
     }
     match hits.len() {
         0 => None,
