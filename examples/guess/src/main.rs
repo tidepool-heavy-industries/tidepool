@@ -39,6 +39,7 @@ enum ConsoleReq {
 /// terminal); tests use `Scripted` to drive the game deterministically.
 enum InputSource {
     Stdin,
+    #[cfg_attr(not(test), allow(dead_code))]
     Scripted(VecDeque<String>),
 }
 

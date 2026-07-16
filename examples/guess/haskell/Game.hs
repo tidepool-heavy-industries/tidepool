@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds, TypeOperators #-}
 module Game where
 
 import Effects

@@ -72,8 +72,11 @@ enum InputSource {
 }
 
 /// Every line `Display` prints, in order — always recorded (cheap:
-/// `Arc<std::sync::Mutex<Vec<String>>>`), only ever read back by the
-/// `#[cfg(test)]` smoke test in `main.rs` via [`OutputLog::drain`].
+/// `Arc<std::sync::Mutex<Vec<String>>>`), only ever read back by the smoke
+/// test in `main.rs` via [`OutputLog::drain`]. Not `#[cfg(test)]`-gated:
+/// `main.rs`'s test compiles this lib crate as an ordinary dependency, so a
+/// gate here (only active when THIS crate is itself under test) would be
+/// invisible to it.
 #[derive(Clone, Default)]
 pub struct OutputLog(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 
@@ -82,7 +85,6 @@ impl OutputLog {
         self.0.lock().unwrap().push(line);
     }
 
-    #[cfg(test)]
     pub fn drain(&self) -> Vec<String> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
@@ -104,7 +106,7 @@ impl ReplHandler {
     }
 
     /// Scripted, file-free construction (no disk I/O) — shared by
-    /// `from_file` and the `#[cfg(test)]` smoke test in `main.rs`.
+    /// `from_file` and the smoke test in `main.rs`.
     pub fn from_lines(lines: Vec<String>) -> Self {
         ReplHandler {
             source: InputSource::File { lines, pos: 0 },
@@ -125,7 +127,6 @@ impl ReplHandler {
 
     /// A cloned handle onto the lines `Display` has printed — for tests that
     /// need to assert on REPL output after `vm.run` completes.
-    #[cfg(test)]
     pub fn output_log(&self) -> OutputLog {
         self.log.clone()
     }

@@ -5,6 +5,16 @@ import Control.Monad.Freer
 import Data.Text (Text)
 import Types
 
+-- Hand-written, not generated: `tidepool_mcp::ensure_effects_module` emits
+-- the STANDARD MCP eval-server stack (`Tidepool.Effects`: Console/KV/Fs/
+-- Http/Exec/Lsp/Llm/Git/Time/Ask) as one fixed bundle, not a pick-and-choose
+-- subset — using it here would pull all nine standard effects into a
+-- five-effect demo. `Console` below happens to share a shape with the
+-- standard `Console` (a single `Print` verb), but its Rust handler stays
+-- custom regardless (real stdout, not the MCP `CapturedOutput` buffer — see
+-- `src/handlers.rs`'s module doc), so the two declarations are independent
+-- by necessity, not oversight.
+
 data Repl a where
   ReadLine :: Repl (Maybe TExpr)
   Display  :: Text -> Repl ()
