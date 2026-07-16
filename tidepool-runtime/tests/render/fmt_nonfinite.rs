@@ -7,22 +7,8 @@
 //! RealFloat: `d == d` is False only for NaN; `|d| > maxFiniteDouble` only for
 //! +/-Inf).
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
-
-/// Never invoked — these holes are pure.
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
+use tidepool_testing::NullDispatcher;
 
 fn eval_hole(hole: &str) -> serde_json::Value {
     let decls = tidepool_mcp::standard_decls();

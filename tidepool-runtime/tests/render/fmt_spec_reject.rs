@@ -7,22 +7,8 @@
 //! This is the aeson-style "drop the un-strippable leaf, name it loudly"
 //! contract: a free, precise compile error instead of a runtime trap.
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
-
-/// Never actually invoked — compilation fails first.
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
+use tidepool_testing::NullDispatcher;
 
 fn try_compile(hole: &str) -> Result<(), String> {
     let decls = tidepool_mcp::standard_decls();

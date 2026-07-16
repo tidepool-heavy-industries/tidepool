@@ -18,12 +18,7 @@
 //! Tidepool.Prelude (accumulator-based, all recursive calls in tail position
 //! → TCO applies → no stack growth for the outer loop).
 
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::prelude_path;
 
 fn run_result(body: &str) -> Result<serde_json::Value, tidepool_runtime::RuntimeError> {
     let src = format!(
