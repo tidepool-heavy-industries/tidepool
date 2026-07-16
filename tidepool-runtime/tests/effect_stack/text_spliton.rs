@@ -8,17 +8,8 @@
 //! - `run_freer`: Prelude + Freer + qualified T (no Library)
 //! - `run_mcp`: full MCP preamble (Freer + Library + extra imports)
 
-use std::path::PathBuf;
-
 use serde_json::json;
-use tidepool_testing::eval_harness::EvalHarness;
-
-fn user_lib_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
-}
+use tidepool_testing::eval_harness::{user_lib_dir, EvalHarness};
 
 fn run(body: &str) -> serde_json::Value {
     let src = format!(

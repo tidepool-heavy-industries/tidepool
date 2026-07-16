@@ -214,7 +214,7 @@ default (Int, Text)
 error :: Text -> a
 error = P.error . T.unpack
 
--- Effect-local error ADTs, matching production (tidepool-mcp/src/effect_defs.rs).
+-- Per-effect error ADTs, matching production (tidepool-mcp/src/effect_defs.rs).
 data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
 data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
 data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)

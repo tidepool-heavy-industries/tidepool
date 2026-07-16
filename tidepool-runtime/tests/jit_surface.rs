@@ -28,23 +28,9 @@
 
 use std::io::Write;
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
+use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
-
-/// Never invoked — every probe is pure (no effect is `send`ed). Present only so
-/// the full effectful preamble compiles.
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or

@@ -65,23 +65,9 @@
 //!   (`src/Tidepool/Translate.hs`).
 
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
+use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
-
-/// Never invoked — every probe here is pure (no effect is `send`ed). Present
-/// only so the full effectful preamble compiles (mirrors `jit_surface.rs`).
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Mirrors `jit_surface.rs::eval_raw`, plus the

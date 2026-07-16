@@ -10,21 +10,9 @@
 //! for the synthetic step functions passed to `walk`.
 
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
+use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
-
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
 
 fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();

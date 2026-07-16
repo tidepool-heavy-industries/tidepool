@@ -9,23 +9,8 @@
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
 //!   TIDEPOOL_GHC_LIBDIR=<with-packages>/lib/ghc-9.12.2/lib \
 //!   cargo test -p tidepool-runtime --test validator_reject
-use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
+use tidepool_testing::NullDispatcher;
 use tidepool_testing::eval_harness::EvalHarness;
-
-/// Never actually invoked — `pure [..|]` dispatches no effect, and the reject
-/// cases fail to compile first.
-struct NullDispatcher;
-impl DispatchEffect<()> for NullDispatcher {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(0))
-    }
-}
 
 fn try_compile(hole: &str) -> Result<(), String> {
     let decls = tidepool_mcp::standard_decls();
