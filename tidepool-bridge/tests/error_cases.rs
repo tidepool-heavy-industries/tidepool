@@ -3,74 +3,16 @@ use tidepool_eval::value::Value;
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 fn get_table() -> DataConTable {
-    let mut table = DataConTable::new();
-    // Bool
+    // standard_datacon_table() covers False/True/(,)/[]/:/I#/D#/... (and more
+    // that this suite doesn't need); append the 3-tuple it lacks, with a
+    // fresh id, for test_arity_mismatch_tuple.
+    let mut table = tidepool_testing::gen::standard_datacon_table();
     table.insert(DataCon {
-        id: DataConId(2),
-        name: "False".to_string(),
-        tag: 1,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-    });
-    table.insert(DataCon {
-        id: DataConId(3),
-        name: "True".to_string(),
-        tag: 2,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-    });
-    // Pair (,)
-    table.insert(DataCon {
-        id: DataConId(4),
-        name: "(,)".to_string(),
-        tag: 1,
-        rep_arity: 2,
-        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
-    // Triple (,,)
-    table.insert(DataCon {
-        id: DataConId(11),
+        id: DataConId(100),
         name: "(,,)".to_string(),
         tag: 1,
         rep_arity: 3,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
-    // List [] and :
-    table.insert(DataCon {
-        id: DataConId(5),
-        name: "[]".to_string(),
-        tag: 1,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-    });
-    table.insert(DataCon {
-        id: DataConId(6),
-        name: ":".to_string(),
-        tag: 2,
-        rep_arity: 2,
-        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
-    // Boxing
-    table.insert(DataCon {
-        id: DataConId(7),
-        name: "I#".to_string(),
-        tag: 1,
-        rep_arity: 1,
-        field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
-    table.insert(DataCon {
-        id: DataConId(8),
-        name: "D#".to_string(),
-        tag: 1,
-        rep_arity: 1,
-        field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
     });
     table
@@ -157,18 +99,9 @@ fn test_edge_f64_neg_inf() {
 
 #[test]
 fn test_edge_empty_string() {
+    // standard_datacon_table() already carries "Text" for String to_value.
     let table = get_table();
     let val = "".to_string();
-    // We need "Text" in table for String to_value
-    let mut table = table;
-    table.insert(DataCon {
-        id: DataConId(14),
-        name: "Text".to_string(),
-        tag: 1,
-        rep_arity: 3,
-        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
     let value = val.to_value(&table).unwrap();
     let back = String::from_value(&value, &table).unwrap();
     assert_eq!(val, back);
@@ -194,17 +127,8 @@ fn test_phantom_data_missing_unit() {
 
 #[test]
 fn test_text_decode_wrong_shape() {
-    let mut table = get_table();
-    let text_id = DataConId(14);
-    table.insert(DataCon {
-        id: text_id,
-        name: "Text".to_string(),
-        tag: 1,
-        rep_arity: 3,
-        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
-    });
-
+    let table = get_table();
+    let text_id = table.get_by_name("Text").unwrap();
     let false_id = table.get_by_name("False").unwrap();
     let val = Value::Con(
         text_id,

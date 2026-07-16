@@ -7,102 +7,12 @@ static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
 fn get_table() -> &'static DataConTable {
     TABLE.get_or_init(|| {
-        let mut table = DataConTable::new();
-        // Maybe
+        // standard_datacon_table() covers Nothing/Just/False/True/(,)/[]/:/
+        // I#/W#/D#/C#/Text; append the constructors it lacks that these
+        // proptests still need (3-tuple, Either) with fresh ids.
+        let mut table = tidepool_testing::gen::standard_datacon_table();
         table.insert(DataCon {
-            id: DataConId(0),
-            name: "Nothing".to_string(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(1),
-            name: "Just".to_string(),
-            tag: 2,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        // Bool
-        table.insert(DataCon {
-            id: DataConId(2),
-            name: "False".to_string(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(3),
-            name: "True".to_string(),
-            tag: 2,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: None,
-        });
-        // Pair (,)
-        table.insert(DataCon {
-            id: DataConId(4),
-            name: "(,)".to_string(),
-            tag: 1,
-            rep_arity: 2,
-            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        // List [] and :
-        table.insert(DataCon {
-            id: DataConId(5),
-            name: "[]".to_string(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(6),
-            name: ":".to_string(),
-            tag: 2,
-            rep_arity: 2,
-            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        // Boxing
-        table.insert(DataCon {
-            id: DataConId(7),
-            name: "I#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(8),
-            name: "D#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(9),
-            name: "W#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(10),
-            name: "C#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        table.insert(DataCon {
-            id: DataConId(11),
+            id: DataConId(100),
             name: "(,,)".to_string(),
             tag: 1,
             rep_arity: 3,
@@ -110,7 +20,7 @@ fn get_table() -> &'static DataConTable {
             qualified_name: None,
         });
         table.insert(DataCon {
-            id: DataConId(12),
+            id: DataConId(101),
             name: "Right".to_string(),
             tag: 2,
             rep_arity: 1,
@@ -118,20 +28,11 @@ fn get_table() -> &'static DataConTable {
             qualified_name: None,
         });
         table.insert(DataCon {
-            id: DataConId(13),
+            id: DataConId(102),
             name: "Left".to_string(),
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
-        });
-        // Text
-        table.insert(DataCon {
-            id: DataConId(14),
-            name: "Text".to_string(),
-            tag: 1,
-            rep_arity: 3,
-            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
             qualified_name: None,
         });
         table

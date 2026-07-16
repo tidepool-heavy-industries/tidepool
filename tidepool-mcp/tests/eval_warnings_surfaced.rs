@@ -12,20 +12,13 @@ use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_runtime::{compile_and_run, EvalResult};
+use tidepool_testing::eval_harness::user_lib_dir;
 
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("haskell/lib")
-        .leak()
-}
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
         .leak()
 }
 
@@ -60,7 +53,7 @@ fn run_mcp(code: &str, helpers: &str) -> EvalResult {
     let eff = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
-    let include = [pp, ulp, eff];
+    let include = [pp, ulp.as_path(), eff];
 
     let mut dispatcher = MockDispatcher;
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
