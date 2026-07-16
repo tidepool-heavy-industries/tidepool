@@ -1,9 +1,5 @@
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_int, JitRun};
-
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
 #[test]
 fn test_nested_joins() {
@@ -47,7 +43,7 @@ fn test_nested_joins() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 30);
     }
@@ -107,7 +103,7 @@ fn test_join_nested_jump() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 20);
     }
@@ -150,7 +146,7 @@ fn test_join_three_params() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 6);
     }
@@ -175,7 +171,7 @@ fn test_join_zero_args() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -233,7 +229,7 @@ fn test_multiple_joins() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 11);
     }

@@ -8,12 +8,7 @@ use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_double, read_lit_float, read_lit_int, JitRun};
-
-/// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::{compile_and_run, read_lit_double, read_lit_float, read_lit_int};
 
 /// Helper: read con_tag from a ConObject.
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
@@ -31,7 +26,7 @@ fn test_emit_lit_int() {
     let tree = RecursiveTree {
         nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(read_lit_int(result.result_ptr), 42);
@@ -50,7 +45,7 @@ fn test_emit_primop_int_add() {
             }, // 2 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 3);
     }
@@ -68,7 +63,7 @@ fn test_emit_primop_int_and() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0x0F);
     }
@@ -86,7 +81,7 @@ fn test_emit_primop_int_or() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0xFF);
     }
@@ -104,7 +99,7 @@ fn test_emit_primop_int_xor() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0xF0);
     }
@@ -121,7 +116,7 @@ fn test_emit_primop_int_not() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -1);
     }
@@ -139,7 +134,7 @@ fn test_emit_primop_int_shl() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 256);
     }
@@ -157,7 +152,7 @@ fn test_emit_primop_int_shra() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -4);
     }
@@ -175,7 +170,7 @@ fn test_emit_primop_word_and() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0x0F);
     }
@@ -193,7 +188,7 @@ fn test_emit_primop_word_or() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0xFF);
     }
@@ -211,7 +206,7 @@ fn test_emit_primop_word_shl() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1i64 << 32);
     }
@@ -229,7 +224,7 @@ fn test_emit_primop_word_shrl() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 16);
     }
@@ -246,7 +241,7 @@ fn test_emit_primop_narrow_narrow8int() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -263,7 +258,7 @@ fn test_emit_primop_narrow_narrow16int() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -280,7 +275,7 @@ fn test_emit_primop_narrow_narrow8word() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0xFF);
     }
@@ -298,7 +293,7 @@ fn test_emit_primop_word_add_word_c_val() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 30);
     }
@@ -316,7 +311,7 @@ fn test_emit_primop_word_sub_word_c_val() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 20);
     }
@@ -334,7 +329,7 @@ fn test_emit_primop_word_add_word_c_carry() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -352,7 +347,7 @@ fn test_emit_primop_word_sub_word_c_carry() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -370,7 +365,7 @@ fn test_emit_primop_word_quot() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 14);
     }
@@ -388,7 +383,7 @@ fn test_emit_primop_word_rem() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 2);
     }
@@ -405,7 +400,7 @@ fn test_emit_primop_char_ord() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 65);
     }
@@ -422,7 +417,7 @@ fn test_emit_primop_char_chr() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 65);
     }
@@ -440,7 +435,7 @@ fn test_emit_primop_char_eq() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -458,7 +453,7 @@ fn test_emit_primop_char_lt() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -476,7 +471,7 @@ fn test_emit_con_fields() {
             }, // 2 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
         assert_eq!(read_con_tag(result.result_ptr), 5);
@@ -498,7 +493,7 @@ fn test_emit_identity_lambda() {
             CoreFrame::App { fun: 2, arg: 0 },     // 3: (λx.x) 42 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -527,7 +522,7 @@ fn test_emit_closure_capture() {
             }, // 7: let y=1 in ... (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 3);
     }
@@ -547,7 +542,7 @@ fn test_emit_let_non_rec() {
             }, // 2 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -565,7 +560,7 @@ fn test_emit_primop_int_sub() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 7);
     }
@@ -583,7 +578,7 @@ fn test_emit_primop_int_mul() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -600,7 +595,7 @@ fn test_emit_primop_int_negate() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -42);
     }
@@ -619,7 +614,7 @@ fn test_emit_primop_int_comparisons() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -650,7 +645,7 @@ fn test_emit_primop_word_ops() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -672,7 +667,7 @@ fn test_emit_word_boxing() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         // Offset 8 is lit_tag
@@ -703,7 +698,7 @@ fn test_emit_let_rec() {
             }, // 5: let rec f = ... (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -729,7 +724,7 @@ fn test_emit_let_rec_factorial_ish() {
             }, // 5: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 10);
     }
@@ -767,7 +762,7 @@ fn test_emit_let_rec_mutual() {
             }, // 9: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -816,7 +811,7 @@ fn test_emit_runtime_error_div_zero() {
             CoreFrame::Var(div_zero_var), // 0 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     assert!(!result.result_ptr.is_null()); // lazy poison closure, not null
     assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(0));
     // Error flag is NOT set — lazy poison defers until call
@@ -832,7 +827,7 @@ fn test_emit_runtime_error_overflow() {
             CoreFrame::Var(overflow_var), // 0 (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     assert!(!result.result_ptr.is_null()); // lazy poison closure, not null
     assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(1));
     // Error flag is NOT set — lazy poison defers until call
@@ -852,7 +847,7 @@ fn test_emit_int_quot() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 7);
     }
@@ -870,7 +865,7 @@ fn test_emit_int_rem() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 2);
     }
@@ -897,7 +892,7 @@ fn test_emit_int_quot_by_zero_does_not_trap() {
         ],
     };
     // Must not panic/abort/SIGILL — returning at all is the point.
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -922,7 +917,7 @@ fn test_emit_primop_bytearray_basic() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 16);
     }
@@ -969,7 +964,7 @@ fn test_emit_primop_bytearray_read_write() {
             }, // 12
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -1016,7 +1011,7 @@ fn test_emit_primop_bytearray_word_read_write() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr) as u64, 0x1122334455667788);
     }
@@ -1093,7 +1088,7 @@ fn test_emit_primop_bytearray_copy() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 123);
     }
@@ -1118,7 +1113,7 @@ fn test_emit_primop_bytearray_freeze() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 10);
     }
@@ -1142,7 +1137,7 @@ fn test_emit_primop_plus_addr() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 'B' as i64);
     }
@@ -1163,7 +1158,7 @@ fn test_emit_primop_char_roundtrip() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 65);
     }
@@ -1182,7 +1177,7 @@ fn test_emit_primop_int_comparisons_extra() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
     assert_eq!(run_cmp(PrimOpKind::IntLt, -5, -3), 1);
@@ -1204,7 +1199,7 @@ fn test_emit_primop_word_comparisons() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
     assert_eq!(run_cmp(PrimOpKind::WordLt, 10, 20), 1);
@@ -1225,7 +1220,7 @@ fn test_emit_primop_int_quot_rem_neg() {
             },
         ],
     };
-    let res_quot = compile_and_run(&tree_quot);
+    let res_quot = compile_and_run(&tree_quot, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_quot.result_ptr), -3);
     }
@@ -1240,7 +1235,7 @@ fn test_emit_primop_int_quot_rem_neg() {
             },
         ],
     };
-    let res_rem = compile_and_run(&tree_rem);
+    let res_rem = compile_and_run(&tree_rem, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_rem.result_ptr), -1);
     }
@@ -1266,7 +1261,7 @@ fn test_emit_primop_word_quot_rem() {
             },
         ],
     };
-    let mut result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree, 65536);
     unsafe {
         let f0 = result.force(read_con_field(result.result_ptr, 0));
         let f1 = result.force(read_con_field(result.result_ptr, 1));
@@ -1287,7 +1282,7 @@ fn test_emit_primop_word8_ops() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 4);
     } // (250 + 10) % 256 = 4
@@ -1302,7 +1297,7 @@ fn test_emit_primop_word8_ops() {
             },
         ],
     };
-    let result_sub = compile_and_run(&tree_sub);
+    let result_sub = compile_and_run(&tree_sub, 65536);
     unsafe {
         assert_eq!(read_lit_int(result_sub.result_ptr), 251);
     } // (5 - 10) % 256 = 251
@@ -1321,7 +1316,7 @@ fn test_emit_primop_clz8() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe {
             // Note: clz8# returns Word#, but we read as int for convenience
             assert_eq!(read_lit_int(result.result_ptr), expected as i64);
@@ -1340,7 +1335,7 @@ fn test_emit_primop_narrowing() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0x3344);
     }
@@ -1366,7 +1361,7 @@ fn test_emit_primop_add_int_c() {
             },
         ],
     };
-    let mut result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree, 65536);
     unsafe {
         let f0 = result.force(read_con_field(result.result_ptr, 0)); // carry
         let f1 = result.force(read_con_field(result.result_ptr, 1)); // val
@@ -1387,7 +1382,7 @@ fn test_emit_primop_double_add() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 4.0);
     }
@@ -1405,7 +1400,7 @@ fn test_emit_primop_double_sub() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 2.0);
     }
@@ -1423,7 +1418,7 @@ fn test_emit_primop_double_mul() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 12.0);
     }
@@ -1441,7 +1436,7 @@ fn test_emit_primop_double_div() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 2.5);
     }
@@ -1458,7 +1453,7 @@ fn test_emit_primop_double_negate() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), -3.14);
     }
@@ -1476,7 +1471,7 @@ fn test_emit_primop_double_eq() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1494,7 +1489,7 @@ fn test_emit_primop_double_lt() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1512,7 +1507,7 @@ fn test_emit_primop_float_add() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_float(result.result_ptr), 4.0);
     }
@@ -1530,7 +1525,7 @@ fn test_emit_primop_float_mul() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_float(result.result_ptr), 12.0);
     }
@@ -1547,7 +1542,7 @@ fn test_emit_primop_float_negate() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_float(result.result_ptr), -2.0);
     }
@@ -1565,7 +1560,7 @@ fn test_emit_primop_float_lt() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1582,7 +1577,7 @@ fn test_emit_int2double_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 42.0);
     }
@@ -1599,7 +1594,7 @@ fn test_emit_double2int_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 3);
     }
@@ -1616,7 +1611,7 @@ fn test_emit_int2float_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_float(result.result_ptr), 42.0);
     }
@@ -1633,7 +1628,7 @@ fn test_emit_float2double_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_double(result.result_ptr), 1.5);
     }
@@ -1651,7 +1646,7 @@ fn test_emit_primop_int64_add() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 300);
     }
@@ -1669,7 +1664,7 @@ fn test_emit_primop_int64_sub() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -100);
     }
@@ -1687,7 +1682,7 @@ fn test_emit_primop_int64_mul() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 56);
     }
@@ -1704,7 +1699,7 @@ fn test_emit_primop_int64_negate() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -42);
     }
@@ -1722,7 +1717,7 @@ fn test_emit_primop_int64_lt() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1740,7 +1735,7 @@ fn test_emit_primop_int64_le() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1758,7 +1753,7 @@ fn test_emit_primop_int64_gt() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -1776,7 +1771,7 @@ fn test_emit_primop_int64_ge() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0);
     }
@@ -1824,7 +1819,7 @@ fn test_emit_primop_bytearray_set() {
             }, // 13
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0xFF);
     }
@@ -1869,7 +1864,7 @@ fn test_emit_primop_bytearray_shrink() {
             }, // 10
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 5);
     }
@@ -1890,7 +1885,7 @@ fn test_emit_primop_bytearray_sizeof_mutable() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 24);
     }
@@ -1964,7 +1959,7 @@ fn test_emit_primop_bytearray_compare() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0);
     }
@@ -1982,7 +1977,7 @@ fn test_emit_primop_int64_shl() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1024);
     }
@@ -2000,7 +1995,7 @@ fn test_emit_primop_int64_shra() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -4);
     }
@@ -2018,7 +2013,7 @@ fn test_emit_primop_word64_and() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr) as u64, 0x0F00);
     }
@@ -2036,7 +2031,7 @@ fn test_emit_primop_word64_or() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr) as u64, 0xF00F);
     }
@@ -2054,7 +2049,7 @@ fn test_emit_primop_word64_shl() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr) as u64, 1u64 << 32);
     }
@@ -2071,7 +2066,7 @@ fn test_emit_int64_to_int_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2094,7 +2089,7 @@ fn test_error_sentinel_let_non_rec_deferred() {
             }, // 2: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2118,7 +2113,7 @@ fn test_error_sentinel_let_non_rec_forced() {
             }, // 2: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     // Should be the lazy poison closure for kind 2 (UserError)
     assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(2));
     let err = host_fns::take_runtime_error();
@@ -2148,7 +2143,7 @@ fn test_error_sentinel_let_rec_deferred() {
             }, // 6: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2171,7 +2166,7 @@ fn test_error_sentinel_let_rec_no_rec_deferred() {
             }, // 2: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2198,7 +2193,7 @@ fn test_error_sentinel_detection_in_complex_rhs() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     // The RHS has no statically extractable message, so it is bound to a
     // deferred thunk (forcing it applies the poison, which raises). The
     // essential contract: binding is deferred and no error fires eagerly.
@@ -2228,7 +2223,7 @@ fn test_non_error_sentinel_not_deferred() {
             }, // 2
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2245,7 +2240,7 @@ fn test_emit_int_to_int64_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -2262,7 +2257,7 @@ fn test_emit_int64_to_word64_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr) as u64, u64::MAX);
     }
@@ -2279,7 +2274,7 @@ fn test_emit_word64_to_int64_conversion() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), -1);
     }
@@ -2354,7 +2349,7 @@ fn test_emit_primop_bytearray_compare_unequal() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert!(read_lit_int(result.result_ptr) != 0);
     }
@@ -2428,7 +2423,7 @@ fn test_emit_primop_bytearray_copy_mutable() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 0x42);
     }
@@ -2479,7 +2474,7 @@ fn test_emit_primop_bytearray_index_word8() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 123);
     }
@@ -2527,7 +2522,7 @@ fn test_emit_primop_bytearray_copy_addr() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 'A' as i64);
     }
@@ -2560,7 +2555,7 @@ fn test_emit_primop_bytearray_resize() {
             }, // 6
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 20);
     }
@@ -2579,7 +2574,7 @@ fn test_emit_primop_float_comparisons() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -2602,7 +2597,7 @@ fn test_emit_primop_float_arith_extra() {
             },
         ],
     };
-    let res_sub = compile_and_run(&tree_sub);
+    let res_sub = compile_and_run(&tree_sub, 65536);
     unsafe {
         assert_eq!(read_lit_float(res_sub.result_ptr), 2.0);
     }
@@ -2617,7 +2612,7 @@ fn test_emit_primop_float_arith_extra() {
             },
         ],
     };
-    let res_div = compile_and_run(&tree_div);
+    let res_div = compile_and_run(&tree_div, 65536);
     unsafe {
         assert_eq!(read_lit_float(res_div.result_ptr), 2.5);
     }
@@ -2636,7 +2631,7 @@ fn test_emit_primop_double_comparisons() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -2659,7 +2654,7 @@ fn test_emit_primop_char_comparisons() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -2682,7 +2677,7 @@ fn test_emit_primop_word_comparisons_extra() {
                 },
             ],
         };
-        let result = compile_and_run(&tree);
+        let result = compile_and_run(&tree, 65536);
         unsafe { read_lit_int(result.result_ptr) }
     }
 
@@ -2702,7 +2697,7 @@ fn test_emit_primop_word_bitwise_extra() {
             },
         ],
     };
-    let res_xor = compile_and_run(&tree_xor);
+    let res_xor = compile_and_run(&tree_xor, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_xor.result_ptr) as u64, 0xF0);
     }
@@ -2716,7 +2711,7 @@ fn test_emit_primop_word_bitwise_extra() {
             },
         ],
     };
-    let res_not = compile_and_run(&tree_not);
+    let res_not = compile_and_run(&tree_not, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_not.result_ptr) as u64, u64::MAX);
     }
@@ -2733,7 +2728,7 @@ fn test_emit_primop_conversions_extra() {
             },
         ],
     };
-    let res_i2w = compile_and_run(&tree_i2w);
+    let res_i2w = compile_and_run(&tree_i2w, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_i2w.result_ptr), 42);
     }
@@ -2747,7 +2742,7 @@ fn test_emit_primop_conversions_extra() {
             },
         ],
     };
-    let res_w2i = compile_and_run(&tree_w2i);
+    let res_w2i = compile_and_run(&tree_w2i, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_w2i.result_ptr), 42);
     }
@@ -2761,7 +2756,7 @@ fn test_emit_primop_conversions_extra() {
             },
         ],
     };
-    let res_d2f = compile_and_run(&tree_d2f);
+    let res_d2f = compile_and_run(&tree_d2f, 65536);
     unsafe {
         assert_eq!(read_lit_float(res_d2f.result_ptr), 1.5);
     }
@@ -2775,7 +2770,7 @@ fn test_emit_primop_conversions_extra() {
             },
         ],
     };
-    let res_f2i = compile_and_run(&tree_f2i);
+    let res_f2i = compile_and_run(&tree_f2i, 65536);
     unsafe {
         assert_eq!(read_lit_int(res_f2i.result_ptr), 3);
     }
@@ -2803,7 +2798,7 @@ fn test_thunk_con_basic() {
         ],
     };
 
-    let mut result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree, 65536);
     unsafe {
         // Result is a Con
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
@@ -2895,7 +2890,7 @@ fn test_thunk_con_recursive() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         // Result should be Lit(42) — the head of go 42
         eprintln!("result tag = {}", layout::read_tag(result.result_ptr));
@@ -2986,7 +2981,7 @@ fn test_thunkcon_field_in_lit_case() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3050,7 +3045,7 @@ fn test_thunkcon_field_in_primop() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3187,7 +3182,7 @@ fn test_thunkcon_recursive_countdown() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3247,7 +3242,7 @@ fn test_thunkcon_primop_field_in_data_case() {
         ],
     };
 
-    let mut result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree, 65536);
     unsafe {
         // Field v is a thunk (lazy case alt extraction), force it explicitly
         let forced = result.force(result.result_ptr);
@@ -3319,7 +3314,7 @@ fn test_thunkcon_app_field_in_lit_case() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3379,7 +3374,7 @@ fn test_thunkcon_app_field_in_primop() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3466,7 +3461,7 @@ fn test_thunkcon_case_field_in_lit_case() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3546,7 +3541,7 @@ fn test_thunkcon_nested_in_primop() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             layout::read_tag(result.result_ptr),
@@ -3620,7 +3615,7 @@ fn test_adversarial_multi_field_thunkcon() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -3719,7 +3714,7 @@ fn test_adversarial_thunk_forces_to_con_in_data_dispatch() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -3784,7 +3779,7 @@ fn test_adversarial_thunked_closure_in_app_fun() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -3855,7 +3850,7 @@ fn test_adversarial_join_point_thunked_arg() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -3924,7 +3919,7 @@ fn test_adversarial_litchar_thunk_dispatch() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -3993,7 +3988,7 @@ fn test_adversarial_double_thunk_in_lit_dispatch() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4056,7 +4051,7 @@ fn test_adversarial_thunked_arg_through_app() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4155,7 +4150,7 @@ fn test_adversarial_multi_alt_after_thunk_force() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4221,7 +4216,7 @@ fn test_holistic_let_nonrec_thunked_con_rhs() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4285,7 +4280,7 @@ fn test_holistic_letrec_case_scrutinee() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4360,7 +4355,7 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4410,7 +4405,7 @@ fn test_holistic_zero_field_con() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4507,7 +4502,7 @@ fn test_holistic_nested_let_nonrec_thunk_chain() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4574,7 +4569,7 @@ fn test_holistic_letrec_con_with_closure_sibling() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4656,7 +4651,7 @@ fn test_holistic_join_in_letrec_body() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4741,7 +4736,7 @@ fn test_holistic_multi_layer_thunk_force() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4818,7 +4813,7 @@ fn test_holistic_case_binder_reuse() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(
@@ -4885,7 +4880,7 @@ fn test_holistic_letrec_recursive_with_case() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
         assert_eq!(

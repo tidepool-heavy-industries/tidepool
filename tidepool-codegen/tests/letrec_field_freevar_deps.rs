@@ -14,11 +14,7 @@
 
 use tidepool_codegen::host_fns;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_int, JitRun};
-
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
 // ---------------------------------------------------------------------------
 // let rec g    = \y -> y
@@ -97,7 +93,7 @@ fn letrec_con_field_app_depends_on_deferred_simple_binder() {
         ],
     };
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     let err = host_fns::take_runtime_error();
     assert!(
         err.is_none(),

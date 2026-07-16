@@ -11,11 +11,7 @@ use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::JitRun;
-
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::compile_and_run;
 
 unsafe fn read_lit_int(ptr: *const u8) -> i64 {
     assert_eq!(layout::read_tag(ptr), layout::TAG_LIT, "expected TAG_LIT");
@@ -57,7 +53,7 @@ fn test_letrec_single_con() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_con_tag(result.result_ptr), 7);
         let f0 = read_con_field(result.result_ptr, 0);
@@ -98,7 +94,7 @@ fn test_letrec_con_mutual_reference() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         // b = Con_2(a)
         assert_eq!(read_con_tag(result.result_ptr), 2);
@@ -142,7 +138,7 @@ fn test_letrec_mixed_con_and_lam() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         // node = Con_5(f)
         assert_eq!(read_con_tag(result.result_ptr), 5);
@@ -211,7 +207,7 @@ fn test_letrec_con_closure_is_callable() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(
             read_lit_int(result.result_ptr),
@@ -297,7 +293,7 @@ fn test_letrec_con_lam_captures_sibling() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 105, "g(5) = 5 + 100 = 105");
     }
@@ -374,7 +370,7 @@ fn test_letrec_continuation_chain_structure() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         // node = Con_NODE(leaf1, leaf2)
         assert_eq!(read_con_tag(result.result_ptr), 20);

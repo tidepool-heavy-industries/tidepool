@@ -1,11 +1,6 @@
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_int, JitRun};
-
-/// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
 /// Helper: read field i from a ConObject.
 unsafe fn read_con_field(ptr: *const u8, i: usize) -> *const u8 {
@@ -33,7 +28,7 @@ fn test_join_basic() {
             }, // 3: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -67,7 +62,7 @@ fn test_join_two_params() {
             }, // 6: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 30);
     }
@@ -91,7 +86,7 @@ fn test_join_body_falls_through() {
             }, // 2: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 99);
     }
@@ -134,7 +129,7 @@ fn test_join_nested_inner_shadows() {
             }, // 7: outer join (root)
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 11);
     }
@@ -166,7 +161,7 @@ fn test_join_with_heap_ptrs() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
         let field = read_con_field(result.result_ptr, 0);

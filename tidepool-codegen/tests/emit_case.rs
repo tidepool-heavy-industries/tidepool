@@ -1,11 +1,6 @@
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_int, JitRun};
-
-/// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 65536)
-}
+use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
 /// Helper: read con_tag from a ConObject.
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
@@ -50,7 +45,7 @@ fn test_case_three_constructors() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 20);
     }
@@ -87,7 +82,7 @@ fn test_case_default_catches_unmatched() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 99);
     }
@@ -125,7 +120,7 @@ fn test_case_field_binding() {
             }, // 6: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 3);
     }
@@ -170,7 +165,7 @@ fn test_case_nested() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -209,7 +204,7 @@ fn test_case_lit_alt() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 99);
     }
@@ -234,7 +229,7 @@ fn test_case_default_only() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 100);
     }
@@ -265,7 +260,7 @@ fn test_case_binder_used() {
             }, // 3: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         // Result should be the Con object itself
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
@@ -308,7 +303,7 @@ fn test_case_lit_double() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 99);
     }
@@ -350,7 +345,7 @@ fn test_case_lit_float() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 77);
     }
@@ -388,7 +383,7 @@ fn test_case_bool() {
             }, // 3: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1);
     }
@@ -427,7 +422,7 @@ fn test_case_computed_int_compare() {
             }, // 5: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 10);
     }
@@ -472,7 +467,7 @@ fn test_case_many_lit_alts() {
             }, // 5: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 20);
     }
@@ -505,7 +500,7 @@ fn test_case_word_lit() {
             }, // 3: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 100);
     }
@@ -544,7 +539,7 @@ fn test_case_char_lit() {
             }, // 4: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 2);
     }
@@ -594,7 +589,7 @@ fn test_case_nested_field_binding() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -623,7 +618,7 @@ fn test_case_scrutinee_lambda_app() {
             }, // 5: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -661,7 +656,7 @@ fn test_case_multiple_alts_same_result() {
             }, // 3: root
         ],
     };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }

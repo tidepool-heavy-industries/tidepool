@@ -46,63 +46,13 @@ fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
     table
 }
 
-/// Build a nested function application chain that allocates garbage:
+/// Nested function application chain that allocates garbage:
 /// `letrec f = \x -> let g1 = Con(1, [x]) in let g2 = Con(1, [g1]) in x in f (f ... (f (Lit 42)))`
+/// — same program shape as `tidepool_testing::gen::make_gc_forcing_setup`;
+/// its expr half is reused directly (the table half is rebuilt locally via
+/// `make_table_with_con` to add the `JitEffectMachine`-required EffCont tags).
 fn build_con_chain(depth: usize) -> CoreExpr {
-    let mut bld = TreeBuilder::new();
-
-    // Body of f: let g1 = Con x in let g2 = Con g1 in x
-    let var_x = bld.push(CoreFrame::Var(VarId(0)));
-    let g1_rhs = bld.push(CoreFrame::Con {
-        tag: DataConId(1),
-        fields: vec![var_x],
-    });
-
-    let var_g1 = bld.push(CoreFrame::Var(VarId(1)));
-    let g2_rhs = bld.push(CoreFrame::Con {
-        tag: DataConId(1),
-        fields: vec![var_g1],
-    });
-
-    // The original let_g1/let_g2/_lam_x chain that returned `x` directly was
-    // unused. We now only use the version below that returns `Con(1, [x])`
-    // while still allocating extra garbage.
-
-    let final_con = bld.push(CoreFrame::Con {
-        tag: DataConId(1),
-        fields: vec![var_x],
-    });
-    let let_g2_con = bld.push(CoreFrame::LetNonRec {
-        binder: VarId(2),
-        rhs: g2_rhs,
-        body: final_con,
-    });
-    let let_g1_con = bld.push(CoreFrame::LetNonRec {
-        binder: VarId(1),
-        rhs: g1_rhs,
-        body: let_g2_con,
-    });
-    let lam_x_con = bld.push(CoreFrame::Lam {
-        binder: VarId(0),
-        body: let_g1_con,
-    });
-
-    // Applications: f (f (f ... (Lit 42)))
-    let mut current = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
-    for _ in 0..depth {
-        let f_var = bld.push(CoreFrame::Var(VarId(99))); // f
-        current = bld.push(CoreFrame::App {
-            fun: f_var,
-            arg: current,
-        });
-    }
-
-    bld.push(CoreFrame::LetRec {
-        bindings: vec![(VarId(99), lam_x_con)],
-        body: current,
-    });
-
-    bld.build()
+    tidepool_testing::gen::make_gc_forcing_setup(depth).0
 }
 
 #[test]

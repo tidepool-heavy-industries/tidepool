@@ -6,12 +6,10 @@
 
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_testing::jit_run::{read_lit_int, JitRun};
+use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
 /// 1 MiB nursery for deep trees.
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
-    tidepool_testing::jit_run::compile_and_run(tree, 1 << 20)
-}
+const NURSERY: usize = 1 << 20;
 
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
     assert_eq!(layout::read_tag(ptr), layout::TAG_CON);
@@ -185,7 +183,7 @@ fn test_deep_list_200() {
         tree.nodes.len()
     );
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         // Result is Cons(1, Cons(2, ...))
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
@@ -203,7 +201,7 @@ fn test_deep_list_500() {
     let tree = build_list(&values);
     assert!(tree.nodes.len() > 1000);
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         let head = read_con_field(result.result_ptr, 0);
         assert_eq!(read_lit_int(head), 1);
@@ -217,7 +215,7 @@ fn test_deep_add_chain_500() {
     let tree = build_deep_add_chain(500);
     assert!(tree.nodes.len() > 1000);
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 500);
     }
@@ -229,7 +227,7 @@ fn test_deep_add_chain_1000() {
     let tree = build_deep_add_chain(1000);
     assert!(tree.nodes.len() > 2000);
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 1000);
     }
@@ -242,7 +240,7 @@ fn test_deep_app_chain_200() {
     let tree = build_deep_app_chain(200);
     assert!(tree.nodes.len() > 600);
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 42);
     }
@@ -254,7 +252,7 @@ fn test_deep_con_chain_200() {
     let tree = build_deep_con_chain(200);
     assert!(tree.nodes.len() > 200);
 
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         // Outermost constructor
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
@@ -317,7 +315,7 @@ fn test_let_chain_then_deep_list() {
     }
 
     let tree = RecursiveTree { nodes };
-    let result = compile_and_run(&tree);
+    let result = compile_and_run(&tree, NURSERY);
     unsafe {
         // First element should be 0
         let head = read_con_field(result.result_ptr, 0);
@@ -341,7 +339,7 @@ fn test_deep_add_small_stack() {
     let result = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(move || {
-            let r = compile_and_run(&tree);
+            let r = compile_and_run(&tree, NURSERY);
             unsafe { read_lit_int(r.result_ptr) }
         })
         .unwrap()
@@ -360,7 +358,7 @@ fn test_deep_list_small_stack() {
     let result = std::thread::Builder::new()
         .stack_size(512 * 1024)
         .spawn(move || {
-            let r = compile_and_run(&tree);
+            let r = compile_and_run(&tree, NURSERY);
             unsafe {
                 let head = read_con_field(r.result_ptr, 0);
                 read_lit_int(head)
@@ -389,7 +387,7 @@ fn test_deep_case_nesting_small_stack() {
     let result = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(move || {
-            let r = compile_and_run(&tree);
+            let r = compile_and_run(&tree, NURSERY);
             unsafe { read_lit_int(r.result_ptr) }
         })
         .unwrap()
@@ -408,7 +406,7 @@ fn test_deep_app_small_stack() {
     let result = std::thread::Builder::new()
         .stack_size(512 * 1024)
         .spawn(move || {
-            let r = compile_and_run(&tree);
+            let r = compile_and_run(&tree, NURSERY);
             unsafe { read_lit_int(r.result_ptr) }
         })
         .unwrap()

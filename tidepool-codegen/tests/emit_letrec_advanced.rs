@@ -6,7 +6,7 @@ use tidepool_testing::jit_run::{read_lit_int, JitRun};
 /// (effect_machine `parse_result`). A deferred-simple LetRec binding bound in
 /// the body (e.g. `letrec … x = f 5 in x`) is a lazy thunk; without this the
 /// raw result pointer is an unforced thunk rather than its value.
-fn compile_and_run(tree: &CoreExpr) -> JitRun {
+fn run_forced(tree: &CoreExpr) -> JitRun {
     let mut run = tidepool_testing::jit_run::compile_and_run(tree, 65536);
     run.result_ptr = unsafe { run.force(run.result_ptr) };
     run
@@ -42,7 +42,7 @@ fn test_letrec_all_simple() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = run_forced(&tree);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 3);
     }
@@ -115,7 +115,7 @@ fn test_letrec_factorial() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = run_forced(&tree);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 120);
     }
@@ -151,7 +151,7 @@ fn test_letrec_cyclic_con() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = run_forced(&tree);
     unsafe {
         let ptr_a = result.result_ptr;
         assert_eq!(layout::read_tag(ptr_a), layout::TAG_CON);
@@ -232,7 +232,7 @@ fn test_letrec_deferred_simple() {
     });
 
     let tree = bld.build();
-    let result = compile_and_run(&tree);
+    let result = run_forced(&tree);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 120);
     }
