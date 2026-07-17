@@ -10,85 +10,14 @@
 //! This test remains as a stress test: nested effectful mapM with real filesystem
 //! reads through the full 10-effect stack + Library.hs preamble.
 
-// Effect request enums mirror Haskell GADT constructors by name.
-#![allow(dead_code, clippy::enum_variant_names)]
-
 use std::path::{Path, PathBuf};
-use tidepool_bridge_derive::FromCore;
-use tidepool_bridge_effects::{FileMeta, Proc};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
+use tidepool_testing::eval_harness::mock::{self, FsReq};
 use tidepool_testing::eval_harness::EvalHarness;
 
 // ---------------------------------------------------------------------------
-// Effect handlers — real Fs, stubs for everything else
+// Effect handlers — real Fs, mocks for everything else
 // ---------------------------------------------------------------------------
-
-#[derive(FromCore)]
-enum ConsoleReq {
-    #[core(name = "Print")]
-    Print(String),
-}
-struct StubConsole;
-impl EffectHandler for StubConsole {
-    type Request = ConsoleReq;
-    fn handle(
-        &mut self,
-        _req: ConsoleReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(())
-    }
-}
-
-#[derive(FromCore)]
-enum KvReq {
-    #[core(name = "KvGet")]
-    KvGet(String),
-    #[core(name = "KvSet")]
-    KvSet(String, Value),
-    #[core(name = "KvDelete")]
-    KvDelete(String),
-    #[core(name = "KvKeys")]
-    KvKeys,
-}
-struct StubKv;
-impl EffectHandler for StubKv {
-    type Request = KvReq;
-    fn handle(
-        &mut self,
-        req: KvReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            KvReq::KvGet(_) => {
-                let nothing: Option<serde_json::Value> = None;
-                cx.respond(nothing)
-            }
-            KvReq::KvSet(_, _) | KvReq::KvDelete(_) => cx.respond(()),
-            KvReq::KvKeys => {
-                let empty: Vec<String> = vec![];
-                cx.respond(empty)
-            }
-        }
-    }
-}
-
-#[derive(FromCore)]
-enum FsReq {
-    #[core(name = "FsRead")]
-    FsRead(String),
-    #[core(name = "FsWrite")]
-    FsWrite(String, String),
-    #[core(name = "FsListDir")]
-    FsListDir(String),
-    #[core(name = "FsGlob")]
-    FsGlob(String),
-    #[core(name = "FsExists")]
-    FsExists(String),
-    #[core(name = "FsMetadata")]
-    FsMetadata(String),
-}
 
 struct RealFs {
     root: PathBuf,
@@ -153,194 +82,15 @@ impl EffectHandler for RealFs {
             FsReq::FsMetadata(path) => {
                 let p = self.resolve(&path);
                 match std::fs::metadata(&p) {
-                    Ok(m) => cx.respond(Some(FileMeta {
+                    Ok(m) => cx.respond(Some(tidepool_bridge_effects::FileMeta {
                         size: m.len() as i64,
                         is_file: m.is_file(),
                         is_dir: m.is_dir(),
                     })),
-                    Err(_) => cx.respond(None::<FileMeta>),
+                    Err(_) => cx.respond(None::<tidepool_bridge_effects::FileMeta>),
                 }
             }
         }
-    }
-}
-
-#[derive(FromCore)]
-enum HttpReq {
-    #[core(name = "HttpGet")]
-    HttpGet(String),
-    #[core(name = "HttpPost")]
-    HttpPost(String, Value),
-}
-struct StubHttp;
-impl EffectHandler for StubHttp {
-    type Request = HttpReq;
-    fn handle(
-        &mut self,
-        _req: HttpReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(())
-    }
-}
-
-#[derive(FromCore)]
-enum ExecReq {
-    #[core(name = "Run")]
-    Run(String),
-    #[core(name = "RunIn")]
-    RunIn(String, String),
-}
-struct StubExec;
-impl EffectHandler for StubExec {
-    type Request = ExecReq;
-    fn handle(
-        &mut self,
-        _req: ExecReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(Ok::<Proc, String>(Proc {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }))
-    }
-}
-
-#[derive(FromCore)]
-enum LspReq {
-    #[core(name = "LspWhere")]
-    LspWhere(String),
-    #[core(name = "LspCallers")]
-    LspCallers(Value),
-    #[core(name = "LspCallees")]
-    LspCallees(Value),
-    #[core(name = "LspRefs")]
-    LspRefs(Value),
-    #[core(name = "LspDef")]
-    LspDef(Value),
-    #[core(name = "LspHover")]
-    LspHover(Value),
-    #[core(name = "LspRename")]
-    LspRename(Value, String),
-    #[core(name = "LspDiagnostics")]
-    LspDiagnostics(String),
-}
-struct StubLsp;
-impl EffectHandler for StubLsp {
-    type Request = LspReq;
-    fn handle(
-        &mut self,
-        req: LspReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            LspReq::LspWhere(_) => {
-                let empty: Vec<Value> = vec![];
-                cx.respond(Ok::<Vec<Value>, String>(empty))
-            }
-            LspReq::LspCallers(_) | LspReq::LspCallees(_) | LspReq::LspRefs(_) => {
-                let empty: Vec<Value> = vec![];
-                cx.respond(empty)
-            }
-            LspReq::LspDef(_) => cx.respond(None::<Value>),
-            LspReq::LspHover(_) => cx.respond(None::<String>),
-            LspReq::LspRename(_, _) => cx.respond(None::<String>),
-            LspReq::LspDiagnostics(_) => {
-                let empty: Vec<Value> = vec![];
-                cx.respond(Ok::<Vec<Value>, String>(empty))
-            }
-        }
-    }
-}
-
-#[derive(FromCore)]
-enum LlmReq {
-    #[core(name = "LlmChat")]
-    LlmChat(String),
-    #[core(name = "LlmStructured")]
-    LlmStructured(String, Value),
-}
-struct StubLlm;
-impl EffectHandler for StubLlm {
-    type Request = LlmReq;
-    fn handle(
-        &mut self,
-        _req: LlmReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(String::from("stub"))
-    }
-}
-
-#[derive(FromCore)]
-enum GitReq {
-    #[core(name = "GitLog")]
-    GitLog(i64),
-    #[core(name = "GitStatus")]
-    GitStatus,
-    #[core(name = "GitDiffStat")]
-    GitDiffStat(String),
-    #[core(name = "GitShow")]
-    GitShow(String),
-}
-struct StubGit;
-impl EffectHandler for StubGit {
-    type Request = GitReq;
-    fn handle(
-        &mut self,
-        req: GitReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            GitReq::GitLog(_) | GitReq::GitStatus | GitReq::GitDiffStat(_) => {
-                let empty: Vec<Value> = vec![];
-                cx.respond(Ok::<Vec<Value>, String>(empty))
-            }
-            GitReq::GitShow(_) => cx.respond(Ok::<tidepool_bridge_effects::GitCommit, String>(
-                tidepool_bridge_effects::GitCommit {
-                    sha: String::new(),
-                    subject: String::new(),
-                    author: String::new(),
-                    date: String::new(),
-                    files: vec![],
-                },
-            )),
-        }
-    }
-}
-
-#[derive(FromCore)]
-enum TimeReq {
-    #[core(name = "TimeNow")]
-    TimeNow,
-}
-struct StubTime;
-impl EffectHandler for StubTime {
-    type Request = TimeReq;
-    fn handle(
-        &mut self,
-        _req: TimeReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(0i64)
-    }
-}
-
-#[derive(FromCore)]
-enum AskReq {
-    #[core(name = "Ask")]
-    Ask(String),
-}
-struct StubAsk;
-impl EffectHandler for StubAsk {
-    type Request = AskReq;
-    fn handle(
-        &mut self,
-        _req: AskReq,
-        cx: &EffectContext,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(String::from("stub"))
     }
 }
 
@@ -394,16 +144,16 @@ pure stats
     }
     let harness = harness.with_effects_module();
     let handlers = frunk::hlist![
-        StubConsole,
-        StubKv,
+        mock::MockConsole,
+        mock::MockKv::new(),
         RealFs::new(),
-        StubHttp,
-        StubExec,
-        StubLsp,
-        StubLlm,
-        StubGit,
-        StubTime,
-        StubAsk
+        mock::MockHttp,
+        mock::MockExec,
+        mock::MockLsp,
+        mock::MockLlm,
+        mock::MockGit,
+        mock::MockTime,
+        mock::MockAsk
     ];
     let result = harness.run(&full_module, "result", handlers).into_result();
 

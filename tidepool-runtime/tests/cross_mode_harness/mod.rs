@@ -4,10 +4,10 @@
 //! split across module boundaries (e.g. PR #272). Downstream tests use this to ensure
 //! that any regression in cross-module translation is caught structurally.
 
-use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::{compile_haskell, DispatchEffect};
+use tidepool_testing::eval_harness::prelude_path;
 
 pub mod structural_eq;
 
@@ -32,12 +32,6 @@ pub struct CrossModeArtifacts {
     /// Keep the temp directory alive so include paths remain valid if needed
     /// (though CoreExpr/DataConTable are owned and don't need it).
     pub _temp_dir: Option<TempDir>,
-}
-
-/// Helper to get the path to the Haskell prelude library.
-pub fn prelude_path() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
 }
 
 /// Stages the split fixture into a temporary directory.

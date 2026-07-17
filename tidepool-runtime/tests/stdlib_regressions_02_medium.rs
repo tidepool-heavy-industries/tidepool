@@ -65,9 +65,9 @@
 //!   (`src/Tidepool/Translate.hs`).
 
 use std::path::Path;
-use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
+use tidepool_testing::NullDispatcher;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Mirrors `jit_surface.rs::eval_raw`, plus the

@@ -28,9 +28,9 @@
 
 use std::io::Write;
 use std::path::Path;
-use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
+use tidepool_testing::NullDispatcher;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or

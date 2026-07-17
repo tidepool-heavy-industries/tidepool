@@ -14,9 +14,9 @@
 //! A failure here is a GC bug (missed root / bad evacuation), never user error.
 
 use std::path::Path;
-use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
+use tidepool_testing::NullDispatcher;
 
 fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();

@@ -9,8 +9,8 @@
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
 //!   TIDEPOOL_GHC_LIBDIR=<with-packages>/lib/ghc-9.12.2/lib \
 //!   cargo test -p tidepool-runtime --test validator_reject
-use tidepool_testing::NullDispatcher;
 use tidepool_testing::eval_harness::EvalHarness;
+use tidepool_testing::NullDispatcher;
 
 fn try_compile(hole: &str) -> Result<(), String> {
     let decls = tidepool_mcp::standard_decls();

@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -513,19 +513,11 @@ impl DispatchEffect<()> for WorkerDispatcher {
 // Include dirs (mirrors lazy_bisect / repro313).
 // ===========================================================================
 
-fn root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
-}
-/// The live project verb library — the preamble emits `import Library`, so
-/// this must stay on the include path for EVERY compiled source.
-fn user_lib_dir() -> &'static Path {
-    root().join(".tidepool/lib").leak()
-}
 /// Probe.hs (t1..t11, the #313 cross-module probes) is a TEST FIXTURE, not a
 /// live session verb — it lives in the test tree so vocab curation of
 /// .tidepool/lib can't break the regression suite (it did once, 2026-07-01).
-fn probe_lib_dir() -> &'static Path {
-    root().join("tidepool-runtime/tests/haskell").leak()
+fn probe_lib_dir() -> PathBuf {
+    tidepool_testing::eval_harness::repo_root().join("tidepool-runtime/tests/haskell")
 }
 
 /// Run ONE case in-process (called by the worker). Reads no env beyond what the
@@ -543,7 +535,7 @@ fn run_case_inproc(case: &Case) -> Result<serde_json::Value, String> {
     };
     tidepool_testing::eval_harness::EvalHarness::new()
         .with_stdlib()
-        .with_include(user_lib_dir())
+        .with_include(tidepool_testing::eval_harness::user_lib_dir())
         .with_include(probe_lib_dir())
         .with_effects_module()
         .with_nursery(nursery)
@@ -669,7 +661,7 @@ fn worker_lib_probe() {
     let dispatcher = WorkerDispatcher { producer, n };
     let r = tidepool_testing::eval_harness::EvalHarness::new()
         .with_stdlib()
-        .with_include(user_lib_dir())
+        .with_include(tidepool_testing::eval_harness::user_lib_dir())
         .with_include(probe_lib_dir())
         .with_effects_module()
         .with_nursery(DEFAULT_NURSERY_SIZE)

@@ -196,78 +196,7 @@ fn show_double_10_effects_full_mcp_with_library() {
         return;
     }
 
-    let src = r#"
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
-module Expr where
-import Tidepool.Prelude hiding (error)
-import qualified Data.Text as T
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
-import qualified Tidepool.Aeson.KeyMap as KM
-import qualified Data.List as L
-import qualified Tidepool.TextFormat as TF
-import qualified Tidepool.Table as Tab
-import Control.Monad.Freer hiding (run)
-import Library
-import qualified Prelude as P
-default (Int, Text)
-error :: Text -> a
-error = P.error . T.unpack
-
--- Per-effect error ADTs, matching production (tidepool-mcp/src/effect_defs.rs).
-data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
-data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
-data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
-data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
-data LspError = LspDaemonDown Text deriving (Show, Eq)
-
-data Console a where
-  Print :: Text -> Console ()
-data KV a where
-  KvGet :: Text -> KV (Maybe Value)
-  KvSet :: Text -> Value -> KV ()
-  KvDelete :: Text -> KV ()
-  KvKeys :: KV [Text]
-data Fs a where
-  FsRead :: Text -> Fs Text
-  FsWrite :: Text -> Text -> Fs ()
-  FsListDir :: Text -> Fs [Text]
-  FsGlob :: Text -> Fs [Text]
-  FsExists :: Text -> Fs Bool
-  FsMetadata :: Text -> Fs (Maybe FileMeta)
-data Http a where
-  HttpGet :: Text -> Http (Either HttpError Value)
-  HttpPost :: Text -> Value -> Http (Either HttpError Value)
-  HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value
-data Exec a where
-  Run :: Text -> Exec (Either ExecError Proc)
-  RunIn :: Text -> Text -> Exec (Either ExecError Proc)
-  RunJson :: Text -> Exec Value
-data Lsp a where
-  LspWhere :: Text -> Lsp (Either LspError [Value])
-  LspCallers :: Value -> Lsp [Value]
-  LspCallees :: Value -> Lsp [Value]
-  LspRefs :: Value -> Lsp [Value]
-  LspDef :: Value -> Lsp (Maybe Value)
-  LspHover :: Value -> Lsp (Maybe Text)
-  LspRename :: Value -> Text -> Lsp (Maybe Text)
-  LspDiagnostics :: Text -> Lsp (Either LspError [Value])
-data Git a where
-  GitLog :: Int -> Git (Either GitError [Value])
-  GitStatus :: Git (Either GitError [Value])
-  GitDiffStat :: Text -> Git (Either GitError [Value])
-  GitShow :: Text -> Git (Either GitError Commit)
-data Llm a where
-  LlmChat :: Text -> Llm Text
-  LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
-data Time a where
-  TimeNow :: Time Int
-data Ask a where
-  Ask :: Text -> Ask Value
-
-type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
-
-say :: Text -> M ()
+    let body = r#"say :: Text -> M ()
 say t = do
   send (Print t)
   v <- send (KvGet "__sayChars")
@@ -365,12 +294,13 @@ result = do
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)
 "#;
+    let src = crate::helpers::mcp_module_with_library(body);
 
     let json = EvalHarness::new()
         .with_stdlib()
         .with_include(user_lib)
         .with_effects_module()
-        .run(src, "result", mock::min_stack())
+        .run(&src, "result", mock::min_stack())
         .json();
     eprintln!("Result: {json}");
 }

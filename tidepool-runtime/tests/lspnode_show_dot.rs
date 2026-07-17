@@ -9,9 +9,9 @@
 //! toolchain does not fail.
 
 use std::path::Path;
-use tidepool_testing::NullDispatcher;
 use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
+use tidepool_testing::NullDispatcher;
 
 fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();
