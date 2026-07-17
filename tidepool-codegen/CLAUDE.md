@@ -12,8 +12,9 @@ Env-gated, OFF by default. The Rust JIT-runtime traces use `log` + `env_logger`
 aliases (mapped in `tidepool_codegen::debug::init_logging`). Example:
 `RUST_LOG=tidepool::calls=trace,tidepool::heap=trace`.
 
-For the Haskell-extract knobs (a separate process: `DUMP_CLOSED`, `VARID_AUDIT`,
-`JOINREC_DEBUG`, `IFACE_DEBUG`) see `haskell/CLAUDE.md`.
+For the Haskell-extract knobs (a separate process: `TIDEPOOL_DUMP_CLOSED`,
+`TIDEPOOL_VARID_AUDIT`, `TIDEPOOL_JOINREC_DEBUG`, `TIDEPOOL_IFACE_DEBUG`) see
+`haskell/CLAUDE.md`.
 
 | Knob | Layer | What it shows | Reach for it when |
 |------|-------|---------------|-------------------|

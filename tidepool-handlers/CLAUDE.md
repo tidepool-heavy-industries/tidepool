@@ -58,10 +58,8 @@ locked decision on union tags).
   For a TYPED per-verb failure (#335), the errors-tagged method returns
   `Result<T, <ErrEnum>>` and takes no `cx`; the generated dispatch arm wraps it
   with `cx.respond` (`Ok → Right v`, `Err → Left e`), so the handler is total by
-  construction — no eval abort for a verb-level failure. (The old
-  `respond_caught` substrate for the `try*` zoo is gone: typed failures replace
-  it. A genuine panic or a non-`Handler` `EffectError` — real corruption — is
-  still the only abort path.)
+  construction — no eval abort for a verb-level failure. (A genuine panic or a
+  non-`Handler` `EffectError` — real corruption — is the only abort path.)
 - **`respond_stream(iter)`** — parks an arbitrary (possibly infinite) Rust
   iterator; the JIT consumes it lazily. Use for open-ended/unbounded sources.
 - **`respond_list(vec)`** — an owned `Vec<T>` exposed lazily at ELEMENT

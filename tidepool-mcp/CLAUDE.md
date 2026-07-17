@@ -129,9 +129,7 @@ matched. See the `qq_patch_pat_*` Suite fixtures for canonical shapes.
 
 ## Structural search
 
-The ast-grep-backed structural combinators (`hsDef`/`hsSig`/`rsFn`/`rHas`/
-`rInside`/`rHasChild`/`rInsideParent`) were cut with the SG effect (f1a480e6).
-`grepGlob` is the only structured-search verb left:
+`grepGlob` is the structured-search verb:
 
 - `grepGlob :: Text -> FilePath -> M (Either FsError [Hit])` — regex-search
   files matching a path glob (arg order: regex first, glob second). Returns

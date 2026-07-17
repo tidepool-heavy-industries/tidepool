@@ -39,7 +39,7 @@ with `tidepool-codegen/src/emit/primop.rs` and `define_primops!` in
   purpose, even though `VecHeap` is currently the only implementation.
 - **`shapes.rs` is the ONE home for Value-level data-shape facts** (Text
   worker encode/decode with its backing forms and slice policies, `I#`-family
-  boxing, `Bool`, `Data.Map` `Bin`/`Tip`, the `NumberI` exact-int policy,
+  boxing, `Bool`, `Data.Map` `Bin`/`Tip`, the aeson `Number`/`Scientific` exact-int policy,
   bignat limb decode, `ARRAY_SENTINEL`). `json.rs` builds on it for the
   JSON-document policy; `tidepool-runtime`'s renderer and `tidepool-bridge`'s
   impls decode through it. Don't hand-roll a Text/Map/boxing reader anywhere —

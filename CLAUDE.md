@@ -74,7 +74,7 @@ in that directory):
 - `tidepool-eval/CLAUDE.md` — the JIT's differential oracle: trampoline
   join-point evaluation, WHNF-only `Value`, thunk lifecycle, how it's actually
   tested (differential harnesses, not its own unit suite).
-- `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, case-trap → `runtime_case_trap` (poison + breadcrumb, not SIGILL).
+- `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, case-trap → `emit_case_trap` (poison + breadcrumb, not SIGILL).
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
 - `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
@@ -150,7 +150,8 @@ Key helpers: `ok :: Proc -> Bool` (true when `exitCode == 0`);
 a nonzero exit is still `Right proc`, inspect `proc.exitCode`. Natural spelling:
 `Right p <- run cmd` (or `run cmd >>= liftEither`).
 `grepGlob :: Text -> FilePath -> M (Either FsError [Hit])`;
-`readGlob :: Text -> M [FileRead]` — per-file failure isolation, not a verb-level Either.
+`readGlob :: Text -> M [FileRead]` — per-file failure isolation, not a verb-level Either;
+a glob matching nothing yields `[]`, not an error.
 
 ---
 
