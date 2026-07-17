@@ -65,7 +65,6 @@
 //!   (`src/Tidepool/Translate.hs`).
 
 use std::path::Path;
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 

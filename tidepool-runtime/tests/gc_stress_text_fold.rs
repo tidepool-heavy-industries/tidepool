@@ -14,7 +14,6 @@
 //! A failure here is a GC bug (missed root / bad evacuation), never user error.
 
 use std::path::Path;
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 

@@ -9,7 +9,6 @@
 //! toolchain does not fail.
 
 use std::path::Path;
-use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
 use tidepool_testing::NullDispatcher;
 
