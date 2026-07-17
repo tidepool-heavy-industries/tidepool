@@ -78,10 +78,27 @@ fn resolve_hs_path(
     }
 
     let basename = abs_hs_path.file_stem().unwrap().to_str().unwrap();
+    // Content-addressed cache dir: same (source bytes, target) → same dir.
+    // Parallel rustc targets expanding this macro converge on one result
+    // instead of clobbering a shared dir, and an existing dir is always
+    // complete and current (#F4) — `run_tidepool_extract` publishes it with
+    // an atomic rename. The target is part of the key because a targeted
+    // extract writes only that binding's `.cbor`.
+    let src_bytes = match std::fs::read(&abs_hs_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(syn::Error::new(
+                path_lit.span(),
+                format!("Failed to read {}: {}", abs_hs_path.display(), e),
+            )
+            .to_compile_error());
+        }
+    };
+    let key = content_key(&src_bytes, binding_name.as_deref());
     let output_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-cbor")
-        .join(basename);
+        .join(format!("{basename}-{key:016x}"));
 
     if let Err(msg) = run_tidepool_extract(
         &abs_hs_path,
@@ -296,10 +313,14 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         extensions_str, module_name, imports_str, include_bodies, source_text
     );
 
-    // Write to target/tidepool-inline/<Module>.hs
+    // Content-addressed staging dir (same rationale as `resolve_hs_path`):
+    // parallel targets expanding this macro write identical content, and the
+    // tmp+rename below keeps every path GHC reads complete at all times.
+    let key = content_key(full_source.as_bytes(), Some(&parsed.target));
     let inline_dir = Path::new(&manifest_dir)
         .join("target")
-        .join("tidepool-inline");
+        .join("tidepool-inline")
+        .join(format!("{key:016x}"));
     if let Err(e) = std::fs::create_dir_all(&inline_dir) {
         return syn::Error::new(
             parsed.source.span(),
@@ -308,7 +329,10 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         .to_compile_error();
     }
     let hs_file = inline_dir.join(format!("{}.hs", module_name));
-    if let Err(e) = std::fs::write(&hs_file, &full_source) {
+    let hs_tmp = inline_dir.join(format!("{}.hs.tmp-{}", module_name, std::process::id()));
+    if let Err(e) =
+        std::fs::write(&hs_tmp, &full_source).and_then(|()| std::fs::rename(&hs_tmp, &hs_file))
+    {
         return syn::Error::new(
             parsed.source.span(),
             format!("Failed to write {}: {}", hs_file.display(), e),
@@ -320,7 +344,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     let output_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-cbor")
-        .join(&module_name);
+        .join(format!("{module_name}-{key:016x}"));
 
     if let Err(msg) = run_tidepool_extract(
         &hs_file,
@@ -476,15 +500,22 @@ fn run_tidepool_extract(
     target: Option<&str>,
     manifest_dir: &Path,
 ) -> Result<(), String> {
-    // The output dir is fully regenerated on every expansion; clear stale
-    // bindings first — the extractor's own `createDirectoryIfMissing` never
-    // removes anything, so a renamed/removed binding's stale `.cbor` would
-    // otherwise keep being served silently after this rebuild (#F4).
-    if let Err(e) = std::fs::remove_dir_all(output_dir) {
+    // The output dir is content-addressed (its name encodes the source+target
+    // hash), so an existing dir is a complete, current result — staleness
+    // (#F4) is impossible by construction, and the publish rename below is
+    // atomic, so a partially-written dir is never visible under the final
+    // name. Concurrent expansions (e.g. `--all-targets` compiling a bin and
+    // its test harness in parallel) converge on one dir instead of clobbering
+    // a shared one.
+    if output_dir.exists() {
+        return Ok(());
+    }
+    let tmp_dir = tmp_sibling(output_dir);
+    if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!(
-                "failed to clear stale output dir {}: {e}",
-                output_dir.display()
+                "failed to clear stale tmp dir {}: {e}",
+                tmp_dir.display()
             ));
         }
     }
@@ -493,14 +524,14 @@ fn run_tidepool_extract(
     let mut cmd = Command::new("tidepool-extract");
     cmd.arg(hs_path);
     cmd.arg("--output-dir");
-    cmd.arg(output_dir);
+    cmd.arg(&tmp_dir);
     if let Some(name) = target {
         cmd.arg("--target");
         cmd.arg(name);
     }
 
     match cmd.output() {
-        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) if output.status.success() => return publish_extract_dir(&tmp_dir, output_dir),
         Ok(output) => {
             // The binary ran and failed — this IS the diagnostic (a GHC type
             // error, a missing binding, ...). Surface it verbatim; falling
@@ -532,20 +563,56 @@ fn run_tidepool_extract(
     ]);
     cmd.arg(hs_path);
     cmd.arg("--output-dir");
-    cmd.arg(output_dir);
+    cmd.arg(&tmp_dir);
     if let Some(name) = target {
         cmd.arg("--target");
         cmd.arg(name);
     }
 
     match cmd.output() {
-        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) if output.status.success() => publish_extract_dir(&tmp_dir, output_dir),
         Ok(output) => Err(format!(
             "nix run tidepool-extract failed (exit {}):\n{}",
             output.status,
             extract_failure_text(&output.stdout, &output.stderr)
         )),
         Err(e) => Err(format!("Failed to run nix: {}. Is nix installed?", e)),
+    }
+}
+
+/// Stable 64-bit key for the extract content cache. `DefaultHasher` is
+/// deterministic for a given toolchain, which is all a `target/`-local cache
+/// needs — every rustc process in one build converges on the same directory.
+fn content_key(bytes: &[u8], target: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    target.hash(&mut h);
+    h.finish()
+}
+
+/// Per-process scratch sibling of a content-addressed dir. Keyed by pid so
+/// concurrent processes never share a scratch dir; a leftover from a killed
+/// build with the same pid is cleared before use.
+fn tmp_sibling(dir: &Path) -> PathBuf {
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    dir.with_file_name(format!("{name}.tmp-{}", std::process::id()))
+}
+
+/// Atomically publish a finished extract dir under its content-addressed
+/// name. Losing the rename race to another process is success — the winner
+/// published identical content.
+fn publish_extract_dir(tmp_dir: &Path, output_dir: &Path) -> Result<(), String> {
+    match std::fs::rename(tmp_dir, output_dir) {
+        Ok(()) => Ok(()),
+        Err(_) if output_dir.exists() => {
+            let _ = std::fs::remove_dir_all(tmp_dir);
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "failed to publish extract output {}: {e}",
+            output_dir.display()
+        )),
     }
 }
 
