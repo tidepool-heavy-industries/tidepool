@@ -1,6 +1,7 @@
 use proptest::strategy::Strategy;
 use proptest::test_runner::{Config, TestRunner};
-use std::path::{Path, PathBuf};
+
+use tidepool_testing::eval_harness::prelude_path;
 
 pub mod cousins;
 pub mod error_family;
@@ -10,11 +11,6 @@ pub mod map_set;
 pub mod more_text_recursive;
 pub mod numeric;
 pub mod text;
-
-fn prelude_path() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
 
 pub fn compile_run_pure(src: &str) -> serde_json::Value {
     compile_run_pure_with_imports(src, "")
