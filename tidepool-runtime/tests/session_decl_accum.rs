@@ -20,7 +20,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serial_test::serial;
 use tidepool_repr::Generation;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
@@ -64,20 +63,28 @@ fn run_probe(lib_dir: &Path, session_dir: &Path, salt: &str, src: &str) -> serde
 }
 
 #[test]
-#[serial]
 fn declarations_accumulate_and_types_coexist() {
     let Some(lib_dir) = setup() else { return };
-    // Force a clean cache so a stale entry from a prior run can't mask a bug —
-    // the growing include changes the key, but be explicit for the proof.
-    let _ = std::fs::remove_dir_all(paths::cache_dir());
+    // A guaranteed-fresh compile cache: the (src, salt) keys are stable across
+    // runs (fixed SessionId + gens), so a stale entry could mask a compile bug.
+    // Redirect this process's cache root instead of deleting the shared
+    // `~/.cache/tidepool` — under nextest other tests use it concurrently.
+    let cache_root = tempfile::tempdir().unwrap();
+    // SAFETY: set before any compile/thread activity in this test process.
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache_root.path()) };
+    assert!(paths::cache_dir().starts_with(cache_root.path()));
 
     let session_root = tempfile::tempdir().unwrap();
+    // Supply the stdlib include explicitly, as the production repl does
+    // (`SessionConfig::base_include`) — define-time validation must not depend
+    // on the extract binary living inside a dist-newstyle tree.
     let mut lib = SessionLib::open(
         SessionId(42),
         session_root.path(),
         ModuleEnv::standalone_default(),
     )
-    .expect("open session");
+    .expect("open session")
+    .with_validation_include(vec![lib_dir.clone()]);
 
     // ---- turn 1: define `slug` ----
     let g1 = lib
