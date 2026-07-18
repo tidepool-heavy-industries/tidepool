@@ -37,9 +37,12 @@ That inverts the security posture in three ways:
 
 **Capability is presence in the stack.** A program whose stack lacks `Exec`
 cannot shell out — not "is prompted before shelling out," cannot. There is no
-string clever enough to invoke an effect that isn't in the type. Granting
-capabilities per-agent, per-session, or per-task is editing a type-level list,
-not maintaining a regex allowlist against an adversarial grammar.
+string clever enough to invoke an effect that isn't in the type. Granting a
+capability is editing a type-level list, not maintaining a regex allowlist
+against an adversarial grammar. (Today that edit happens at compile time — the
+server ships one full stack, and cutting an effect is a one-line stack edit +
+rebuild. Per-agent and per-session grants are the obvious next knob; the
+enforcement they'd ride on is already in the type.)
 
 **Policy lives in the handler, in a real language.** The `Fs` handler enforces
 the workspace sandbox in Rust, at the one chokepoint every file operation flows
@@ -53,11 +56,15 @@ error*. The verb surface doesn't contain it.
 values (CBOR on the wire). The complete record of what an agent did is not a
 chat transcript you skim — it's a trace you can log, diff, replay, and write
 policy against. "Show me every write outside `src/`" is a query, not a
-forensic reconstruction.
+forensic reconstruction. (Candor: the typed wire format is shipped; the durable
+request trace that rides on it isn't yet. It's the cheapest item on the roadmap
+precisely because the data is already structured — nothing to parse, only to
+persist.)
 
 And the escape hatch is honest: `Exec` still exists, because sometimes you need
-bash. But it's *one effect* — you can deny it, allowlist it, or wrap it in an
-approval `ask`, and its grant status is visible in the type of every program
+bash. But it's *one effect* — a single chokepoint where deny, allowlist, or
+wrap-in-an-approval-`ask` controls belong (deny-by-stack-edit is the one that
+exists today), and its grant status is visible in the type of every program
 that uses it. Bash becomes a capability you extend deliberately instead of the
 entire substrate everything runs on.
 
@@ -89,6 +96,9 @@ security post.)
 
 ## Notes / TODO
 
+- Hoist a one-sentence thesis into the opening — the pitch currently first
+  lands at "Tidepool's bet" (¶3) and is stated plainly only at the end of the
+  three-bullet spine.
 - Concrete before/after: a real bash disaster (unset-var `rm -rf`) vs the same
   intent as an `M`-program hitting the Fs sandbox.
 - Numbers for the fluency claim: eval-vs-bash token counts from the track-2
