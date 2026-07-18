@@ -31,12 +31,53 @@ Two principles follow:
   and the frictions where it doesn't — drive each round of UX changes and new
   effects.
 
+## The repl: typed working memory
+
+Tidepool ships two MCP servers over the same effect surface: `tidepool`
+(one-shot `eval` — every call is a fresh program) and `tidepool-repl` (a
+GHCi-style session — one resident JIT machine whose bindings, declarations,
+and heap persist across calls). The repl is where the model stops acting like
+a tool-caller and starts acting like someone at a workbench:
+
+- **Substrate once, interrogate for many turns.** Bind an expensive value (a
+  parsed corpus, an API dump, a git history) in turn one; every later turn is
+  a cheap typed fold over it. No re-fetch, no re-derive.
+- **Intermediates stay out of the context window.** Big values live in the
+  session heap, not the conversation. Fold them in-session and return the
+  aggregate; a value too large to render is auto-stubbed but stays a live
+  binding you can keep computing on.
+- **A toolkit accumulates.** Function and `data` declarations persist with
+  GHCi shadowing semantics — define a helper in turn two, refine it in turn
+  nine; a reshaped `data` type coexists with its older generation.
+
+A condensed real session — join every backtick-quoted claim in this repo's
+docs against the tracked file tree, with no file ever entering the model's
+context:
+
+```haskell
+-- turn 1: substrate (doc bodies + file list live in the session heap)
+docs <- readGlob "*/CLAUDE.md"
+Right ls <- run "git ls-files"
+let tracked = Set.fromList (T.lines ls.stdout)
+
+-- turn 2: every `claim` in every doc (only a count returns to the model)
+let claims = [ (d.path, s) | d <- docs, Right t <- [d.contents]
+             , (i, s) <- zip [(0::Int)..] (T.splitOn "`" t), odd i ]
+
+-- turn 3: the verdict — only the misses cross back into context
+pure [ c | c@(_, s) <- claims, T.count "/" s > 0, not (Set.member s tracked) ]
+```
+
+The thousand-file join runs in the session; a handful of tokens come back.
+This exact fold found real drift in this repo's own docs (commit `b227fdc2`).
+
 ## Getting Started
 
-### 1. Install the MCP server
+### 1. Install the MCP servers
 
 ```bash
-cargo install tidepool
+cargo install tidepool     # one-shot eval server
+cargo install --git https://github.com/tidepool-heavy-industries/tidepool tidepool-repl
 ```
 
 ### 2. Install the GHC toolchain (requires Nix)
@@ -65,9 +106,8 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 ```json
 {
   "mcpServers": {
-    "tidepool": {
-      "command": "tidepool"
-    }
+    "tidepool":      { "command": "tidepool" },
+    "tidepool-repl": { "command": "tidepool-repl" }
   }
 }
 ```
@@ -126,6 +166,12 @@ tidepool-effect/            Effect handling: EffectHandler trait, HList dispatch
 tidepool-codegen/           Cranelift JIT compiler + effect machine
 tidepool-runtime/           High-level API: compile_haskell, compile_and_run, caching
 tidepool-mcp/               MCP server library (generic over effect handlers)
+tidepool-handlers/          Concrete effect handlers shared by both servers
+tidepool-repl/              GHCi-style resident-session MCP server
+tidepool-lsp/               LSP client + workspace daemon (call graph, hover, refs)
+tidepool-bignum/            Native ghc-bignum shims (Integer arithmetic sans GMP)
+tidepool-bridge-effects/    Bridged record types shared by handlers + test mocks
+tidepool-testing/           Test utilities + property-based generators
 ```
 
 ## How It Works
@@ -272,17 +318,20 @@ The `tidepool` binary provides these effect handlers:
 |--------|-----------|
 | **Console** | `Print :: Text -> Console ()` |
 | **KV** | `KvGet`, `KvSet`, `KvDelete`, `KvKeys` — persistent key-value store |
-| **Fs** | `FsRead`, `FsWrite`, `FsListDir`, `FsGlob`, `FsExists`, `FsMetadata` — sandboxed file I/O |
+| **Fs** | `FsRead`, `FsWrite`, `FsGlob`, `FsReadGlob` (batch read, per-file failure isolation), `FsGrep`, `FsListDir`, `FsExists`, `FsMetadata` — sandboxed file I/O + editing verbs |
 | **Http** | `HttpGet`, `HttpPost` — outbound HTTP (no localhost) |
-| **Exec** | `Run`, `RunIn` — shell command execution |
-| **Llm** | `LlmChat`, `LlmStructured` — call a fast LLM for classification/extraction |
-| **Ask** | `Ask :: Text -> Ask Value` — suspend execution and ask the calling LLM a question |
+| **Exec** | `Run`, `RunIn` — shell commands returning typed `Proc` records |
+| **Lsp** | `LspWhere`, `LspCallers`, `LspCallees`, `LspRefs`, `LspDef`, `LspHover`, `LspRename`, `LspDiagnostics` — semantic code graph via rust-analyzer |
+| **Llm** | `LlmStructured` — schema-validated LLM call for classification/extraction |
+| **Git** | `GitLog`, `GitStatus`, `GitDiffStat`, `GitShow` — read-only queries as typed records |
+| **Time** | `TimeNow` — UTC clock (epoch millis; `getCurrentTime`, ISO-8601 helpers) |
+| **Ask** | `AskWith :: Text -> Value -> Ask Value` — suspend and ask the calling LLM a schema-validated question |
 
 > **`--debug` flag**: Run `tidepool --debug` to enable the **Meta** effect (`MetaConstructors`, `MetaLookupCon`, `MetaPrimOps`, `MetaEffects`, `MetaDiagnostics`, `MetaVersion`, `MetaHelp`) for runtime introspection. For git operations, use `run "git ..."` via the Exec effect.
 
 ### MCP Server Usage Examples
 
-Tidepool also supports live compilation, in cases where the user has the Haskell compiler available. To demonstrate this, we have provided an MCP server that provides this functionality. It's a bit like GHCi (Haskell's REPL), but specialized for the monadic composition of pure effects that are executed by Rust code.
+With GHC available, the servers compile live. The `eval` tool takes one Haskell expression per call; `tidepool-repl` keeps a resident session (see [The repl: typed working memory](#the-repl-typed-working-memory)). The examples below use the one-shot form; every one also works turn-by-turn in the repl, where bindings persist between them.
 
 #### Pure computation
 
@@ -295,30 +344,30 @@ pure (1 + 2 :: Int)
 
 #### Sequencing monadic effects
 
-Each effect operation (`say`, `fsRead`, `run`, etc.) is a monadic action. Chain them with `do`-notation:
+Each effect operation (`say`, `readFile`, `run`, etc.) is a monadic action; failures are typed data, so `Right x <-` is the natural spelling. Chain them with `do`-notation:
 
 ```haskell
-content <- fsRead "Cargo.toml"
-let lineCount = len (lines content)
-say ("Cargo.toml has " <> pack (show lineCount) <> " lines")
+Right content <- readFile "Cargo.toml"
+let lineCount = length (T.lines content)
+say ("Cargo.toml has " <> show lineCount <> " lines")
 pure lineCount
 ```
 ```
 ## Output
-Cargo.toml has 29 lines
+Cargo.toml has 57 lines
 
 ## Result
-29
+57
 ```
 
 Effects compose freely — read files, run shell commands, query a KV store, all in one program:
 
 ```haskell
-(_, rustc_out, _) <- run "rustc --version"
-say ("Rust: " <> strip rustc_out)
-kvSet "env" (object ["rustc" .= strip rustc_out])
+Right p <- run "rustc --version"
+say ("Rust: " <> T.strip p.stdout)
+kvSet "env" (object ["rustc" .= T.strip p.stdout])
 v <- kvGet "env"
-pure (case v of { Just val -> val; Nothing -> Null })
+pure (fromMaybe Null v)
 ```
 ```json
 { "rustc": "rustc 1.93.0 (254b59607 2026-01-19)" }
@@ -326,59 +375,55 @@ pure (case v of { Just val -> val; Nothing -> Null })
 
 #### Codebase census in a single eval
 
-One eval replaces many tool calls. Glob for files, gather metadata, sort, return structured JSON:
+One eval replaces many tool calls. Batch-read matching files (per-file failure isolation — one binary file doesn't fail the sweep) and return structured JSON:
 
 ```haskell
-files <- fsGlob "tidepool-*/Cargo.toml"
-sizes <- mapM (\f -> do
-  (sz, _, _) <- fsMetadata f
-  pure (object ["file" .= f, "bytes" .= sz])) files
-pure (toJSON sizes)
+rs <- readGlob "tidepool-*/Cargo.toml"
+pure (toJSON [ object ["file" .= r.path, "lines" .= length (T.lines t)]
+             | r <- rs, Right t <- [r.contents] ])
 ```
 ```json
 [
-  {"bytes": 482, "file": "tidepool-bridge/Cargo.toml"},
-  {"bytes": 921, "file": "tidepool-codegen/Cargo.toml"},
+  {"file": "tidepool-bignum/Cargo.toml", "lines": 12},
+  {"file": "tidepool-bridge/Cargo.toml", "lines": 24},
   ...
 ]
 ```
 
-#### Free pagination via continuation
+#### Structured suspension via `ask`
 
-`ask` suspends the computation and returns control to the calling LLM. The LLM can do independent work (run other tools, think), then resume with an answer. The suspended eval is a coroutine checkpoint:
+`ask` suspends the computation and hands a schema-validated question to the calling LLM, which can do independent work (run other tools, think) before resuming. The suspended eval is a coroutine checkpoint, and an invalid reply does not consume the continuation:
 
 ```haskell
-files <- fsGlob "tidepool-*/src/lib.rs"
-info <- mapM (\f -> do
-  (sz, _, _) <- fsMetadata f
-  pure (f <> " (" <> pack (show sz) <> " bytes)")) files
-let numbered = map (\(i, f) -> pack (show i) <> ". " <> f) (zipWithIndex info)
-answer <- ask ("Which file to inspect?\n" <> unlines numbered)
--- ← computation suspends here, LLM resumes with "9"
-let chosen = head (sdrop (round (answer ^? _Number)) files)
-content <- fsRead chosen
-pure (toJSON (take 10 (lines content)))
+files <- glob "tidepool-*/src/lib.rs" >>= liftEither
+v <- ask (SObj [("file", SEnum files)]) "Which lib.rs should I inspect?"
+-- ← computation suspends here; the LLM resumes with {"file": "..."}
+case v ^? key "file" . _String of
+  Nothing -> pure Null
+  Just chosen -> do
+    content <- readFile chosen >>= liftEither
+    pure (toJSON (take 5 (T.lines content)))
 ```
 
-The LLM sees a menu of 12 files with sizes, picks one, and the eval resumes to read it — all within a single logical computation.
+The LLM receives the question plus a JSON Schema whose enum is the live file list; the reply is validated server-side and the eval resumes exactly where it suspended — all one logical computation.
 
 #### Complex effect sequences
 
-Combine structural code search (ast-grep), file I/O, and LLM classification in one program:
+Combine regex search, schema-validated LLM classification, and the KV store in one program:
 
 ```haskell
--- Find all struct definitions in the codegen crate
-matches <- sgFind Rust "struct $NAME { $$$FIELDS }" ["tidepool-codegen/src/"]
-say ("Found " <> pack (show (length matches)) <> " structs")
+-- Find every TODO/FIXME marker in the workspace
+hits <- grepGlob "TODO|FIXME" "**/*.rs" >>= liftEither
+say (show (length hits) <> " markers found")
 
--- Classify each one with a fast LLM
-results <- mapM (\m -> do
-  let text = case m of Match t _ _ _ _ -> t
-  category <- llm ("Classify this Rust struct as 'data', 'config', or 'handler': " <> text)
-  pure (object ["struct" .= text, "category" .= category])) (take 5 matches)
+-- Classify a sample with a fast LLM (structured output, typed errors)
+results <- for (take 5 hits) (\h -> do
+  r <- llm (SObj [("category", SEnum ["bug", "cleanup", "feature"])])
+           ("Classify this marker: " <> h.text)
+  pure (object ["at" .= (h.path <> ":" <> show h.line), "class" .= either (const Null) id r]))
 
 -- Persist results for later evals
-kvSet "struct_analysis" (toJSON results)
+kvSet "todo_audit" (toJSON results)
 pure (toJSON results)
 ```
 
@@ -394,11 +439,9 @@ cargo test --workspace   # Run all tests
 
 ## Known Limitations
 
-- **Stack overflow at ~50+ recursion depth (eval):** The tree-walking interpreter (`tidepool-eval`) uses Rust's call stack for recursion. Deeply recursive Haskell functions (>~50 frames) may overflow. The JIT backend (`tidepool-codegen`) supports TCO and handles deep recursion.
-- **`nub` crashes at ~31 elements with complex `Text`:** O(n²) equality comparisons on `Text` values can trigger "application of non-closure (tag=255)" around 31 elements. Use `nubBy` with simpler comparisons or shorter lists.
 - **`Text`, not `String`:** The JIT evaluates eagerly, making `String` (`[Char]`) expensive. The Prelude standardizes on `Text` — use it everywhere. `show` returns `Text`, `pack` is polymorphic, `error` takes `Text`.
-- **SIGILL = case trap, not missing primop:** All primop variants are implemented. `SIGILL` crashes come from Cranelift `trap` instructions on exhausted case branches (constructor tag mismatch, unexpected value shape). Check constructor tags and case coverage.
-- **No JSON parsing in Haskell:** `encode`/`decode` are removed. Use the `httpGet` effect (parsed on the Rust side via serde_json) or `run` with external tools.
+- **Deep recursion in the oracle interpreter:** the tree-walking `tidepool-eval` (the differential-testing oracle, not the serving path) recurses on the host stack and can overflow around ~50 frames. The JIT backend supports TCO and handles deep recursion.
+- **Case traps abort cleanly:** an exhausted case branch (constructor tag mismatch, unexpected value shape) surfaces as a `runtime case trap` diagnostic with a breadcrumb — a poisoned eval result, not a process SIGILL.
 
 ## License
 
