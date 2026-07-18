@@ -46,7 +46,7 @@ Ops: `where` (seed by name) → `callers` / `callees` / `references` / `def` /
 `hover` / `rename` / `diagnostics` (all node- or file-addressed). **`rename`
 returns a unified diff — it does NOT apply the edit.** This crate doesn't
 declare or handle the Haskell-facing constructors itself — see
-`tidepool-mcp/src/effect_decls.rs` (declaration) and
+`tidepool-mcp/src/effect_defs.rs` (single-source definition) and
 `tidepool-handlers/src/lib.rs`'s Lsp section (handling); this doc only covers
 what happens on the daemon side of the socket call.
 

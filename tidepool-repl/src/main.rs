@@ -2,7 +2,7 @@
 //!
 //! A SEPARATE server from `tidepool` (the eval server), but it builds the SAME
 //! full effect suite from the shared `tidepool-handlers` crate
-//! (`build_base_stack`): Console, KV, Fs, Http, Exec/run, Lsp, Llm
+//! (`build_base_stack`): Console, KV, Fs, Http, Exec/run, Git, Time, Lsp, Llm
 //! — plus the `Ask` suspend interposed by the session worker. What makes this a
 //! distinct server is the STATE: a resident JIT machine holds the value heap
 //! across `session_run` turns and Lane-A declarations accumulate, so the

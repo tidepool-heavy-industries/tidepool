@@ -35,22 +35,22 @@ be loud. If you see one, that's a reportable codegen bug, not user error.
 families:
 
 - **Shape/tag-mismatch traps** → `runtime_shape_trap` (`src/host_fns/errors.rs`),
-  formerly `runtime_case_trap`. A value's constructor tag or heap shape didn't
+  A value's constructor tag or heap shape didn't
   match what was compiled. Three `ShapeTrapKind` callers: a case scrutinee
   matching no alternative (`CaseMiss`, `emit_case_trap` in `src/emit/case.rs`), and
   the numeric-unbox guards for wrong Con arity (`BoxingArity`) / wrong literal
   class (`LitClass`) in `src/emit/primop.rs`. The `kind` selects the breadcrumb
   label (`[CASE TRAP]` / `[SHAPE TRAP: …]`); all three surface
   `RuntimeError::CaseTrap` and print the enclosing fn + scrutinee tag + expected
-  alt tags. `emit_case_trap` replaced a bare `trap user2` (→ `ud2` → SIGILL) — it
+  alt tags. `emit_case_trap` emits no bare `trap` (so no SIGILL) — it
   CALLs the host fn, uses its poison return, and continues; if a poison/error
   already cascaded in it returns poison immediately, and a lazy poison-closure
   scrutinee is triggered to set the error flag.
 
 - **Runtime domain errors** (division by zero, `Prelude.chr: bad argument`) →
   the `runtime_error`/`runtime_error_with_msg` machinery, same as a Haskell
-  `error` call. The div/`chr` guards in `src/emit/primop.rs` used to emit bare
-  `trap`/`trapnz` (→ SIGILL); they now raise a clean `RuntimeError` and substitute
+  `error` call. The div/`chr` guards in `src/emit/primop.rs` raise a clean
+  `RuntimeError` (no bare `trap`/`trapnz`, so no SIGILL) and substitute
   a safe operand so execution continues to a placeholder value the pending error
   preempts.
 
@@ -58,11 +58,11 @@ Almost all PrimOpKind variants are implemented; a clean runtime error is
 surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
 SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine
 language-level error reaches a signal.) Two variants are NOT emitted:
-`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2124`).
+`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2154`).
 `TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs`, grep the
 `pop == TagToEnumOp` guard; ~L1463),
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
-handled by the eval oracle (`tidepool-eval/src/eval.rs:1539`) but NOT the JIT.
+handled by the eval oracle (`tidepool-eval/src/eval.rs:1544`) but NOT the JIT.
 The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
 (checked 2026-07-07), so this gap isn't exercised today; if the generator is
 extended to cover it, either implement `SeqOp` in the JIT or exclude it from

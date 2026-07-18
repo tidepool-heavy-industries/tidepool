@@ -5,23 +5,32 @@
 Crates must be published in dependency order. Wait for each crate to appear on crates.io before publishing the next.
 
 ```
-1.  tidepool-repr
-2.  tidepool-eval
-3.  tidepool-heap
+1.  tidepool-bignum
+2.  tidepool-repr
+3.  tidepool-eval
 4.  tidepool-bridge
 5.  tidepool-bridge-derive
-6.  tidepool-optimize
-7.  tidepool-macro
-8.  tidepool-effect
-9.  tidepool-codegen
+6.  tidepool-effect
+7.  tidepool-heap
+8.  tidepool-codegen
+9.  tidepool-bridge-effects
 10. tidepool-runtime
 11. tidepool-mcp
-12. tidepool (binary)
+12. tidepool-handlers
+13. tidepool-macro
+14. tidepool-optimize
+15. tidepool (binary)
+16. tidepool-lsp (binary)
+17. tidepool-repl (binary)
 ```
 
-`tidepool-testing` has `publish = false` and is a dev-dependency only — crates.io ignores it.
+This order is derived from the workspace dependency graph (`cargo metadata`,
+normal deps only) — re-derive it after adding a crate or changing inter-crate
+dependencies rather than editing the list by hand.
 
-Note: v0.0.1 was previously published for all crates, so 0.1.0 will work.
+`tidepool-testing` and the two example crates (`tidepool-guess`, `tidepool-tide`)
+have `publish = false` — crates.io ignores them. Everything else in the workspace
+publishes, including the three binaries at the end of the list.
 
 ## Dry Run
 

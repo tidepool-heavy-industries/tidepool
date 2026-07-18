@@ -21,9 +21,15 @@ Always verify your changes by running the workspace-wide tests and checks:
 
 ```bash
 cargo check --workspace   # Type check the entire workspace
-cargo test --workspace    # Run all tests
+scripts/battery.sh        # Run ALL tests (cargo-nextest; builds TIDEPOOL_EXTRACT if unset)
+cargo nextest run         # Quick tier: pure-Rust crates only
 cargo clippy --workspace  # Run lints
 ```
+
+The test runner is `cargo-nextest` (`cargo install cargo-nextest --locked`), which
+runs each test in its own OS process. GHC-heavy crates need the `TIDEPOOL_EXTRACT`
+env var pointing at a built `tidepool-extract-bin` — `scripts/battery.sh` sets this
+up automatically. See the Build & Test section of `CLAUDE.md` for the full matrix.
 
 ## MCP Server
 
@@ -36,13 +42,12 @@ tidepool # Communicates via JSON-RPC over stdio
 
 ## Adding New Effects
 
-Adding an effect involves changes in both Haskell and Rust:
-
-1.  **Haskell**: Define your effect type and operations (e.g., in `haskell/lib/Tidepool/MyEffect.hs`).
-2.  **Rust Request Type**: Define a Rust struct or enum that represents the effect request.
-3.  **Bridge Implementation**: Use `#[derive(FromCore, ToCore)]` from `tidepool-bridge` to enable conversion between Haskell values and your Rust request type.
-4.  **Effect Handler**: Implement the `EffectHandler` trait from `tidepool-effect` for your request type.
-5.  **Dispatch**: Register your handler in the `HList` used by the `JitEffectMachine`.
+The effect stack derives from a single declaration: `tidepool-mcp/src/effect_defs.rs`.
+Each effect is one `<effect>_effect_def!` block; two projections generate the
+effect declaration builder and the Rust `<Eff>Req` enum + handler dispatch from it.
+Add, remove, or reorder an effect by editing that file, then write the handler
+method the dispatch arm calls — see `tidepool-mcp/CLAUDE.md` (how to add an effect)
+and `tidepool-handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
 
 ## Adding Prelude Functions
 
@@ -50,7 +55,7 @@ When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep th
 
 - **Monomorphization**: Polymorphic base functions that use typeclass dictionaries often crash when JIT-compiled because error branches in dictionaries are eagerly evaluated.
 - **Shadowing**: Shadow polymorphic base functions with monomorphic versions that use primops directly (e.g., use `rem` instead of the `Integral` typeclass version).
-- **Avoid Dictionary-Heavy Functions**: Functions like `sum`, `product`, `maximum`, and `minimum` now work via lazy poison closures.
+- **Monomorphic shadows over dictionaries**: `Tidepool.Prelude` exports monomorphic versions of dictionary-heavy functions like `sum`, `product`, `maximum`, and `minimum`; follow that pattern for new additions.
 
 ## Testing Approach
 

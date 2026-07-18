@@ -32,13 +32,20 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 - **`tidepool-repr`**: Defines the Core IR, `Value` types, and handles CBOR serialization/deserialization.
 - **`tidepool-eval`**: A tree-walking interpreter for evaluating Core expressions without JIT overhead, used for testing and as a reference implementation.
 - **`tidepool-heap`**: Implements the manual memory layout (raw byte buffers) and the copying garbage collector used by the JIT runtime.
+- **`tidepool-bignum`**: Native `ghc-bignum` shims — `Integer` arithmetic without GMP.
 - **`tidepool-optimize`**: Contains optimization passes like beta reduction, dead code elimination (DCE), inlining, and case reduction.
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
 - **`tidepool-runtime`**: The high-level orchestration layer that handles Haskell compilation (via `tidepool-extract`), caching, and running programs.
 - **`tidepool-effect`**: Core traits and logic for effect dispatch and handling (`EffectHandler`, `DispatchEffect`).
-- **`tidepool-macro`**: Procedural macros for inlining Haskell code directly into Rust using `haskell_inline!`.
+- **`tidepool-macro`**: Procedural macros embedding Haskell source as CBOR at build time (`haskell_eval!` for whole programs, `haskell_inline!` for inline snippets).
 - **`tidepool-bridge`**: Provides `FromCore` and `ToCore` traits for seamless data conversion between Rust types and Tidepool `Value`s.
 - **`tidepool-bridge-derive`**: Procedural macro crate providing `#[derive(FromCore)]` and `#[derive(ToCore)]`.
+- **`tidepool-bridge-effects`**: Single-source bridged-record types (e.g. `Proc`, `Hit`, `Commit`) shared by handlers and test mocks.
+- **`tidepool-handlers`**: Central effect-request handler arms — the Rust side of the effect contract (`<Eff>Req` matches, sandbox enforcement).
+- **`tidepool-mcp`**: MCP server library, generic over effect handlers.
+- **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls).
+- **`tidepool-lsp`**: LSP client + workspace daemon (call graph, hover, references).
+- **`tidepool`**: Facade crate + the `tidepool` MCP server binary.
 - **`tidepool-testing`**: Internal utilities and property-based generators for testing the compiler and runtime.
 
 ## Data Flow

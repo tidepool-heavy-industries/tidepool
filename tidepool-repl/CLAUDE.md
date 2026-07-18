@@ -41,7 +41,8 @@ large/quote-heavy content in `items` itself.
 
 Each string in `items` is classified into a kind: **decl** (a top-level
 declaration), **stmt** (a bind `x <- e` / `let x = e`, or a bare expression),
-or **meta** (a `:command` — `:bindings`, `:reset`, `:t`, `:i`, `:vocab`).
+or **meta** (a `:command` — `:bindings`, `:reset`, `:t`, `:i`, `:vocab`,
+`:browse [Effect]`, `:stub <n>`, `:program`).
 Execution stops on the first error. A block ending in a bind leaves the
 top-level `value` null (read `items[].result` instead); end with a bare
 expression to populate `value`. `:vocab` takes an optional module argument

@@ -5,7 +5,7 @@ the oracle, `tidepool-optimize`, `tidepool-codegen` the JIT) consumes `CoreExpr`
 built here. **Read the repo-root `CLAUDE.md` Key Decisions Reference FIRST** —
 it defines the `CoreFrame` variants this doc's traversal code is written
 against; nothing here re-lists them. This doc goes deeper on 4 of the crate's
-~14 source files — the shared tree/table/id/wire-format machinery
+~17 source files — the shared tree/table/id/wire-format machinery
 (`tree.rs`, `datacon_table.rs`, `session_ids.rs`, `serial/`). It does NOT cover
 `frame.rs` (the `CoreFrame`/`VarId`/`Literal` type defs themselves — that's
 root's territory), `types.rs` (`PrimOpKind`/`define_primops!`), or

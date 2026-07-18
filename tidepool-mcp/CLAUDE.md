@@ -25,7 +25,8 @@ definition + one hand-written inherent method on the handler struct (using
 `cx.respond`/`respond_stream`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
-`tidepool/src/main.rs` only wires the handler stack (`build_base_stack`); the
+the `tidepool` binary only wires the handler stack (`build_base_stack`, called
+from `tidepool/src/stack.rs`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
 
 ## On-disk paths & config (`tidepool_runtime::paths`)

@@ -78,7 +78,7 @@ in that directory):
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
 - `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
-  handler arm, the four `cx.respond*` variants, sandbox enforcement.
+  handler arm, the three `cx.respond*` variants, sandbox enforcement.
 - `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
   mechanism, repl-specific usage notes.
@@ -165,6 +165,6 @@ Critical architectural decisions for daily work (the Locked Decisions source of 
 - **CBOR** via serialise (Haskell) / ciborium (Rust)
 - **Cast/Tick/Type erasure** happens in Haskell serializer, NOT in Rust
 - **HeapObject:** manual memory layout (raw byte buffers + unsafe accessors), NOT a Rust enum
-- **GC:** Copying collector, custom RBP frame walker, split gc-trace/gc-compact
+- **GC:** Copying collector (Cheney scan), custom RBP frame walker in tidepool-codegen; tidepool-heap provides shared object layout + `gc::raw` copy primitives
 - **freer-simple continuations:** Leaf/Node tree (type-aligned sequence), NOT single closures
 - **Union tags:** unboxed Word# constants (0##, 1##, ...) indexing the effect type list
