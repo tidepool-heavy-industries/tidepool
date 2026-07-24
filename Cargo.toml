@@ -17,6 +17,8 @@ members = [
     "tidepool-handlers",
     "tidepool-repl",
     "tidepool-lsp",
+    "tidepool-harness",
+    "tidepool-web",
     "tidepool",
     "examples/guess",
     "examples/tide",

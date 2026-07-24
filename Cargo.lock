@@ -3692,6 +3692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-harness"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tidepool-repr",
+]
+
+[[package]]
 name = "tidepool-heap"
 version = "0.1.0"
 dependencies = [
@@ -3881,6 +3891,15 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "tidepool-web"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tidepool-harness",
 ]
 
 [[package]]

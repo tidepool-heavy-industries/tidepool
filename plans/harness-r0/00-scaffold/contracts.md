@@ -15,18 +15,26 @@ decided elsewhere vs defined here.
 - `Ui` ADT + JSON wire shape — `50-ui-edsl/SPEC.md` (fable finalizes at
   E1 spawn; Rust mirror type in `tidepool-harness::ui`).
 
-## Defined here during 0b (skeleton compiles before wave 1 forks)
+## Defined (0b landed — crates scaffolded, `cargo check` green)
 
-- `SessionNode` / `NodeState` (thunk | running | suspended | waiting-on-
-  operator | done | cancelled) — the tree's vocabulary, shared by log,
-  forcing, protocol, renderer.
-- `HoleId` / `SiteId` newtypes (SiteId = the extract pass's u32).
-- `Slot` lifecycle enum for the session registry (segment 20 step 3) —
-  lives in tidepool-harness, wraps tidepool-runtime types.
-- `ProtocolVerb` request/response serde types (segment 30 C4) + SSE event
-  envelope (= log event + monotonic seq).
-- `ModelProvider` trait signature (segment 60).
-- Crate boundaries: `tidepool-harness` (tree, log, forcing, scheduler,
-  provider trait) depends on tidepool-runtime/effect/handlers;
-  `tidepool-web` (axum + datastar + maud renderer + observatory) depends
-  on tidepool-harness only through the protocol types.
+- `tidepool-harness/src/tree.rs` — `NodeId`, `NodeState` (Thunk/Running/
+  Suspended{hole}/Done/Cancelled; waiting-on-operator GLYPH derives from
+  hole routing, not a node state), `HoleId` (opaque engine cont-id
+  string), `SiteId(u32)`, `FanBadge` (Exact/Bounded/Dynamic),
+  `PriceClass` (Zero/Llm/Frontier — draft granularity, segment 30 may
+  refine), `Slot<M>` (generic over the machine handle — segment 20
+  instantiates; keeps the JIT dependency out of the contract crate).
+- `tidepool-harness/src/log.rs` — `LogHeader` (prelude_hash,
+  extract_fingerprint, harness_version) + `Event` enum (node_created/
+  forced/turn_start/effect{req,resp}/hole_published/hole_answer_attempt/
+  hole_consumed/node_done/node_cancelled), `Actor`, `AnswerOutcome`.
+  `Effect` carries the RESPONSE — substitution replay depends on it.
+- `tidepool-harness/src/provider.rs` — `ModelProvider` trait +
+  `TurnRequest`/`TurnResponse`/`Usage`/`ProviderError`.
+- Crate boundaries as scaffolded: `tidepool-harness` depends only on
+  tidepool-repr + serde (segment 20 adds tidepool-runtime);
+  `tidepool-web` depends on tidepool-harness (C4 adds axum/datastar,
+  50 adds maud).
+- Protocol verb request/response serde types: C4-owned (co-designed with
+  the axum handlers); the SSE envelope contract is fixed = `log::Event` +
+  a monotonic per-run `seq`.
