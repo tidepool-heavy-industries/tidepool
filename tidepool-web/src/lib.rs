@@ -8,5 +8,8 @@
 //! APIs (E1: the web UI is a client of the documented protocol).
 
 pub mod render;
+pub mod server;
+pub mod shell;
 
 pub use render::{fragment, render_with_answer_url};
+pub use server::{router, AppState};

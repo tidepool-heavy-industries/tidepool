@@ -109,6 +109,17 @@ struct PendingHole {
     classified: ClassifiedHole,
 }
 
+/// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
+/// suspended) whether the pending hole is a fork and its prompt.
+#[derive(Debug, Clone)]
+pub struct NodeSummary {
+    pub node: NodeId,
+    pub parent: Option<NodeId>,
+    pub state: crate::tree::NodeState,
+    pub is_fork_hole: bool,
+    pub hole_prompt: Option<String>,
+}
+
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
 pub struct Harness {
@@ -151,6 +162,64 @@ impl Harness {
     /// protocol server's tree pane).
     pub fn tree(&self) -> &NodeTree<()> {
         &self.tree
+    }
+
+    /// A flat snapshot of the tree for the observatory tree pane, in node-id
+    /// order (creation order). Each entry carries enough to render a node row:
+    /// id, parent, state, and — when suspended — whether the pending hole is a
+    /// fork (so the pane can badge it).
+    pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
+        let mut out = Vec::new();
+        // Node ids are dense from 0; probe until a gap of misses. Simpler: the
+        // tree exposes children from a root walk. Walk from every root.
+        let mut stack: Vec<NodeId> = Vec::new();
+        // Find roots: nodes whose parent is None. We don't have a roots list, so
+        // scan ids 0.. until `state` returns None twice in a row (dense ids).
+        let mut id = 0u64;
+        let mut misses = 0;
+        while misses < 4 {
+            let n = NodeId(id);
+            if self.tree.state(n).is_some() {
+                misses = 0;
+                if self.tree.parent(n) == Some(None) {
+                    stack.push(n);
+                }
+            } else {
+                misses += 1;
+            }
+            id += 1;
+        }
+        // DFS from roots, preserving child order.
+        stack.reverse();
+        let mut visit = stack;
+        let mut order = Vec::new();
+        while let Some(n) = visit.pop() {
+            order.push(n);
+            if let Some(children) = self.tree.children(n) {
+                for c in children.into_iter().rev() {
+                    visit.push(c);
+                }
+            }
+        }
+        for n in order {
+            let Some(state) = self.tree.state(n) else {
+                continue;
+            };
+            let pending = self.pending_hole(n);
+            let is_fork = matches!(
+                pending.as_ref().map(|c| &c.routing),
+                Some(HoleRouting::Fork { .. })
+            );
+            let prompt = pending.as_ref().map(|c| c.prompt.clone());
+            out.push(NodeSummary {
+                node: n,
+                parent: self.tree.parent(n).flatten(),
+                state,
+                is_fork_hole: is_fork,
+                hole_prompt: prompt,
+            });
+        }
+        out
     }
 
     /// Create a ROOT node as a thunk. `title` seeds the teaser + first user
@@ -452,6 +521,29 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.as_ref())
             .map(|p| p.classified.clone())
+    }
+
+    /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
+    /// from the routing payload — what the observatory form pane renders. `None`
+    /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
+    pub fn pending_dialog_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
+        match self.pending_hole(node)?.routing {
+            HoleRouting::Dialog { ui } => serde_json::from_value(ui).ok(),
+            _ => None,
+        }
+    }
+
+    /// The first node currently suspended on a Dialog (operator) hole, if any —
+    /// what the inspector focuses by default.
+    pub fn first_operator_hole(&self) -> Option<NodeId> {
+        let convos = self.convos.lock();
+        convos.iter().find_map(|(n, c)| {
+            matches!(
+                c.pending.as_ref().map(|p| &p.classified.routing),
+                Some(HoleRouting::Dialog { .. }) | Some(HoleRouting::Ask { .. })
+            )
+            .then_some(*n)
+        })
     }
 
     /// Force + drive a FORK answerer for `node`'s pending fork hole. Registers a
