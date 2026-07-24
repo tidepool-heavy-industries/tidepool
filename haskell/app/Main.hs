@@ -38,7 +38,7 @@ import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 -- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
@@ -210,7 +210,7 @@ processFile args path = do
               -- cross-target Map.union silently drop one of a colliding pair
               -- (same varId, different qualified name) before it ever reaches
               -- the loud collision-preserving merge below.
-              return (Just (Map.fromList [((dcid, qname), entry) | entry@(dcid, _, _, _, _, qname, _) <- usedMeta], reachBinds))
+              return (Just (Map.fromList [((dcmId entry, dcmQualName entry), entry) | entry <- usedMeta], reachBinds))
           case result of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e

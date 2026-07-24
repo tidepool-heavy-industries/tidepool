@@ -100,6 +100,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                 rep_arity: parsed.arity,
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
             next_id += 1;
         }
@@ -192,6 +193,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
             rep_arity: arity,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         next_id += 1;
     }

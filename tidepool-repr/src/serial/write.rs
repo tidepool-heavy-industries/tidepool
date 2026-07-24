@@ -80,9 +80,10 @@ pub fn write_metadata(
                 .collect(),
         );
 
-        // Always the full 7-element shape (matching
+        // Always the full 8-element shape (matching
         // `Tidepool.CborEncode.encodeMetaEntry`): an absent qualified name is
-        // the empty string, absent field labels the empty array.
+        // the empty string, absent field labels the empty array. The parent
+        // type name (8th element) is always present.
         let entry = vec![
             Value::Integer(dcid.into()),
             Value::Text(name.clone()),
@@ -91,6 +92,7 @@ pub fn write_metadata(
             bangs,
             Value::Text(dc.qualified_name.clone().unwrap_or_default()),
             field_labels_value(table.field_labels_of(dc.id).unwrap_or(&[])),
+            Value::Text(dc.type_name.clone()),
         ];
         entries.push(Value::Array(entry));
     }

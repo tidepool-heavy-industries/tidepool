@@ -34,6 +34,7 @@ fn empty_table() -> DataConTable {
             },
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     table

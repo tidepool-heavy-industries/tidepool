@@ -74,6 +74,7 @@ mod tests {
                 rep_arity: *arity,
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
         }
         t
@@ -560,6 +561,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         // to_value should still work because from_table uses get_companion
         // to find the Tip closest to Bin
@@ -603,6 +605,7 @@ mod tests {
                 rep_arity: *arity,
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
         }
         // Data.Map constructors with qualified names
@@ -613,6 +616,7 @@ mod tests {
             rep_arity: 5,
             field_bangs: vec![],
             qualified_name: Some("Data.Map.Bin".into()),
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(101),
@@ -621,6 +625,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: Some("Data.Map.Tip".into()),
+            type_name: String::new(),
         });
         // Data.Set constructors with SAME unqualified names
         t.insert(DataCon {
@@ -630,6 +635,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: Some("Data.Set.Bin".into()),
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(201),
@@ -638,6 +644,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: Some("Data.Set.Tip".into()),
+            type_name: String::new(),
         });
 
         // to_value should resolve via qualified names

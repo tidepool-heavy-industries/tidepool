@@ -2715,6 +2715,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         for (i, kind) in crate::effect_machine::EffContKind::ALL.iter().enumerate() {
             table.insert(DataCon {
@@ -2732,6 +2733,7 @@ mod tests {
                 },
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
         }
         (expr, table)

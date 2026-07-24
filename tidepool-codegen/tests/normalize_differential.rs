@@ -26,6 +26,7 @@ fn test_table() -> DataConTable {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
 
@@ -41,6 +42,7 @@ fn test_table() -> DataConTable {
             },
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     table

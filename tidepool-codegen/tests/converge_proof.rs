@@ -54,6 +54,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     // freer-simple constructors — qualified names are what ConTags resolves.
     table.insert(DataCon {
@@ -63,6 +64,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("Control.Monad.Freer.Val".to_string()),
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: E_ID,
@@ -71,6 +73,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: Some("Control.Monad.Freer.E".to_string()),
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: UNION_ID,
@@ -79,6 +82,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("Data.OpenUnion.Union".to_string()),
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: LEAF_ID,
@@ -87,6 +91,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("Data.FTCQueue.Leaf".to_string()),
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: NODE_ID,
@@ -95,6 +100,7 @@ fn table_with_freer_and_c1() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: Some("Data.FTCQueue.Node".to_string()),
+        type_name: String::new(),
     });
     table
 }
@@ -160,6 +166,7 @@ fn table_with_c1() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }

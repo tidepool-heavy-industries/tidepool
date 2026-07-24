@@ -55,6 +55,7 @@ fn table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: ERR_SCRUT,
@@ -63,6 +64,7 @@ fn table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: ERR_ALT,
@@ -71,6 +73,7 @@ fn table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }

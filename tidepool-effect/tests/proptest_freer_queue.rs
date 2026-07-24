@@ -56,6 +56,7 @@ fn make_test_table() -> DataConTable {
             rep_arity,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     };
     ins(VAL, "Val", 1, 1);

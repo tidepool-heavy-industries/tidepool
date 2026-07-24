@@ -18,6 +18,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 3,
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(101),
@@ -26,6 +27,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(102),
@@ -34,6 +36,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
             qualified_name: None,
+            type_name: String::new(),
         });
         table
     })

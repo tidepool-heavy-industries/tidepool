@@ -79,17 +79,21 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 // Fixture migration tool (issue #338)
 // ---------------------------------------------------------------------------
 //
-// `captured_core/meta.cbor` was written by the OLD Rust metadata writer
-// (pre-parity), whose per-constructor entries carried FEWER than the current
-// always-7 elements `Tidepool.CborEncode.encodeMetaEntry` emits. The strict
-// wire reader (`read_metadata`) correctly rejects that shape — there is ONE
-// current format and stale fixtures get migrated, never tolerated.
+// `captured_core/meta.cbor` was written by an OLDER Rust metadata writer,
+// whose per-constructor entries carried FEWER than the current always-8
+// elements `Tidepool.CborEncode.encodeMetaEntry` emits (most recently: no
+// parent-type-name 8th element). The strict wire reader (`read_metadata`)
+// correctly rejects that shape — there is ONE current format and stale
+// fixtures get migrated, never tolerated.
 //
 // This helper migrates the BYTES forward: it parses the old meta with a LOCAL
 // minimal CBOR reader (private to this tool — the production reader stays
 // strict) and re-encodes via `tidepool_repr::serial::write_metadata`, the
-// current always-7 writer. The DataConIds/tags/names are preserved exactly, so
+// current always-8 writer. The DataConIds/tags/names are preserved exactly, so
 // the expr fixtures' node refs stay consistent with the regenerated table.
+// (Fields the old shape never carried, like parent-type-name, migrate to
+// their empty-default rather than a real value — this fixture pins two
+// specific JIT-vs-eval divergences and doesn't exercise type-name lookup.)
 //
 // It is `#[ignore]`d (mutates checked-in fixtures) and is the documented
 // migration path for any future captured-fixture schema drift. Re-run with:
@@ -129,8 +133,9 @@ mod regen {
     }
 
     /// Parse an old-format metadata entry. The old writer emitted a prefix of
-    /// today's 7 elements; anything past what it wrote defaults (absent
-    /// qualified name → `None`, absent field labels → empty).
+    /// today's 8 elements; anything past what it wrote defaults (absent
+    /// qualified name → `None`, absent field labels → empty, absent parent
+    /// type name → empty string).
     fn parse_entry(entry: &Cbor) -> (DataCon, Vec<String>) {
         let arr = match entry {
             Cbor::Array(a) => a,
@@ -157,6 +162,10 @@ mod regen {
             Some(Cbor::Array(labels)) => labels.iter().map(as_text).collect(),
             _ => Vec::new(),
         };
+        let type_name = match arr.get(7) {
+            Some(Cbor::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
         (
             DataCon {
                 id,
@@ -165,6 +174,7 @@ mod regen {
                 rep_arity,
                 field_bangs,
                 qualified_name,
+                type_name,
             },
             field_labels,
         )
@@ -204,7 +214,7 @@ mod regen {
     }
 
     /// Migrate `captured_core/meta.cbor` from the old writer's shape to the
-    /// current always-7 wire format, preserving every constructor's identity.
+    /// current always-8 wire format, preserving every constructor's identity.
     #[test]
     #[ignore = "mutates the checked-in meta.cbor fixture; run explicitly to migrate"]
     fn regenerate_meta_fixture() {

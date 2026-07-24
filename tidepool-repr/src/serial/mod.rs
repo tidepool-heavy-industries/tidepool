@@ -59,11 +59,11 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 /// this build's is rejected (`ReadError::UnsupportedVersion`) — bump this
 /// only on a breaking shape change, in the same commit as the Haskell
 /// serializer and the regenerated fixture corpora.
-pub const VERSION_MAJOR: u16 = 1;
+pub const VERSION_MAJOR: u16 = 2;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.
-pub const VERSION_MINOR: u16 = 1;
+pub const VERSION_MINOR: u16 = 0;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 
@@ -360,6 +360,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![SrcBang::SrcBang],
             qualified_name: None,
+            type_name: "Maybe".to_string(),
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -368,6 +369,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: "Maybe".to_string(),
         });
 
         let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
@@ -389,6 +391,7 @@ mod tests {
             rep_arity: 5,
             field_bangs: vec![],
             qualified_name: Some("Data.Map.Bin".to_string()),
+            type_name: "Map".to_string(),
         });
         table.insert(DataCon {
             id: DataConId(200),
@@ -397,6 +400,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: Some("Data.Map.Tip".to_string()),
+            type_name: "Map".to_string(),
         });
         table.insert(DataCon {
             id: DataConId(300),
@@ -405,6 +409,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: Some("Data.Set.Bin".to_string()),
+            type_name: "Set".to_string(),
         });
 
         let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
@@ -454,6 +459,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: Some("Tidepool.Records.Hit".to_string()),
+            type_name: "Hit".to_string(),
         });
         table.set_field_labels(
             DataConId(10),
@@ -468,6 +474,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: "Loc".to_string(),
         });
         table.set_field_labels(DataConId(20), vec!["ln".to_string()]);
         // Positional con: no labels at all.
@@ -478,6 +485,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: "Plain".to_string(),
         });
 
         let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
@@ -515,6 +523,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: Some("Data.Maybe.Just".to_string()),
+            type_name: "Maybe".to_string(),
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -523,6 +532,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None, // legacy: no qualified name
+            type_name: "Maybe".to_string(),
         });
 
         let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");

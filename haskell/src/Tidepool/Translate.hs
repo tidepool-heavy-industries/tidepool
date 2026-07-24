@@ -3,6 +3,7 @@ module Tidepool.Translate
   , translateModule
   , translateModuleClosed
   , ClosedModule(..)
+  , DCMeta(..)
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
@@ -29,7 +30,7 @@ import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Types.FieldLabel (flLabel)
 import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
@@ -52,7 +53,7 @@ import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet, isEmpty
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
-import GHC.Utils.Outputable (showPprUnsafe)
+import GHC.Utils.Outputable (showPprUnsafe, renderWithContext, defaultSDocContext, ppr)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
 import Data.List (isPrefixOf, isInfixOf)
@@ -944,11 +945,27 @@ isGhcCompilerDC = isGhcCompilerName . dataConName
 isGhcCompilerTyCon :: TyCon -> Bool
 isGhcCompilerTyCon = isGhcCompilerName . tyConName
 
+-- | One DataCon's serializable metadata (the per-entry shape
+-- 'Tidepool.CborEncode.encodeMetaEntry' writes to meta.cbor).
+data DCMeta = DCMeta
+  { dcmId         :: !Word64
+  , dcmName       :: !Text
+  , dcmTag        :: !Int
+  , dcmArity      :: !Int
+  , dcmBangs      :: ![Text]
+  , dcmQualName   :: !Text
+  , dcmFieldLabels :: ![Text]
+  -- | Rendered name of the constructor's parent TyCon (e.g. "Verdict"),
+  -- unqualified — lets Rust resolve a rendered type name to its constructor
+  -- set ('DataConTable::constructors_of_type').
+  , dcmTypeName   :: !Text
+  }
+
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
 -- Val, E, Leaf, Node, Union) that aren't in the module's mg_tcs.
 -- GHC compiler-library constructors are excluded (see 'isGhcCompilerDC').
-collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
+collectUsedDataCons :: [CoreBind] -> [DCMeta]
 collectUsedDataCons binds =
   let allDCs = foldMap collectFromBind binds
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
@@ -970,16 +987,26 @@ dcFieldLabels :: DataCon -> [Text]
 dcFieldLabels dc =
   map (T.pack . unpackFS . field_label . flLabel) (dataConFieldLabels dc)
 
-dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text], Text, [Text])
-dcToMeta dc =
-  ( varId (dataConWorkId dc)
-  , T.pack (occNameString (nameOccName (dataConName dc)))
-  , dataConTag dc
-  , valueRepArity dc
-  , map mapBang (dataConSrcBangs dc)
-  , qualifiedName (dataConName dc)
-  , dcFieldLabels dc
-  )
+-- | Rendered name of a DataCon's parent TyCon (e.g. "Verdict" for a
+-- constructor of @data Verdict = GO | PARTIAL | NOGO@), unqualified — same
+-- pretty-print convention as the asks.json sidecar
+-- ('Tidepool.GhcPipeline.renderType': @renderWithContext defaultSDocContext
+-- . ppr@). Lets Rust resolve a rendered type name to its constructor set
+-- (@DataConTable::constructors_of_type@).
+dcParentTypeName :: DataCon -> Text
+dcParentTypeName dc = T.pack (renderWithContext defaultSDocContext (ppr (dataConTyCon dc)))
+
+dcToMeta :: DataCon -> DCMeta
+dcToMeta dc = DCMeta
+  { dcmId          = varId (dataConWorkId dc)
+  , dcmName        = T.pack (occNameString (nameOccName (dataConName dc)))
+  , dcmTag         = dataConTag dc
+  , dcmArity       = valueRepArity dc
+  , dcmBangs       = map mapBang (dataConSrcBangs dc)
+  , dcmQualName    = qualifiedName (dataConName dc)
+  , dcmFieldLabels = dcFieldLabels dc
+  , dcmTypeName    = dcParentTypeName dc
+  }
 
 -- | Combine the metadata sources (HIGHEST priority FIRST, e.g.
 -- @[wiredIn, tycon, used, scan, transitive]@) into the final entry list.
@@ -994,19 +1021,18 @@ dcToMeta dc =
 -- silently dropped one of a colliding pair (the freer-simple @Union@
 -- eviction). In the no-collision case the output is identical — every varId
 -- still appears once, in ascending varId order — so meta.cbor is unchanged.
-mergeMetaPreserving :: [[(Word64, Text, Int, Int, [Text], Text, [Text])]]
-                    -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
+mergeMetaPreserving :: [[DCMeta]] -> [DCMeta]
 mergeMetaPreserving sources =
   -- Map.fromList keeps the LAST value per key, so feed the flattened sources
   -- reversed: the highest-priority copy (earliest in the input) is seen last
   -- and wins. Map.elems then yields ascending (varId, qname) order.
   Map.elems $ Map.fromList
-    [ ((dcid, qname), e)
-    | e@(dcid, _, _, _, _, qname, _) <- reverse (concat sources) ]
+    [ ((dcmId e, dcmQualName e), e)
+    | e <- reverse (concat sources) ]
 
 -- | Compute transitive closure of TyCons reachable from all binder types,
 -- expanding through newtypes, then return metadata for all their DataCons.
-collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
+collectTransitiveDCons :: [CoreBind] -> [DCMeta]
 collectTransitiveDCons binds =
   let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
       seedTyCons  = filter (not . isGhcCompilerTyCon)
@@ -1038,7 +1064,7 @@ closeTyCons visited (tc:rest)
             Nothing  -> []
       in closeTyCons visited' (newtypeChildren ++ fieldChildren ++ rest)
 
-tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
+tyConToDCMeta :: TyCon -> [DCMeta]
 tyConToDCMeta tc = case tyConDataCons_maybe tc of
   Just dcs -> map dcToMeta dcs
   Nothing  -> []
@@ -2368,7 +2394,7 @@ hasIOType ty = case splitTyConApp_maybe ty of
     Just (_, _, _, ret) -> hasIOType ret
     Nothing -> False
 
-collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
+collectDataCons :: [TyCon] -> [DCMeta]
 collectDataCons tycons =
   [ dcToMeta dc
   | tc <- tycons
@@ -2387,7 +2413,7 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
 -- mg_tcs or binder types. We include these unconditionally in metadata so
 -- that ToCore impls ((), Bool, Char, Int, Word, Double, Float, tuples,
 -- Ordering, lists) always find their constructors in the DataConTable.
-wiredInDataCons :: [(Word64, Text, Int, Int, [Text], Text, [Text])]
+wiredInDataCons :: [DCMeta]
 wiredInDataCons = map dcToMeta wiredInList
   where
     wiredInList =

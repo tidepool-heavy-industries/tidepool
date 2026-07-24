@@ -47,6 +47,10 @@ pub struct DataConTable {
     by_name: HashMap<String, Vec<DataConId>>,
     /// Mapping from module-qualified name to its DataConId.
     by_qualified_name: HashMap<String, DataConId>,
+    /// Mapping from parent-type name (e.g. "Verdict") to all DataConIds of
+    /// that type, in insertion order — the constructor's declaration order,
+    /// since the Haskell side emits `tyConDataCons` in that order.
+    by_type_name: HashMap<String, Vec<DataConId>>,
     /// Type-sibling groups: DataConIds that appear together in case branches.
     /// If Bin and Tip appear as alternatives in the same Case, they're siblings.
     siblings: HashMap<DataConId, Vec<DataConId>>,
@@ -116,15 +120,17 @@ impl DataConTable {
         let id = dc.id;
         let name = dc.name.clone();
         let qualified_name = dc.qualified_name.clone();
+        let type_name = dc.type_name.clone();
 
         // If we're overwriting an existing entry for this id, remove its old
-        // name mappings — but ONLY the ones that actually changed. Re-pushing an
+        // name mapping — but ONLY if it actually changed. Re-pushing an
         // unchanged name would move `id` to the end of its `by_name` Vec, and
         // `get_by_name_arity` treats that Vec's order as a load-bearing
         // insertion-order tie-break between two ids sharing a name+arity. A
         // genuine re-encounter of the same constructor (identical name) must
         // keep its position, so skip the retain/re-push when the name is equal.
         let mut name_unchanged = false;
+        let mut type_name_changed = false;
         if let Some(old_dc) = self.by_id.insert(id, dc) {
             if old_dc.name == name {
                 name_unchanged = true;
@@ -134,17 +140,45 @@ impl DataConTable {
                     self.by_name.remove(&old_dc.name);
                 }
             }
+            if old_dc.type_name != type_name {
+                type_name_changed = true;
+                if let Some(vec) = self.by_type_name.get_mut(&old_dc.type_name) {
+                    vec.retain(|&existing| existing != id);
+                    if vec.is_empty() {
+                        self.by_type_name.remove(&old_dc.type_name);
+                    }
+                }
+            }
             if old_dc.qualified_name != qualified_name {
                 if let Some(ref old_qn) = old_dc.qualified_name {
                     self.by_qualified_name.remove(old_qn);
                 }
             }
+        } else {
+            type_name_changed = true; // first time this id is seen
         }
 
-        // Insert the mappings for the new name (skipping an unchanged name so
+        // Insert the mapping for the new name (skipping an unchanged name so
         // its existing Vec position — and thus tie-break order — is preserved).
         if !name_unchanged {
             self.by_name.entry(name).or_default().push(id);
+        }
+        // `by_type_name` orders by constructor TAG, not insertion order: the
+        // Haskell-side merge (`mergeMetaPreserving`) re-sorts entries by
+        // varId before they ever reach the wire, so insertion order at load
+        // time carries no declaration-order information. `dataConTag` is
+        // 1-based per-type declaration order by construction, so re-sorting
+        // the bucket on every insert keeps `constructors_of_type` correct
+        // regardless of what order entries arrive in (and keeps the table
+        // canonical/order-independent for equality comparisons). Always
+        // re-sort the current bucket, even when `id` was already in it — an
+        // overwrite (`insert` overwrites by id) may have changed its tag.
+        if type_name_changed {
+            self.by_type_name.entry(type_name.clone()).or_default().push(id);
+        }
+        if let Some(bucket) = self.by_type_name.get_mut(&type_name) {
+            let by_id = &self.by_id;
+            bucket.sort_by_key(|i| (by_id.get(i).map(|d| d.tag).unwrap_or(0), i.0));
         }
         if let Some(qn) = qualified_name {
             self.by_qualified_name.insert(qn, id);
@@ -209,6 +243,13 @@ impl DataConTable {
     /// Return all DataConIds sharing a given name (in insertion order).
     pub fn get_all_by_name(&self, name: &str) -> &[DataConId] {
         self.by_name.get(name).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Resolve a rendered parent-type name (e.g. "Verdict") to its full
+    /// constructor set, in declaration order. Empty when no constructor was
+    /// recorded against that type name.
+    pub fn constructors_of_type(&self, type_name: &str) -> Vec<DataConId> {
+        self.by_type_name.get(type_name).cloned().unwrap_or_default()
     }
 
     /// Find a constructor by name+arity that is a type-sibling of `known_id`.
@@ -301,6 +342,7 @@ mod tests {
             rep_arity,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         }
     }
 
@@ -318,6 +360,19 @@ mod tests {
             rep_arity,
             field_bangs: vec![],
             qualified_name: Some(qname.to_string()),
+            type_name: String::new(),
+        }
+    }
+
+    fn make_datacon_typed(id: u64, name: &str, tag: u32, rep_arity: u32, type_name: &str) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: type_name.to_string(),
         }
     }
 
@@ -660,6 +715,23 @@ mod tests {
             table.get_by_qualified_name("Data.Map.Bin"),
             Some(DataConId(1))
         );
+    }
+
+    #[test]
+    fn test_constructors_of_type_declaration_order() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon_typed(1, "GO", 1, 0, "Verdict"));
+        table.insert(make_datacon_typed(2, "PARTIAL", 2, 0, "Verdict"));
+        table.insert(make_datacon_typed(3, "NOGO", 3, 0, "Verdict"));
+        // Unrelated type must not pollute the lookup.
+        table.insert(make_datacon_typed(4, "Just", 1, 1, "Maybe"));
+
+        assert_eq!(
+            table.constructors_of_type("Verdict"),
+            vec![DataConId(1), DataConId(2), DataConId(3)]
+        );
+        assert_eq!(table.constructors_of_type("Maybe"), vec![DataConId(4)]);
+        assert_eq!(table.constructors_of_type("NoSuchType"), Vec::new());
     }
 
     #[test]

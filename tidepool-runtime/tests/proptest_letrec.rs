@@ -58,6 +58,7 @@ fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
                 rep_arity: arity,
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
         }
     }

@@ -40,6 +40,7 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: Some("TestMod.Alpha.Read".to_string()),
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: beta_id,
@@ -48,6 +49,7 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: Some("TestMod.Beta.Read".to_string()),
+        type_name: String::new(),
     });
     (table, alpha_id, beta_id)
 }

@@ -66,6 +66,7 @@ fn render_table() -> DataConTable {
             rep_arity: *arity,
             field_bangs: vec![SrcBang::NoSrcBang; *arity as usize],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     t

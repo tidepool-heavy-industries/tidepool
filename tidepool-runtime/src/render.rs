@@ -549,6 +549,7 @@ mod tests {
                 rep_arity: arity,
                 field_bangs: vec![],
                 qualified_name: None,
+                type_name: String::new(),
             });
         }
         t
@@ -834,6 +835,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: Some("Tidepool.Records.Hit".into()),
+            type_name: String::new(),
         });
         table.set_field_labels(hit_id, vec!["path".into(), "line".into(), "text".into()]);
 
@@ -876,6 +878,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: outer_id,
@@ -884,6 +887,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.set_field_labels(inner_id, vec!["line".into()]);
         table.set_field_labels(outer_id, vec!["name".into(), "loc".into()]);
@@ -911,6 +915,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         let val = Value::Con(
             con_id,
@@ -938,6 +943,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         // Only one label, but two runtime fields.
         table.set_field_labels(con_id, vec!["only".into()]);

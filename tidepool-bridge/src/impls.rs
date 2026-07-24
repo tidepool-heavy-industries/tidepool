@@ -656,6 +656,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(1),
@@ -664,6 +665,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(2),
@@ -672,6 +674,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(3),
@@ -680,6 +683,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(4),
@@ -688,6 +692,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(5),
@@ -696,6 +701,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(6),
@@ -704,6 +710,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(7),
@@ -712,6 +719,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(8),
@@ -720,6 +728,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(9),
@@ -728,6 +737,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(10),
@@ -736,6 +746,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(11),
@@ -744,6 +755,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(12),
@@ -752,6 +764,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(13),
@@ -760,6 +773,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(14),
@@ -768,6 +782,7 @@ mod tests {
             rep_arity: 0,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t.insert(DataCon {
             id: DataConId(15),
@@ -776,6 +791,7 @@ mod tests {
             rep_arity: 3,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         t
     }

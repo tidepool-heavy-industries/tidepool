@@ -224,6 +224,7 @@ fn std_table() -> DataConTable {
             rep_arity: arity,
             field_bangs: vec![SrcBang::NoSrcBang; arity as usize],
             qualified_name: None,
+            type_name: String::new(),
         });
     };
     add(0, "Nothing", 0);
@@ -704,6 +705,7 @@ proptest! {
                 rep_arity: arity,
                 field_bangs: vec![SrcBang::NoSrcBang; arity as usize],
                 qualified_name: None,
+                type_name: String::new(),
             });
         };
         // A same-name "I#" decoy at a DIFFERENT arity, inserted FIRST.

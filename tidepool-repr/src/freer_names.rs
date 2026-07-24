@@ -76,6 +76,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some("Data.Tree.Node".to_string()),
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -84,6 +85,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some(NODE_QUALIFIED.to_string()),
+            type_name: String::new(),
         });
         assert_eq!(table.get_by_name("Node"), None, "bare name is ambiguous");
         assert_eq!(
@@ -103,6 +105,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         assert_eq!(resolve(&table, LEAF_QUALIFIED, LEAF), Some(DataConId(1)));
     }

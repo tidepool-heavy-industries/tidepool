@@ -30,4 +30,10 @@ pub struct DataCon {
     pub field_bangs: Vec<SrcBang>,
     /// Module-qualified name (e.g., "Data.Map.Bin"). None for legacy CBOR without this field.
     pub qualified_name: Option<String>,
+    /// Rendered name of the constructor's parent TyCon (e.g. "Verdict" for a
+    /// constructor of `data Verdict = GO | PARTIAL | NOGO`), unqualified.
+    /// Always present — every DataCon has a parent type. Lets Rust resolve a
+    /// rendered type name to its constructor set
+    /// (`DataConTable::constructors_of_type`).
+    pub type_name: String,
 }

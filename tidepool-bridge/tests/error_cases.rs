@@ -14,6 +14,7 @@ fn get_table() -> DataConTable {
         rep_arity: 3,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }

@@ -8,11 +8,13 @@ import Data.Text (Text)
 import Data.Word
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Tidepool.Translate
+import Tidepool.Translate (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..), DCMeta(..))
 
--- | 8-byte version header: magic 'TPLR' + version 1.1
+-- | 8-byte version header: magic 'TPLR' + version 2.0 (bumped from 1.1 for
+-- the breaking metadata-entry shape change: 7 -> 8 elements, parent-type-name
+-- channel).
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x01, 0x00, 0x01]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x02, 0x00, 0x00]
 
 -- | Encodes the flattened node tree into a CBOR payload prepended with the TPLR version header.
 encodeTree :: Seq FlatNode -> ByteString
@@ -98,7 +100,7 @@ encodeFlatAltCon = \case
 -- The trailing @[Text]@ is the GHC diagnostic warnings for the target module
 -- (see GhcPipeline.prWarnings) — an empty list omits the @warnings@ key
 -- entirely, keeping a clean compile's meta.cbor byte-identical to before.
-encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text, [Text])] -> Bool -> Maybe Text -> [(Word64, Text)] -> [Text] -> ByteString
+encodeMetadata :: [DCMeta] -> Bool -> Maybe Text -> [(Word64, Text)] -> [Text] -> ByteString
 encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
@@ -121,26 +123,29 @@ encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toS
             <> encodeListLen (fromIntegral (length warnings))
             <> foldMap encodeString warnings)
 
-encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text, [Text]) -> Encoding
-encodeMetaEntry (dcid, name, tag, arity, bangs, qualName, fieldLabels) =
+encodeMetaEntry :: DCMeta -> Encoding
+encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName} =
   let
     tagWord :: Word
     tagWord =
-      if tag < 0
+      if dcmTag < 0
         then error "encodeMetaEntry: negative constructor tag"
-        else fromIntegral tag
+        else fromIntegral dcmTag
   in
-  -- 7-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
-  -- requires EXACTLY 7 elements — a 5- or 6-element entry is a hard
-  -- InvalidStructure error, not a backward-compatible short form. Positional
-  -- constructors carry an empty labels array.
-  encodeListLen 7
-  <> encodeWord64 dcid
-  <> encodeString name
+  -- 8-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
+  -- requires EXACTLY 8 elements — a shorter entry (e.g. the legacy 7-element
+  -- shape) is a hard InvalidStructure error, not a backward-compatible short
+  -- form. Positional constructors carry an empty labels array. The 8th
+  -- element is the rendered name of the constructor's parent TyCon (e.g.
+  -- "Verdict"), always present — every DataCon has a parent type.
+  encodeListLen 8
+  <> encodeWord64 dcmId
+  <> encodeString dcmName
   <> encodeWord tagWord
-  <> encodeInt arity
-  <> encodeListLen (fromIntegral (length bangs))
-  <> foldMap encodeString bangs
-  <> encodeString qualName
-  <> encodeListLen (fromIntegral (length fieldLabels))
-  <> foldMap encodeString fieldLabels
+  <> encodeInt dcmArity
+  <> encodeListLen (fromIntegral (length dcmBangs))
+  <> foldMap encodeString dcmBangs
+  <> encodeString dcmQualName
+  <> encodeListLen (fromIntegral (length dcmFieldLabels))
+  <> foldMap encodeString dcmFieldLabels
+  <> encodeString dcmTypeName

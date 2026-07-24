@@ -32,6 +32,7 @@ fn ambiguous_i_hash_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("GHC.Internal.Types.I#".into()),
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(200),
@@ -40,6 +41,7 @@ fn ambiguous_i_hash_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("UserDefined.I#".into()),
+        type_name: String::new(),
     });
     t
 }
@@ -75,6 +77,7 @@ fn unambiguous_i_hash_does_not_trip_assert() {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("GHC.Internal.Types.I#".into()),
+        type_name: String::new(),
     });
     let result = 42i64
         .to_value(&t)

@@ -64,6 +64,7 @@ fn adversarial_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: PAIR_ID,
@@ -72,6 +73,7 @@ fn adversarial_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     // freer-simple constructors (ConTags resolves by qualified name).
     for (id, name, qual, arity) in [
@@ -88,6 +90,7 @@ fn adversarial_table() -> DataConTable {
             rep_arity: arity,
             field_bangs: vec![],
             qualified_name: Some(qual.to_string()),
+            type_name: String::new(),
         });
     }
     table

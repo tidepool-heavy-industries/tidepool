@@ -12,6 +12,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(1),
@@ -20,6 +21,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     // Bool
     table.insert(DataCon {
@@ -29,6 +31,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(3),
@@ -37,6 +40,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     // Pair (,)
     table.insert(DataCon {
@@ -46,6 +50,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     // List [] and :
     table.insert(DataCon {
@@ -55,6 +60,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(6),
@@ -63,6 +69,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     // Boxing
     table.insert(DataCon {
@@ -72,6 +79,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(8),
@@ -80,6 +88,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(9),
@@ -88,6 +97,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(DataCon {
         id: DataConId(10),
@@ -96,6 +106,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     // Text (Data.Text.Internal.Text)
     table.insert(DataCon {
@@ -105,6 +116,7 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 3,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }

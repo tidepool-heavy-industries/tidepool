@@ -26,6 +26,7 @@ fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
         rep_arity: arity,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     // Add required freer-simple tags for JitEffectMachine::compile
     use tidepool_codegen::effect_machine::EffContKind;
@@ -41,6 +42,7 @@ fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
             },
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     table

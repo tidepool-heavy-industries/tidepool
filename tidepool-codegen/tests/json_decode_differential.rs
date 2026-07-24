@@ -48,6 +48,7 @@ fn dc(id: u64, name: &str, tag: u32, arity: u32, qual: Option<&str>) -> DataCon 
         rep_arity: arity,
         field_bangs: vec![SrcBang::NoSrcBang; arity as usize],
         qualified_name: qual.map(|s| s.to_string()),
+        type_name: String::new(),
     }
 }
 

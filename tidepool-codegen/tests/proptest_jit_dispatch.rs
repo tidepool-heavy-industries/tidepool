@@ -106,6 +106,7 @@ fn make_table() -> DataConTable {
             rep_arity: ar,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     t

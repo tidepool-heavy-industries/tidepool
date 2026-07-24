@@ -364,6 +364,7 @@ fn setup_table() -> DataConTable {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     table.insert(DataCon {
@@ -373,6 +374,7 @@ fn setup_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }
@@ -718,6 +720,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         let w_hash = DataConId(101);
 
@@ -730,6 +733,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some(crate::freer_names::UNION_QUALIFIED.to_string()),
+            type_name: String::new(),
         });
 
         // A user's own `data Union a b = Union a b`, inserted AFTER — same
@@ -742,6 +746,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some("MyMod.Union".to_string()),
+            type_name: String::new(),
         });
 
         // Sanity: this IS the ambiguity the fix must route around.

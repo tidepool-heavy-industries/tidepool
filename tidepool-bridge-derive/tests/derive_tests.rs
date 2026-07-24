@@ -48,6 +48,7 @@ fn test_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(21),
@@ -56,6 +57,7 @@ fn test_table() -> DataConTable {
         rep_arity: 3,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(22),
@@ -64,6 +66,7 @@ fn test_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(23),
@@ -72,6 +75,7 @@ fn test_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(24),
@@ -80,6 +84,7 @@ fn test_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(25),
@@ -88,6 +93,7 @@ fn test_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(26),
@@ -96,6 +102,7 @@ fn test_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t
 }
@@ -314,6 +321,7 @@ fn partial_two_variant_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t
 }

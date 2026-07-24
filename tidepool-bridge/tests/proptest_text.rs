@@ -17,6 +17,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 3,
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
             qualified_name: None,
+            type_name: String::new(),
         });
         // I# (needed for i64/Int# fields of Text if they were boxed,
         // but current impl uses literals for off/len)
@@ -27,6 +28,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
             qualified_name: None,
+            type_name: String::new(),
         });
         table
     })

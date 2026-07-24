@@ -108,8 +108,8 @@ pub struct MetaWarnings {
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
 ///
 /// The one accepted shape: 2-element array `[entries_array, warnings_map]`,
-/// every entry a 7-element array (id, name, tag, arity, bangs, qualified-name,
-/// field-labels) — the shape `Tidepool.CborEncode.encodeMetadata` emits.
+/// every entry an 8-element array (id, name, tag, arity, bangs, qualified-name,
+/// field-labels, parent-type-name) — the shape `Tidepool.CborEncode.encodeMetadata` emits.
 pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     use crate::datacon::{DataCon, SrcBang};
     use crate::datacon_table::DataConTable;
@@ -141,10 +141,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if a.len() == 7 => a,
+            Value::Array(a) if a.len() == 8 => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be an array of exactly 7".to_string(),
+                    "Metadata entry must be an array of exactly 8".to_string(),
                 ))
             }
         };
@@ -211,6 +211,17 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             _ => Vec::new(),
         };
 
+        // 8th element: rendered name of the constructor's parent TyCon (e.g.
+        // "Verdict") — always present, every DataCon has a parent type.
+        let type_name = match &arr[7] {
+            Value::Text(t) => t.clone(),
+            _ => {
+                return Err(ReadError::InvalidStructure(
+                    "DataCon parent type name must be text".to_string(),
+                ))
+            }
+        };
+
         let id = DataConId(dcid);
         table.insert_checked(DataCon {
             id,
@@ -219,6 +230,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             rep_arity: arity,
             field_bangs: bangs,
             qualified_name,
+            type_name,
         })?;
         table.set_field_labels(id, field_labels);
     }
@@ -633,12 +645,13 @@ mod tests {
 
     #[test]
     fn test_strip_header_unsupported_major() {
+        let bogus_major = super::super::VERSION_MAJOR + 1;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&super::super::HEADER_MAGIC);
-        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&bogus_major.to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
         let err = strip_header(&bytes).expect_err("should fail");
-        assert!(matches!(err, ReadError::UnsupportedVersion(2, 0)));
+        assert!(matches!(err, ReadError::UnsupportedVersion(m, 0) if m == bogus_major));
     }
 
     #[test]
@@ -672,6 +685,7 @@ mod tests {
             Cbor::Array(vec![]),
             Cbor::Text(qn.to_string()),
             Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
         ])
     }
 
@@ -730,6 +744,7 @@ mod tests {
             Cbor::Array(vec![]),
             Cbor::Text(String::new()),
             Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {
@@ -750,6 +765,7 @@ mod tests {
             Cbor::Array(vec![]),
             Cbor::Text(String::new()),
             Cbor::Array(vec![]),
+            Cbor::Text(String::new()),
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {
@@ -809,6 +825,7 @@ mod tests {
                 Cbor::Text("good_label".to_string()),
                 Cbor::Integer(7.into()), // corrupt: not text
             ]),
+            Cbor::Text(String::new()),
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {

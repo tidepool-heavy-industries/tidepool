@@ -53,6 +53,7 @@ fn build_enum_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(1001),
@@ -61,6 +62,7 @@ fn build_enum_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(1002),
@@ -69,6 +71,7 @@ fn build_enum_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t
 }
@@ -158,6 +161,7 @@ fn build_struct_table() -> DataConTable {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: DataConId(2001),
@@ -166,6 +170,7 @@ fn build_struct_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     t
 }

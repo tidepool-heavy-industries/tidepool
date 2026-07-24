@@ -37,6 +37,7 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
         rep_arity: 1,
         field_bangs: vec![],
         qualified_name: Some("Pattern.Memory.Read".into()),
+        type_name: String::new(),
     });
     t.insert(DataCon {
         id: beta_id,
@@ -45,6 +46,7 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: Some("Pattern.File.Read".into()),
+        type_name: String::new(),
     });
     (t, alpha_id, beta_id)
 }
@@ -121,6 +123,7 @@ fn unknown_name_reports_arity() {
         rep_arity: 5, // neither Alpha's 1 nor Beta's 2
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
 
     let val = Alpha::Read(1);

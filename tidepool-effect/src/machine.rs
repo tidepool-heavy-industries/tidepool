@@ -328,6 +328,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -336,6 +337,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(3),
@@ -344,6 +346,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(4),
@@ -352,6 +355,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(5),
@@ -360,6 +364,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table
     }
@@ -380,6 +385,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -388,6 +394,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(5),
@@ -396,6 +403,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
         // The user's own `data Tree = Node Tree Tree | Leaf Int`, colliding on
         // the bare name with the freer continuation constructors (same arity
@@ -407,6 +415,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some("Data.Tree.Node".to_string()),
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(7),
@@ -415,6 +424,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: Some("Data.Tree.Leaf".to_string()),
+            type_name: String::new(),
         });
         // The real freer continuation constructors, qualified.
         table.insert(DataCon {
@@ -424,6 +434,7 @@ mod tests {
             rep_arity: 1,
             field_bangs: vec![],
             qualified_name: Some(crate::freer_names::LEAF_QUALIFIED.to_string()),
+            type_name: String::new(),
         });
         table.insert(DataCon {
             id: DataConId(4),
@@ -432,6 +443,7 @@ mod tests {
             rep_arity: 2,
             field_bangs: vec![],
             qualified_name: Some(crate::freer_names::NODE_QUALIFIED.to_string()),
+            type_name: String::new(),
         });
 
         assert_eq!(

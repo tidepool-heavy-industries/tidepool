@@ -54,6 +54,7 @@ fn test_table() -> DataConTable {
             },
             field_bangs: vec![],
             qualified_name: None,
+            type_name: String::new(),
         });
     }
     // List constructors for the handler's response.
@@ -64,6 +65,7 @@ fn test_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table.insert(tidepool_repr::datacon::DataCon {
         id: DataConId(NIL_ID),
@@ -72,6 +74,7 @@ fn test_table() -> DataConTable {
         rep_arity: 0,
         field_bangs: vec![],
         qualified_name: None,
+        type_name: String::new(),
     });
     table
 }

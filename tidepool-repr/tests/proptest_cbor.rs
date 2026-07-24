@@ -88,15 +88,17 @@ fn arb_data_con() -> impl Strategy<Value = DataCon> {
         any::<u32>(),
         prop::collection::vec(arb_src_bang(), 0..10),
         prop::option::of(prop::string::string_regex("[A-Z][a-z]+\\.[A-Z][a-z]+").unwrap()),
+        prop::string::string_regex("[A-Z][a-zA-Z0-9_]{0,20}").unwrap(),
     )
         .prop_map(
-            |(id, name, tag, rep_arity, field_bangs, qualified_name)| DataCon {
+            |(id, name, tag, rep_arity, field_bangs, qualified_name, type_name)| DataCon {
                 id,
                 name,
                 tag,
                 rep_arity,
                 field_bangs,
                 qualified_name,
+                type_name,
             },
         )
 }
