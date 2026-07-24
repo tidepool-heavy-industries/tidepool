@@ -3882,6 +3882,7 @@ dependencies = [
 name = "tidepool-harness"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "genai",
  "openai-auth",
  "parking_lot",
