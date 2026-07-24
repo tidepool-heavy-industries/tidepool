@@ -125,7 +125,7 @@ impl TidepoolMcpServerImpl {
         // QuasiQuotes/ViewPatterns PRAGMAS are always-on in build_preamble
         // (root decision — see the comment there for the latency FIXME).
         if uses_qq(&req.code) || uses_qq(&req.helpers) {
-            all_imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
+            all_imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
         }
         all_imports.push_str(&req.imports);
         let normalized_input = req.input.as_ref().map(normalize_input);

@@ -7,6 +7,8 @@
 --                  position) and structural diff matching (pattern position).
 -- @[uri|...|]@   — validated 'Data.Text.Text' literal (an http(s) URI),
 --                  checked at compile time.
+-- @[form|...|]@  — 'Tidepool.Ui.Ui' form literals from a line-based DSL
+--                  (one widget per line), parsed at compile time.
 --
 -- Both quoters do all parsing at COMPILE time (inside the splice
 -- evaluator) and expand to plain Core over 'Data.Text.Text' and the
@@ -18,9 +20,11 @@ module Tidepool.QQ
   , j
   , patch
   , uri
+  , form
   ) where
 
 import Tidepool.QQ.Fmt (fmt)
 import Tidepool.QQ.Json (j)
 import Tidepool.QQ.Patch (patch)
 import Tidepool.QQ.Validate (uri)
+import Tidepool.FormQQ (form)

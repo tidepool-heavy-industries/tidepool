@@ -158,7 +158,11 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
 /// cannot false-negative. A false positive (the token inside a string
 /// literal) only costs the ~+385ms quoter-module import, never correctness.
 pub fn uses_qq(src: &str) -> bool {
-    src.contains("[fmt|") || src.contains("[j|") || src.contains("[patch|") || src.contains("[uri|")
+    src.contains("[fmt|")
+        || src.contains("[j|")
+        || src.contains("[patch|")
+        || src.contains("[uri|")
+        || src.contains("[form|")
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -514,8 +518,8 @@ mod tests {
     // can be hit directly: determinism and structural invariants. Failure
     // classification moved to `tidepool_runtime::failclass` (tested there).
 
-    /// The four quasi-quoter open-tokens `uses_qq` must recognize.
-    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|"];
+    /// The five quasi-quoter open-tokens `uses_qq` must recognize.
+    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|", "[form|"];
 
     proptest! {
         /// Any text containing a quoter open-token is detected as QQ, no matter
@@ -617,6 +621,7 @@ mod tests {
         // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
         assert!(uses_qq("apply [patch|--- a/x|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
+        assert!(uses_qq("dialogAsk (toJSON [form|choice ok?: yes no|])"));
         // dropped quoters are NOT special: glob (removed) and sg (cut with the
         // SG effect) must both classify as non-QQ.
         assert!(!uses_qq("pure [glob|src/*.rs|]"));

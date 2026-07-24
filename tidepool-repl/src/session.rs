@@ -243,7 +243,7 @@ impl Session {
             if !imports.is_empty() {
                 imports.push('\n');
             }
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)");
         }
         imports
     }
@@ -854,7 +854,7 @@ impl Session {
         // Same per-turn quasi-quoter gating as `turn_imports` (this path
         // assembles its imports independently of session_imports).
         if tidepool_mcp::uses_qq(expr_text) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
         }
         // Clone (not take): `input` stays in scope for EVERY item in the block
         // — including items that run after an in-block `ask`/resume — and for the
