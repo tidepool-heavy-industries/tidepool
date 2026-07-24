@@ -1,5 +1,13 @@
 # Widen (S3) — leaf briefs behind the freezes
 
+> **COMPLETE (2026-07-24).** All waves merged: A1 uiOf, A2 web-widen,
+> A3 acceptance, provider-responses, B1 fanout+scheduler, B2 elaboration,
+> C fork-combinators (forkFilter by composition; forkMap/forkCata via the
+> combinator-sites extract mechanism — see TARGET §1 premise correction),
+> C form-qq (GO; `[form|]` shipped + auto-imported), C leftovers (heap
+> pane, turn_spliced). Remaining ideas are dogfood-gated (TARGET §7) —
+> next scope comes from operator usage, not from this file.
+
 All leaves build against FREEZES.md (F1/F2/F3 — do not reopen) on
 post-spike main (`ffd31153`+). Testing policy: TARGETED nextest over
 touched crates only; no battery. Sonnet leaves; specs carry the plan.

@@ -77,7 +77,8 @@ tool, never raw git).
 ## Status (2026-07-23)
 
 - [x] 00 scaffold (rename + contracts merged)
-- [ ] 10 extract pass — IN FLIGHT (last open worker)
+- [x] 10 extract pass (returnControl/Fork/Fanout interception + sidecar +
+      combinator-site recognition)
 - [x] 20 engine residency (ResidentSession + registry merged)
 - [x] 30 harness core — C1 log + C3 forcing merged; C2/C4/C5 dissolved
       into the spike (see SPEC supersession note)
@@ -86,7 +87,10 @@ tool, never raw git).
 - [x] 50 ui edsl — E1 Ui.hs + E2a renderer merged; E2b tree view lands in
       the spike/widen
 - [x] 60 auth (genai + openai-auth provider merged)
-- [ ] 70 acceptance — absorbed into spike golden path + widen (TARGET §2)
+- [x] 70 acceptance (PRD §11 suite via record-replay, incl. kill-9
+      against the real binary)
 
-Next: fold 10 → launch the spike (spike/SPEC.md, ONE opus agent) →
-F1/F2/F3 freezes → widen fan-out.
+**BUILDOUT COMPLETE 2026-07-24** — spike merged, freezes recorded
+(FREEZES.md), widen waves A/B/C merged (WIDEN.md). What remains is
+dogfood-gated (TARGET §7): operator drives the live system; frictions
+and wins decide the next scope.
