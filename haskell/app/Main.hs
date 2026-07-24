@@ -302,6 +302,7 @@ writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe T
 writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
                , cmReachBinds = reachBinds, cmVarNames = varNames
+               , cmReturnControlSites = returnControlSites
                } <- translateModuleClosed hscEnv binds targetName
   if not (null unresolved) then do
     let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
@@ -330,6 +331,14 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
   let metaFile = outDir </> "meta.cbor"
   BS.writeFile metaFile metaCbor
   hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+  -- returnControl (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
+  -- written (empty list when the module has no returnControl/returnControlFork
+  -- sites) — loud absence beats a silently-missing file for the Rust-side
+  -- consumer (segment 30) to distinguish "no sites" from "extract too old".
+  let asksFile = outDir </> "asks.json"
+  writeFile asksFile (renderAsksJson returnControlSites)
+  hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length returnControlSites) ++ " sites)"
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
@@ -452,12 +461,18 @@ renderBoundBindersJson binders =
   "{\"binders\":[" ++ intercalate "," (map renderOne binders) ++ "]}"
   where
     renderOne (name, varid, modul, tier, tdisp, _, _) =
-      "{\"name\":" ++ js name
-        ++ ",\"varId\":" ++ js (show varid)
-        ++ ",\"module\":" ++ js modul
-        ++ ",\"tier\":" ++ js tier
-        ++ ",\"typeDisplay\":" ++ js tdisp ++ "}"
-    js str = '"' : concatMap esc str ++ "\""
+      "{\"name\":" ++ jsonString name
+        ++ ",\"varId\":" ++ jsonString (show varid)
+        ++ ",\"module\":" ++ jsonString modul
+        ++ ",\"tier\":" ++ jsonString tier
+        ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
+
+-- | Hand-rolled JSON string escaping, shared by every hand-rolled JSON sidecar
+-- this file writes (@BoundBinder@, @asks.json@) — same fixed-shape rationale
+-- as 'Tidepool.DiagJson': small, no aeson dependency needed.
+jsonString :: String -> String
+jsonString str = '"' : concatMap esc str ++ "\""
+  where
     esc '"'  = "\\\""
     esc '\\' = "\\\\"
     esc '\n' = "\\n"
@@ -467,6 +482,16 @@ renderBoundBindersJson binders =
       | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
       | otherwise  = [c]
     pad4 s = replicate (4 - length s) '0' ++ s
+
+-- | returnControl/returnControlFork {site, type} pairs (#R0) as the asks.json
+-- sidecar: @[{"site": <u32>, "type": "<rendered>"}]@. @site@ is a bare JSON
+-- number (extract's own monotonic per-module counter, well inside u32 range).
+renderAsksJson :: [(Word64, Text)] -> String
+renderAsksJson sites =
+  "[" ++ intercalate "," (map renderOne sites) ++ "]"
+  where
+    renderOne (site, ty) =
+      "{\"site\":" ++ show site ++ ",\"type\":" ++ jsonString (T.unpack ty) ++ "}"
 
 -- | Module name from file basename, mirroring GhcPipeline's convention.
 capitalizeMod :: String -> String

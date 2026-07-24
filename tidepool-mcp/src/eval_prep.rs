@@ -106,6 +106,11 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
     // diff via `Patch.genPatch`/`Patch.renderPatch`.
     out.push_str("import qualified Tidepool.Patch as Patch\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
+    // returnControl/returnControlFork's hidden *Sited siblings (#R0) coerce the
+    // ask reply back to the caller's answer type after extract has statically
+    // checked it's monomorphic and function-free — see ask_effect_def!'s helper
+    // text (effect_defs.rs) for why that's safe.
+    out.push_str("import Unsafe.Coerce (unsafeCoerce)\n");
     out.push_str("import qualified Prelude as P\n");
     out.push_str("default (Int, Double, Text)\n");
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");

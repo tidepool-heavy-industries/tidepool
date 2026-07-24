@@ -47,8 +47,8 @@ import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
-import GHC.Core.TyCo.FVs (tyConsOfType)
-import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet)
+import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
+import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet, isEmptyVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
@@ -67,6 +67,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
+import qualified Data.Foldable
 import qualified Data.Map.Strict as Map
 import Control.Monad.State
 import Control.Monad (foldM, forM, when)
@@ -125,6 +126,14 @@ data TransState = TransState
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
+  -- returnControl (#R0 typed-yield pass): varIds of the hidden Sited siblings
+  -- (Nothing when the Ask effect's helper text isn't in the closed program —
+  -- an interception site with no sibling available is an extract-pipeline bug).
+  , tsReturnControlSitedId :: !(Maybe Word64)
+  , tsReturnControlForkSitedId :: !(Maybe Word64)
+  , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
+  , tsReturnControlSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
+  , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
   }
 
 type TransM = State TransState
@@ -148,6 +157,21 @@ freshSynthVarId = do
 recordDC :: DataCon -> TransM ()
 recordDC dc = modify' $ \s ->
   s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
+
+-- | Fresh site id for a returnControl/returnControlFork call site (#R0):
+-- a plain per-'translateModule'-run counter, distinct from 'freshSynthVarId'
+-- (this counter's values travel as literal 'Int' payload data, not VarIds).
+freshSiteId :: TransM Word64
+freshSiteId = do
+  s <- get
+  let c = tsSiteCounter s
+  put s { tsSiteCounter = c + 1 }
+  return c
+
+-- | Record one returnControl/returnControlFork site for the asks.json sidecar.
+recordReturnControlSite :: Word64 -> Text -> TransM ()
+recordReturnControlSite siteId typeStr = modify' $ \s ->
+  s { tsReturnControlSites = tsReturnControlSites s |> (siteId, typeStr) }
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
@@ -373,7 +397,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -381,7 +405,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -400,12 +424,23 @@ translateBinds binds = concatMap translateBind binds
 -- the DataConTable meta walks so those harvest only constructors the program
 -- can run, never the full closed graph (quoter-internal / TH machinery binds
 -- that merely sit on the include path).
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind])
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text))
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
-      (_, finalState) = runState (wrapAllBinds neededBinds targetId) (TransState Seq.empty Map.empty Set.empty 0 unresolvedIds)
-  in (tsNodes finalState, tsUsedDCs finalState, neededBinds)
+      -- returnControl (#R0): the hidden Sited siblings are ordinary home-module
+      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text),
+      -- so a name-only scan over the FULL (pre-reachability) bind pool finds
+      -- their real Ids — mirroring findTargetId's own name lookup. `translate`
+      -- can't do an HscEnv/environment lookup itself (TransM is pure State, no
+      -- IO), so both varIds are resolved ONCE here and threaded through
+      -- TransState for the interception arm to consult.
+      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
+                    (findAuxVarId "returnControlSited" allBinds)
+                    (findAuxVarId "returnControlForkSited" allBinds)
+                    0 Seq.empty Nothing
+      (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
+  in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsReturnControlSites finalState)
   where
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
@@ -422,6 +457,19 @@ translateModule allBinds targetName unresolvedIds =
           && isExternalName (idName b)
           && not (isSystemName (idName b))
         isNameMatch b =
+          occNameString (nameOccName (idName b)) == name
+          && not (isSystemName (idName b))
+
+    -- | Name-only lookup for a helper binding that may or may not be present
+    -- (unlike 'findTargetId', absence is not an error — it just means the
+    -- corresponding returnControl/returnControlFork interception can't fire).
+    findAuxVarId :: String -> [CoreBind] -> Maybe Word64
+    findAuxVarId name binds =
+      case filter isMatch (concatMap bindersOf binds) of
+        (b:_) -> Just (varId b)
+        []    -> Nothing
+      where
+        isMatch b =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
 
@@ -528,6 +576,7 @@ translateModule allBinds targetName unresolvedIds =
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
       | otherwise = do
+          modify' $ \s -> s { tsCurrentBinder = Just (T.pack (occNameString (nameOccName (idName b)))) }
           rhsIdx <- translate rhs
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
@@ -548,7 +597,9 @@ translateModule allBinds targetName unresolvedIds =
                   joinBodyIdx <- translate joinBody
                   foldM (\inner p -> emitNode $ NLam (varId p) inner)
                         joinBodyIdx (reverse params)
-                Nothing -> translate rhs
+                Nothing -> do
+                  modify' $ \s -> s { tsCurrentBinder = Just (T.pack (occNameString (nameOccName (idName b)))) }
+                  translate rhs
             return (varId b, rhs')
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetRec pairIdxs bodyIdx)
@@ -573,6 +624,9 @@ data ClosedModule = ClosedModule
     -- ^ The reachable binds actually compiled — the meta walks run over this.
   , cmVarNames   :: [(Word64, Text)]
     -- ^ varId → human name for runtime unresolved-error naming (friction #12).
+  , cmReturnControlSites :: [(Word64, Text)]
+    -- ^ returnControl/returnControlFork {site, type} pairs (#R0), for the
+    -- asks.json sidecar 'writeWholeModuleClosed' writes next to meta.cbor.
   }
 
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
@@ -644,7 +698,7 @@ translateModuleClosed hscEnv allBinds targetName = do
         _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds) = translateModule closedBinds targetName unresolvedIds
+      (nodes, usedDCs, reachBinds, returnControlSites) = translateModule closedBinds targetName unresolvedIds
   let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
@@ -718,6 +772,7 @@ translateModuleClosed hscEnv allBinds targetName = do
     , cmUnresolved = trulyUnresolved
     , cmReachBinds = reachBinds
     , cmVarNames   = varNames
+    , cmReturnControlSites = Data.Foldable.toList returnControlSites
     }
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
@@ -899,11 +954,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1474,6 +1529,47 @@ translate expr =
             -- Use VarId 0 as the case binder (unused in alternatives)
             emitNode $ NCase argIdx 0 altData
           _ -> error $ "tagToEnum# without resolvable type argument"
+
+    -- returnControl @T prompt / returnControlFork @T prompt (#R0 typed-yield
+    -- pass): detected the same way as the tagToEnum# arm above (a known Var
+    -- applied to [Type ty] + one value arg). The ONLY Core synthesis
+    -- permitted is the head-swap to the hidden *Sited sibling (its varId
+    -- resolved once, name-only, in 'translateModule') with a fresh site-id
+    -- literal prepended — the sibling's REAL body (which builds the
+    -- "typedSite"-tagged AskWith payload) then runs normally at JIT runtime;
+    -- we never construct that payload ourselves.
+    Var v | isReturnControlVar v || isReturnControlForkVar v
+          , let typeArgs = filter (not . isValueArg) allArgs
+          , [Type ty] <- typeArgs
+          , [promptArg] <- args -> do
+        checkReturnControlType ty
+        let sitedField = if isReturnControlVar v
+                            then tsReturnControlSitedId
+                            else tsReturnControlForkSitedId
+        sitedIdM <- gets sitedField
+        case sitedIdM of
+          -- The sibling's varId is resolved ONCE, name-only, by a scan over
+          -- the FULL closed bind pool ('translateModule's 'findAuxVarId') —
+          -- always populated on the real writeWholeModuleClosed pass (Ask's
+          -- helper text is always present). This branch instead fires when
+          -- OTHER callers re-run 'translate' with a throwaway, unseeded
+          -- TransState purely to harvest 'tsUsedDCs' (e.g.
+          -- 'collectUsedDataCons'/'collectTransitiveDCons' rescanning
+          -- 'reachBinds' for the meta.cbor constructor table) — those callers
+          -- discard 'tsNodes' entirely, so emitting a poison here (mirroring
+          -- 'emitFfiPoison') is harmless; still translate the prompt so its
+          -- own DataCon usage isn't missed by that scan.
+          Nothing -> do
+            _ <- translate promptArg
+            emitFfiPoison
+          Just sitedVarId -> do
+            siteId <- freshSiteId
+            recordReturnControlSite siteId (T.pack (Tidepool.GhcPipeline.renderType ty))
+            sitedRef <- emitNode $ NVar sitedVarId
+            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
+            appLit <- emitNode $ NApp sitedRef litIdx
+            promptIdx <- translate promptArg
+            emitNode $ NApp appLit promptIdx
 
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
@@ -2462,6 +2558,67 @@ isEitherDecodeValueVar v =
 isParseISO8601Var :: Id -> Bool
 isParseISO8601Var v =
   occNameString (nameOccName (idName v)) == "parseISO8601"
+
+-- | Recognize @returnControl@/@returnControlFork@ (the stdlib OPAQUE surface
+-- verbs in ask_effect_def!'s helper text, Tidepool.Effects). OPAQUE keeps
+-- their calls un-inlined (matched here by unqualified occurrence name, same
+-- convention as eitherDecodeValue/parseISO8601) so the type application at
+-- each call site survives to this interception.
+isReturnControlVar :: Id -> Bool
+isReturnControlVar v =
+  occNameString (nameOccName (idName v)) == "returnControl"
+
+isReturnControlForkVar :: Id -> Bool
+isReturnControlForkVar v =
+  occNameString (nameOccName (idName v)) == "returnControlFork"
+
+-- | The two extract-time rejections for a returnControl/returnControlFork
+-- site's answer type (spec step 4): a leftover type variable (the site isn't
+-- monomorphic) or a function arrow anywhere in the type's structure (R0 has
+-- no way to serialize a function-typed answer across the suspend boundary).
+-- Both raise via plain 'error', mirroring every other hard-failure in this
+-- file (e.g. the tagToEnum# arm above) — caught by 'processFile's `try` and
+-- rendered as a diagnostic, not a pipeline crash.
+checkReturnControlType :: Type -> TransM ()
+checkReturnControlType ty = do
+  binder <- gets tsCurrentBinder
+  let siteDesc = maybe "<top level>" T.unpack binder
+      typeStr = Tidepool.GhcPipeline.renderType ty
+  when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
+    error $ "polymorphic returnControl site in " ++ siteDesc ++ ": " ++ typeStr
+  when (typeHasFunctionArrow ty) $
+    error $ "function-typed answers not supported in R0 (site in "
+          ++ siteDesc ++ "): " ++ typeStr
+
+-- | Does @ty@ contain a function arrow anywhere in its structure — either
+-- directly, in a type-application argument, or nested inside a field of some
+-- ADT/newtype the type transitively refers to? Mirrors 'closeTyCons's
+-- newtype/field walk (visited-set keyed on TyCon, so a recursive type like
+-- @data Rec = Rec (Int -> Int) Rec@ terminates instead of looping).
+typeHasFunctionArrow :: Type -> Bool
+typeHasFunctionArrow = goT emptyUniqSet
+  where
+    goT :: UniqSet TyCon -> Type -> Bool
+    goT visited ty
+      | Just _ <- splitFunTy_maybe ty = True
+      | Just (tc, tyArgs) <- splitTyConApp_maybe ty =
+          any (goT visited) tyArgs || goTc visited tc
+      | otherwise = False
+
+    goTc :: UniqSet TyCon -> TyCon -> Bool
+    goTc visited tc
+      | tc `elementOfUniqSet` visited = False
+      | isGhcCompilerTyCon tc = False
+      | otherwise =
+          let visited' = addOneToUniqSet visited tc
+              newtypeHit = case unwrapNewTyCon_maybe tc of
+                Just (_tvs, reprTy, _coax) -> goT visited' reprTy
+                Nothing -> False
+              fieldHit = case tyConDataCons_maybe tc of
+                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
+                                             (dataConOrigArgTys dc)) dcs
+                Nothing -> False
+          in newtypeHit || fieldHit
 
 -- | Recognize GHC's specialized showSignedFloat for Double.
 -- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat
