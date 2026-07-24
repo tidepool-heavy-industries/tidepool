@@ -26,6 +26,18 @@ routings:
   cata/ana whose per-node judgment is a forked answerer — the LspGraph
   idiom: scheme traverses, forks judge) built over the same machinery.
   Applicative fanout = later speed optimization, no hard need.
+  PREMISE CORRECTION (2026-07-24, root call — operator review invited):
+  "built over the same machinery" is FALSE for caller-typed combinators —
+  the concat-modules extract compiles each module once with no
+  whole-program specialization, so a generic wrapper's answer type is
+  irreducibly free at its own binding (INLINE and SPECIALIZE both
+  verified ineffective; evidence in Tidepool.Fork's haddock). Ruling
+  stands via a mechanism extension instead: Translate.hs recognizes the
+  combinator heads and captures the type at the user call site (same
+  head-swap/sidecar machinery, one level up). The Value-typed fallback
+  (b) was rejected as a hedged hybrid that would strip typed answers
+  from the flagship surface. forkFilter (@Bool, concrete) needed no
+  mechanism and shipped by composition.
 - The operator dialog surface (⚖ D2 RULED) is its OWN effect, NOT part
   of the return family: `Ui`-valued elicitation as a normal effect verb
   (name at freeze; mechanically it is still a hole with operator
