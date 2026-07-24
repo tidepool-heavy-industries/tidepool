@@ -4101,6 +4101,7 @@ dependencies = [
  "datastar",
  "futures-core",
  "maud",
+ "percent-encoding",
  "pulldown-cmark",
  "serde",
  "serde_json",

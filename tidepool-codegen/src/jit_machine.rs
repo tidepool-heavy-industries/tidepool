@@ -1902,6 +1902,10 @@ impl Drop for NestedChildGuard {
                 .take()
                 .expect("stowed cell present for the guard's life");
             *self.suspended_continuation = Some(*cell);
+            debug_assert!(
+                *self.nested_child_depth > 0,
+                "nested_child_depth underflow — double drop"
+            );
             *self.nested_child_depth = (*self.nested_child_depth).saturating_sub(1);
         }
     }

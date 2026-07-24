@@ -6,16 +6,23 @@
 //! have). No state lives here: nothing is cached, nothing is mutated,
 //! nothing is read back out of the `Ui` tree between renders.
 //!
-//! Markdown trust model: `Prose` markdown is rendered as HTML, including
-//! fenced code blocks, without sanitization. `Ui` values are always
-//! operator-authored (constructed by the harness / its Haskell programs,
-//! never by an untrusted third party) and tidepool-web binds loopback-only
-//! (see `tidepool-web/CLAUDE.md`), so there is no cross-tenant HTML
-//! injection surface to defend against here.
+//! Trust model: a `Ui` value is constructed by the harness's Haskell
+//! programs, but its CONTENTS (`Prose` text, `Choice` option keys/labels,
+//! ...) can originate from the calling MODEL via `dialogAsk` — and a
+//! prompt-injected model is an untrusted-input carrier. Loopback binding
+//! (see `tidepool-web/CLAUDE.md`) stops a remote network attacker; it does
+//! nothing about a payload the model was induced to emit and the operator's
+//! own browser then executes same-origin, where e.g. `/eval_in_binding` is
+//! arbitrary code against a live heap. What actually closes the surface:
+//! `render_markdown` neutralizes raw HTML at the source (`Event::Html`/
+//! `Event::InlineHtml` become escaped text, never live DOM) and every
+//! model-supplied key interpolated into a single-quoted `@post('...')`
+//! target is percent-encoded first (see `choice_option_target`).
 
 use datastar::prelude::PatchElements;
 use maud::{html, Markup, PreEscaped};
-use pulldown_cmark::{html::push_html, Options, Parser};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use pulldown_cmark::{html::push_html, Event, Options, Parser};
 use tidepool_harness::ui::{BadgeKind, Ui};
 
 /// The open-sum escape path (B2 law, see `tidepool_harness::ui` module doc):
@@ -36,11 +43,37 @@ fn prose_escape(answer_url: &str) -> Markup {
     }
 }
 
+/// Render `source` as markdown, with raw HTML NEUTRALIZED at the event-stream
+/// level: `Event::Html`/`Event::InlineHtml` (pulldown-cmark's "pass this
+/// through verbatim" events) are remapped to `Event::Text` before reaching
+/// `push_html`, so `push_html`'s own escaping applies to them exactly like
+/// any other text run. Real markdown formatting (bold, lists, code, links)
+/// is unaffected — only literal HTML tags in the source are neutralized.
 fn render_markdown(source: &str) -> Markup {
-    let parser = Parser::new_ext(source, Options::empty());
+    let parser = Parser::new_ext(source, Options::empty()).map(|event| match event {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        other => other,
+    });
     let mut rendered = String::new();
     push_html(&mut rendered, parser);
     PreEscaped(rendered)
+}
+
+/// Build the `@post('...')` target for one `Choice` option: `answer_url`
+/// (harness-controlled, never model text) followed by `/` and the
+/// percent-encoded option `key` (model-supplied, untrusted — see the module
+/// trust-model doc). Encodes against `NON_ALPHANUMERIC` rather than a
+/// hand-rolled unsafe-character list: the key is untrusted input, so
+/// correctness beats minimal encoding — this forecloses the `'`
+/// JS-string-literal breakout, `/ ? # %` path-semantics confusion, and any
+/// control/non-ASCII mischief in one move, with no risk of an omitted
+/// character. Axum auto-percent-decodes path params, so the
+/// `/answer/{node}/{key}` route handler receives `key` decoded back to its
+/// original text; only the JS-string-literal context this fragment is
+/// embedded in needs the encoding.
+fn choice_option_target(answer_url: &str, key: &str) -> String {
+    let encoded_key = utf8_percent_encode(key, NON_ALPHANUMERIC);
+    format!("@post('{answer_url}/{encoded_key}')")
 }
 
 fn badge_kind_class(kind: BadgeKind) -> &'static str {
@@ -82,7 +115,7 @@ pub fn render_with_answer_url(ui: &Ui, answer_url: &str) -> Markup {
                         button
                             type="button"
                             class="ui-choice-option"
-                            data-on-click=(format!("@post('{answer_url}/{key}')")) {
+                            data-on-click=(choice_option_target(answer_url, key)) {
                             (label)
                         }
                     }
@@ -174,6 +207,51 @@ mod tests {
              <button type=\"submit\">Submit</button>\
              </form>\
              </div>"
+        );
+    }
+
+    /// SECURITY: a `Prose` body containing raw `<script>`/`<img onerror>`
+    /// markup must render as escaped literal text, never live DOM — the eDSL
+    /// must be structurally unable to emit HTML the browser executes.
+    #[test]
+    fn prose_html_is_escaped_not_live() {
+        let ui = Ui::Prose {
+            text: "<script>alert(1)</script><img src=x onerror=alert(1)>".into(),
+        };
+        let rendered = render_with_answer_url(&ui, URL).into_string();
+        assert!(
+            rendered.contains("&lt;script&gt;"),
+            "script tag must be escaped: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<script>"),
+            "must not contain a live <script> tag: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<img"),
+            "must not contain a live <img> tag (onerror= as escaped text is fine, \
+             onerror= as a real attribute on a live element is not): {rendered}"
+        );
+    }
+
+    /// SECURITY: a model-supplied `Choice` option key containing a single
+    /// quote must not break out of the `@post('...')` JS string literal it's
+    /// interpolated into.
+    #[test]
+    fn choice_key_with_quote_cannot_break_out_of_post_literal() {
+        let ui = Ui::Choice {
+            prompt: "p?".into(),
+            options: vec![("x')//".into(), "Evil".into())],
+        };
+        let rendered = render_with_answer_url(&ui, URL).into_string();
+        // The raw key must never appear unescaped inside the single-quoted target.
+        assert!(
+            !rendered.contains("@post('/answer/n1/x')//')"),
+            "unescaped key broke out of the @post('...') literal: {rendered}"
+        );
+        assert!(
+            rendered.contains("data-on-click=\"@post('/answer/n1/x%27%29%2F%2F')\""),
+            "expected the percent-encoded key in the post target: {rendered}"
         );
     }
 

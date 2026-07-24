@@ -522,10 +522,24 @@ fn run_tidepool_extract(
 
     // $TIDEPOOL_EXTRACT (the same override every test tier honors) wins over
     // PATH — a repo with a freshly built extract must never be trumped by a
-    // stale installed one.
-    let extract_bin = std::env::var_os("TIDEPOOL_EXTRACT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("tidepool-extract"));
+    // stale installed one. A SET-but-unreadable $TIDEPOOL_EXTRACT is a hard
+    // error here, not a silent fall-through to PATH/nix: falling through
+    // would run a DIFFERENT binary than `extract_identity()` hashed into the
+    // content key, a producer/key divergence. An UNSET env still falls back
+    // to PATH then nix below, same as always.
+    let extract_env = std::env::var_os("TIDEPOOL_EXTRACT").map(std::path::PathBuf::from);
+    let extract_bin = match &extract_env {
+        Some(path) => {
+            if !path.is_file() {
+                return Err(format!(
+                    "$TIDEPOOL_EXTRACT is set to {} but that is not a readable file",
+                    path.display()
+                ));
+            }
+            path.clone()
+        }
+        None => std::path::PathBuf::from("tidepool-extract"),
+    };
     let mut cmd = Command::new(&extract_bin);
     cmd.arg(hs_path);
     cmd.arg("--output-dir");
@@ -547,11 +561,15 @@ fn run_tidepool_extract(
                 extract_failure_text(&output.stdout, &output.stderr)
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Not found (bad $TIDEPOOL_EXTRACT or bare name not on PATH) —
-            // fall back to nix run below.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && extract_env.is_none() => {
+            // Bare "tidepool-extract" not on PATH, and $TIDEPOOL_EXTRACT was
+            // never set — fall back to nix run below.
         }
         Err(e) => {
+            // Either a genuine spawn failure, or $TIDEPOOL_EXTRACT was set
+            // (and passed the `is_file` check above, so this is a race —
+            // e.g. removed between check and spawn). Either way: fail loud,
+            // never silently fall back to a different binary.
             return Err(format!(
                 "failed to spawn {}: {e}",
                 extract_bin.display()
@@ -606,6 +624,17 @@ fn content_key(bytes: &[u8], target: Option<&str>) -> u64 {
 /// address must include the PRODUCER, not just the inputs, or an extract
 /// upgrade (e.g. a wire-format major bump) silently serves output in the
 /// old format from a "complete, current" cache dir.
+///
+/// A SET-but-unreadable `$TIDEPOOL_EXTRACT` panics here rather than falling
+/// back to a PATH-resolved binary: this function runs FIRST (via
+/// `content_key`, before `run_tidepool_extract`'s own check), and its result
+/// picks the content-addressed `output_dir`. If that dir already exists
+/// (published by a past, correctly-configured run), `run_tidepool_extract`
+/// short-circuits on the existence check and never reaches its own
+/// fail-loud path — so silently keying against the wrong binary here would
+/// let a misconfigured `$TIDEPOOL_EXTRACT` silently serve a stale/foreign
+/// cache hit instead of erroring. Panicking inside a proc macro surfaces as
+/// a loud compile error, same as any other `expect`/`panic!` in this crate.
 fn extract_identity() -> u64 {
     use std::hash::{Hash, Hasher};
     use std::sync::OnceLock;
@@ -614,16 +643,23 @@ fn extract_identity() -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Same resolution order as `run_tidepool_extract`: $TIDEPOOL_EXTRACT,
         // then PATH — the key must hash the binary that will actually run.
-        let resolved = std::env::var_os("TIDEPOOL_EXTRACT")
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_file())
-            .or_else(|| {
-                std::env::var_os("PATH").and_then(|paths| {
-                    std::env::split_paths(&paths)
-                        .map(|d| d.join("tidepool-extract"))
-                        .find(|p| p.is_file())
-                })
-            });
+        let resolved = match std::env::var_os("TIDEPOOL_EXTRACT") {
+            Some(path) => {
+                let path = std::path::PathBuf::from(path);
+                if !path.is_file() {
+                    panic!(
+                        "$TIDEPOOL_EXTRACT is set to {} but that is not a readable file",
+                        path.display()
+                    );
+                }
+                Some(path)
+            }
+            None => std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|d| d.join("tidepool-extract"))
+                    .find(|p| p.is_file())
+            }),
+        };
         match resolved.and_then(|p| std::fs::read(p).ok()) {
             Some(bytes) => bytes.hash(&mut h),
             // No binary found: extraction itself will fail loudly; an

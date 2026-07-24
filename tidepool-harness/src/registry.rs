@@ -58,9 +58,10 @@ pub enum CheckoutError {
     /// (a child requires a suspended parent by construction).
     #[error("session {0} is not suspended; a nested child requires a suspended parent")]
     NotSuspended(SessionId),
-    /// A new turn was attempted on a suspended session. Until segment 40 lands
-    /// nested child runs, a suspended session accepts only a resume/abort of its
-    /// pending hole.
+    /// A new TOP-LEVEL turn was attempted on a suspended session. A suspended
+    /// session accepts only a resume/abort of its pending hole
+    /// (`checkout_resume`) or a nested child run against it (`checkout_child`,
+    /// segment 40) — never a fresh top-level turn while suspended.
     #[error("session {session} is suspended on {hole:?}; resume or abort it first")]
     Suspended { session: SessionId, hole: HoleId },
     /// A resume/abort referenced a hole that is not the one this session is

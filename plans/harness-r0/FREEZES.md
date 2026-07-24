@@ -70,9 +70,6 @@ this file records what is frozen and the deliberate seams left open.
 
 ## Known-thin (widen backlog, not freeze violations)
 
-- Elaboration fallback stubbed pass-through (F1 path exists, model not
-  wired).
-- `answer_return_control` built but not test-exercised.
 - Harness seed/fork side-maps process-static (one-Harness-per-process R0
   assumption, flagged in code).
 - Tree pane snapshot O(n) dense-id scan.
