@@ -47,6 +47,10 @@ text).
     weeks-shaped (the one new invariant: GC-rooting the stowed
     continuation); parallel fork months-shaped. Engine-side R0 critical
     path ≈ 4–6 weeks single-person, swarm-parallelized.
+11. **D1 node-scale bar dropped (operator, 2026-07-23)**: real trees
+    won't approach 10³–10⁴ nodes — tree view is plain Datastar
+    server-rendering with collapse-by-default; no virtualization, no
+    Preact-island escape hatch. Revisit only on observed slowness.
 
 ## v2 PRD (verbatim requirements reference)
 

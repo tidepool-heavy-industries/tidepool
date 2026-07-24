@@ -23,10 +23,11 @@ sonnet leaves implement against it.
 - DO NOT put UI state in Rust components — the renderer is stateless per
   render; state lives in the session tree + event log; updates arrive by
   SSE patch (Datastar fragments), never client-side state sync.
-- Tree view: DO NOT assume small trees — subtrees collapse by default;
-  rendering must stay usable at 10^3–10^4 nodes (virtualize or paginate;
-  the PRD permits a bundler-free Preact island if Datastar attributes
-  aren't enough — escape hatch, not default).
+- Tree view: plain Datastar-normal rendering, subtrees collapse by
+  default. Operator ruling 2026-07-23: real trees won't reach the PRD's
+  10^3–10^4 node bar — NO virtualization, NO Preact island. If a tree
+  ever gets slow, collapse + pagination first; revisit only on observed
+  pain.
 
 ## ADT sketch (fable finalizes; R0 subset)
 
