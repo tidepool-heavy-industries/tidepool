@@ -13,7 +13,7 @@ extractor. The Rust runtime invokes it via the `TIDEPOOL_EXTRACT` env var if set
 else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs`, `cache.rs`).
 On `$PATH` that resolves to `~/.nix-profile/bin/tidepool-extract`
 — a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH
-and `exec`s the `tidepool-harness` binary **in the nix store**. Deploying a new
+and `exec`s the `tidepool-extract-bin` binary **in the nix store**. Deploying a new
 extract means updating that nix profile entry (see below) — copying a binary
 under `~/.local/bin` or `~/.cargo/bin` does nothing, as the nix-profile entry is
 earlier on PATH.

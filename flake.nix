@@ -140,7 +140,7 @@
             witherable
             safe
           ]);
-          harness = hsPkgs.callCabal2nix "tidepool-harness" ./haskell {};
+          harness = hsPkgs.callCabal2nix "tidepool-extract" ./haskell {};
         in pkgs.writeShellScriptBin "tidepool-extract" ''
           export PATH="${ghcEnv}/bin:$PATH"
           exec ${harness}/bin/tidepool-extract-bin "$@"
