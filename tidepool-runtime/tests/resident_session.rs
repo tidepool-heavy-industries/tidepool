@@ -120,7 +120,11 @@ fn setup() -> Option<EvalHarness> {
         eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
         return None;
     }
-    Some(EvalHarness::new())
+    // The mock preamble imports `Tidepool.Prelude`/`Tidepool.Aeson.KeyMap`,
+    // so the stdlib `lib/` must be on the include path (`.with_stdlib()`); the
+    // self-contained GADT preamble means NO `.tidepool/lib` verb-library
+    // dependency.
+    Some(EvalHarness::new().with_stdlib())
 }
 
 // ---------------------------------------------------------------------------
@@ -135,24 +139,24 @@ fn setup() -> Option<EvalHarness> {
 fn multi_turn_accumulates_across_suspend_resume() {
     let Some(harness) = setup() else { return };
     // Bootstrap from a trivial effectful turn (seeds the 10-effect ConTags).
-    let mut session = bootstrap(&harness, "result = pure (0 :: Int)");
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
     // Turn 1: write a KV key, then `ask`, then write a second key using the
     // ANSWER — so completion depends on the resumed value, and BOTH writes land
     // in the resident MockKv across the suspend boundary.
+    let (t1_expr, t1_table) = compile_turn(
+        &harness,
+        "result :: M Int\nresult = do\n  \
+           send (KvSet \"before\" (toJSON (1 :: Int)))\n  \
+           n <- send (Ask \"pick a number\")\n  \
+           send (KvSet \"after\" n)\n  \
+           pure (0 :: Int)",
+    );
     let outcome = session
         .run(
             "turn1",
-            &compile_turn(
-                &harness,
-                "result = do\n  \
-                   send (KvSet \"before\" (toJSON (1 :: Int)))\n  \
-                   n <- send (Ask \"pick a number\")\n  \
-                   send (KvSet \"after\" n)\n  \
-                   pure (0 :: Int)",
-            )
-            .0,
-            &compile_turn(&harness, "result = pure (0 :: Int)").1,
+            &t1_expr,
+            &t1_table,
             &tidepool_codegen::emit::ExternalEnv::new(),
         )
         .expect("turn 1 runs");
@@ -174,10 +178,12 @@ fn multi_turn_accumulates_across_suspend_resume() {
 
     // The session is now suspended — no OS thread is parked (E2). A NEW run is
     // rejected cleanly until the ask is resolved.
+    let (intrude_expr, intrude_table) =
+        compile_turn(&harness, "result :: M Int\nresult = pure (9 :: Int)");
     match session.run(
         "intrude",
-        &compile_turn(&harness, "result = pure (9 :: Int)").0,
-        &compile_turn(&harness, "result = pure (9 :: Int)").1,
+        &intrude_expr,
+        &intrude_table,
         &tidepool_codegen::emit::ExternalEnv::new(),
     ) {
         Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
@@ -219,18 +225,18 @@ fn multi_turn_accumulates_across_suspend_resume() {
     // suspend/resume turn wrote. "before" proves the pre-suspend write survived;
     // "after" proves the resumed value (42) landed post-resume. This is the
     // resident cross-turn state.
+    let (t2_expr, t2_table) = compile_turn(
+        &harness,
+        "result :: M Value\nresult = do\n  \
+           b <- send (KvGet \"before\")\n  \
+           a <- send (KvGet \"after\")\n  \
+           pure (toJSON [b, a])",
+    );
     let outcome = session
         .run(
             "turn2",
-            &compile_turn(
-                &harness,
-                "result = do\n  \
-                   b <- send (KvGet \"before\")\n  \
-                   a <- send (KvGet \"after\")\n  \
-                   pure (toJSON [b, a])",
-            )
-            .0,
-            &compile_turn(&harness, "result = pure (0 :: Int)").1,
+            &t2_expr,
+            &t2_table,
             &tidepool_codegen::emit::ExternalEnv::new(),
         )
         .expect("turn 2 runs on the reused machine");
@@ -254,10 +260,10 @@ fn multi_turn_accumulates_across_suspend_resume() {
 #[test]
 fn plain_turns_reuse_the_machine() {
     let Some(harness) = setup() else { return };
-    let mut session = bootstrap(&harness, "result = pure (0 :: Int)");
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
     for expected in [11i64, 22, 33] {
-        let body = format!("result = pure ({expected} :: Int)");
+        let body = format!("result :: M Int\nresult = pure ({expected} :: Int)");
         let (expr, table) = compile_turn(&harness, &body);
         match session
             .run(
