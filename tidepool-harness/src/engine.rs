@@ -218,6 +218,34 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
     blocks.pop()
 }
 
+/// Split a model-written block into (imports, expression). A model sometimes
+/// puts `import Foo` lines at the top of its ```haskell block; those are NOT
+/// legal inside the templated `M a` EXPRESSION position, so they are peeled off
+/// and routed to `template_haskell`'s `imports` field. `Tidepool.Ui` is always
+/// added (harmless if unused) so `dialogAsk (toJSON (card …))` resolves without
+/// the model having to remember the import.
+pub fn split_imports(block: &str) -> (String, String) {
+    let mut imports = vec!["Tidepool.Ui".to_string()];
+    let mut body = Vec::new();
+    let mut in_body = false;
+    for line in block.lines() {
+        let trimmed = line.trim_start();
+        if !in_body && trimmed.starts_with("import ") {
+            // `import Qualified.Mod (names)` — keep everything after `import `.
+            let rest = trimmed.trim_start_matches("import ").trim().to_string();
+            if !rest.is_empty() {
+                imports.push(rest);
+            }
+        } else if !in_body && trimmed.is_empty() {
+            // Blank lines before the body are skipped (don't start the body).
+        } else {
+            in_body = true;
+            body.push(line);
+        }
+    }
+    (imports.join("\n"), body.join("\n"))
+}
+
 // ---------------------------------------------------------------------------
 // Include-path resolution + effect-stack config
 // ---------------------------------------------------------------------------
@@ -290,12 +318,74 @@ impl EngineConfig {
 
 /// Wrap a model-written `M a` block as a full templated module the extract can
 /// compile, with optional extra `helpers` (e.g. the answerer's `resume`) and
-/// `imports` (e.g. `Tidepool.Ui`).
+/// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
+/// contract of a NORMAL turn (its terminal value is displayed).
 pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = cfg.effect_stack_type();
     tidepool_mcp::template_haskell(&preamble, &stack, code, imports, helpers, None, None)
+}
+
+/// Wrap an ANSWERER block as a module whose `result` returns the RAW value —
+/// NOT `toJSON`'d. A fork/return answerer's block is `resume expr :: M T`, and
+/// the value fed to the parent's continuation must be the raw `T` (an `Int`,
+/// an ADT — whatever the hole's type is), because `returnControl`/`Fork`'s
+/// `unsafeCoerce` relabels the SAME runtime bytes back to `T`. `template_turn`'s
+/// `toJSON _r` would instead hand back an Aeson `Value` (a `Number`, an
+/// `Object`), which the parent's `T`-typed continuation then case-traps on.
+///
+/// So this emits `result :: Eff stack a; result = <block>` — GHC infers `a`
+/// from the block's `resume :: T -> M T` (or the polymorphic identity), and the
+/// value stays in its native `T` representation.
+pub fn template_answer_turn(
+    cfg: &EngineConfig,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+) -> String {
+    let decls = tidepool_mcp::standard_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let stack = cfg.effect_stack_type();
+
+    let mut out = String::new();
+    // Insert user imports right before the `default` decl (same insertion point
+    // template_haskell uses), else append the preamble whole.
+    if imports.trim().is_empty() {
+        out.push_str(&preamble);
+    } else {
+        let insert = preamble.find("default (Int").unwrap_or(preamble.len());
+        out.push_str(&preamble[..insert]);
+        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str("import ");
+            out.push_str(imp);
+            out.push('\n');
+        }
+        out.push_str(&preamble[insert..]);
+    }
+    out.push_str("-- [user]\n");
+    if !helpers.trim().is_empty() {
+        out.push_str(helpers);
+        if !helpers.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    // The RAW-result binding: no toJSON, no paginate. No explicit type
+    // signature — GHC infers the result type from the block (the answerer's
+    // `resume :: T -> M T` helper fixes `T` when the hole type is known). The
+    // block is embedded verbatim inside an explicit let-bracket (same
+    // layout-suspension trick as template_haskell) so unindented multi-line
+    // blocks stay valid. `stack` is unused in the raw binding (the type is
+    // inferred), so silence it deliberately.
+    let _ = &stack;
+    out.push_str("result = let {\n __b =\n");
+    out.push_str(code);
+    if !code.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(" } in __b\n");
+    out
 }
 
 #[derive(Debug, thiserror::Error)]

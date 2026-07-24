@@ -384,7 +384,8 @@ impl Harness {
         };
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
-        self.run_block(node, &block, "", "").await
+        let (imports, body) = engine::split_imports(&block);
+        self.run_block(node, &body, &imports, "").await
     }
 
     /// Compile a `block` (with optional imports/helpers) and run it against
@@ -726,7 +727,8 @@ impl Harness {
                 Some(t) => format!("resume :: {t} -> M {t}\nresume = pure"),
                 None => RESUME_HELPER.to_string(),
             };
-            let src = engine::template_turn(&self.cfg, &block, "import Tidepool.Ui", &helpers);
+            let (imports, body) = engine::split_imports(&block);
+            let src = engine::template_answer_turn(&self.cfg, &body, &imports, &helpers);
             let cfg_bin = self.cfg.extract_bin.clone();
             let include = self.cfg.include.clone();
             let compiled = tokio::task::spawn_blocking(move || {
@@ -783,7 +785,12 @@ impl Harness {
             self.put_session(target, session, None, AsksSidecar::default());
 
             match child_out {
-                Ok(result) => return Ok(result.into_value()),
+                Ok(result) => {
+                    if std::env::var("HARNESS_DEBUG").is_ok() {
+                        eprintln!("[harness] child answer value: {:?}", result.value());
+                    }
+                    return Ok(result.into_value());
+                }
                 Err(ResidentError::NotSuspended) => {
                     return Err(HarnessError::NotSuspended(target))
                 }
