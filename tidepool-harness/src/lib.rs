@@ -7,12 +7,14 @@
 //! implementations. Types here are the vocabulary, not the machinery —
 //! keep them dependency-light.
 
+pub mod forcing;
 pub mod log;
 pub mod provider;
 pub mod registry;
 pub mod tree;
 pub mod ui;
 
+pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};
