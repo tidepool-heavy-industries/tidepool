@@ -1155,3 +1155,41 @@ fn works_fork() {
     .unwrap_or_else(|e| panic!("forkFilter probe failed: {e}"));
     assert_eq!(got, serde_json::json!([1, 3]));
 }
+
+/// Answers ONE fanout dispatch with a fixed `[Int]` list.
+struct IntListOnce {
+    answer: Vec<i64>,
+}
+
+impl DispatchEffect<()> for IntListOnce {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        _request: &Value,
+        cx: &EffectContext<'_, ()>,
+    ) -> Result<Response, EffectError> {
+        assert_eq!(tag, ASK_TAG, "expected the fanout's Ask dispatch");
+        cx.respond_list(self.answer.clone())
+    }
+}
+
+/// `forkMap` (`Tidepool.Fork`, combinator-sites widen) runs end to end on the
+/// JIT: a CALLER-chosen answer type (`@Int`, not forkFilter's fixed `Bool`)
+/// reaches a REAL `returnControlFanout`-shaped dispatch — the mechanism
+/// `Tidepool.Fork`'s module haddock and `works_fork`'s doc comment describe
+/// as the previously-blocked wall, closed by the combinator-sites extract
+/// pass.
+#[test]
+fn works_fork_map() {
+    let mut map_d = IntListOnce {
+        answer: vec![10, 20, 30, 40],
+    };
+    let got = eval_with_dispatch(
+        "Tidepool.Fork",
+        "do { ys <- forkMap @Int (\\x -> T.pack (show (x :: Int))) [1, 2, 3, 4 :: Int]; \
+         pure (toJSON (ys :: [Int])) }",
+        &mut map_d,
+    )
+    .unwrap_or_else(|e| panic!("forkMap probe failed: {e}"));
+    assert_eq!(got, serde_json::json!([10, 20, 30, 40]));
+}

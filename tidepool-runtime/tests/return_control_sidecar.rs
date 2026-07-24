@@ -156,12 +156,18 @@ fn returncontrol_site_ids_match_under_branch_and_loop() {
         recorder.sites
     );
     // The gate, the branch, and the loop are three DISTINCT static occurrences.
-    assert_ne!(gate_site, branch_site, "the gate and branch sites must differ");
+    assert_ne!(
+        gate_site, branch_site,
+        "the gate and branch sites must differ"
+    );
     assert_ne!(
         branch_site, loop_sites[0],
         "the branch site and the loop site must be distinct static occurrences"
     );
-    assert_ne!(gate_site, loop_sites[0], "the gate and loop sites must differ");
+    assert_ne!(
+        gate_site, loop_sites[0],
+        "the gate and loop sites must differ"
+    );
 
     // Sidecar: read asks.json from a kept-alive extract invocation over the
     // SAME source (bypassing `compile_haskell`'s auto-cleaned tempdir).
@@ -196,12 +202,18 @@ fn returncontrol_site_ids_match_under_branch_and_loop() {
         "expected 1 Bool site, got {sidecar_types:?}"
     );
     assert_eq!(
-        sidecar_types.iter().filter(|t| t.contains("Verdict")).count(),
+        sidecar_types
+            .iter()
+            .filter(|t| t.contains("Verdict"))
+            .count(),
         2,
         "expected 2 Verdict sites, got {sidecar_types:?}"
     );
     assert_eq!(
-        sidecar_types.iter().filter(|t| t.contains("Outcome")).count(),
+        sidecar_types
+            .iter()
+            .filter(|t| t.contains("Outcome"))
+            .count(),
         1,
         "expected 1 Outcome site, got {sidecar_types:?}"
     );
@@ -284,6 +296,117 @@ fn try_compile_returncontrol(hole: &str, helpers: &str) -> Result<(), String> {
         .map_err(|e| tidepool_runtime::classify_compile(&e).message)
 }
 
+// ---------------------------------------------------------------------------
+// forkMap (combinator-sites widen): the same extract-level recognition
+// mechanism, generalized to a library combinator with a CALLER-chosen
+// answer type. See Tidepool.Fork's module haddock for why this needed a
+// new mechanism (forkFilter's fixed-Bool answer never did) and
+// Tidepool.Translate's forkMap/forkCata case arm for the implementation.
+// ---------------------------------------------------------------------------
+
+/// Same as `try_compile_returncontrol`, but imports `Tidepool.Fork` so
+/// `forkMap`/`forkCata` are in scope.
+fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
+    let src =
+        tidepool_mcp::template_haskell(&pre, &stack, &code, "Tidepool.Fork", helpers, None, None);
+
+    EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .with_extract_env()
+        .compile(&src, "result")
+        .map(|_| ())
+        .map_err(|e| tidepool_runtime::classify_compile(&e).message)
+}
+
+#[test]
+fn forkmap_accepts_monomorphic_answer_type() {
+    let src_result = try_compile_forkmap(
+        "forkMap @Verdict (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]",
+        "data Verdict = Approve | Reject deriving (Show)",
+    );
+    assert!(
+        src_result.is_ok(),
+        "a monomorphic forkMap @Verdict call site should compile cleanly, got error: {:?}",
+        src_result.err()
+    );
+}
+
+/// The forkMap @Verdict call site's asks.json entry is INDISTINGUISHABLE in
+/// shape from a bare `returnControlFanout @Verdict` site — same "[Verdict]"
+/// type string, same single-entry sidecar — because forkMapSited routes
+/// through exactly one returnControlFanoutSited dispatch.
+#[test]
+fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let code = "do\n  ys <- forkMap @Verdict (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]\n  pure (toJSON (length (ys :: [Verdict])))\n";
+    let src = tidepool_mcp::template_haskell(
+        &pre,
+        &stack,
+        code,
+        "Tidepool.Fork",
+        "data Verdict = Approve | Reject deriving (Show)",
+        None,
+        None,
+    );
+
+    let asks = compile_and_read_asks(&src, "result");
+    let entries = asks.as_array().expect("asks.json is an array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly 1 forkMap site, got {asks}"
+    );
+    let ty = entries[0]["type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("asks.json entry missing string type: {asks}"));
+    assert!(
+        ty.starts_with('[') && ty.ends_with(']') && ty.contains("Verdict"),
+        "forkMap's sidecar type must match a bare fanout site's own \"[T]\" \
+         convention, got {ty:?}"
+    );
+}
+
+#[test]
+fn forkmap_rejects_polymorphic_answer_type() {
+    // Mirrors `returncontrol_rejects_polymorphic_site`: a NOINLINE wrapper
+    // with its own `forall b` gives forkMap a genuinely free type variable
+    // at its call site.
+    let helpers = "{-# NOINLINE polyForkMap #-}\n\
+                   polyForkMap :: forall b. (Int -> Text) -> [Int] -> M [b]\n\
+                   polyForkMap f xs = forkMap @b f xs\n";
+    let err = try_compile_forkmap("polyForkMap (\\x -> T.pack (show x)) [1, 2, 3]", helpers)
+        .expect_err("a polymorphic forkMap site must fail extract");
+    assert!(
+        err.contains("polymorphic returnControl site"),
+        "expected the (shared) polymorphic-site error text, got:\n{err}"
+    );
+}
+
+#[test]
+fn forkmap_rejects_partial_application() {
+    // `forkMap @Verdict f` alone (no list argument) never reaches the
+    // full-application shape the extract arm rewrites — must fail at
+    // extract naming the site, not fall through to forkMap's own dead
+    // OPAQUE (runtime-error) stub.
+    let helpers = "data Verdict = Approve | Reject deriving (Show)\n\
+                   {-# NOINLINE useForkMap #-}\n\
+                   useForkMap :: (Int -> Text) -> M ([Int] -> M [Verdict])\n\
+                   useForkMap f = pure (forkMap @Verdict f)\n";
+    let err = try_compile_forkmap("useForkMap (\\x -> T.pack (show x)) >> pure ()", helpers)
+        .expect_err("a partially-applied forkMap site must fail extract");
+    assert!(
+        err.contains("forkMap") && err.contains("not fully applied"),
+        "expected the forkMap partial-application error text, got:\n{err}"
+    );
+}
+
 /// Invoke `tidepool-extract-bin` directly (mirroring `compile_haskell`'s own
 /// `Command` construction) into a tempdir we keep alive, so `asks.json` (next
 /// to `meta.cbor`, `writeWholeModuleClosed`'s sidecar) is still on disk to
@@ -317,8 +440,12 @@ fn compile_and_read_asks(source: &str, target: &str) -> serde_json::Value {
     );
 
     let asks_path: PathBuf = temp_dir.path().join("asks.json");
-    let asks_bytes = std::fs::read(&asks_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", asks_path.display()));
-    serde_json::from_slice(&asks_bytes)
-        .unwrap_or_else(|e| panic!("parse asks.json: {e}\n{}", String::from_utf8_lossy(&asks_bytes)))
+    let asks_bytes =
+        std::fs::read(&asks_path).unwrap_or_else(|e| panic!("read {}: {e}", asks_path.display()));
+    serde_json::from_slice(&asks_bytes).unwrap_or_else(|e| {
+        panic!(
+            "parse asks.json: {e}\n{}",
+            String::from_utf8_lossy(&asks_bytes)
+        )
+    })
 }

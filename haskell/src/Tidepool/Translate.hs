@@ -133,6 +133,8 @@ data TransState = TransState
   , tsReturnControlSitedId :: !(Maybe Word64)
   , tsReturnControlForkSitedId :: !(Maybe Word64)
   , tsReturnControlFanoutSitedId :: !(Maybe Word64)  -- B1 widen: returnControlFanout's sibling
+  , tsForkMapSitedId :: !(Maybe Word64)      -- combinator-sites widen: forkMap's hidden sibling
+  , tsForkCataSitedId :: !(Maybe Word64)     -- combinator-sites widen: forkCata's hidden sibling
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
   , tsReturnControlSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
@@ -399,7 +401,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -407,7 +409,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -441,6 +443,8 @@ translateModule allBinds targetName unresolvedIds =
                     (findAuxVarId "returnControlSited" allBinds)
                     (findAuxVarId "returnControlForkSited" allBinds)
                     (findAuxVarId "returnControlFanoutSited" allBinds)
+                    (findAuxVarId "forkMapSited" allBinds)
+                    (findAuxVarId "forkCataSited" allBinds)
                     0 Seq.empty Nothing
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsReturnControlSites finalState)
@@ -973,11 +977,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1611,6 +1615,68 @@ translate expr =
             appLit <- emitNode $ NApp sitedRef litIdx
             promptIdx <- translate promptArg
             emitNode $ NApp appLit promptIdx
+
+    -- forkMap @b f xs / forkCata @b combine tree (combinator-sites widen):
+    -- library-defined recursion-scheme combinators (Tidepool.Fork) over
+    -- returnControlFanout, recognized by name exactly like
+    -- returnControl/returnControlFork/returnControlFanout above. Two
+    -- differences from that arm: the value-arg arity is 2 (not 1), and the
+    -- answer type is the FIRST type argument, not the only one — forkMap/
+    -- forkCata are each quantified `forall b a. ...` so a single explicit
+    -- `forkMap @T` application pins the answer type b (the element/tree
+    -- type a is inferred from the second value argument and is NEVER
+    -- checked here: it never crosses the suspend boundary, only b does).
+    -- Head-swap target is the hidden *Sited sibling (resolved once by name
+    -- in 'translateModule', same as the returnControl siblings); the
+    -- sidecar records the SAME "[b]" shape a bare returnControlFanout site
+    -- records — forkMap/forkCata's *Sited body routes through exactly one
+    -- returnControlFanoutSited dispatch per answer, so every AskWith
+    -- payload this site's id ever tags really does carry a `[b]`-shaped
+    -- fanout (see Tidepool.Fork's haddock).
+    Var v | isForkMapVar v || isForkCataVar v
+          , let typeArgs = filter (not . isValueArg) allArgs
+          , [Type tyAns, Type _tyElem] <- typeArgs
+          , [fnArg, xsArg] <- args -> do
+        checkReturnControlType tyAns
+        let sitedField
+              | isForkMapVar v = tsForkMapSitedId
+              | otherwise = tsForkCataSitedId
+        sitedIdM <- gets sitedField
+        case sitedIdM of
+          Nothing -> do
+            _ <- translate fnArg
+            _ <- translate xsArg
+            emitFfiPoison
+          Just sitedVarId -> do
+            siteId <- freshSiteId
+            let typeStr = "[" ++ Tidepool.GhcPipeline.renderType tyAns ++ "]"
+            recordReturnControlSite siteId (T.pack typeStr)
+            sitedRef <- emitNode $ NVar sitedVarId
+            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
+            appLit <- emitNode $ NApp sitedRef litIdx
+            fnIdx <- translate fnArg
+            appFn <- emitNode $ NApp appLit fnIdx
+            xsIdx <- translate xsArg
+            emitNode $ NApp appFn xsIdx
+
+    -- Any OTHER shape at a forkMap/forkCata head (partial application, a
+    -- type-argument count that doesn't match [answer, element/tree], or a
+    -- mis-arity value-arg list) can never be extracted: the answer type
+    -- must be captured HERE, at the full application, or not at all — there
+    -- is no runtime fallback (mirrors the tagToEnum# arm's own fallback
+    -- below, and Tidepool.Fork's OPAQUE stub bodies, which 'error' if ever
+    -- actually reached). Fails loudly, naming the enclosing binder, instead
+    -- of silently falling through to that dead stub.
+    Var v | isForkMapVar v || isForkCataVar v -> do
+        binder <- gets tsCurrentBinder
+        let siteDesc = maybe "<top level>" T.unpack binder
+            which = if isForkMapVar v then "forkMap" else "forkCata" :: String
+        error $ which ++ " site in " ++ siteDesc
+              ++ " is not fully applied or its answer type is not a concrete "
+              ++ "monomorphic type at this call site — apply it to both of "
+              ++ "its arguments and ensure the answer type is instantiated "
+              ++ "here (partial application and un-instantiated type "
+              ++ "variables cannot be extracted)."
 
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
@@ -2616,6 +2682,24 @@ isReturnControlForkVar v =
 isReturnControlFanoutVar :: Id -> Bool
 isReturnControlFanoutVar v =
   occNameString (nameOccName (idName v)) == "returnControlFanout"
+
+-- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
+-- stubs, combinator-sites widen) — same convention as
+-- 'isReturnControlVar' et al. Their hidden @*Sited@ siblings
+-- ('forkMapSited'\/'forkCataSited') are matched by NEITHER this predicate
+-- NOR any other arm in this file (disjoint names), so occurrences of the
+-- Sited siblings — the head-swap target's own real logic, referencing
+-- @returnControlFanoutSited@, itself a third, also-unmatched name — always
+-- fall through to ordinary Var/App translation. No separate "pass-through"
+-- arm is needed: it holds by construction of the naming, not by an extra
+-- runtime check.
+isForkMapVar :: Id -> Bool
+isForkMapVar v =
+  occNameString (nameOccName (idName v)) == "forkMap"
+
+isForkCataVar :: Id -> Bool
+isForkCataVar v =
+  occNameString (nameOccName (idName v)) == "forkCata"
 
 -- | The two extract-time rejections for a returnControl/returnControlFork
 -- site's answer type (spec step 4): a leftover type variable (the site isn't

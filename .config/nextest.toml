@@ -84,7 +84,9 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # `acceptance_fanout` (B1, returnControlFanout) is the same shape again: a fan
 # of 3 real GHC extracts (root + 3 children) through the real Harness.
 # `acceptance_fork_combinators` (Wave C, Tidepool.Fork) is the same shape
-# again: a `forkFilter` fan of 3 real GHC extracts through the real Harness.
+# again: a `forkFilter` fan of 3 real GHC extracts through the real Harness,
+# plus (combinator-sites widen) a `forkCata` 2-level tree — a leaf-batch
+# fanout followed by the root's own singleton fanout on the same node.
 # `elaboration` (B2, the dialog elaboration flow) is the same shape again: a
 # real GHC extract of the elaborator's proposed `resume` expr (plus one
 # deliberately ill-typed retry attempt), driven through the real Harness.
