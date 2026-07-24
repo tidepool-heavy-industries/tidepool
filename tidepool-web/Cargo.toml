@@ -21,6 +21,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tokio-stream = "0.1"
 futures-core = "0.3"
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "tidepool-harness"
 path = "src/bin/tidepool-harness.rs"

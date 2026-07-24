@@ -4104,6 +4104,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "tempfile",
  "tidepool-harness",
  "tokio",
  "tokio-stream",

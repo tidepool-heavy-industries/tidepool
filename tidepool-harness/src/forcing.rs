@@ -485,6 +485,31 @@ impl<M> NodeTree<M> {
     pub fn session_of(&self, node: NodeId) -> Option<SessionId> {
         self.inner.lock().nodes.get(&node).and_then(|e| e.session)
     }
+
+    /// Cursor-paged node-id enumeration (widen: replaces the tree pane's old
+    /// probe-for-gaps scan). Node ids are minted monotonically from 0 and
+    /// never reused ([`Self::create_node`]), so every id in `0..next_node_id`
+    /// is a live node — this is an exact `O(min(limit, n))` slice, not a
+    /// probe. Returns up to `limit` ids strictly greater than `cursor`
+    /// (`None` starts from the beginning), plus the next cursor to pass back
+    /// for the following page (`None` once the page reaches the end).
+    pub fn node_ids_after(&self, cursor: Option<NodeId>, limit: usize) -> (Vec<NodeId>, Option<NodeId>) {
+        let inner = self.inner.lock();
+        let start = cursor.map(|c| c.0.saturating_add(1)).unwrap_or(0);
+        let end = inner.next_node_id;
+        let mut ids = Vec::new();
+        let mut id = start;
+        while id < end && ids.len() < limit {
+            ids.push(NodeId(id));
+            id += 1;
+        }
+        let next = if ids.len() == limit && id < end {
+            ids.last().copied()
+        } else {
+            None
+        };
+        (ids, next)
+    }
 }
 
 #[cfg(test)]
@@ -881,5 +906,60 @@ mod tests {
         ));
         assert!(matches!(child_events[2], LogEvent::TurnStart { .. }));
         assert!(matches!(child_events[3], LogEvent::NodeDone { .. }));
+    }
+
+    // ---- cursor-paged node-id enumeration --------------------------------
+
+    #[test]
+    fn node_ids_after_pages_through_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = tree_at(&dir.path().join("run.jsonl"));
+        let ids: Vec<NodeId> = (0..5)
+            .map(|i| {
+                tree.create_node(None, &format!("n{i}"), vec![], ForkShape::Exact(0), false)
+                    .unwrap()
+            })
+            .collect();
+
+        let (page1, next1) = tree.node_ids_after(None, 2);
+        assert_eq!(page1, ids[0..2]);
+        assert_eq!(next1, Some(ids[1]));
+
+        let (page2, next2) = tree.node_ids_after(next1, 2);
+        assert_eq!(page2, ids[2..4]);
+        assert_eq!(next2, Some(ids[3]));
+
+        let (page3, next3) = tree.node_ids_after(next2, 2);
+        assert_eq!(page3, ids[4..5]);
+        assert_eq!(next3, None, "the last, partial page has no further cursor");
+
+        // Paging explicitly past the end (cursor = the last real id) is empty.
+        let (page4, next4) = tree.node_ids_after(Some(ids[4]), 2);
+        assert!(page4.is_empty());
+        assert_eq!(next4, None);
+    }
+
+    #[test]
+    fn node_ids_after_none_with_large_limit_returns_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = tree_at(&dir.path().join("run.jsonl"));
+        let ids: Vec<NodeId> = (0..3)
+            .map(|i| {
+                tree.create_node(None, &format!("n{i}"), vec![], ForkShape::Exact(0), false)
+                    .unwrap()
+            })
+            .collect();
+        let (all, next) = tree.node_ids_after(None, usize::MAX);
+        assert_eq!(all, ids);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn node_ids_after_empty_tree_returns_empty_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree: NodeTree<FakeMachine> = tree_at(&dir.path().join("run.jsonl"));
+        let (page, next) = tree.node_ids_after(None, 10);
+        assert!(page.is_empty());
+        assert_eq!(next, None);
     }
 }

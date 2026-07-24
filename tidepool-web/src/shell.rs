@@ -48,8 +48,8 @@ body {
 .app {
   display: grid; height: 100vh;
   grid-template-rows: auto 1fr;
-  grid-template-columns: minmax(220px, 300px) 1fr minmax(280px, 380px);
-  grid-template-areas: "hdr hdr hdr" "tree main log";
+  grid-template-columns: minmax(220px, 280px) 1fr minmax(260px, 320px) minmax(280px, 380px);
+  grid-template-areas: "hdr hdr hdr hdr" "tree main side log";
 }
 header.hdr {
   grid-area: hdr; display: flex; align-items: center; gap: var(--s4);
@@ -65,6 +65,9 @@ header.hdr .status.signed-out { color: var(--warn); }
 .pane { overflow-y: auto; padding: var(--s3); }
 .pane.tree { grid-area: tree; background: var(--bg-raised); border-right: 1px solid var(--border); }
 .pane.main { grid-area: main; }
+.pane.side { grid-area: side; background: var(--bg-raised); border-left: 1px solid var(--border); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.pane.side .sub { flex: 1 1 50%; min-height: 0; overflow-y: auto; padding: var(--s3); }
+.pane.side .sub + .sub { border-top: 1px solid var(--border); }
 .pane.log  { grid-area: log; background: var(--bg-inset); border-left: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
 .pane h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--fg-faint); margin: 0 0 var(--s3); font-weight: 600; }
 
@@ -108,6 +111,21 @@ textarea, input[type=text] { font: inherit; background: var(--bg-inset); color: 
 textarea:focus, input:focus { outline: none; border-color: var(--accent); }
 .ui-badge { display: inline-block; font-size: 10px; padding: 1px var(--s2); border-radius: 999px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--fg-dim); margin-right: var(--s1); }
 .empty { color: var(--fg-faint); font-style: italic; padding: var(--s4); }
+
+/* meters */
+.meter-rollup { font-size: 12px; color: var(--fg-dim); margin-bottom: var(--s3); }
+.meter-rollup b { color: var(--fg); font-weight: 600; }
+table.meter-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.meter-table th, table.meter-table td { text-align: left; padding: 2px var(--s2); border-bottom: 1px solid var(--border); }
+table.meter-table th { color: var(--fg-faint); font-weight: 500; }
+
+/* trace */
+.trace-node { margin-bottom: var(--s2); }
+.trace-node summary { cursor: pointer; font-size: 12px; color: var(--fg-dim); padding: var(--s1) 0; }
+.trace-node summary:hover { color: var(--fg); }
+.trace-row { padding: var(--s2) 0; border-top: 1px dashed var(--border); font-family: var(--mono); font-size: 11px; }
+.trace-row .chip { margin-bottom: var(--s1); }
+.trace-req, .trace-resp { white-space: pre-wrap; word-break: break-word; color: var(--fg-dim); margin-top: 2px; }
 
 /* log */
 .log-line { padding: 2px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
@@ -186,9 +204,17 @@ pub const OBSERVATORY_JS: &str = r#"
 "#;
 
 /// Render the full observatory page shell. `signed_in` drives the auth banner;
-/// `tree` / `inspector` / `log` are the initial server-rendered pane contents
-/// (later patched over SSE).
-pub fn page(signed_in: bool, tree: Markup, inspector: Markup, log: Markup) -> Markup {
+/// `tree` / `inspector` / `meters` / `trace` / `log` are the initial
+/// server-rendered pane contents (later patched over SSE).
+#[allow(clippy::too_many_arguments)]
+pub fn page(
+    signed_in: bool,
+    tree: Markup,
+    inspector: Markup,
+    meters: Markup,
+    trace: Markup,
+    log: Markup,
+) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -219,6 +245,16 @@ pub fn page(signed_in: bool, tree: Markup, inspector: Markup, log: Markup) -> Ma
                     div class="pane main" {
                         h2 { "inspector" }
                         div id="inspector" { (inspector) }
+                    }
+                    div class="pane side" {
+                        div class="sub" {
+                            h2 { "meters" }
+                            div id="meters" { (meters) }
+                        }
+                        div class="sub" {
+                            h2 { "trace" }
+                            div id="trace" { (trace) }
+                        }
                     }
                     div class="pane log" {
                         h2 { "event log" }

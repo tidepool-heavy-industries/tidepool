@@ -13,14 +13,22 @@
 //! - `POST /answer/:node/:key`    — a mechanical option-key answer (D6).
 //! - `POST /fork/:node`  — force + drive the fork answerer for a fork hole.
 //! - `POST /cancel/:node`— cancel a node.
+//! - `POST /eval_in_binding/:node` — evaluate a plain `M a` expression against
+//!                         a SUSPENDED node's live session heap; a
+//!                         non-consuming heap-browser peek (D4), not an
+//!                         answer. Body `{name, expr}`; `name` is a label only.
+//! - `GET  /snapshot`    — cursor-paged flat node list: `?cursor=<id>&limit=<n>`
+//!                         (both optional; `limit` default 50). Response
+//!                         `{nodes: [...], next_cursor: <id>|null}`.
 //! - `POST /auth/start`  — begin OAuth sign-in (returns the URL + port-forward
 //!                         hint); `GET /auth/status` reports sign-in state.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -76,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/answer/{node}", post(answer))
         .route("/answer/{node}/{key}", post(answer_key))
         .route("/cancel/{node}", post(cancel))
+        .route("/eval_in_binding/{node}", post(eval_in_binding))
+        .route("/snapshot", get(snapshot))
         .route("/auth/start", post(auth_start))
         .route("/auth/status", get(auth_status))
         .with_state(state)
@@ -92,8 +102,10 @@ async fn page(State(st): State<AppState>) -> Html<String> {
     );
     let tree = tree_fragment(&st);
     let inspector = inspector_fragment(&st);
+    let meters = meters_fragment(&st);
+    let trace = trace_fragment(&st);
     let log = log_fragment(&st);
-    Html(shell::page(signed_in, tree, inspector, log).into_string())
+    Html(shell::page(signed_in, tree, inspector, meters, trace, log).into_string())
 }
 
 /// The tree pane markup (id="tree" so SSE patches replace it wholesale).
@@ -160,6 +172,160 @@ fn inspector_fragment(st: &AppState) -> Markup {
         shell::inspector_empty()
     };
     html! { div id="inspector" { (inner) } }
+}
+
+/// One node's token-usage rollup, folded from `TurnDelta` events.
+struct MeterRow {
+    node: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+/// Fold every logged `TurnDelta`'s `usage` (present on assistant turns only,
+/// per F2) into a per-node total plus a whole-run rollup. Node rows are in
+/// ascending node-id order (a `BTreeMap` fold, not log order).
+fn fold_usage(path: &std::path::Path) -> (Vec<MeterRow>, (u64, u64)) {
+    let Ok((_h, iter)) = LogReader::open(path) else {
+        return (Vec::new(), (0, 0));
+    };
+    let mut per_node: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+    for rec in iter.flatten() {
+        if let LogEvent::TurnDelta {
+            node,
+            usage: Some(usage),
+            ..
+        } = rec.event
+        {
+            let entry = per_node.entry(node.0).or_insert((0, 0));
+            entry.0 += usage.input_tokens;
+            entry.1 += usage.output_tokens;
+        }
+    }
+    let total = per_node
+        .values()
+        .fold((0u64, 0u64), |acc, (i, o)| (acc.0 + i, acc.1 + o));
+    let rows = per_node
+        .into_iter()
+        .map(|(node, (input_tokens, output_tokens))| MeterRow {
+            node,
+            input_tokens,
+            output_tokens,
+        })
+        .collect();
+    (rows, total)
+}
+
+/// Pure render of a meters snapshot (split from `meters_fragment` so it's
+/// testable without an `AppState`/live `Harness`).
+fn render_meters(rows: &[MeterRow], total: (u64, u64)) -> Markup {
+    html! {
+        div id="meters" {
+            div class="meter-rollup" {
+                "rollup: " b { (total.0) } " in / " b { (total.1) } " out tokens"
+            }
+            @if rows.is_empty() {
+                div class="empty" { "No assistant turns yet." }
+            } @else {
+                table class="meter-table" {
+                    thead { tr { th { "node" } th { "in" } th { "out" } } }
+                    tbody {
+                        @for r in rows {
+                            tr {
+                                td { "n" (r.node) }
+                                td { (r.input_tokens) }
+                                td { (r.output_tokens) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The meters pane markup (id="meters"): per-node + rollup token usage.
+fn meters_fragment(st: &AppState) -> Markup {
+    let (rows, total) = fold_usage(&st.log_path);
+    render_meters(&rows, total)
+}
+
+/// One logged effect req/resp pair, rendered for the trace pane.
+struct EffectRow {
+    seq: u64,
+    tag: String,
+    req: String,
+    resp: String,
+}
+
+/// Fold every logged `Effect` event into a per-node tail (the last `tail`
+/// entries per node, log order preserved within each node's list). Node keys
+/// are in ascending node-id order.
+fn fold_effects(path: &std::path::Path, tail: usize) -> Vec<(u64, Vec<EffectRow>)> {
+    let Ok((_h, iter)) = LogReader::open(path) else {
+        return Vec::new();
+    };
+    let mut per_node: BTreeMap<u64, Vec<EffectRow>> = BTreeMap::new();
+    for rec in iter.flatten() {
+        if let LogEvent::Effect {
+            node,
+            seq,
+            tag,
+            req,
+            resp,
+        } = rec.event
+        {
+            per_node.entry(node.0).or_default().push(EffectRow {
+                seq,
+                tag,
+                req: req.to_string(),
+                resp: resp.to_string(),
+            });
+        }
+    }
+    per_node
+        .into_iter()
+        .map(|(node, mut rows)| {
+            if rows.len() > tail {
+                rows = rows.split_off(rows.len() - tail);
+            }
+            (node, rows)
+        })
+        .collect()
+}
+
+/// Pure render of a trace snapshot (split from `trace_fragment` so it's
+/// testable without an `AppState`/live `Harness`). Each node's tail is a
+/// `<details>` element, collapsed by default.
+fn render_trace(per_node: &[(u64, Vec<EffectRow>)]) -> Markup {
+    html! {
+        div id="trace" {
+            @if per_node.is_empty() {
+                div class="empty" { "No effects yet." }
+            }
+            @for (node, rows) in per_node {
+                details class="trace-node" {
+                    summary {
+                        "node " (node) " · " (rows.len())
+                        (if rows.len() == 1 { " effect" } else { " effects" })
+                    }
+                    @for r in rows {
+                        div class="trace-row" {
+                            span class="chip" { (r.tag) " #" (r.seq) }
+                            div class="trace-req" { "→ " (truncate(&r.req, 200)) }
+                            div class="trace-resp" { "← " (truncate(&r.resp, 200)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The trace pane markup (id="trace"): per-node effect req/resp tail,
+/// collapsed by default (20 most recent effects per node).
+fn trace_fragment(st: &AppState) -> Markup {
+    let per_node = fold_effects(&st.log_path, 20);
+    render_trace(&per_node)
 }
 
 /// The log pane markup (id="log"). Renders the last N events.
@@ -311,13 +477,17 @@ mod async_stream {
         tokio_stream::iter(std::iter::once(Ok(first)))
     }
 
-    /// Render the tree + inspector as a single Datastar patch-elements frame.
-    /// (Both panes in one frame: the client applies each `[id]` element.)
+    /// Render the tree + inspector + meters + trace as a single Datastar
+    /// patch-elements frame. (All four panes in one frame: the client applies
+    /// each `[id]` element. The log pane is initial-render only — it is not
+    /// re-rendered here.)
     fn render_frames(st: &AppState) -> Event {
         use datastar::prelude::PatchElements;
         let tree = super::tree_fragment(st).into_string();
         let inspector = super::inspector_fragment(st).into_string();
-        let combined = format!("{tree}{inspector}");
+        let meters = super::meters_fragment(st).into_string();
+        let trace = super::trace_fragment(st).into_string();
+        let combined = format!("{tree}{inspector}{meters}{trace}");
         PatchElements::new(combined).write_as_axum_sse_event()
     }
 }
@@ -427,6 +597,85 @@ async fn cancel(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
     }
 }
 
+/// Evaluate `expr` against `node`'s suspended session heap; a non-consuming
+/// heap-browser peek (D4), NOT an answer — the pending hole is untouched, so
+/// this does not `ping()` the tree/inspector. Body: `{name, expr}` (`name`
+/// defaults to `"binding"` if omitted — it only labels the JIT fragment).
+async fn eval_in_binding(
+    State(st): State<AppState>,
+    Path(node): Path<u64>,
+    body: Option<Json<Jv>>,
+) -> Response {
+    let node = NodeId(node);
+    let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let name = raw
+        .get("name")
+        .and_then(Jv::as_str)
+        .unwrap_or("binding")
+        .to_string();
+    let Some(expr) = raw.get("expr").and_then(Jv::as_str) else {
+        return err_json("missing \"expr\" (a plain M a expression to evaluate)".to_string());
+    };
+    match st.harness.eval_in_binding(node, &name, expr).await {
+        Ok(rendered) => Json(json!({"ok": true, "name": name, "rendered": rendered})).into_response(),
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SnapshotQuery {
+    cursor: Option<u64>,
+    limit: Option<usize>,
+}
+
+/// A [`tidepool_harness::NodeSummary`] flattened for the wire — kept local
+/// (rather than deriving `Serialize` on `NodeSummary` itself) so this leaf's
+/// one wire shape lives entirely in `tidepool-web`.
+#[derive(serde::Serialize)]
+struct SnapshotNode {
+    node: u64,
+    parent: Option<u64>,
+    state: &'static str,
+    hole: Option<String>,
+    is_fork_hole: bool,
+    hole_prompt: Option<String>,
+}
+
+fn snapshot_node(n: &tidepool_harness::NodeSummary) -> SnapshotNode {
+    let (state, hole) = match &n.state {
+        NodeState::Thunk => ("thunk", None),
+        NodeState::Running => ("running", None),
+        NodeState::Suspended { hole } => ("suspended", Some(hole.0.clone())),
+        NodeState::Done => ("done", None),
+        NodeState::Cancelled { reason } => ("cancelled", Some(reason.clone())),
+    };
+    SnapshotNode {
+        node: n.node.0,
+        parent: n.parent.map(|p| p.0),
+        state,
+        hole,
+        is_fork_hole: n.is_fork_hole,
+        hole_prompt: n.hole_prompt.clone(),
+    }
+}
+
+/// Cursor-paged flat node snapshot (E1/C4: "snapshot endpoints paginate, no
+/// small-tree assumption"). `?cursor=<id>&limit=<n>`, both optional (`limit`
+/// default 50, clamped to 500). Response: `{nodes: [...], next_cursor:
+/// <id>|null}` — pass `next_cursor` back as `cursor` for the following page;
+/// `null` means the snapshot is exhausted.
+async fn snapshot(State(st): State<AppState>, Query(q): Query<SnapshotQuery>) -> Response {
+    let cursor = q.cursor.map(NodeId);
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let (nodes, next) = st.harness.tree_snapshot_page(cursor, limit);
+    Json(json!({
+        "ok": true,
+        "nodes": nodes.iter().map(snapshot_node).collect::<Vec<_>>(),
+        "next_cursor": next.map(|n| n.0),
+    }))
+    .into_response()
+}
+
 async fn auth_start(State(st): State<AppState>) -> Response {
     match oauth::start_login(&st.oauth).await {
         Ok(start) => Json(json!({
@@ -481,5 +730,255 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{cut}…")
     } else {
         one_line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_harness::log::{Event as LogEvent, LogHeader, LogWriter};
+    use tidepool_harness::provider::{Role, Usage};
+
+    fn header() -> LogHeader {
+        LogHeader {
+            prelude_hash: "test-prelude".into(),
+            extract_fingerprint: "test-extract".into(),
+            harness_version: "test-harness".into(),
+        }
+    }
+
+    /// A fixture log with usage on two nodes (one node with two assistant
+    /// turns, one with none) and two effect events on node 0 — enough to
+    /// exercise both fold functions' per-node grouping + rollup.
+    fn write_fixture_log(path: &std::path::Path) {
+        let mut w = LogWriter::create(path, &header()).unwrap();
+        w.append(LogEvent::TurnDelta {
+            node: NodeId(0),
+            turn: 0,
+            role: Role::Assistant,
+            content: "hi".into(),
+            usage: Some(Usage {
+                input_tokens: 120,
+                output_tokens: 40,
+            }),
+        })
+        .unwrap();
+        w.append(LogEvent::TurnDelta {
+            node: NodeId(0),
+            turn: 1,
+            role: Role::Assistant,
+            content: "again".into(),
+            usage: Some(Usage {
+                input_tokens: 30,
+                output_tokens: 10,
+            }),
+        })
+        .unwrap();
+        // A user-role turn (no usage) must not pollute the rollup.
+        w.append(LogEvent::TurnDelta {
+            node: NodeId(1),
+            turn: 0,
+            role: Role::User,
+            content: "seed".into(),
+            usage: None,
+        })
+        .unwrap();
+        w.append(LogEvent::TurnDelta {
+            node: NodeId(1),
+            turn: 1,
+            role: Role::Assistant,
+            content: "ok".into(),
+            usage: Some(Usage {
+                input_tokens: 8,
+                output_tokens: 3,
+            }),
+        })
+        .unwrap();
+        w.append(LogEvent::Effect {
+            node: NodeId(0),
+            seq: 0,
+            tag: "Fs".into(),
+            req: json!({"op": "read", "path": "a.txt"}),
+            resp: json!({"ok": true}),
+        })
+        .unwrap();
+        w.append(LogEvent::Effect {
+            node: NodeId(0),
+            seq: 1,
+            tag: "Exec".into(),
+            req: json!({"cmd": "ls"}),
+            resp: json!({"stdout": "a b"}),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn fold_usage_groups_per_node_and_rolls_up_assistant_usage_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        write_fixture_log(&path);
+
+        let (rows, total) = fold_usage(&path);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].node, 0);
+        assert_eq!(rows[0].input_tokens, 150);
+        assert_eq!(rows[0].output_tokens, 50);
+        assert_eq!(rows[1].node, 1);
+        assert_eq!(rows[1].input_tokens, 8);
+        assert_eq!(rows[1].output_tokens, 3);
+        assert_eq!(total, (158, 53));
+    }
+
+    #[test]
+    fn fold_usage_missing_log_is_empty() {
+        let (rows, total) = fold_usage(std::path::Path::new("/nonexistent/does-not-exist.jsonl"));
+        assert!(rows.is_empty());
+        assert_eq!(total, (0, 0));
+    }
+
+    #[test]
+    fn fold_effects_groups_per_node_and_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        write_fixture_log(&path);
+
+        let per_node = fold_effects(&path, 20);
+        assert_eq!(per_node.len(), 1, "only node 0 has effect events");
+        let (node, rows) = &per_node[0];
+        assert_eq!(*node, 0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tag, "Fs");
+        assert_eq!(rows[1].tag, "Exec");
+    }
+
+    #[test]
+    fn fold_effects_tail_keeps_only_the_most_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let mut w = LogWriter::create(&path, &header()).unwrap();
+        for i in 0..5u64 {
+            w.append(LogEvent::Effect {
+                node: NodeId(0),
+                seq: i,
+                tag: format!("Fs{i}"),
+                req: Jv::Null,
+                resp: Jv::Null,
+            })
+            .unwrap();
+        }
+        let per_node = fold_effects(&path, 2);
+        assert_eq!(per_node.len(), 1);
+        let (_, rows) = &per_node[0];
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tag, "Fs3");
+        assert_eq!(rows[1].tag, "Fs4");
+    }
+
+    #[test]
+    fn snapshot_meters_empty() {
+        let rendered = render_meters(&[], (0, 0)).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"meters\">\
+             <div class=\"meter-rollup\">rollup: <b>0</b> in / <b>0</b> out tokens</div>\
+             <div class=\"empty\">No assistant turns yet.</div>\
+             </div>"
+        );
+    }
+
+    #[test]
+    fn snapshot_meters_with_rows() {
+        let rows = vec![
+            MeterRow {
+                node: 0,
+                input_tokens: 150,
+                output_tokens: 50,
+            },
+            MeterRow {
+                node: 2,
+                input_tokens: 8,
+                output_tokens: 3,
+            },
+        ];
+        let rendered = render_meters(&rows, (158, 53)).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"meters\">\
+             <div class=\"meter-rollup\">rollup: <b>158</b> in / <b>53</b> out tokens</div>\
+             <table class=\"meter-table\">\
+             <thead><tr><th>node</th><th>in</th><th>out</th></tr></thead>\
+             <tbody>\
+             <tr><td>n0</td><td>150</td><td>50</td></tr>\
+             <tr><td>n2</td><td>8</td><td>3</td></tr>\
+             </tbody>\
+             </table>\
+             </div>"
+        );
+    }
+
+    #[test]
+    fn snapshot_trace_empty() {
+        let rendered = render_trace(&[]).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"trace\"><div class=\"empty\">No effects yet.</div></div>"
+        );
+    }
+
+    #[test]
+    fn snapshot_trace_collapsed_by_default_with_effect_rows() {
+        let per_node = vec![(
+            0u64,
+            vec![
+                EffectRow {
+                    seq: 0,
+                    tag: "Fs".into(),
+                    req: "{\"op\":\"read\"}".into(),
+                    resp: "{\"ok\":true}".into(),
+                },
+                EffectRow {
+                    seq: 1,
+                    tag: "Exec".into(),
+                    req: "{\"cmd\":\"ls\"}".into(),
+                    resp: "{\"stdout\":\"a b\"}".into(),
+                },
+            ],
+        )];
+        let rendered = render_trace(&per_node).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"trace\">\
+             <details class=\"trace-node\">\
+             <summary>node 0 · 2 effects</summary>\
+             <div class=\"trace-row\">\
+             <span class=\"chip\">Fs #0</span>\
+             <div class=\"trace-req\">→ {&quot;op&quot;:&quot;read&quot;}</div>\
+             <div class=\"trace-resp\">← {&quot;ok&quot;:true}</div>\
+             </div>\
+             <div class=\"trace-row\">\
+             <span class=\"chip\">Exec #1</span>\
+             <div class=\"trace-req\">→ {&quot;cmd&quot;:&quot;ls&quot;}</div>\
+             <div class=\"trace-resp\">← {&quot;stdout&quot;:&quot;a b&quot;}</div>\
+             </div>\
+             </details>\
+             </div>"
+        );
+        // A <details> element with no `open` attribute is collapsed by default.
+        assert!(!rendered.contains("open"));
+    }
+
+    #[test]
+    fn snapshot_trace_singular_effect_count_label() {
+        let per_node = vec![(
+            7u64,
+            vec![EffectRow {
+                seq: 0,
+                tag: "Fs".into(),
+                req: "{}".into(),
+                resp: "{}".into(),
+            }],
+        )];
+        let rendered = render_trace(&per_node).into_string();
+        assert!(rendered.contains("<summary>node 7 · 1 effect</summary>"));
     }
 }

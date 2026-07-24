@@ -164,31 +164,21 @@ impl Harness {
         &self.tree
     }
 
-    /// A flat snapshot of the tree for the observatory tree pane, in node-id
-    /// order (creation order). Each entry carries enough to render a node row:
-    /// id, parent, state, and — when suspended — whether the pending hole is a
-    /// fork (so the pane can badge it).
+    /// A flat snapshot of the tree for the observatory tree pane, in DFS
+    /// (parent-before-child, creation order) order. Each entry carries enough
+    /// to render a node row: id, parent, state, and — when suspended —
+    /// whether the pending hole is a fork (so the pane can badge it).
+    ///
+    /// Unpaginated — reads the whole tree via [`NodeTree::node_ids_after`]
+    /// with no limit. Fine at R0 scale; [`Self::tree_snapshot_page`] is the
+    /// cursor-paged alternative for the protocol endpoint (D1: "usable at
+    /// 10³–10⁴ nodes").
     pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
-        let mut out = Vec::new();
-        // Node ids are dense from 0; probe until a gap of misses. Simpler: the
-        // tree exposes children from a root walk. Walk from every root.
-        let mut stack: Vec<NodeId> = Vec::new();
-        // Find roots: nodes whose parent is None. We don't have a roots list, so
-        // scan ids 0.. until `state` returns None twice in a row (dense ids).
-        let mut id = 0u64;
-        let mut misses = 0;
-        while misses < 4 {
-            let n = NodeId(id);
-            if self.tree.state(n).is_some() {
-                misses = 0;
-                if self.tree.parent(n) == Some(None) {
-                    stack.push(n);
-                }
-            } else {
-                misses += 1;
-            }
-            id += 1;
-        }
+        let (all_ids, _) = self.tree.node_ids_after(None, usize::MAX);
+        let mut stack: Vec<NodeId> = all_ids
+            .into_iter()
+            .filter(|n| self.tree.parent(*n) == Some(None))
+            .collect();
         // DFS from roots, preserving child order.
         stack.reverse();
         let mut visit = stack;
@@ -201,25 +191,42 @@ impl Harness {
                 }
             }
         }
-        for n in order {
-            let Some(state) = self.tree.state(n) else {
-                continue;
-            };
-            let pending = self.pending_hole(n);
-            let is_fork = matches!(
-                pending.as_ref().map(|c| &c.routing),
-                Some(HoleRouting::Fork { .. })
-            );
-            let prompt = pending.as_ref().map(|c| c.prompt.clone());
-            out.push(NodeSummary {
-                node: n,
-                parent: self.tree.parent(n).flatten(),
-                state,
-                is_fork_hole: is_fork,
-                hole_prompt: prompt,
-            });
-        }
-        out
+        order.into_iter().filter_map(|n| self.node_summary(n)).collect()
+    }
+
+    /// Cursor-paged tree snapshot (widen C4: "snapshot endpoints paginate, no
+    /// small-tree assumption") — flat id order (not the DFS parent/child order
+    /// `tree_snapshot` uses; a page is a slice of the id space, not a subtree).
+    /// Returns up to `limit` rows after `cursor`, plus the next cursor to page
+    /// with (`None` once exhausted). Built on [`NodeTree::node_ids_after`], the
+    /// one additive pagination primitive this leaf adds to `NodeTree`.
+    pub fn tree_snapshot_page(
+        &self,
+        cursor: Option<NodeId>,
+        limit: usize,
+    ) -> (Vec<NodeSummary>, Option<NodeId>) {
+        let (ids, next) = self.tree.node_ids_after(cursor, limit);
+        let nodes = ids.into_iter().filter_map(|n| self.node_summary(n)).collect();
+        (nodes, next)
+    }
+
+    /// Build one node's summary row, or `None` if `n` doesn't exist (a benign
+    /// race with a concurrent tree mutation — callers filter these out).
+    fn node_summary(&self, n: NodeId) -> Option<NodeSummary> {
+        let state = self.tree.state(n)?;
+        let pending = self.pending_hole(n);
+        let is_fork = matches!(
+            pending.as_ref().map(|c| &c.routing),
+            Some(HoleRouting::Fork { .. })
+        );
+        let prompt = pending.as_ref().map(|c| c.prompt.clone());
+        Some(NodeSummary {
+            node: n,
+            parent: self.tree.parent(n).flatten(),
+            state,
+            is_fork_hole: is_fork,
+            hole_prompt: prompt,
+        })
     }
 
     /// Create a ROOT node as a thunk. `title` seeds the teaser + first user
@@ -660,6 +667,55 @@ impl Harness {
         self.log_answer_attempt(node, &pending.hole, "operator", AnswerOutcome::Consumed)?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
+    }
+
+    /// Evaluate `expr` (a plain `M a` expression — no `resume`/hole semantics)
+    /// against `node`'s currently SUSPENDED session heap: a non-consuming
+    /// heap-browser peek (widen C4 / PRD D4). The pending hole, the tree
+    /// state, and the event log are all untouched — `run_child` nests the
+    /// eval against the suspended machine and restores it afterward, the same
+    /// discipline [`Self::drive_answerer_to_value`] uses for a real answer,
+    /// minus the model loop and the `resume`. `name` labels the compiled
+    /// fragment (surfaces in JIT diagnostics); it is NOT persisted as a
+    /// session binding — each call is independent, same as `run_child`
+    /// elsewhere in this file. Requires `node` to be suspended (the
+    /// precondition `run_child` itself enforces).
+    pub async fn eval_in_binding(
+        &self,
+        node: NodeId,
+        name: &str,
+        expr: &str,
+    ) -> Result<String, HarnessError> {
+        let (imports, body) = engine::split_imports(expr);
+        let src = engine::template_answer_turn(&self.cfg, &body, &imports, "");
+        let cfg_bin = self.cfg.extract_bin.clone();
+        let include = self.cfg.include.clone();
+        let compiled = tokio::task::spawn_blocking(move || {
+            compile::compile_turn(&cfg_bin, &src, "result", &include)
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
+        .map_err(|e| HarnessError::Compile(e.to_string()))?;
+
+        let mut session = self.take_session(node)?;
+        let cexpr = compiled.expr;
+        let ctable = compiled.table.clone();
+        let label = name.to_string();
+        let (session, out) = tokio::task::spawn_blocking(move || {
+            let out = session.run_child(
+                &label,
+                &cexpr,
+                &ctable,
+                &tidepool_codegen::emit::ExternalEnv::new(),
+            );
+            (session, out)
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
+        self.put_session(node, session, None, AsksSidecar::default());
+
+        out.map(|r| r.to_string_pretty())
+            .map_err(|e| HarnessError::Resident(e.to_string()))
     }
 
     /// Drive `answerer`'s turn loop until it emits an answering block, then run
