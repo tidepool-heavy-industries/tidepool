@@ -68,7 +68,13 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # tests, likewise pass `--ignore-default-filter -p <crate>` (a bare `-p
 # tidepool-runtime` reports "0 running, N skipped" — the default-filter is
 # ANDed with `-p`, not overridden by it).
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing))'
+# tidepool-harness is a MIXED crate: its lib/unit tests are pure-Rust (quick
+# tier), but the `golden_path` integration binary drives real GHC extracts
+# (the S1 record-replay golden path) — that one binary is GHC-tier, excluded
+# here and capped via the ghc-heavy group below. (Its in-test skip-gate alone
+# is not enough: a stale `tidepool-extract` on PATH satisfies the gate and then
+# fails the compile, so the filter is the real tier boundary.)
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)))'
 
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
@@ -85,5 +91,5 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 max-threads = 4
 
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing)'
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path))'
 test-group = 'ghc-heavy'
