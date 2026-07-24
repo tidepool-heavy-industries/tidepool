@@ -149,6 +149,30 @@ pub fn login_status(cfg: &OauthConfig) -> LoginStatus {
     }
 }
 
+/// Prove the stored credential chain is live WITHOUT an inference call:
+/// force a refresh-token exchange against the auth server and persist the
+/// result. Success means the token file, the refresh token, and the auth
+/// server all agree; `ProviderError::Auth` means re-run `auth/start`.
+pub async fn verify_login(cfg: &OauthConfig) -> Result<(), ProviderError> {
+    let stored = load_token(&cfg.token_path).ok_or_else(|| {
+        ProviderError::Auth(format!(
+            "not signed in — run auth/start ({} has no token)",
+            cfg.token_path.display()
+        ))
+    })?;
+    let refreshed = cfg
+        .client()?
+        .refresh_token(&stored.refresh_token)
+        .await
+        .map_err(|e| {
+            ProviderError::Auth(format!(
+                "refresh token rejected, re-auth required via auth/start: {e}"
+            ))
+        })?;
+    save_token(&cfg.token_path, &refreshed)
+        .map_err(|e| ProviderError::Api(format!("failed to persist refreshed token: {e}")))
+}
+
 /// Refresh if the stored token is within its skew window
 /// (`TokenSet::is_expired` — a 5-minute buffer built into `openai-auth`).
 /// A dead refresh token (revoked/expired) surfaces as
