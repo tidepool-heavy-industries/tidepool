@@ -10,5 +10,7 @@
 pub mod tree;
 pub mod log;
 pub mod provider;
+pub mod registry;
 
+pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
