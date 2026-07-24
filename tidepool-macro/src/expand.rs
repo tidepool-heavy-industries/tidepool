@@ -500,13 +500,13 @@ fn run_tidepool_extract(
     target: Option<&str>,
     manifest_dir: &Path,
 ) -> Result<(), String> {
-    // The output dir is content-addressed (its name encodes the source+target
-    // hash), so an existing dir is a complete, current result — staleness
-    // (#F4) is impossible by construction, and the publish rename below is
-    // atomic, so a partially-written dir is never visible under the final
-    // name. Concurrent expansions (e.g. `--all-targets` compiling a bin and
-    // its test harness in parallel) converge on one dir instead of clobbering
-    // a shared one.
+    // The output dir is content-addressed (its name encodes the
+    // source+target+extract-binary hash), so an existing dir is a complete,
+    // current result — staleness (#F4) is impossible by construction, and
+    // the publish rename below is atomic, so a partially-written dir is
+    // never visible under the final name. Concurrent expansions (e.g.
+    // `--all-targets` compiling a bin and its test harness in parallel)
+    // converge on one dir instead of clobbering a shared one.
     if output_dir.exists() {
         return Ok(());
     }
@@ -588,7 +588,34 @@ fn content_key(bytes: &[u8], target: Option<&str>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     target.hash(&mut h);
+    extract_identity().hash(&mut h);
     h.finish()
+}
+
+/// Identity of the `tidepool-extract` binary this process will invoke — its
+/// file bytes hashed once per process. Folded into every content key: the
+/// address must include the PRODUCER, not just the inputs, or an extract
+/// upgrade (e.g. a wire-format major bump) silently serves output in the
+/// old format from a "complete, current" cache dir.
+fn extract_identity() -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::sync::OnceLock;
+    static ID: OnceLock<u64> = OnceLock::new();
+    *ID.get_or_init(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let resolved = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|d| d.join("tidepool-extract"))
+                .find(|p| p.is_file())
+        });
+        match resolved.and_then(|p| std::fs::read(p).ok()) {
+            Some(bytes) => bytes.hash(&mut h),
+            // No binary found: extraction itself will fail loudly; an
+            // unkeyed 0 here never masks that.
+            None => 0u64.hash(&mut h),
+        }
+        h.finish()
+    })
 }
 
 /// Per-process scratch sibling of a content-addressed dir. Keyed by pid so
