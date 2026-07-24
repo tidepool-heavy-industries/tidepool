@@ -3,6 +3,17 @@
 //! (ChatGPT-subscription OAuth, API-key) behind this one trait, passing
 //! one shared behavior suite. This is NOT the in-program `Llm` effect
 //! (tidepool-handlers); different consumer, different budget accounting.
+//!
+//! Both impls (`oauth`, `api_key`) route chat calls through `genai` (`http`
+//! submodule) rather than hand-rolled request/response JSON, and OAuth's
+//! mechanics ride the `openai-auth` crate rather than a hand-rolled PKCE
+//! flow — see `oauth`'s module doc for what that crate covers and the R0
+//! callback-port constraint it implies.
+
+pub mod api_key;
+pub(crate) mod http;
+pub mod oauth;
+pub(crate) mod paths;
 
 use serde::{Deserialize, Serialize};
 

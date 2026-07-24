@@ -14,3 +14,9 @@ tidepool-repr = { path = "../tidepool-repr", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+genai = "0.5"
+openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
