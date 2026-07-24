@@ -649,6 +649,24 @@ macro_rules! ask_effect_def {
                 { raw ["{-# OPAQUE returnControlForkSited #-}",
                        "returnControlForkSited :: forall a. Int -> Text -> M a",
                        "returnControlForkSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
+                // dialogAsk (harness Ui-elicitation surface, D2). Mechanically a
+                // hole with OPERATOR routing (not the returnControl family): it
+                // sends AskWith carrying a `"ui"` payload field the harness
+                // recognizes and renders in the observatory form pane. The
+                // submission (widget values + always-present prose channel) comes
+                // back as the returned Value. `ui` is a pre-rendered JSON Value —
+                // eval authors build it with the `Tidepool.Ui` smart constructors
+                // (`import Tidepool.Ui`) and `toJSON`, e.g.
+                // `dialogAsk (toJSON (card "Pick" [choice "verdict?" [("a","A")]]))`.
+                // Kept as `Value -> M Value` (not `Ui -> M Value`) so the always-
+                // present generated Effects module needs no `Tidepool.Ui` import;
+                // the Ui vocabulary rides the per-eval import list instead.
+                { raw ["-- | Elicit an operator answer via a `Ui`-shaped form (rendered in the",
+                       "-- observatory form pane). `ui` is a Ui value passed through `toJSON`;",
+                       "-- `import Tidepool.Ui` for the smart constructors. Returns the submission",
+                       "-- {values, prose} Value.",
+                       "dialogAsk :: Value -> M Value",
+                       "dialogAsk ui = send (AskWith \"\" (object [\"ui\" .= ui]))"] },
             ],
         }
     };

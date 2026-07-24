@@ -76,6 +76,28 @@ fn sample_events() -> Vec<Event> {
             node: NodeId(2),
             reason: "operator cancel".to_string(),
         },
+        Event::TurnDelta {
+            node: NodeId(1),
+            turn: 0,
+            role: crate::provider::Role::User,
+            content: "reconcile the verdicts".to_string(),
+            usage: None,
+        },
+        Event::TurnDelta {
+            node: NodeId(1),
+            turn: 1,
+            role: crate::provider::Role::Assistant,
+            content: "```haskell\nresume Approve\n```".to_string(),
+            usage: Some(crate::provider::Usage {
+                input_tokens: 120,
+                output_tokens: 8,
+            }),
+        },
+        Event::TurnForked {
+            node: NodeId(2),
+            parent: NodeId(1),
+            parent_turn: 1,
+        },
     ]
 }
 

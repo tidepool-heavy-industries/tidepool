@@ -372,6 +372,56 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
+    /// Log one conversation-turn delta on `node` (the transcript store's
+    /// append — F2 turn schema). Requires `Running` OR `Suspended`: a fork
+    /// answerer's assistant turn lands while its own node is `Running`, but the
+    /// operator's answer to a still-`Suspended` node is also a turn worth
+    /// recording, so both non-terminal working states are accepted.
+    pub fn turn_delta(
+        &self,
+        node: NodeId,
+        turn: u64,
+        role: crate::provider::Role,
+        content: String,
+        usage: Option<crate::provider::Usage>,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        match &inner.entry(node)?.state {
+            NodeState::Thunk => return Err(TreeError::UnforcedThunk(node)),
+            NodeState::Running | NodeState::Suspended { .. } => {}
+            other => return Err(TreeError::NotRunning(node, other.clone())),
+        }
+        inner.writer.append(Event::TurnDelta {
+            node,
+            turn,
+            role,
+            content,
+            usage,
+        })?;
+        Ok(())
+    }
+
+    /// Record a fork's transcript reference: `node` inherits `parent`'s
+    /// conversation up to `parent_turn`. `node` must be a `Thunk` (a fork is
+    /// registered before it is forced — the reference is set at materialization
+    /// time, the child forced separately).
+    pub fn turn_forked(
+        &self,
+        node: NodeId,
+        parent: NodeId,
+        parent_turn: u64,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        inner.entry(node)?;
+        inner.entry(parent)?;
+        inner.writer.append(Event::TurnForked {
+            node,
+            parent,
+            parent_turn,
+        })?;
+        Ok(())
+    }
+
     /// Complete `node`, moving `Running` to `Done`.
     pub fn node_done(&self, node: NodeId, result_rendered: String) -> Result<(), TreeError> {
         let mut inner = self.inner.lock();
@@ -480,7 +530,9 @@ mod tests {
             | LogEvent::HoleAnswerAttempt { node, .. }
             | LogEvent::HoleConsumed { node, .. }
             | LogEvent::NodeDone { node, .. }
-            | LogEvent::NodeCancelled { node, .. } => *node,
+            | LogEvent::NodeCancelled { node, .. }
+            | LogEvent::TurnDelta { node, .. }
+            | LogEvent::TurnForked { node, .. } => *node,
         }
     }
 

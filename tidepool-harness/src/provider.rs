@@ -65,3 +65,38 @@ pub trait ModelProvider: Send + Sync {
         req: TurnRequest,
     ) -> impl std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send;
 }
+
+/// Object-safe (`dyn`-compatible) face of [`ModelProvider`]. The `-> impl
+/// Future` in `ModelProvider` (RPITIT) is not dyn-compatible, so the harness —
+/// which stores its provider behind `Arc<dyn …>` so the engine and every forked
+/// answerer share ONE signed-in client — drives this trait instead. Blanket-
+/// impl'd for every `ModelProvider` by boxing the future. This is the standard
+/// "async trait object" bridge, kept local so the ergonomic `impl Future`
+/// surface stays the one providers implement.
+pub trait DynModelProvider: Send + Sync {
+    fn complete_boxed<'a>(
+        &'a self,
+        req: TurnRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send + 'a>,
+    >;
+}
+
+impl<P: ModelProvider> DynModelProvider for P {
+    fn complete_boxed<'a>(
+        &'a self,
+        req: TurnRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send + 'a>,
+    > {
+        Box::pin(self.complete(req))
+    }
+}
+
+/// So a `dyn DynModelProvider` (what the harness stores) is itself usable
+/// wherever a `ModelProvider` is expected.
+impl ModelProvider for dyn DynModelProvider + '_ {
+    async fn complete(&self, req: TurnRequest) -> Result<TurnResponse, ProviderError> {
+        self.complete_boxed(req).await
+    }
+}

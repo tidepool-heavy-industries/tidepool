@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::provider::{Role, Usage};
 use crate::tree::{FanBadge, HoleId, NodeId, PriceClass, SiteId};
 
 mod reader;
@@ -110,6 +111,33 @@ pub enum Event {
     NodeCancelled {
         node: NodeId,
         reason: String,
+    },
+    /// One conversation-turn delta (F2 turn-store draft — the transcript is
+    /// reconstructed by FOLDING these in `seq` order). A turn's `content` is
+    /// the whole message (R0 stores messages inline, not as sub-deltas — the
+    /// "delta" framing is the schema seam, kept so a later streaming turn can
+    /// append partial content under the same `node`+`turn` without reshaping
+    /// the enum). `turn` is the per-node monotonic turn index the transcript
+    /// store assigns; a fork references a parent `(node, turn)` via
+    /// [`Event::TurnForked`].
+    TurnDelta {
+        node: NodeId,
+        turn: u64,
+        role: Role,
+        content: String,
+        /// Present on assistant turns; `None` for the operator/system framing
+        /// turns that cost no tokens.
+        usage: Option<Usage>,
+    },
+    /// A fork's transcript reference: the child `node` inherits the parent
+    /// conversation up to and including the parent's turn at index
+    /// `parent_turn` (F2: "fork = ref to parent position"). Reconstruction
+    /// folds the parent's `TurnDelta`s with `turn <= parent_turn`, then the
+    /// child's own.
+    TurnForked {
+        node: NodeId,
+        parent: NodeId,
+        parent_turn: u64,
     },
 }
 
