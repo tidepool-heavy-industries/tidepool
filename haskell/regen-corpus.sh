@@ -16,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EXTRACT="${TIDEPOOL_EXTRACT:-$HERE/dist-newstyle/build/x86_64-linux/ghc-9.12.2/tidepool-harness-0.1.0.0/x/tidepool-extract-bin/build/tidepool-extract-bin/tidepool-extract-bin}"
+EXTRACT="${TIDEPOOL_EXTRACT:-$HERE/dist-newstyle/build/x86_64-linux/ghc-9.12.2/tidepool-extract-0.1.0.0/x/tidepool-extract-bin/build/tidepool-extract-bin/tidepool-extract-bin}"
 export TIDEPOOL_GHC_LIBDIR="${TIDEPOOL_GHC_LIBDIR:-/nix/store/swcff7l71v3466rks25slabajwzrx51c-ghc-native-bignum-9.12.2/lib/ghc-9.12.2/lib}"
 
 SRC="$HERE/test/corpus/Corpus.hs"
