@@ -563,6 +563,14 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 // These survive across runs and are cleared only at machine drop.
                 ms.extend_persistent_roots(&mut root_slots);
 
+                // Append stowed roots (segment 40): the parent's suspended
+                // continuation cell(s), registered for the duration of a nested
+                // child run so this (child-triggered) collection evacuates the
+                // parent's stowed continuation tree and rewrites the cell in
+                // place. Empty in the non-nested case — a plain run/resume never
+                // registers one, so this is a no-op there.
+                ms.extend_stowed_roots(&mut root_slots);
+
                 // Defense-in-depth: trace VMContext tail_callee/tail_arg
                 // SAFETY: vmctx is valid and these fields are heap pointers.
                 unsafe {

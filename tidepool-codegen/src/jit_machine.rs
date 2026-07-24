@@ -1,3 +1,50 @@
+//! The high-level JIT effect machine ([`JitEffectMachine`]) and the effect-drive
+//! loop at the JIT↔Rust boundary.
+//!
+//! # Nested child runs on a suspended machine (segment 40)
+//!
+//! A parent turn suspended at a typed yield (`returnControl`/`Ask`) can host an
+//! arbitrary number of SEQUENTIAL child fragment runs — including ones that
+//! force GC and heap doubling — and resume correctly afterward. Two invariants
+//! make this memory-safe:
+//!
+//! 1. **Registered-root replaces the temporal argument.** The stowed continuation
+//!    used to be safe because "no GC runs on a suspended machine" (enforced by
+//!    the L7 `suspended_continuation.is_none()` asserts on every run entry).
+//!    While a child runs, that is no longer true — the child allocates and
+//!    collects. [`JitEffectMachine::enter_nested_child`] MOVES the continuation
+//!    pointer out of `suspended_continuation` into a heap-stable `Box` cell and
+//!    registers that cell's address in the machine's `stowed_roots` set, which
+//!    `perform_gc` folds into its root assembly. A child collection therefore
+//!    evacuates the parent's continuation tree and rewrites the cell in place; on
+//!    child teardown the (GC-current) pointer is read back out. The L7 asserts
+//!    stay UNCHANGED and still fire for the illegal case — a plain run entry
+//!    (`run`/`run_pure`/`run_fragment`/`*_and_bind`) started while a continuation
+//!    is stowed and UNREGISTERED. The child entries
+//!    ([`JitEffectMachine::run_child_fragment`] and its pure sibling) are the
+//!    only sanctioned way to run while suspended: they register the root, and by
+//!    moving the pointer into the cell they leave `suspended_continuation` reading
+//!    `None` for the child's duration, so the child fragment drives through the
+//!    plain entries whose asserts then pass naturally.
+//!
+//! 2. **Reclaim/cursor nesting.** A child turn's [`RegistryGuard::drop`] reclaims
+//!    the session heap buffer + high-water cursor into `self.session` (buffer may
+//!    have been swapped/doubled by a child GC). The `NestedChildGuard` drops
+//!    AFTER the child's `RegistryGuard` (the child guard lives inside
+//!    `run_with_entry`; the nested guard is the outer local in
+//!    `run_child_fragment`), so it reads the continuation pointer back out of the
+//!    stowed cell AFTER the reclaim — observing the POST-child heap. The pointer
+//!    stays valid across the reclaim because moving a `Vec<u64>` moves its 24-byte
+//!    header, not its heap data (the address the pointer targets is stable). When
+//!    the parent later resumes, `install_registries` re-installs that same buffer
+//!    and the continuation pointer resolves correctly.
+//!
+//! `nested_child_depth` counts children currently running against the parent; a
+//! parent resume is rejected while it is > 0 (sequential-isolated: exactly one
+//! computation on the heap at a time). Module accretion (a child's
+//! `add_function`) is inert for the parent — it mints a fresh `FuncId` and does
+//! not touch the stowed continuation.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -104,10 +151,34 @@ pub struct JitEffectMachine {
     /// turn that suspended at the ask boundary (`run_suspendable` →
     /// `SuspendableOutcome::Suspended`), waiting for `resume_suspended`. `None`
     /// for a running or completed machine. The pointer is into this machine's
-    /// retained session heap; it stays valid while stowed (no GC runs on a
-    /// suspended machine) and is re-rooted by `resume_suspended` before its
-    /// answer materialization can collect.
+    /// retained session heap.
+    ///
+    /// SEGMENT 40 — the safety argument for this pointer changed. It used to be
+    /// safe because "no GC runs on a suspended machine" (a temporal argument the
+    /// L7 asserts enforced). It is now safe because, while nested CHILD runs
+    /// execute against the suspended parent, the continuation is a REGISTERED GC
+    /// ROOT: [`Self::enter_nested_child`] copies this pointer into
+    /// `stowed_root_cell` and registers that heap-stable cell in the machine's
+    /// `stowed_roots` set, so any child collection evacuates the continuation
+    /// tree and rewrites the cell in place; on child teardown the (GC-current)
+    /// pointer is read back out. `resume_suspended` still re-roots via
+    /// `materialize_response_and_resume` for its own answer materialization.
     suspended_continuation: Option<*mut u8>,
+    /// Heap-stable cell holding the stowed continuation pointer WHILE a nested
+    /// child is running (segment 40). A `Box` (not the `suspended_continuation`
+    /// field directly) because the machine itself moves between threads under
+    /// the stow-XOR-run discipline: the `Box`'s POINTEE address is a stable heap
+    /// allocation that does NOT move with the struct, so the `stowed_roots`
+    /// registration (the cell's address) stays valid across the move — exactly
+    /// the `OldSpace` slots pattern. `None` unless a child is mid-run.
+    stowed_root_cell: Option<Box<*mut u8>>,
+    /// Number of nested child runs currently executing against this suspended
+    /// parent (segment 40). Zero when idle, suspended-but-no-child, or running
+    /// its own turn. A parent resume is rejected while this is > 0 (exactly one
+    /// computation on the heap at a time — sequential-isolated). Incremented by
+    /// [`Self::enter_nested_child`], decremented on guard drop; the stowed root
+    /// is registered on 0→1 and deregistered on 1→0.
+    nested_child_depth: usize,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -360,6 +431,8 @@ impl JitEffectMachine {
             session: None,
             machine_state: MachineState::new(),
             suspended_continuation: None,
+            stowed_root_cell: None,
+            nested_child_depth: 0,
         })
     }
 
@@ -392,6 +465,8 @@ impl JitEffectMachine {
             }),
             machine_state: MachineState::new(),
             suspended_continuation: None,
+            stowed_root_cell: None,
+            nested_child_depth: 0,
         })
     }
 
@@ -697,11 +772,37 @@ impl JitEffectMachine {
         suspend_tag: u64,
         input: ResumeInput,
     ) -> Result<SuspendableOutcome, JitError> {
-        let continuation = self.suspended_continuation.take().ok_or_else(|| {
-            JitError::Effect(EffectError::Handler(
+        // PEEK the continuation — do NOT consume it yet. The A5 NF-force
+        // (segment 40) rejects a bottom-bearing answer WITHOUT consuming the
+        // continuation, so the caller can retry with a corrected answer; only
+        // after the answer is verified NF do we `.take()` (below). A `None`
+        // here (not suspended) is the same clean error as before.
+        if self.suspended_continuation.is_none() {
+            return Err(JitError::Effect(EffectError::Handler(
                 "resume_suspended called on a machine that is not suspended".into(),
-            ))
-        })?;
+            )));
+        }
+        // A5 — NF-force the data-kinded answer BEFORE consuming the
+        // continuation. A bottom anywhere in the answer (a residual unforced
+        // thunk — an `undefined`/`⊥` the child-answer bridge would have raised,
+        // caught here as defense-in-depth) fails the answer as a retryable
+        // error and leaves `suspended_continuation` intact. Function-bearing
+        // answer types were rejected at extract (segment 10), so every field of
+        // a data-kinded answer is walkable by construction; the walk terminates
+        // on a visited-set (cyclic data).
+        if let ResumeInput::Answer(val) = &input {
+            answer_force_nf(val).map_err(|reason| {
+                JitError::Effect(EffectError::Handler(format!(
+                    "resume answer is not in normal form (bottom in the answer): {reason}"
+                )))
+            })?;
+        }
+        // Answer verified NF (or this is an Abort) — NOW consume the
+        // continuation. Every early return above left it stowed.
+        let continuation = self
+            .suspended_continuation
+            .take()
+            .expect("suspended_continuation present (checked is_some above)");
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
         // Re-points GC state at the retained heap (heap `Some` → session buffer,
@@ -1612,6 +1713,169 @@ impl JitEffectMachine {
     pub fn persistent_roots_count(&self) -> usize {
         self.machine_state.persistent_roots_count()
     }
+
+    /// Whether this machine is currently suspended at a typed yield (`Ask`),
+    /// holding a stowed continuation awaiting `resume_suspended`.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended_continuation.is_some()
+    }
+
+    /// Number of stowed GC roots currently registered (test/diagnostic
+    /// accessor — 1 while a nested child is running against a suspended parent,
+    /// 0 otherwise). Segment 40.
+    pub fn stowed_roots_count(&self) -> usize {
+        self.machine_state.stowed_roots_count()
+    }
+
+    // ----------------------------------------------------------------------
+    // Segment 40 — nested child runs on a suspended machine.
+    //
+    // While a parent turn is suspended at a typed yield (`returnControl`/`Ask`,
+    // `suspended_continuation` is `Some`), CHILD fragment runs can execute
+    // against the SAME machine — reading the parent's bindings zero-copy —
+    // provided the parent's stowed continuation is a REGISTERED GC ROOT so a
+    // child's collection evacuates it rather than freeing it.
+    //
+    // The temporal "no GC runs on a suspended machine" argument (the L7 asserts)
+    // is REPLACED, for the nested case only, by this registered root. The L7
+    // asserts on the plain entries (`run`/`run_pure`/`run_fragment`/`*_and_bind`)
+    // stay UNCHANGED: a plain entry started while a continuation is stowed and
+    // UNREGISTERED is still an illegal state and still panics. The nested-child
+    // entries below are the ONLY sanctioned way to run while suspended, and they
+    // register the root first.
+    // ----------------------------------------------------------------------
+
+    /// Enter nested-child mode: MOVE the stowed continuation out of
+    /// `suspended_continuation` into a heap-stable `Box` cell, register that
+    /// cell in `stowed_roots`, and increment `nested_child_depth`. Returns a
+    /// [`NestedChildGuard`] whose `Drop` reads the (GC-current) pointer back out
+    /// and restores it into `suspended_continuation`, deregisters the root, and
+    /// decrements the depth.
+    ///
+    /// Moving the pointer OUT of `suspended_continuation` for the child's
+    /// duration is load-bearing two ways: (1) `suspended_continuation` reads
+    /// `None` while the child runs, so the plain run entries' L7 asserts pass
+    /// naturally — the child fragment goes through `run_fragment*` exactly like
+    /// any turn — and (2) the continuation is protected NOT by the (now-absent)
+    /// temporal argument but by the `stowed_roots` registration on the
+    /// heap-stable cell, which every child collection traces and rewrites in
+    /// place. On guard drop the machine's `suspended_continuation` again points
+    /// at the (possibly relocated) continuation.
+    ///
+    /// # Panics
+    /// Panics if the machine is not suspended (no continuation to root) — a
+    /// nested child requires a suspended parent by construction.
+    fn enter_nested_child(&mut self) -> NestedChildGuard {
+        let cont = self
+            .suspended_continuation
+            .take()
+            .expect("enter_nested_child on a machine that is not suspended");
+        // Heap-stable cell: the machine moves between threads (stow XOR run),
+        // but the Box's pointee address is a stable heap allocation, so the
+        // registered slot address stays valid across the move.
+        let mut cell = Box::new(cont);
+        let slot: *mut *mut u8 = &mut *cell;
+        self.stowed_root_cell = Some(cell);
+        // SAFETY: `slot` is the address of the Box's inner cell, stable for the
+        // Box's life (until the guard drops and puts the pointer back). The GC
+        // reads and rewrites `*slot` in place on every collection until then.
+        self.machine_state.register_stowed_root(slot);
+        self.nested_child_depth += 1;
+        NestedChildGuard {
+            machine_state: &self.machine_state as *const MachineState,
+            suspended_continuation: &mut self.suspended_continuation as *mut Option<*mut u8>,
+            stowed_root_cell: &mut self.stowed_root_cell as *mut Option<Box<*mut u8>>,
+            nested_child_depth: &mut self.nested_child_depth as *mut usize,
+            slot,
+        }
+    }
+
+    /// Run a fragment as a CHILD against this suspended parent, dispatching
+    /// effects through the handler HList exactly as [`Self::run_fragment`] does.
+    /// The parent's stowed continuation is GC-rooted for the child's duration
+    /// (see [`Self::enter_nested_child`]); a child collection — including heap
+    /// doubling — evacuates it, so the parent resumes correctly afterward.
+    ///
+    /// The child fragment reads the parent's session bindings zero-copy through
+    /// its `external_env` (resolved when the fragment was `add_function`-minted),
+    /// against the SAME retained session heap. Module accretion is inert for the
+    /// parent: adding a child fragment does not perturb the parent's stowed
+    /// continuation.
+    ///
+    /// # Panics
+    /// Panics if the machine is not currently suspended.
+    pub fn run_child_fragment<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+    ) -> Result<Value, JitError> {
+        assert!(
+            self.suspended_continuation.is_some(),
+            "run_child_fragment requires a suspended parent (call run_fragment on an idle machine)"
+        );
+        let _nested = self.enter_nested_child();
+        // With the continuation moved into the registered stowed cell,
+        // `suspended_continuation` is None — the plain run entry's L7 assert
+        // passes, and the fragment drives byte-identically to any turn.
+        self.run_with_entry(func_id, table, handlers, user)
+    }
+
+    /// Pure sibling of [`Self::run_child_fragment`] — run an `add_function`-minted
+    /// pure fragment as a child against the suspended parent's retained heap.
+    ///
+    /// # Panics
+    /// Panics if the machine is not currently suspended.
+    pub fn run_child_fragment_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
+        assert!(
+            self.suspended_continuation.is_some(),
+            "run_child_fragment_pure requires a suspended parent"
+        );
+        let _nested = self.enter_nested_child();
+        self.run_pure_with_entry(func_id)
+    }
+}
+
+/// RAII proof that a nested child is running against a suspended parent
+/// (segment 40). On drop it reads the (GC-current) continuation pointer back
+/// out of the heap-stable stowed cell and restores it into the machine's
+/// `suspended_continuation`, deregisters the stowed root, drops the cell, and
+/// decrements the nested-child depth — leaving the machine exactly as suspended
+/// as it was on entry, but with the continuation pointer updated to wherever the
+/// child's collections relocated it.
+///
+/// All four raw pointers point into the owning `JitEffectMachine`. The guard is
+/// a local in `run_child_fragment*` and drops at that method's end, strictly
+/// within the method's `&mut self` scope — so `self` cannot have moved or
+/// dropped while the guard is alive. This mirrors `RegistryGuard`, which
+/// likewise holds raw pointers into its owning call frame rather than a borrow
+/// (so `self` stays free for the run call it wraps).
+struct NestedChildGuard {
+    machine_state: *const MachineState,
+    suspended_continuation: *mut Option<*mut u8>,
+    stowed_root_cell: *mut Option<Box<*mut u8>>,
+    nested_child_depth: *mut usize,
+    slot: *mut *mut u8,
+}
+
+impl Drop for NestedChildGuard {
+    fn drop(&mut self) {
+        // SAFETY: all pointers target the owning JitEffectMachine's fields,
+        // live for the guard's whole scope (the guard is a local in the child
+        // run method, which holds `&mut self`). The stowed cell holds the
+        // GC-current continuation pointer (rewritten in place by any child
+        // collection through the registered slot); read it back out and restore
+        // it so the parent stays suspended on the relocated continuation.
+        unsafe {
+            (*self.machine_state).deregister_stowed_root(self.slot);
+            let cell = (*self.stowed_root_cell)
+                .take()
+                .expect("stowed cell present for the guard's life");
+            *self.suspended_continuation = Some(*cell);
+            *self.nested_child_depth = (*self.nested_child_depth).saturating_sub(1);
+        }
+    }
 }
 
 impl Drop for JitEffectMachine {
@@ -2193,6 +2457,59 @@ fn dismantle_list_spine(
 
 fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
     Yield::Error(runtime_error_or_signal(e.0))
+}
+
+/// A5 (segment 40) — the deepseq-style NF check on a data-kinded resume answer.
+///
+/// A bridged answer `Value` is produced by `heap_to_value_forcing`, which forces
+/// each node to WHNF as it walks — so a genuine bottom (`undefined`/`⊥`, a lazy
+/// poison closure) is already raised at that bridge boundary as a `JitError`,
+/// never reaching this point as a `Value`. This walk is the defense-in-depth
+/// backstop the spec mandates: it rejects any answer carrying a residual
+/// **unforced thunk** (`ThunkRef`) — the shape a not-fully-forced bottom would
+/// take — as a retryable error, so the caller's continuation is NOT consumed.
+///
+/// Iterative (explicit work stack — data can be arbitrarily deep) with an
+/// address-keyed visited set on `Con` payloads so shared/cyclic data terminates.
+/// `Con`/`Lit`/`ByteArray` are normal-form data; `ThunkRef` is a bottom-reject;
+/// `Closure`/`JoinCont`/`ConFun` cannot occur in a data-kinded answer
+/// (function-bearing types were rejected at extract, segment 10) but are treated
+/// as a reject too, since they are not first-order NF data.
+fn answer_force_nf(root: &tidepool_eval::value::Value) -> Result<(), String> {
+    use tidepool_eval::value::Value;
+    let mut work: Vec<&Value> = vec![root];
+    let mut visited: std::collections::HashSet<*const Vec<Value>> = std::collections::HashSet::new();
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Lit(_) | Value::ByteArray(_) => {}
+            Value::Con(_, fields) => {
+                // Dedup shared/cyclic sub-graphs by the payload Vec's address.
+                if visited.insert(fields as *const Vec<Value>) {
+                    for f in fields {
+                        work.push(f);
+                    }
+                }
+            }
+            Value::ThunkRef(id) => {
+                return Err(format!("unforced thunk {id} in answer"));
+            }
+            Value::Closure { .. } => {
+                return Err("function-bearing value (closure) in answer".to_string());
+            }
+            Value::JoinCont { .. } => {
+                return Err("join-point value in answer".to_string());
+            }
+            Value::ConFun(id, arity, args) => {
+                return Err(format!(
+                    "partially-applied constructor (Con#{} {}/{}) in answer",
+                    id.0,
+                    args.len(),
+                    arity
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

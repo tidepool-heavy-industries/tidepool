@@ -69,10 +69,21 @@ pub enum PriceClass {
 /// crate stays free of the JIT dependency — segment 20 instantiates `M`
 /// with its resident-session type. The stowed-XOR-running discipline
 /// (jit_machine.rs Send rationale) maps onto these variants: a machine is
-/// in exactly one slot, and `Running` means it is out on a turn.
+/// in exactly one slot, and `Running`/`RunningChild` means it is out on a turn.
 #[derive(Debug)]
 pub enum Slot<M> {
     Idle(M),
     Running,
-    Suspended { machine: M, hole: HoleId },
+    Suspended {
+        machine: M,
+        hole: HoleId,
+    },
+    /// Segment 40: the machine is out on a NESTED CHILD run against a suspended
+    /// parent — the parent is still suspended on `hole`, and the child restores
+    /// the slot back to `Suspended { hole }` on completion. A parent
+    /// resume/abort or a new top-level run is rejected while in this state
+    /// (sequential-isolated: exactly one computation on the heap at a time).
+    RunningChild {
+        hole: HoleId,
+    },
 }

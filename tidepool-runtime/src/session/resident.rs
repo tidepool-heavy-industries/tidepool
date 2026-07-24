@@ -36,13 +36,19 @@
 //! `Suspended`; [`ResidentSession::resume`] re-enters and drives the fragment
 //! to completion.
 //!
-//! # This segment's boundary vs. segment 40
+//! # Nested child runs (segment 40)
 //!
-//! A suspended session here simply REJECTS a new turn (see
-//! [`ResidentError::Suspended`]) — nested child runs on a stowed continuation
-//! are segment 40's job (they need the stowed-continuation GC root). The L7
-//! `suspended_continuation.is_none()` asserts in `jit_machine.rs` stay intact:
-//! this module never starts a turn while a continuation is suspended.
+//! A suspended session REJECTS a new TOP-LEVEL turn (see
+//! [`ResidentError::Suspended`]) but ACCEPTS a nested CHILD run
+//! ([`ResidentSession::run_child`]): a fragment driven against the suspended
+//! parent's SAME heap — reading the parent's bindings zero-copy — while the
+//! parent's stowed continuation is registered as a GC root
+//! ([`JitEffectMachine::run_child_fragment`]). The child does not consume the
+//! parent's continuation; the session stays suspended on its hole across the
+//! child run. The L7 `suspended_continuation.is_none()` asserts in
+//! `jit_machine.rs` stay intact for the plain entries; the child entry moves the
+//! continuation into a registered stowed root for its duration (so those asserts
+//! still pass) — see the jit_machine module docstring for the full invariant.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,11 +98,20 @@ pub enum ResidentOutcome {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
-    /// A new `run` was attempted while the session is suspended on an `Ask`.
-    /// Until segment 40 lands nested child runs, a suspended session accepts
-    /// only `resume`/`abort` — never a fresh turn.
-    #[error("session is suspended on continuation {0}; resume or abort it before a new run")]
+    /// A new top-level `run` was attempted while the session is suspended on an
+    /// `Ask`. A suspended session accepts `resume`/`abort` (parent) or
+    /// `run_child` (nested child) — never a fresh top-level turn.
+    #[error("session is suspended on continuation {0}; resume, abort, or run a child before a new top-level run")]
     Suspended(String),
+    /// A `run_child` was attempted on an idle (not-suspended) session — a
+    /// nested child requires a suspended parent by construction (segment 40).
+    #[error("session is not suspended; a nested child run requires a suspended parent")]
+    NotSuspended,
+    /// A nested child fragment itself suspended at an `Ask`. R0 is single-level
+    /// sequential-isolated nesting — the machine holds exactly one stowed
+    /// continuation, so a child cannot suspend while the parent already is.
+    #[error("nested child suspended at an ask; R0 supports single-level nesting only")]
+    ChildSuspended,
     /// A `resume`/`abort` referenced a continuation id that is not the one this
     /// session is currently suspended on (or the session is not suspended).
     /// Atomic validate-before-consume: the pending continuation is NOT touched.
@@ -274,6 +289,79 @@ where
             machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
         })?;
         Ok(self.classify(outcome))
+    }
+
+    /// Run a NESTED CHILD turn against this SUSPENDED session (segment 40): add
+    /// `expr` as a fragment referencing the suspended parent's session bindings
+    /// (via `external_env`, zero-copy against the same retained heap), then drive
+    /// it through [`JitEffectMachine::run_child_fragment`] while the parent's
+    /// stowed continuation is GC-rooted. The session STAYS suspended on the same
+    /// hole afterward — the child does not consume the parent's continuation.
+    ///
+    /// Requires the session to be suspended (a child needs a suspended parent);
+    /// an idle session is rejected with [`ResidentError::NotSuspended`]. A child
+    /// that itself suspends is rejected ([`ResidentError::ChildSuspended`]) —
+    /// the machine holds exactly one stowed continuation, so a child cannot
+    /// suspend while the parent is already suspended (R0 is sequential-isolated,
+    /// single-level nesting).
+    pub fn run_child(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        external_env: &ExternalEnv,
+    ) -> Result<EvalResult, ResidentError> {
+        // A child requires a suspended parent.
+        if self.pending.is_none() {
+            return Err(ResidentError::NotSuspended);
+        }
+        // Merge this child's table into the session table (monotone).
+        for dc in table.iter() {
+            self.table
+                .insert_checked(dc.clone())
+                .map_err(|e| ResidentError::TableCollision(e.to_string()))?;
+        }
+        let frag_name = format!(
+            "{name_hint}_child_{}",
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        );
+        // Add the child fragment to the live machine. Module accretion is inert
+        // for the parent — a fresh FuncId, the stowed continuation untouched.
+        let func_id = {
+            let machine = self
+                .machine
+                .as_mut()
+                .expect("machine present when suspended (moved out only during a turn)");
+            machine
+                .add_function(&frag_name, expr, &self.table, external_env)
+                .map_err(ResidentError::AddFunction)?
+        };
+
+        // Snapshot the hole so the child cannot lose it. `on_eval_thread` moves
+        // the machine out and back; `pending` is untouched throughout — the
+        // parent stays suspended on the same hole across the child run.
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            machine
+                .run_child_fragment(func_id, table, handlers, captured)
+                // A child run returns a plain `Value` (not a SuspendableOutcome);
+                // wrap it as Completed so `on_eval_thread`'s shared plumbing
+                // applies. A child fragment does not go through the suspend
+                // driver, so it either completes or errors — it never suspends.
+                .map(SuspendableOutcome::Completed)
+        })?;
+
+        match outcome {
+            SuspendableOutcome::Completed(value) => {
+                // Drain the child's debug output so it does not leak into a
+                // later parent-turn snapshot/drain. The child's RESULT is the
+                // deliverable; its console output is debug-only here.
+                let _ = self.captured.drain();
+                Ok(EvalResult::new(value, self.table.clone(), Vec::new()))
+            }
+            // Unreachable by construction (run_child_fragment can't suspend),
+            // but keep it a typed error rather than a panic.
+            SuspendableOutcome::Suspended { .. } => Err(ResidentError::ChildSuspended),
+        }
     }
 
     /// Resume the suspended turn with `answer`, driving the fragment to its next

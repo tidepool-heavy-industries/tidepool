@@ -4,6 +4,39 @@ Compiles `CoreExpr` to Cranelift-backed state machines and drives the effect
 machine at the JIT↔Rust boundary. See the repo-root `CLAUDE.md` for the project
 map and locked decisions.
 
+## Nested child runs on a suspended machine (segment 40)
+
+A parent turn suspended at a typed yield (`returnControl`/`Ask`) can host
+SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
+bindings zero-copy — while its stowed continuation is a REGISTERED GC ROOT. The
+full invariant is in the `jit_machine.rs` module docstring; the essentials:
+
+- The GC root assembly (`perform_gc`, `host_fns/gc.rs`) folds FIVE sources:
+  frame-walked stack, run-scoped `rust_roots`, session `persistent_roots`, the
+  vmctx tail-call slots, and — new — the nested-child-scoped `stowed_roots`
+  (`MachineState`). `stowed_roots` is DELIBERATELY separate from
+  `persistent_roots` so intent is auditable: a persistent root is a
+  machine-lifetime tenured value; a stowed root is a *transient* parent
+  continuation rooted only while a child runs.
+- `JitEffectMachine::run_child_fragment{,_pure}` are the ONLY sanctioned run
+  entries while suspended. They go through `enter_nested_child`, which moves the
+  continuation into a heap-stable `Box` cell, registers it in `stowed_roots`,
+  and (by emptying `suspended_continuation` for the child's duration) lets the
+  child drive through the plain entries whose L7 `is_none()` asserts then pass.
+  The `NestedChildGuard` drops AFTER the child's `RegistryGuard` reclaim, so it
+  reads the GC-current continuation pointer back out against the POST-child heap.
+- The L7 asserts on the plain entries are UNCHANGED and still fire for the
+  illegal state (a plain run while a continuation is stowed unregistered).
+- `resume_suspended` NF-forces (A5) a data-kinded answer BEFORE consuming the
+  continuation: a bottom (residual unforced thunk) is rejected as a retryable
+  error WITHOUT consuming, so the caller can resume again with a fixed answer.
+
+The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
+`TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child
+GC + heap doubling with a live suspended parent, deep-verified resume, decl
+accretion inert for the parent, bottom-not-consuming, L7 misuse panic, and
+value-plane tenure across suspend → child GC → resume.
+
 ## Diagnostics — JIT runtime / effect machine / cache
 
 Env-gated, OFF by default. The Rust JIT-runtime traces use `log` + `env_logger`

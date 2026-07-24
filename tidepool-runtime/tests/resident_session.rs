@@ -254,6 +254,143 @@ fn multi_turn_accumulates_across_suspend_resume() {
     }
 }
 
+/// Segment 40 — nested child runs on a SUSPENDED resident session, through the
+/// production path (`ResidentSession::run_child` → `run_child_fragment` → the
+/// stowed-continuation GC root). A turn suspends at `ask`; while suspended, a
+/// CHILD turn runs against the SAME machine (allocating hard enough to force a
+/// real GC), the session stays suspended on its hole, and the parent then
+/// resumes correctly. This is the DONE criterion: a parent suspended at a typed
+/// yield hosts child fragment runs — including GC-forcing ones — and resumes.
+#[test]
+fn nested_child_runs_while_parent_suspended_then_resumes() {
+    let Some(harness) = setup() else { return };
+    // Small nursery so a child's allocation forces a real collection with the
+    // parent's continuation stowed and GC-rooted.
+    let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (0 :: Int)");
+    let effect_names = mock::EFFECT_NAMES.iter().map(|s| s.to_string()).collect();
+    let mut session = ResidentSession::bootstrap(
+        &expr,
+        table,
+        AsSink(mock::min_stack()),
+        ASK_TAG,
+        effect_names,
+        TestSink::default(),
+        Vec::new(),
+        1 << 16,
+    )
+    .expect("bootstrap");
+
+    // Turn 1: write a KV key, then suspend at `ask`.
+    let (t1_expr, t1_table) = compile_turn(
+        &harness,
+        "result :: M Int\nresult = do\n  \
+           send (KvSet \"parent\" (toJSON (7 :: Int)))\n  \
+           n <- send (Ask \"pick\")\n  \
+           send (KvSet \"answered\" n)\n  \
+           pure (0 :: Int)",
+    );
+    let hole = match session
+        .run("t1", &t1_expr, &t1_table, &tidepool_codegen::emit::ExternalEnv::new())
+        .expect("turn 1 runs")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at ask"),
+    };
+
+    // A CHILD turn runs against the suspended parent. It allocates a sizeable
+    // list and folds it (forcing GC in the small nursery), reading the parent's
+    // resident KV zero-copy, and returns a derived value. The parent's stowed
+    // continuation is GC-rooted throughout.
+    let (child_expr, child_table) = compile_turn(
+        &harness,
+        "result :: M Int\nresult = do\n  \
+           p <- send (KvGet \"parent\")\n  \
+           let xs = [1 .. 20000 :: Int]\n  \
+           pure (sum xs)",
+    );
+    for round in 0..3 {
+        let child = session
+            .run_child(
+                "child",
+                &child_expr,
+                &child_table,
+                &tidepool_codegen::emit::ExternalEnv::new(),
+            )
+            .unwrap_or_else(|e| panic!("child run {round} against suspended parent: {e}"));
+        assert_eq!(
+            child.to_json(),
+            serde_json::json!(200010000i64),
+            "child computes sum [1..20000] = 200010000 (round {round})"
+        );
+        // The session is STILL suspended on the same hole after each child.
+        assert_eq!(
+            session.pending_continuation(),
+            Some(hole.as_str()),
+            "the parent stays suspended on its hole across child runs (round {round})"
+        );
+    }
+
+    // A new TOP-LEVEL run is still rejected while suspended.
+    let (intrude_expr, intrude_table) =
+        compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
+    match session.run(
+        "intrude",
+        &intrude_expr,
+        &intrude_table,
+        &tidepool_codegen::emit::ExternalEnv::new(),
+    ) {
+        Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
+        other => panic!("a suspended session must reject a new top-level run; got {other:?}"),
+    }
+
+    // Resume the parent with 42: the continuation (stowed across all the child
+    // GCs) drives to completion correctly.
+    match session.resume(&hole, int(42)).expect("resume after children") {
+        ResidentOutcome::Completed { result, .. } => {
+            assert_eq!(result.to_json(), serde_json::json!(0));
+        }
+        ResidentOutcome::Suspended { .. } => panic!("resume should complete"),
+    }
+    assert!(session.is_idle());
+
+    // Post-resume: the parent's pre-suspend write AND the resumed value both
+    // landed — proving the continuation and the resident state survived the
+    // whole suspend → child-GC → resume round-trip.
+    let (verify_expr, verify_table) = compile_turn(
+        &harness,
+        "result :: M Value\nresult = do\n  \
+           p <- send (KvGet \"parent\")\n  \
+           a <- send (KvGet \"answered\")\n  \
+           pure (toJSON [p, a])",
+    );
+    match session
+        .run("verify", &verify_expr, &verify_table, &tidepool_codegen::emit::ExternalEnv::new())
+        .expect("verify turn")
+    {
+        ResidentOutcome::Completed { result, .. } => {
+            assert_eq!(
+                result.to_json(),
+                serde_json::json!([7, 42]),
+                "resident state survived suspend → child GC → resume"
+            );
+        }
+        ResidentOutcome::Suspended { .. } => panic!("verify turn should complete"),
+    }
+}
+
+/// A `run_child` on an IDLE (not suspended) resident session is rejected —
+/// a nested child requires a suspended parent (segment 40).
+#[test]
+fn run_child_on_idle_session_is_not_suspended() {
+    let Some(harness) = setup() else { return };
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
+    let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
+    match session.run_child("child", &expr, &table, &tidepool_codegen::emit::ExternalEnv::new()) {
+        Err(ResidentError::NotSuspended) => {}
+        other => panic!("run_child on an idle session must be NotSuspended; got {other:?}"),
+    }
+}
+
 /// A plain (non-suspending) resident turn completes and returns its value, and
 /// a following turn reuses the same machine — the base residency path with no
 /// ask involved.

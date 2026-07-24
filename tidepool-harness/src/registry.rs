@@ -45,9 +45,19 @@ pub enum CheckoutError {
     #[error("no session {0}")]
     Unknown(SessionId),
     /// A turn is already executing on this session (its machine is out —
-    /// `Slot::Running`). Turns on one session are strictly sequential.
+    /// `Slot::Running` or `Slot::RunningChild`). Turns on one session are
+    /// strictly sequential.
     #[error("session {0} is already running a turn")]
     Running(SessionId),
+    /// A resume/abort or new-turn checkout was attempted while a nested CHILD
+    /// run is executing against the suspended parent (`Slot::RunningChild`).
+    /// The parent stays suspended on `hole`; retry after the child completes.
+    #[error("session {session} is running a nested child against hole {hole:?}; wait for it")]
+    RunningChild { session: SessionId, hole: HoleId },
+    /// A child-run checkout was attempted on a session that is NOT suspended
+    /// (a child requires a suspended parent by construction).
+    #[error("session {0} is not suspended; a nested child requires a suspended parent")]
+    NotSuspended(SessionId),
     /// A new turn was attempted on a suspended session. Until segment 40 lands
     /// nested child runs, a suspended session accepts only a resume/abort of its
     /// pending hole.
@@ -106,10 +116,12 @@ impl<M> SessionRegistry<M> {
         matches!(self.slots.lock().get(&id), Some(Slot::Idle(_)))
     }
 
-    /// The hole a session is suspended on, if any.
+    /// The hole a session is suspended on, if any. A session with a nested
+    /// child mid-run (`RunningChild`) is still suspended on its hole.
     pub fn pending_hole(&self, id: SessionId) -> Option<HoleId> {
         match self.slots.lock().get(&id) {
             Some(Slot::Suspended { hole, .. }) => Some(hole.clone()),
+            Some(Slot::RunningChild { hole }) => Some(hole.clone()),
             _ => None,
         }
     }
@@ -124,6 +136,10 @@ impl<M> SessionRegistry<M> {
         match slots.get_mut(&id) {
             None => Err(CheckoutError::Unknown(id)),
             Some(Slot::Running) => Err(CheckoutError::Running(id)),
+            Some(Slot::RunningChild { hole }) => Err(CheckoutError::RunningChild {
+                session: id,
+                hole: hole.clone(),
+            }),
             Some(Slot::Suspended { hole, .. }) => Err(CheckoutError::Suspended {
                 session: id,
                 hole: hole.clone(),
@@ -154,6 +170,10 @@ impl<M> SessionRegistry<M> {
         match slots.get_mut(&id) {
             None => Err(CheckoutError::Unknown(id)),
             Some(Slot::Running) => Err(CheckoutError::Running(id)),
+            Some(Slot::RunningChild { hole: pending }) => Err(CheckoutError::RunningChild {
+                session: id,
+                hole: pending.clone(),
+            }),
             Some(Slot::Idle(_)) => Err(CheckoutError::WrongHole {
                 session: id,
                 attempted: hole.clone(),
@@ -169,6 +189,45 @@ impl<M> SessionRegistry<M> {
             Some(slot) => {
                 // Matched Suspended with the right hole.
                 let Slot::Suspended { machine, .. } = std::mem::replace(slot, Slot::Running) else {
+                    unreachable!("matched Suspended above")
+                };
+                Ok(Checkout {
+                    registry: self,
+                    id,
+                    machine: Some(machine),
+                })
+            }
+        }
+    }
+
+    /// Check a machine OUT for a NESTED CHILD run against its suspended parent
+    /// (segment 40): `Suspended{hole} → RunningChild{hole}`, keeping the hole so
+    /// the parent stays suspended. The child restores via
+    /// [`Checkout::restore_suspended`] with the SAME hole. Refuses a session
+    /// that is not suspended, already running, or running another child.
+    ///
+    /// The `hole` need not be validated here the way `checkout_resume` does —
+    /// a child run does not consume the parent's continuation (the parent's
+    /// stowed continuation is GC-rooted, not fed) — but the caller passes it so
+    /// the slot can carry it through `RunningChild` back to `Suspended`.
+    pub fn checkout_child(&self, id: SessionId) -> Result<Checkout<'_, M>, CheckoutError> {
+        let mut slots = self.slots.lock();
+        match slots.get_mut(&id) {
+            None => Err(CheckoutError::Unknown(id)),
+            Some(Slot::Running) => Err(CheckoutError::Running(id)),
+            Some(Slot::RunningChild { hole }) => Err(CheckoutError::RunningChild {
+                session: id,
+                hole: hole.clone(),
+            }),
+            Some(Slot::Idle(_)) => Err(CheckoutError::NotSuspended(id)),
+            Some(slot @ Slot::Suspended { .. }) => {
+                let hole = match slot {
+                    Slot::Suspended { hole, .. } => hole.clone(),
+                    _ => unreachable!("matched Suspended above"),
+                };
+                let Slot::Suspended { machine, .. } =
+                    std::mem::replace(slot, Slot::RunningChild { hole })
+                else {
                     unreachable!("matched Suspended above")
                 };
                 Ok(Checkout {
@@ -368,6 +427,83 @@ mod tests {
         assert_eq!(
             err(reg.checkout_run(SessionId(9))),
             CheckoutError::Unknown(SessionId(9))
+        );
+    }
+
+    /// Segment 40: a suspended session hosts a nested child run
+    /// (`Suspended → RunningChild → Suspended`), and while the child is mid-run
+    /// the parent's resume/abort and a new top-level run are all rejected
+    /// cleanly (sequential-isolated). After the child restores, the parent is
+    /// suspended on the SAME hole and resumes normally.
+    #[test]
+    fn nested_child_run_keeps_parent_suspended_and_blocks_resume() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(5);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+
+        // Run → suspend.
+        let co = reg.checkout_run(id).expect("idle → run");
+        co.restore_suspended(hole("scont_1"));
+        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+
+        // Check a child out: Suspended → RunningChild, parent still suspended.
+        let mut child = reg.checkout_child(id).expect("suspended → child");
+        assert_eq!(
+            reg.pending_hole(id),
+            Some(hole("scont_1")),
+            "parent stays suspended on its hole while a child runs"
+        );
+
+        // While the child runs, EVERYTHING else is rejected.
+        assert_eq!(
+            err(reg.checkout_run(id)),
+            CheckoutError::RunningChild {
+                session: id,
+                hole: hole("scont_1")
+            }
+        );
+        assert_eq!(
+            err(reg.checkout_resume(id, &hole("scont_1"))),
+            CheckoutError::RunningChild {
+                session: id,
+                hole: hole("scont_1")
+            },
+            "parent resume must be rejected while a child is mid-run"
+        );
+        assert_eq!(
+            err(reg.checkout_child(id)),
+            CheckoutError::RunningChild {
+                session: id,
+                hole: hole("scont_1")
+            },
+            "a second concurrent child must be rejected"
+        );
+
+        // The child ran a turn on the machine; restore back to Suspended.
+        child.machine().turns += 1;
+        child.restore_suspended(hole("scont_1"));
+        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+
+        // The parent now resumes on its (untouched) hole; the child's turn count
+        // survived (it ran on the same machine).
+        let mut co = reg
+            .checkout_resume(id, &hole("scont_1"))
+            .expect("parent resumes after the child completes");
+        assert_eq!(co.machine().turns, 1, "the child's turn ran on the machine");
+        co.restore_idle();
+        assert!(reg.is_idle(id));
+    }
+
+    /// A nested child requires a suspended parent — checking a child out on an
+    /// idle session is `NotSuspended`, not a silent mis-transition.
+    #[test]
+    fn child_checkout_on_idle_is_not_suspended() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(6);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        assert_eq!(
+            err(reg.checkout_child(id)),
+            CheckoutError::NotSuspended(id)
         );
     }
 
