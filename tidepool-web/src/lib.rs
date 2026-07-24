@@ -6,3 +6,7 @@
 //! `Ui` → Datastar fragment renderer and the D1 tree view. Depends on
 //! tidepool-harness only through its protocol/contract types — no private
 //! APIs (E1: the web UI is a client of the documented protocol).
+
+pub mod render;
+
+pub use render::{fragment, render_with_answer_url};
