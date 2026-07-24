@@ -139,3 +139,17 @@ executable varid-mechanism-test
     mtl
   default-language: GHC2024
   default-extensions: OverloadedStrings
+
+-- Unit tests for the pure [form|...|] DSL line parser (no TH/splice
+-- evaluation — see FormQQParserTest.hs). The compile-time-fail path is
+-- exercised live through the JIT eval pipeline by `works_form_qq` in
+-- tidepool-runtime/tests/jit_surface.rs.
+-- Run: cabal run formqq-parser-test
+executable formqq-parser-test
+  main-is:          FormQQParserTest.hs
+  hs-source-dirs:   test-formqq, lib
+  other-modules:
+    Tidepool.FormQQ.Parse
+  build-depends:
+    base >= 4.20 && < 5
+  default-language: GHC2024

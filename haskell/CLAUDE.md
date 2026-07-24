@@ -98,7 +98,19 @@ surface here — it drifts. Module map:
 - `FilePath` — System.FilePath over Text (`FilePath = Text`); the file-IO interface.
 - `Data/Time` — `UTCTime` newtype (epoch-millisecond, opaque); `formatISO8601` (ISO-8601, pure civil_from_days); `diffUTCTime`/`addUTCTime` (seconds); `epochMillis` escape hatch. `getCurrentTime :: M UTCTime` lives in the generated `Tidepool.Effects` (via `time_decl()` helpers).
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
-- `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]` quasiquoters.
+- `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters.
+- `Ui` — the `Ui` eDSL (card/prose/code/choice/textIn/badge smart constructors).
+  `FormQQ` — `[form|]`, a line-based DSL compiling to `[Ui]` (one widget per
+  line: `choice <prompt>: <key> ...` / `text <prompt>` / `multiline <prompt>` /
+  prose passthrough); a QuasiQuoter defined entirely in this stdlib (not
+  shipped with GHC), proving such quoters survive the extract pipeline
+  end-to-end — see `works_form_qq` in `tidepool-runtime/tests/jit_surface.rs`.
+  A new stdlib module needs no build-time registration to be eval-importable
+  (the extract binary resolves `haskell/lib` as a GHC include path at
+  runtime); `tidepool-extract.cabal`'s `other-modules` list is unrelated to
+  this and can safely lag behind (confirmed empirically: `Tidepool.Ui`,
+  `Tidepool.Cargo`, `Tidepool.Git`, `Tidepool.Records.Bridged` all work
+  eval-side despite not being listed there).
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 

@@ -1003,3 +1003,66 @@ fn works_ui() {
         }),
     );
 }
+
+/// `[form|...|]` (`haskell/lib/Tidepool/FormQQ.hs`) — the GO half of the
+/// Wave-C QQ gate: a QuasiQuoter DEFINED IN THE STDLIB (not shipped with
+/// GHC/base) compiles and runs a splice through the real extract pipeline,
+/// exactly like the already-shipped `Tidepool.QQ` quoters
+/// (`[fmt|]`/`[j|]`/`[patch|]`/`[uri|]`). Parsing (blank-line skip, `choice`/
+/// `text`/`multiline`/prose dispatch) happens entirely at COMPILE time inside
+/// the splice evaluator; the expansion is a plain `[Ui]` list built from
+/// `Tidepool.Ui`'s smart constructors, so `card title [form|...|]` is the
+/// idiomatic use — exercised here.
+#[test]
+fn works_form_qq() {
+    works_with_imports(
+        "Tidepool.Ui\nTidepool.FormQQ (form)",
+        r#"pure (card "setup"
+             [form|
+Welcome! Fill this in.
+choice env: dev prod
+text token
+multiline notes
+|])"#,
+        serde_json::json!({
+            "ui": "card",
+            "title": "setup",
+            "body": [
+                {"ui": "prose", "text": "Welcome! Fill this in."},
+                {"ui": "choice", "prompt": "env", "options": [["dev", "dev"], ["prod", "prod"]]},
+                {"ui": "text_in", "prompt": "token", "multiline": false},
+                {"ui": "text_in", "prompt": "notes", "multiline": true}
+            ]
+        }),
+    );
+}
+
+/// A malformed `[form|...|]` line is a COMPILE-TIME error naming the
+/// offending 1-indexed line number — never a silent misparse. Line 2 here
+/// (`choice missing colon`) has no `:`.
+#[test]
+fn form_qq_bad_line_fails_loudly_with_line_number() {
+    let imports = "Tidepool.Ui\nTidepool.FormQQ (form)".to_string();
+    let code = r#"pure (card "setup"
+             [form|
+choice missing colon
+|])"#
+        .to_string();
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_imports(&imports, &code)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())
+        .and_then(|r| r);
+    match got {
+        Ok(v) => panic!("expected a compile-time failure naming the bad line, got Ok: {v}"),
+        Err(e) => assert!(
+            e.contains("form: line 2") && e.contains("requires ': key key ...'"),
+            "error must name the offending line and reason, got: {e}"
+        ),
+    }
+}
