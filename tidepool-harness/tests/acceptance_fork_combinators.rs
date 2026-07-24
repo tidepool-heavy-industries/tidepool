@@ -36,6 +36,17 @@
 //!   the SAME node. The final `Int` is the sum of the leaf verdicts plus
 //!   the root's own contribution, pinning that both dispatches actually
 //!   fired and fed the right values through.
+//! - A user's OWN `forkMap` — an unrelated, monomorphic local helper that
+//!   merely shares the combinator's occurrence name (never imports
+//!   `Tidepool.Fork`, never calls `returnControlFanout`) — must NOT abort
+//!   extract. `Translate.hs`'s recognizer matches by unqualified occurrence
+//!   name only, so before the fork-catchall-fallthrough fix ANY Var named
+//!   `forkMap`/`forkCata` that didn't match the exact recognized shape
+//!   ([Type, Type] + 2 value args) hit a catch-all `error`, aborting the
+//!   WHOLE eval. The recognizer now falls through to ordinary Var/App
+//!   translation for a mis-shaped occurrence, mirroring the
+//!   `returnControl`/`returnControlFork`/`returnControlFanout` arm's own
+//!   fall-through convention.
 
 use std::sync::Arc;
 
@@ -375,5 +386,106 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
     assert!(
         rendered.contains("16"),
         "the rendered total is the root's own scripted verdict (16), got: {rendered}"
+    );
+}
+
+/// A user's OWN `forkMap` — a plain, monomorphic top-level function in the
+/// user's OWN project library module, unrelated to `Tidepool.Fork`, that
+/// merely shares its occurrence name — must NOT abort extract. Regression
+/// test for the fork-catchall-fallthrough fix.
+///
+/// `Translate.hs`'s forkMap/forkCata recognizer matches by UNQUALIFIED
+/// occurrence name only (see `isForkMapVar`'s haddock), not by module —
+/// before the fix, ANY Var named `forkMap`/`forkCata` that didn't match the
+/// exact recognized shape ([Type, Type] + 2 value args) hit a catch-all
+/// `error`, aborting the WHOLE eval. This is deliberately a TOP-LEVEL,
+/// EXPORTED function in its own module (not an inline `let` in the eval
+/// body): an inline local binding gets renamed with a unique-keyed suffix
+/// by `externalizeInternalTops` (`GhcPipeline.hs`'s #313 fix for top-level
+/// float collisions) before `Translate.hs` ever sees it, so it can never
+/// actually collide with the recognizer's plain-name check — a genuine
+/// module-level export (an EXTERNAL name, never renamed) is what a "user's
+/// own forkMap" collision looks like in practice, e.g. a `.tidepool/lib`
+/// project module. Verified against the real (pre-fix) catch-all: this
+/// exact construction aborts extract with "forkMap site in forkMap is not
+/// fully applied..." on the unpatched recognizer, and completes cleanly
+/// once the catch-all is replaced with a fall-through.
+///
+/// The library's `forkMap` is single-type-variable (`forall a. (a -> a) ->
+/// [a] -> [a]`), so its call site carries only ONE type argument — it can
+/// never match the real combinator's `[Type, Type]` + 2-value-arg shape,
+/// and must fall through to ordinary Var/App translation, running as an
+/// ordinary recursive function.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_defined_forkmap_does_not_abort_extract() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let lib_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        lib_dir.path().join("MyLib.hs"),
+        "module MyLib (forkMap) where\n\
+         import Prelude\n\
+         \n\
+         -- | A plain helper: nothing to do with Tidepool.Fork.\n\
+         forkMap :: (a -> a) -> [a] -> [a]\n\
+         forkMap f xs = case xs of\n\
+         \x20 [] -> []\n\
+         \x20 (y : ys) -> f y : forkMap f ys\n",
+    )
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("user_forkmap.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), Some(lib_dir.path().to_path_buf()))
+        .expect("engine config");
+
+    let replies = vec![reply(
+        "This is my own project's `forkMap` — a plain recursive map, \
+         nothing to do with `Tidepool.Fork`. No `returnControlFanout` \
+         involved.\n\n\
+         ```haskell\n\
+         import MyLib (forkMap)\n\
+         \n\
+         pure (toJSON (forkMap (+1) [1, 2, 3 :: Int]))\n\
+         ```",
+    )];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root("user forkMap root", "Call my own project's forkMap.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root completes without extract aborting on the name collision");
+    match outcome {
+        tidepool_harness::TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains('2') && rendered.contains('3') && rendered.contains('4'),
+                "the user's forkMap runs as an ordinary function, [1,2,3] -> \
+                 [2,3,4], got: {rendered}"
+            );
+        }
+        other => panic!(
+            "a user-defined forkMap must complete normally (no suspend, no \
+             abort), got {}",
+            outcome_tag(&other)
+        ),
+    }
+
+    assert_eq!(
+        harness.tree().state(root),
+        Some(NodeState::Done),
+        "the root completes normally — the name collision with Tidepool.Fork's \
+         forkMap never touches the returnControlFanout suspend machinery"
     );
 }

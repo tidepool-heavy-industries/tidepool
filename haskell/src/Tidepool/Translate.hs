@@ -1660,23 +1660,20 @@ translate expr =
             emitNode $ NApp appFn xsIdx
 
     -- Any OTHER shape at a forkMap/forkCata head (partial application, a
-    -- type-argument count that doesn't match [answer, element/tree], or a
-    -- mis-arity value-arg list) can never be extracted: the answer type
-    -- must be captured HERE, at the full application, or not at all — there
-    -- is no runtime fallback (mirrors the tagToEnum# arm's own fallback
-    -- below, and Tidepool.Fork's OPAQUE stub bodies, which 'error' if ever
-    -- actually reached). Fails loudly, naming the enclosing binder, instead
-    -- of silently falling through to that dead stub.
-    Var v | isForkMapVar v || isForkCataVar v -> do
-        binder <- gets tsCurrentBinder
-        let siteDesc = maybe "<top level>" T.unpack binder
-            which = if isForkMapVar v then "forkMap" else "forkCata" :: String
-        error $ which ++ " site in " ++ siteDesc
-              ++ " is not fully applied or its answer type is not a concrete "
-              ++ "monomorphic type at this call site — apply it to both of "
-              ++ "its arguments and ensure the answer type is instantiated "
-              ++ "here (partial application and un-instantiated type "
-              ++ "variables cannot be extracted)."
+    -- type-argument count that doesn't match [answer, element/tree], a
+    -- mis-arity value-arg list — OR a Var that merely shares the occurrence
+    -- name with the real Tidepool.Fork combinator, e.g. a user's own local
+    -- helper) is deliberately NOT special-cased here, mirroring the
+    -- returnControl/returnControlFork/returnControlFanout arm above: no
+    -- catch-all error, just fall through to ordinary Var/App translation
+    -- below. isForkMapVar/isForkCataVar match by unqualified occurrence
+    -- name only (see their haddock), so a hard failure here would abort the
+    -- WHOLE eval on any user binding named forkMap/forkCata, not just a
+    -- genuine misuse of the real combinator. A genuinely mis-shaped call to
+    -- the REAL forkMap/forkCata still fails — just via the ordinary
+    -- composition-wall error surfaced once its (OPAQUE, dead-at-runtime)
+    -- stub body is reached, same as any other un-rewritten site; that is an
+    -- acceptable, real-misuse failure, not a regression.
 
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
