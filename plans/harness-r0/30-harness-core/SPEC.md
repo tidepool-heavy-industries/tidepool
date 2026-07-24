@@ -1,5 +1,13 @@
 # Spec: harness core — event log, replay, forcing, protocol
 
+> **PARTIALLY SUPERSEDED by TARGET.md (2026-07-23):** C1 and C3 are
+> merged. C2/C4/C5 as separately-spawned leaves are dissolved — replay,
+> the protocol server, and the turn driver land inside the SPIKE
+> (plans/harness-r0/spike/SPEC.md) as thin keep-path versions, then
+> widen behind the freezes. The leaf briefs below remain as reference
+> for the widen phase; sequencing notes here are stale where they
+> conflict with TARGET.
+
 The `tidepool-harness` crate (name freed by 00-scaffold): session tree
 state, durable event log, forcing gates, and the `tidepool-web` protocol
 server. Four leaves; C2 (replay) is opus, rest sonnet. Leaf specs are
