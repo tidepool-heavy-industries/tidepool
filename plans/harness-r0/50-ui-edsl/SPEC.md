@@ -68,7 +68,9 @@ place. <2s update via SSE patch; no manual refresh; collapse-by-default.
 ## VERIFY
 
 - `jit_surface.rs` probe green (Ui values construct + serialize on the
-  JIT); battery green.
+  JIT): `cargo nextest run --ignore-default-filter -p tidepool-runtime
+  -E 'test(works_ui)'`. NO full battery (operator policy 2026-07-23:
+  targeted tests per leaf; battery is a root-level gate).
 - Renderer snapshot tests; a live smoke: run the harness binary, publish
   a synthetic hole, see the card + answer flow in a browser over
   loopback, tree updates without refresh.

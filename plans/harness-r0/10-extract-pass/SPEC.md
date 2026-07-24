@@ -20,7 +20,9 @@ polymorphic or function-bearing `T` with an error naming the site.
 - DO NOT add a new CLI mode — the sidecar rides the NORMAL extraction
   invocation (`processFile` already writes multiple outputs).
 - DO NOT forget: `*.cbor` fixtures are gitignored — `git add -f` new ones.
-- DO NOT skip `scripts/battery.sh`; extract changes need the full tier.
+- DO NOT run full `scripts/battery.sh` (operator policy 2026-07-23:
+  targeted tests per leaf; battery is a root-level gate). The GHC-tier
+  subset in VERIFY is the required spot check.
 
 ## READ FIRST
 
@@ -97,10 +99,13 @@ both for free — verify, don't duplicate.
   else returnControl @B …`) and inside a `mapM`-loop body.
 - Negative: polymorphic site and function-bearing site each fail extract
   with an error naming the site; error text asserted in tests.
-- `scripts/battery.sh` green.
+- Targeted GHC-tier spot check (NOT full battery — root runs that at
+  merge if needed): rebuild extract per haskell/CLAUDE.md, then
+  `cargo nextest run --ignore-default-filter -p tidepool-runtime -p tidepool-macro`
+  and `cargo nextest run -p tidepool-repr`.
 
 ## DONE
 
 `returnControl @T` at any statement or expression position yields a
 suspension whose payload carries a site-id resolving to the rendered `T`;
-bad sites fail at extract, not at runtime; battery green.
+bad sites fail at extract, not at runtime; targeted suites green.
