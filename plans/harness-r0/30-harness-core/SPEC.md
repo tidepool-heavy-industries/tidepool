@@ -75,6 +75,23 @@ Also here: the ask-dispatch merge of segment 10's `asks.json` sidecar
 into published holes (the `typedSite` lookup — contract in
 10-extract-pass/SPEC.md step 6).
 
+### C5 — model-turn driver (sonnet; AFTER C3 + segment 40; gap caught 2026-07-23)
+The agent loop that makes holes model-answerable — the piece that turns
+the harness from operator-console into agent runtime. On a forced
+model-routed hole: create the child node/session (nested on the parent's
+machine, segment 40 machinery), assemble the opening prompt (rendered
+hole card: question + `Code` type sig + "you have ONE tool: eval; answer
+by evaluating `resume <expr>`"), then loop: `ModelProvider::complete` →
+extract the eval block from the reply → run it via the resident session →
+feed back the rendered result or the GHC/type error verbatim (the error
+IS the retry prompt — do not paraphrase it) → until `resume` consumes the
+hole, or a turn/budget cap trips (cap trips → hole stays open, surfaces
+as an attention item, operator can answer). Every provider call's Usage
+goes to the log for meters; every eval source is logged (replay needs
+it). Eval-block extraction: fenced ```haskell block, last one in the
+reply, documented convention in the prompt — no bespoke tool-call
+protocol (freeform transport per the PRD's spec-v0.1 core).
+
 ## VERIFY
 
 Per leaf: unit tests + one integration test through the real server
