@@ -43,15 +43,27 @@ use crate::compile::AsksSidecar;
 use crate::provider::{
     DynModelProvider, Message, ProviderError, Role, TurnRequest, TurnResponse, Usage,
 };
+use crate::tree::FanBadge;
 
 /// How a suspended `AskWith` request routes — decoded from its payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HoleRouting {
     /// `returnControl @T` — the same calling model answers in context.
     ReturnControl { site: u32, ty: Option<String> },
-    /// `returnControlFork @T` — park; a forked child answerer produces the
-    /// typed value.
-    Fork { site: u32, ty: Option<String> },
+    /// `returnControlFork @T` (`fan: None`) — park; a forked child answerer
+    /// produces the typed value. `returnControlFanout @T` (B1 widen,
+    /// `fan: Some(_)`) — same payload-classification scheme (F3: "fan"
+    /// joins additively), park; N thunk children each answer the element
+    /// type. `ty` is the RENDERED answer type: the element type `T` for a
+    /// plain fork, the LIST type `[T]` for a fanout (`engine::strip_list_type`
+    /// recovers `T` from it). `prompts` carries the per-child prompt text,
+    /// one per fanout child, in declaration order (empty for a plain fork).
+    Fork {
+        site: u32,
+        ty: Option<String>,
+        fan: Option<FanBadge>,
+        prompts: Vec<String>,
+    },
     /// `dialogAsk ui` — operator routing; the `Ui` value renders in the form
     /// pane.
     Dialog { ui: Json },
@@ -71,7 +83,8 @@ pub struct ClassifiedHole {
 ///
 /// The request is `Con(AskWith, [prompt :: Text, payload :: Value])`. The
 /// payload object's fields decide the routing: `fork` + `typedSite` →
-/// [`HoleRouting::Fork`], `typedSite` alone → [`HoleRouting::ReturnControl`],
+/// [`HoleRouting::Fork`] (additionally `fan` + `prompts` for a
+/// `returnControlFanout` site), `typedSite` alone → [`HoleRouting::ReturnControl`],
 /// `ui` → [`HoleRouting::Dialog`], else [`HoleRouting::Ask`]. `asks` resolves a
 /// `typedSite` to its rendered answer type.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -84,7 +97,25 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             .and_then(Json::as_bool)
             .unwrap_or(false)
         {
-            HoleRouting::Fork { site, ty }
+            let fan = payload
+                .get("fan")
+                .and_then(Json::as_u64)
+                .map(|n| FanBadge::Exact { n: n as u32 });
+            let prompts = payload
+                .get("prompts")
+                .and_then(Json::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            HoleRouting::Fork {
+                site,
+                ty,
+                fan,
+                prompts,
+            }
         } else {
             HoleRouting::ReturnControl { site, ty }
         }
@@ -94,6 +125,15 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         HoleRouting::Ask { payload }
     };
     ClassifiedHole { routing, prompt }
+}
+
+/// Strip one layer of `[...]` from a rendered type string — the FANOUT
+/// element-type derivation (F3: a `returnControlFanout` site's recorded
+/// asks.json type is the LIST type `[T]`; the harness recovers the
+/// per-child element type `T` by stripping the outer brackets). `None` if
+/// `ty` isn't bracket-wrapped.
+pub fn strip_list_type(ty: &str) -> Option<&str> {
+    ty.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
 }
 
 /// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
@@ -261,6 +301,12 @@ pub struct EngineConfig {
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
+    /// Per-CHILD turn cap for a `returnControlFanout` answerer (B1 widen):
+    /// each of the N children gets this budget independently, so one
+    /// pathological child can't consume the whole node's turn allowance the
+    /// way a single shared cap would. Plain fork/return-control answerers
+    /// still use `max_turns`.
+    pub max_child_turns: u32,
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
 }
@@ -296,6 +342,7 @@ impl EngineConfig {
             effect_names,
             ask_tag,
             max_turns: 8,
+            max_child_turns: 4,
             max_tokens: Some(2048),
         })
     }
@@ -451,6 +498,28 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
     answer
         .to_value(table)
         .map_err(|e| EngineError::Run(format!("bridge answer to Value: {e}")))
+}
+
+/// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
+/// `Value` (F3's RAW-value rule for a `returnControlFanout` resume — the
+/// same "hand back the native representation, not an Aeson wrapper"
+/// discipline a single fork's `unsafeCoerce` relies on). `items` must
+/// already be in declaration order; `table` only needs to know the
+/// always-wired-in `:`/`[]` constructors (any `DataConTable` from the same
+/// compiled program qualifies — `DataConId`s are stable hashes, not
+/// table-local indices, so a table from a DIFFERENT compile of the same
+/// program resolves to the same ids, exactly how a single fork's answer
+/// already crosses from the child's compiled table into the parent's heap).
+pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value, EngineError> {
+    let nil_id = tidepool_bridge::get_resilient(table, "[]", 0)
+        .ok_or_else(|| EngineError::Run("build_list_value: no [] constructor in table".to_string()))?;
+    let cons_id = tidepool_bridge::get_resilient(table, ":", 2)
+        .ok_or_else(|| EngineError::Run("build_list_value: no : constructor in table".to_string()))?;
+    let mut result = Value::Con(nil_id, vec![]);
+    for item in items.into_iter().rev() {
+        result = Value::Con(cons_id, vec![item, result]);
+    }
+    Ok(result)
 }
 
 /// Shared handle to a provider, so the engine and its forked answerers all use

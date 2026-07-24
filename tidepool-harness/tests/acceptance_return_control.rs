@@ -279,28 +279,22 @@ async fn return_control_end_to_end_type_retry_and_answer() {
 /// covered above); the fault is a RUNTIME error.
 ///
 /// OBSERVED BEHAVIOR (verified by running this against the real GHC/JIT
-/// pipeline — this is not a src change, just what the test found): forcing
-/// `error "boom"` faults INSIDE `run_child`'s evaluation of the answerer's
-/// own block, before `Harness::resume_parent` is ever called. `drive_answerer_
-/// to_value`'s runtime-fault branch (harness.rs, the `Err(e)` arm after
-/// `run_child`) feeds `"The answer failed at runtime: {e}. Try again."` back
-/// to the answerer and loops — the SAME retry shape as an ill-typed compile
-/// failure. So: the continuation genuinely is NOT consumed by a bottom
-/// answer; `HoleConsumed` and `NodeDone` are correctly withheld until a valid
-/// answer resumes it. A5 ("forced to NF before consumption") reads as
-/// satisfied for this case, at least incidentally — WHNF-forcing an `Int`
-/// during the answerer's own eval is enough to trip `error` before it ever
-/// reaches the parent.
+/// pipeline): forcing `error "boom"` faults INSIDE `run_child`'s evaluation of
+/// the answerer's own block, before `Harness::resume_parent` is ever called.
+/// `drive_answerer_to_value`'s runtime-fault branch (harness.rs, the `Err(e)`
+/// arm after `run_child`) feeds `"The answer failed at runtime: {e}. Try
+/// again."` back to the answerer and loops — the SAME retry shape as an
+/// ill-typed compile failure. So: the continuation genuinely is NOT consumed
+/// by a bottom answer; `HoleConsumed` and `NodeDone` are correctly withheld
+/// until a valid answer resumes it. A5 ("forced to NF before consumption")
+/// reads as satisfied for this case, at least incidentally — WHNF-forcing an
+/// `Int` during the answerer's own eval is enough to trip `error` before it
+/// ever reaches the parent.
 ///
-/// GAP WORTH FLAGGING (reported in the submit note, src NOT changed): unlike
-/// the ill-typed COMPILE failure (which logs a `HoleAnswerAttempt{Rejected}`
-/// via `log_answer_attempt`), the RUNTIME-fault branch logs nothing to the
-/// durable event log at all — the retry-prompt text lands only as a
-/// `TurnDelta`, with no `HoleAnswerAttempt` marking that an attempt was made
-/// and rejected. The audit trail (D-observatory) is therefore incomplete for
-/// this attempt class; not a consent/correctness bug (nothing is
-/// mis-consumed), but a visibility gap in the same family the `HoleAnswerAttempt`
-/// event exists to close.
+/// AUDIT FIX (B1 widen): the runtime-fault branch now logs a `Rejected`
+/// `HoleAnswerAttempt` too, same as the compile-failure branch — the durable
+/// audit trail now shows every attempt (bottom answers included), not just
+/// the one that eventually consumes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
     if !extract_available() {
@@ -360,19 +354,31 @@ async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
     let Event::HoleConsumed { hole: consumed_hole, .. } = consumed[0] else { unreachable!() };
     assert_eq!(consumed_hole.0, hole_before, "the SAME hole survives the bottom-answer fault to be consumed by the valid retry");
 
-    // GAP: the runtime-fault attempt logs NO HoleAnswerAttempt at all (unlike
-    // the ill-typed compile-failure path) — only the final consuming attempt
-    // shows up. Asserted here so a future fix (logging a Rejected attempt for
-    // runtime faults too) is a visible, deliberate change to this test.
+    // FIXED (B1 widen): the runtime-fault attempt now logs a Rejected
+    // HoleAnswerAttempt too — one Rejected for the bottom-answer fault, one
+    // Consumed for the valid retry — closing the audit-trail gap the
+    // compile-failure path never had.
     let attempts: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::HoleAnswerAttempt { .. })).collect();
     assert_eq!(
         attempts.len(),
-        1,
-        "runtime-fault retries are NOT logged as HoleAnswerAttempt (only the final Consumed one is) — \
-         got {attempts:?}; if this now fails, the runtime-fault branch has started logging attempts too"
+        2,
+        "one Rejected attempt (the runtime fault) and one Consumed attempt (the valid retry), got {attempts:?}"
+    );
+    let Event::HoleAnswerAttempt {
+        hole: h0,
+        outcome: AnswerOutcome::Rejected { error },
+        ..
+    } = attempts[0]
+    else {
+        panic!("first attempt must be Rejected (the runtime fault), got {:?}", attempts[0]);
+    };
+    assert_eq!(h0.0, hole_before, "the rejected attempt references the SAME hole (not consumed)");
+    assert!(
+        error.contains("boom"),
+        "the logged rejection must name the runtime fault, got:\n{error}"
     );
     assert!(matches!(
-        attempts[0],
+        attempts[1],
         Event::HoleAnswerAttempt { outcome: AnswerOutcome::Consumed, .. }
     ));
 

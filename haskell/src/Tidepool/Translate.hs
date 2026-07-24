@@ -132,6 +132,7 @@ data TransState = TransState
   -- an interception site with no sibling available is an extract-pipeline bug).
   , tsReturnControlSitedId :: !(Maybe Word64)
   , tsReturnControlForkSitedId :: !(Maybe Word64)
+  , tsReturnControlFanoutSitedId :: !(Maybe Word64)  -- B1 widen: returnControlFanout's sibling
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
   , tsReturnControlSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
@@ -398,7 +399,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -406,7 +407,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -439,6 +440,7 @@ translateModule allBinds targetName unresolvedIds =
       initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
                     (findAuxVarId "returnControlSited" allBinds)
                     (findAuxVarId "returnControlForkSited" allBinds)
+                    (findAuxVarId "returnControlFanoutSited" allBinds)
                     0 Seq.empty Nothing
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsReturnControlSites finalState)
@@ -971,11 +973,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing 0 Seq.empty Nothing)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing 0 Seq.empty Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1556,22 +1558,25 @@ translate expr =
             emitNode $ NCase argIdx 0 altData
           _ -> error $ "tagToEnum# without resolvable type argument"
 
-    -- returnControl @T prompt / returnControlFork @T prompt (#R0 typed-yield
-    -- pass): detected the same way as the tagToEnum# arm above (a known Var
-    -- applied to [Type ty] + one value arg). The ONLY Core synthesis
-    -- permitted is the head-swap to the hidden *Sited sibling (its varId
-    -- resolved once, name-only, in 'translateModule') with a fresh site-id
-    -- literal prepended — the sibling's REAL body (which builds the
-    -- "typedSite"-tagged AskWith payload) then runs normally at JIT runtime;
-    -- we never construct that payload ourselves.
-    Var v | isReturnControlVar v || isReturnControlForkVar v
+    -- returnControl @T prompt / returnControlFork @T prompt / returnControlFanout
+    -- @T prompts (#R0 typed-yield pass, returnControlFanout added in B1 widen):
+    -- detected the same way as the tagToEnum# arm above (a known Var applied to
+    -- [Type ty] + one value arg — for Fanout that one value arg is the `[Text]`
+    -- prompts list, same shape, translated like any other Core expression). The
+    -- ONLY Core synthesis permitted is the head-swap to the hidden *Sited
+    -- sibling (its varId resolved once, name-only, in 'translateModule') with a
+    -- fresh site-id literal prepended — the sibling's REAL body (which builds
+    -- the "typedSite"-tagged AskWith payload) then runs normally at JIT
+    -- runtime; we never construct that payload ourselves.
+    Var v | isReturnControlVar v || isReturnControlForkVar v || isReturnControlFanoutVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , [Type ty] <- typeArgs
           , [promptArg] <- args -> do
         checkReturnControlType ty
-        let sitedField = if isReturnControlVar v
-                            then tsReturnControlSitedId
-                            else tsReturnControlForkSitedId
+        let sitedField
+              | isReturnControlVar v = tsReturnControlSitedId
+              | isReturnControlForkVar v = tsReturnControlForkSitedId
+              | otherwise = tsReturnControlFanoutSitedId
         sitedIdM <- gets sitedField
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, name-only, by a scan over
@@ -1590,7 +1595,17 @@ translate expr =
             emitFfiPoison
           Just sitedVarId -> do
             siteId <- freshSiteId
-            recordReturnControlSite siteId (T.pack (Tidepool.GhcPipeline.renderType ty))
+            -- returnControlFanout's answer type is `[T]` (a fanout of N
+            -- children each answering T), but `ty` here is the per-child
+            -- element type `T` applied at the call site (`@T`) — record the
+            -- LIST type in the asks.json sidecar so the harness's rendered
+            -- type matches what actually resumes the parent; the harness
+            -- derives the element type back by stripping the outer `[]`.
+            let renderedTy = Tidepool.GhcPipeline.renderType ty
+                typeStr = if isReturnControlFanoutVar v
+                            then "[" ++ renderedTy ++ "]"
+                            else renderedTy
+            recordReturnControlSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
             appLit <- emitNode $ NApp sitedRef litIdx
@@ -2597,6 +2612,10 @@ isReturnControlVar v =
 isReturnControlForkVar :: Id -> Bool
 isReturnControlForkVar v =
   occNameString (nameOccName (idName v)) == "returnControlFork"
+
+isReturnControlFanoutVar :: Id -> Bool
+isReturnControlFanoutVar v =
+  occNameString (nameOccName (idName v)) == "returnControlFanout"
 
 -- | The two extract-time rejections for a returnControl/returnControlFork
 -- site's answer type (spec step 4): a leftover type variable (the site isn't

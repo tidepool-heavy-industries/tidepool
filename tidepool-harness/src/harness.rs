@@ -132,6 +132,14 @@ pub struct Harness {
     /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
     /// Compiled once, reused for every node's bootstrap.
     boot: Arc<compile::CompiledTurn>,
+    /// A just-created root's opening prompt, staged between `create_root` and
+    /// `force` (a thunk node has no live `NodeConvo` to hold it yet). Removed
+    /// once consumed at force time.
+    seeds: Mutex<HashMap<NodeId, String>>,
+    /// A just-registered fork/fanout child's inherited transcript (parent
+    /// prefix + hole card), staged between `register_fork_child` and `force`
+    /// for the same reason as `seeds`. Removed once consumed at force time.
+    forked_transcripts: Mutex<HashMap<NodeId, Vec<Message>>>,
 }
 
 impl Harness {
@@ -157,6 +165,8 @@ impl Harness {
             provider,
             convos: Mutex::new(HashMap::new()),
             boot: Arc::new(boot),
+            seeds: Mutex::new(HashMap::new()),
+            forked_transcripts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -246,7 +256,7 @@ impl Harness {
         // pending seed map via the transcript on force. Here we just remember it
         // by re-deriving from the prompt at force. Keep it simple: store the seed
         // prompt keyed by node until forced.
-        self.seeds().lock().insert(node, prompt.to_string());
+        self.seeds.lock().insert(node, prompt.to_string());
         Ok(node)
     }
 
@@ -272,16 +282,17 @@ impl Harness {
         // real session).
         self.tree.force(node, actor, ())?;
 
-        // Seed the transcript: a fork answerer inherits its parent's transcript
-        // (set by `register_fork`); a plain root gets its opening prompt.
+        // Seed the transcript: a fork/fanout answerer inherits its parent's
+        // transcript (set by `register_fork_child`); a plain root gets its
+        // opening prompt.
         let mut convos = self.convos.lock();
         let transcript = self
-            .forked_transcripts()
+            .forked_transcripts
             .lock()
             .remove(&node)
             .unwrap_or_else(|| {
                 let seed = self
-                    .seeds()
+                    .seeds
                     .lock()
                     .remove(&node)
                     .unwrap_or_else(|| "Begin.".to_string());
@@ -314,33 +325,7 @@ impl Harness {
         };
         Box::new(tidepool_handlers::build_base_stack(&cfg))
     }
-
-    // -- lazy side maps (seed prompts, forked transcripts) --------------------
-    // These carry data between create/register and force without widening the
-    // NodeConvo lifecycle. OnceLock-per-field via helper accessors keeps the
-    // struct lean; they're small and short-lived.
-    fn seeds(&self) -> &Mutex<HashMap<NodeId, String>> {
-        self.seeds_cell().get_or_init(|| Mutex::new(HashMap::new()))
-    }
-    fn forked_transcripts(&self) -> &Mutex<HashMap<NodeId, Vec<Message>>> {
-        self.forks_cell()
-            .get_or_init(|| Mutex::new(HashMap::new()))
-    }
-    fn seeds_cell(&self) -> &std::sync::OnceLock<Mutex<HashMap<NodeId, String>>> {
-        &SEEDS
-    }
-    fn forks_cell(&self) -> &std::sync::OnceLock<Mutex<HashMap<NodeId, Vec<Message>>>> {
-        &FORKS
-    }
 }
-
-// The seed/fork side maps are per-process-simple: a single Harness per process
-// in R0 (one run, one log). Thread-locals-free module statics keyed by NodeId,
-// gated by the Harness's own construction. (If R0 ever runs >1 Harness in one
-// process, these move into the struct — flagged in the freeze notes.)
-static SEEDS: std::sync::OnceLock<Mutex<HashMap<NodeId, String>>> = std::sync::OnceLock::new();
-static FORKS: std::sync::OnceLock<Mutex<HashMap<NodeId, Vec<Message>>>> =
-    std::sync::OnceLock::new();
 
 impl Harness {
     /// Drive ONE model turn on `node`: assemble its transcript, call the
@@ -576,9 +561,11 @@ impl Harness {
         })
     }
 
-    /// Force + drive a FORK answerer for `node`'s pending fork hole. Registers a
-    /// child node (transcript forked at the parent's current turn), forces it,
-    /// drives its turn loop until it produces an answering block, runs that block
+    /// Force + drive a FORK answerer for `node`'s pending fork hole (a plain
+    /// `returnControlFork`, `fan: None` — a `returnControlFanout` hole
+    /// routes to [`Self::answer_fanout`] instead). Registers a child node
+    /// (transcript forked at the parent's current turn), forces it, drives
+    /// its turn loop until it produces an answering block, runs that block
     /// via `run_child` against the parent, and resumes the parent with the
     /// resulting typed Value. The ONE deliberate ill-typed attempt in the golden
     /// path exercises the GHC-verbatim retry here (a compile failure feeds back
@@ -591,7 +578,9 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         let (site_ty, prompt) = match &pending.classified.routing {
-            HoleRouting::Fork { ty, .. } => (ty.clone(), pending.classified.prompt.clone()),
+            HoleRouting::Fork { ty, fan: None, .. } => {
+                (ty.clone(), pending.classified.prompt.clone())
+            }
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -603,14 +592,15 @@ impl Harness {
 
         // Register the fork child: inherit the parent transcript up to the
         // parent's current turn, append the hole card.
-        let child = self.register_fork(node, &prompt, site_ty.as_deref())?;
+        let child =
+            self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
         self.force(child, actor)?;
 
         // Drive the child's turn loop until it emits an answering block, then run
         // that block via run_child against the SUSPENDED PARENT (not the child's
         // own session) to produce a Value in the parent's heap.
         let answer_value = self
-            .drive_answerer_to_value(child, node, site_ty.as_deref())
+            .drive_answerer_to_value(child, node, site_ty.as_deref(), self.cfg.max_turns)
             .await?;
 
         // Resume the parent with the child's typed answer.
@@ -619,6 +609,73 @@ impl Harness {
         let _ = self.tree.node_done(child, "answer delivered".to_string());
         self.drop_session(child);
         Ok(child)
+    }
+
+    /// Force + drive a FANOUT answerer set for `node`'s pending fanout hole
+    /// (`returnControlFanout @T`, `HoleRouting::Fork` with `fan: Some(_)`).
+    /// One park, N thunk children — each registered under `node` (transcript
+    /// forked at the checkpoint, same discipline as [`Self::answer_fork`]),
+    /// forced, and driven to an answering value IN DECLARATION ORDER: children
+    /// serialize against the parked parent's single heap (F3's
+    /// sequential-isolated rule — `run_child` only ever touches one machine at
+    /// a time), so this needs no new `Slot` state beyond what a plain fork
+    /// already uses. Each child gets its own turn-cap budget
+    /// (`cfg.max_child_turns`) rather than the whole-node cap. The N raw
+    /// per-child `T` values are assembled into a genuine `[T]` `Value` (F3's
+    /// RAW-value rule, same discipline a single fork's `unsafeCoerce` relies
+    /// on) and resume the parent exactly once.
+    pub async fn answer_fanout(&self, node: NodeId, actor: Actor) -> Result<Vec<NodeId>, HarnessError> {
+        let pending = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.pending.clone())
+            .ok_or(HarnessError::NotSuspended(node))?;
+        let (list_ty, prompts) = match &pending.classified.routing {
+            HoleRouting::Fork {
+                ty,
+                fan: Some(_),
+                prompts,
+                ..
+            } => (ty.clone(), prompts.clone()),
+            other => {
+                return Err(HarnessError::RoutingMismatch {
+                    node,
+                    routing: "fanout",
+                    actual: format!("{other:?}"),
+                })
+            }
+        };
+        let element_ty = list_ty.as_deref().and_then(engine::strip_list_type);
+
+        let mut children = Vec::with_capacity(prompts.len());
+        let mut answers = Vec::with_capacity(prompts.len());
+        for (idx, prompt) in prompts.iter().enumerate() {
+            let child = self.register_fork_child(
+                node,
+                &format!("fanout answerer {idx}"),
+                prompt,
+                element_ty,
+            )?;
+            self.force(child, actor)?;
+            let value = self
+                .drive_answerer_to_value(child, node, element_ty, self.cfg.max_child_turns)
+                .await?;
+            let _ = self.tree.node_done(child, "answer delivered".to_string());
+            self.drop_session(child);
+            children.push(child);
+            answers.push(value);
+        }
+
+        let table = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.suspend_table.clone())
+            .unwrap_or_default();
+        let list_value = engine::build_list_value(answers, &table)?;
+        self.resume_parent(node, &pending.hole, list_value).await?;
+        Ok(children)
     }
 
     /// Answer an in-context `returnControl` hole: the SAME node's model writes
@@ -644,7 +701,9 @@ impl Harness {
         // Push the hole card as a user turn, then drive the node's own loop to an
         // answering value against itself.
         self.push_user_turn(node, &engine::hole_card(&pending.classified.prompt, ty.as_deref()))?;
-        let value = self.drive_answerer_to_value(node, node, ty.as_deref()).await?;
+        let value = self
+            .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns)
+            .await?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -837,17 +896,21 @@ impl Harness {
     /// Drive `answerer`'s turn loop until it emits an answering block, then run
     /// that block via `run_child` against `target`'s suspended session to
     /// produce a Value. On a compile failure (the GHC-verbatim retry), feed the
-    /// error back as the answerer's next user turn and loop (bounded by the turn
-    /// cap). `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
+    /// error back as the answerer's next user turn and loop (bounded by
+    /// `max_turns` — a single answerer's cap for a plain fork/return-control
+    /// answer, or one fanout child's per-child cap, `cfg.max_child_turns`, so
+    /// no single child of a fan can consume the whole node's turn budget).
+    /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
     async fn drive_answerer_to_value(
         &self,
         answerer: NodeId,
         target: NodeId,
         ty: Option<&str>,
+        max_turns: u32,
     ) -> Result<Value, HarnessError> {
         let mut attempts = 0;
         loop {
-            if attempts >= self.cfg.max_turns {
+            if attempts >= max_turns {
                 return Err(EngineError::NoBlock { turns: attempts }.into());
             }
             attempts += 1;
@@ -967,10 +1030,28 @@ impl Harness {
                     return Err(HarnessError::NotSuspended(target))
                 }
                 Err(e) => {
-                    // A run-time fault in the answerer — retry with the message.
+                    // A run-time fault in the answerer (e.g. `error "boom"`
+                    // forced during its own eval, before the parent's
+                    // continuation is ever touched) — logged as a Rejected
+                    // attempt, same as the compile-failure branch above, so
+                    // the durable audit trail shows every attempt, not just
+                    // the one that eventually consumes. The continuation is
+                    // NEVER consumed by this attempt; retry with the message.
+                    let err = e.to_string();
+                    self.log_answer_attempt(
+                        target,
+                        &self
+                            .convos
+                            .lock()
+                            .get(&target)
+                            .and_then(|c| c.pending.as_ref().map(|p| p.hole.clone()))
+                            .unwrap_or(HoleId(String::new())),
+                        "child",
+                        AnswerOutcome::Rejected { error: err.clone() },
+                    )?;
                     self.push_user_turn(
                         answerer,
-                        &format!("The answer failed at runtime: {e}. Try again."),
+                        &format!("The answer failed at runtime: {err}. Try again."),
                     )?;
                     continue;
                 }
@@ -1046,12 +1127,16 @@ impl Harness {
         }
     }
 
-    /// Register a fork child under `parent`, inheriting the parent's transcript
-    /// up to its current turn plus the hole card. Emits `TurnForked` referencing
-    /// the parent position. The child is a THUNK — the caller forces it.
-    fn register_fork(
+    /// Register a fork/fanout child under `parent`, inheriting the parent's
+    /// transcript up to its current turn plus the hole card. Emits
+    /// `TurnForked` referencing the parent position. The child is a THUNK —
+    /// the caller forces it. `title` distinguishes a plain fork's single
+    /// child ("fork answerer") from one of a fanout's N children ("fanout
+    /// answerer <i>").
+    fn register_fork_child(
         &self,
         parent: NodeId,
+        title: &str,
         prompt: &str,
         ty: Option<&str>,
     ) -> Result<NodeId, HarnessError> {
@@ -1062,7 +1147,7 @@ impl Harness {
         };
         let child = self.tree.create_node(
             Some(parent),
-            "fork answerer",
+            title,
             self.cfg.effect_names.clone(),
             ForkShape::Exact(0),
             false,
@@ -1077,7 +1162,7 @@ impl Harness {
             role: Role::User,
             content: engine::hole_card(prompt, ty),
         });
-        self.forked_transcripts().lock().insert(child, transcript);
+        self.forked_transcripts.lock().insert(child, transcript);
         Ok(child)
     }
 
