@@ -84,6 +84,20 @@ pub struct MachineState {
     /// thread-local): tenured bindings' stable slots. Survive across runs;
     /// cleared only at machine teardown (`free_session_heap`).
     persistent_roots: RefCell<Vec<*mut *mut u8>>,
+    /// STOWED GC roots (segment 40): the suspended continuation slot(s) of a
+    /// parent turn parked at a typed yield (`returnControl`/`Ask`), registered
+    /// for the duration of a NESTED CHILD run so a child's collection evacuates
+    /// the parent's stowed continuation tree instead of freeing it. Kept as a
+    /// SEPARATE set from `persistent_roots` DELIBERATELY: intent must be
+    /// auditable — a persistent root is a tenured value-plane binding that lives
+    /// for the machine's whole life; a stowed root is a *transient* parent
+    /// continuation rooted only while at least one child is running against the
+    /// suspended machine. `perform_gc` folds this set in alongside the other
+    /// three sources. Registered on entering nested-child mode, deregistered on
+    /// parent resume or child teardown; cleared defensively at machine teardown
+    /// (`free_session_heap`). NOT touched by `clear_run_scratch` — a child
+    /// turn's per-run teardown must not strand the parent's continuation.
+    stowed_roots: RefCell<Vec<*mut *mut u8>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -107,6 +121,7 @@ impl MachineState {
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
             persistent_roots: RefCell::new(Vec::new()),
+            stowed_roots: RefCell::new(Vec::new()),
         }
     }
 
@@ -412,6 +427,9 @@ impl MachineState {
     /// the dying machine's own registries.
     pub(crate) fn free_session_heap(&self) {
         self.clear_persistent_roots();
+        // Defensive: a machine dropped mid-nested-child (a child panicked and
+        // its guard unwound) must not leave a dangling stowed slot registered.
+        self.clear_stowed_roots();
         self.gc_state.borrow_mut().take();
     }
 
@@ -465,6 +483,45 @@ impl MachineState {
     /// persistent-root sibling of `extend_rust_roots`, used by `perform_gc`.
     pub(crate) fn extend_persistent_roots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.persistent_roots.borrow().iter().copied());
+    }
+
+    // --- stowed roots (nested-child-scoped GC roots, segment 40) ----------
+
+    /// Register a STOWED GC root slot (segment 40): the parent's suspended
+    /// continuation cell, rooted for the duration of a nested child run.
+    ///
+    /// Unlike a persistent root (session lifetime), a stowed root is
+    /// deregistered when the parent resumes or the last child tears down.
+    /// `perform_gc` folds these in on every collection, so a child's GC
+    /// evacuates the parent's continuation tree and rewrites `*slot` in place.
+    pub(crate) fn register_stowed_root(&self, slot: *mut *mut u8) {
+        self.stowed_roots.borrow_mut().push(slot);
+    }
+
+    /// Remove a previously-registered stowed root by slot address (parent
+    /// resume / child teardown). Removes the FIRST matching entry so nested
+    /// child depth pairs each register with exactly one deregister.
+    pub(crate) fn deregister_stowed_root(&self, slot: *mut *mut u8) {
+        let mut roots = self.stowed_roots.borrow_mut();
+        if let Some(pos) = roots.iter().position(|&s| s == slot) {
+            roots.remove(pos);
+        }
+    }
+
+    /// Number of registered stowed roots (test/diagnostic accessor).
+    pub(crate) fn stowed_roots_count(&self) -> usize {
+        self.stowed_roots.borrow().len()
+    }
+
+    /// Clear all stowed roots (defensive machine-teardown path).
+    pub(crate) fn clear_stowed_roots(&self) {
+        self.stowed_roots.borrow_mut().clear();
+    }
+
+    /// Append this machine's stowed roots to `out` — the stowed-root sibling of
+    /// `extend_persistent_roots`, used by `perform_gc`.
+    pub(crate) fn extend_stowed_roots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.stowed_roots.borrow().iter().copied());
     }
 }
 
