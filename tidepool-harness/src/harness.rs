@@ -40,7 +40,7 @@ use serde_json::Value as Json;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
-use tidepool_repr::DataConTable;
+use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -84,6 +84,8 @@ pub enum HarnessError {
     },
     #[error("node {0:?}: no mechanical derived form for the pending hole (uiOf yields None, or the submission doesn't map) — fall back to the model-driven answerer")]
     NoDerivedForm(NodeId),
+    #[error("node {0:?} has no pending elaborator proposal to confirm/reject")]
+    NoPendingProposal(NodeId),
 }
 
 /// Per-node conversation state the Harness keeps live (also derivable from the
@@ -103,12 +105,30 @@ struct NodeConvo {
     /// bridge an answer Value against the same constructor set.
     suspend_table: Option<DataConTable>,
     suspend_asks: AsksSidecar,
+    /// B2 elaboration: a GHC-valid `resume expr` the calling model produced
+    /// for a non-mechanical dialog submission, staged for an operator
+    /// confirm/reject decision — NOT yet run or consumed. `None` unless an
+    /// elaboration just completed and is awaiting that decision.
+    pending_proposal: Option<PendingProposal>,
 }
 
 #[derive(Clone)]
 struct PendingHole {
     hole: HoleId,
     classified: ClassifiedHole,
+}
+
+/// A staged, unconsumed elaborator answer (B2). `expr`/`table` are the
+/// COMPILED artifacts from the elaboration turn that produced a GHC-valid
+/// `resume` expression — confirming re-runs them via `run_child` (the same
+/// discipline [`Harness::answer_mechanical`] uses), so confirming never
+/// re-compiles or re-asks the model. `source` is the Haskell the operator
+/// sees in the inspector.
+struct PendingProposal {
+    hole: HoleId,
+    source: String,
+    expr: CoreExpr,
+    table: DataConTable,
 }
 
 /// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
@@ -310,6 +330,7 @@ impl Harness {
                 pending: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
+                pending_proposal: None,
             },
         );
         Ok(())
@@ -546,6 +567,18 @@ impl Harness {
         let table = convo.suspend_table.clone()?;
         drop(convos);
         crate::uiof::ui_of(&table, &ty)
+    }
+
+    /// The source of `node`'s pending elaborator proposal (B2), if one is
+    /// staged awaiting an operator confirm/reject — what the inspector's
+    /// proposal card renders instead of the raw form. `None` when no
+    /// elaboration has produced an unconsumed proposal.
+    pub fn pending_proposal_source(&self, node: NodeId) -> Option<String> {
+        self.convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.pending_proposal.as_ref())
+            .map(|p| p.source.clone())
     }
 
     /// The first node currently suspended on a Dialog (operator) hole, if any —
@@ -805,9 +838,11 @@ impl Harness {
     /// Answer an operator `dialogAsk` (or plain `ask`) hole with a form
     /// submission `{values, prose}`. MECHANICAL-FIRST (D6): an empty-prose known
     /// option key consumes directly (the submission JSON becomes the resume
-    /// Value); non-empty prose or an unknown shape would route to the model as
-    /// elaborator (R0 spike: prose is passed through as the resume Value too — the
-    /// elaboration path is the documented exception handler, drafted here).
+    /// Value) — ZERO model turns, UNCHANGED from the R0 spike. Non-empty prose
+    /// or an unknown shape (no `values` at all) routes to [`Self::elaborate_dialog`]
+    /// — the calling model interprets the submission and proposes a `resume
+    /// expr`, SHOWN to the operator (not auto-consumed); see
+    /// [`Self::confirm_proposal`]/[`Self::reject_proposal`].
     pub async fn answer_dialog(
         &self,
         node: NodeId,
@@ -829,6 +864,11 @@ impl Harness {
                 })
             }
         }
+
+        if !Self::submission_is_mechanical(&submission) {
+            return self.elaborate_dialog(node, &pending, submission).await;
+        }
+
         // The suspend table is the constructor set the hole suspended with; the
         // submission Value bridges against it. dialogAsk returns a Value, so the
         // submission JSON IS the resume answer (mechanical: no model turn).
@@ -842,6 +882,235 @@ impl Harness {
         self.log_answer_attempt(node, &pending.hole, "operator", AnswerOutcome::Consumed)?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
+    }
+
+    /// D6's mechanical/exception-path split for a dialog submission (F1):
+    /// empty prose AND a non-empty `values` map is the ONLY mechanical shape —
+    /// non-empty prose (prose wins over a conflicting widget, per FREEZES.md
+    /// F1) or an empty/absent `values` map (unknown shape: no answer the
+    /// harness can bridge without interpretation) both fall to elaboration.
+    fn submission_is_mechanical(submission: &Json) -> bool {
+        let prose_empty = submission
+            .get("prose")
+            .and_then(Json::as_str)
+            .is_none_or(str::is_empty);
+        let has_values = submission
+            .get("values")
+            .and_then(Json::as_object)
+            .is_some_and(|m| !m.is_empty());
+        prose_empty && has_values
+    }
+
+    /// F1's exception path (B2): push the elaborator prompt (hole card + the
+    /// raw submission + a `resume :: Value -> M Value` instruction) as `node`'s
+    /// next user turn, drive the SAME node's own conversation (no forked
+    /// child — this is operator-hole interpretation in the calling model's
+    /// own context, same discipline [`Self::answer_return_control`] uses) to a
+    /// GHC-valid proposal, then STAGE it rather than running/consuming it.
+    async fn elaborate_dialog(
+        &self,
+        node: NodeId,
+        pending: &PendingHole,
+        submission: Json,
+    ) -> Result<(), HarnessError> {
+        let prompt = engine::elaborator_prompt(&pending.classified.prompt, &submission);
+        self.push_user_turn(node, &prompt)?;
+
+        let (source, expr, table) = self
+            .drive_elaborator_to_proposal(node, self.cfg.max_turns)
+            .await?;
+
+        self.log_answer_attempt(
+            node,
+            &pending.hole,
+            "operator",
+            AnswerOutcome::Proposed {
+                source: source.clone(),
+            },
+        )?;
+        self.set_pending_proposal(
+            node,
+            PendingProposal {
+                hole: pending.hole.clone(),
+                source,
+                expr,
+                table,
+            },
+        );
+        Ok(())
+    }
+
+    /// Drive `node`'s own turn loop until it emits a GHC-valid `resume expr ::
+    /// Value` block (retrying with the verbatim GHC error on a compile
+    /// failure, same discipline as [`Self::drive_answerer_to_value`]) — but,
+    /// unlike that helper, NEVER runs the compiled expr; elaboration only
+    /// needs it to TYPE-CHECK before showing it to the operator. Returns the
+    /// proposed source text plus the compiled artifacts
+    /// [`Self::run_compiled_answer`] later runs at confirm time.
+    async fn drive_elaborator_to_proposal(
+        &self,
+        node: NodeId,
+        max_turns: u32,
+    ) -> Result<(String, CoreExpr, DataConTable), HarnessError> {
+        let mut attempts = 0;
+        loop {
+            if attempts >= max_turns {
+                return Err(EngineError::NoBlock { turns: attempts }.into());
+            }
+            attempts += 1;
+
+            let (transcript, turn_seq) = {
+                let convos = self.convos.lock();
+                let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+                (convo.transcript.clone(), convo.turn_seq)
+            };
+            let driven = engine::drive_model_turn(
+                self.provider.as_ref(),
+                &transcript,
+                self.cfg.max_tokens,
+            )
+            .await?;
+            self.tree.turn_delta(
+                node,
+                turn_seq,
+                Role::Assistant,
+                driven.reply.clone(),
+                Some(driven.usage),
+            )?;
+            {
+                let mut convos = self.convos.lock();
+                let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+                convo.transcript.push(Message {
+                    role: Role::Assistant,
+                    content: driven.reply.clone(),
+                });
+                convo.turn_seq += 1;
+            }
+
+            let Some(block) = driven.block else {
+                self.push_user_turn(
+                    node,
+                    "Reply with a single ```haskell block: `resume expr` where `expr` is a \
+                     `Value` built via `toJSON`.",
+                )?;
+                continue;
+            };
+
+            let (imports, body) = engine::split_imports(&block);
+            let src = engine::template_answer_turn(
+                &self.cfg,
+                &body,
+                &imports,
+                engine::DIALOG_RESUME_HELPER,
+            );
+            let cfg_bin = self.cfg.extract_bin.clone();
+            let include = self.cfg.include.clone();
+            let compiled = tokio::task::spawn_blocking(move || {
+                compile::compile_turn(&cfg_bin, &src, "result", &include)
+            })
+            .await
+            .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?;
+
+            match compiled {
+                Ok(c) => return Ok((body, c.expr, c.table)),
+                Err(e) => {
+                    // GHC-verbatim retry: the continuation is untouched — no
+                    // proposal is ever staged from a rejected attempt.
+                    let err = e.to_string();
+                    let hole = self
+                        .convos
+                        .lock()
+                        .get(&node)
+                        .and_then(|c| c.pending.as_ref().map(|p| p.hole.clone()))
+                        .unwrap_or(HoleId(String::new()));
+                    self.log_answer_attempt(
+                        node,
+                        &hole,
+                        "operator",
+                        AnswerOutcome::Rejected { error: err.clone() },
+                    )?;
+                    self.push_user_turn(
+                        node,
+                        &format!(
+                            "That did not compile. Fix it and try again — the error is:\n\n\
+                             ```\n{err}\n```"
+                        ),
+                    )?;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Confirm `node`'s pending elaborator proposal (B2): run the ALREADY
+    /// GHC-validated compiled expr via `run_child` against `node`'s own
+    /// suspended session (same discipline as [`Self::answer_mechanical`]'s
+    /// tail — no re-compile, no second model turn) and resume the parent with
+    /// the result. Errors with [`HarnessError::NoPendingProposal`] if nothing
+    /// is staged.
+    pub async fn confirm_proposal(&self, node: NodeId) -> Result<(), HarnessError> {
+        let proposal = self.take_pending_proposal(node)?;
+        let value = self
+            .run_compiled_answer(node, proposal.expr, proposal.table)
+            .await?;
+        self.resume_parent(node, &proposal.hole, value).await
+    }
+
+    /// Reject `node`'s pending elaborator proposal (B2): discard it without
+    /// running it. The hole was never anything but `Suspended` while the
+    /// proposal was staged, so this is a pure log event — the continuation is
+    /// untouched and the hole is already "reopened" (it never closed).
+    pub fn reject_proposal(&self, node: NodeId) -> Result<(), HarnessError> {
+        let proposal = self.take_pending_proposal(node)?;
+        self.log_answer_attempt(
+            node,
+            &proposal.hole,
+            "operator",
+            AnswerOutcome::ProposalDiscarded,
+        )
+    }
+
+    fn take_pending_proposal(&self, node: NodeId) -> Result<PendingProposal, HarnessError> {
+        let mut convos = self.convos.lock();
+        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+        convo
+            .pending_proposal
+            .take()
+            .ok_or(HarnessError::NoPendingProposal(node))
+    }
+
+    fn set_pending_proposal(&self, node: NodeId, proposal: PendingProposal) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.pending_proposal = Some(proposal);
+        }
+    }
+
+    /// Run an already-compiled answer expression via `run_child` against
+    /// `target`'s suspended session — the shared tail [`Self::confirm_proposal`]
+    /// uses, factored out since it needs no drive loop (the expr already
+    /// type-checked at elaboration time).
+    async fn run_compiled_answer(
+        &self,
+        target: NodeId,
+        expr: CoreExpr,
+        table: DataConTable,
+    ) -> Result<Value, HarnessError> {
+        let mut session = self.take_session(target)?;
+        let (session, out) = tokio::task::spawn_blocking(move || {
+            let out = session.run_child(
+                "elaborated",
+                &expr,
+                &table,
+                &tidepool_codegen::emit::ExternalEnv::new(),
+            );
+            (session, out)
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
+        self.put_session(target, session, None, AsksSidecar::default());
+        out.map(|r| r.into_value())
+            .map_err(|e| HarnessError::Resident(e.to_string()))
     }
 
     /// Evaluate `expr` (a plain `M a` expression — no `resume`/hole semantics)
@@ -1237,5 +1506,49 @@ impl Harness {
         self.tree
             .turn_delta(node, turn, Role::User, content.to_string(), None)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -- the mechanical/elaborate routing decision (B2) ----------------------
+
+    #[test]
+    fn empty_prose_known_values_is_mechanical() {
+        assert!(Harness::submission_is_mechanical(
+            &json!({ "values": { "yes": true }, "prose": "" })
+        ));
+    }
+
+    #[test]
+    fn empty_prose_missing_prose_field_is_mechanical() {
+        // The prose channel is always present per F1, but a submission
+        // missing it entirely (e.g. a raw values-only client) is still
+        // treated as empty prose, not a malformed shape.
+        assert!(Harness::submission_is_mechanical(&json!({ "values": { "yes": true } })));
+    }
+
+    #[test]
+    fn non_empty_prose_is_never_mechanical_even_with_values() {
+        // Prose wins over a conflicting widget (FREEZES.md F1).
+        assert!(!Harness::submission_is_mechanical(
+            &json!({ "values": { "yes": true }, "prose": "actually no" })
+        ));
+    }
+
+    #[test]
+    fn non_empty_prose_alone_routes_to_elaboration() {
+        assert!(!Harness::submission_is_mechanical(
+            &json!({ "values": {}, "prose": "do the thing" })
+        ));
+    }
+
+    #[test]
+    fn empty_values_and_empty_prose_is_unknown_shape_routes_to_elaboration() {
+        assert!(!Harness::submission_is_mechanical(&json!({ "values": {}, "prose": "" })));
+        assert!(!Harness::submission_is_mechanical(&json!({})));
     }
 }

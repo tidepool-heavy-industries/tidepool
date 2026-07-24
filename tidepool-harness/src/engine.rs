@@ -185,6 +185,35 @@ where `expr :: T` matches the hole's declared type. `resume` is the identity her
 /// the answerer turn's `helpers` so `resume` is in scope.
 pub const RESUME_HELPER: &str = "resume :: a -> M a\nresume = pure";
 
+/// The B2 elaborator's `resume :: Value -> M Value` helper. A `dialogAsk`/`ask`
+/// hole always resumes with an untyped JSON `Value` (`Value` is re-exported
+/// unqualified from `Tidepool.Prelude`, no extra import needed) — unlike
+/// `returnControl`/`Fork`, there is no program-declared answer type to
+/// specialize `resume` to, so this is the ONE fixed signature every dialog
+/// elaboration turn compiles against.
+pub const DIALOG_RESUME_HELPER: &str = "resume :: Value -> M Value\nresume = pure";
+
+/// The B2 elaborator's prompt: the hole's card plus the operator's raw
+/// `{values, prose}` submission, asking the calling model to interpret it and
+/// answer with `resume expr :: Value` (built via `toJSON`). Rendered once per
+/// elaboration attempt's opening turn; retries instead feed back the GHC
+/// error (same discipline as [`hole_card`]'s answerers).
+pub fn elaborator_prompt(prompt: &str, submission: &Json) -> String {
+    let rendered = serde_json::to_string_pretty(submission).unwrap_or_else(|_| submission.to_string());
+    format!(
+        "An operator-routed hole received a submission that needs interpretation \
+         (non-empty prose, or a shape with no known mechanical mapping) — you are \
+         acting as the ELABORATOR: read the submission and decide what answer it means.\n\n\
+         {prompt}\n\n\
+         The operator submitted:\n\n```json\n{rendered}\n```\n\n\
+         Answer by evaluating `resume expr` where:\n\n\
+         ```haskell\nresume :: Value -> M Value\n```\n\n\
+         Build `expr` with `toJSON` (e.g. `toJSON (object [\"key\" .= value])`). Your \
+         proposed answer is NOT consumed automatically — it is shown to the operator, \
+         who confirms or rejects it before the hole resumes."
+    )
+}
+
 /// Assemble the provider request from a transcript and framing. The system
 /// message is always first; the transcript follows in order.
 pub fn assemble_request(transcript: &[Message], max_tokens: Option<u32>) -> TurnRequest {

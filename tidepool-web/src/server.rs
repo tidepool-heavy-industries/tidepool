@@ -12,6 +12,11 @@
 //! - `POST /answer/:node`         — submit a form/prose answer to a Dialog hole.
 //! - `POST /answer/:node/:key`    — a mechanical option-key answer (D6).
 //! - `POST /fork/:node`  — force + drive the fork answerer for a fork hole.
+//! - `POST /confirm/:node` — consume a staged elaborator proposal (B2): runs
+//!                         the already GHC-validated `resume expr` and
+//!                         resumes the hole.
+//! - `POST /reject/:node`  — discard a staged elaborator proposal (B2): the
+//!                         hole reopens untouched for a fresh answer.
 //! - `POST /cancel/:node`— cancel a node.
 //! - `POST /eval_in_binding/:node` — evaluate a plain `M a` expression against
 //!                         a SUSPENDED node's live session heap; a
@@ -83,6 +88,8 @@ pub fn router(state: AppState) -> Router {
         .route("/fork/{node}", post(fork))
         .route("/answer/{node}", post(answer))
         .route("/answer/{node}/{key}", post(answer_key))
+        .route("/confirm/{node}", post(confirm))
+        .route("/reject/{node}", post(reject))
         .route("/cancel/{node}", post(cancel))
         .route("/eval_in_binding/{node}", post(eval_in_binding))
         .route("/snapshot", get(snapshot))
@@ -158,11 +165,15 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
     }
 }
 
-/// The inspector pane markup (id="inspector"). Renders the pending operator
-/// (Dialog) hole's `Ui` form, or an empty placeholder.
+/// The inspector pane markup (id="inspector"). When the focused operator hole
+/// has a staged elaborator proposal (B2), that takes priority — the operator
+/// must confirm/reject it before the raw form is relevant again. Otherwise
+/// renders the pending Dialog hole's `Ui` form, or an empty placeholder.
 fn inspector_fragment(st: &AppState) -> Markup {
     let inner = if let Some(node) = st.harness.first_operator_hole() {
-        if let Some(ui) = st.harness.pending_dialog_ui(node) {
+        if let Some(source) = st.harness.pending_proposal_source(node) {
+            render_proposal(node, &source)
+        } else if let Some(ui) = st.harness.pending_dialog_ui(node) {
             let answer_url = format!("/answer/{}", node.0);
             render_with_answer_url(&ui, &answer_url)
         } else {
@@ -172,6 +183,23 @@ fn inspector_fragment(st: &AppState) -> Markup {
         shell::inspector_empty()
     };
     html! { div id="inspector" { (inner) } }
+}
+
+/// The elaborator proposal card (B2): the GHC-valid `resume expr` the calling
+/// model proposed for a non-mechanical dialog submission, SHOWN BEFORE
+/// CONSUME — the operator confirms (runs it and resumes the hole) or rejects
+/// (discards it; the hole reopens, submission preserved in the transcript).
+fn render_proposal(node: NodeId, source: &str) -> Markup {
+    html! {
+        div class="ui-card" {
+            h3 class="ui-card-title" { "Elaborated proposal" }
+            pre class="ui-code" { code { (source) } }
+            div class="actions" {
+                button data-on-click=(format!("@post('/confirm/{}')", node.0)) { "confirm" }
+                button class="ghost" data-on-click=(format!("@post('/reject/{}')", node.0)) { "reject" }
+            }
+        }
+    }
 }
 
 /// One node's token-usage rollup, folded from `TurnDelta` events.
@@ -584,6 +612,34 @@ async fn answer_key(
     });
     st.ping();
     Json(json!({"ok": true, "key": key})).into_response()
+}
+
+/// Confirm a staged elaborator proposal (B2): consumes the hole. Runs off the
+/// request task (same fire-and-ping shape as `fork`/`answer`) since it drives
+/// a `run_child` + resume through the blocking pool.
+async fn confirm(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
+    let node = NodeId(node);
+    let harness = st.harness.clone();
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        let _ = harness.confirm_proposal(node).await;
+        st2.ping();
+    });
+    st.ping();
+    Json(json!({"ok": true, "confirming": node.0})).into_response()
+}
+
+/// Reject a staged elaborator proposal (B2): discards it, the hole stays
+/// suspended and open for a fresh answer. Synchronous (no session/GHC work).
+async fn reject(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
+    let node = NodeId(node);
+    match st.harness.reject_proposal(node) {
+        Ok(()) => {
+            st.ping();
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
 }
 
 async fn cancel(State(st): State<AppState>, Path(node): Path<u64>) -> Response {

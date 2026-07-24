@@ -158,4 +158,14 @@ pub enum AnswerOutcome {
     Rejected {
         error: String,
     },
+    /// B2 elaboration flow: the calling model produced a GHC-valid `resume
+    /// expr` for a non-empty-prose/unknown-shape dialog submission. NOT
+    /// consumed yet — `source` is the proposed expr, shown in the inspector
+    /// for an operator confirm/reject decision.
+    Proposed {
+        source: String,
+    },
+    /// The operator explicitly discarded a shown proposal (B2 reject verb).
+    /// Continuation NOT consumed; the hole stays open for a fresh answer.
+    ProposalDiscarded,
 }
