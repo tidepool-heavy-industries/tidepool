@@ -3881,6 +3881,7 @@ version = "0.1.0"
 dependencies = [
  "genai",
  "openai-auth",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",

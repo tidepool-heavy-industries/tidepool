@@ -33,9 +33,13 @@ pub enum NodeState {
     /// Unforced: no session, no tokens, no effects (C1).
     Thunk,
     Running,
-    Suspended { hole: HoleId },
+    Suspended {
+        hole: HoleId,
+    },
     Done,
-    Cancelled { reason: String },
+    Cancelled {
+        reason: String,
+    },
 }
 
 /// Pre-force fan-out badge (C3, three-valued by amendment): `Dynamic`

@@ -19,12 +19,15 @@
 pub mod binders;
 pub mod engine;
 pub mod render;
+pub mod resident;
 pub mod turn;
 
 pub use engine::{
     AbortOutcome, EngineConfig, OutputSink, RenderPolicy, ResumeOutcome, Retention, SessionEngine,
     StartError, StartTurn, TurnOutcome,
 };
+
+pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
 
 pub use turn::{
     classify_turn, compile_session_turn, BoundBinder, SessionBind, SessionTurnResult,

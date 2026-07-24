@@ -66,7 +66,10 @@ pub enum Event {
     },
     /// The ONLY work-begins event. Consent integrity = no Turn/Effect
     /// events for a node without a prior Forced (audited, literal zero).
-    Forced { node: NodeId, actor: Actor },
+    Forced {
+        node: NodeId,
+        actor: Actor,
+    },
     TurnStart {
         node: NodeId,
         source: String,
@@ -96,9 +99,18 @@ pub enum Event {
         source: String,
         outcome: AnswerOutcome,
     },
-    HoleConsumed { node: NodeId, hole: HoleId },
-    NodeDone { node: NodeId, result_rendered: String },
-    NodeCancelled { node: NodeId, reason: String },
+    HoleConsumed {
+        node: NodeId,
+        hole: HoleId,
+    },
+    NodeDone {
+        node: NodeId,
+        result_rendered: String,
+    },
+    NodeCancelled {
+        node: NodeId,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,5 +127,7 @@ pub enum Actor {
 pub enum AnswerOutcome {
     Consumed,
     /// Continuation NOT consumed; the error is the retry prompt.
-    Rejected { error: String },
+    Rejected {
+        error: String,
+    },
 }

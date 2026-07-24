@@ -7,10 +7,12 @@
 //! implementations. Types here are the vocabulary, not the machinery —
 //! keep them dependency-light.
 
-pub mod tree;
 pub mod log;
 pub mod provider;
+pub mod registry;
+pub mod tree;
 pub mod ui;
 
+pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};

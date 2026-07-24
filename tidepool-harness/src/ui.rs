@@ -14,18 +14,32 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "ui", rename_all = "snake_case")]
 pub enum Ui {
-    Card { title: String, body: Vec<Ui> },
+    Card {
+        title: String,
+        body: Vec<Ui>,
+    },
     /// Markdown.
-    Prose { text: String },
+    Prose {
+        text: String,
+    },
     /// Fenced source block — type signatures, decls, eval sources.
-    Code { lang: String, source: String },
+    Code {
+        lang: String,
+        source: String,
+    },
     Choice {
         prompt: String,
         /// (key, label) pairs; the answer references the key.
         options: Vec<(String, String)>,
     },
-    TextIn { prompt: String, multiline: bool },
-    Badge { label: String, kind: BadgeKind },
+    TextIn {
+        prompt: String,
+        multiline: bool,
+    },
+    Badge {
+        label: String,
+        kind: BadgeKind,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,12 +63,18 @@ mod tests {
         let ui = Ui::Card {
             title: "hole".into(),
             body: vec![
-                Ui::Code { lang: "haskell".into(), source: "resume :: Verdict -> M ()".into() },
+                Ui::Code {
+                    lang: "haskell".into(),
+                    source: "resume :: Verdict -> M ()".into(),
+                },
                 Ui::Choice {
                     prompt: "verdict?".into(),
                     options: vec![("approve".into(), "Approve".into())],
                 },
-                Ui::Badge { label: "Exec, Fs".into(), kind: BadgeKind::EffectRow },
+                Ui::Badge {
+                    label: "Exec, Fs".into(),
+                    kind: BadgeKind::EffectRow,
+                },
             ],
         };
         let json = serde_json::to_string(&ui).unwrap();
