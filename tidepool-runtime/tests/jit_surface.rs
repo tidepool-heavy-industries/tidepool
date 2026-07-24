@@ -974,3 +974,32 @@ fn works_parse_iso8601_format_day_roundtrip() {
         serde_json::json!("2024-03-05"),
     );
 }
+
+/// `Ui` (`haskell/lib/Tidepool/Ui.hs`) constructs on the JIT and serializes
+/// to the same JSON contract as `tidepool-harness/src/ui.rs`'s
+/// `wire_shape_is_stable` test (externally tagged by `"ui"`, snake_case
+/// tags, `options` as 2-element arrays). Compared structurally, not as a
+/// literal string — the vendored `object` is `Data.Map.Strict`-backed and
+/// always emits keys in ascending order, so it cannot reproduce the Rust
+/// struct's declaration-order field sequence; JSON object member order
+/// carries no semantics and neither side depends on it.
+#[test]
+fn works_ui() {
+    works_with_imports(
+        "Tidepool.Ui",
+        r#"pure (card "hole"
+             [ code "haskell" "resume :: Verdict -> M ()"
+             , choice "verdict?" [("approve", "Approve")]
+             , badge "Exec, Fs" EffectRow
+             ])"#,
+        serde_json::json!({
+            "ui": "card",
+            "title": "hole",
+            "body": [
+                {"ui": "code", "lang": "haskell", "source": "resume :: Verdict -> M ()"},
+                {"ui": "choice", "prompt": "verdict?", "options": [["approve", "Approve"]]},
+                {"ui": "badge", "label": "Exec, Fs", "kind": "effect_row"}
+            ]
+        }),
+    );
+}
