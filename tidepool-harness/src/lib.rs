@@ -17,6 +17,7 @@ pub mod registry;
 pub mod replay;
 pub mod tree;
 pub mod ui;
+pub mod uiof;
 
 pub use compile::{AsksSidecar, CompiledTurn};
 pub use engine::{
@@ -27,3 +28,4 @@ pub use harness::{Harness, HarnessError, NodeSummary};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};
+pub use uiof::{defining_module, resume_expr_from_submission, ui_of};

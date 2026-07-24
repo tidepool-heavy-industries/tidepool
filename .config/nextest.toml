@@ -79,7 +79,9 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # `tidepool-web`'s `kill9_restart` acceptance test spawns the real
 # `tidepool-harness` binary, which itself drives real GHC extracts — GHC-tier
 # for the same reason even though tidepool-web has no other GHC dependency.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-web) & binary(kill9_restart)))'
+# `uiof_mechanical` (A1, uiOf server-derived forms) is the same shape again: a
+# real GHC extract of a user `Verdict` module, driven through the real Harness.
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-web) & binary(kill9_restart)))'
 
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
@@ -96,5 +98,5 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 max-threads = 4
 
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-web) & binary(kill9_restart))'
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-web) & binary(kill9_restart))'
 test-group = 'ghc-heavy'
