@@ -74,7 +74,12 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # here and capped via the ghc-heavy group below. (Its in-test skip-gate alone
 # is not enough: a stale `tidepool-extract` on PATH satisfies the gate and then
 # fails the compile, so the filter is the real tier boundary.)
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)))'
+# `acceptance_return_control` (A3, PRD §11) is the same shape as
+# `golden_path`: record-replay through the real Harness, real GHC extracts.
+# `tidepool-web`'s `kill9_restart` acceptance test spawns the real
+# `tidepool-harness` binary, which itself drives real GHC extracts — GHC-tier
+# for the same reason even though tidepool-web has no other GHC dependency.
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-web) & binary(kill9_restart)))'
 
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
@@ -91,5 +96,5 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 max-threads = 4
 
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path))'
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_return_control)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-web) & binary(kill9_restart))'
 test-group = 'ghc-heavy'
