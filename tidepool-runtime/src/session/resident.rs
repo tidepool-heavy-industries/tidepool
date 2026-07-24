@@ -66,6 +66,7 @@ use super::engine::OutputSink;
 /// this is a distinct, smaller enum: no `Paused`/`TimedOut` (timeout-yield is
 /// permanently excluded from the stowable resident path — a locked decision),
 /// and completion carries the bridged result value.
+#[derive(Debug)]
 pub enum ResidentOutcome {
     /// The turn ran to completion. `result` is the bridged result value; the
     /// machine is back in its slot, ready for the next turn.
