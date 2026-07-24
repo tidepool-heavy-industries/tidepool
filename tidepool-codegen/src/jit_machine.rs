@@ -101,6 +101,20 @@ fn varid_check_enabled() -> bool {
     std::env::var("TIDEPOOL_VARID_CHECK").map_or(true, |v| v != "0")
 }
 
+/// A read-only snapshot of one machine's heap/GC counters
+/// ([`JitEffectMachine::heap_stats`]) — plain numbers, no GC/rooting
+/// internals exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapStats {
+    /// Total capacity of the machine's nursery, in bytes.
+    pub nursery_bytes: usize,
+    /// The session heap's bump high-water mark, in bytes (0 for a one-shot
+    /// machine, or a session machine that hasn't run a turn yet).
+    pub live_bytes: usize,
+    /// Number of collections this machine has run ([`MachineState::gc_generation`]).
+    pub gc_count: u64,
+}
+
 /// High-level JIT effect machine.
 ///
 /// Compiles a `CoreExpr` (Haskell effect program) into native code via Cranelift
@@ -1725,6 +1739,21 @@ impl JitEffectMachine {
     /// 0 otherwise). Segment 40.
     pub fn stowed_roots_count(&self) -> usize {
         self.machine_state.stowed_roots_count()
+    }
+
+    /// Read-only heap/GC snapshot (observatory heap pane) — EXISTING counters
+    /// only, no new instrumentation inside the collector. `nursery_bytes` is
+    /// the nursery's total capacity; `live_bytes` is the session heap's bump
+    /// high-water mark (`SessionState::cursor` — bytes allocated since the
+    /// last GC, or since bootstrap if none has run yet); `gc_count` is
+    /// [`MachineState::gc_generation`], bumped once per actual collection.
+    pub fn heap_stats(&self) -> HeapStats {
+        let live_bytes = self.session.as_ref().map(|s| s.cursor).unwrap_or(0);
+        HeapStats {
+            nursery_bytes: self.nursery.size(),
+            live_bytes,
+            gc_count: self.machine_state.gc_generation(),
+        }
     }
 
     // ----------------------------------------------------------------------

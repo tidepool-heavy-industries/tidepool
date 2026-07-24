@@ -18,6 +18,11 @@
 //! - `POST /reject/:node`  — discard a staged elaborator proposal (B2): the
 //!                         hole reopens untouched for a fresh answer.
 //! - `POST /cancel/:node`— cancel a node.
+//! - `POST /splice/:node` — interject an operator message into `node`'s OWN
+//!                         transcript (F2's `turn_spliced` kind), landing at
+//!                         its current turn position so it is visible in
+//!                         `node`'s next prompt assembly. Body `{content}`.
+//!                         Requires `node` to be `Running` or `Suspended`.
 //! - `POST /eval_in_binding/:node` — evaluate a plain `M a` expression against
 //!                         a SUSPENDED node's live session heap; a
 //!                         non-consuming heap-browser peek (D4), not an
@@ -91,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/confirm/{node}", post(confirm))
         .route("/reject/{node}", post(reject))
         .route("/cancel/{node}", post(cancel))
+        .route("/splice/{node}", post(splice))
         .route("/eval_in_binding/{node}", post(eval_in_binding))
         .route("/snapshot", get(snapshot))
         .route("/auth/start", post(auth_start))
@@ -111,8 +117,9 @@ async fn page(State(st): State<AppState>) -> Html<String> {
     let inspector = inspector_fragment(&st);
     let meters = meters_fragment(&st);
     let trace = trace_fragment(&st);
+    let heap = heap_fragment(&st);
     let log = log_fragment(&st);
-    Html(shell::page(signed_in, tree, inspector, meters, trace, log).into_string())
+    Html(shell::page(signed_in, tree, inspector, meters, trace, heap, log).into_string())
 }
 
 /// The tree pane markup (id="tree" so SSE patches replace it wholesale).
@@ -356,6 +363,66 @@ fn trace_fragment(st: &AppState) -> Markup {
     render_trace(&per_node)
 }
 
+/// One node's live heap/GC snapshot, for the heap pane.
+struct HeapRow {
+    node: u64,
+    nursery_bytes: usize,
+    live_bytes: usize,
+    gc_count: u64,
+}
+
+/// Live heap/GC snapshot for every node with a resident session. Unlike
+/// `fold_usage`/`fold_effects`, this does NOT fold the log — `Harness::heap_stats`
+/// is a straight-through getter over the resident `JitEffectMachine`'s existing
+/// counters, so this reads LIVE state directly (a node with no live session,
+/// e.g. thunk/done/cancelled, is filtered out by `heap_stats` returning `None`).
+fn heap_rows(st: &AppState) -> Vec<HeapRow> {
+    st.harness
+        .tree_snapshot()
+        .iter()
+        .filter_map(|n| {
+            st.harness.heap_stats(n.node).map(|s| HeapRow {
+                node: n.node.0,
+                nursery_bytes: s.nursery_bytes,
+                live_bytes: s.live_bytes,
+                gc_count: s.gc_count,
+            })
+        })
+        .collect()
+}
+
+/// Pure render of a heap snapshot (split from `heap_fragment` so it's
+/// testable without an `AppState`/live `Harness`).
+fn render_heap(rows: &[HeapRow]) -> Markup {
+    html! {
+        div id="heap" {
+            @if rows.is_empty() {
+                div class="empty" { "No live sessions yet." }
+            } @else {
+                table class="heap-table" {
+                    thead { tr { th { "node" } th { "nursery" } th { "live" } th { "gc" } } }
+                    tbody {
+                        @for r in rows {
+                            tr {
+                                td { "n" (r.node) }
+                                td { (r.nursery_bytes) }
+                                td { (r.live_bytes) }
+                                td { (r.gc_count) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The heap pane markup (id="heap"): per-node live heap/GC snapshot (nursery
+/// capacity, session live-bytes high-water mark, GC-generation count).
+fn heap_fragment(st: &AppState) -> Markup {
+    render_heap(&heap_rows(st))
+}
+
 /// The log pane markup (id="log"). Renders the last N events.
 fn log_fragment(st: &AppState) -> Markup {
     let lines = recent_log_lines(&st.log_path, 200);
@@ -428,6 +495,9 @@ fn summarize(ev: &LogEvent) -> (&'static str, u64, String) {
             node.0,
             format!("from n{} @turn {}", parent.0, parent_turn),
         ),
+        LogEvent::TurnSpliced { node, content, .. } => {
+            ("turn_spliced", node.0, content.clone())
+        }
     }
 }
 
@@ -505,17 +575,18 @@ mod async_stream {
         tokio_stream::iter(std::iter::once(Ok(first)))
     }
 
-    /// Render the tree + inspector + meters + trace as a single Datastar
-    /// patch-elements frame. (All four panes in one frame: the client applies
-    /// each `[id]` element. The log pane is initial-render only — it is not
-    /// re-rendered here.)
+    /// Render the tree + inspector + meters + trace + heap as a single
+    /// Datastar patch-elements frame. (All five panes in one frame: the
+    /// client applies each `[id]` element. The log pane is initial-render
+    /// only — it is not re-rendered here.)
     fn render_frames(st: &AppState) -> Event {
         use datastar::prelude::PatchElements;
         let tree = super::tree_fragment(st).into_string();
         let inspector = super::inspector_fragment(st).into_string();
         let meters = super::meters_fragment(st).into_string();
         let trace = super::trace_fragment(st).into_string();
-        let combined = format!("{tree}{inspector}{meters}{trace}");
+        let heap = super::heap_fragment(st).into_string();
+        let combined = format!("{tree}{inspector}{meters}{trace}{heap}");
         PatchElements::new(combined).write_as_axum_sse_event()
     }
 }
@@ -645,6 +716,29 @@ async fn reject(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
 async fn cancel(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
     let node = NodeId(node);
     match st.harness.cancel(node, "operator cancel") {
+        Ok(()) => {
+            st.ping();
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
+/// Interject an operator message into `node`'s own transcript (F2's
+/// `turn_spliced` kind) — synchronous (a plain transcript append + log
+/// write, no session/GHC work), unlike `answer`/`fork`/`confirm`. Body:
+/// `{content}`.
+async fn splice(
+    State(st): State<AppState>,
+    Path(node): Path<u64>,
+    body: Option<Json<Jv>>,
+) -> Response {
+    let node = NodeId(node);
+    let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let Some(content) = raw.get("content").and_then(Jv::as_str) else {
+        return err_json("missing \"content\" (the message to splice in)".to_string());
+    };
+    match st.harness.splice(node, content) {
         Ok(()) => {
             st.ping();
             Json(json!({"ok": true})).into_response()
@@ -1036,5 +1130,45 @@ mod tests {
         )];
         let rendered = render_trace(&per_node).into_string();
         assert!(rendered.contains("<summary>node 7 · 1 effect</summary>"));
+    }
+
+    #[test]
+    fn snapshot_heap_empty() {
+        let rendered = render_heap(&[]).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"heap\"><div class=\"empty\">No live sessions yet.</div></div>"
+        );
+    }
+
+    #[test]
+    fn snapshot_heap_with_rows() {
+        let rows = vec![
+            HeapRow {
+                node: 0,
+                nursery_bytes: 1 << 20,
+                live_bytes: 4096,
+                gc_count: 2,
+            },
+            HeapRow {
+                node: 3,
+                nursery_bytes: 1 << 20,
+                live_bytes: 0,
+                gc_count: 0,
+            },
+        ];
+        let rendered = render_heap(&rows).into_string();
+        assert_eq!(
+            rendered,
+            "<div id=\"heap\">\
+             <table class=\"heap-table\">\
+             <thead><tr><th>node</th><th>nursery</th><th>live</th><th>gc</th></tr></thead>\
+             <tbody>\
+             <tr><td>n0</td><td>1048576</td><td>4096</td><td>2</td></tr>\
+             <tr><td>n3</td><td>1048576</td><td>0</td><td>0</td></tr>\
+             </tbody>\
+             </table>\
+             </div>"
+        );
     }
 }

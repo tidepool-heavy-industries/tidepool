@@ -63,7 +63,7 @@ same `/auth/start` verb.
 ## The observatory panes
 
 `GET /` serves the page shell; `GET /sse` is the live patch stream (Datastar
-`datastar-patch-elements` frames). Five panes, each independently scrollable:
+`datastar-patch-elements` frames). Six panes, each independently scrollable:
 
 - **tree** (`#tree`) — the cognition tree: node id, lifecycle state, fork
   badge, pending-hole prompt teaser. Force/fork buttons post the verbs below.
@@ -73,12 +73,17 @@ same `/auth/start` verb.
   `TurnDelta` events' `usage` field (assistant turns only).
 - **trace** (`#trace`) — per-node effect request/response tail (last 20 per
   node), one collapsed `<details>` per node.
+- **heap** (`#heap`) — per-node LIVE heap/GC snapshot, straight off the
+  resident `JitEffectMachine` (not folded from the log, unlike meters/trace):
+  nursery capacity in bytes, the session heap's bump high-water mark in
+  bytes, and the GC-generation count. A node with no live session (thunk,
+  done, or cancelled) is simply absent from the table.
 - **log** (`#log`) — the last 200 raw log lines (initial render only; not
   SSE-live in R0).
 
-`tree`, `inspector`, `meters`, and `trace` all re-render and patch live over
-SSE on every logged event (or an internal "tick" nudge right after a verb
-mutates the harness).
+`tree`, `inspector`, `meters`, `trace`, and `heap` all re-render and patch
+live over SSE on every logged event (or an internal "tick" nudge right after
+a verb mutates the harness).
 
 ## Driving via curl
 
@@ -122,6 +127,24 @@ curl -sX POST http://127.0.0.1:4600/fork/1
 
 ```bash
 curl -sX POST http://127.0.0.1:4600/cancel/0
+```
+
+**Splice an operator message into a node's transcript (F2 `turn_spliced`):**
+
+Interjects `content` into `node`'s OWN transcript, landing at its current
+turn position — visible in `node`'s NEXT prompt assembly (the next `force`,
+`fork` answerer turn, etc. reads the live transcript this appends to). Logged
+as a distinct `turn_spliced` event, not a `turn_delta` — an audit trail can
+tell an operator interjection apart from a modeled or harness-generated
+turn. Requires `node` to be `running` or `suspended` (same as any other
+transcript-mutating verb); a `thunk`/`done`/`cancelled` node has no live
+transcript to splice into.
+
+```bash
+curl -sX POST http://127.0.0.1:4600/splice/1 \
+  -H 'content-type: application/json' \
+  -d '{"content": "Operator note: focus on the auth path, ignore the rest."}'
+# => {"ok": true}
 ```
 
 **`eval_in_binding` — a non-consuming heap-browser peek (D4):**

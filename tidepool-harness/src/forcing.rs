@@ -401,6 +401,34 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
+    /// Log an OPERATOR-SPLICED message on `node` (F2's `turn_spliced` kind,
+    /// now built) — distinct from [`Self::turn_delta`] so a genuine operator
+    /// interjection is never mistaken for a modeled turn when auditing
+    /// history. Same non-terminal, forced-state guard as `turn_delta`
+    /// (`Running` or `Suspended`): a splice needs a live transcript to land
+    /// in, exactly like a turn delta does.
+    pub fn turn_spliced(
+        &self,
+        node: NodeId,
+        turn: u64,
+        role: crate::provider::Role,
+        content: String,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        match &inner.entry(node)?.state {
+            NodeState::Thunk => return Err(TreeError::UnforcedThunk(node)),
+            NodeState::Running | NodeState::Suspended { .. } => {}
+            other => return Err(TreeError::NotRunning(node, other.clone())),
+        }
+        inner.writer.append(Event::TurnSpliced {
+            node,
+            turn,
+            role,
+            content,
+        })?;
+        Ok(())
+    }
+
     /// Record a fork's transcript reference: `node` inherits `parent`'s
     /// conversation up to `parent_turn`. `node` must be a `Thunk` (a fork is
     /// registered before it is forced — the reference is set at materialization
@@ -557,7 +585,8 @@ mod tests {
             | LogEvent::NodeDone { node, .. }
             | LogEvent::NodeCancelled { node, .. }
             | LogEvent::TurnDelta { node, .. }
-            | LogEvent::TurnForked { node, .. } => *node,
+            | LogEvent::TurnForked { node, .. }
+            | LogEvent::TurnSpliced { node, .. } => *node,
         }
     }
 
@@ -757,6 +786,56 @@ mod tests {
             tree.node_cancelled(node, "too late".into()),
             Err(TreeError::AlreadyTerminal(n, NodeState::Done)) if n == node
         ));
+    }
+
+    #[test]
+    fn turn_spliced_rejects_thunk_accepts_running_and_suspended_rejects_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("run.jsonl");
+        let tree = tree_at(&log_path);
+        let node = tree
+            .create_node(None, "root", vec![], ForkShape::Exact(0), false)
+            .unwrap();
+
+        // Unforced: rejected, same guard as turn_delta.
+        assert!(matches!(
+            tree.turn_spliced(node, 0, crate::provider::Role::User, "hi".into()),
+            Err(TreeError::UnforcedThunk(n)) if n == node
+        ));
+
+        tree.force(node, Actor::Operator, FakeMachine { id: 1 })
+            .unwrap();
+
+        // Running: accepted.
+        tree.turn_spliced(node, 0, crate::provider::Role::User, "operator says hi".into())
+            .unwrap();
+
+        // Suspended: also accepted (an operator can interject while a node
+        // waits on a hole, same as a turn delta can be logged then).
+        tree.hole_published(node, HoleId("scont_1".into()), None, None, "?".into(), false)
+            .unwrap();
+        tree.turn_spliced(node, 1, crate::provider::Role::User, "still here".into())
+            .unwrap();
+
+        tree.hole_consumed(node, HoleId("scont_1".into())).unwrap();
+        tree.node_done(node, "done".into()).unwrap();
+
+        // Done: terminal, rejected.
+        assert!(matches!(
+            tree.turn_spliced(node, 2, crate::provider::Role::User, "too late".into()),
+            Err(TreeError::NotRunning(n, NodeState::Done)) if n == node
+        ));
+
+        // The log carries exactly the two accepted TurnSpliced events, in order.
+        let (_header, events) = LogReader::open(&log_path).expect("open log");
+        let spliced: Vec<String> = events
+            .map(|r| r.expect("well-formed record").event)
+            .filter_map(|e| match e {
+                LogEvent::TurnSpliced { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spliced, vec!["operator says hi", "still here"]);
     }
 
     #[test]

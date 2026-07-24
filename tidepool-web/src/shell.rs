@@ -66,7 +66,7 @@ header.hdr .status.signed-out { color: var(--warn); }
 .pane.tree { grid-area: tree; background: var(--bg-raised); border-right: 1px solid var(--border); }
 .pane.main { grid-area: main; }
 .pane.side { grid-area: side; background: var(--bg-raised); border-left: 1px solid var(--border); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-.pane.side .sub { flex: 1 1 50%; min-height: 0; overflow-y: auto; padding: var(--s3); }
+.pane.side .sub { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: var(--s3); }
 .pane.side .sub + .sub { border-top: 1px solid var(--border); }
 .pane.log  { grid-area: log; background: var(--bg-inset); border-left: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
 .pane h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--fg-faint); margin: 0 0 var(--s3); font-weight: 600; }
@@ -118,6 +118,11 @@ textarea:focus, input:focus { outline: none; border-color: var(--accent); }
 table.meter-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.meter-table th, table.meter-table td { text-align: left; padding: 2px var(--s2); border-bottom: 1px solid var(--border); }
 table.meter-table th { color: var(--fg-faint); font-weight: 500; }
+
+/* heap */
+table.heap-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.heap-table th, table.heap-table td { text-align: left; padding: 2px var(--s2); border-bottom: 1px solid var(--border); }
+table.heap-table th { color: var(--fg-faint); font-weight: 500; }
 
 /* trace */
 .trace-node { margin-bottom: var(--s2); }
@@ -204,7 +209,7 @@ pub const OBSERVATORY_JS: &str = r#"
 "#;
 
 /// Render the full observatory page shell. `signed_in` drives the auth banner;
-/// `tree` / `inspector` / `meters` / `trace` / `log` are the initial
+/// `tree` / `inspector` / `meters` / `trace` / `heap` / `log` are the initial
 /// server-rendered pane contents (later patched over SSE).
 #[allow(clippy::too_many_arguments)]
 pub fn page(
@@ -213,6 +218,7 @@ pub fn page(
     inspector: Markup,
     meters: Markup,
     trace: Markup,
+    heap: Markup,
     log: Markup,
 ) -> Markup {
     html! {
@@ -254,6 +260,10 @@ pub fn page(
                         div class="sub" {
                             h2 { "trace" }
                             div id="trace" { (trace) }
+                        }
+                        div class="sub" {
+                            h2 { "heap" }
+                            div id="heap" { (heap) }
                         }
                     }
                     div class="pane log" {

@@ -105,7 +105,8 @@ fn event_node(e: &Event) -> Option<NodeId> {
         | Event::NodeDone { node, .. }
         | Event::NodeCancelled { node, .. }
         | Event::TurnDelta { node, .. }
-        | Event::TurnForked { node, .. } => Some(*node),
+        | Event::TurnForked { node, .. }
+        | Event::TurnSpliced { node, .. } => Some(*node),
     }
 }
 
