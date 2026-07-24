@@ -520,8 +520,13 @@ fn run_tidepool_extract(
         }
     }
 
-    // Try tidepool-extract directly from PATH first
-    let mut cmd = Command::new("tidepool-extract");
+    // $TIDEPOOL_EXTRACT (the same override every test tier honors) wins over
+    // PATH — a repo with a freshly built extract must never be trumped by a
+    // stale installed one.
+    let extract_bin = std::env::var_os("TIDEPOOL_EXTRACT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("tidepool-extract"));
+    let mut cmd = Command::new(&extract_bin);
     cmd.arg(hs_path);
     cmd.arg("--output-dir");
     cmd.arg(&tmp_dir);
@@ -543,10 +548,14 @@ fn run_tidepool_extract(
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // tidepool-extract not on PATH — fall back to nix run below.
+            // Not found (bad $TIDEPOOL_EXTRACT or bare name not on PATH) —
+            // fall back to nix run below.
         }
         Err(e) => {
-            return Err(format!("failed to spawn tidepool-extract: {e}"));
+            return Err(format!(
+                "failed to spawn {}: {e}",
+                extract_bin.display()
+            ));
         }
     }
 
@@ -603,11 +612,18 @@ fn extract_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        let resolved = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|d| d.join("tidepool-extract"))
-                .find(|p| p.is_file())
-        });
+        // Same resolution order as `run_tidepool_extract`: $TIDEPOOL_EXTRACT,
+        // then PATH — the key must hash the binary that will actually run.
+        let resolved = std::env::var_os("TIDEPOOL_EXTRACT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                std::env::var_os("PATH").and_then(|paths| {
+                    std::env::split_paths(&paths)
+                        .map(|d| d.join("tidepool-extract"))
+                        .find(|p| p.is_file())
+                })
+            });
         match resolved.and_then(|p| std::fs::read(p).ok()) {
             Some(bytes) => bytes.hash(&mut h),
             // No binary found: extraction itself will fail loudly; an
