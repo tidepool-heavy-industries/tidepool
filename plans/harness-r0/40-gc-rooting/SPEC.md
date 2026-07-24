@@ -44,6 +44,27 @@ lands. Opus implements; fable reviews every diff at the merge boundary.**
   persistent root cells (126).
 - Segment 20's landed code (the nested mode extends its registry states).
 
+## HANDOFF FROM SEGMENT 20 (landed 9faa78a2 — read these files first)
+
+- The exact seams to replace: `ResidentSession::run`'s `Suspended`
+  rejection (`ResidentError::Suspended`) in
+  `tidepool-runtime/src/session/resident.rs`, and
+  `SessionRegistry::checkout_run` rejecting `Slot::Suspended` in
+  `tidepool-harness/src/registry.rs`. Nested child runs replace those
+  rejections with child-fragment runs against the suspended machine.
+- CONTRACT CHANGE REQUIRED: `resume_suspended` `.take()`s the stowed
+  continuation ON ENTRY regardless of outcome, and
+  `ResidentSession::reenter` clears `pending` up front to match. A
+  nested-run design must PRESERVE the continuation across child runs —
+  that consume-on-entry contract changes here, deliberately.
+- Segment 20 proved cross-turn state via the effect plane only (resident
+  KV). Value-plane tenure across a suspension (a session `RootSlot`
+  referenced by a later fragment's `ExternalEnv`) was explicitly deferred
+  to THIS segment — add it to the adversarial suite: parent binds a
+  value, suspends, child forces GC, parent resumes and reads the binding.
+- `run_fragment_suspendable` / `run_suspendable_with_entry` exist in
+  jit_machine.rs (segment 20's factoring) — build on them.
+
 ## MECHANISM / STEPS
 
 1. **Root registration**: entering nested-child mode registers the

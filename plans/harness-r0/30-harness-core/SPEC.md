@@ -21,6 +21,21 @@ scope, the log schema draft, and the traps.
 - DO NOT log effect responses lazily/optionally — E4 replay is
   effect-response substitution; a missing response breaks restoration.
 
+## HANDOFF FROM SEGMENT 20 (landed 9faa78a2)
+
+`ResidentSession` (tidepool-runtime/src/session/resident.rs) exposes
+`pending_continuation()`, `is_idle()`, `effect_names()`, and returns
+`ResidentOutcome { hole, request, output }` — the hooks C3/C4 map to
+`log::Event` (hole_published etc.). `SessionRegistry`
+(tidepool-harness/src/registry.rs) is the `SessionId`-keyed `Slot` store
+where the node tree binds `NodeId` → live session; it is `M`-generic, so
+wrap `ResidentSession` in a richer node type if needed. Resident
+continuation ids use prefix `"scont"`. Leaf ORDER within this segment:
+C3 (node tree + forcing — owns the NodeId↔SessionId binding) BEFORE C4
+(protocol server, which serves C3's tree); C2 (replay) AFTER segment 40
+lands, because 40 deliberately changes the consume-on-entry continuation
+contract that hole restoration depends on.
+
 ## Leaves
 
 ### C1 — event log (sonnet)
