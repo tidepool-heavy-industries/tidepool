@@ -10,5 +10,7 @@
 pub mod tree;
 pub mod log;
 pub mod provider;
+pub mod ui;
 
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
+pub use ui::{BadgeKind, Ui};
