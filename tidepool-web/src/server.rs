@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(page))
         .route("/sse", get(sse))
+        .route("/create", post(create))
         .route("/force/{node}", post(force))
         .route("/fork/{node}", post(fork))
         .route("/answer/{node}", post(answer))
@@ -325,6 +326,25 @@ mod async_stream {
 // Verbs
 // ---------------------------------------------------------------------------
 
+/// Create a root node (thunk). Body: `{title, prompt}`. Returns the node id.
+/// The operator then forces it (a separate consent step — the root is a thunk,
+/// no work until forced).
+async fn create(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
+    let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let title = raw.get("title").and_then(Jv::as_str).unwrap_or("root");
+    let prompt = raw
+        .get("prompt")
+        .and_then(Jv::as_str)
+        .unwrap_or("Begin.");
+    match st.harness.create_root(title, prompt) {
+        Ok(node) => {
+            st.ping();
+            Json(json!({"ok": true, "node": node.0})).into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
 async fn force(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
     let node = NodeId(node);
     match st.harness.force(node, tidepool_harness::log::Actor::Operator) {
@@ -333,7 +353,10 @@ async fn force(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
             let harness = st.harness.clone();
             let st2 = st.clone();
             tokio::spawn(async move {
-                let _ = harness.run_to_hole_or_done(node).await;
+                if let Err(e) = harness.run_to_hole_or_done(node).await {
+                    eprintln!("[drive] node {} failed: {e}", node.0);
+                    let _ = harness.cancel(node, &format!("drive failed: {e}"));
+                }
                 st2.ping();
             });
             st.ping();
