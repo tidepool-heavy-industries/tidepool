@@ -66,7 +66,11 @@ use super::engine::OutputSink;
 /// this is a distinct, smaller enum: no `Paused`/`TimedOut` (timeout-yield is
 /// permanently excluded from the stowable resident path — a locked decision),
 /// and completion carries the bridged result value.
+// `Completed`'s `EvalResult` is the large variant; like the engine's
+// `SuspendableRun`, this is a transient boundary carrier destructured
+// immediately by the caller, so the size asymmetry is inherent, not a leak.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResidentOutcome {
     /// The turn ran to completion. `result` is the bridged result value; the
     /// machine is back in its slot, ready for the next turn.
@@ -173,6 +177,10 @@ where
     /// carrying the effect tag list the dispatch needs); turns are then added as
     /// fragments. Mirrors the repl's bootstrap (`session.rs`: compile_session on
     /// the first turn's table).
+    // The arg list mirrors the engine's `StartTurn` field carrier (source,
+    // handlers, ask_tag, effect_names, captured, include, nursery) — bundling
+    // them into a struct would just move the arity, not remove it.
+    #[allow(clippy::too_many_arguments)]
     pub fn bootstrap(
         expr: &CoreExpr,
         table: DataConTable,
@@ -245,7 +253,10 @@ where
                 .insert_checked(dc.clone())
                 .map_err(|e| ResidentError::TableCollision(e.to_string()))?;
         }
-        let frag_name = format!("{name_hint}_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let frag_name = format!(
+            "{name_hint}_{}",
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        );
 
         // Add the fragment to the live machine (borrows &mut machine briefly).
         let func_id = {
@@ -270,14 +281,22 @@ where
     /// match the pending continuation or the pending one is untouched
     /// ([`ResidentError::WrongContinuation`], mirroring `engine.rs`:684–698 and
     /// the repl server's three-way resume errors).
-    pub fn resume(&mut self, cont_id: &str, answer: Value) -> Result<ResidentOutcome, ResidentError> {
+    pub fn resume(
+        &mut self,
+        cont_id: &str,
+        answer: Value,
+    ) -> Result<ResidentOutcome, ResidentError> {
         self.reenter(cont_id, ResumeInput::Answer(answer))
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
     /// itself fails (byte-identically to the engine's stowed-abort path). Same
     /// validate-before-consume as [`Self::resume`].
-    pub fn abort(&mut self, cont_id: &str, reason: String) -> Result<ResidentOutcome, ResidentError> {
+    pub fn abort(
+        &mut self,
+        cont_id: &str,
+        reason: String,
+    ) -> Result<ResidentOutcome, ResidentError> {
         self.reenter(cont_id, ResumeInput::Abort(reason))
     }
 
@@ -364,8 +383,9 @@ where
     }
 
     /// Classify a raw [`SuspendableOutcome`] into a [`ResidentOutcome`], minting
-    /// + arming a continuation id on suspension and draining/snapshotting output
-    /// the same way the engine does (drain on completion, snapshot on suspend).
+    /// and arming a continuation id on suspension and draining/snapshotting
+    /// output the same way the engine does (drain on completion, snapshot on
+    /// suspend).
     fn classify(&mut self, outcome: SuspendableOutcome) -> ResidentOutcome {
         match outcome {
             SuspendableOutcome::Completed(value) => {

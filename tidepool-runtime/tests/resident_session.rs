@@ -276,4 +276,3 @@ fn plain_turns_reuse_the_machine() {
         assert!(session.is_idle());
     }
 }
-

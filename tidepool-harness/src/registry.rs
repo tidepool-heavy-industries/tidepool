@@ -160,8 +160,7 @@ impl<M> SessionRegistry<M> {
                 pending: None,
             }),
             Some(Slot::Suspended {
-                hole: pending_hole,
-                ..
+                hole: pending_hole, ..
             }) if pending_hole != hole => Err(CheckoutError::WrongHole {
                 session: id,
                 attempted: hole.clone(),
@@ -341,7 +340,9 @@ mod tests {
         assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
 
         // Resume on the RIGHT hole checks the machine out and completes.
-        let co = reg.checkout_resume(id, &hole("scont_1")).expect("right hole");
+        let co = reg
+            .checkout_resume(id, &hole("scont_1"))
+            .expect("right hole");
         co.restore_idle();
         assert!(reg.is_idle(id));
     }
@@ -378,9 +379,6 @@ mod tests {
         let co = reg.checkout_run(id).expect("idle → run");
         co.abandon();
         // The session is gone, not left Running.
-        assert_eq!(
-            err(reg.checkout_run(id)),
-            CheckoutError::Unknown(id)
-        );
+        assert_eq!(err(reg.checkout_run(id)), CheckoutError::Unknown(id));
     }
 }
