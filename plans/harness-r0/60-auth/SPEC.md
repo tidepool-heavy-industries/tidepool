@@ -1,5 +1,23 @@
 # Spec: provider client — ChatGPT-subscription OAuth + API-key mode
 
+> **STEERING (operator, 2026-07-23): this segment is operator-steered.**
+> Thesis: an existing crate likely covers the client/OAuth surface —
+> handcoding is presumed wrong. First deliverable is a crate SURVEY
+> (OpenAI-compatible clients, Codex-auth/oauth2 device+PKCE coverage,
+> maintenance signals, remaining glue) with a recommendation, before any
+> implementation. The steps below describe the required BEHAVIOR, not a
+> mandate to hand-write it.
+>
+> **DECISION RECORD (2026-07-23, post-survey):** chat calls route through
+> `genai` (already a workspace dep — AuthResolver/ServiceTargetResolver);
+> OAuth = Codex flow 1 (auth-code+PKCE loopback :1455) via the
+> `openai-auth` crate (v1.0, MIT; does not persist tokens — our
+> config-dir/0600 glue does). The beta device-code flow is NOT ported
+> (undocumented wire shape, server-issued PKCE verifier — reopens only if
+> remote-browser sign-in becomes a hard requirement). R0 constraint,
+> documented in the module: sign-in browser needs `ssh -L 1455:...` to
+> the harness box, one-time; refresh automatic.
+
 The harness spawns calling-model turns (parent programs' authors and
 child answerers). R0 bills those to a ChatGPT subscription via
 Codex-style OAuth sign-in, with API-key mode as the co-equal supported
