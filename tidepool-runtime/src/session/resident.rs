@@ -317,12 +317,15 @@ where
             }
         }
         let ask_tag = self.ask_tag;
+        // `resume_suspended` consumes the machine's stowed continuation as soon
+        // as it is entered (`.take()`), so the OLD hole is spent regardless of
+        // the re-entry's outcome — clear `pending` up front. `classify` re-arms
+        // it with a FRESH hole if the re-entry suspends again; an error leaves
+        // the session idle (the spent continuation cannot be resumed twice).
+        self.pending = None;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine.resume_suspended(table, handlers, captured, ask_tag, input)
         })?;
-        // Consume the pending id only now that the re-entry has produced an
-        // outcome (the classify step re-arms `pending` if it suspended again).
-        self.pending = None;
         Ok(self.classify(outcome))
     }
 
