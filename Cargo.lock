@@ -879,7 +879,10 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0805c542838bb4c0769e26e1cdf70ff913e43e146b7e7563241fe95f32606643"
 dependencies = [
+ "axum",
  "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3886,7 +3889,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "tidepool-bridge",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-handlers",
+ "tidepool-mcp",
  "tidepool-repr",
+ "tidepool-runtime",
  "tokio",
 ]
 
@@ -4086,12 +4096,16 @@ dependencies = [
 name = "tidepool-web"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "datastar",
+ "futures-core",
  "maud",
  "pulldown-cmark",
  "serde",
  "serde_json",
  "tidepool-harness",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
