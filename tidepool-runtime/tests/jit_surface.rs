@@ -28,8 +28,16 @@
 
 use std::io::Write;
 use std::path::Path;
+use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
+use tidepool_effect::error::EffectError;
+use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
+
+/// Ask's position in the standard effect stack (see
+/// `return_control_sidecar.rs`'s `ASK_TAG` doc: 9 base effects at tags 0..8,
+/// Ask interposed last at tag 9).
+const ASK_TAG: u64 = 9;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
@@ -1065,4 +1073,85 @@ choice missing colon
             "error must name the offending line and reason, got: {e}"
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tidepool.Fork (Wave C) — forkFilter compiles and runs on the JIT.
+//
+// `forkMap`/`forkCata` (a CALLER-chosen answer type `b`) are NOT shipped:
+// extract statically rejects a `returnControlFanout` occurrence whose
+// answer type still carries a free type variable
+// (`Tidepool.Translate.checkReturnControlType`), and closing that gap for a
+// library-defined generic wrapper would require GHC to duplicate the
+// wrapper's definition (type-substituted) into every call site before
+// extract ever sees the Core — empirically, neither `{-# INLINE #-}` nor an
+// explicit `{-# SPECIALIZE #-}` at the call site makes that happen in this
+// pipeline (`TIDEPOOL_DUMP_CLOSED` shows the call site still applying the
+// generic, un-inlined top-level binding). See `Tidepool.Fork`'s module
+// haddock for the full finding. `forkFilter` has no such requirement — its
+// fanout always answers a fixed `Bool` — so it's the one combinator that
+// composes over `returnControlFanout` cleanly.
+//
+// Unlike `works`/`works_with_imports` (NullDispatcher), a
+// `returnControlFanout` site genuinely dispatches an `Ask` effect (tag 9,
+// same as `return_control_sidecar.rs`'s `ASK_TAG`) — this probe answers it
+// with a scripted `DispatchEffect` so the eval runs straight through to a
+// final value, exactly as a harness-driven `answer_fanout` would.
+// ---------------------------------------------------------------------------
+
+/// Same shape as `eval_raw_with_imports`, generic over the dispatcher so a
+/// scripted `Ask` responder can stand in for the calling agent.
+fn eval_with_dispatch<H: DispatchEffect<()>>(
+    imports: &str,
+    code: &str,
+    dispatcher: &mut H,
+) -> Result<serde_json::Value, String> {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, "", None, None);
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hs = root.join("haskell/lib");
+    let lib = root.join(".tidepool/lib");
+    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
+    match compile_and_run(&src, "result", &include, dispatcher, &()) {
+        Ok(v) => Ok(v.to_json()),
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
+    }
+}
+
+/// Answers ONE fanout dispatch with a fixed `[Bool]` list.
+struct BoolListOnce {
+    answer: Vec<bool>,
+}
+
+impl DispatchEffect<()> for BoolListOnce {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        _request: &Value,
+        cx: &EffectContext<'_, ()>,
+    ) -> Result<Response, EffectError> {
+        assert_eq!(tag, ASK_TAG, "expected the fanout's Ask dispatch");
+        cx.respond_list(self.answer.clone())
+    }
+}
+
+/// `forkFilter` (`Tidepool.Fork`, Wave C) runs on the JIT: answers a REAL
+/// `returnControlFanout` dispatch (not a NullDispatcher stub), keeping only
+/// the elements whose scripted verdict is `True`, in original order.
+#[test]
+fn works_fork() {
+    let mut filter_d = BoolListOnce {
+        answer: vec![true, false, true, false],
+    };
+    let got = eval_with_dispatch(
+        "Tidepool.Fork",
+        "do { ys <- forkFilter (\\x -> T.pack (show (x :: Int))) [1, 2, 3, 4 :: Int]; \
+         pure (toJSON (ys :: [Int])) }",
+        &mut filter_d,
+    )
+    .unwrap_or_else(|e| panic!("forkFilter probe failed: {e}"));
+    assert_eq!(got, serde_json::json!([1, 3]));
 }
