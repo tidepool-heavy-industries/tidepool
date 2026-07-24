@@ -24,7 +24,7 @@ pub use engine::{
     classify_hole, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
 };
 pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
-pub use harness::{Harness, HarnessError, NodeSummary};
+pub use harness::{Harness, HarnessError, HeapSummary, NodeSummary};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};

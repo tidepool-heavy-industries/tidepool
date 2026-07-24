@@ -139,6 +139,27 @@ pub enum Event {
         parent: NodeId,
         parent_turn: u64,
     },
+    /// F2's reserved `turn_spliced` kind, now built: an OPERATOR verb that
+    /// interjects a message into `node`'s OWN transcript (never a different
+    /// node's — the operator addresses the conversation directly, unlike a
+    /// fork's parent-position reference). Kept PARALLEL to [`Event::TurnDelta`]
+    /// (`node`/`turn`/`role`/`content`) rather than reusing it outright: a
+    /// splice is operator-injected, not a turn the model produced or
+    /// consumed, so a distinct kind means an interjection is never mistaken
+    /// for a modeled turn when auditing history. `turn` is the SAME per-node
+    /// monotonic turn-index space `TurnDelta` uses — the splice lands at
+    /// `node`'s CURRENT turn position (whatever its turn-sequence counter is
+    /// when the operator interjects), so transcript reconstruction folds it
+    /// in at exactly that point, ahead of whatever turn the node produces
+    /// next. `role` is always operator-ish (`Role::User` — the model sees it
+    /// exactly like a user-turn nudge); a splice never carries `usage`
+    /// (harness/operator-injected, costs no tokens by construction).
+    TurnSpliced {
+        node: NodeId,
+        turn: u64,
+        role: Role,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

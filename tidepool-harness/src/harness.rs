@@ -131,6 +131,17 @@ struct PendingProposal {
     table: DataConTable,
 }
 
+/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
+/// its resident `JitEffectMachine`, straight from
+/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
+/// instrumentation, this is a read-only view of counters that already exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapSummary {
+    pub nursery_bytes: usize,
+    pub live_bytes: usize,
+    pub gc_count: u64,
+}
+
 /// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
 /// suspended) whether the pending hole is a fork and its prompt.
 #[derive(Debug, Clone)]
@@ -258,6 +269,21 @@ impl Harness {
             state,
             is_fork_hole: is_fork,
             hole_prompt: prompt,
+        })
+    }
+
+    /// `node`'s live heap/GC snapshot, straight off its resident
+    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
+    /// when `node` has no live session (never forced, terminal) or during the
+    /// transient mid-turn gap while its session runs on the blocking pool
+    /// (the same benign race [`Self::node_summary`] tolerates).
+    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
+        let convos = self.convos.lock();
+        let stats = convos.get(&node)?.session.as_ref()?.heap_stats()?;
+        Some(HeapSummary {
+            nursery_bytes: stats.nursery_bytes,
+            live_bytes: stats.live_bytes,
+            gc_count: stats.gc_count,
         })
     }
 
@@ -1451,6 +1477,32 @@ impl Harness {
     pub fn cancel(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
         self.tree.node_cancelled(node, reason.to_string())?;
         self.drop_session(node);
+        Ok(())
+    }
+
+    /// F2's `turn_spliced` verb, now built: interject `content` into `node`'s
+    /// OWN transcript, landing at `node`'s CURRENT turn position. Appends
+    /// straight to the LIVE `NodeConvo::transcript` (the same list
+    /// `drive_turn`/`push_user_turn` read/append), so the very next prompt
+    /// assembly on `node` sees it — no separate replay-only path, the fold
+    /// crash-replay uses (`replay::apply_event`) is the SAME shape a fresh
+    /// process would reconstruct from the log. Logged as `Event::TurnSpliced`
+    /// (not `TurnDelta`) so a genuine operator interjection is distinguishable
+    /// from a harness-generated nudge when auditing history. Requires `node`
+    /// to be `Running` or `Suspended` (the same non-terminal, forced-state
+    /// guard `turn_delta` uses — a splice needs a live transcript to land in).
+    pub fn splice(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
+        let mut convos = self.convos.lock();
+        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+        let turn = convo.turn_seq;
+        convo.transcript.push(Message {
+            role: Role::User,
+            content: content.to_string(),
+        });
+        convo.turn_seq += 1;
+        drop(convos);
+        self.tree
+            .turn_spliced(node, turn, Role::User, content.to_string())?;
         Ok(())
     }
 }

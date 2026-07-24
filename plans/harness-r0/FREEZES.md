@@ -37,8 +37,13 @@ this file records what is frozen and the deliberate seams left open.
   `Effect` events carry req AND resp (replay = effect-response
   substitution); header pins `{prelude_hash, extract_fingerprint,
   harness_version}`.
-- **Reserved kinds** (names reserved, unbuilt): `turn_spliced` (operator
-  interjection into a child conversation), memo events.
+- **Reserved kinds**: `turn_spliced` (operator interjection into a live
+  node's transcript) is now built — `Event::TurnSpliced {node, turn, role,
+  content}`, kept parallel to `TurnDelta` (see `log/mod.rs` doc comment);
+  `Harness::splice` appends it to the node's live transcript at its current
+  turn position, so it folds into the node's next prompt assembly the same
+  way crash-replay's `apply_event` folds it into a reconstructed transcript.
+  `memo events` remain reserved, unbuilt.
 - Durability: jsonl, fsync per event, torn-tail-tolerant reader.
 
 ## F3 — fork surface

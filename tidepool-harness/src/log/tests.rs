@@ -98,6 +98,12 @@ fn sample_events() -> Vec<Event> {
             parent: NodeId(1),
             parent_turn: 1,
         },
+        Event::TurnSpliced {
+            node: NodeId(1),
+            turn: 2,
+            role: crate::provider::Role::User,
+            content: "operator: also check the edge case".to_string(),
+        },
     ]
 }
 

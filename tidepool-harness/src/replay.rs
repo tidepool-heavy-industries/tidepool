@@ -216,6 +216,21 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
         } => {
             folded.forks.insert(node, (parent, parent_turn));
         }
+        Event::TurnSpliced {
+            node,
+            role,
+            content,
+            ..
+        } => {
+            // Folded exactly like a `TurnDelta`: a splice is transcript
+            // content the child sees on its next prompt assembly, whatever
+            // the audit trail calls it.
+            folded
+                .transcripts
+                .entry(node)
+                .or_default()
+                .push(Message { role, content });
+        }
         // TurnStart / Effect / HoleAnswerAttempt do not change tree STATE (they
         // are within-turn detail the replayer substitutes against, not folded
         // into node lifecycle here).
