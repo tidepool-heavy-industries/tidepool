@@ -594,6 +594,48 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
+        let func_id = self.func_id;
+        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag)
+    }
+
+    /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
+    /// [`Self::add_function`]-minted fragment through the same threadless
+    /// suspend path [`Self::run_suspendable`] uses for the machine's original
+    /// entry. A fragment that reaches `suspend_tag` (an `Ask`) mid-computation
+    /// stows its continuation on `self` exactly as the entry path does; the
+    /// binding it was computing lands on [`Self::resume_suspended`] to
+    /// completion. This is the composition of the fragment plane (C2 session
+    /// re-entry) with E2 threadless suspension — same shared
+    /// [`drive_effect_loop`], only the entry `func_id` differs.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine — heap retention across the suspension
+    /// requires [`Self::compile_session`].
+    pub fn run_fragment_suspendable<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag)
+    }
+
+    /// Shared suspend-capable run body, parametrized by the entry `func_id`.
+    /// [`Self::run_suspendable`] passes the machine's original entry;
+    /// [`Self::run_fragment_suspendable`] passes an [`Self::add_function`]-minted
+    /// fragment id. The lifecycle is identical either way (session vmctx, reclaim
+    /// arming, suspend-capable effect loop), so the entry path stays
+    /// byte-identical to the pre-refactor `run_suspendable`.
+    fn run_suspendable_with_entry<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+    ) -> Result<SuspendableOutcome, JitError> {
         assert!(
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
@@ -604,7 +646,6 @@ impl JitEffectMachine {
             "run_suspendable called while a continuation is already suspended — \
              resume_suspended it first"
         );
-        let func_id = self.func_id;
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
         let mut _guard = self.install_registries();
