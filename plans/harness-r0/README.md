@@ -2,8 +2,15 @@
 
 Exo-driven plan. Root (fable) decomposes/specs/merges; leaves implement.
 Each segment dir holds the spec a subagent is pointed at. PRD.md is the
-product requirements source (v2 + landed amendments); this file is the
-orchestration source.
+product requirements source (v2 + landed amendments).
+
+> **REPLANNED 2026-07-23:** [`TARGET.md`](TARGET.md) is now the
+> orchestration source — calendar phases dissolved into
+> spike-then-freeze-then-widen. The segment table below records the
+> original wave (all merged except 10); what remains lands via
+> [`spike/SPEC.md`](spike/SPEC.md) (ONE opus agent), then the F1/F2/F3
+> freezes, then the sonnet widen fan-out. 70-acceptance is absorbed into
+> the spike's record-replay golden path + widen acceptance leaves.
 
 ## The idea in one paragraph
 
@@ -32,8 +39,9 @@ tidepool-repl is untouched; reusable glue factors out as needed.
 | `70-acceptance/` | PRD §11 end-to-end suite through production path | sonnet | after all merges |
 
 Merge order: 10/60 as ready → 20 → 30/50 → 40 (last engine merge, fable
-adversarial review) → 70. Verify per merge: `cargo check --workspace`,
-`cargo nextest run`; `scripts/battery.sh` when haskell/ changed.
+adversarial review) → 70. Verify per merge: TARGETED nextest over touched
+crates (operator policy 2026-07-23); full `scripts/battery.sh` only at
+freeze gates and root-level engine merges.
 
 ## Token economics
 
@@ -66,13 +74,19 @@ tool, never raw git).
 - Timeout-yield is permanently excluded from stowable paths (parks a
   thread; ask boundaries are trampoline-clean by construction).
 
-## Status
+## Status (2026-07-23)
 
-- [ ] 00 scaffold
-- [ ] 10 extract pass
-- [ ] 20 engine residency
-- [ ] 30 harness core
-- [ ] 40 gc rooting
-- [ ] 50 ui edsl
-- [ ] 60 auth
-- [ ] 70 acceptance
+- [x] 00 scaffold (rename + contracts merged)
+- [ ] 10 extract pass — IN FLIGHT (last open worker)
+- [x] 20 engine residency (ResidentSession + registry merged)
+- [x] 30 harness core — C1 log + C3 forcing merged; C2/C4/C5 dissolved
+      into the spike (see SPEC supersession note)
+- [x] 40 gc rooting (nested-child roots + NF-force, adversarial suite
+      green incl. GHC tier)
+- [x] 50 ui edsl — E1 Ui.hs + E2a renderer merged; E2b tree view lands in
+      the spike/widen
+- [x] 60 auth (genai + openai-auth provider merged)
+- [ ] 70 acceptance — absorbed into spike golden path + widen (TARGET §2)
+
+Next: fold 10 → launch the spike (spike/SPEC.md, ONE opus agent) →
+F1/F2/F3 freezes → widen fan-out.

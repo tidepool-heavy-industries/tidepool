@@ -45,9 +45,9 @@ conversation-plane operation; that is why it is cheap.
 | layer | component | state |
 |---|---|---|
 | engine | ResidentSession / SessionRegistry / fragment-suspend | **merged** |
-| engine | GC-rooted nested child runs + NF-force | in flight (opus) |
+| engine | GC-rooted nested child runs + NF-force | **merged** |
 | extract | typed-yield site capture | in flight; fork verbs join the same interception list post-merge |
-| haskell | `Ui` eDSL module | in flight |
+| haskell | `Ui` eDSL module | **merged** |
 | haskell | fork/await/dialogAsk verbs | unbuilt (extend Ask effect — no new union slot; root-decided §6) |
 | harness | event log writer/reader | **merged** |
 | harness | NodeTree/forcing/consent | **merged** |
