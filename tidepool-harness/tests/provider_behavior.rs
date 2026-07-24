@@ -23,9 +23,15 @@ use tidepool_harness::provider::{Message, ModelProvider, ProviderError, Role, Tu
 /// `(method, path)`.
 type RouteTable = HashMap<(String, String), VecDeque<(u16, serde_json::Value)>>;
 
+/// Headers of the most recent request per `(method, path)` — lets a test
+/// assert the client sent a specific header (e.g. `chatgpt-account-id`)
+/// without the mock server needing to branch behavior on it.
+type SeenHeaders = HashMap<(String, String), HashMap<String, String>>;
+
 struct MockServer {
     addr: std::net::SocketAddr,
     routes: Arc<Mutex<RouteTable>>,
+    seen_headers: Arc<Mutex<SeenHeaders>>,
 }
 
 impl MockServer {
@@ -33,17 +39,24 @@ impl MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().unwrap();
         let routes: Arc<Mutex<RouteTable>> = Arc::new(Mutex::new(HashMap::new()));
+        let seen_headers: Arc<Mutex<SeenHeaders>> = Arc::new(Mutex::new(HashMap::new()));
         let routes_bg = routes.clone();
+        let seen_headers_bg = seen_headers.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let routes = routes_bg.clone();
+                let seen_headers = seen_headers_bg.clone();
                 std::thread::spawn(move || {
-                    let _ = handle_conn(stream, &routes);
+                    let _ = handle_conn(stream, &routes, &seen_headers);
                 });
             }
         });
-        Self { addr, routes }
+        Self {
+            addr,
+            routes,
+            seen_headers,
+        }
     }
 
     fn base_url(&self) -> String {
@@ -58,9 +71,25 @@ impl MockServer {
             .or_default()
             .push_back((status, body));
     }
+
+    /// The value of `header_name` (case-insensitive) on the most recent
+    /// request to `(method, path)`, if any request has landed yet.
+    fn header_seen(&self, method: &str, path: &str, header_name: &str) -> Option<String> {
+        let header_name = header_name.to_ascii_lowercase();
+        self.seen_headers
+            .lock()
+            .unwrap()
+            .get(&(method.to_string(), path.to_string()))
+            .and_then(|headers| headers.get(&header_name))
+            .cloned()
+    }
 }
 
-fn handle_conn(mut stream: TcpStream, routes: &Arc<Mutex<RouteTable>>) -> std::io::Result<()> {
+fn handle_conn(
+    mut stream: TcpStream,
+    routes: &Arc<Mutex<RouteTable>>,
+    seen_headers: &Arc<Mutex<SeenHeaders>>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -69,21 +98,29 @@ fn handle_conn(mut stream: TcpStream, routes: &Arc<Mutex<RouteTable>>) -> std::i
     let path = parts.next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
+    let mut headers = HashMap::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         if line == "\r\n" || line.is_empty() {
             break;
         }
-        if let Some(v) = line
-            .strip_prefix("Content-Length:")
-            .or_else(|| line.strip_prefix("content-length:"))
-        {
-            content_length = v.trim().parse().unwrap_or(0);
+        if let Some((name, value)) = line.trim_end().split_once(':') {
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            if name == "content-length" {
+                content_length = value.parse().unwrap_or(0);
+            }
+            headers.insert(name, value);
         }
     }
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
+
+    seen_headers
+        .lock()
+        .unwrap()
+        .insert((method.clone(), path.clone()), headers);
 
     let (status, resp_body) = {
         let mut routes = routes.lock().unwrap();
@@ -123,6 +160,44 @@ fn chat_ok_body(text: &str, prompt_tokens: i64, completion_tokens: i64) -> serde
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
     })
+}
+
+/// `/v1/responses`-shaped body (`genai`'s `RespResponse`) — the OAuth
+/// provider's path, distinct from `chat_ok_body`'s `/chat/completions`
+/// shape used by the API-key provider.
+fn responses_ok_body(text: &str, input_tokens: i64, output_tokens: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": "resp-test",
+        "status": "completed",
+        "model": "gpt-4o-mini",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}]
+        }],
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens
+        }
+    })
+}
+
+/// A JWT with the `https://api.openai.com/auth.chatgpt_account_id` claim
+/// Codex-flow access tokens carry — unsigned (`alg: none`-shaped; nothing
+/// in the harness verifies the signature, matching `openai-auth`'s own
+/// trust posture for tokens it already exchanged). Header/signature
+/// segments are placeholders; only the payload segment is read.
+fn jwt_with_account_id(account_id: &str) -> String {
+    use base64::Engine as _;
+    let b64 = |v: &serde_json::Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+    };
+    let header = b64(&serde_json::json!({"alg": "none", "typ": "JWT"}));
+    let payload = b64(&serde_json::json!({
+        "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
+    }));
+    format!("{header}.{payload}.sig")
 }
 
 fn sample_req() -> TurnRequest {
@@ -251,19 +326,30 @@ fn write_token(
     oauth::save_token(path, &token).unwrap();
 }
 
+/// The OAuth provider routes through `/v1/responses` (not
+/// `/v1/chat/completions`) with a `chatgpt-account-id` header derived from
+/// the access-token JWT's `chatgpt_account_id` claim — Codex-flow
+/// subscription tokens 401 on chat-completions regardless of `aud`, but
+/// pass on responses with this header. See `oauth.rs`'s module doc.
 #[tokio::test]
 async fn oauth_provider_completes_ok_with_valid_token() {
     let chat_server = MockServer::start();
-    chat_server.queue("POST", "/chat/completions", 200, chat_ok_body("pong", 3, 1));
+    chat_server.queue("POST", "/responses", 200, responses_ok_body("pong", 3, 1));
 
     let dir = tempfile::tempdir().unwrap();
     let token_path = dir.path().join("token.json");
-    write_token(&token_path, "valid-access-token", "rt", 3600);
+    let token = jwt_with_account_id("acct-123");
+    write_token(&token_path, &token, "rt", 3600);
 
     let cfg = oauth_cfg_for_mock(&chat_server, "http://127.0.0.1:1/", token_path);
     let provider = OauthProvider::new(cfg);
 
     assert_completes_ok(&provider).await;
+    assert_eq!(
+        chat_server.header_seen("POST", "/responses", "chatgpt-account-id"),
+        Some("acct-123".to_string()),
+        "responses request must carry the chatgpt-account-id header"
+    );
 }
 
 #[tokio::test]
@@ -271,7 +357,7 @@ async fn oauth_provider_401_from_chat_is_auth_error() {
     let chat_server = MockServer::start();
     chat_server.queue(
         "POST",
-        "/chat/completions",
+        "/responses",
         401,
         serde_json::json!({"error": {"message": "token revoked", "type": "invalid_request_error"}}),
     );
@@ -321,7 +407,7 @@ async fn oauth_provider_dead_refresh_token_is_auth_error() {
 #[tokio::test]
 async fn oauth_provider_refreshes_expired_token_and_persists_new_one() {
     let chat_server = MockServer::start();
-    chat_server.queue("POST", "/chat/completions", 200, chat_ok_body("pong", 3, 1));
+    chat_server.queue("POST", "/responses", 200, responses_ok_body("pong", 3, 1));
     let token_server = MockServer::start();
     token_server.queue(
         "POST",

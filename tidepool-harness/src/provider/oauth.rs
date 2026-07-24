@@ -21,16 +21,62 @@
 //! equivalent), then open the returned URL and sign in. Refresh is
 //! automatic thereafter — no further port-forward is needed until the
 //! refresh token itself dies, at which point [`start_login`] runs again.
+//!
+//! **Chat routing is NOT the chat-completions endpoint.** Codex-flow
+//! subscription tokens carry `aud = https://api.openai.com/v1` but
+//! `/v1/chat/completions` 401s them regardless — verified against the
+//! Codex CLI (`openai/codex`'s `codex-rs`, Apache-2.0), which sends these
+//! tokens to `/v1/responses` with a `chatgpt-account-id` header sourced
+//! from a claim on the access-token JWT. `genai` (0.5.3) already speaks
+//! this endpoint as `AdapterKind::OpenAIResp` — forced here by routing
+//! through the `openai_resp::` model namespace regardless of the
+//! configured model name — and already supports per-call custom headers
+//! via `ChatOptions::with_extra_headers`. `openai-auth` (1.0.0) does not
+//! export its own JWT-claim decoder (`jwt` is a private module), so
+//! [`chatgpt_account_id`] below re-derives just the one claim it exposes
+//! internally: `chatgpt_account_id` under the
+//! `https://api.openai.com/auth` claim, decoded WITHOUT signature
+//! verification (the token already came from our own OAuth flow, the same
+//! trust posture `openai-auth`'s own decoder uses).
 
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use openai_auth::{OAuthClient, OAuthConfig as InnerOAuthConfig, TokenSet};
 
 use crate::provider::http::{
-    build_client, chat_options, map_genai_err, to_chat_request, to_turn_response,
+    build_client, chat_options_with_headers, map_genai_err, to_chat_request, to_turn_response,
 };
 use crate::provider::paths::{secrets_dir, write_secret};
 use crate::provider::{ModelProvider, ProviderError, TurnRequest, TurnResponse};
+
+/// Forces `genai`'s `AdapterKind::OpenAIResp` (the `/v1/responses` adapter)
+/// regardless of what `model` looks like — namespace-forcing takes priority
+/// over `genai`'s model-name heuristics (`AdapterKind::from_model`), so this
+/// works for any configured model string, not just the `gpt-5-codex`-shaped
+/// names `genai` would route there on its own.
+fn responses_routed_model(model: &str) -> String {
+    format!("openai_resp::{model}")
+}
+
+/// Extract the `chatgpt_account_id` claim from an access-token JWT, decoded
+/// WITHOUT signature verification — see the module doc. Returns `None` on
+/// any decode failure or a missing claim; the caller treats that as "send
+/// the request without the header" rather than a hard failure, since a
+/// malformed/legacy token should surface as the provider's own 401, not an
+/// opaque local decode error.
+fn chatgpt_account_id(access_token: &str) -> Option<String> {
+    let payload_b64 = access_token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(str::to_string)
+}
 
 /// Matches `openai_auth::OAuthConfig::default()`'s redirect URI port.
 pub const DEFAULT_CALLBACK_PORT: u16 = 1455;
@@ -215,12 +261,16 @@ impl OauthProvider {
 impl ModelProvider for OauthProvider {
     async fn complete(&self, req: TurnRequest) -> Result<TurnResponse, ProviderError> {
         let token = access_token(&self.cfg).await?;
+        let mut headers = genai::Headers::default();
+        if let Some(account_id) = chatgpt_account_id(&token) {
+            headers.merge(("chatgpt-account-id", account_id));
+        }
         let client = build_client(self.cfg.chat_base_url.clone(), token);
         let resp = client
             .exec_chat(
-                &self.cfg.model,
+                &responses_routed_model(&self.cfg.model),
                 to_chat_request(&req),
-                chat_options(&req).as_ref(),
+                Some(&chat_options_with_headers(&req, headers)),
             )
             .await
             .map_err(map_genai_err)?;
