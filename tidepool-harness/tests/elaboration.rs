@@ -371,16 +371,15 @@ async fn reject_discards_without_running_and_leaves_continuation_untouched() {
         .iter()
         .filter(|e| matches!(e, Event::HoleAnswerAttempt { .. }))
         .collect();
-    // The mechanical dialog path (unchanged by B2) logs a Consumed attempt
-    // TWICE — once in `answer_dialog` itself (source "operator"), once inside
-    // `resume_parent` (source "harness") — a pre-existing quirk of the R0
-    // spike this leaf must not touch. So: Proposed, ProposalDiscarded, then
-    // that pair of Consumed attempts from the follow-up mechanical answer.
+    // `resume_parent` is the SOLE logger of a Consumed attempt (invariant: one
+    // successful resume, one Consumed record — `answer_dialog`'s mechanical
+    // branch no longer logs its own, so the follow-up mechanical answer here
+    // logs exactly one). So: Proposed, ProposalDiscarded, then the single
+    // Consumed from the follow-up mechanical answer.
     assert_eq!(
         attempts.len(),
-        4,
-        "one Proposed, one ProposalDiscarded, two Consumed (the unchanged \
-         mechanical path's own double-log), got {attempts:?}"
+        3,
+        "one Proposed, one ProposalDiscarded, one Consumed, got {attempts:?}"
     );
     assert!(matches!(
         attempts[0],
@@ -398,13 +397,6 @@ async fn reject_discards_without_running_and_leaves_continuation_untouched() {
     ));
     assert!(matches!(
         attempts[2],
-        Event::HoleAnswerAttempt {
-            outcome: AnswerOutcome::Consumed,
-            ..
-        }
-    ));
-    assert!(matches!(
-        attempts[3],
         Event::HoleAnswerAttempt {
             outcome: AnswerOutcome::Consumed,
             ..

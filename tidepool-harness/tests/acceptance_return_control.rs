@@ -19,7 +19,7 @@ use tidepool_harness::log::{Actor, AnswerOutcome, Event, LogHeader, LogReader, L
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, HoleRouting};
+use tidepool_harness::{Harness, HoleRouting, Ui};
 
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
@@ -445,4 +445,146 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
             .count(),
         1
     );
+}
+
+/// A SECOND, sequential `returnControl` hole in the SAME compiled turn — the
+/// resumed continuation (`Session::resume`) hits another `AskWith` before the
+/// do-block completes. This is the re-suspend arm of `resume_parent`: it must
+/// classify + publish the second hole's REAL site + type (`HoleRouting::ReturnControl
+/// { ty: Some("Bool"), .. }`), not the `None`/`None` a stale re-suspend used to
+/// carry. Also proves the typed-answer path works on hole 2: the mechanical
+/// `Ui::Choice` form is derivable from the SAME `Bool` type via
+/// `pending_derived_ui`, and answering it (in-context, via
+/// `answer_return_control` again) resumes the continuation to completion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn return_control_second_sequential_hole_carries_its_type() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("rc-second-hole.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+
+    let replies = vec![
+        // Root turn: two SEQUENTIAL returnControl holes in one compiled block.
+        reply(
+            "```haskell\ndo\n  n <- returnControl @Int \"pick a number between 1 and 100\"\n  \
+             b <- returnControl @Bool \"is it even?\"\n  pure (toJSON (n, b))\n```",
+        ),
+        // Answers the FIRST hole (Int).
+        reply("```haskell\nresume (42 :: Int)\n```"),
+        // Answers the SECOND hole (Bool) — the re-suspend this test targets.
+        reply("```haskell\nresume True\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root("rc second hole", "Get a number, then a bool, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to its first hole");
+    match &outcome {
+        tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
+            HoleRouting::ReturnControl { ty, .. } => {
+                assert_eq!(ty.as_deref(), Some("Int"), "first hole carries Int");
+            }
+            other => panic!("expected a ReturnControl hole, got {other:?}"),
+        },
+        other => panic!("root should suspend at the first returnControl, got {}", outcome_tag(other)),
+    }
+
+    // Answer the FIRST hole. This drives the resumed continuation straight
+    // into the SECOND returnControl — the re-suspend arm under test.
+    harness
+        .answer_return_control(root)
+        .await
+        .expect("first hole answered; resume hits the second hole");
+
+    // The node must still be Suspended (on the second hole), not Done yet.
+    assert!(matches!(
+        harness.tree().state(root),
+        Some(NodeState::Suspended { .. })
+    ));
+
+    // --- the flagship assertion: the SECOND hole carries its real type -----
+    let second_pending = harness
+        .pending_hole(root)
+        .expect("root is suspended on the second hole");
+    let (second_site, second_ty) = match &second_pending.routing {
+        HoleRouting::ReturnControl { site, ty } => (*site, ty.clone()),
+        other => panic!("second hole must also be a ReturnControl, got {other:?}"),
+    };
+    assert_eq!(
+        second_ty.as_deref(),
+        Some("Bool"),
+        "the SECOND hole must carry its real type from the fresh classification, not None"
+    );
+
+    // The typed-answer/derived-form path works on hole 2: `Bool` is a nullary
+    // sum, so the server-derived mechanical form is a Choice — provable only
+    // if the second hole's type resolved correctly.
+    let derived = harness
+        .pending_derived_ui(root)
+        .expect("hole 2's type resolves to a mechanically-derivable Ui");
+    assert!(
+        matches!(derived, Ui::Choice { .. }),
+        "Bool derives a Choice form, got {derived:?}"
+    );
+
+    // The durable log's second HolePublished record also carries site + ty.
+    let events = events_for(&log_path, root);
+    let published: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HolePublished { .. }))
+        .collect();
+    assert_eq!(
+        published.len(),
+        2,
+        "two holes published in sequence, got {published:?}"
+    );
+    let Event::HolePublished { site, ty, .. } = published[1] else {
+        unreachable!()
+    };
+    assert!(
+        site.is_some(),
+        "the second HolePublished record must carry a site id, got {site:?}"
+    );
+    assert_eq!(
+        ty.as_deref(),
+        Some("Bool"),
+        "the durable HolePublished record for hole 2 must carry its type"
+    );
+    assert_eq!(site.map(|s| s.0), Some(second_site));
+
+    // Answer the SECOND hole and drive the program to completion — proves the
+    // typed-answer path is not just classified correctly but actually usable.
+    harness
+        .answer_return_control(root)
+        .await
+        .expect("second hole answered; the program completes");
+    assert_eq!(
+        harness.tree().state(root),
+        Some(NodeState::Done),
+        "the node completes once BOTH sequential holes are answered"
+    );
+
+    let events = events_for(&log_path, root);
+    let consumed: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HoleConsumed { .. }))
+        .collect();
+    assert_eq!(
+        consumed.len(),
+        2,
+        "each hole consumes exactly once, got {consumed:?}"
+    );
+    assert!(events.iter().any(|e| matches!(e, Event::NodeDone { .. })));
 }

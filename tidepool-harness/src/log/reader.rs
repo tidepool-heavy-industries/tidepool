@@ -87,8 +87,11 @@ impl LogReader {
 
 /// Yields events from the current file position to EOF. Torn-tail
 /// tolerant: a final line left incomplete by a crash mid-append (no
-/// trailing newline, or truncated JSON) ends iteration cleanly — the
-/// caller sees every whole event and nothing past it, not an error.
+/// trailing newline, or a newline-terminated but truncated JSON body
+/// with nothing after it) ends iteration cleanly — the caller sees
+/// every whole event and nothing past it, not an error. A parse
+/// failure on a line that is NOT the last thing in the file is genuine
+/// corruption, not a torn tail, and surfaces as [`ReadError::Parse`].
 pub struct EventIter {
     reader: BufReader<File>,
 }
@@ -103,15 +106,26 @@ impl Iterator for EventIter {
             Ok(_) => {
                 if !line.ends_with('\n') {
                     // Torn tail: crash left a partial line with no
-                    // terminator. Stop cleanly at the last whole event.
+                    // terminator, and by definition nothing follows it
+                    // (read_line only returns without a newline at EOF).
+                    // Stop cleanly at the last whole event.
                     return None;
                 }
                 match serde_json::from_str::<EventRecord>(line.trim_end()) {
                     Ok(record) => Some(Ok(record)),
-                    // Malformed final line (e.g. truncated mid-object but
-                    // happened to end on a byte before a later newline
-                    // was appended) — same torn-tail tolerance.
-                    Err(_) => None,
+                    Err(e) => {
+                        // A parse failure is only tolerated when this
+                        // line is the last thing in the file (a torn
+                        // tail that happened to already have its
+                        // newline written). If more bytes follow, this
+                        // is a corrupt MIDDLE record, not a crash tail —
+                        // surface it rather than silently truncating.
+                        match self.reader.fill_buf() {
+                            Ok([]) => None,
+                            Ok(_) => Some(Err(ReadError::Parse(e))),
+                            Err(io_err) => Some(Err(ReadError::Io(io_err))),
+                        }
+                    }
                 }
             }
             Err(e) => Some(Err(ReadError::Io(e))),

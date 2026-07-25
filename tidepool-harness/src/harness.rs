@@ -905,7 +905,10 @@ impl Harness {
             .and_then(|c| c.suspend_table.clone())
             .unwrap_or_default();
         let value = engine::json_answer_to_value(&submission, &table)?;
-        self.log_answer_attempt(node, &pending.hole, "operator", AnswerOutcome::Consumed)?;
+        // `resume_parent` logs the Consumed attempt itself, once, only after
+        // the resume actually succeeds — logging it here too used to
+        // double-log every mechanical dialog answer (fixed: single source of
+        // truth for the Consumed record).
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -1363,8 +1366,21 @@ impl Harness {
         hole: &HoleId,
         answer: Value,
     ) -> Result<(), HarnessError> {
-        self.log_answer_attempt(node, hole, "harness", AnswerOutcome::Consumed)?;
-        self.tree.hole_consumed(node, hole.clone())?;
+        // `Session::resume` continues the ALREADY-COMPILED fragment the node
+        // suspended with (it does not recompile), so any hole reached further
+        // down that same continuation — including a second sequential ask —
+        // resolves its site-id -> type against this SAME table, exactly like
+        // `run_block` resolves the first hole's. Snapshot it now (session is
+        // about to be taken out) so the re-suspend arm below can classify the
+        // next hole with real site/type instead of publishing `None`/`None`.
+        let (table, asks) = {
+            let convos = self.convos.lock();
+            let c = convos.get(&node);
+            (
+                c.and_then(|c| c.suspend_table.clone()).unwrap_or_default(),
+                c.map(|c| c.suspend_asks.clone()).unwrap_or_default(),
+            )
+        };
 
         let mut session = self.take_session(node)?;
         let hole_str = hole.0.clone();
@@ -1374,7 +1390,21 @@ impl Harness {
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("resume join: {e}")))?;
-        self.put_session(node, session, None, AsksSidecar::default());
+        // Refresh suspend_table/suspend_asks explicitly on every restore, not
+        // just the first suspend — downstream lookups (`pending_derived_ui`,
+        // mechanical/dialog answers) must read the table the resident session
+        // is actually compiled against, not silently-preserved first-suspend
+        // state.
+        self.put_session(node, session, Some(table.clone()), asks.clone());
+
+        // Only log the hole as Consumed (and clear it from `pending`) once the
+        // resume has ACTUALLY SUCCEEDED — a fault here (e.g. `error` forced
+        // mid-resume) must not leave a durable Consumed record with no
+        // matching NodeDone or re-HolePublished.
+        let outcome = outcome.map_err(|e| HarnessError::Resident(e.to_string()))?;
+
+        self.log_answer_attempt(node, hole, "harness", AnswerOutcome::Consumed)?;
+        self.tree.hole_consumed(node, hole.clone())?;
         {
             let mut convos = self.convos.lock();
             if let Some(convo) = convos.get_mut(&node) {
@@ -1383,29 +1413,35 @@ impl Harness {
         }
 
         match outcome {
-            Ok(ResidentOutcome::Completed { result, .. }) => {
+            ResidentOutcome::Completed { result, .. } => {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered)?;
                 self.drop_session(node);
                 Ok(())
             }
-            Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
-                // The resumed turn hit ANOTHER hole. Re-classify + re-publish.
-                let (table, asks) = {
-                    let convos = self.convos.lock();
-                    let c = convos.get(&node);
-                    (
-                        c.and_then(|c| c.suspend_table.clone()).unwrap_or_default(),
-                        c.map(|c| c.suspend_asks.clone()).unwrap_or_default(),
-                    )
-                };
+            ResidentOutcome::Suspended { hole, request, .. } => {
+                // The resumed turn hit ANOTHER hole. Re-classify against the
+                // table snapshotted above (the compile the still-executing
+                // fragment was built with) and re-publish with its REAL
+                // site + type, same as a first-suspend `run_block` hole.
                 let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
+                let ty = match &classified.routing {
+                    HoleRouting::Fork { ty, .. } | HoleRouting::ReturnControl { ty, .. } => {
+                        ty.clone()
+                    }
+                    _ => None,
+                };
+                let site = match &classified.routing {
+                    HoleRouting::Fork { site, .. }
+                    | HoleRouting::ReturnControl { site, .. } => Some(crate::tree::SiteId(*site)),
+                    _ => None,
+                };
                 self.tree.hole_published(
                     node,
                     HoleId(hole.clone()),
-                    None,
-                    None,
+                    site,
+                    ty,
                     classified.prompt.clone(),
                     fork,
                 )?;
@@ -1418,7 +1454,6 @@ impl Harness {
                 );
                 Ok(())
             }
-            Err(e) => Err(HarnessError::Resident(e.to_string())),
         }
     }
 

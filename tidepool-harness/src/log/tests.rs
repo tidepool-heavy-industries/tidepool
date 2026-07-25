@@ -195,6 +195,41 @@ fn torn_final_line_reads_cleanly_to_last_whole_event() {
 }
 
 #[test]
+fn corrupt_middle_line_is_a_read_error_not_silent_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+    write_sample_log(&path);
+
+    // Corrupt one JSON body in the middle of the file (not the last
+    // line) while preserving line structure: same byte length, still
+    // newline-terminated, but no longer valid JSON.
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
+    assert!(
+        lines.len() > 3,
+        "need at least a header + a few events to corrupt a middle one"
+    );
+    let target = 2; // header is lines[0]; corrupt an early event line.
+    let corrupted = lines[target].replace('{', "#");
+    assert_ne!(corrupted, lines[target], "corruption must actually change the line");
+    lines[target] = corrupted;
+    let mut rewritten = lines.join("\n");
+    rewritten.push('\n');
+    std::fs::write(&path, rewritten).unwrap();
+
+    let (_, iter) = LogReader::open(&path).expect("open log");
+    let result: Result<Vec<EventRecord>, ReadError> = iter.collect();
+    match result {
+        Err(ReadError::Parse(_)) => {}
+        Err(other) => panic!("expected ReadError::Parse, got {other:?}"),
+        Ok(records) => panic!(
+            "corrupt middle record must not silently truncate the fold; got {} records",
+            records.len()
+        ),
+    }
+}
+
+#[test]
 fn follow_mode_sees_appends() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.jsonl");
