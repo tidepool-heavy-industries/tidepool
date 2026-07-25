@@ -38,6 +38,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value as Json;
 use tidepool_effect::dispatch::DispatchEffect;
+use tokio::sync::oneshot;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -86,6 +87,10 @@ pub enum HarnessError {
     NoDerivedForm(NodeId),
     #[error("node {0:?} has no pending elaborator proposal to confirm/reject")]
     NoPendingProposal(NodeId),
+    #[error("node {node:?} aborted: {reason}")]
+    Aborted { node: NodeId, reason: String },
+    #[error("node {0:?} has no pending operator escalation to resolve")]
+    NoPendingEscalation(NodeId),
 }
 
 /// Per-node conversation state the Harness keeps live (also derivable from the
@@ -151,6 +156,48 @@ pub struct NodeSummary {
     pub state: crate::tree::NodeState,
     pub is_fork_hole: bool,
     pub hole_prompt: Option<String>,
+    /// Set when this node is mid-`drive_answerer_to_value`, PARKED on the
+    /// operator-decision channel after exhausting its rung-1 auto-retry
+    /// (the escalation ladder's rung 2) — the node's [`crate::tree::NodeState`]
+    /// itself is unchanged (still `Running`: no hole was published, no event
+    /// was logged), so this is the harness's own in-memory signal the
+    /// observatory badges/pops up on. `None` otherwise.
+    pub awaiting_operator: bool,
+}
+
+/// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
+/// answerer exhausted its auto-retry and is parked awaiting an operator
+/// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
+/// durable event log; a process restart mid-escalation loses it (the
+/// operator re-triggers by re-forcing, same as any other in-flight turn —
+/// durable mid-fan suspension is explicitly out of R0 scope).
+#[derive(Debug, Clone)]
+pub struct Escalation {
+    /// Human-facing summary of why this node escalated (e.g. cap-exhausted
+    /// after N attempts).
+    pub reason: String,
+    /// A short tail of the answerer's own transcript, for the popup's
+    /// "what has it been trying" preview. Model-authored — render it through
+    /// the same HTML-neutralizing path any other model text uses.
+    pub transcript_preview: String,
+}
+
+/// The operator's rung-2 decision, delivered through the oneshot channel
+/// [`Harness::resolve_escalation`] fires. `AllocateMore` grants a fresh turn
+/// budget (replacing, not adding to, what remained) and optionally injects
+/// `steer` as the answerer's next corrective user turn before it retries.
+#[derive(Debug, Clone)]
+pub enum OperatorDecision {
+    AllocateMore { turns: u32, steer: Option<String> },
+    Abort,
+}
+
+/// The outcome of [`Harness::handle_cap_exhaustion`]'s ladder step: either
+/// the caller's loop keeps going with a (possibly larger) turn budget, or the
+/// answerer is being torn down.
+enum CapDecision {
+    Retry { turn_budget: u32 },
+    Abort { reason: String },
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -171,6 +218,18 @@ pub struct Harness {
     /// prefix + hole card), staged between `register_fork_child` and `force`
     /// for the same reason as `seeds`. Removed once consumed at force time.
     forked_transcripts: Mutex<HashMap<NodeId, Vec<Message>>>,
+    /// Rung-2 escalation state (operator popup), keyed by the answerer node
+    /// that is parked awaiting a decision. Set by
+    /// [`Self::escalate_to_operator`] just before the await, read by the web
+    /// layer to render the stuck-node popup, removed once resolved.
+    escalations: Mutex<HashMap<NodeId, Escalation>>,
+    /// The oneshot sender half for each PENDING rung-2 escalation, keyed the
+    /// same way as `escalations`. [`Self::resolve_escalation`] (driven by the
+    /// web resolve endpoint, or fired directly in a test) removes and fires
+    /// the sender; the matching receiver lives on `escalate_to_operator`'s
+    /// async stack, in-process only (see that method's doc for the
+    /// durability caveat).
+    operator_decisions: Mutex<HashMap<NodeId, oneshot::Sender<OperatorDecision>>>,
 }
 
 impl Harness {
@@ -198,6 +257,8 @@ impl Harness {
             boot: Arc::new(boot),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
+            escalations: Mutex::new(HashMap::new()),
+            operator_decisions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -269,6 +330,7 @@ impl Harness {
             state,
             is_fork_hole: is_fork,
             hole_prompt: prompt,
+            awaiting_operator: self.escalations.lock().contains_key(&n),
         })
     }
 
@@ -607,6 +669,38 @@ impl Harness {
             .map(|p| p.source.clone())
     }
 
+    /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
+    /// an operator decision — what the stuck-node popup renders.
+    pub fn escalation_of(&self, node: NodeId) -> Option<Escalation> {
+        self.escalations.lock().get(&node).cloned()
+    }
+
+    /// The first node currently parked on a rung-2 escalation, if any — what
+    /// the inspector's stuck-node popup focuses by default (checked BEFORE
+    /// the plain operator-hole focus, since an escalated answerer blocks fan
+    /// progress and has no pending hole of its own to otherwise surface it).
+    pub fn first_escalated_node(&self) -> Option<NodeId> {
+        self.escalations.lock().keys().min().copied()
+    }
+
+    /// Resolve `node`'s pending rung-2 escalation with the operator's
+    /// `decision` (driven by the web `/steer/:node` endpoint, or fired
+    /// directly in a test to simulate the popup). Errors with
+    /// [`HarnessError::NoPendingEscalation`] if `node` has no escalation
+    /// parked (already resolved, or never escalated).
+    pub fn resolve_escalation(&self, node: NodeId, decision: OperatorDecision) -> Result<(), HarnessError> {
+        let tx = self
+            .operator_decisions
+            .lock()
+            .remove(&node)
+            .ok_or(HarnessError::NoPendingEscalation(node))?;
+        tx.send(decision).map_err(|_| {
+            HarnessError::Resident(format!(
+                "node {node:?}: operator decision could not be delivered (its wait was already abandoned)"
+            ))
+        })
+    }
+
     /// The first node currently suspended on a Dialog (operator) hole, if any —
     /// what the inspector focuses by default.
     pub fn first_operator_hole(&self) -> Option<NodeId> {
@@ -683,6 +777,17 @@ impl Harness {
     /// per-child `T` values are assembled into a genuine `[T]` `Value` (F3's
     /// RAW-value rule, same discipline a single fork's `unsafeCoerce` relies
     /// on) and resume the parent exactly once.
+    ///
+    /// A child that exhausts its `max_child_turns` budget does NOT hard-fail
+    /// straight out of this loop anymore: [`Self::drive_answerer_to_value`]
+    /// runs the escalation ladder internally (auto corrective-retry, then an
+    /// operator popup) before ever returning an error. If a child is still
+    /// stuck after the operator aborts, that child is CANCELLED inside
+    /// `drive_answerer_to_value` (never left `Running`) before the error
+    /// propagates here via `?` — this function does nothing further: earlier
+    /// children in the loop are already terminal (`Done`), later ones were
+    /// never created, and `node` (the parent) is simply never resumed, so it
+    /// stays `Suspended` on its original fanout hole, re-answerable.
     pub async fn answer_fanout(&self, node: NodeId, actor: Actor) -> Result<Vec<NodeId>, HarnessError> {
         let pending = self
             .convos
@@ -1199,6 +1304,15 @@ impl Harness {
     /// answer, or one fanout child's per-child cap, `cfg.max_child_turns`, so
     /// no single child of a fan can consume the whole node's turn budget).
     /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
+    ///
+    /// CAP EXHAUSTION does NOT return straight out anymore (the old
+    /// mid-fan hard-failure that leaked a `Running` answerer and wedged the
+    /// parent) — it runs the escalation ladder via
+    /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
+    /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
+    /// an unrelated resident/routing error) unwinds out of this loop; on
+    /// abort, `answerer` is cancelled here (never left dangling) and
+    /// [`HarnessError::Aborted`] is returned, naming `answerer` and why.
     async fn drive_answerer_to_value(
         &self,
         answerer: NodeId,
@@ -1207,9 +1321,29 @@ impl Harness {
         max_turns: u32,
     ) -> Result<Value, HarnessError> {
         let mut attempts = 0;
+        let mut turn_budget = max_turns;
+        let mut auto_retries_used = 0u32;
         loop {
-            if attempts >= max_turns {
-                return Err(EngineError::NoBlock { turns: attempts }.into());
+            if attempts >= turn_budget {
+                match self
+                    .handle_cap_exhaustion(answerer, ty, attempts, &mut auto_retries_used)
+                    .await?
+                {
+                    CapDecision::Retry {
+                        turn_budget: new_budget,
+                    } => {
+                        turn_budget = new_budget;
+                        continue;
+                    }
+                    CapDecision::Abort { reason } => {
+                        self.tree.node_cancelled(answerer, reason.clone())?;
+                        self.drop_session(answerer);
+                        return Err(HarnessError::Aborted {
+                            node: answerer,
+                            reason,
+                        });
+                    }
+                }
             }
             attempts += 1;
 
@@ -1355,6 +1489,122 @@ impl Harness {
                 }
             }
         }
+    }
+
+    /// The escalation ladder's ONE rung-1 auto-retry: a fixed extra turn
+    /// budget granted exactly once per [`Self::drive_answerer_to_value`] call
+    /// before further exhaustion escalates to rung 2. Kept small and
+    /// singular deliberately — this is meant to unwedge the common case (the
+    /// model just needed one more nudge), not to substitute for the
+    /// operator.
+    const AUTO_RETRY_MAX: u32 = 1;
+    /// The turn-budget bump rung 1's single auto-retry grants.
+    const AUTO_RETRY_BUMP: u32 = 3;
+
+    /// [`Self::drive_answerer_to_value`]'s ladder step, called when
+    /// `answerer` has exhausted its current turn budget (`attempts >=
+    /// turn_budget`) without producing a consumed answer — whether from
+    /// repeated `NoBlock` replies, repeated ill-typed `resume` attempts, or a
+    /// mix (both retry paths consume from the same `attempts` counter, so
+    /// either exhausts the same way). RUNG 1 fires at most once per answerer
+    /// per call (`auto_retries_used` is the caller's counter, threaded
+    /// through so a SECOND exhaustion after an operator-granted budget goes
+    /// straight back to rung 2 rather than re-trying rung 1): it injects a
+    /// corrective user turn — reusing the same feed-the-error-back-verbatim
+    /// idiom the compile-failure retry above uses, just with a different
+    /// message — and grants [`Self::AUTO_RETRY_BUMP`] more turns. Once rung 1
+    /// is spent, this escalates to [`Self::escalate_to_operator`] (rung 2).
+    async fn handle_cap_exhaustion(
+        &self,
+        answerer: NodeId,
+        ty: Option<&str>,
+        attempts: u32,
+        auto_retries_used: &mut u32,
+    ) -> Result<CapDecision, HarnessError> {
+        if *auto_retries_used < Self::AUTO_RETRY_MAX {
+            *auto_retries_used += 1;
+            let ty_clause = ty
+                .map(|t| format!(" of type `{t}`"))
+                .unwrap_or_default();
+            self.push_user_turn(
+                answerer,
+                &format!(
+                    "You have exhausted your turn budget ({attempts} turns) without \
+                     producing a single valid `resume expr`{ty_clause}. You have \
+                     {bump} more turns — produce a single valid `resume expr` now.",
+                    bump = Self::AUTO_RETRY_BUMP
+                ),
+            )?;
+            return Ok(CapDecision::Retry {
+                turn_budget: attempts + Self::AUTO_RETRY_BUMP,
+            });
+        }
+        self.escalate_to_operator(answerer, attempts).await
+    }
+
+    /// Rung 2 of the escalation ladder: park `answerer` awaiting an operator
+    /// decision. Publishes an [`Escalation`] (what the stuck-node popup
+    /// renders) and a oneshot sender (fired by [`Self::resolve_escalation`],
+    /// driven by the web `/steer/:node` endpoint or a test simulating the
+    /// popup), THEN drops every lock before awaiting the receiver — the
+    /// partial fan state a caller further up the stack (e.g.
+    /// [`Self::answer_fanout`]'s `answers` vector) is holding lives on the
+    /// ASYNC STACK across this await, which is fine and intended: this is an
+    /// IN-PROCESS control-plane wait, not durable-across-restart mid-fan
+    /// suspension (explicitly out of R0 scope) — a process death here loses
+    /// the in-flight fan and the operator re-triggers, same as any other
+    /// in-flight turn.
+    async fn escalate_to_operator(
+        &self,
+        answerer: NodeId,
+        attempts: u32,
+    ) -> Result<CapDecision, HarnessError> {
+        let (tx, rx) = oneshot::channel();
+        let escalation = Escalation {
+            reason: format!("cap-exhausted after {attempts} attempts"),
+            transcript_preview: self.transcript_tail(answerer, 6),
+        };
+        self.escalations.lock().insert(answerer, escalation);
+        self.operator_decisions.lock().insert(answerer, tx);
+
+        let decision = rx.await.map_err(|_| {
+            self.escalations.lock().remove(&answerer);
+            HarnessError::Resident(format!(
+                "node {answerer:?}: operator escalation channel dropped without a decision"
+            ))
+        })?;
+        self.escalations.lock().remove(&answerer);
+
+        match decision {
+            OperatorDecision::AllocateMore { turns, steer } => {
+                if let Some(steer) = steer.filter(|s| !s.trim().is_empty()) {
+                    self.push_user_turn(answerer, &steer)?;
+                }
+                Ok(CapDecision::Retry {
+                    turn_budget: attempts + turns,
+                })
+            }
+            OperatorDecision::Abort => Ok(CapDecision::Abort {
+                reason: format!("cap-exhausted after {attempts} attempts; operator aborted"),
+            }),
+        }
+    }
+
+    /// The last `n` transcript messages on `node`, rendered as a plain-text
+    /// preview for the escalation popup. Model-authored content — the caller
+    /// renders it through the same HTML-neutralizing path any other
+    /// model/operator-visible text uses; this returns bare text, no markup.
+    fn transcript_tail(&self, node: NodeId, n: usize) -> String {
+        let convos = self.convos.lock();
+        let Some(convo) = convos.get(&node) else {
+            return String::new();
+        };
+        let start = convo.transcript.len().saturating_sub(n);
+        convo.transcript[start..]
+            .iter()
+            .map(|m| format!("{:?}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     /// Resume `node`'s parked continuation with `answer` (a Value in the node's

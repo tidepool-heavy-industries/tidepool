@@ -17,6 +17,16 @@
 //!                         resumes the hole.
 //! - `POST /reject/:node`  — discard a staged elaborator proposal (B2): the
 //!                         hole reopens untouched for a fresh answer.
+//! - `POST /steer/:node`  — resolve a node's rung-2 escalation (the
+//!                         escalation ladder's operator popup): a child
+//!                         answerer that exhausted its auto-retry parks here
+//!                         awaiting an operator decision. Body
+//!                         `{"turns": <n>, "steer": <text?>}` grants `turns`
+//!                         more turns (optionally injecting `steer` as the
+//!                         answerer's next corrective user turn first), or
+//!                         `{"abort": true}` cancels the stuck answerer and
+//!                         surfaces a typed error to the fan while the
+//!                         parent stays suspended, re-answerable.
 //! - `POST /cancel/:node`— cancel a node.
 //! - `POST /splice/:node` — interject an operator message into `node`'s OWN
 //!                         transcript (F2's `turn_spliced` kind), landing at
@@ -95,6 +105,8 @@ pub fn router(state: AppState) -> Router {
         .route("/answer/{node}/{key}", post(answer_key))
         .route("/confirm/{node}", post(confirm))
         .route("/reject/{node}", post(reject))
+        .route("/steer/{node}", post(steer))
+        .route("/steer/{node}/abort", post(steer_abort))
         .route("/cancel/{node}", post(cancel))
         .route("/splice/{node}", post(splice))
         .route("/eval_in_binding/{node}", post(eval_in_binding))
@@ -153,6 +165,7 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
             div class="meta" {
                 span class={ "chip state-" (state_class) } { (state_label) }
                 @if n.is_fork_hole { span class="chip fork" { "fork" } }
+                @if n.awaiting_operator { span class="chip escalated" { "awaiting operator" } }
             }
             @if let Some(prompt) = &n.hole_prompt {
                 div class="meta" { span class="chip" { (truncate(prompt, 48)) } }
@@ -172,12 +185,19 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
     }
 }
 
-/// The inspector pane markup (id="inspector"). When the focused operator hole
-/// has a staged elaborator proposal (B2), that takes priority — the operator
-/// must confirm/reject it before the raw form is relevant again. Otherwise
-/// renders the pending Dialog hole's `Ui` form, or an empty placeholder.
+/// The inspector pane markup (id="inspector"). A parked rung-2 ESCALATION
+/// (the stuck-node popup) takes top priority — it blocks a whole fan's
+/// progress and has no pending hole of its own to otherwise surface it.
+/// Next, a staged elaborator proposal (B2) — the operator must confirm/reject
+/// it before the raw form is relevant again. Otherwise renders the pending
+/// Dialog hole's `Ui` form, or an empty placeholder.
 fn inspector_fragment(st: &AppState) -> Markup {
-    let inner = if let Some(node) = st.harness.first_operator_hole() {
+    let inner = if let Some(node) = st.harness.first_escalated_node() {
+        match st.harness.escalation_of(node) {
+            Some(esc) => render_escalation(node, &esc),
+            None => shell::inspector_empty(),
+        }
+    } else if let Some(node) = st.harness.first_operator_hole() {
         if let Some(source) = st.harness.pending_proposal_source(node) {
             render_proposal(node, &source)
         } else if let Some(ui) = st.harness.pending_dialog_ui(node) {
@@ -190,6 +210,41 @@ fn inspector_fragment(st: &AppState) -> Markup {
         shell::inspector_empty()
     };
     html! { div id="inspector" { (inner) } }
+}
+
+/// The stuck-node popup (escalation ladder rung 2): `node`'s identity, why it
+/// escalated, and a short preview of its own transcript (model-authored —
+/// interpolated through maud's `(expr)`, which HTML-escapes by default, the
+/// same neutralization discipline every other model-visible text in this
+/// crate relies on; no raw-render path is introduced here). Two controls:
+/// a form (allocate more turns, optionally WITH a steering message) POSTing
+/// to `/steer/:node`, and a plain click button (abort the fan) POSTing to
+/// `/steer/:node/abort` — split into two routes rather than one body-shaped
+/// endpoint because the vendored client (`shell::OBSERVATORY_JS`) only ever
+/// sends a body for `data-on-submit` forms (gathered from `data-bind`
+/// fields); a `data-on-click` button always POSTs empty — same discipline
+/// `/answer/:node/:key` already uses for a mechanical option click vs.
+/// `/answer/:node`'s form submit.
+fn render_escalation(node: NodeId, esc: &tidepool_harness::Escalation) -> Markup {
+    let allocate_url = format!("/steer/{}", node.0);
+    let abort_url = format!("/steer/{}/abort", node.0);
+    html! {
+        div class="ui-card escalation" {
+            h3 class="ui-card-title" { "Node " (node.0) " is awaiting you" }
+            p class="escalation-reason" { (esc.reason) }
+            pre class="ui-code" { code { (esc.transcript_preview) } }
+            form class="escalation-allocate" data-on-submit=(format!("@post('{allocate_url}')")) {
+                label for="escalation-turns" { "Allocate more turns:" }
+                input id="escalation-turns" type="text" name="turns" data-bind="turns" value="3";
+                label for="escalation-steer" { "Optional steering message:" }
+                textarea id="escalation-steer" name="steer" data-bind="steer" rows="3" {}
+                button type="submit" { "Allocate + continue" }
+            }
+            button class="ghost escalation-abort" data-on-click=(format!("@post('{abort_url}')")) {
+                "Abort fan"
+            }
+        }
+    }
 }
 
 /// The elaborator proposal card (B2): the GHC-valid `resume expr` the calling
@@ -713,6 +768,63 @@ async fn reject(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
     }
 }
 
+/// Resolve a node's rung-2 escalation with an ALLOCATE-MORE decision: grants
+/// `turns` more turns, optionally injecting `steer` as the answerer's next
+/// corrective user turn first. Body: `{"turns": <n>, "steer": <text?>}`
+/// (`turns` accepts either a JSON number or the string a form field submits;
+/// missing/unparseable defaults to 0 — an operator asking for zero more turns
+/// is a de-facto abort-by-inaction, not an error). Fires the oneshot the
+/// parked `drive_answerer_to_value` await is waiting on; that task resumes
+/// and continues asynchronously, so this handler itself returns immediately
+/// (same fire-and-ping shape as `fork`/`answer`, minus the spawn — sending
+/// on the channel does not block on the answerer's next turn).
+async fn steer(
+    State(st): State<AppState>,
+    Path(node): Path<u64>,
+    body: Option<Json<Jv>>,
+) -> Response {
+    let node = NodeId(node);
+    let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let turns = raw
+        .get("turns")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        })
+        .unwrap_or(0) as u32;
+    let steer = raw
+        .get("steer")
+        .and_then(Jv::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    let decision = tidepool_harness::OperatorDecision::AllocateMore { turns, steer };
+    match st.harness.resolve_escalation(node, decision) {
+        Ok(()) => {
+            st.ping();
+            Json(json!({"ok": true, "turns": turns})).into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
+/// Resolve a node's rung-2 escalation with an ABORT decision: the stuck
+/// answerer is cancelled (never left `Running`) and a typed error surfaces
+/// to the fan; the parent stays suspended, re-answerable. No body — a plain
+/// click, same discipline as `/fork/:node`.
+async fn steer_abort(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
+    let node = NodeId(node);
+    match st
+        .harness
+        .resolve_escalation(node, tidepool_harness::OperatorDecision::Abort)
+    {
+        Ok(()) => {
+            st.ping();
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
 async fn cancel(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
     let node = NodeId(node);
     match st.harness.cancel(node, "operator cancel") {
@@ -789,6 +901,10 @@ struct SnapshotNode {
     hole: Option<String>,
     is_fork_hole: bool,
     hole_prompt: Option<String>,
+    /// Escalation ladder rung 2: this node is mid-`drive_answerer_to_value`,
+    /// parked awaiting an operator `/steer/:node` decision. Independent of
+    /// `state` (still `"running"` — no hole was published).
+    awaiting_operator: bool,
 }
 
 fn snapshot_node(n: &tidepool_harness::NodeSummary) -> SnapshotNode {
@@ -806,6 +922,7 @@ fn snapshot_node(n: &tidepool_harness::NodeSummary) -> SnapshotNode {
         hole,
         is_fork_hole: n.is_fork_hole,
         hole_prompt: n.hole_prompt.clone(),
+        awaiting_operator: n.awaiting_operator,
     }
 }
 

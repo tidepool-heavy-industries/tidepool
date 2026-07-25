@@ -85,6 +85,7 @@ header.hdr .status.signed-out { color: var(--warn); }
 .chip.state-thunk { color: var(--fg-faint); }
 .chip.state-cancelled { color: var(--err); border-color: var(--err); }
 .chip.fork { color: var(--fork); border-color: var(--fork); }
+.chip.escalated { color: var(--err); border-color: var(--err); }
 .node .actions { margin-top: var(--s2); }
 button {
   font: inherit; font-size: 12px; padding: var(--s1) var(--s3);
@@ -110,6 +111,11 @@ button.ghost:hover { border-color: var(--fg-dim); color: var(--fg); }
 textarea, input[type=text] { font: inherit; background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border-strong); border-radius: var(--r); padding: var(--s2); resize: vertical; }
 textarea:focus, input:focus { outline: none; border-color: var(--accent); }
 .ui-badge { display: inline-block; font-size: 10px; padding: 1px var(--s2); border-radius: 999px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--fg-dim); margin-right: var(--s1); }
+.ui-card.escalation { border-color: var(--err); }
+.escalation-reason { color: var(--warn); font-size: 12px; margin: 0 0 var(--s3); }
+.escalation-allocate { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s3); }
+.escalation-allocate label { font-size: 12px; color: var(--fg-dim); }
+.escalation-abort { margin-top: var(--s3); }
 .empty { color: var(--fg-faint); font-style: italic; padding: var(--s4); }
 
 /* meters */

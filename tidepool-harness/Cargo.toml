@@ -24,7 +24,7 @@ thiserror = "2"
 genai = "0.5"
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
 base64 = "0.22"
-tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }
 parking_lot = "0.12"
 tempfile = "3"
 

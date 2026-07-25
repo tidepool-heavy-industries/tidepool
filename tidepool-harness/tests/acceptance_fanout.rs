@@ -10,13 +10,14 @@
 //! order regardless of which child needed a retry.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
-use tidepool_harness::{Harness, HoleRouting};
+use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorDecision};
 
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
@@ -194,4 +195,206 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
         pos1 < pos2 && pos2 < pos3,
         "the rendered [Int] preserves declaration order [1, 2, 3], got: {rendered}"
     );
+}
+
+/// RUNG 1 of the escalation ladder: a fanout child that exhausts its
+/// `max_child_turns` budget (here set to 1, via a `NoBlock` prose-only first
+/// reply) does NOT hard-fail the fan — [`Harness::answer_fanout`] (via
+/// `drive_answerer_to_value`) injects ONE auto corrective-retry turn and
+/// grants a small extra budget, and the child recovers on its very next
+/// reply. The fan completes with both children `Done`; no operator
+/// involvement, no escalation ever appears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-rung1.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    // A budget of 1 turn per child: the first (prose-only) reply immediately
+    // exhausts it, forcing the very next loop check through the escalation
+    // ladder's rung 1.
+    cfg.max_child_turns = 1;
+
+    let replies = vec![
+        // 1. Root turn: fan out two prompts.
+        reply(
+            "```haskell\n\
+             do\n\
+             \x20 ns <- returnControlFanout @Int [\"pick 1\", \"pick 2\"]\n\
+             \x20 pure (toJSON ns)\n\
+             ```",
+        ),
+        // 2. Child 0 ("pick 1"): a pure-prose reply, no ```haskell block —
+        //    burns the child's entire 1-turn budget with nothing to run.
+        reply("Let me think about this for a moment."),
+        // 3. Child 0, after rung 1's corrective nudge: answers validly.
+        reply("```haskell\nresume (1 :: Int)\n```"),
+        // 4. Child 1 ("pick 2"): valid on the first attempt (its own fresh
+        //    1-turn budget is enough).
+        reply("```haskell\nresume (2 :: Int)\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root("fanout rung1", "Fan out for two numbers, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+    assert!(matches!(
+        harness.tree().state(root),
+        Some(NodeState::Suspended { .. })
+    ));
+
+    let children = harness
+        .answer_fanout(root, Actor::Operator)
+        .await
+        .expect("the fan recovers via rung 1 and completes, despite child 0's cap exhaustion");
+    assert_eq!(children.len(), 2);
+    for child in &children {
+        assert_eq!(
+            harness.tree().state(*child),
+            Some(NodeState::Done),
+            "every fanout child completes, including the one that needed rung 1"
+        );
+    }
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    // No node was ever left awaiting an operator — rung 1 alone unwedged it.
+    assert!(harness.first_escalated_node().is_none());
+}
+
+/// The ABORT FLOOR: a fanout child that is STILL stuck after rung 1 (its one
+/// auto-retry) escalates to rung 2 — the operator popup — and here the
+/// operator aborts. The failing child must end up `Cancelled` (never left
+/// `Running` — the old mid-fan hard-failure's leak), the PARENT must stay
+/// `Suspended` on its original fanout hole (re-answerable, its continuation
+/// never half-consumed), and the error surfaced to the fan must be typed and
+/// name the failing child. The operator-decision oneshot is fired directly
+/// here (`Harness::resolve_escalation`), simulating the web popup's
+/// `/steer/:node/abort` POST without a browser.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-abort.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.max_child_turns = 1;
+
+    let replies = vec![
+        // 1. Root turn: fan out ONE prompt (so the stuck child's id is
+        //    predictable: root = NodeId(0), child = NodeId(1)).
+        reply(
+            "```haskell\n\
+             do\n\
+             \x20 ns <- returnControlFanout @Int [\"pick 1\"]\n\
+             \x20 pure (toJSON ns)\n\
+             ```",
+        ),
+        // 2..5. Four consecutive prose-only (no ```haskell block) replies:
+        //    1 to exhaust the initial 1-turn budget, 3 more to exhaust rung
+        //    1's auto-retry bump (AUTO_RETRY_BUMP = 3) — the fifth check
+        //    (attempts=4 >= budget=4, rung 1 already spent) escalates to
+        //    rung 2.
+        reply("Thinking (1)."),
+        reply("Thinking (2)."),
+        reply("Thinking (3)."),
+        reply("Thinking (4)."),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root("fanout abort", "Fan out for one number, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+    let root_hole = match harness.tree().state(root) {
+        Some(NodeState::Suspended { hole }) => hole,
+        other => panic!("expected root suspended on its fanout hole, got {other:?}"),
+    };
+
+    let child = NodeId(1);
+    let fan_harness = harness.clone();
+    let fan_task = tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
+
+    // Poll for the escalation to appear (rung 1 exhausted, parked on rung 2)
+    // — bounded so a regression that never escalates fails the test instead
+    // of hanging it.
+    let mut waited = Duration::ZERO;
+    while harness.escalation_of(child).is_none() {
+        assert!(
+            waited < Duration::from_secs(10),
+            "child never escalated to the operator (rung 1 should have exhausted by now)"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        waited += Duration::from_millis(5);
+    }
+    let escalation = harness.escalation_of(child).expect("just observed Some above");
+    assert!(
+        escalation.reason.contains("cap-exhausted"),
+        "escalation reason should name cap exhaustion: {}",
+        escalation.reason
+    );
+
+    // Simulate the web popup's abort control firing directly.
+    harness
+        .resolve_escalation(child, OperatorDecision::Abort)
+        .expect("the escalation is pending; resolving it must succeed");
+
+    let outcome = fan_task.await.expect("fan task did not panic");
+    match outcome {
+        Err(HarnessError::Aborted { node, reason }) => {
+            assert_eq!(node, child, "the typed error names the failing child");
+            assert!(
+                reason.contains("operator aborted"),
+                "the typed error's reason names the operator abort: {reason}"
+            );
+        }
+        other => panic!("expected HarnessError::Aborted, got {other:?}"),
+    }
+
+    // The failing child is CANCELLED, not leaked Running.
+    assert!(
+        matches!(harness.tree().state(child), Some(NodeState::Cancelled { .. })),
+        "the aborted child must be Cancelled, got {:?}",
+        harness.tree().state(child)
+    );
+
+    // The parent stays Suspended on its ORIGINAL hole — never half-resumed,
+    // still re-answerable.
+    assert_eq!(
+        harness.tree().state(root),
+        Some(NodeState::Suspended { hole: root_hole }),
+        "the parent must stay suspended on its untouched fanout hole"
+    );
+
+    // NO node anywhere in the tree is left Running — the leak this ladder
+    // replaces is structurally impossible now.
+    let (all_ids, _) = harness.tree().node_ids_after(None, usize::MAX);
+    for id in all_ids {
+        assert!(
+            !matches!(harness.tree().state(id), Some(NodeState::Running)),
+            "node {id:?} was left Running — the old mid-fan hard-failure's leak"
+        );
+    }
+
+    // The resolved escalation is cleaned up, not left dangling.
+    assert!(harness.escalation_of(child).is_none());
 }

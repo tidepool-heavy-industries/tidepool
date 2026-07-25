@@ -66,9 +66,13 @@ same `/auth/start` verb.
 `datastar-patch-elements` frames). Six panes, each independently scrollable:
 
 - **tree** (`#tree`) — the cognition tree: node id, lifecycle state, fork
-  badge, pending-hole prompt teaser. Force/fork buttons post the verbs below.
-- **inspector** (`#inspector`) — the first node suspended on an operator
-  (`dialogAsk`/`ask`) hole, rendered as a `Ui` form.
+  badge, pending-hole prompt teaser, and an "awaiting operator" badge for a
+  node parked on the escalation ladder's rung 2 (below). Force/fork buttons
+  post the verbs below.
+- **inspector** (`#inspector`) — priority order: a node parked awaiting an
+  escalation decision (the stuck-node popup, below) first, then the first
+  node suspended on an operator (`dialogAsk`/`ask`) hole, rendered as a `Ui`
+  form.
 - **meters** (`#meters`) — per-node + rollup token usage, folded from
   `TurnDelta` events' `usage` field (assistant turns only).
 - **trace** (`#trace`) — per-node effect request/response tail (last 20 per
@@ -122,6 +126,37 @@ curl -sX POST http://127.0.0.1:4600/answer/0 \
 curl -sX POST http://127.0.0.1:4600/fork/1
 # => {"ok": true, "forking": 1}
 ```
+
+**Resolve a stuck-node escalation (the fanout escalation ladder):**
+
+A fanout (or plain fork/return-control) answerer that exhausts its turn
+budget does not hard-fail the fan anymore. It first tries ONE auto
+corrective-retry (rung 1, no operator involved — a nudge plus a small extra
+turn budget). If it's still stuck after that, it parks awaiting an operator
+decision (rung 2) — the tree pane badges the node "awaiting operator" and the
+inspector shows the stuck-node popup: the node's own recent transcript, an
+"allocate more turns" control (with an optional steering message injected as
+the answerer's next turn), and an "abort fan" control.
+
+```bash
+# Grant 5 more turns, optionally steering the answerer:
+curl -sX POST http://127.0.0.1:4600/steer/2 \
+  -H 'content-type: application/json' \
+  -d '{"turns": 5, "steer": "Remember: resume must be a single Int, not a String."}'
+# => {"ok": true, "turns": 5}
+
+# Abort the fan instead: cancels the stuck answerer (never left "running"),
+# a typed error surfaces to the fan, and the PARENT stays suspended on its
+# original hole, re-answerable.
+curl -sX POST http://127.0.0.1:4600/steer/2/abort
+# => {"ok": true}
+```
+
+Both are in-process-only: the operator decision is delivered through an
+in-memory oneshot channel the parked turn loop is awaiting on its own async
+stack, not a durable/across-restart suspension. A process restart mid-wait
+loses the in-flight fan; the operator re-triggers by re-forcing, same as any
+other in-flight turn.
 
 **Cancel a node:**
 
