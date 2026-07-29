@@ -128,6 +128,11 @@ pub enum Event {
         /// Present on assistant turns; `None` for the operator/system framing
         /// turns that cost no tokens.
         usage: Option<Usage>,
+        /// The assistant turn's reasoning-summary ("thinking"), when the
+        /// provider surfaced one. Optional + `serde(default)` so older logs
+        /// (written before thinking capture) still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     /// A fork's transcript reference: the child `node` inherits the parent
     /// conversation up to and including the parent's turn at index
@@ -179,14 +184,4 @@ pub enum AnswerOutcome {
     Rejected {
         error: String,
     },
-    /// B2 elaboration flow: the calling model produced a GHC-valid `resume
-    /// expr` for a non-empty-prose/unknown-shape dialog submission. NOT
-    /// consumed yet — `source` is the proposed expr, shown in the inspector
-    /// for an operator confirm/reject decision.
-    Proposed {
-        source: String,
-    },
-    /// The operator explicitly discarded a shown proposal (B2 reject verb).
-    /// Continuation NOT consumed; the hole stays open for a fresh answer.
-    ProposalDiscarded,
 }

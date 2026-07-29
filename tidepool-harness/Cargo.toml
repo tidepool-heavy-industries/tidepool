@@ -23,7 +23,9 @@ serde_json = "1"
 thiserror = "2"
 genai = "0.5"
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
+reqwest = { version = "0.13", features = ["json", "form", "stream"] }
 base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }
 parking_lot = "0.12"
 tempfile = "3"

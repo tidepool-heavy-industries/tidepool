@@ -52,6 +52,7 @@ pub fn ui_of(table: &DataConTable, ty: &str) -> Option<Ui> {
         return Some(Ui::Choice {
             prompt: format!("Choose a {ty}"),
             options,
+            key: None,
         });
     }
 
@@ -65,6 +66,7 @@ pub fn ui_of(table: &DataConTable, ty: &str) -> Option<Ui> {
             .map(|label| Ui::TextIn {
                 prompt: label.clone(),
                 multiline: false,
+                key: None,
             })
             .collect();
         return Some(Ui::Card {
@@ -228,6 +230,7 @@ mod tests {
                     ("PARTIAL".to_string(), "PARTIAL".to_string()),
                     ("NOGO".to_string(), "NOGO".to_string()),
                 ],
+                key: None,
             }
         );
     }
@@ -247,6 +250,7 @@ mod tests {
                     ("False".to_string(), "False".to_string()),
                     ("True".to_string(), "True".to_string()),
                 ],
+                key: None,
             }
         );
     }
@@ -267,10 +271,12 @@ mod tests {
                     Ui::TextIn {
                         prompt: "name".to_string(),
                         multiline: false,
+                        key: None,
                     },
                     Ui::TextIn {
                         prompt: "age".to_string(),
                         multiline: false,
+                        key: None,
                     },
                 ],
             }
@@ -320,6 +326,7 @@ mod tests {
                 ("GO".to_string(), "GO".to_string()),
                 ("NOGO".to_string(), "NOGO".to_string()),
             ],
+            key: None,
         };
         let submitted = values(json!({ "NOGO": true }));
         assert_eq!(
@@ -333,6 +340,7 @@ mod tests {
         let ui = Ui::Choice {
             prompt: "Choose a Verdict".to_string(),
             options: vec![("GO".to_string(), "GO".to_string())],
+            key: None,
         };
         let submitted = values(json!({ "MAYBE": true }));
         assert_eq!(resume_expr_from_submission(&ui, &submitted), None);
@@ -346,6 +354,7 @@ mod tests {
                 ("GO".to_string(), "GO".to_string()),
                 ("NOGO".to_string(), "NOGO".to_string()),
             ],
+            key: None,
         };
         let submitted = values(json!({ "GO": true, "NOGO": true }));
         assert_eq!(resume_expr_from_submission(&ui, &submitted), None);
@@ -356,6 +365,7 @@ mod tests {
         let ui = Ui::Choice {
             prompt: "Choose a Verdict".to_string(),
             options: vec![("GO".to_string(), "GO".to_string())],
+            key: None,
         };
         let submitted = values(json!({}));
         assert_eq!(resume_expr_from_submission(&ui, &submitted), None);
@@ -370,10 +380,12 @@ mod tests {
                 Ui::TextIn {
                     prompt: "name".to_string(),
                     multiline: false,
+                    key: None,
                 },
                 Ui::TextIn {
                     prompt: "age".to_string(),
                     multiline: false,
+                    key: None,
                 },
             ],
         }

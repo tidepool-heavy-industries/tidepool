@@ -105,6 +105,11 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
     // Pure Myers-diff core: the `planUpdate` editing helper renders its review
     // diff via `Patch.genPatch`/`Patch.renderPatch`.
     out.push_str("import qualified Tidepool.Patch as Patch\n");
+    // `Ui` is the argument type of `dialogAsk` (typed elicitation surface —
+    // `dialogAsk :: Ui -> M Value`), so the generated module imports it. The
+    // eDSL is DATA with a `ToJSON` instance; `Ui` only depends on
+    // `Tidepool.Aeson.Value`, so this import is cheap and non-circular.
+    out.push_str("import Tidepool.Ui (Ui)\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     // returnControl/returnControlFork's hidden *Sited siblings (#R0) coerce the
     // ask reply back to the caller's answer type after extract has statically
@@ -621,7 +626,7 @@ mod tests {
         // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
         assert!(uses_qq("apply [patch|--- a/x|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
-        assert!(uses_qq("dialogAsk (toJSON [form|choice ok?: yes no|])"));
+        assert!(uses_qq("dialogAsk (card \"Q\" [form|choice ok?: yes no|])"));
         // dropped quoters are NOT special: glob (removed) and sg (cut with the
         // SG effect) must both classify as non-QQ.
         assert!(!uses_qq("pure [glob|src/*.rs|]"));

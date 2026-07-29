@@ -182,13 +182,14 @@ fn write_source_log(path: &std::path::Path) {
         node: NodeId(0),
         turn: 0,
         role: Role::Assistant,
-        content: "```haskell\ndo\n  _ <- dialogAsk (toJSON (card \"Confirm\" [choice \"Proceed?\" \
-                  [(\"yes\", \"Yes\"), (\"no\", \"No\")]]))\n  pure (toJSON (1 :: Int))\n```"
+        content: "```haskell\ndo\n  _ <- dialogAsk (card \"Confirm\" [choice \"Proceed?\" \
+                  [(\"yes\", \"Yes\"), (\"no\", \"No\")]])\n  pure (toJSON (1 :: Int))\n```"
             .to_string(),
         usage: Some(Usage {
             input_tokens: 50,
             output_tokens: 10,
         }),
+        reasoning: None,
     })
     .unwrap();
 }

@@ -1173,6 +1173,52 @@ mod tests {
         );
     }
 
+    /// A bare `[FileRead]` as the eval's final value must render through the
+    /// server's `toJSON _r` result wrapper — pins `instance ToJSON FileRead`
+    /// in the generated effects module. Without it, ANY eval ending on
+    /// `readGlob` is an extract-time compile error (`No instance for ToJSON
+    /// FileRead`), which is how the harness follow-up path first hit this.
+    /// `contents` rides the stock `Either` instance: `{"Right": text}` /
+    /// `{"Left": {tag, ...}}`.
+    #[tokio::test]
+    async fn fs_read_glob_bare_result_renders_via_tojson_wrapper() {
+        use tempfile::tempdir;
+        use tidepool_testing::eval_harness::EvalHarness;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello").unwrap();
+        std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        let decls = tidepool_mcp::standard_decls();
+        let preamble = tidepool_mcp::build_preamble(&decls, false);
+        let stack = tidepool_mcp::build_effect_stack_type(&decls);
+        let code = tidepool_mcp::wrap_do(concat!(
+            "rs <- readGlob \"*\"\n",
+            "pure (sortOn (.path) rs)",
+        ));
+        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
+
+        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_tojson_test_kv.json");
+        let handlers = frunk::hlist![
+            crate::ConsoleHandler,
+            crate::KvHandler::new(kv_path),
+            FsHandler::new(root),
+        ];
+
+        let harness = EvalHarness::new().with_stdlib().with_effects_module();
+        let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
+        assert_eq!(
+            out.json(),
+            serde_json::json!([
+                {"path": "bad.bin", "contents": {"Left": {"tag": "FsNotUtf8", "path": "bad.bin"}}},
+                {"path": "good.txt", "contents": {"Right": "hello"}},
+            ]),
+            "{:?}",
+            out.err()
+        );
+    }
+
     /// `with_dir_flock` serializes a read-modify-write across concurrent
     /// openers. flock contends between distinct open file descriptions even in
     /// one process, so 8 threads each incrementing a shared counter file 50

@@ -77,7 +77,7 @@ fn golden_replies() -> Vec<RecordedReply> {
            ```haskell\n\
            do\n\
            \x20 n <- returnControlFork @Int \"pick a number between 1 and 100\"\n\
-           \x20 _ <- dialogAsk (toJSON (card \"Confirm\" [choice \"Proceed?\" [(\"yes\", \"Yes\"), (\"no\", \"No\")]]))\n\
+           \x20 _ <- dialogAsk (card \"Confirm\" [choice \"Proceed?\" [(\"yes\", \"Yes\"), (\"no\", \"No\")]])\n\
            \x20 pure (toJSON n)\n\
            ```"),
         // 2. Fork answerer, DELIBERATELY ill-typed: a String where Int is wanted.

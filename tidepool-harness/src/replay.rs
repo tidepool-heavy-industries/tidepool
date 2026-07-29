@@ -72,6 +72,7 @@ impl ReplayProvider {
                 role: Role::Assistant,
                 content,
                 usage,
+                ..
             } = record.event
             {
                 replies.push(RecordedReply {
@@ -95,16 +96,26 @@ impl ReplayProvider {
 }
 
 impl ModelProvider for ReplayProvider {
-    async fn complete(&self, _req: TurnRequest) -> Result<TurnResponse, ProviderError> {
+    async fn complete(
+        &self,
+        _req: TurnRequest,
+        sink: Option<crate::provider::StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
         let reply = self
             .queue
             .lock()
             .unwrap()
             .pop_front()
             .ok_or_else(|| ProviderError::Api("replay queue exhausted".to_string()))?;
+        // Replay has no real stream; emit the recorded reply as one delta so a
+        // watching observatory still sees the turn appear.
+        if let Some(s) = &sink {
+            let _ = s.send(crate::provider::StreamDelta::Text(reply.content.clone()));
+        }
         Ok(TurnResponse {
             text: reply.content,
             usage: reply.usage,
+            reasoning: None,
         })
     }
 }
@@ -134,8 +145,12 @@ impl<P> RecordingProvider<P> {
 }
 
 impl<P: ModelProvider> ModelProvider for RecordingProvider<P> {
-    async fn complete(&self, req: TurnRequest) -> Result<TurnResponse, ProviderError> {
-        let resp = self.inner.complete(req).await?;
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        sink: Option<crate::provider::StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        let resp = self.inner.complete(req, sink).await?;
         self.captured.lock().unwrap().push(resp.text.clone());
         Ok(resp)
     }
@@ -321,6 +336,7 @@ mod tests {
             role: Role::User,
             content: "go".into(),
             usage: None,
+            reasoning: None,
         })
         .unwrap();
         w.append(Event::TurnDelta {
@@ -328,6 +344,7 @@ mod tests {
             turn: 1,
             role: Role::Assistant,
             content: "```haskell\nreturnControlFork @Int \"n\"\n```".into(),
+            reasoning: None,
             usage: Some(Usage {
                 input_tokens: 10,
                 output_tokens: 20,

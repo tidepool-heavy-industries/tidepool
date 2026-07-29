@@ -29,12 +29,23 @@ pub enum Ui {
     },
     Choice {
         prompt: String,
-        /// (key, label) pairs; the answer references the key.
+        /// (option-key, label) pairs; the answer references the option-key.
         options: Vec<(String, String)>,
+        /// FORM FIELD key. When `Some`, this Choice is a field of an enclosing
+        /// form: it renders as a radio group whose selection is submitted under
+        /// `values.<key>` (not an immediate-post button set). When `None` (the
+        /// default, omitted on the wire), it's a standalone one-click choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     TextIn {
         prompt: String,
         multiline: bool,
+        /// FORM FIELD key. When `Some`, this input is a field of an enclosing
+        /// form, submitted under `values.<key>`; when `None` (default, omitted
+        /// on the wire), it's a standalone single-value text box.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     Badge {
         label: String,
@@ -70,6 +81,7 @@ mod tests {
                 Ui::Choice {
                     prompt: "verdict?".into(),
                     options: vec![("approve".into(), "Approve".into())],
+                    key: None,
                 },
                 Ui::Badge {
                     label: "Exec, Fs".into(),
@@ -81,6 +93,31 @@ mod tests {
         assert_eq!(
             json,
             r#"{"ui":"card","title":"hole","body":[{"ui":"code","lang":"haskell","source":"resume :: Verdict -> M ()"},{"ui":"choice","prompt":"verdict?","options":[["approve","Approve"]]},{"ui":"badge","label":"Exec, Fs","kind":"effect_row"}]}"#
+        );
+    }
+
+    /// A form-field `key`, when present, IS emitted (it's how a multi-field
+    /// form's submission gets keyed); when absent it's omitted (backward
+    /// compat with standalone widgets). Pins both halves of the contract.
+    #[test]
+    fn keyed_field_wire_shape() {
+        let keyed = Ui::TextIn {
+            prompt: "Name".into(),
+            multiline: false,
+            key: Some("f0".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&keyed).unwrap(),
+            r#"{"ui":"text_in","prompt":"Name","multiline":false,"key":"f0"}"#
+        );
+        let unkeyed = Ui::TextIn {
+            prompt: "Name".into(),
+            multiline: false,
+            key: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&unkeyed).unwrap(),
+            r#"{"ui":"text_in","prompt":"Name","multiline":false}"#
         );
     }
 }

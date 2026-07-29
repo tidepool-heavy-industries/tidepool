@@ -58,7 +58,14 @@ impl ApiKeyProvider {
 }
 
 impl ModelProvider for ApiKeyProvider {
-    async fn complete(&self, req: TurnRequest) -> Result<TurnResponse, ProviderError> {
+    // The API-key path is buffered (genai chat/completions); it doesn't stream
+    // to `sink`. Passing `None` from the harness yields the same result, so the
+    // observatory simply shows the turn on completion for this provider.
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        _sink: Option<crate::provider::StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
         let key = self.cfg.resolve_key().ok_or_else(|| {
             ProviderError::Auth(format!(
                 "no API key found: set {} or write {}",
@@ -155,7 +162,7 @@ mod tests {
             messages: vec![],
             max_tokens: None,
         };
-        let result = provider.complete(req).await;
+        let result = provider.complete(req, None).await;
         assert!(matches!(result, Err(ProviderError::Auth(_))));
 
         std::env::remove_var("TIDEPOOL_CONFIG_DIR");

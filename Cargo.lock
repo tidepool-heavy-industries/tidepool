@@ -2924,6 +2924,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -3886,6 +3887,7 @@ dependencies = [
  "genai",
  "openai-auth",
  "parking_lot",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3899,6 +3901,7 @@ dependencies = [
  "tidepool-repr",
  "tidepool-runtime",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -108,6 +108,8 @@ pub enum TreeError {
     },
     #[error("node {0:?} is already terminal (state: {1:?})")]
     AlreadyTerminal(NodeId, NodeState),
+    #[error("node {0:?} cannot be reopened for a follow-up (state: {1:?}); only a Done node continues")]
+    NotReopenable(NodeId, NodeState),
     #[error("event log write failed: {0}")]
     Log(#[from] WriteError),
 }
@@ -385,6 +387,21 @@ impl<M> NodeTree<M> {
         content: String,
         usage: Option<crate::provider::Usage>,
     ) -> Result<(), TreeError> {
+        self.turn_delta_reasoned(node, turn, role, content, usage, None)
+    }
+
+    /// Like [`Self::turn_delta`] but also records the assistant turn's
+    /// reasoning-summary ("thinking"). Split out so the common no-reasoning
+    /// call sites (user/system framing turns) keep their simple signature.
+    pub fn turn_delta_reasoned(
+        &self,
+        node: NodeId,
+        turn: u64,
+        role: crate::provider::Role,
+        content: String,
+        usage: Option<crate::provider::Usage>,
+        reasoning: Option<String>,
+    ) -> Result<(), TreeError> {
         let mut inner = self.inner.lock();
         match &inner.entry(node)?.state {
             NodeState::Thunk => return Err(TreeError::UnforcedThunk(node)),
@@ -397,6 +414,7 @@ impl<M> NodeTree<M> {
             role,
             content,
             usage,
+            reasoning,
         })?;
         Ok(())
     }
@@ -463,6 +481,26 @@ impl<M> NodeTree<M> {
             .get_mut(&node)
             .expect("checked present above")
             .state = NodeState::Done;
+        Ok(())
+    }
+
+    /// Reopen a completed node for a FOLLOW-UP turn: `Done` → `Running`, so the
+    /// operator can continue the conversation. Only a `Done` node reopens (a
+    /// `Suspended` node has a hole to answer instead; `Thunk`/`Cancelled` don't
+    /// continue). No event is logged for the flip itself — the follow-up's
+    /// `TurnDelta`/`TurnStart`/`NodeDone` events carry the story, and
+    /// crash-replay folds cleanly (the later `NodeDone` wins).
+    pub fn reopen(&self, node: NodeId) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        match &inner.entry(node)?.state {
+            NodeState::Done => {}
+            other => return Err(TreeError::NotReopenable(node, other.clone())),
+        }
+        inner
+            .nodes
+            .get_mut(&node)
+            .expect("checked present above")
+            .state = NodeState::Running;
         Ok(())
     }
 

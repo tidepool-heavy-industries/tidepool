@@ -19,9 +19,11 @@ use tidepool_harness::provider::{Message, ModelProvider, ProviderError, Role, Tu
 // Mock server: queued (status, json-body) responses keyed by (method, path).
 // ---------------------------------------------------------------------
 
-/// Queued (status, JSON body) responses per pending request, keyed by
-/// `(method, path)`.
-type RouteTable = HashMap<(String, String), VecDeque<(u16, serde_json::Value)>>;
+/// Queued (status, raw body) responses per pending request, keyed by
+/// `(method, path)`. Bodies are pre-rendered strings so a route can serve
+/// either a JSON body (the API-key/genai + token-exchange paths) or a raw
+/// SSE stream (the OAuth `/responses` path is hand-rolled and parses SSE).
+type RouteTable = HashMap<(String, String), VecDeque<(u16, String)>>;
 
 /// Headers of the most recent request per `(method, path)` — lets a test
 /// assert the client sent a specific header (e.g. `chatgpt-account-id`)
@@ -64,6 +66,12 @@ impl MockServer {
     }
 
     fn queue(&self, method: &str, path: &str, status: u16, body: serde_json::Value) {
+        self.queue_raw(method, path, status, body.to_string());
+    }
+
+    /// Queue a verbatim body (not JSON-wrapped) — used to serve an SSE
+    /// stream to the hand-rolled OAuth `/responses` path.
+    fn queue_raw(&self, method: &str, path: &str, status: u16, body: String) {
         self.routes
             .lock()
             .unwrap()
@@ -128,12 +136,13 @@ fn handle_conn(
             Some(q) if !q.is_empty() => q.pop_front().unwrap(),
             _ => (
                 500,
-                serde_json::json!({"error": format!("no fixture queued for {method} {path}")}),
+                serde_json::json!({"error": format!("no fixture queued for {method} {path}")})
+                    .to_string(),
             ),
         }
     };
 
-    let body_str = resp_body.to_string();
+    let body_str = resp_body;
     let reason = if (200..300).contains(&status) {
         "OK"
     } else {
@@ -162,25 +171,21 @@ fn chat_ok_body(text: &str, prompt_tokens: i64, completion_tokens: i64) -> serde
     })
 }
 
-/// `/v1/responses`-shaped body (`genai`'s `RespResponse`) — the OAuth
-/// provider's path, distinct from `chat_ok_body`'s `/chat/completions`
-/// shape used by the API-key provider.
-fn responses_ok_body(text: &str, input_tokens: i64, output_tokens: i64) -> serde_json::Value {
-    serde_json::json!({
-        "id": "resp-test",
-        "status": "completed",
-        "model": "gpt-4o-mini",
-        "output": [{
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": text}]
-        }],
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens
-        }
-    })
+/// A Codex-backend `/responses` SSE stream — the OAuth provider's path,
+/// which is hand-rolled and parses server-sent events (not genai/JSON, see
+/// `oauth.rs`'s module doc). One text delta plus a terminal
+/// `response.completed` carrying usage, matching what the parser consumes.
+fn responses_sse_body(text: &str, input_tokens: i64, output_tokens: i64) -> String {
+    let delta = serde_json::json!({"type": "response.output_text.delta", "delta": text});
+    let completed = serde_json::json!({
+        "type": "response.completed",
+        "response": {"usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}}
+    });
+    format!(
+        "event: response.output_text.delta\ndata: {delta}\n\n\
+         event: response.completed\ndata: {completed}\n\n\
+         data: [DONE]\n"
+    )
 }
 
 /// A JWT with the `https://api.openai.com/auth.chatgpt_account_id` claim
@@ -222,7 +227,7 @@ fn with_config_dir<F: FnOnce()>(dir: &std::path::Path, f: F) {
 
 async fn assert_completes_ok(provider: &impl ModelProvider) {
     let resp = provider
-        .complete(sample_req())
+        .complete(sample_req(), None)
         .await
         .expect("complete should succeed");
     assert_eq!(resp.text, "pong");
@@ -231,7 +236,7 @@ async fn assert_completes_ok(provider: &impl ModelProvider) {
 }
 
 async fn assert_auth_error(provider: &impl ModelProvider) {
-    let result = provider.complete(sample_req()).await;
+    let result = provider.complete(sample_req(), None).await;
     assert!(
         matches!(result, Err(ProviderError::Auth(_))),
         "expected ProviderError::Auth, got {result:?}"
@@ -284,7 +289,7 @@ async fn api_key_provider_missing_key_is_auth_error() {
     let cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_MISSING", "gpt-4o-mini");
     let provider = ApiKeyProvider::new(cfg);
 
-    let result = provider.complete(sample_req()).await;
+    let result = provider.complete(sample_req(), None).await;
     assert!(matches!(result, Err(ProviderError::Auth(_))));
     std::env::remove_var("TIDEPOOL_CONFIG_DIR");
 }
@@ -334,7 +339,7 @@ fn write_token(
 #[tokio::test]
 async fn oauth_provider_completes_ok_with_valid_token() {
     let chat_server = MockServer::start();
-    chat_server.queue("POST", "/responses", 200, responses_ok_body("pong", 3, 1));
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong", 3, 1));
 
     let dir = tempfile::tempdir().unwrap();
     let token_path = dir.path().join("token.json");
@@ -407,7 +412,7 @@ async fn oauth_provider_dead_refresh_token_is_auth_error() {
 #[tokio::test]
 async fn oauth_provider_refreshes_expired_token_and_persists_new_one() {
     let chat_server = MockServer::start();
-    chat_server.queue("POST", "/responses", 200, responses_ok_body("pong", 3, 1));
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong", 3, 1));
     let token_server = MockServer::start();
     token_server.queue(
         "POST",

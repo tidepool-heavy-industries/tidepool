@@ -38,10 +38,10 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value as Json;
 use tidepool_effect::dispatch::DispatchEffect;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -51,7 +51,8 @@ use crate::engine::{
 };
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
-use crate::provider::{DynModelProvider, Message, Role};
+use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
+use crate::provider::{DynModelProvider, Message, Role, StreamDelta};
 use crate::tree::{HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
@@ -85,8 +86,6 @@ pub enum HarnessError {
     },
     #[error("node {0:?}: no mechanical derived form for the pending hole (uiOf yields None, or the submission doesn't map) — fall back to the model-driven answerer")]
     NoDerivedForm(NodeId),
-    #[error("node {0:?} has no pending elaborator proposal to confirm/reject")]
-    NoPendingProposal(NodeId),
     #[error("node {node:?} aborted: {reason}")]
     Aborted { node: NodeId, reason: String },
     #[error("node {0:?} has no pending operator escalation to resolve")]
@@ -105,35 +104,22 @@ struct NodeConvo {
     session: Option<Session>,
     transcript: Vec<Message>,
     turn_seq: u64,
+    /// Shared buffer the session's [`TracingDispatcher`] appends each effect to;
+    /// drained per turn by [`Harness::flush_effects`] into `Event::Effect`.
+    effect_trace: EffectTrace,
+    /// Monotonic per-node effect sequence number for the logged `Event::Effect`s.
+    effect_seq: u64,
     pending: Option<PendingHole>,
     /// Compile artifacts of the turn that suspended — the table is needed to
     /// bridge an answer Value against the same constructor set.
     suspend_table: Option<DataConTable>,
     suspend_asks: AsksSidecar,
-    /// B2 elaboration: a GHC-valid `resume expr` the calling model produced
-    /// for a non-mechanical dialog submission, staged for an operator
-    /// confirm/reject decision — NOT yet run or consumed. `None` unless an
-    /// elaboration just completed and is awaiting that decision.
-    pending_proposal: Option<PendingProposal>,
 }
 
 #[derive(Clone)]
 struct PendingHole {
     hole: HoleId,
     classified: ClassifiedHole,
-}
-
-/// A staged, unconsumed elaborator answer (B2). `expr`/`table` are the
-/// COMPILED artifacts from the elaboration turn that produced a GHC-valid
-/// `resume` expression — confirming re-runs them via `run_child` (the same
-/// discipline [`Harness::answer_mechanical`] uses), so confirming never
-/// re-compiles or re-asks the model. `source` is the Haskell the operator
-/// sees in the inspector.
-struct PendingProposal {
-    hole: HoleId,
-    source: String,
-    expr: CoreExpr,
-    table: DataConTable,
 }
 
 /// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
@@ -200,6 +186,30 @@ enum CapDecision {
     Abort { reason: String },
 }
 
+/// Cap a (possibly huge) GHC/extract compile error before feeding it back to
+/// the model as a corrective turn — the head carries the structured diagnostics
+/// and first errors, which is what the model needs to fix its Haskell. UTF-8
+/// safe (truncates on a char boundary).
+fn truncate_ghc_error(msg: &str) -> String {
+    const CAP: usize = 3000;
+    if msg.chars().count() <= CAP {
+        msg.to_string()
+    } else {
+        let head: String = msg.chars().take(CAP).collect();
+        format!("{head}\n… (truncated)")
+    }
+}
+
+/// A node's in-progress turn as it streams — the answer text and reasoning
+/// ("thinking") accumulated so far, before the turn completes and is logged.
+/// The observatory renders this so tokens appear live; it's cleared when the
+/// turn lands in the durable log.
+#[derive(Debug, Clone, Default)]
+pub struct LiveTurn {
+    pub text: String,
+    pub reasoning: String,
+}
+
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
 pub struct Harness {
@@ -207,6 +217,15 @@ pub struct Harness {
     cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
+    /// Per-node streaming turn buffer (see [`LiveTurn`]). Present only while a
+    /// node's turn is actively streaming; the entry is removed when the turn
+    /// completes (its content is then in the log).
+    live_turns: Mutex<HashMap<NodeId, LiveTurn>>,
+    /// A "something changed" callback the web layer installs
+    /// ([`Self::set_notifier`]) so streaming deltas nudge the SSE stream to
+    /// re-render. `None` (unset) in tests / headless runs — the harness works
+    /// the same, just without live push.
+    notifier: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
     /// Compiled once, reused for every node's bootstrap.
     boot: Arc<compile::CompiledTurn>,
@@ -254,12 +273,132 @@ impl Harness {
             cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
+            live_turns: Mutex::new(HashMap::new()),
+            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(boot),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             operator_decisions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Install the "changed" callback the web layer uses to nudge its SSE
+    /// stream when a streaming delta lands. Set once, at startup.
+    pub fn set_notifier(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.notifier.set(Box::new(f));
+    }
+
+    /// Fire the installed notifier, if any (no-op otherwise).
+    fn notify(&self) {
+        if let Some(f) = self.notifier.get() {
+            f();
+        }
+    }
+
+    /// The node's in-progress streaming turn, if one is active — the
+    /// observatory renders this to show tokens/thinking as they arrive.
+    pub fn live_turn(&self, node: NodeId) -> Option<LiveTurn> {
+        self.live_turns.lock().get(&node).cloned()
+    }
+
+    /// Fold one streaming delta into the node's live-turn buffer.
+    fn apply_delta(&self, node: NodeId, delta: StreamDelta) {
+        let mut live = self.live_turns.lock();
+        let entry = live.entry(node).or_default();
+        match delta {
+            StreamDelta::Text(t) => entry.text.push_str(&t),
+            StreamDelta::Reasoning(r) => entry.reasoning.push_str(&r),
+        }
+    }
+
+    /// Drive one model turn on `node` with live streaming: deltas land in the
+    /// node's live-turn buffer (rendered token-by-token in the observatory)
+    /// while the complete turn is assembled, with a throttled `notify()`
+    /// nudging the SSE stream. On failure the partial buffer is dropped; on
+    /// success it's left intact for the caller to swap for the logged turn via
+    /// [`Self::finish_live_turn`], so the transcript never flickers empty.
+    /// Shared by the root turn loop and the fork/fanout answerer loops.
+    async fn stream_turn(
+        &self,
+        node: NodeId,
+        transcript: &[Message],
+    ) -> Result<engine::DrivenTurn, HarnessError> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamDelta>();
+        let provider = self.provider.as_ref();
+        let drive_fut =
+            engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, Some(tx));
+        tokio::pin!(drive_fut);
+        let mut last_notify: Option<std::time::Instant> = None;
+        let result = loop {
+            tokio::select! {
+                res = &mut drive_fut => {
+                    while let Ok(d) = rx.try_recv() {
+                        self.apply_delta(node, d);
+                    }
+                    break res;
+                }
+                Some(delta) = rx.recv() => {
+                    self.apply_delta(node, delta);
+                    if last_notify.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(120)) {
+                        self.notify();
+                        last_notify = Some(std::time::Instant::now());
+                    }
+                }
+            }
+        };
+        match result {
+            Ok(d) => Ok(d),
+            Err(e) => {
+                self.live_turns.lock().remove(&node);
+                self.notify();
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Clear the node's live-turn buffer and re-render — called right after the
+    /// turn is logged, so the transcript swaps the streaming buffer for the
+    /// durable turn in a single frame.
+    fn finish_live_turn(&self, node: NodeId) {
+        self.live_turns.lock().remove(&node);
+        self.notify();
+    }
+
+    /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
+    /// captured effect (mapping the stack tag to its effect name). Called after
+    /// a turn's block runs, while the node is still `Running`. Requires the node
+    /// to be `Running` (the tree's `effect` guard); a drained record that fails
+    /// to log is dropped rather than aborting the turn.
+    fn flush_effects(&self, node: NodeId) {
+        let (records, mut seq) = {
+            let mut convos = self.convos.lock();
+            let Some(convo) = convos.get_mut(&node) else {
+                return;
+            };
+            let records: Vec<EffectRecord> = convo
+                .effect_trace
+                .lock()
+                .map(|mut t| std::mem::take(&mut *t))
+                .unwrap_or_default();
+            (records, convo.effect_seq)
+        };
+        if records.is_empty() {
+            return;
+        }
+        for rec in records {
+            let tag = self
+                .cfg
+                .effect_names
+                .get(rec.tag as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("tag{}", rec.tag));
+            let _ = self.tree.effect(node, seq, tag, rec.req, rec.resp);
+            seq += 1;
+        }
+        if let Some(convo) = self.convos.lock().get_mut(&node) {
+            convo.effect_seq = seq;
+        }
     }
 
     /// Read-only handle to the node tree (state/children/parent queries for the
@@ -371,8 +510,9 @@ impl Harness {
     /// Force a thunk node: emit `Forced`, bootstrap its resident session, seed
     /// its transcript with the opening prompt. Returns the node's session id.
     pub fn force(&self, node: NodeId, actor: Actor) -> Result<(), HarnessError> {
-        // Bootstrap a fresh resident session for this node.
-        let stack: BoxedStack = self.build_stack();
+        // Bootstrap a fresh resident session for this node, keeping a handle to
+        // its effect-trace buffer so per-turn effects can be logged.
+        let (stack, effect_trace) = self.build_stack();
         let session = ResidentSession::bootstrap(
             &self.boot.expr,
             self.boot.table.clone(),
@@ -394,45 +534,58 @@ impl Harness {
         // transcript (set by `register_fork_child`); a plain root gets its
         // opening prompt.
         let mut convos = self.convos.lock();
-        let transcript = self
-            .forked_transcripts
-            .lock()
-            .remove(&node)
-            .unwrap_or_else(|| {
+        let inherited = self.forked_transcripts.lock().remove(&node);
+        let transcript = match inherited {
+            // A fork/fanout answerer inherits its parent's transcript, whose
+            // turns are already in the log — nothing to re-log.
+            Some(t) => t,
+            // A plain root: log its opening prompt as a User turn so the
+            // transcript shows what was asked, not just the model's reply
+            // (symmetric with the assistant `turn_delta` in `drive_turn`).
+            None => {
                 let seed = self
                     .seeds
                     .lock()
                     .remove(&node)
                     .unwrap_or_else(|| "Begin.".to_string());
+                self.tree
+                    .turn_delta(node, 0, Role::User, seed.clone(), None)?;
                 vec![Message {
                     role: Role::User,
                     content: seed,
                 }]
-            });
+            }
+        };
         convos.insert(
             node,
             NodeConvo {
                 session: Some(session),
                 transcript,
                 turn_seq: 0,
+                effect_trace,
+                effect_seq: 0,
                 pending: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
-                pending_proposal: None,
             },
         );
         Ok(())
     }
 
-    fn build_stack(&self) -> BoxedStack {
-        // The concrete handler stack rooted at the process CWD (Fs/Exec/… sandbox).
+    /// Build the concrete handler stack (rooted at the process CWD sandbox),
+    /// wrapped in a [`TracingDispatcher`] that records every effect into the
+    /// returned [`EffectTrace`] — the harness drains it per turn to write
+    /// `Event::Effect` (the observatory's trace pane).
+    fn build_stack(&self) -> (BoxedStack, EffectTrace) {
         let cfg = tidepool_handlers::HandlerConfig {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             kv_path: tidepool_runtime::paths::cache_dir().join("harness-kv.json"),
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         };
-        Box::new(tidepool_handlers::build_base_stack(&cfg))
+        let trace: EffectTrace = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stack = TracingDispatcher::new(tidepool_handlers::build_base_stack(&cfg), trace.clone());
+        (Box::new(stack), trace)
     }
 }
 
@@ -455,21 +608,19 @@ impl Harness {
         self.tree
             .turn_start(node, "model".to_string(), None)?;
 
-        let driven = engine::drive_model_turn(
-            self.provider.as_ref(),
-            &transcript,
-            self.cfg.max_tokens,
-        )
-        .await?;
-
-        // Log the assistant turn delta.
-        self.tree.turn_delta(
+        // Stream the provider call into `node`'s live-turn buffer (rendered
+        // token-by-token), then log the completed turn with its thinking and
+        // swap the buffer for the durable turn in one frame.
+        let driven = self.stream_turn(node, &transcript).await?;
+        self.tree.turn_delta_reasoned(
             node,
             turn_seq,
             Role::Assistant,
             driven.reply.clone(),
             Some(driven.usage),
+            driven.reasoning.clone(),
         )?;
+        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -535,11 +686,20 @@ impl Harness {
         // Restore the session and record the turn's compile table.
         self.put_session(node, session, Some(compiled.table.clone()), asks.clone());
 
+        // Log the effects this turn ran (while the node is still `Running`,
+        // before any `node_done` below) so the observatory's trace pane shows
+        // them. Safe to call unconditionally — a no-op if the turn ran none.
+        self.flush_effects(node);
+
         match outcome {
             Ok(ResidentOutcome::Completed { result, .. }) => {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered.clone())?;
-                self.drop_session(node);
+                // Keep the resident session ALIVE past completion (don't
+                // `drop_session`): a Done root node can be reopened for a
+                // follow-up turn ([`Self::follow_up`]), and the persisted
+                // session carries its heap + bindings across turns — a true
+                // REPL continuation, not a restart.
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
@@ -589,7 +749,11 @@ impl Harness {
 
     /// Loop [`Self::drive_turn`] until the node SUSPENDS at a hole, COMPLETES,
     /// or hits the per-node turn cap. A pure-prose turn (NoBlock) feeds a nudge
-    /// and loops. Returns the terminal turn outcome.
+    /// and loops; a turn whose block DOESN'T COMPILE feeds the GHC error back so
+    /// the model can self-correct (the same type-retry the fork answerer gets —
+    /// a common, fixable model mistake like wrong verb arity shouldn't cancel
+    /// the whole node). Returns the terminal turn outcome; only exhausting the
+    /// turn cap surfaces an error to the caller.
     pub async fn run_to_hole_or_done(
         &self,
         node: NodeId,
@@ -600,16 +764,66 @@ impl Harness {
                 return Err(EngineError::NoBlock { turns }.into());
             }
             turns += 1;
-            match self.drive_turn(node).await? {
-                out @ (engine::TurnOutcome::Completed { .. }
-                | engine::TurnOutcome::Suspended { .. }) => return Ok(out),
-                engine::TurnOutcome::NoBlock { .. } => {
+            match self.drive_turn(node).await {
+                Ok(
+                    out @ (engine::TurnOutcome::Completed { .. }
+                    | engine::TurnOutcome::Suspended { .. }),
+                ) => return Ok(out),
+                Ok(engine::TurnOutcome::NoBlock { .. }) => {
                     self.push_user_turn(
                         node,
                         "Reply with a single ```haskell block to run (or to answer the \
                          hole with `resume expr`).",
                     )?;
                 }
+                // The model's Haskell didn't compile — feed the GHC error back
+                // verbatim (capped) as a corrective user turn and retry, rather
+                // than cancelling the node.
+                Err(HarnessError::Compile(msg)) => {
+                    let ghc = truncate_ghc_error(&msg);
+                    self.push_user_turn(
+                        node,
+                        &format!(
+                            "That Haskell did not compile. Fix it and reply with a \
+                             corrected single ```haskell block. Common causes: a verb \
+                             needs more arguments (e.g. `grepGlob pat path`), or you \
+                             passed `Text` where a different type is expected.\n\n\
+                             GHC error:\n{ghc}"
+                        ),
+                    )?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Continue a COMPLETED node's conversation with a new operator message —
+    /// the multi-turn REPL follow-up. Reopens the `Done` node
+    /// ([`NodeTree::reopen`]), appends `message` as a user turn, and drives to
+    /// the next hole/done. The node's resident session persisted past its
+    /// previous completion, so bindings and heap carry over — this continues
+    /// the session rather than restarting it. Errors if the node isn't `Done`
+    /// or its session is gone (e.g. it was cancelled).
+    pub async fn follow_up(
+        &self,
+        node: NodeId,
+        message: &str,
+    ) -> Result<engine::TurnOutcome, HarnessError> {
+        if !self.convos.lock().contains_key(&node) {
+            return Err(HarnessError::NoSession(node));
+        }
+        self.tree.reopen(node)?;
+        self.push_user_turn(node, message)?;
+        match self.run_to_hole_or_done(node).await {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                // The follow-up turn failed: return the node to `Done` so the
+                // prior conversation is preserved and still continuable, rather
+                // than stranded `Running`. The failure is recorded as the turn's
+                // result so it shows in the transcript.
+                let _ = self.tree.node_done(node, format!("follow-up failed: {e}"));
+                self.finish_live_turn(node);
+                Err(e)
             }
         }
     }
@@ -632,6 +846,10 @@ impl Harness {
     /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
     pub fn pending_dialog_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
         match self.pending_hole(node)?.routing {
+            // `dialogAsk :: Ui -> M Value` (typed at the Haskell surface): the
+            // payload is a well-formed `Ui` by construction, so a parse failure
+            // here means a genuine wire mismatch, not a model mistake. No
+            // boundary coercion — the type system guards the shape upstream.
             HoleRouting::Dialog { ui } => serde_json::from_value(ui).ok(),
             _ => None,
         }
@@ -655,18 +873,6 @@ impl Harness {
         let table = convo.suspend_table.clone()?;
         drop(convos);
         crate::uiof::ui_of(&table, &ty)
-    }
-
-    /// The source of `node`'s pending elaborator proposal (B2), if one is
-    /// staged awaiting an operator confirm/reject — what the inspector's
-    /// proposal card renders instead of the raw form. `None` when no
-    /// elaboration has produced an unconsumed proposal.
-    pub fn pending_proposal_source(&self, node: NodeId) -> Option<String> {
-        self.convos
-            .lock()
-            .get(&node)
-            .and_then(|c| c.pending_proposal.as_ref())
-            .map(|p| p.source.clone())
     }
 
     /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
@@ -959,6 +1165,7 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
         self.put_session(node, session, None, AsksSidecar::default());
+        self.flush_effects(node);
 
         let value = out
             .map_err(|e| HarnessError::Resident(e.to_string()))?
@@ -967,13 +1174,11 @@ impl Harness {
     }
 
     /// Answer an operator `dialogAsk` (or plain `ask`) hole with a form
-    /// submission `{values, prose}`. MECHANICAL-FIRST (D6): an empty-prose known
-    /// option key consumes directly (the submission JSON becomes the resume
-    /// Value) — ZERO model turns, UNCHANGED from the R0 spike. Non-empty prose
-    /// or an unknown shape (no `values` at all) routes to [`Self::elaborate_dialog`]
-    /// — the calling model interprets the submission and proposes a `resume
-    /// expr`, SHOWN to the operator (not auto-consumed); see
-    /// [`Self::confirm_proposal`]/[`Self::reject_proposal`].
+    /// submission `{values, prose}`. `dialogAsk :: Ui -> M Value` returns the
+    /// submission DIRECTLY as its value — the program that called `dialogAsk`
+    /// decides what it means — so the submission JSON always becomes the resume
+    /// Value with zero model turns. (Typed structure is the caller's job, via
+    /// `Tidepool.Form` / `dialogForm`, not a harness-side interpretation step.)
     pub async fn answer_dialog(
         &self,
         node: NodeId,
@@ -996,13 +1201,9 @@ impl Harness {
             }
         }
 
-        if !Self::submission_is_mechanical(&submission) {
-            return self.elaborate_dialog(node, &pending, submission).await;
-        }
-
         // The suspend table is the constructor set the hole suspended with; the
-        // submission Value bridges against it. dialogAsk returns a Value, so the
-        // submission JSON IS the resume answer (mechanical: no model turn).
+        // submission Value bridges against it. `dialogAsk` returns a Value, so
+        // the submission JSON IS the resume answer — always, no interpretation.
         let table = self
             .convos
             .lock()
@@ -1016,235 +1217,6 @@ impl Harness {
         // truth for the Consumed record).
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
-    }
-
-    /// D6's mechanical/exception-path split for a dialog submission (F1):
-    /// empty prose AND a non-empty `values` map is the ONLY mechanical shape —
-    /// non-empty prose (prose wins over a conflicting widget, per FREEZES.md
-    /// F1) or an empty/absent `values` map (unknown shape: no answer the
-    /// harness can bridge without interpretation) both fall to elaboration.
-    fn submission_is_mechanical(submission: &Json) -> bool {
-        let prose_empty = submission
-            .get("prose")
-            .and_then(Json::as_str)
-            .is_none_or(str::is_empty);
-        let has_values = submission
-            .get("values")
-            .and_then(Json::as_object)
-            .is_some_and(|m| !m.is_empty());
-        prose_empty && has_values
-    }
-
-    /// F1's exception path (B2): push the elaborator prompt (hole card + the
-    /// raw submission + a `resume :: Value -> M Value` instruction) as `node`'s
-    /// next user turn, drive the SAME node's own conversation (no forked
-    /// child — this is operator-hole interpretation in the calling model's
-    /// own context, same discipline [`Self::answer_return_control`] uses) to a
-    /// GHC-valid proposal, then STAGE it rather than running/consuming it.
-    async fn elaborate_dialog(
-        &self,
-        node: NodeId,
-        pending: &PendingHole,
-        submission: Json,
-    ) -> Result<(), HarnessError> {
-        let prompt = engine::elaborator_prompt(&pending.classified.prompt, &submission);
-        self.push_user_turn(node, &prompt)?;
-
-        let (source, expr, table) = self
-            .drive_elaborator_to_proposal(node, self.cfg.max_turns)
-            .await?;
-
-        self.log_answer_attempt(
-            node,
-            &pending.hole,
-            "operator",
-            AnswerOutcome::Proposed {
-                source: source.clone(),
-            },
-        )?;
-        self.set_pending_proposal(
-            node,
-            PendingProposal {
-                hole: pending.hole.clone(),
-                source,
-                expr,
-                table,
-            },
-        );
-        Ok(())
-    }
-
-    /// Drive `node`'s own turn loop until it emits a GHC-valid `resume expr ::
-    /// Value` block (retrying with the verbatim GHC error on a compile
-    /// failure, same discipline as [`Self::drive_answerer_to_value`]) — but,
-    /// unlike that helper, NEVER runs the compiled expr; elaboration only
-    /// needs it to TYPE-CHECK before showing it to the operator. Returns the
-    /// proposed source text plus the compiled artifacts
-    /// [`Self::run_compiled_answer`] later runs at confirm time.
-    async fn drive_elaborator_to_proposal(
-        &self,
-        node: NodeId,
-        max_turns: u32,
-    ) -> Result<(String, CoreExpr, DataConTable), HarnessError> {
-        let mut attempts = 0;
-        loop {
-            if attempts >= max_turns {
-                return Err(EngineError::NoBlock { turns: attempts }.into());
-            }
-            attempts += 1;
-
-            let (transcript, turn_seq) = {
-                let convos = self.convos.lock();
-                let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
-                (convo.transcript.clone(), convo.turn_seq)
-            };
-            let driven = engine::drive_model_turn(
-                self.provider.as_ref(),
-                &transcript,
-                self.cfg.max_tokens,
-            )
-            .await?;
-            self.tree.turn_delta(
-                node,
-                turn_seq,
-                Role::Assistant,
-                driven.reply.clone(),
-                Some(driven.usage),
-            )?;
-            {
-                let mut convos = self.convos.lock();
-                let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
-                convo.transcript.push(Message {
-                    role: Role::Assistant,
-                    content: driven.reply.clone(),
-                });
-                convo.turn_seq += 1;
-            }
-
-            let Some(block) = driven.block else {
-                self.push_user_turn(
-                    node,
-                    "Reply with a single ```haskell block: `resume expr` where `expr` is a \
-                     `Value` built via `toJSON`.",
-                )?;
-                continue;
-            };
-
-            let (imports, body) = engine::split_imports(&block);
-            let src = engine::template_answer_turn(
-                &self.cfg,
-                &body,
-                &imports,
-                engine::DIALOG_RESUME_HELPER,
-            );
-            let cfg_bin = self.cfg.extract_bin.clone();
-            let include = self.cfg.include.clone();
-            let compiled = tokio::task::spawn_blocking(move || {
-                compile::compile_turn(&cfg_bin, &src, "result", &include)
-            })
-            .await
-            .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?;
-
-            match compiled {
-                Ok(c) => return Ok((body, c.expr, c.table)),
-                Err(e) => {
-                    // GHC-verbatim retry: the continuation is untouched — no
-                    // proposal is ever staged from a rejected attempt.
-                    let err = e.to_string();
-                    let hole = self
-                        .convos
-                        .lock()
-                        .get(&node)
-                        .and_then(|c| c.pending.as_ref().map(|p| p.hole.clone()))
-                        .unwrap_or(HoleId(String::new()));
-                    self.log_answer_attempt(
-                        node,
-                        &hole,
-                        "operator",
-                        AnswerOutcome::Rejected { error: err.clone() },
-                    )?;
-                    self.push_user_turn(
-                        node,
-                        &format!(
-                            "That did not compile. Fix it and try again — the error is:\n\n\
-                             ```\n{err}\n```"
-                        ),
-                    )?;
-                    continue;
-                }
-            }
-        }
-    }
-
-    /// Confirm `node`'s pending elaborator proposal (B2): run the ALREADY
-    /// GHC-validated compiled expr via `run_child` against `node`'s own
-    /// suspended session (same discipline as [`Self::answer_mechanical`]'s
-    /// tail — no re-compile, no second model turn) and resume the parent with
-    /// the result. Errors with [`HarnessError::NoPendingProposal`] if nothing
-    /// is staged.
-    pub async fn confirm_proposal(&self, node: NodeId) -> Result<(), HarnessError> {
-        let proposal = self.take_pending_proposal(node)?;
-        let value = self
-            .run_compiled_answer(node, proposal.expr, proposal.table)
-            .await?;
-        self.resume_parent(node, &proposal.hole, value).await
-    }
-
-    /// Reject `node`'s pending elaborator proposal (B2): discard it without
-    /// running it. The hole was never anything but `Suspended` while the
-    /// proposal was staged, so this is a pure log event — the continuation is
-    /// untouched and the hole is already "reopened" (it never closed).
-    pub fn reject_proposal(&self, node: NodeId) -> Result<(), HarnessError> {
-        let proposal = self.take_pending_proposal(node)?;
-        self.log_answer_attempt(
-            node,
-            &proposal.hole,
-            "operator",
-            AnswerOutcome::ProposalDiscarded,
-        )
-    }
-
-    fn take_pending_proposal(&self, node: NodeId) -> Result<PendingProposal, HarnessError> {
-        let mut convos = self.convos.lock();
-        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
-        convo
-            .pending_proposal
-            .take()
-            .ok_or(HarnessError::NoPendingProposal(node))
-    }
-
-    fn set_pending_proposal(&self, node: NodeId, proposal: PendingProposal) {
-        let mut convos = self.convos.lock();
-        if let Some(convo) = convos.get_mut(&node) {
-            convo.pending_proposal = Some(proposal);
-        }
-    }
-
-    /// Run an already-compiled answer expression via `run_child` against
-    /// `target`'s suspended session — the shared tail [`Self::confirm_proposal`]
-    /// uses, factored out since it needs no drive loop (the expr already
-    /// type-checked at elaboration time).
-    async fn run_compiled_answer(
-        &self,
-        target: NodeId,
-        expr: CoreExpr,
-        table: DataConTable,
-    ) -> Result<Value, HarnessError> {
-        let mut session = self.take_session(target)?;
-        let (session, out) = tokio::task::spawn_blocking(move || {
-            let out = session.run_child(
-                "elaborated",
-                &expr,
-                &table,
-                &tidepool_codegen::emit::ExternalEnv::new(),
-            );
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
-        self.put_session(target, session, None, AsksSidecar::default());
-        out.map(|r| r.into_value())
-            .map_err(|e| HarnessError::Resident(e.to_string()))
     }
 
     /// Evaluate `expr` (a plain `M a` expression — no `resume`/hole semantics)
@@ -1291,6 +1263,7 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
         self.put_session(node, session, None, AsksSidecar::default());
+        self.flush_effects(node);
 
         out.map(|r| r.to_string_pretty())
             .map_err(|e| HarnessError::Resident(e.to_string()))
@@ -1353,19 +1326,16 @@ impl Harness {
                 let convo = convos.get(&answerer).ok_or(HarnessError::NoSession(answerer))?;
                 (convo.transcript.clone(), convo.turn_seq)
             };
-            let driven = engine::drive_model_turn(
-                self.provider.as_ref(),
-                &transcript,
-                self.cfg.max_tokens,
-            )
-            .await?;
-            self.tree.turn_delta(
+            let driven = self.stream_turn(answerer, &transcript).await?;
+            self.tree.turn_delta_reasoned(
                 answerer,
                 turn_seq,
                 Role::Assistant,
                 driven.reply.clone(),
                 Some(driven.usage),
+                driven.reasoning.clone(),
             )?;
+            self.finish_live_turn(answerer);
             {
                 let mut convos = self.convos.lock();
                 let convo = convos.get_mut(&answerer).ok_or(HarnessError::NoSession(answerer))?;
@@ -1450,6 +1420,7 @@ impl Harness {
             .await
             .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
             self.put_session(target, session, None, AsksSidecar::default());
+            self.flush_effects(target);
 
             match child_out {
                 Ok(result) => {
@@ -1646,6 +1617,7 @@ impl Harness {
         // is actually compiled against, not silently-preserved first-suspend
         // state.
         self.put_session(node, session, Some(table.clone()), asks.clone());
+        self.flush_effects(node);
 
         // Only log the hole as Consumed (and clear it from `pending`) once the
         // resume has ACTUALLY SUCCEEDED — a fault here (e.g. `error` forced
@@ -1666,7 +1638,10 @@ impl Harness {
             ResidentOutcome::Completed { result, .. } => {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered)?;
-                self.drop_session(node);
+                // Keep the session ALIVE past completion (don't `drop_session`),
+                // same as `run_block`: a node that suspended on a hole and then
+                // resumed to Done is still a followable conversation — its
+                // persisted session lets `follow_up` reopen it with heap intact.
                 Ok(())
             }
             ResidentOutcome::Suspended { hole, request, .. } => {
@@ -1843,49 +1818,5 @@ impl Harness {
         self.tree
             .turn_delta(node, turn, Role::User, content.to_string(), None)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    // -- the mechanical/elaborate routing decision (B2) ----------------------
-
-    #[test]
-    fn empty_prose_known_values_is_mechanical() {
-        assert!(Harness::submission_is_mechanical(
-            &json!({ "values": { "yes": true }, "prose": "" })
-        ));
-    }
-
-    #[test]
-    fn empty_prose_missing_prose_field_is_mechanical() {
-        // The prose channel is always present per F1, but a submission
-        // missing it entirely (e.g. a raw values-only client) is still
-        // treated as empty prose, not a malformed shape.
-        assert!(Harness::submission_is_mechanical(&json!({ "values": { "yes": true } })));
-    }
-
-    #[test]
-    fn non_empty_prose_is_never_mechanical_even_with_values() {
-        // Prose wins over a conflicting widget (FREEZES.md F1).
-        assert!(!Harness::submission_is_mechanical(
-            &json!({ "values": { "yes": true }, "prose": "actually no" })
-        ));
-    }
-
-    #[test]
-    fn non_empty_prose_alone_routes_to_elaboration() {
-        assert!(!Harness::submission_is_mechanical(
-            &json!({ "values": {}, "prose": "do the thing" })
-        ));
-    }
-
-    #[test]
-    fn empty_values_and_empty_prose_is_unknown_shape_routes_to_elaboration() {
-        assert!(!Harness::submission_is_mechanical(&json!({ "values": {}, "prose": "" })));
-        assert!(!Harness::submission_is_mechanical(&json!({})));
     }
 }

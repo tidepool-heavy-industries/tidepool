@@ -669,18 +669,24 @@ macro_rules! ask_effect_def {
                 // sends AskWith carrying a `"ui"` payload field the harness
                 // recognizes and renders in the observatory form pane. The
                 // submission (widget values + always-present prose channel) comes
-                // back as the returned Value. `ui` is a pre-rendered JSON Value —
-                // eval authors build it with the `Tidepool.Ui` smart constructors
-                // (`import Tidepool.Ui`) and `toJSON`, e.g.
-                // `dialogAsk (toJSON (card "Pick" [choice "verdict?" [("a","A")]]))`.
-                // Kept as `Value -> M Value` (not `Ui -> M Value`) so the always-
-                // present generated Effects module needs no `Tidepool.Ui` import;
-                // the Ui vocabulary rides the per-eval import list instead.
-                { raw ["-- | Elicit an operator answer via a `Ui`-shaped form (rendered in the",
-                       "-- observatory form pane). `ui` is a Ui value passed through `toJSON`;",
-                       "-- `import Tidepool.Ui` for the smart constructors. Returns the submission",
-                       "-- {values, prose} Value.",
-                       "dialogAsk :: Value -> M Value",
+                // back as the returned Value. TYPED as `Ui -> M Value`: the arg
+                // IS the `Tidepool.Ui` eDSL, not an untyped Value — so a wrong
+                // shape (e.g. a bare `toJSON "question"`) is a GHC error the
+                // model self-corrects from, not a payload that dead-ends in the
+                // renderer. Build it with the `Tidepool.Ui` smart constructors
+                // (`import Tidepool.Ui`), e.g. `dialogAsk (textIn "one rough
+                // spot?" True)` or `dialogAsk (card "Pick" [choice "verdict?"
+                // [("a","A")]])`. The generated Effects module imports `Ui` (see
+                // `eval_prep::effects_module_source`); the constructors ride the
+                // per-eval import list.
+                { raw ["-- | Elicit an operator answer via a RAW `Ui` form (rendered in the",
+                       "-- observatory form pane), returning the untyped {values, prose}",
+                       "-- submission `Value`. This is the escape hatch — for a TYPED result",
+                       "-- prefer `dialogForm` (`import Tidepool.Form`), which builds a form",
+                       "-- applicatively and decodes the submission into your type. Build `ui`",
+                       "-- with the `Tidepool.Ui` constructors (`import Tidepool.Ui`), e.g.",
+                       "-- `dialogAsk (textIn \"your note?\" True)`.",
+                       "dialogAsk :: Ui -> M Value",
                        "dialogAsk ui = send (AskWith \"\" (object [\"ui\" .= ui]))"] },
             ],
         }
@@ -971,6 +977,7 @@ macro_rules! fs_effect_def {
             // top-level decls in the generated module are order-independent.
             type_defs [
                 "data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)",
+                "instance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]",
             ],
             // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
             // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
@@ -1187,6 +1194,11 @@ mod tests {
         // Both the FileRead record and the error ADT land in type_defs.
         assert!(d.type_defs.contains(
             &"data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)"
+        ));
+        // FileRead renders as a result value (the eval wrapper is `toJSON _r`),
+        // so its ToJSON instance ships alongside the decl.
+        assert!(d.type_defs.contains(
+            &"instance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]"
         ));
         assert!(d.type_defs.contains(&"data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)\ninstance ToJSON FsError where\n  toJSON e = case e of\n    FsNotFound path -> object [\"tag\" .= (\"FsNotFound\" :: Text), \"path\" .= path]\n    FsNotUtf8 path -> object [\"tag\" .= (\"FsNotUtf8\" :: Text), \"path\" .= path]\n    FsSandbox detail -> object [\"tag\" .= (\"FsSandbox\" :: Text), \"detail\" .= detail]\n    FsBadRegex detail -> object [\"tag\" .= (\"FsBadRegex\" :: Text), \"detail\" .= detail]\n    FsIo detail -> object [\"tag\" .= (\"FsIo\" :: Text), \"detail\" .= detail]\n"));
     }

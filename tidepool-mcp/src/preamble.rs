@@ -147,6 +147,11 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     if has_git {
         imports.push("import qualified Tidepool.Git as Git".into());
     }
+    // Typed forms — gated on Ask (see `pragmas_and_imports`); keeps the decl and
+    // eval/stmt planes from diverging on the import surface.
+    if effects.iter().any(|e| e.type_name == "Ask") {
+        imports.push("import Tidepool.Form".into());
+    }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
     // decl plane's import surface diverges — a decl using `readGlob` failed
@@ -199,6 +204,13 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
     }
     if has_git {
         out.push_str("import qualified Tidepool.Git as Git\n");
+    }
+    // Typed forms (`dialogForm` + field constructors) — auto-imported so a form
+    // is one expression, no import tax. Gated on `Ask`: `Tidepool.Form` builds
+    // on `dialogAsk`, which only exists when the Ask effect is in the stack
+    // (mirrors the Shell/Git gates above; a minimal Console-only stack omits it).
+    if effects.iter().any(|e| e.type_name == "Ask") {
+        out.push_str("import Tidepool.Form\n");
     }
     // The pagination / orchestration helper DEFINITIONS live in the generated
     // Tidepool.Orchestrate module (always written by `ensure_effects_module`,

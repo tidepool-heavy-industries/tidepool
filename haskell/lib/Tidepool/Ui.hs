@@ -27,6 +27,8 @@ module Tidepool.Ui
   , code
   , choice
   , textIn
+  , keyedText
+  , keyedChoice
   , badge
   ) where
 
@@ -42,8 +44,12 @@ data Ui
   = Card   { title :: Text, body :: [Ui] }
   | Prose  { text :: Text }                              -- ^ Markdown.
   | Code   { lang :: Text, source :: Text }               -- ^ Fenced source block.
-  | Choice { prompt :: Text, options :: [(Text, Text)] }  -- ^ (key, label) pairs.
-  | TextIn { prompt :: Text, multiline :: Bool }
+    -- | @options@ are (option-key, label) pairs. @key@ is the FORM-FIELD key:
+    -- 'Just' makes this a field of an enclosing form (renders as a radio group
+    -- submitted under @values.<key>@); 'Nothing' is a standalone one-click
+    -- choice. (@Tidepool.Form@ sets it; hand-authored @choice@ leaves it off.)
+  | Choice { prompt :: Text, options :: [(Text, Text)], key :: Maybe Text }
+  | TextIn { prompt :: Text, multiline :: Bool, key :: Maybe Text }
   | Badge  { label :: Text, kind :: BadgeKind }
   deriving (Eq, Show)
 
@@ -56,9 +62,13 @@ instance ToJSON Ui where
     Card t b    -> object [ "ui" .= ("card" :: Text), "title" .= t, "body" .= b ]
     Prose t     -> object [ "ui" .= ("prose" :: Text), "text" .= t ]
     Code l s    -> object [ "ui" .= ("code" :: Text), "lang" .= l, "source" .= s ]
-    Choice p os -> object [ "ui" .= ("choice" :: Text), "prompt" .= p, "options" .= os ]
-    TextIn p m  -> object [ "ui" .= ("text_in" :: Text), "prompt" .= p, "multiline" .= m ]
+    Choice p os mk -> object ([ "ui" .= ("choice" :: Text), "prompt" .= p, "options" .= os ] ++ keyField mk)
+    TextIn p m mk  -> object ([ "ui" .= ("text_in" :: Text), "prompt" .= p, "multiline" .= m ] ++ keyField mk)
     Badge l k   -> object [ "ui" .= ("badge" :: Text), "label" .= l, "kind" .= k ]
+    where
+      -- Emit the form-field key only when present (matches the Rust mirror's
+      -- `skip_serializing_if`, so standalone widgets stay wire-identical).
+      keyField = maybe [] (\k -> [ "key" .= (k :: Text) ])
 
 instance ToJSON BadgeKind where
   toJSON EffectRow = String "effect_row"
@@ -82,14 +92,24 @@ prose = Prose
 code :: Text -> Text -> Ui
 code = Code
 
--- | A closed set of (key, label) options; the renderer adds an open-prose
--- escape unconditionally (B2 — not represented here).
+-- | A standalone one-click choice: (option-key, label) options; the renderer
+-- adds an open-prose escape unconditionally (B2 — not represented here).
 choice :: Text -> [(Text, Text)] -> Ui
-choice = Choice
+choice p os = Choice p os Nothing
 
--- | A free-text prompt; 'True' for a multiline (textarea) input.
+-- | A standalone free-text prompt; 'True' for a multiline (textarea) input.
 textIn :: Text -> Bool -> Ui
-textIn = TextIn
+textIn p m = TextIn p m Nothing
+
+-- | A FORM-FIELD text input, submitted under @values.<key>@ (used by
+-- 'Tidepool.Form'): field key, prompt, multiline flag.
+keyedText :: Text -> Text -> Bool -> Ui
+keyedText k p m = TextIn p m (Just k)
+
+-- | A FORM-FIELD radio choice, submitted under @values.<key>@ (used by
+-- 'Tidepool.Form'): field key, prompt, (option-key, label) options.
+keyedChoice :: Text -> Text -> [(Text, Text)] -> Ui
+keyedChoice k p os = Choice p os (Just k)
 
 -- | A small chip (effect-row \/ fan \/ price \/ state).
 badge :: Text -> BadgeKind -> Ui

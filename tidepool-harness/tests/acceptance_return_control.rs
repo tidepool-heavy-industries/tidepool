@@ -394,10 +394,10 @@ async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
     assert!(events.iter().any(|e| matches!(e, Event::NodeDone { .. })));
 }
 
-/// `dialogAsk`'s MECHANICAL answer path (D6, zero model turns) also flows
-/// through `resume_parent` — sanity check that the NORMAL (non-bottom) answer
-/// path is unaffected: `answer_dialog` still logs Consumed only alongside a
-/// real completion when the value is well-formed.
+/// `dialogAsk`'s answer path: the submission `{values, prose}` becomes the
+/// resume Value DIRECTLY (zero model turns), flowing through `resume_parent`.
+/// Sanity check that a well-formed option submission completes and logs one
+/// Consumed alongside the completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dialog_mechanical_answer_completes_and_logs_consistently() {
     if !extract_available() {
@@ -410,8 +410,8 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
 
     let replies = vec![reply(
-        "```haskell\ndo\n  _ <- dialogAsk (toJSON (card \"Confirm\" [choice \"Proceed?\" \
-         [(\"yes\", \"Yes\"), (\"no\", \"No\")]]))\n  pure (toJSON (1 :: Int))\n```",
+        "```haskell\ndo\n  _ <- dialogAsk (card \"Confirm\" [choice \"Proceed?\" \
+         [(\"yes\", \"Yes\"), (\"no\", \"No\")]])\n  pure (toJSON (1 :: Int))\n```",
     )];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
@@ -433,7 +433,7 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
     harness
         .answer_dialog(root, json!({ "values": { "yes": true }, "prose": "" }))
         .await
-        .expect("mechanical dialog answer");
+        .expect("dialog answer");
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
 
     let events = events_for(&log_path, root);
@@ -445,6 +445,156 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
             .count(),
         1
     );
+}
+
+/// REGRESSION GUARD (elaborator removed): a `dialogAsk` answered with NON-EMPTY
+/// PROSE resumes the hole DIRECTLY with the `{values, prose}` submission as the
+/// value — no elaborator model turn, no proposal to confirm. Before the cut,
+/// non-empty prose routed to the elaborator (an LLM "interpretation" turn); now
+/// `dialogAsk` returns the raw submission, so the block completes immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dialog_prose_answer_resumes_directly_without_elaboration() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("dialog_prose.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+
+    // Exactly ONE scripted turn: if the elaborator fired it would demand a
+    // SECOND provider turn and this single-reply queue would exhaust.
+    let replies = vec![reply(
+        "```haskell\ndo\n  _ <- dialogAsk (textIn \"your note?\" True)\n  \
+         pure (toJSON (1 :: Int))\n```",
+    )];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness.create_root("dialog root", "Ask, finish.").unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    let _ = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+
+    // Free-text prose answer — the case that used to elaborate.
+    harness
+        .answer_dialog(root, json!({ "values": {}, "prose": "vim, obviously" }))
+        .await
+        .expect("prose dialog answer resumes directly");
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+}
+
+/// Typed FORMS end-to-end (`Tidepool.Form`): a turn builds a MULTI-FIELD form
+/// with `dialogForm`, the operator submits several keyed fields in ONE
+/// submission, and the block resumes with the DECODED typed value. Exercises
+/// the whole stack through the real extract — the keyed `Ui` + form renderer +
+/// the Haskell `Form` applicative + Haskell-side decode all composing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dialog_form_multi_field_decodes_typed_value() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("form.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+
+    // A form yielding (Text, Text): a radio choice (key "a" -> "Alpha") plus a
+    // free-text field. `show r` returns the decoded Either as Text.
+    // No `import Tidepool.Form` — it is auto-imported by the turn preamble.
+    let replies = vec![reply(
+        "```haskell\ndo\n  \
+         r <- dialogForm ((,) <$> choiceField \"Lane\" [(\"a\", \"Alpha\" :: Text), (\"b\", \"Beta\")] \
+         <*> textField \"Notes\")\n  \
+         pure (toJSON (show r))\n```",
+    )];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness.create_root("form root", "Fill the form.").unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    assert!(matches!(
+        outcome,
+        tidepool_harness::TurnOutcome::Suspended { .. }
+    ));
+
+    // ONE submission carrying BOTH keyed fields: choice f0 = "a", text f1.
+    harness
+        .answer_dialog(
+            root,
+            json!({ "values": { "f0": "a", "f1": "my notes" }, "prose": "" }),
+        )
+        .await
+        .expect("multi-field form answer");
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    // The decoded typed value flows back: Right ("Alpha","my notes").
+    let events = events_for(&log_path, root);
+    let done = events
+        .iter()
+        .find_map(|e| match e {
+            Event::NodeDone {
+                result_rendered, ..
+            } => Some(result_rendered.clone()),
+            _ => None,
+        })
+        .expect("node done with a result");
+    assert!(done.contains("Alpha"), "decoded choice value in {done}");
+    assert!(done.contains("my notes"), "decoded text value in {done}");
+}
+
+/// REGRESSION: a node that SUSPENDED on a dialog hole and then RESUMED to `Done`
+/// must still be followable — the resume-completion path keeps the session alive
+/// (like `run_block`), so `follow_up` can reopen it. Before the fix,
+/// `resume_parent` dropped the session on completion and a follow-up failed with
+/// "no live session".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn follow_up_after_dialog_resume_to_done() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("followup.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+
+    // Turn 1 suspends on a dialog then completes with 1; the follow-up turn
+    // completes with 2. Two scripted replies — the follow-up drives a real turn.
+    let replies = vec![
+        reply(
+            "```haskell\ndo\n  _ <- dialogAsk (textIn \"name?\" False)\n  \
+             pure (toJSON (1 :: Int))\n```",
+        ),
+        reply("```haskell\npure (toJSON (2 :: Int))\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness.create_root("followup root", "Ask, then finish.").unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    assert!(matches!(
+        outcome,
+        tidepool_harness::TurnOutcome::Suspended { .. }
+    ));
+
+    // Answer the dialog → the continuation resumes to Done (via resume_parent).
+    harness
+        .answer_dialog(root, json!({ "values": {}, "prose": "Ada" }))
+        .await
+        .expect("dialog answer resumes to done");
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    // THE FIX: a Done-via-resume node can still be followed up.
+    let out = harness
+        .follow_up(root, "now do it again")
+        .await
+        .expect("follow_up after a resume-to-done must succeed (session kept alive)");
+    assert!(matches!(out, tidepool_harness::TurnOutcome::Completed { .. }));
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
 }
 
 /// A SECOND, sequential `returnControl` hole in the SAME compiled turn — the

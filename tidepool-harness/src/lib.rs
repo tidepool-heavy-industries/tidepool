@@ -8,6 +8,7 @@
 //! keep them dependency-light.
 
 pub mod compile;
+pub mod effect_trace;
 pub mod engine;
 pub mod forcing;
 pub mod harness;

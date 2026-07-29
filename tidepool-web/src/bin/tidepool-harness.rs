@@ -26,6 +26,15 @@ use tidepool_web::server::AppState;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+
+    // `--login`: run the device-authorization flow to completion and exit. No
+    // server, no callback port — the operator opens a public URL and types a
+    // code; this process polls OpenAI directly. The right flow for a headless
+    // or SSH-remote box (loopback callback would need a port-forward).
+    if args.iter().any(|a| a == "--login") {
+        return run_device_login().await;
+    }
+
     let replay_log = arg_value(&args, "--replay");
     let port: u16 = arg_str(&args, "--port")
         .and_then(|p| p.parse().ok())
@@ -55,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let model = std::env::var("TIDEPOOL_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-5".to_string());
+                .unwrap_or_else(|_| "gpt-5.4-mini".to_string());
             let oauth = OauthConfig::new(model.clone());
             (Arc::new(OauthProvider::new(oauth)), model)
         }
@@ -74,7 +83,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Arc::new(Harness::new(writer, cfg, provider)?);
 
     let oauth_cfg = OauthConfig::new(model);
-    let state = AppState::new(harness, log_path, oauth_cfg);
+    let state = AppState::new(harness.clone(), log_path, oauth_cfg);
+    // Let streaming deltas nudge the SSE stream: the harness fires this on each
+    // live token, sending to the same tick the verb handlers use.
+    {
+        let tick = state.tick.clone();
+        harness.set_notifier(move || {
+            let _ = tick.send(());
+        });
+    }
     let app = tidepool_web::server::router(state);
 
     let addr = format!("127.0.0.1:{port}");
@@ -83,6 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+/// Device-authorization sign-in: print the verification URL + one-time code,
+/// poll to completion, persist the token. No server, no callback port.
+async fn run_device_login() -> Result<(), Box<dyn std::error::Error>> {
+    use tidepool_harness::provider::oauth;
+    let model = std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+    let oauth_cfg = OauthConfig::new(model);
+    let start = oauth::start_device_login(&oauth_cfg).await?;
+    println!();
+    println!("  Sign in to OpenAI");
+    println!();
+    println!("  1. Open this URL in any browser (nothing to forward):");
+    println!("       {}", start.verification_url);
+    println!();
+    println!("  2. Enter this one-time code (expires in 15 minutes):");
+    println!();
+    println!("       {}", start.user_code);
+    println!();
+    println!("  Waiting for authorization…");
+    oauth::complete_device_login(&oauth_cfg, &start).await?;
+    println!(
+        "  ✓ signed in — token saved to {}",
+        oauth_cfg.token_path.display()
+    );
     Ok(())
 }
 

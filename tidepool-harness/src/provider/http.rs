@@ -56,18 +56,6 @@ pub(crate) fn chat_options(req: &TurnRequest) -> Option<ChatOptions> {
         .map(|n| ChatOptions::default().with_max_tokens(n))
 }
 
-/// Same as [`chat_options`] but with `extra_headers` merged onto whatever
-/// `chat_options` would have produced — used only by the OAuth provider to
-/// carry the `chatgpt-account-id` header the Responses API requires
-/// alongside a subscription bearer token. `chat_options` itself stays
-/// untouched so the API-key path (which never needs extra headers) is
-/// unaffected.
-pub(crate) fn chat_options_with_headers(req: &TurnRequest, headers: genai::Headers) -> ChatOptions {
-    chat_options(req)
-        .unwrap_or_default()
-        .with_extra_headers(headers)
-}
-
 pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, ProviderError> {
     let text = resp
         .first_text()
@@ -77,7 +65,12 @@ pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, Provi
         input_tokens: resp.usage.prompt_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: resp.usage.completion_tokens.unwrap_or(0).max(0) as u64,
     };
-    Ok(TurnResponse { text, usage })
+    // genai's chat/completions path carries no reasoning-summary stream.
+    Ok(TurnResponse {
+        text,
+        usage,
+        reasoning: None,
+    })
 }
 
 /// A 401/403 from the provider — regardless of which adapter surfaced it —

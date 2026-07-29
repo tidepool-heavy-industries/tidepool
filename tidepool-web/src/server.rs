@@ -12,11 +12,6 @@
 //! - `POST /answer/:node`         — submit a form/prose answer to a Dialog hole.
 //! - `POST /answer/:node/:key`    — a mechanical option-key answer (D6).
 //! - `POST /fork/:node`  — force + drive the fork answerer for a fork hole.
-//! - `POST /confirm/:node` — consume a staged elaborator proposal (B2): runs
-//!                         the already GHC-validated `resume expr` and
-//!                         resumes the hole.
-//! - `POST /reject/:node`  — discard a staged elaborator proposal (B2): the
-//!                         hole reopens untouched for a fresh answer.
 //! - `POST /steer/:node`  — resolve a node's rung-2 escalation (the
 //!                         escalation ladder's operator popup): a child
 //!                         answerer that exhausted its auto-retry parks here
@@ -57,6 +52,7 @@ use maud::{html, Markup};
 use serde_json::{json, Value as Jv};
 use tidepool_harness::log::{Event as LogEvent, LogReader};
 use tidepool_harness::provider::oauth::{self, OauthConfig};
+use tidepool_harness::provider::Role;
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::Harness;
 use tokio::sync::broadcast;
@@ -75,6 +71,12 @@ pub struct AppState {
     /// mutating the harness so the SSE stream re-renders promptly (the log
     /// follower is the durable source; this is the low-latency nudge).
     pub tick: broadcast::Sender<()>,
+    /// The node the operator has focused (clicked in the tree), if any. A
+    /// view concern, not harness state: when set, the transcript shows just
+    /// that node's conversation and the tree highlights it; when `None`, the
+    /// transcript shows every node. Single-operator (loopback), so one shared
+    /// selection is correct.
+    pub selected: Arc<std::sync::Mutex<Option<NodeId>>>,
 }
 
 impl AppState {
@@ -85,11 +87,16 @@ impl AppState {
             log_path,
             oauth,
             tick,
+            selected: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     fn ping(&self) {
         let _ = self.tick.send(());
+    }
+
+    fn selected(&self) -> Option<NodeId> {
+        *self.selected.lock().unwrap()
     }
 }
 
@@ -103,14 +110,15 @@ pub fn router(state: AppState) -> Router {
         .route("/fork/{node}", post(fork))
         .route("/answer/{node}", post(answer))
         .route("/answer/{node}/{key}", post(answer_key))
-        .route("/confirm/{node}", post(confirm))
-        .route("/reject/{node}", post(reject))
         .route("/steer/{node}", post(steer))
         .route("/steer/{node}/abort", post(steer_abort))
         .route("/cancel/{node}", post(cancel))
+        .route("/select/{node}", post(select))
+        .route("/followup/{node}", post(followup))
         .route("/splice/{node}", post(splice))
         .route("/eval_in_binding/{node}", post(eval_in_binding))
         .route("/snapshot", get(snapshot))
+        .route("/signin", get(signin_page))
         .route("/auth/start", post(auth_start))
         .route("/auth/status", get(auth_status))
         .with_state(state)
@@ -130,28 +138,33 @@ async fn page(State(st): State<AppState>) -> Html<String> {
     let meters = meters_fragment(&st);
     let trace = trace_fragment(&st);
     let heap = heap_fragment(&st);
+    let transcript = transcript_fragment(&st);
     let log = log_fragment(&st);
-    Html(shell::page(signed_in, tree, inspector, meters, trace, heap, log).into_string())
+    Html(
+        shell::page(signed_in, tree, inspector, meters, trace, heap, transcript, log)
+            .into_string(),
+    )
 }
 
 /// The tree pane markup (id="tree" so SSE patches replace it wholesale).
 fn tree_fragment(st: &AppState) -> Markup {
     let nodes = st.harness.tree_snapshot();
+    let selected = st.selected();
     html! {
         div id="tree" {
             @if nodes.is_empty() {
                 div class="empty" { "No nodes yet." }
             }
             @for n in &nodes {
-                (node_row(n))
+                (node_row(n, selected == Some(n.node)))
             }
         }
     }
 }
 
-fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
+fn node_row(n: &tidepool_harness::NodeSummary, is_selected: bool) -> Markup {
     let (state_class, state_label) = match &n.state {
-        NodeState::Thunk => ("thunk", "thunk"),
+        NodeState::Thunk => ("thunk", "not started"),
         NodeState::Running => ("running", "running"),
         NodeState::Suspended { .. } => ("suspended", "suspended"),
         NodeState::Done => ("done", "done"),
@@ -160,7 +173,8 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
     let is_child = n.parent.is_some();
     let suspended = matches!(n.state, NodeState::Suspended { .. });
     html! {
-        div class={ "node" @if is_child { " child" } @if suspended { " suspended" } } {
+        div class={ "node" @if is_child { " child" } @if suspended { " suspended" } @if is_selected { " selected" } }
+            data-on-click=(format!("@post('/select/{}')", n.node.0)) {
             div class="teaser" { "node " (n.node.0) }
             div class="meta" {
                 span class={ "chip state-" (state_class) } { (state_label) }
@@ -173,10 +187,10 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
             div class="actions" {
                 @match &n.state {
                     NodeState::Thunk => {
-                        button data-on-click=(format!("@post('/force/{}')", n.node.0)) { "force" }
+                        button data-on-click=(format!("@post('/force/{}')", n.node.0)) { "start" }
                     }
                     NodeState::Suspended { .. } if n.is_fork_hole => {
-                        button data-on-click=(format!("@post('/fork/{}')", n.node.0)) { "force fork answerer" }
+                        button data-on-click=(format!("@post('/fork/{}')", n.node.0)) { "answer via fork" }
                     }
                     _ => {}
                 }
@@ -188,9 +202,8 @@ fn node_row(n: &tidepool_harness::NodeSummary) -> Markup {
 /// The inspector pane markup (id="inspector"). A parked rung-2 ESCALATION
 /// (the stuck-node popup) takes top priority — it blocks a whole fan's
 /// progress and has no pending hole of its own to otherwise surface it.
-/// Next, a staged elaborator proposal (B2) — the operator must confirm/reject
-/// it before the raw form is relevant again. Otherwise renders the pending
-/// Dialog hole's `Ui` form, or an empty placeholder.
+/// Otherwise renders the pending Dialog hole's `Ui` form, or an empty
+/// placeholder.
 fn inspector_fragment(st: &AppState) -> Markup {
     let inner = if let Some(node) = st.harness.first_escalated_node() {
         match st.harness.escalation_of(node) {
@@ -198,9 +211,7 @@ fn inspector_fragment(st: &AppState) -> Markup {
             None => shell::inspector_empty(),
         }
     } else if let Some(node) = st.harness.first_operator_hole() {
-        if let Some(source) = st.harness.pending_proposal_source(node) {
-            render_proposal(node, &source)
-        } else if let Some(ui) = st.harness.pending_dialog_ui(node) {
+        if let Some(ui) = st.harness.pending_dialog_ui(node) {
             let answer_url = format!("/answer/{}", node.0);
             render_with_answer_url(&ui, &answer_url)
         } else {
@@ -242,23 +253,6 @@ fn render_escalation(node: NodeId, esc: &tidepool_harness::Escalation) -> Markup
             }
             button class="ghost escalation-abort" data-on-click=(format!("@post('{abort_url}')")) {
                 "Abort fan"
-            }
-        }
-    }
-}
-
-/// The elaborator proposal card (B2): the GHC-valid `resume expr` the calling
-/// model proposed for a non-mechanical dialog submission, SHOWN BEFORE
-/// CONSUME — the operator confirms (runs it and resumes the hole) or rejects
-/// (discards it; the hole reopens, submission preserved in the transcript).
-fn render_proposal(node: NodeId, source: &str) -> Markup {
-    html! {
-        div class="ui-card" {
-            h3 class="ui-card-title" { "Elaborated proposal" }
-            pre class="ui-code" { code { (source) } }
-            div class="actions" {
-                button data-on-click=(format!("@post('/confirm/{}')", node.0)) { "confirm" }
-                button class="ghost" data-on-click=(format!("@post('/reject/{}')", node.0)) { "reject" }
             }
         }
     }
@@ -479,6 +473,202 @@ fn heap_fragment(st: &AppState) -> Markup {
 }
 
 /// The log pane markup (id="log"). Renders the last N events.
+/// The conversation transcript (id="transcript") — the full turn-by-turn view
+/// the raw event log can't give: grouped by node, no truncation, rendering the
+/// actual message CONTENT (the operator's prompt, the Haskell the model wrote
+/// with its token cost, the eval result, suspensions, failures). Each turn is
+/// an expandable `<details>` (open by default). Folded from the same log the
+/// event feed reads, but as a conversation rather than a flat event stream.
+/// Live: included in `render_frames`, unlike the raw log pane.
+fn transcript_fragment(st: &AppState) -> Markup {
+    let by_node = fold_transcript(&st.log_path);
+    let selected = st.selected();
+    // When a node is focused, show only its conversation; otherwise all.
+    let shown: Vec<&(u64, Vec<Markup>)> = by_node
+        .iter()
+        .filter(|(node, _)| selected.is_none_or(|s| s.0 == *node))
+        .collect();
+    html! {
+        div id="transcript" {
+            @if let Some(s) = selected {
+                div class="tx-focus" {
+                    "focused on node " (s.0) " — click it again in the tree to show all"
+                }
+            }
+            @if shown.is_empty() {
+                div class="empty" {
+                    @if selected.is_some() {
+                        "This node has no turns yet."
+                    } @else {
+                        "No turns yet. Force a node to begin — its prompt, the Haskell it writes, "
+                        "and the result appear here as they happen."
+                    }
+                }
+            }
+            @for (node, rows) in &shown {
+                div class="tx-node" {
+                    div class="tx-node-hdr" { "node " (node) }
+                    @for row in rows.iter() { (row) }
+                    @if let Some(live) = live_turn_row(st, *node) { (live) }
+                }
+            }
+            // Follow-up composer: continue a focused, completed node's
+            // conversation. Shown only for a single Done node (a Suspended node
+            // has a hole to answer in the inspector instead).
+            @if let Some(sel) = selected {
+                @if node_is_done(st, sel) {
+                    form class="tx-followup" data-on-submit=(format!("@post('/followup/{}')", sel.0)) {
+                        textarea name="message" data-bind="message" rows="2"
+                            placeholder=(format!("follow up on node {} — continue this conversation…", sel.0)) {}
+                        button type="submit" { "send follow-up ↵" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether `node` is currently in the `Done` state (eligible for a follow-up).
+fn node_is_done(st: &AppState, node: NodeId) -> bool {
+    st.harness
+        .tree_snapshot()
+        .iter()
+        .any(|n| n.node == node && matches!(n.state, NodeState::Done))
+}
+
+/// A collapsible "thinking" block (the model's reasoning summary). Collapsed by
+/// default for completed turns, open while a turn is live so the operator sees
+/// reasoning as it streams.
+fn thinking_block(text: &str, open: bool) -> Markup {
+    html! {
+        details class="tx-think" open[open] {
+            summary { "🧠 thinking" }
+            pre class="tx-think-body" { code { (text) } }
+        }
+    }
+}
+
+/// The node's in-progress streaming turn, rendered live from the harness's
+/// live-turn buffer (answer text growing token-by-token, plus thinking as it
+/// arrives). `None` when the node isn't currently streaming.
+fn live_turn_row(st: &AppState, node: u64) -> Option<Markup> {
+    let live = st.harness.live_turn(NodeId(node))?;
+    if live.text.is_empty() && live.reasoning.is_empty() {
+        return None;
+    }
+    Some(html! {
+        div class="tx-turn tx-assistant tx-live" {
+            div class="tx-live-hdr" { span class="tx-role" { "assistant" } " " span class="tx-streaming" { "streaming…" } }
+            @if !live.reasoning.is_empty() { (thinking_block(&live.reasoning, true)) }
+            @if !live.text.is_empty() {
+                pre class="tx-body" { code { (live.text) } span class="tx-cursor" { "▍" } }
+            }
+        }
+    })
+}
+
+/// Fold the log into per-node ordered transcript rows (BTreeMap keeps nodes in
+/// id order; each node's rows stay in log `seq` order).
+fn fold_transcript(path: &std::path::Path) -> Vec<(u64, Vec<Markup>)> {
+    let Ok((_h, iter)) = LogReader::open(path) else {
+        return Vec::new();
+    };
+    let mut by_node: BTreeMap<u64, Vec<Markup>> = BTreeMap::new();
+    // `i` is the event's position in the append-only log: a STABLE id per row
+    // across renders, so the client can preserve each turn's open/closed state.
+    for (i, rec) in iter.flatten().enumerate() {
+        if let Some((node, row)) = transcript_row(&rec.event, i as u64) {
+            by_node.entry(node).or_default().push(row);
+        }
+    }
+    by_node.into_iter().collect()
+}
+
+/// One log event → one transcript row (or `None` for events that aren't turn
+/// content: forcing, hole plumbing, fork refs). Full content, never truncated.
+/// `row_id` is a stable per-row id so the client preserves `<details>` state.
+fn transcript_row(ev: &LogEvent, row_id: u64) -> Option<(u64, Markup)> {
+    match ev {
+        LogEvent::TurnDelta {
+            node,
+            role,
+            content,
+            usage,
+            reasoning,
+            ..
+        } => {
+            let (cls, label) = match role {
+                Role::Assistant => ("assistant", "assistant"),
+                Role::User => ("user", "prompt"),
+                Role::System => ("system", "system"),
+            };
+            let toks = usage
+                .as_ref()
+                .map(|u| format!("{} in / {} out", u.input_tokens, u.output_tokens))
+                .unwrap_or_default();
+            Some((
+                node.0,
+                html! {
+                    details id=(format!("txr{row_id}")) class={ "tx-turn tx-" (cls) } open {
+                        summary {
+                            span class="tx-role" { (label) }
+                            @if !toks.is_empty() { " " span class="tx-toks" { (toks) } }
+                        }
+                        @if let Some(think) = reasoning { (thinking_block(think, false)) }
+                        pre class="tx-body" { code { (content) } }
+                    }
+                },
+            ))
+        }
+        LogEvent::TurnSpliced { node, content, .. } => Some((
+            node.0,
+            html! {
+                details id=(format!("txr{row_id}")) class="tx-turn tx-user" open {
+                    summary { span class="tx-role" { "operator" } }
+                    pre class="tx-body" { code { (content) } }
+                }
+            },
+        )),
+        LogEvent::NodeDone {
+            node,
+            result_rendered,
+        } => Some((
+            node.0,
+            html! {
+                div class="tx-result" {
+                    span class="tx-arrow" { "→ result" }
+                    pre class="tx-body" { code { (result_rendered) } }
+                }
+            },
+        )),
+        LogEvent::HolePublished {
+            node,
+            prompt,
+            ty,
+            fork,
+            ..
+        } => Some((
+            node.0,
+            html! {
+                div class="tx-hole" {
+                    span class="tx-arrow" { (if *fork { "⑂ fork hole" } else { "⊙ suspended" }) }
+                    @if let Some(t) = ty { " :: " span class="tx-type" { (t) } }
+                    div class="tx-hole-prompt" { (prompt) }
+                }
+            },
+        )),
+        LogEvent::NodeCancelled { node, reason } => Some((
+            node.0,
+            html! {
+                div class="tx-error" {
+                    span class="tx-arrow" { "✕ cancelled" } " " (reason)
+                }
+            },
+        )),
+        _ => None,
+    }
+}
+
 fn log_fragment(st: &AppState) -> Markup {
     let lines = recent_log_lines(&st.log_path, 200);
     html! {
@@ -630,10 +820,10 @@ mod async_stream {
         tokio_stream::iter(std::iter::once(Ok(first)))
     }
 
-    /// Render the tree + inspector + meters + trace + heap as a single
-    /// Datastar patch-elements frame. (All five panes in one frame: the
-    /// client applies each `[id]` element. The log pane is initial-render
-    /// only — it is not re-rendered here.)
+    /// Render every live pane as a single Datastar patch-elements frame — the
+    /// client applies each `[id]` element. Includes the transcript (the
+    /// conversation view) and the raw event log, so both update as turns land
+    /// rather than only at page load.
     fn render_frames(st: &AppState) -> Event {
         use datastar::prelude::PatchElements;
         let tree = super::tree_fragment(st).into_string();
@@ -641,7 +831,9 @@ mod async_stream {
         let meters = super::meters_fragment(st).into_string();
         let trace = super::trace_fragment(st).into_string();
         let heap = super::heap_fragment(st).into_string();
-        let combined = format!("{tree}{inspector}{meters}{trace}{heap}");
+        let transcript = super::transcript_fragment(st).into_string();
+        let log = super::log_fragment(st).into_string();
+        let combined = format!("{tree}{inspector}{transcript}{meters}{trace}{heap}{log}");
         PatchElements::new(combined).write_as_axum_sse_event()
     }
 }
@@ -667,6 +859,43 @@ async fn create(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
         }
         Err(e) => err_json(e.to_string()),
     }
+}
+
+/// Continue a completed node's conversation with a new operator message
+/// (multi-turn follow-up). Body `{message}`. Fires the turn off the request
+/// task (like `force`); the node reopens, streams, and lands at a new
+/// hole/done. A failed follow-up reverts the node to `Done` (harness side) so
+/// the conversation is preserved.
+async fn followup(State(st): State<AppState>, Path(node): Path<u64>, body: Option<Json<Jv>>) -> Response {
+    let node = NodeId(node);
+    let message = body
+        .and_then(|Json(v)| v.get("message").and_then(Jv::as_str).map(str::to_string))
+        .unwrap_or_default();
+    if message.trim().is_empty() {
+        return err_json("follow-up message is empty".to_string());
+    }
+    let harness = st.harness.clone();
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        if let Err(e) = harness.follow_up(node, &message).await {
+            eprintln!("[followup] node {} failed: {e}", node.0);
+        }
+        st2.ping();
+    });
+    st.ping();
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Focus a node (or toggle it off if it's already selected). Pure view state —
+/// no harness mutation — so it's synchronous and just re-renders.
+async fn select(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
+    let node = NodeId(node);
+    {
+        let mut sel = st.selected.lock().unwrap();
+        *sel = if *sel == Some(node) { None } else { Some(node) };
+    }
+    st.ping();
+    Json(json!({"ok": true, "selected": node.0})).into_response()
 }
 
 async fn force(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
@@ -738,34 +967,6 @@ async fn answer_key(
     });
     st.ping();
     Json(json!({"ok": true, "key": key})).into_response()
-}
-
-/// Confirm a staged elaborator proposal (B2): consumes the hole. Runs off the
-/// request task (same fire-and-ping shape as `fork`/`answer`) since it drives
-/// a `run_child` + resume through the blocking pool.
-async fn confirm(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
-    let node = NodeId(node);
-    let harness = st.harness.clone();
-    let st2 = st.clone();
-    tokio::spawn(async move {
-        let _ = harness.confirm_proposal(node).await;
-        st2.ping();
-    });
-    st.ping();
-    Json(json!({"ok": true, "confirming": node.0})).into_response()
-}
-
-/// Reject a staged elaborator proposal (B2): discards it, the hole stays
-/// suspended and open for a fresh answer. Synchronous (no session/GHC work).
-async fn reject(State(st): State<AppState>, Path(node): Path<u64>) -> Response {
-    let node = NodeId(node);
-    match st.harness.reject_proposal(node) {
-        Ok(()) => {
-            st.ping();
-            Json(json!({"ok": true})).into_response()
-        }
-        Err(e) => err_json(e.to_string()),
-    }
 }
 
 /// Resolve a node's rung-2 escalation with an ALLOCATE-MORE decision: grants
@@ -945,11 +1146,71 @@ async fn snapshot(State(st): State<AppState>, Query(q): Query<SnapshotQuery>) ->
 
 async fn auth_start(State(st): State<AppState>) -> Response {
     match oauth::start_login(&st.oauth).await {
-        Ok(start) => Json(json!({
-            "authorization_url": start.authorization_url,
-            "port_forward_hint": start.port_forward_hint,
-        }))
-        .into_response(),
+        Ok(start) => {
+            // Spawn the loopback callback server (:1455) that catches the
+            // browser redirect, exchanges the code for a token, and persists
+            // it. Without this the authorization URL dead-ends — nothing
+            // serves the redirect_uri. `start` carries the state + PKCE
+            // verifier that secure THIS attempt; hand the whole LoginStart to
+            // complete_login. The task ends when the round-trip completes (or
+            // errors); `/auth/status` reflects the persisted token.
+            let oauth_cfg = st.oauth.clone();
+            let flow = start.clone();
+            tokio::spawn(async move {
+                if let Err(e) = oauth::complete_login(&oauth_cfg, &flow).await {
+                    eprintln!("[auth] callback/login failed: {e}");
+                }
+            });
+            Json(json!({
+                "authorization_url": start.authorization_url,
+                "port_forward_hint": start.port_forward_hint,
+            }))
+            .into_response()
+        }
+        Err(e) => err_json(e.to_string()),
+    }
+}
+
+/// Human sign-in entry point — the observatory has no auth affordance, and
+/// handing the operator a 400-char URL to paste is fragile: terminal/line-wrap
+/// whitespace splits a scope token (`email` → `emai l`) and the server rejects
+/// it as `invalid_scope`. Serving the URL as an anchor `href` can't be
+/// corrupted. Reachable over the same SSH forward as the rest of the
+/// observatory (`-L 4600:localhost:4600`); the callback still lands on :1455.
+/// Like `auth_start`, this spawns the callback server for THIS attempt —
+/// reload only to start a fresh one.
+async fn signin_page(State(st): State<AppState>) -> Response {
+    match oauth::start_login(&st.oauth).await {
+        Ok(start) => {
+            let oauth_cfg = st.oauth.clone();
+            let flow = start.clone();
+            tokio::spawn(async move {
+                if let Err(e) = oauth::complete_login(&oauth_cfg, &flow).await {
+                    eprintln!("[auth] callback/login failed: {e}");
+                }
+            });
+            let url = start.authorization_url;
+            let markup = html! {
+                (maud::DOCTYPE)
+                html lang="en" {
+                    head { meta charset="utf-8"; title { "tidepool harness — sign in" } }
+                    body style="font-family:system-ui;background:#0f1117;color:#e6e9f0;padding:3rem;line-height:1.6" {
+                        h2 { "Sign in to OpenAI" }
+                        p { "Click to authorize with your paid ChatGPT account. No copy-paste — the link can't be mangled." }
+                        p {
+                            a href=(url) style="display:inline-block;padding:.8rem 1.4rem;background:#10a37f;color:#fff;border-radius:8px;text-decoration:none;font-weight:600" {
+                                "Authorize tidepool-harness →"
+                            }
+                        }
+                        hr style="border-color:#262b3a;margin:2rem 0";
+                        p style="color:#8b93a7;font-size:.85rem" {
+                            "The callback lands on localhost:1455 (your SSH -L forward). When it reports success, return to the terminal."
+                        }
+                    }
+                }
+            };
+            Html(markup.into_string()).into_response()
+        }
         Err(e) => err_json(e.to_string()),
     }
 }
@@ -1024,6 +1285,7 @@ mod tests {
             turn: 0,
             role: Role::Assistant,
             content: "hi".into(),
+            reasoning: None,
             usage: Some(Usage {
                 input_tokens: 120,
                 output_tokens: 40,
@@ -1035,6 +1297,7 @@ mod tests {
             turn: 1,
             role: Role::Assistant,
             content: "again".into(),
+            reasoning: None,
             usage: Some(Usage {
                 input_tokens: 30,
                 output_tokens: 10,
@@ -1047,6 +1310,7 @@ mod tests {
             turn: 0,
             role: Role::User,
             content: "seed".into(),
+            reasoning: None,
             usage: None,
         })
         .unwrap();
@@ -1055,6 +1319,7 @@ mod tests {
             turn: 1,
             role: Role::Assistant,
             content: "ok".into(),
+            reasoning: None,
             usage: Some(Usage {
                 input_tokens: 8,
                 output_tokens: 3,

@@ -142,6 +142,7 @@ async fn mechanical_choice_answer_resumes_return_control_to_completion() {
                 ("PARTIAL".to_string(), "PARTIAL".to_string()),
                 ("NOGO".to_string(), "NOGO".to_string()),
             ],
+            key: None,
         }
     );
 

@@ -86,7 +86,11 @@ impl SpliceProbeProvider {
 }
 
 impl ModelProvider for SpliceProbeProvider {
-    async fn complete(&self, req: TurnRequest) -> Result<TurnResponse, ProviderError> {
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        _sink: Option<tidepool_harness::provider::StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
         let idx = {
             let mut n = self.call_index.lock().unwrap();
             let i = *n;
@@ -104,6 +108,7 @@ impl ModelProvider for SpliceProbeProvider {
                        ```"
                     .to_string(),
                 usage: usage(),
+                reasoning: None,
             }),
             // 1. Child's FIRST turn: splice an operator note into the CHILD's
             //    own transcript, then answer ill-typed (forcing a GHC-verbatim
@@ -117,6 +122,7 @@ impl ModelProvider for SpliceProbeProvider {
                 Ok(TurnResponse {
                     text: "```haskell\nresume \"forty-two\"\n```".to_string(),
                     usage: usage(),
+                    reasoning: None,
                 })
             }
             // 2. Child's SECOND turn: capture the outbound prompt (the
@@ -127,6 +133,7 @@ impl ModelProvider for SpliceProbeProvider {
                 Ok(TurnResponse {
                     text: "Right, an Int.\n\n```haskell\nresume (42 :: Int)\n```".to_string(),
                     usage: usage(),
+                    reasoning: None,
                 })
             }
             other => Err(ProviderError::Api(format!(

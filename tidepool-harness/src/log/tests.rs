@@ -82,6 +82,7 @@ fn sample_events() -> Vec<Event> {
             role: crate::provider::Role::User,
             content: "reconcile the verdicts".to_string(),
             usage: None,
+            reasoning: None,
         },
         Event::TurnDelta {
             node: NodeId(1),
@@ -92,6 +93,7 @@ fn sample_events() -> Vec<Event> {
                 input_tokens: 120,
                 output_tokens: 8,
             }),
+            reasoning: Some("checking both verdicts agree".to_string()),
         },
         Event::TurnForked {
             node: NodeId(2),

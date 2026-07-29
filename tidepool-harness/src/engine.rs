@@ -41,7 +41,7 @@ use tidepool_repr::DataConTable;
 
 use crate::compile::AsksSidecar;
 use crate::provider::{
-    DynModelProvider, Message, ProviderError, Role, TurnRequest, TurnResponse, Usage,
+    DynModelProvider, Message, ProviderError, Role, StreamSink, TurnRequest, TurnResponse, Usage,
 };
 use crate::tree::FanBadge;
 
@@ -172,9 +172,35 @@ same effect-monad surface as tidepool eval (verbs like `run`, `grepGlob`, `readG
 `llm`, `returnControl`, `returnControlFork`, `dialogAsk`). The LAST such block in your \
 reply is compiled and run against the session; prose around it is ignored by the runtime.\n\
 \n\
+Verbs return typed DATA you unwrap — failures are `Either`, NOT exceptions. PREFER a typed \
+verb over shelling out with `run` (there is a verb for files, http, git, kv):\n\
+- `run :: Text -> M (Either ExecError Proc)` — a shell command. `Right p <- run \"cmd\"`, then \
+`p.stdout` / `p.exitCode` (record-dot). `run` does NOT return `Text`.\n\
+- `readFile :: FilePath -> M (Either FsError Text)` / `writeFile :: FilePath -> Text -> M (Either FsError ())` \
+(mkdir-p) — read/write ONE file (do NOT `run \"cat/awk …\"` or `run \"… > file\"`); process text with `lines`, \
+`T.` fns. `readGlob :: Text -> M [FileRead]` for a glob (each `.path`, `.contents`). To edit, `update path old new`.\n\
+- `grepGlob :: Text -> FilePath -> M (Either FsError [Hit])` — regex FIRST, path-glob SECOND (each `.path`/`.line`/`.text`).\n\
+- `httpGet :: Text -> M (Either HttpError Value)` — HTTP GET → JSON (do NOT `run \"curl …\"`); \
+extract with `v ^? key \"f\" . _Int` / `_String`.\n\
+- Git (not `run \"git …\"`): `gitLog`, `gitStatus`, `gitShow \"HEAD\" :: M (Either GitError Commit)` \
+(`.sha`/`.subject`/`.author`/`.files`).\n\
+- KV store: `kvSet key (toJSON v)`, `kvGet key :: M (Maybe Value)`.\n\
+- JSON: `object [\"k\" .= v]`, `toJSON`; extract with `v ^? key \"f\" . _String`.\n\
+Unwrap an `Either` via `Right x <- verb …` or `verb … >>= liftEither`. Avoid `read`-parsing — \
+use the typed verbs + optics.\n\
+\n\
 To SUSPEND for a typed answer, evaluate `returnControl @T \"prompt\"` (answered in your \
-own context) or `returnControlFork @T \"prompt\"` (answered by a forked sub-agent). To \
-elicit an operator form, `dialogAsk (toJSON someUi)` (needs `import Tidepool.Ui`).\n\
+own context) or `returnControlFork @T \"prompt\"` (answered by a forked sub-agent).\n\
+\n\
+To elicit an operator form, PREFER a TYPED form (`import Tidepool.Form`): build a \
+`Form a` applicatively and answer with `dialogForm form :: M (Either FormError a)` — \
+e.g. `dialogForm ((,) <$> choiceField \"Lane\" [(\"a\", Alpha), (\"b\", Beta)] <*> textField \
+\"Notes\")` renders ONE multi-field form and returns the decoded typed value (a missing/ \
+ill-typed field is `Left FormError`). Field constructors: `textField`/`multilineField` \
+(→ `Text`), `choiceField label [(key, value)]` (a radio → the selected value), \
+`boolField` (→ `Bool`), `intField` (→ `Int`). For a raw untyped form, `dialogAsk ui` \
+(`import Tidepool.Ui`) returns the raw `Value` submission — pass the `Ui` directly (e.g. \
+`dialogAsk (textIn \"note?\" True)`), NOT `toJSON` of it.\n\
 \n\
 When you are answering a HOLE, your block's value IS the answer: write `resume expr` \
 where `expr :: T` matches the hole's declared type. `resume` is the identity here — \
@@ -184,35 +210,6 @@ where `expr :: T` matches the hole's declared type. `resume` is the identity her
 /// answerer writes `resume expr` and the block's value is `expr`. Injected into
 /// the answerer turn's `helpers` so `resume` is in scope.
 pub const RESUME_HELPER: &str = "resume :: a -> M a\nresume = pure";
-
-/// The B2 elaborator's `resume :: Value -> M Value` helper. A `dialogAsk`/`ask`
-/// hole always resumes with an untyped JSON `Value` (`Value` is re-exported
-/// unqualified from `Tidepool.Prelude`, no extra import needed) — unlike
-/// `returnControl`/`Fork`, there is no program-declared answer type to
-/// specialize `resume` to, so this is the ONE fixed signature every dialog
-/// elaboration turn compiles against.
-pub const DIALOG_RESUME_HELPER: &str = "resume :: Value -> M Value\nresume = pure";
-
-/// The B2 elaborator's prompt: the hole's card plus the operator's raw
-/// `{values, prose}` submission, asking the calling model to interpret it and
-/// answer with `resume expr :: Value` (built via `toJSON`). Rendered once per
-/// elaboration attempt's opening turn; retries instead feed back the GHC
-/// error (same discipline as [`hole_card`]'s answerers).
-pub fn elaborator_prompt(prompt: &str, submission: &Json) -> String {
-    let rendered = serde_json::to_string_pretty(submission).unwrap_or_else(|_| submission.to_string());
-    format!(
-        "An operator-routed hole received a submission that needs interpretation \
-         (non-empty prose, or a shape with no known mechanical mapping) — you are \
-         acting as the ELABORATOR: read the submission and decide what answer it means.\n\n\
-         {prompt}\n\n\
-         The operator submitted:\n\n```json\n{rendered}\n```\n\n\
-         Answer by evaluating `resume expr` where:\n\n\
-         ```haskell\nresume :: Value -> M Value\n```\n\n\
-         Build `expr` with `toJSON` (e.g. `toJSON (object [\"key\" .= value])`). Your \
-         proposed answer is NOT consumed automatically — it is shown to the operator, \
-         who confirms or rejects it before the hole resumes."
-    )
-}
 
 /// Assemble the provider request from a transcript and framing. The system
 /// message is always first; the transcript follows in order.
@@ -291,8 +288,9 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// puts `import Foo` lines at the top of its ```haskell block; those are NOT
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
 /// and routed to `template_haskell`'s `imports` field. `Tidepool.Ui` is always
-/// added (harmless if unused) so `dialogAsk (toJSON (card …))` resolves without
-/// the model having to remember the import.
+/// added (harmless if unused) so `dialogAsk (card …)` resolves without the model
+/// having to remember the import (`Tidepool.Form`, for typed `dialogForm`, is
+/// likewise auto-imported by the turn preamble — see `preamble::pragmas_and_imports`).
 pub fn split_imports(block: &str) -> (String, String) {
     let mut imports = vec!["Tidepool.Ui".to_string()];
     let mut body = Vec::new();
@@ -501,21 +499,30 @@ pub enum TurnOutcome {
 pub struct DrivenTurn {
     pub reply: String,
     pub usage: Usage,
+    /// The turn's reasoning-summary ("thinking"), when the provider surfaced one.
+    pub reasoning: Option<String>,
     pub block: Option<String>,
 }
 
 /// Call the provider once with the assembled transcript and extract the block.
+/// `sink`, when `Some`, receives streaming deltas as the provider reads them.
 pub async fn drive_model_turn(
     provider: &dyn DynModelProvider,
     transcript: &[Message],
     max_tokens: Option<u32>,
+    sink: Option<StreamSink>,
 ) -> Result<DrivenTurn, EngineError> {
     let req = assemble_request(transcript, max_tokens);
-    let TurnResponse { text, usage } = provider.complete_boxed(req).await?;
+    let TurnResponse {
+        text,
+        usage,
+        reasoning,
+    } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
     Ok(DrivenTurn {
         reply: text,
         usage,
+        reasoning,
         block,
     })
 }
