@@ -93,6 +93,17 @@ pub struct BindingTable {
     live: HashMap<SessionVarId, BindingEntry>,
 }
 
+// SAFETY: a `BindingTable` is only `!Send` because a `BindingEntry`'s
+// `BoundValue` carries a `RootSlot(*mut *mut u8)`. That slot is a stable
+// ADDRESS into the owning `JitEffectMachine`'s persistent-root region — process-
+// global address space, valid on any thread, and moved together WITH the machine
+// (a resident session owns both). It is only ever dereferenced during a run, and
+// a session is stowed-XOR-running (the same discipline that justifies
+// `unsafe impl Send for JitEffectMachine`), so the table and its slots are
+// touched by exactly one thread at a time. Sending ownership across the
+// suspend/resume thread boundary is therefore sound.
+unsafe impl Send for BindingTable {}
+
 impl BindingTable {
     /// Create an empty binding table.
     #[must_use]

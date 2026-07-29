@@ -16,10 +16,11 @@
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
+use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::SuspendableOutcome;
 use tidepool_codegen::old_space::RootSlot;
+use tidepool_eval::value::Value;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{
     first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
@@ -29,8 +30,8 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, SessionBind,
-    SessionError, SessionLib, TurnKind, ValueTier,
+    classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, ParkedThread,
+    PersistentSession, SessionBind, SessionError, SessionLib, TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -44,6 +45,19 @@ use crate::command::{
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
+
+/// The repl parks its worker thread on an `Ask` (serviced inline by
+/// [`crate::ask::ReplAskDispatcher`]), so a turn under the parked-thread
+/// mechanism never returns `Suspended` in-band — it always completes. Unwrap
+/// the always-`Completed` outcome the shared core returns.
+fn expect_completed(outcome: SuspendableOutcome) -> Value {
+    match outcome {
+        SuspendableOutcome::Completed(value) => value,
+        SuspendableOutcome::Suspended { .. } => unreachable!(
+            "parked-thread turn suspended in-band; the ask is serviced by ReplAskDispatcher"
+        ),
+    }
+}
 
 /// Static configuration for a resident session, assembled once at open.
 #[derive(Clone)]
@@ -71,22 +85,14 @@ pub struct SessionConfig {
 /// Owned by the worker thread; reached only through a [`SessionHandle`].
 pub struct Session {
     cfg: SessionConfig,
-    lib: SessionLib,
-    /// The live machine. `None` until the first expression item bootstraps it
-    /// (via `compile_session`); later turns re-enter it via `add_function`.
-    machine: Option<JitEffectMachine>,
-    /// Monotonic per-turn counter, for unique fragment function names.
-    turn_counter: u64,
-    /// The value-plane bridge: `name → (SessionVarId, RootSlot, Val.G<g>)`.
-    /// Empty until the first `x <- e` / `let x = e`.
-    bindings: BindingTable,
-    /// Monotonic value-binding generation. Each bind mints a fresh
-    /// `Tidepool.Session.Val.G<g>` so its `stableVarId` is collision-free and a
-    /// rebind shadows without clobbering the prior root.
-    val_gen: Generation,
-    /// The DataConTable accumulated across turns (union via `insert_checked`), so
-    /// a custom-ADT value bound earlier renders with real con names later.
-    session_table: DataConTable,
+    /// The shared persistent-session core: the resident [`JitEffectMachine`], the
+    /// accumulated `DataConTable`, the [`SessionLib`] decl plane, the
+    /// `BindingTable` value plane, and the value-binding generation — driven
+    /// through the parked-thread suspend mechanism (an `Ask` blocks this worker
+    /// thread; see [`crate::ask::ReplAskDispatcher`]). The turn-run primitives
+    /// (bootstrap, add-fragment, run/bind, table merge, decl accumulation) live
+    /// in the core, shared with the harness's threadless session.
+    core: PersistentSession<ParkedThread>,
     /// Per-block `input` payload from the `session_run` request. Injected into
     /// the generated module so `input :: Aeson.Value` is in scope. CLONED (not
     /// taken) by every evaluated item so it is visible to all items in the block
@@ -154,14 +160,10 @@ impl Session {
             // Decl validation must resolve the same imports eval does (notably
             // the generated `Tidepool.Effects`), so feed it the base include.
             .with_validation_include(cfg.base_include.clone());
+        let core = PersistentSession::new(Some(lib), cfg.ask_tag, cfg.nursery_size);
         Ok(Session {
             cfg,
-            lib,
-            machine: None,
-            turn_counter: 0,
-            bindings: BindingTable::new(),
-            val_gen: Generation(0),
-            session_table: DataConTable::new(),
+            core,
             eval_input: None,
             cancel_slot: None,
             last_stubs: Vec::new(),
@@ -183,38 +185,22 @@ impl Session {
     /// `query_inner_type`) — same constraint the inlined copies had.
     fn turn_include(&self) -> Vec<&Path> {
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(self.lib.include_dir());
+        include.push(self.core.lib().include_dir());
         include
     }
 
     /// Module names of every live value binding — what a turn injects
-    /// (`--inject-val`) AND imports so a session reference typechecks.
+    /// (`--inject-val`) AND imports so a session reference typechecks. Delegates
+    /// to the shared core (the value plane lives there).
     fn live_val_modules(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .bindings
-            .live_modules()
-            .map(|m| m.module_name())
-            .collect();
-        v.sort();
-        v.dedup();
-        v
+        self.core.live_val_modules()
     }
 
     /// The CURRENT (newest) `Val.G<g>` module per still-live name — what a turn
-    /// IMPORTS (unqualified). This EXCLUDES shadowed older gens: a rebound name
-    /// `x` is rooted under both `Val.G1` and `Val.G2`, and importing both
-    /// unqualified makes every later `x` an ambiguous occurrence. Old gens are
-    /// still INJECTED (see [`Self::live_val_modules`]) so already-compiled
-    /// fragments / closure captures keep resolving — they just are not imported.
+    /// IMPORTS (unqualified). Excludes shadowed older gens (still injected, not
+    /// imported). Delegates to the shared core.
     fn current_val_modules(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .bindings
-            .iter_current()
-            .map(|(_, entry)| entry.module.module_name())
-            .collect();
-        v.sort();
-        v.dedup();
-        v
+        self.core.current_val_modules()
     }
 
     /// The `imports` block a turn prepends: the current `Lib.G<g>` decl module
@@ -227,7 +213,7 @@ impl Session {
         // — the value plane's `Val.G<g>` module is the sole provider. (One
         // mechanism: retraction at the source, not per-consumer hiding.)
         let mut lines: Vec<String> = Vec::new();
-        if let Some(m) = self.lib.current_module() {
+        if let Some(m) = self.core.current_lib_module() {
             lines.push(m.module_name());
         }
         lines.extend(self.current_val_modules());
@@ -250,14 +236,9 @@ impl Session {
 
     /// Merge a turn's DataCons into the session-accumulated table (loud on a
     /// genuine `stableVarId` collision — gen-versioned names make that a real
-    /// bug, not churn).
+    /// bug, not churn). Delegates to the shared core.
     fn merge_table(&mut self, table: &DataConTable) -> Result<(), String> {
-        for dc in table.iter() {
-            self.session_table
-                .insert_checked(dc.clone())
-                .map_err(|e| format!("session DataConTable collision: {e}"))?;
-        }
-        Ok(())
+        self.core.merge_table(table)
     }
 
     /// Bind `entry` on the value (materialized) plane, EVICTING any pure
@@ -275,9 +256,9 @@ impl Session {
         // later `let`/`def` would compile against it). `retract` is a no-op when
         // the name was never a decl head (a plain `p <- run …`). Best-effort: a
         // rare module-write failure leaves the binding materialized correctly.
-        let _ = self.lib.retract(&entry.name.0);
+        let _ = self.core.retract(&entry.name.0);
         self.pure_binds.remove(&entry.name.0);
-        self.bindings.bind(entry);
+        self.core.bind(entry);
     }
 
     /// Register `pb` on the decl (pure) plane under `name`, EVICTING any
@@ -285,7 +266,7 @@ impl Session {
     /// The dual of [`Self::bind_materialized`] — the single site that upholds
     /// the one-name-one-plane invariant for pure binds.
     fn bind_pure(&mut self, name: &str, pb: PureBind) {
-        self.bindings.remove_current(name);
+        self.core.bindings_mut().remove_current(name);
         self.pure_binds.insert(name.to_string(), pb);
     }
 
@@ -539,8 +520,8 @@ impl Session {
 
         let shape = if verbose {
             ResponseShape::Verbose {
-                generation: self.lib.generation().0,
-                val_gen: self.val_gen.0,
+                generation: self.core.lib().generation().0,
+                val_gen: self.core.val_gen().0,
             }
         } else {
             ResponseShape::Slim
@@ -562,10 +543,7 @@ impl Session {
     /// here (`run_def`, the whole-block decl batch, `try_pure_bind_as_decl`);
     /// an unscoped `SessionLib::define*` call from the repl is a bug.
     fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
-        let import_modules = self.current_val_modules();
-        let inject_modules = self.live_val_modules();
-        self.lib
-            .define_batch_with_vals(decl_texts, &import_modules, &inject_modules)
+        self.core.define_scoped(decl_texts)
     }
 
     /// Declaration handler: append the declaration to the Lane-A log + regenerate
@@ -639,9 +617,7 @@ impl Session {
                 // Otherwise the decl failure is a real error (collision / type)
                 // — surface it rather than materialize a broken binding.
                 let err_str = e.to_string();
-                let refs_materialized_value = self
-                    .bindings
-                    .iter_current()
+                let refs_materialized_value = self.core.bindings().iter_current()
                     .any(|(n, _)| mentions_word(expr_text, &n.0));
                 // Whole-word `input` (GHC: "Variable not in scope: input :: Value"),
                 // never `inputText`/`input'` — check the char after the match is not
@@ -695,9 +671,7 @@ impl Session {
     /// Shared by `run_def` and the whole-block decl-batch path. `text` is the
     /// decl item's source, used to gate the type probe to VALUE bindings.
     fn defined_outcome(&mut self, text: &str, head: String, gen: Generation) -> TurnOutcome {
-        let mut stale: Vec<String> = self
-            .bindings
-            .iter_current()
+        let mut stale: Vec<String> = self.core.bindings().iter_current()
             .filter(|(_, e)| {
                 e.defining_expr
                     .as_deref()
@@ -789,7 +763,7 @@ impl Session {
                 // expression. (#321)
                 [] => {
                     let rhs = split_discard_bind(expr_text).unwrap_or(expr_text);
-                    if !self.bindings.is_empty() || self.lib.generation().0 > 0 {
+                    if !self.core.bindings().is_empty() || self.core.lib().generation().0 > 0 {
                         self.run_session_reference(rhs, handlers, captured)
                     } else {
                         self.run_plain_eval(rhs, handlers, captured)
@@ -846,9 +820,7 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let mut imports = self
-            .lib
-            .current_module()
+        let mut imports = self.core.lib().current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
         // Same per-turn quasi-quoter gating as `turn_imports` (this path
@@ -870,7 +842,7 @@ impl Session {
             None,
         );
 
-        let salt = self.lib.cache_salt();
+        let salt = self.core.lib().cache_salt();
         // Block-scope `include` so the borrow on `self.cfg.base_include` is
         // released before we call `query_inner_type` (which needs `&mut self`).
         let compile_result = {
@@ -897,29 +869,31 @@ impl Session {
         // `__t <- <expr>` gives `__t :: a`, not the Eff-wrapped action type.
         let inner_type = self.query_inner_type(expr_text);
 
-        self.turn_counter += 1;
-        let frag_name = format!("repl_turn_{}", self.turn_counter);
-        let run_result = match self.machine {
-            Some(ref mut machine) => {
-                match machine.add_function(&frag_name, &expr, &table, &ExternalEnv::new()) {
-                    Ok(fid) => machine.run_fragment(fid, &table, handlers, captured),
-                    Err(e) => return TurnOutcome::Error(run_fail("JIT re-entry error", e)),
-                }
+        let run_result = if self.core.is_bootstrapped() {
+            // Later turn: add this expression as a fragment against ITS OWN table
+            // (a standalone plain-eval turn carries its own metadata) with an
+            // empty env, and run it on the resident machine.
+            match self
+                .core
+                .add_fragment_with_table("repl_turn", &expr, &table, &ExternalEnv::new())
+            {
+                Ok(fid) => self
+                    .core
+                    .run_funcid_with_table(fid, &table, handlers, captured)
+                    .map(expect_completed),
+                Err(e) => return TurnOutcome::Error(run_fail("JIT re-entry error", e)),
             }
-            None => {
-                let m =
-                    match JitEffectMachine::compile_session(&expr, &table, self.cfg.nursery_size) {
-                        Ok(m) => m,
-                        Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
-                    };
-                // Store + publish the cancel handle BEFORE running, so a runaway
-                // on this bare-expression path is cancellable from the start.
-                self.bootstrap_machine(m);
-                self.machine
-                    .as_mut()
-                    .expect("just bootstrapped")
-                    .run(&table, handlers, captured)
+        } else {
+            // First turn: bootstrap the machine from `expr` (the seed IS the
+            // program) and publish the cancel handle BEFORE running, so a runaway
+            // on this bare-expression path is cancellable from the start.
+            if let Err(e) = self.core.bootstrap_if_needed(&expr, &table) {
+                return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
+            self.publish_cancel();
+            self.core
+                .run_entry(&table, handlers, captured)
+                .map(expect_completed)
         };
 
         match run_result {
@@ -987,7 +961,7 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let g = self.val_gen.next();
+        let g = self.core.val_gen().next();
         let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
@@ -1040,32 +1014,28 @@ impl Session {
 
         // Bootstrap the resident machine on the first turn from THIS turn's table
         // (an Eff module → carries the effect ConTags the machine's dispatch
-        // needs). Later binds re-enter the live machine.
-        if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
-            {
-                Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
+        // needs), publishing the cancel handle. Later binds re-enter the live
+        // machine.
+        if !self.core.is_bootstrapped() {
+            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+                return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
+            self.publish_cancel();
         }
 
         // Seed the env from EXISTING bindings (so `action` resolves earlier x's);
-        // the new binding is added after it is rooted.
-        let env = self.bindings.seed_external_env();
-        self.turn_counter += 1;
-        let frag_name = format!("repl_bind_{}", self.turn_counter);
-
-        let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
+        // the new binding is added after it is rooted. `add_fragment_session`
+        // mints the fragment against the accumulated table; `bind_funcid` runs +
+        // deep-forces + tenures it. (`run_fragment_and_bind` takes a `forced`
+        // bool; the tier is the source of truth — derive the flag here, expand
+        // the same tier back to a `BoundValue` via `bound_value`.)
+        let env = self.core.seed_external_env();
+        let fid = match self.core.add_fragment_session("repl_bind", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT bind add_function error", e)),
         };
-        // `run_fragment_and_bind` still takes a `forced: bool` (a codegen API);
-        // the tier is the single source of truth — derive the flag at the call
-        // and expand the same tier back to a `BoundValue` via `bound_value`.
-        let slot = match machine.run_fragment_and_bind(
+        let slot = match self.core.bind_funcid(
             fid,
-            &self.session_table,
             handlers,
             captured,
             matches!(binder.tier, ValueTier::Tier0Data),
@@ -1074,7 +1044,7 @@ impl Session {
             Err(e) => return TurnOutcome::Error(run_fail("bind runtime error", e)),
         };
 
-        self.val_gen = g;
+        self.core.set_val_gen(g);
         let value = bound_value(binder.tier, slot);
         // `bind_materialized` records the value binding AND evicts any pure decl
         // of the same name (cross-plane shadow, one-plane invariant).
@@ -1106,7 +1076,7 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let g = self.val_gen.next();
+        let g = self.core.val_gen().next();
         let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
@@ -1157,38 +1127,33 @@ impl Session {
             return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
         }
 
-        if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
-            {
-                Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
+        if !self.core.is_bootstrapped() {
+            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+                return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
+            self.publish_cancel();
         }
 
-        let env = self.bindings.seed_external_env();
-        self.turn_counter += 1;
-        let frag_name = format!("repl_multi_bind_{}", self.turn_counter);
-
-        let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
+        let env = self.core.seed_external_env();
+        let fid = match self
+            .core
+            .add_fragment_session("repl_multi_bind", &turn.expr, &env)
+        {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT multi-bind add_function error", e)),
         };
-        // run_fragment_and_bind_projected deep-forces the whole tuple first
-        // (GC-safe: registers all pending parents as Rust roots), then projects
-        // each field from the post-GC NF tuple and tenures each separately.
-        let slots = match machine.run_fragment_and_bind_projected(
-            fid,
-            &self.session_table,
-            handlers,
-            captured,
-            names.len(),
-        ) {
+        // bind_funcid_projected deep-forces the whole tuple first (GC-safe:
+        // registers all pending parents as Rust roots), then projects each field
+        // from the post-GC NF tuple and tenures each separately.
+        let slots = match self
+            .core
+            .bind_funcid_projected(fid, handlers, captured, names.len())
+        {
             Ok(s) => s,
             Err(e) => return TurnOutcome::Error(run_fail("multi-bind runtime error", e)),
         };
 
-        self.val_gen = g;
+        self.core.set_val_gen(g);
         // Zip binders with their slots and record each component.
         // Tier is read from binder metadata (deep_force already handled NF).
         let mut components: Vec<BoundComponent> = Vec::new();
@@ -1317,31 +1282,27 @@ impl Session {
         // freer cons even when THIS fragment is pure (a pure fragment omits
         // `Val` etc.; a later Eff fragment would then fail).
         self.ensure_effect_machine();
-        if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
-            {
-                Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
+        if !self.core.is_bootstrapped() {
+            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+                return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
+            self.publish_cancel();
         }
-        let env = self.bindings.seed_external_env();
-        self.turn_counter += 1;
-        let frag_name = format!("repl_ref_{}", self.turn_counter);
-
-        let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
+        let env = self.core.seed_external_env();
+        let fid = match self.core.add_fragment_session("repl_ref", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
         };
         let run_result = match mode {
-            EvalMode::Pure => machine.run_fragment_pure(fid),
-            EvalMode::Effectful => {
-                machine.run_fragment(fid, &self.session_table, handlers, captured)
-            }
+            EvalMode::Pure => self.core.run_funcid_pure(fid),
+            EvalMode::Effectful => self
+                .core
+                .run_funcid_session(fid, handlers, captured)
+                .map(expect_completed),
         };
         match run_result {
             Ok(value) => {
-                let rendered = value_to_json(&value, &self.session_table, 0);
+                let rendered = value_to_json(&value, self.core.session_table(), 0);
                 self.value_outcome(rendered, inner_type)
             }
             Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
@@ -1375,7 +1336,7 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let g = self.val_gen.next();
+        let g = self.core.val_gen().next();
         let eval_input = self.eval_input.clone();
         // TWO names, matching the `(it, toWire it)` tuple `result` now
         // yields: this rides the SAME multi-binder `splitTupleType` path
@@ -1465,19 +1426,15 @@ impl Session {
         // Bootstrap the resident machine on the first turn from THIS turn's
         // table (an Eff module either way — both wraps end in
         // `pure (it, toWire it)`).
-        if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
-            {
-                Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
+        if !self.core.is_bootstrapped() {
+            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+                return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
+            self.publish_cancel();
         }
 
-        let env = self.bindings.seed_external_env();
-        self.turn_counter += 1;
-        let frag_name = format!("repl_it_{}", self.turn_counter);
-        let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
+        let env = self.core.seed_external_env();
+        let fid = match self.core.add_fragment_session("repl_it", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => {
                 return TurnOutcome::Error(run_fail("JIT bare-expression add_function error", e))
@@ -1488,9 +1445,8 @@ impl Session {
         // completion here (field 0's bind), whichever wrap compiled. Field 1
         // (`toWire it`, pure) rides along in the SAME run — no second
         // compile, no second execution of `__user`'s effect.
-        let (it_slot, rendered_value) = match machine.run_fragment_and_bind_render(
+        let (it_slot, rendered_value) = match self.core.bind_funcid_render(
             fid,
-            &self.session_table,
             handlers,
             captured,
             matches!(it_binder.tier, ValueTier::Tier0Data),
@@ -1499,7 +1455,7 @@ impl Session {
             Err(e) => return TurnOutcome::Error(run_fail("runtime error", e)),
         };
 
-        self.val_gen = g;
+        self.core.set_val_gen(g);
         let it_value = bound_value(it_binder.tier, it_slot);
         self.bind_materialized(BindingEntry {
             name: BindingName("it".to_string()),
@@ -1510,7 +1466,7 @@ impl Session {
             defining_expr: Some(expr_text.to_string()),
         });
 
-        let rendered = value_to_json(&rendered_value, &self.session_table, 0);
+        let rendered = value_to_json(&rendered_value, self.core.session_table(), 0);
         self.value_outcome_bound_it(rendered, Some(it_binder.type_display))
     }
 
@@ -1523,8 +1479,8 @@ impl Session {
     /// with subsequent real binds. Returns `None` if the compile fails (e.g. a
     /// non-monadic expression, which has no inner type to peel).
     fn query_inner_type(&mut self, expr_text: &str) -> Option<String> {
-        let g = self.val_gen.next();
-        self.val_gen = g;
+        let g = self.core.val_gen().next();
+        self.core.set_val_gen(g);
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.turn_imports(expr_text);
@@ -1559,9 +1515,7 @@ impl Session {
             MetaCommand::Bindings => {
                 // The unified environment view: materialized (effectful) value
                 // binds AND pure binds (decl-backed, GHCi-environment model).
-                let mut bindings: Vec<serde_json::Value> = self
-                    .bindings
-                    .iter_current()
+                let mut bindings: Vec<serde_json::Value> = self.core.bindings().iter_current()
                     .map(|(name, entry)| {
                         serde_json::json!({
                             "name": name.0,
@@ -1583,8 +1537,8 @@ impl Session {
                 bindings.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
                 TurnOutcome::Meta(serde_json::json!({
                     "bindings": bindings,
-                    "generation": self.lib.generation().0,
-                    "valGeneration": self.val_gen.0,
+                    "generation": self.core.lib().generation().0,
+                    "valGeneration": self.core.val_gen().0,
                 }))
             }
             MetaCommand::Reset => {
@@ -1599,23 +1553,24 @@ impl Session {
                     self.cfg.module_env.clone(),
                 ) {
                     Ok(lib) => {
-                        self.lib = lib.with_validation_include(self.cfg.base_include.clone());
-                        // Drop the resident machine (frees the session heap +
-                        // every persistent root) and clear both planes: the
-                        // decl log (just rebuilt above at gen 0) and the value
-                        // bindings + session table.
-                        self.machine = None;
-                        // `self.machine = None` bypasses `bootstrap_machine`,
-                        // so publish the (now empty) cancel handle explicitly —
-                        // otherwise the shared `CancelSlot` keeps the dropped
-                        // machine's stale `CancelHandle` until the next
-                        // bootstrap, and a server-side timeout in that window
-                        // cancels a dead flag instead of a live one.
+                        // Rebuild the whole core from a fresh decl plane: this
+                        // drops the resident machine (freeing the session heap +
+                        // every persistent root) and clears both planes (the
+                        // value bindings + accumulated table) and the turn
+                        // counter in one move.
+                        let lib = lib.with_validation_include(self.cfg.base_include.clone());
+                        self.core = PersistentSession::new(
+                            Some(lib),
+                            self.cfg.ask_tag,
+                            self.cfg.nursery_size,
+                        );
+                        // The rebuilt core has no machine, so publish the (now
+                        // empty) cancel handle explicitly — otherwise the shared
+                        // `CancelSlot` keeps the dropped machine's stale
+                        // `CancelHandle` until the next bootstrap, and a
+                        // server-side timeout in that window cancels a dead flag
+                        // instead of a live one.
                         self.publish_cancel();
-                        self.turn_counter = 0;
-                        self.bindings = BindingTable::new();
-                        self.val_gen = Generation(0);
-                        self.session_table = DataConTable::new();
                         self.last_stubs = Vec::new();
                         self.pure_binds.clear();
                         TurnOutcome::Meta(serde_json::json!({"reset": true}))
@@ -1632,9 +1587,9 @@ impl Session {
                 let preamble = self.patched_preamble();
                 // Consume a throwaway generation to prevent an iface collision
                 // with the next real bind (compile_session_turn writes a Val.G<g>.hi
-                // even for the discard path). We do NOT add to self.bindings.
-                let throwaway_gen = self.val_gen.next();
-                self.val_gen = throwaway_gen;
+                // even for the discard path). We do NOT add to self.core.bindings().
+                let throwaway_gen = self.core.val_gen().next();
+                self.core.set_val_gen(throwaway_gen);
                 let inject = self.live_val_modules();
                 let imports = self.turn_imports(expr);
                 let eval_input = self.eval_input.clone();
@@ -1681,7 +1636,7 @@ impl Session {
             }
             MetaCommand::Info(name) => {
                 // 1. Bound value lookup (highest priority — a session binding shadows types).
-                if let Some((_, entry)) = self.bindings.iter_current().find(|(n, _)| n.0 == *name) {
+                if let Some((_, entry)) = self.core.bindings().iter_current().find(|(n, _)| n.0 == *name) {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
                         "type": entry.type_display.clone().unwrap_or_default(),
@@ -1719,7 +1674,7 @@ impl Session {
                     }
                 }
                 // 3. Session-defined types (data/newtype/type/class from declaration items).
-                if let Some(src) = self.lib.decl_type_source(name) {
+                if let Some(src) = self.core.lib().decl_type_source(name) {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
                         "shape": src,
@@ -1729,7 +1684,7 @@ impl Session {
                 // 3b. Session-defined values/functions (`f x = …`). These are
                 // decls, not bindings or types, so they fell through to a total
                 // miss before — the exact place a caller reaches for `:i`. (#318)
-                if let Some(src) = self.lib.decl_value_source(name) {
+                if let Some(src) = self.core.lib().decl_value_source(name) {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
                         "shape": src,
@@ -1768,9 +1723,9 @@ impl Session {
                 // live bind's defining text (val-gen order). Effectful binds
                 // re-RUN their effect on replay; that's honest — the heap is a
                 // cache of this document, not the source of truth.
-                let decls: Vec<&str> = self.lib.decl_sources();
+                let decls: Vec<&str> = self.core.lib().decl_sources();
                 let mut binds: Vec<(&BindingName, &BindingEntry)> =
-                    self.bindings.iter_current().collect();
+                    self.core.bindings().iter_current().collect();
                 binds.sort_by_key(|(_, e)| e.module.gen.0);
 
                 let mut program = String::new();
@@ -1798,7 +1753,7 @@ impl Session {
                     "program": program,
                     "decls": decls.len(),
                     "binds": binds.len(),
-                    "generation": self.lib.generation().0,
+                    "generation": self.core.lib().generation().0,
                 }))
             }
             MetaCommand::Vocab(only) => {
@@ -1841,7 +1796,7 @@ impl Session {
         let mut entries: Vec<serde_json::Value> = Vec::new();
         // Decl plane: current in-scope heads (latest-wins), minus pure-bind
         // names (those are surfaced as `bind` below).
-        for (name, gen) in self.lib.current_decl_heads() {
+        for (name, gen) in self.core.lib().current_decl_heads() {
             if self.pure_binds.contains_key(&name) {
                 continue;
             }
@@ -1853,7 +1808,7 @@ impl Session {
             }));
         }
         // Value plane: materialized (effectful) binds.
-        for (name, entry) in self.bindings.iter_current() {
+        for (name, entry) in self.core.bindings().iter_current() {
             entries.push(serde_json::json!({
                 "name": name.0,
                 "type": entry.type_display.clone().unwrap_or_default(),
@@ -1873,8 +1828,8 @@ impl Session {
         entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         serde_json::json!({
             "bindings": entries,
-            "generation": self.lib.generation().0,
-            "valGeneration": self.val_gen.0,
+            "generation": self.core.lib().generation().0,
+            "valGeneration": self.core.val_gen().0,
         })
     }
 
@@ -1895,9 +1850,9 @@ impl Session {
     /// way GHCi shadowing would. (BUG-7 + the verb/value-plane collision class.)
     fn patched_preamble(&self) -> String {
         let mut names: Vec<String> = Vec::new();
-        names.extend(self.lib.decl_value_names().into_iter().map(str::to_string));
-        names.extend(self.lib.decl_type_names().into_iter().map(str::to_string));
-        names.extend(self.bindings.iter_current().map(|(n, _)| n.0.clone()));
+        names.extend(self.core.lib().decl_value_names().into_iter().map(str::to_string));
+        names.extend(self.core.lib().decl_type_names().into_iter().map(str::to_string));
+        names.extend(self.core.bindings().iter_current().map(|(n, _)| n.0.clone()));
         names.sort();
         names.dedup();
         if names.is_empty() {
@@ -1926,7 +1881,7 @@ impl Session {
     /// [`SessionHandle::close`].
     fn free(&mut self) {
         // JitEffectMachine::drop calls free_session_heap for session machines.
-        self.machine = None;
+        self.core.drop_machine();
     }
 
     /// Store the per-turn input payload so `run_plain_eval` / `run_session_reference`
@@ -1943,15 +1898,6 @@ impl Session {
         self.publish_cancel();
     }
 
-    /// Bootstrap the resident machine AND publish its cancel handle to the
-    /// shared slot in one step — so a turn is cancellable from the instant the
-    /// machine exists (including a session's first turn, before its runaway
-    /// loop starts). All machine-bootstrap sites go through here.
-    fn bootstrap_machine(&mut self, m: JitEffectMachine) {
-        self.machine = Some(m);
-        self.publish_cancel();
-    }
-
     /// Ensure the resident machine exists AND its DataConTable carries the freer
     /// `Eff` constructors (`Val`/`Leaf`/`Node`/…), by bootstrapping from a
     /// trivial Eff fragment (`pure ()`) if the machine hasn't started. A PURE
@@ -1960,7 +1906,7 @@ impl Session {
     /// bootstrap — would otherwise fail a later Eff fragment with "missing
     /// freer-simple constructor 'Val'". No-op once the machine is up.
     fn ensure_effect_machine(&mut self) {
-        if self.machine.is_some() {
+        if self.core.is_bootstrapped() {
             return;
         }
         let preamble = self.patched_preamble();
@@ -1989,10 +1935,8 @@ impl Session {
         };
         if let Ok(turn) = compiled {
             let _ = self.merge_table(&turn.table);
-            if let Ok(m) =
-                JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
-            {
-                self.bootstrap_machine(m);
+            if self.core.bootstrap_if_needed(&turn.expr, &turn.table).is_ok() {
+                self.publish_cancel();
             }
         }
     }
@@ -2001,14 +1945,14 @@ impl Session {
     /// slot is wired or the machine hasn't bootstrapped).
     fn publish_cancel(&mut self) {
         if let Some(slot) = &self.cancel_slot {
-            *slot.lock() = self.machine.as_ref().map(|m| m.cancel_handle());
+            *slot.lock() = self.core.machine().map(|m| m.cancel_handle());
         }
     }
 
     /// Clear a prior cancellation so the next turn starts clean. The cancel flag
     /// is per-machine and shared, so this resets it via the live handle.
     fn reset_cancel(&mut self) {
-        if let Some(m) = &self.machine {
+        if let Some(m) = self.core.machine() {
             m.cancel_handle().reset();
         }
     }
@@ -2064,7 +2008,7 @@ impl SessionHandle<Open> {
 
     /// The current declaration generation (0 until the first declaration item).
     pub fn generation(&self) -> u64 {
-        self.inner.lib.generation().0
+        self.inner.core.lib().generation().0
     }
 
     /// A read-only JSON snapshot of the live session bindings — the worker
@@ -3397,10 +3341,9 @@ mod reset_tests {
         let mut session = Session::open(minimal_config(dir.path().to_path_buf()))
             .expect("session opens on a fresh dir");
 
-        // Poke markers into fields the pre-fix "clear before open" code path
+        // Poke markers into state the pre-fix "clear before open" code path
         // wiped unconditionally, even on a failed reopen.
-        session.turn_counter = 7;
-        session.val_gen = Generation(3);
+        session.core.set_val_gen(Generation(3));
         session.pure_binds.insert(
             "marker".to_string(),
             PureBind {
@@ -3422,11 +3365,7 @@ mod reset_tests {
         );
 
         assert_eq!(
-            session.turn_counter, 7,
-            "a failed reopen must not clear turn_counter"
-        );
-        assert_eq!(
-            session.val_gen,
+            session.core.val_gen(),
             Generation(3),
             "a failed reopen must not clear val_gen"
         );
@@ -3436,9 +3375,9 @@ mod reset_tests {
         );
     }
 
-    /// F4(b): an in-block `:reset` drops the resident machine WITHOUT going
-    /// through `bootstrap_machine`'s `publish_cancel` call, so the shared
-    /// `CancelSlot` must be cleared explicitly — otherwise it keeps the
+    /// F4(b): an in-block `:reset` drops the resident machine WITHOUT a
+    /// bootstrap (which is what pairs machine creation with `publish_cancel`),
+    /// so the shared `CancelSlot` must be cleared explicitly — otherwise it keeps the
     /// dropped machine's stale `CancelHandle` until the next bootstrap, and a
     /// server-side timeout in that window cancels a dead flag instead of a
     /// live one. Needs a real compiled machine (GHC extract), so this test
@@ -3481,7 +3420,7 @@ mod reset_tests {
         session.set_cancel_slot(slot.clone());
         session.ensure_effect_machine();
         assert!(
-            session.machine.is_some(),
+            session.core.is_bootstrapped(),
             "machine must bootstrap from a trivial `pure ()` fragment"
         );
         assert!(

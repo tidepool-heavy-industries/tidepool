@@ -18,9 +18,12 @@
 
 pub mod binders;
 pub mod engine;
+pub mod persistent;
 pub mod render;
 pub mod resident;
 pub mod turn;
+
+pub use persistent::{ParkedThread, PersistentSession, SuspensionMechanism, Threadless};
 
 pub use engine::{
     AbortOutcome, EngineConfig, OutputSink, RenderPolicy, ResumeOutcome, Retention, SessionEngine,

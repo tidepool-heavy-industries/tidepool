@@ -48,7 +48,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use cranelift_module::FuncId;
+pub use cranelift_module::FuncId;
 use tidepool_effect::{DispatchEffect, EffectContext, EffectError};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable};

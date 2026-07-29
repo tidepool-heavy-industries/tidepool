@@ -64,6 +64,7 @@ use crate::render::EvalResult;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use super::engine::OutputSink;
+use super::persistent::{PersistentSession, SuspensionMechanism, Threadless};
 
 /// The classified result of driving a resident turn to its first yield.
 ///
@@ -145,18 +146,15 @@ pub enum ResidentError {
 /// [`super::SessionEngine`]. The registry (`tidepool-harness`) instantiates
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
-    /// The resident machine — `None` while a turn is executing on an eval
-    /// thread (moved out for the turn, moved back on completion/suspension),
-    /// and `Some` when idle or suspended. The registry's `Slot::Running`
-    /// mirrors the "moved out" state at the type level.
-    machine: Option<JitEffectMachine>,
-    /// The accumulated constructor table (every turn's table merged in — later
-    /// turns are a subset, so `merge` is monotone).
-    table: DataConTable,
+    /// The shared persistent-session core (machine + accumulated table + the two
+    /// planes), driven through the threadless suspend mechanism. The harness does
+    /// not (yet) accumulate on the decl/value planes — they sit empty here until
+    /// W1b turns them on — but the machine lifecycle + table merge + fragment-run
+    /// primitives all live in the core, shared with the repl's parked-thread
+    /// session.
+    core: PersistentSession<Threadless>,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
-    /// The `Ask` union tag intercepted by the suspend driver.
-    ask_tag: u64,
     /// Effect names by tag (registry-entry metadata; exposed via
     /// [`ResidentSession::effect_names`] for the harness's effect-roster
     /// rendering — the resident surface does not re-classify run errors here).
@@ -167,7 +165,7 @@ pub struct ResidentSession<H, O> {
     /// are pre-compiled Core — but carried as the registry-entry seam).
     #[allow(dead_code)]
     include: Vec<PathBuf>,
-    /// Monotonic fragment counter → unique fragment names + continuation ids.
+    /// Monotonic continuation-id counter.
     next_id: AtomicU64,
     /// The continuation id this session is suspended on, or `None` when idle.
     /// The machine's `suspended_continuation` is the ground truth; this is the
@@ -206,12 +204,14 @@ where
         include: Vec<PathBuf>,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let machine = JitEffectMachine::compile_session(expr, &table, nursery_size)?;
+        // No decl plane in the harness today (W1b turns it on); the value plane
+        // starts empty. The boot table seeds the accumulated session table.
+        let mut core = PersistentSession::<Threadless>::new(None, ask_tag, nursery_size);
+        core.bootstrap_if_needed(expr, &table)?;
+        core.seed_session_table(table);
         Ok(ResidentSession {
-            machine: Some(machine),
-            table,
+            core,
             handlers,
-            ask_tag,
             effect_names,
             captured,
             include,
@@ -239,9 +239,9 @@ where
 
     /// Read-only heap/GC snapshot of this session's live machine (observatory
     /// heap pane) — `None` only during the transient window a turn is running
-    /// on its own eval thread (`self.machine` moved out; see [`Self::on_eval_thread`]).
+    /// on its own eval thread (the machine moved out; see [`Self::on_eval_thread`]).
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
-        self.machine.as_ref().map(|m| m.heap_stats())
+        self.core.machine().map(|m| m.heap_stats())
     }
 
     fn next_cont_id(&self) -> String {
@@ -268,32 +268,22 @@ where
         if let Some(p) = &self.pending {
             return Err(ResidentError::Suspended(p.clone()));
         }
-        // Merge this turn's table into the session table (later turns are a
-        // subset; the merge is monotone). Mirrors the repl's `merge_table`.
-        for dc in table.iter() {
-            self.table
-                .insert_checked(dc.clone())
-                .map_err(|e| ResidentError::TableCollision(e.to_string()))?;
-        }
-        let frag_name = format!(
-            "{name_hint}_{}",
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        );
+        // Merge this turn's table into the accumulated session table (later turns
+        // are a subset; the merge is monotone). `add_fragment_session` mints the
+        // fragment against that table on THIS (calling) thread — the env is
+        // `!Send` and cannot cross to the eval thread; only the machine (Send)
+        // does. The run itself goes through the threadless mechanism.
+        self.core
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let func_id = self
+            .core
+            .add_fragment_session(name_hint, expr, external_env)
+            .map_err(ResidentError::AddFunction)?;
 
-        // Add the fragment to the live machine (borrows &mut machine briefly).
-        let func_id = {
-            let machine = self
-                .machine
-                .as_mut()
-                .expect("machine present when idle (moved out only during a turn)");
-            machine
-                .add_function(&frag_name, expr, &self.table, external_env)
-                .map_err(ResidentError::AddFunction)?
-        };
-
-        let ask_tag = self.ask_tag;
+        let ask_tag = self.core.ask_tag();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
+            Threadless::run_fragment(machine, func_id, table, handlers, captured, ask_tag)
         })?;
         Ok(self.classify(outcome))
     }
@@ -322,31 +312,20 @@ where
         if self.pending.is_none() {
             return Err(ResidentError::NotSuspended);
         }
-        // Merge this child's table into the session table (monotone).
-        for dc in table.iter() {
-            self.table
-                .insert_checked(dc.clone())
-                .map_err(|e| ResidentError::TableCollision(e.to_string()))?;
-        }
-        let frag_name = format!(
-            "{name_hint}_child_{}",
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        );
-        // Add the child fragment to the live machine. Module accretion is inert
-        // for the parent — a fresh FuncId, the stowed continuation untouched.
-        let func_id = {
-            let machine = self
-                .machine
-                .as_mut()
-                .expect("machine present when suspended (moved out only during a turn)");
-            machine
-                .add_function(&frag_name, expr, &self.table, external_env)
-                .map_err(ResidentError::AddFunction)?
-        };
+        // Merge this child's table into the session table (monotone). Add the
+        // child fragment on THIS thread (env is `!Send`); module accretion is
+        // inert for the parent — a fresh FuncId, the stowed continuation
+        // untouched.
+        self.core
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let func_id = self
+            .core
+            .add_child_fragment_session(name_hint, expr, external_env)
+            .map_err(ResidentError::AddFunction)?;
 
-        // Snapshot the hole so the child cannot lose it. `on_eval_thread` moves
-        // the machine out and back; `pending` is untouched throughout — the
-        // parent stays suspended on the same hole across the child run.
+        // `pending` is untouched throughout — the parent stays suspended on the
+        // same hole across the child run.
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine
                 .run_child_fragment(func_id, table, handlers, captured)
@@ -363,7 +342,11 @@ where
                 // later parent-turn snapshot/drain. The child's RESULT is the
                 // deliverable; its console output is debug-only here.
                 let _ = self.captured.drain();
-                Ok(EvalResult::new(value, self.table.clone(), Vec::new()))
+                Ok(EvalResult::new(
+                    value,
+                    self.core.session_table().clone(),
+                    Vec::new(),
+                ))
             }
             // Unreachable by construction (run_child_fragment can't suspend),
             // but keep it a typed error rather than a panic.
@@ -411,7 +394,7 @@ where
                 })
             }
         }
-        let ask_tag = self.ask_tag;
+        let ask_tag = self.core.ask_tag();
         // `resume_suspended` consumes the machine's stowed continuation as soon
         // as it is entered (`.take()`), so the OLD hole is spent regardless of
         // the re-entry's outcome — clear `pending` up front. `classify` re-arms
@@ -419,17 +402,17 @@ where
         // the session idle (the spent continuation cannot be resumed twice).
         self.pending = None;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            machine.resume_suspended(table, handlers, captured, ask_tag, input)
+            Threadless::resume(machine, table, handlers, captured, ask_tag, input)
         })?;
         Ok(self.classify(outcome))
     }
 
-    /// Move the machine + handlers onto a stack-sized eval thread, run `body`,
-    /// and move the machine back. E2 lets `body` run on this fresh thread —
-    /// `run_fragment_suspendable`/`resume_suspended` re-install the machine's
-    /// per-thread reach and re-point GC state at the retained heap. The machine
-    /// leaves `self` (`Slot::Running` at the registry level) only for the
-    /// thread's lifetime.
+    /// Move the machine onto a stack-sized eval thread, run `body`, and move the
+    /// machine back. E2 lets `body` run on this fresh thread — the threadless
+    /// mechanism's `run_fragment`/`resume` re-install the machine's per-thread
+    /// reach and re-point GC state at the retained heap. Only the machine (and
+    /// the accumulated table) crosses to the thread; the rest of the session
+    /// core is `!Send` (raw-pointer roots) and stays here.
     fn on_eval_thread<F>(&mut self, body: F) -> Result<SuspendableOutcome, ResidentError>
     where
         F: FnOnce(
@@ -440,11 +423,8 @@ where
             ) -> Result<SuspendableOutcome, JitError>
             + Send,
     {
-        let mut machine = self
-            .machine
-            .take()
-            .expect("machine present (idle or suspended) before a turn");
-        let table = &self.table;
+        let mut machine = self.core.take_machine();
+        let table = self.core.session_table();
         let handlers = &mut self.handlers;
         // The sink is Arc-backed (`OutputSink: Clone + Send`) and shares its
         // buffer; move a clone onto the thread rather than requiring `O: Sync`
@@ -452,7 +432,7 @@ where
         let captured = self.captured.clone();
 
         // A scoped thread borrows `machine`/`handlers`/`table`/`captured` from
-        // this frame — the machine is moved back into `self` after the scope
+        // this frame — the machine is moved back into the core after the scope
         // joins, so it stays resident. `EVAL_STACK_SIZE` matches the oneshot
         // eval thread (deep JIT recursion needs it), so `Builder::spawn_scoped`
         // (the stack-sized form of `scope.spawn`) is used.
@@ -471,7 +451,7 @@ where
         });
 
         // The machine is resident again regardless of the turn's fate.
-        self.machine = Some(machine);
+        self.core.restore_machine(machine);
 
         match result {
             Ok(Ok(outcome)) => outcome.map_err(|e| ResidentError::Run(RuntimeError::Jit(e))),
@@ -491,7 +471,7 @@ where
                 let output = self.captured.drain();
                 ResidentOutcome::Completed {
                     output,
-                    result: EvalResult::new(value, self.table.clone(), Vec::new()),
+                    result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
                 }
             }
             SuspendableOutcome::Suspended { request } => {
