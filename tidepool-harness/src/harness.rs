@@ -41,8 +41,10 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tokio::sync::{mpsc, oneshot};
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
-use tidepool_repr::DataConTable;
-use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
+use tidepool_repr::{DataConTable, SessionId};
+use tidepool_runtime::session::{
+    classify_turn, ModuleEnv, ResidentError, ResidentOutcome, ResidentSession, SessionLib, TurnKind,
+};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use crate::compile::{self, AsksSidecar};
@@ -513,6 +515,13 @@ impl Harness {
         // Bootstrap a fresh resident session for this node, keeping a handle to
         // its effect-trace buffer so per-turn effects can be logged.
         let (stack, effect_trace) = self.build_stack();
+        // Give the node its OWN decl plane so declarations accumulate across its
+        // turns (a value bound in turn N is a live binding in turn N+1). Each
+        // node's plane is rooted in its own directory, so a fork parent's
+        // declarations survive independently of any child's — the child forces a
+        // separate node with a separate plane. Degrades to no accumulation
+        // (`None`) if the session root cannot be created.
+        let lib = self.node_decl_plane(node);
         let session = ResidentSession::bootstrap(
             &self.boot.expr,
             self.boot.table.clone(),
@@ -522,6 +531,7 @@ impl Harness {
             CapturedOutput::new(),
             self.cfg.include.clone(),
             DEFAULT_NURSERY_SIZE,
+            lib,
         )
         .map_err(|e| HarnessError::Resident(e.to_string()))?;
 
@@ -587,6 +597,23 @@ impl Harness {
         let stack = TracingDispatcher::new(tidepool_handlers::build_base_stack(&cfg), trace.clone());
         (Box::new(stack), trace)
     }
+
+    /// Create a fresh, per-node decl plane rooted in its OWN directory, so a
+    /// declaration turn accumulates for that node alone (independent of every
+    /// other node's plane). Returns `None` — degrading to no cross-turn
+    /// accumulation — if the root can't be prepared. The validation include is
+    /// the node's compile include, so a decl can resolve the same imports a turn
+    /// does (stdlib, the generated effects module).
+    fn node_decl_plane(&self, node: NodeId) -> Option<SessionLib> {
+        let root = tidepool_runtime::paths::cache_dir()
+            .join("harness-sessions")
+            .join(format!("node-{}", node.0));
+        // Fresh: clear any stale gen modules left by a prior run at this node id.
+        let _ = std::fs::remove_dir_all(&root);
+        SessionLib::open(SessionId(node.0), &root, ModuleEnv::standalone_default())
+            .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
+            .ok()
+    }
 }
 
 impl Harness {
@@ -651,11 +678,67 @@ impl Harness {
         imports: &str,
         helpers: &str,
     ) -> Result<engine::TurnOutcome, HarnessError> {
-        let src = engine::template_turn(&self.cfg, block, imports, helpers);
         let cfg_bin = self.cfg.extract_bin.clone();
-        let include = self.cfg.include.clone();
 
-        // Compile off-reactor.
+        // Classify the block OFF-REACTOR (it shells the extractor). A top-level
+        // DECLARATION accumulates on the node's decl plane (so a value declared
+        // this turn is a live binding next turn) instead of running as an
+        // expression; a classify failure falls through to the expression path,
+        // which re-reports any real error.
+        let block_owned = block.to_string();
+        let is_decl = {
+            let b = block_owned.clone();
+            tokio::task::spawn_blocking(move || classify_turn(&b))
+                .await
+                .map_err(|e| HarnessError::Resident(format!("classify task join: {e}")))?
+                .map(|c| c.kind == TurnKind::Decl)
+                .unwrap_or(false)
+        };
+
+        if is_decl {
+            let mut session = self.take_session(node)?;
+            let (session, res) = tokio::task::spawn_blocking(move || {
+                let r = session.define_scoped(&[&block_owned]);
+                (session, r)
+            })
+            .await
+            .map_err(|e| HarnessError::Resident(format!("declare task join: {e}")))?;
+            self.put_session(node, session, None, AsksSidecar::default());
+            self.flush_effects(node);
+            return match res {
+                Ok(gen) => {
+                    let rendered = format!("declared (gen {})", gen.0);
+                    self.tree.node_done(node, rendered.clone())?;
+                    Ok(engine::TurnOutcome::Completed { rendered })
+                }
+                Err(e) => {
+                    let msg = format!("The declaration failed: {e}");
+                    self.push_user_turn(node, &msg)?;
+                    Err(HarnessError::Resident(e.to_string()))
+                }
+            };
+        }
+
+        // Expression turn: make the compile session-aware — import the node's
+        // current `Lib.G<g>` decl module (if any) and add its directory to the
+        // search path, so a reference to a prior turn's declaration resolves. The
+        // decl context is peeked under the lock WITHOUT checking the session out,
+        // so a compile failure below never leaks it (the session is taken only
+        // once a compiled fragment is in hand — as the original path did).
+        let (session_module, session_include) = self.session_decl_context(node);
+        let merged_imports = match session_module {
+            Some(m) if imports.is_empty() => m,
+            Some(m) => format!("{imports}\n{m}"),
+            None => imports.to_string(),
+        };
+        let src = engine::template_turn(&self.cfg, block, &merged_imports, helpers);
+        let mut include = self.cfg.include.clone();
+        if let Some(dir) = session_include {
+            include.push(dir);
+        }
+
+        // Compile off-reactor (the session is still resident — no leak on a
+        // compile failure).
         let compiled = tokio::task::spawn_blocking(move || {
             compile::compile_turn(&cfg_bin, &src, "result", &include)
         })
@@ -663,9 +746,8 @@ impl Harness {
         .map_err(|e| HarnessError::Resident(format!("compile task join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
 
-        // Run the fragment against the session. We must move the session out to
-        // run it on the blocking pool, then move it back — the resident session
-        // is `Send`. Take it out under the lock, run, restore.
+        // Run the compiled fragment against the session (move it onto the
+        // blocking pool and back — the resident session is `Send`).
         let mut session = self.take_session(node)?;
         let expr = compiled.expr;
         let table = compiled.table.clone();
@@ -1770,6 +1852,18 @@ impl Harness {
 // -- session take/put/drop + pending accessors -------------------------------
 
 impl Harness {
+    /// Read a node's decl-plane context — the current `Lib.G<g>` module to import
+    /// and its include directory — WITHOUT checking the session out, so a caller
+    /// can build a session-aware compile before taking the session for the run.
+    /// `(None, None)` when the node has no session or no accumulated decl plane.
+    fn session_decl_context(&self, node: NodeId) -> (Option<String>, Option<PathBuf>) {
+        let convos = self.convos.lock();
+        match convos.get(&node).and_then(|c| c.session.as_ref()) {
+            Some(s) => (s.session_import_module(), s.lib_include_dir()),
+            None => (None, None),
+        }
+    }
+
     fn take_session(&self, node: NodeId) -> Result<Session, HarnessError> {
         let mut convos = self.convos.lock();
         let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;

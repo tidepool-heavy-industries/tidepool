@@ -111,6 +111,7 @@ fn bootstrap(
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,
+        None,
     )
     .expect("bootstrap the resident machine")
 }
@@ -277,6 +278,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
         TestSink::default(),
         Vec::new(),
         1 << 16,
+        None,
     )
     .expect("bootstrap");
 

@@ -50,7 +50,7 @@
 //! continuation into a registered stowed root for its duration (so those asserts
 //! still pass) — see the jit_machine module docstring for the full invariant.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tidepool_codegen::emit::ExternalEnv;
@@ -65,6 +65,7 @@ use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use super::engine::OutputSink;
 use super::persistent::{PersistentSession, SuspensionMechanism, Threadless};
+use super::{SessionError, SessionLib};
 
 /// The classified result of driving a resident turn to its first yield.
 ///
@@ -193,6 +194,10 @@ where
     // The arg list mirrors the engine's `StartTurn` field carrier (source,
     // handlers, ask_tag, effect_names, captured, include, nursery) — bundling
     // them into a struct would just move the arity, not remove it.
+    ///
+    /// `lib` is the decl plane: pass `Some` to accumulate declarations across
+    /// turns (the harness, once W1b turns it on), or `None` for a value-only
+    /// session. The boot table seeds the accumulated session table.
     #[allow(clippy::too_many_arguments)]
     pub fn bootstrap(
         expr: &CoreExpr,
@@ -203,10 +208,9 @@ where
         captured: O,
         include: Vec<PathBuf>,
         nursery_size: usize,
+        lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        // No decl plane in the harness today (W1b turns it on); the value plane
-        // starts empty. The boot table seeds the accumulated session table.
-        let mut core = PersistentSession::<Threadless>::new(None, ask_tag, nursery_size);
+        let mut core = PersistentSession::<Threadless>::new(lib, ask_tag, nursery_size);
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -219,6 +223,30 @@ where
             pending: None,
             cont_prefix: "scont".to_string(),
         })
+    }
+
+    /// Accumulate `decls` on the decl plane (mirrors the repl's
+    /// `Session::define_scoped`): a declaration turn appends to the gen-versioned
+    /// `Lib.G<g>` module a later turn imports. Requires a decl plane (`Some(lib)`
+    /// at bootstrap). Each node's plane is independent, so a parent's accumulated
+    /// declarations survive across a child run on a different node.
+    pub fn define_scoped(
+        &mut self,
+        decls: &[&str],
+    ) -> Result<tidepool_repr::Generation, SessionError> {
+        self.core.define_scoped(decls)
+    }
+
+    /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
+    /// turn imports to see accumulated declarations, or `None` before any decl.
+    pub fn session_import_module(&self) -> Option<String> {
+        self.core.current_lib_module().map(|m| m.module_name())
+    }
+
+    /// The decl-plane include directory to add to a later turn's compile search
+    /// path (so `import Lib.G<g>` resolves), or `None` with no decl plane.
+    pub fn lib_include_dir(&self) -> Option<PathBuf> {
+        self.core.lib_include_dir().map(Path::to_path_buf)
     }
 
     /// The continuation id this session is suspended on, if any.

@@ -29,6 +29,7 @@
 //! the two consumers' orchestration around this core.
 
 use std::marker::PhantomData;
+use std::path::Path;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
@@ -671,6 +672,13 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     /// session has no decl plane at all).
     pub fn current_lib_module(&self) -> Option<SessionModule> {
         self.lib.as_ref().and_then(|l| l.current_module())
+    }
+
+    /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for
+    /// a later turn's compile search path. `None` when the session has no decl
+    /// plane.
+    pub fn lib_include_dir(&self) -> Option<&Path> {
+        self.lib.as_ref().map(|l| l.include_dir())
     }
 
     /// Define decl text(s) scoped against live session values: the current
