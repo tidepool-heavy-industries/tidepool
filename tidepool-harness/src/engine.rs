@@ -92,11 +92,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
     let routing = if let Some(site) = payload.get("typedSite").and_then(Json::as_u64) {
         let site = site as u32;
         let ty = asks.type_of(site).map(str::to_string);
-        if payload
-            .get("fork")
-            .and_then(Json::as_bool)
-            .unwrap_or(false)
-        {
+        if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
             let fan = payload
                 .get("fan")
                 .and_then(Json::as_u64)
@@ -367,8 +363,8 @@ impl EngineConfig {
             include.push(lib);
         }
         include.push(effects_dir);
-        let extract_bin = std::env::var("TIDEPOOL_EXTRACT")
-            .unwrap_or_else(|_| "tidepool-extract".to_string());
+        let extract_bin =
+            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
         Ok(EngineConfig {
             extract_bin,
             include,
@@ -628,10 +624,12 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
 /// program resolves to the same ids, exactly how a single fork's answer
 /// already crosses from the child's compiled table into the parent's heap).
 pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value, EngineError> {
-    let nil_id = tidepool_bridge::get_resilient(table, "[]", 0)
-        .ok_or_else(|| EngineError::Run("build_list_value: no [] constructor in table".to_string()))?;
-    let cons_id = tidepool_bridge::get_resilient(table, ":", 2)
-        .ok_or_else(|| EngineError::Run("build_list_value: no : constructor in table".to_string()))?;
+    let nil_id = tidepool_bridge::get_resilient(table, "[]", 0).ok_or_else(|| {
+        EngineError::Run("build_list_value: no [] constructor in table".to_string())
+    })?;
+    let cons_id = tidepool_bridge::get_resilient(table, ":", 2).ok_or_else(|| {
+        EngineError::Run("build_list_value: no : constructor in table".to_string())
+    })?;
     let mut result = Value::Con(nil_id, vec![]);
     for item in items.into_iter().rev() {
         result = Value::Con(cons_id, vec![item, result]);

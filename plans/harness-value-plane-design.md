@@ -1,5 +1,20 @@
 # W1b-redux Step 1 — within-node value-plane materialization (design)
 
+## ✅ COMPLETE (2026-08-01) — commits a38d33ee, 1046c7c1, 0d4be565, 088ec27a
+
+An effectful value bind persists across turns. `acceptance_value_bind` (turn 1
+`steps <- returnControlFork @[Int]` → answer `[1,2,3]` → turn 2 `total <- pure
+(sum steps)` renders `6`) passes end to end through the real
+`drive_turn → run_bind → answer_fork → resume_bind → materialize → inject-val`
+path. Harness regression 18/18, codegen 601/601 under GC poison, resident_session
+4/4 — no regression. Scope landed: BIND turns (the common value-persistence path).
+Follow-ups (NOT step 1): expr turns referencing a value binding (route the expr
+path through `compile_session_turn` too — deferred for expr-render parity);
+multi-bind `(a,b) <- e`. Steps 2 (decl-source fork inheritance) and 3 (value
+heap-clone on fork) remain per the main plan.
+
+---
+
 Status: DESIGN COMPLETE, implementation in progress (single-threaded, by hand).
 This is the authoritative spec; a prior delegated attempt failed by splitting the
 bind across the async boundary (forcing `!Send` `RootSlot`/`ExternalEnv` through

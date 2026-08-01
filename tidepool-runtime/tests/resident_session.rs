@@ -154,10 +154,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
            pure (0 :: Int)",
     );
     let outcome = session
-        .run(
-            "turn1",
-            &t1_expr,
-            &t1_table,        )
+        .run("turn1", &t1_expr, &t1_table)
         .expect("turn 1 runs");
 
     let hole = match outcome {
@@ -179,10 +176,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
     // rejected cleanly until the ask is resolved.
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (9 :: Int)");
-    match session.run(
-        "intrude",
-        &intrude_expr,
-        &intrude_table,    ) {
+    match session.run("intrude", &intrude_expr, &intrude_table) {
         Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
         other => panic!("a suspended session must reject a new run; got {other:?}"),
     }
@@ -230,10 +224,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
            pure (toJSON [b, a])",
     );
     let outcome = session
-        .run(
-            "turn2",
-            &t2_expr,
-            &t2_table,        )
+        .run("turn2", &t2_expr, &t2_table)
         .expect("turn 2 runs on the reused machine");
 
     match outcome {
@@ -285,10 +276,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
            send (KvSet \"answered\" n)\n  \
            pure (0 :: Int)",
     );
-    let hole = match session
-        .run("t1", &t1_expr, &t1_table)
-        .expect("turn 1 runs")
-    {
+    let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
         ResidentOutcome::Suspended { hole, .. } => hole,
         ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at ask"),
     };
@@ -329,17 +317,17 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     // A new TOP-LEVEL run is still rejected while suspended.
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
-    match session.run(
-        "intrude",
-        &intrude_expr,
-        &intrude_table,    ) {
+    match session.run("intrude", &intrude_expr, &intrude_table) {
         Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
         other => panic!("a suspended session must reject a new top-level run; got {other:?}"),
     }
 
     // Resume the parent with 42: the continuation (stowed across all the child
     // GCs) drives to completion correctly.
-    match session.resume(&hole, int(42)).expect("resume after children") {
+    match session
+        .resume(&hole, int(42))
+        .expect("resume after children")
+    {
         ResidentOutcome::Completed { result, .. } => {
             assert_eq!(result.to_json(), serde_json::json!(0));
         }
@@ -379,7 +367,12 @@ fn run_child_on_idle_session_is_not_suspended() {
     let Some(harness) = setup() else { return };
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
-    match session.run_child("child", &expr, &table, &tidepool_codegen::emit::ExternalEnv::new()) {
+    match session.run_child(
+        "child",
+        &expr,
+        &table,
+        &tidepool_codegen::emit::ExternalEnv::new(),
+    ) {
         Err(ResidentError::NotSuspended) => {}
         other => panic!("run_child on an idle session must be NotSuspended; got {other:?}"),
     }
@@ -397,10 +390,7 @@ fn plain_turns_reuse_the_machine() {
         let body = format!("result :: M Int\nresult = pure ({expected} :: Int)");
         let (expr, table) = compile_turn(&harness, &body);
         match session
-            .run(
-                "plain",
-                &expr,
-                &table,            )
+            .run("plain", &expr, &table)
             .expect("plain turn runs")
         {
             ResidentOutcome::Completed { result, .. } => {

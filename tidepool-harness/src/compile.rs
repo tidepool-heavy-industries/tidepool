@@ -75,10 +75,7 @@ pub struct CompiledTurn {
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
     #[error("failed to spawn tidepool-extract ({bin}): {source}")]
-    Spawn {
-        bin: String,
-        source: std::io::Error,
-    },
+    Spawn { bin: String, source: std::io::Error },
     #[error("tidepool-extract failed:\n{0}")]
     Extract(String),
     #[error("io error during compile: {0}")]

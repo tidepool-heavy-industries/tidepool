@@ -38,7 +38,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value as Json;
 use tidepool_effect::dispatch::DispatchEffect;
-use tokio::sync::{mpsc, oneshot};
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
@@ -47,14 +46,13 @@ use tidepool_runtime::session::{
     ResidentSession, SessionBind, SessionLib, TurnKind,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::compile::{self, AsksSidecar};
-use crate::engine::{
-    self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, RESUME_HELPER,
-};
+use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
+use crate::engine::{self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, RESUME_HELPER};
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
-use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta};
 use crate::tree::{HoleId, NodeId};
 
@@ -268,12 +266,7 @@ impl Harness {
         provider: Arc<dyn DynModelProvider>,
     ) -> Result<Self, HarnessError> {
         // A trivial effectful seed carrying the full effect-stack ConTags.
-        let boot_src = engine::template_turn(
-            &cfg,
-            "pure (toJSON (0 :: Int))",
-            "",
-            "",
-        );
+        let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "");
         let boot = compile::compile_turn(&cfg.extract_bin, &boot_src, "result", &cfg.include)
             .map_err(|e| HarnessError::Compile(e.to_string()))?;
         Ok(Harness {
@@ -442,7 +435,10 @@ impl Harness {
                 }
             }
         }
-        order.into_iter().filter_map(|n| self.node_summary(n)).collect()
+        order
+            .into_iter()
+            .filter_map(|n| self.node_summary(n))
+            .collect()
     }
 
     /// Cursor-paged tree snapshot (widen C4: "snapshot endpoints paginate, no
@@ -457,7 +453,10 @@ impl Harness {
         limit: usize,
     ) -> (Vec<NodeSummary>, Option<NodeId>) {
         let (ids, next) = self.tree.node_ids_after(cursor, limit);
-        let nodes = ids.into_iter().filter_map(|n| self.node_summary(n)).collect();
+        let nodes = ids
+            .into_iter()
+            .filter_map(|n| self.node_summary(n))
+            .collect();
         (nodes, next)
     }
 
@@ -601,7 +600,8 @@ impl Harness {
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         };
         let trace: EffectTrace = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let stack = TracingDispatcher::new(tidepool_handlers::build_base_stack(&cfg), trace.clone());
+        let stack =
+            TracingDispatcher::new(tidepool_handlers::build_base_stack(&cfg), trace.clone());
         (Box::new(stack), trace)
     }
 
@@ -639,8 +639,7 @@ impl Harness {
             (convo.transcript.clone(), convo.turn_seq)
         };
 
-        self.tree
-            .turn_start(node, "model".to_string(), None)?;
+        self.tree.turn_start(node, "model".to_string(), None)?;
 
         // Stream the provider call into `node`'s live-turn buffer (rendered
         // token-by-token), then log the completed turn with its thinking and
@@ -732,7 +731,9 @@ impl Harness {
         // falls through to the expression path below.
         if kind == Some(TurnKind::Bind) {
             if let Some(name) = classification.and_then(|c| c.binders.into_iter().next()) {
-                return self.run_bind_turn(node, block, imports, helpers, &name).await;
+                return self
+                    .run_bind_turn(node, block, imports, helpers, &name)
+                    .await;
             }
         }
 
@@ -817,8 +818,9 @@ impl Harness {
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. }
-                    | HoleRouting::ReturnControl { site, .. } => Some(crate::tree::SiteId(*site)),
+                    HoleRouting::Fork { site, .. } | HoleRouting::ReturnControl { site, .. } => {
+                        Some(crate::tree::SiteId(*site))
+                    }
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -913,7 +915,8 @@ impl Harness {
             (true, false) => session_imports,
             (false, false) => format!("{imports}\n{session_imports}"),
         };
-        let src = engine::template_session_bind(&self.cfg, stmt, binder_name, &merged_imports, helpers);
+        let src =
+            engine::template_session_bind(&self.cfg, stmt, binder_name, &merged_imports, helpers);
         let mut include = self.cfg.include.clone();
         include.push(session_root.clone());
         let names = vec![binder_name.to_string()];
@@ -1109,7 +1112,11 @@ impl Harness {
     /// directly in a test to simulate the popup). Errors with
     /// [`HarnessError::NoPendingEscalation`] if `node` has no escalation
     /// parked (already resolved, or never escalated).
-    pub fn resolve_escalation(&self, node: NodeId, decision: OperatorDecision) -> Result<(), HarnessError> {
+    pub fn resolve_escalation(
+        &self,
+        node: NodeId,
+        decision: OperatorDecision,
+    ) -> Result<(), HarnessError> {
         let tx = self
             .operator_decisions
             .lock()
@@ -1166,8 +1173,7 @@ impl Harness {
 
         // Register the fork child: inherit the parent transcript up to the
         // parent's current turn, append the hole card.
-        let child =
-            self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
+        let child = self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
         self.force(child, actor)?;
 
         // Drive the child's turn loop until it emits an answering block, then run
@@ -1178,7 +1184,8 @@ impl Harness {
             .await?;
 
         // Resume the parent with the child's typed answer.
-        self.resume_parent(node, &pending.hole, answer_value).await?;
+        self.resume_parent(node, &pending.hole, answer_value)
+            .await?;
         // The child answerer node is done once it has produced the answer.
         let _ = self.tree.node_done(child, "answer delivered".to_string());
         self.drop_session(child);
@@ -1209,7 +1216,11 @@ impl Harness {
     /// children in the loop are already terminal (`Done`), later ones were
     /// never created, and `node` (the parent) is simply never resumed, so it
     /// stays `Suspended` on its original fanout hole, re-answerable.
-    pub async fn answer_fanout(&self, node: NodeId, actor: Actor) -> Result<Vec<NodeId>, HarnessError> {
+    pub async fn answer_fanout(
+        &self,
+        node: NodeId,
+        actor: Actor,
+    ) -> Result<Vec<NodeId>, HarnessError> {
         let pending = self
             .convos
             .lock()
@@ -1285,7 +1296,10 @@ impl Harness {
         };
         // Push the hole card as a user turn, then drive the node's own loop to an
         // answering value against itself.
-        self.push_user_turn(node, &engine::hole_card(&pending.classified.prompt, ty.as_deref()))?;
+        self.push_user_turn(
+            node,
+            &engine::hole_card(&pending.classified.prompt, ty.as_deref()),
+        )?;
         let value = self
             .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns)
             .await?;
@@ -1307,7 +1321,11 @@ impl Harness {
     /// the model loop. Any failure to derive a form or map the submission is
     /// [`HarnessError::NoDerivedForm`] — the caller falls back to
     /// [`Self::answer_return_control`]/[`Self::answer_fork`].
-    pub async fn answer_mechanical(&self, node: NodeId, submission: Json) -> Result<(), HarnessError> {
+    pub async fn answer_mechanical(
+        &self,
+        node: NodeId,
+        submission: Json,
+    ) -> Result<(), HarnessError> {
         let pending = self
             .convos
             .lock()
@@ -1394,11 +1412,7 @@ impl Harness {
     /// decides what it means — so the submission JSON always becomes the resume
     /// Value with zero model turns. (Typed structure is the caller's job, via
     /// `Tidepool.Form` / `dialogForm`, not a harness-side interpretation step.)
-    pub async fn answer_dialog(
-        &self,
-        node: NodeId,
-        submission: Json,
-    ) -> Result<(), HarnessError> {
+    pub async fn answer_dialog(&self, node: NodeId, submission: Json) -> Result<(), HarnessError> {
         let pending = self
             .convos
             .lock()
@@ -1538,7 +1552,9 @@ impl Harness {
             // One provider turn on the answerer.
             let (transcript, turn_seq) = {
                 let convos = self.convos.lock();
-                let convo = convos.get(&answerer).ok_or(HarnessError::NoSession(answerer))?;
+                let convo = convos
+                    .get(&answerer)
+                    .ok_or(HarnessError::NoSession(answerer))?;
                 (convo.transcript.clone(), convo.turn_seq)
             };
             let driven = self.stream_turn(answerer, &transcript).await?;
@@ -1553,7 +1569,9 @@ impl Harness {
             self.finish_live_turn(answerer);
             {
                 let mut convos = self.convos.lock();
-                let convo = convos.get_mut(&answerer).ok_or(HarnessError::NoSession(answerer))?;
+                let convo = convos
+                    .get_mut(&answerer)
+                    .ok_or(HarnessError::NoSession(answerer))?;
                 convo.transcript.push(Message {
                     role: Role::Assistant,
                     content: driven.reply.clone(),
@@ -1644,9 +1662,7 @@ impl Harness {
                     }
                     return Ok(result.into_value());
                 }
-                Err(ResidentError::NotSuspended) => {
-                    return Err(HarnessError::NotSuspended(target))
-                }
+                Err(ResidentError::NotSuspended) => return Err(HarnessError::NotSuspended(target)),
                 Err(e) => {
                     // A run-time fault in the answerer (e.g. `error "boom"`
                     // forced during its own eval, before the parent's
@@ -1709,9 +1725,7 @@ impl Harness {
     ) -> Result<CapDecision, HarnessError> {
         if *auto_retries_used < Self::AUTO_RETRY_MAX {
             *auto_retries_used += 1;
-            let ty_clause = ty
-                .map(|t| format!(" of type `{t}`"))
-                .unwrap_or_default();
+            let ty_clause = ty.map(|t| format!(" of type `{t}`")).unwrap_or_default();
             self.push_user_turn(
                 answerer,
                 &format!(
@@ -1887,8 +1901,9 @@ impl Harness {
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. }
-                    | HoleRouting::ReturnControl { site, .. } => Some(crate::tree::SiteId(*site)),
+                    HoleRouting::Fork { site, .. } | HoleRouting::ReturnControl { site, .. } => {
+                        Some(crate::tree::SiteId(*site))
+                    }
                     _ => None,
                 };
                 self.tree.hole_published(

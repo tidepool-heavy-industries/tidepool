@@ -932,10 +932,8 @@ impl JitEffectMachine {
                 // tail arm; arm+drop the guard here to restore the session buffer
                 // exactly as the pre-W1b path did (which armed before this branch).
                 unsafe {
-                    _guard.arm_reclaim(
-                        &mut self.session as *mut _,
-                        machine.vmctx_mut() as *const _,
-                    );
+                    _guard
+                        .arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
                 }
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "ask aborted by caller: {reason}"
@@ -2686,7 +2684,8 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
 fn answer_force_nf(root: &tidepool_eval::value::Value) -> Result<(), String> {
     use tidepool_eval::value::Value;
     let mut work: Vec<&Value> = vec![root];
-    let mut visited: std::collections::HashSet<*const Vec<Value>> = std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<*const Vec<Value>> =
+        std::collections::HashSet::new();
     while let Some(v) = work.pop() {
         match v {
             Value::Lit(_) | Value::ByteArray(_) => {}
