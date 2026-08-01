@@ -53,18 +53,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::{BindingName, CoreExpr, DataConTable, Generation, SessionModule, SessionVarId};
 
 use crate::render::EvalResult;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use super::engine::OutputSink;
 use super::persistent::{PersistentSession, SuspensionMechanism, Threadless};
+use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
 
 /// The classified result of driving a resident turn to its first yield.
@@ -137,6 +139,10 @@ pub enum ResidentError {
     /// `merge_table`).
     #[error("session DataConTable collision: {0}")]
     TableCollision(String),
+    /// A decl-plane operation failed while materializing a value bind — the
+    /// cross-plane shadow retract (a value bind evicting a same-name decl head).
+    #[error(transparent)]
+    Session(#[from] SessionError),
 }
 
 /// A resident JIT session: one long-lived [`JitEffectMachine`] whose heap and
@@ -249,6 +255,20 @@ where
         self.core.lib_include_dir().map(Path::to_path_buf)
     }
 
+    /// The current value-binding generation. The caller mints the NEXT one
+    /// (`val_gen().next()`) BEFORE compiling a bind turn — the extract stamps that
+    /// generation into `Val.G<g>`, and [`Self::run_bind`]/[`Self::resume_bind`]
+    /// materialize at the same `g`.
+    pub fn val_gen(&self) -> Generation {
+        self.core.val_gen()
+    }
+
+    /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
+    /// reference earlier value bindings. Empty until the first bind materializes.
+    pub fn inject_val_modules(&self) -> Vec<String> {
+        self.core.live_val_modules()
+    }
+
     /// The continuation id this session is suspended on, if any.
     pub fn pending_continuation(&self) -> Option<&str> {
         self.pending.as_deref()
@@ -291,7 +311,6 @@ where
         name_hint: &str,
         expr: &CoreExpr,
         table: &DataConTable,
-        external_env: &ExternalEnv,
     ) -> Result<ResidentOutcome, ResidentError> {
         if let Some(p) = &self.pending {
             return Err(ResidentError::Suspended(p.clone()));
@@ -304,15 +323,64 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
+        // Seed the env from the session's live value bindings so this turn can
+        // reference an earlier `x <- e` (the value plane's Var-miss resolution).
+        // Empty until the first bind materializes, so a value-plane-free session
+        // behaves exactly as before.
+        let env = self.core.seed_external_env();
         let func_id = self
             .core
-            .add_fragment_session(name_hint, expr, external_env)
+            .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
 
         let ask_tag = self.core.ask_tag();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             Threadless::run_fragment(machine, func_id, table, handlers, captured, ask_tag)
         })?;
+        Ok(self.classify(outcome))
+    }
+
+    /// Run a value-plane BIND turn (`x <- e`): seed the env from prior bindings,
+    /// add the fragment, and drive it through the suspendable BIND path
+    /// (tenure-on-completion). On completion, materialize `binder` into the value
+    /// plane at `gen` (the SAME generation the extract stamped into
+    /// `binder.module` — mint it once at compile, thread it here). A fork bind
+    /// SUSPENDS here (no value yet); it is bound on the eventual
+    /// [`Self::resume_bind`] with the same `binder`/`gen`.
+    pub fn run_bind(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        binder: &BoundBinder,
+        gen: Generation,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        if let Some(p) = &self.pending {
+            return Err(ResidentError::Suspended(p.clone()));
+        }
+        self.core
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let env = self.core.seed_external_env();
+        let func_id = self
+            .core
+            .add_fragment_session(name_hint, expr, &env)
+            .map_err(ResidentError::AddFunction)?;
+
+        let ask_tag = self.core.ask_tag();
+        // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
+        // tenured as-is.
+        let forced = matches!(binder.tier, ValueTier::Tier0Data);
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            machine.run_fragment_suspendable_binding(
+                func_id, table, handlers, captured, ask_tag, forced,
+            )
+        })?;
+        // A completion (no suspension) tenured the result — bind it now. A
+        // suspension defers the bind to `resume_bind`.
+        if matches!(outcome, SuspendableOutcome::Completed(_)) {
+            self.materialize_binder(binder, gen)?;
+        }
         Ok(self.classify(outcome))
     }
 
@@ -392,7 +460,22 @@ where
         cont_id: &str,
         answer: Value,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Answer(answer))
+        self.reenter(cont_id, ResumeInput::Answer(answer), None)
+    }
+
+    /// Resume a suspended value-plane BIND turn: like [`Self::resume`], but on
+    /// completion materialize `binder` at `gen` into the value plane — a bind that
+    /// suspended at a fork lands its value here. `binder`/`gen` are the SAME ones
+    /// the initiating [`Self::run_bind`] carried (threaded by the caller across the
+    /// suspension).
+    pub fn resume_bind(
+        &mut self,
+        cont_id: &str,
+        answer: Value,
+        binder: &BoundBinder,
+        gen: Generation,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.reenter(cont_id, ResumeInput::Answer(answer), Some((binder, gen)))
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -403,13 +486,14 @@ where
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Abort(reason))
+        self.reenter(cont_id, ResumeInput::Abort(reason), None)
     }
 
     fn reenter(
         &mut self,
         cont_id: &str,
         input: ResumeInput,
+        bind: Option<(&BoundBinder, Generation)>,
     ) -> Result<ResidentOutcome, ResidentError> {
         // Validate BEFORE consuming the pending continuation. A mismatch leaves
         // `self.pending` intact — the caller can retry with the right id.
@@ -429,10 +513,58 @@ where
         // it with a FRESH hole if the re-entry suspends again; an error leaves
         // the session idle (the spent continuation cannot be resumed twice).
         self.pending = None;
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            Threadless::resume(machine, table, handlers, captured, ask_tag, input)
-        })?;
+        // A bind re-entry drives the tenure-on-completion variant. `forced` is
+        // Copy so it (not the borrowed `bind`) is what crosses into the eval
+        // closure; `bind` stays here for the post-run materialize.
+        let forced = bind.map(|(b, _)| matches!(b.tier, ValueTier::Tier0Data));
+        let outcome =
+            self.on_eval_thread(move |machine, table, handlers, captured| match forced {
+                Some(forced) => machine
+                    .resume_suspended_binding(table, handlers, captured, ask_tag, input, forced),
+                None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
+            })?;
+        // A bind that completed on this re-entry tenured its result — bind it.
+        if let (Some((binder, gen)), SuspendableOutcome::Completed(_)) = (bind, &outcome) {
+            self.materialize_binder(binder, gen)?;
+        }
         Ok(self.classify(outcome))
+    }
+
+    /// Materialize a completed bind's tenured root into the value plane at `gen`
+    /// (the generation the extract stamped into `binder.module`). Mirrors the
+    /// repl's `bind_materialized`: the session layer owns the `BindingEntry`
+    /// construction, the core owns the plane. Evicts any same-name decl (the
+    /// one-plane invariant — a value bind wins over an earlier decl head).
+    fn materialize_binder(
+        &mut self,
+        binder: &BoundBinder,
+        gen: Generation,
+    ) -> Result<(), ResidentError> {
+        let slot = self
+            .core
+            .machine_mut()
+            .and_then(|m| m.take_last_bound_root())
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    "value-plane bind completed but no tenured root was recorded".into(),
+                ))))
+            })?;
+        let value = match binder.tier {
+            ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+            ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+        };
+        // Evict any pure decl of the same name before binding (cross-plane shadow).
+        self.core.retract(&binder.name)?;
+        self.core.bind(BindingEntry {
+            name: BindingName(binder.name.clone()),
+            id: SessionVarId::from_extract(binder.var_id),
+            module: SessionModule::val(gen),
+            value,
+            type_display: Some(binder.type_display.clone()),
+            defining_expr: None,
+        });
+        self.core.set_val_gen(gen);
+        Ok(())
     }
 
     /// Move the machine onto a stack-sized eval thread, run `body`, and move the

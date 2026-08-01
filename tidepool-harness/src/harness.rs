@@ -754,12 +754,7 @@ impl Harness {
         let asks = compiled.asks;
 
         let (session, outcome) = tokio::task::spawn_blocking(move || {
-            let out = session.run(
-                "turn",
-                &expr,
-                &table,
-                &tidepool_codegen::emit::ExternalEnv::new(),
-            );
+            let out = session.run("turn", &expr, &table);
             (session, out)
         })
         .await

@@ -157,9 +157,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
         .run(
             "turn1",
             &t1_expr,
-            &t1_table,
-            &tidepool_codegen::emit::ExternalEnv::new(),
-        )
+            &t1_table,        )
         .expect("turn 1 runs");
 
     let hole = match outcome {
@@ -184,9 +182,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
     match session.run(
         "intrude",
         &intrude_expr,
-        &intrude_table,
-        &tidepool_codegen::emit::ExternalEnv::new(),
-    ) {
+        &intrude_table,    ) {
         Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
         other => panic!("a suspended session must reject a new run; got {other:?}"),
     }
@@ -237,9 +233,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
         .run(
             "turn2",
             &t2_expr,
-            &t2_table,
-            &tidepool_codegen::emit::ExternalEnv::new(),
-        )
+            &t2_table,        )
         .expect("turn 2 runs on the reused machine");
 
     match outcome {
@@ -292,7 +286,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
            pure (0 :: Int)",
     );
     let hole = match session
-        .run("t1", &t1_expr, &t1_table, &tidepool_codegen::emit::ExternalEnv::new())
+        .run("t1", &t1_expr, &t1_table)
         .expect("turn 1 runs")
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -338,9 +332,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     match session.run(
         "intrude",
         &intrude_expr,
-        &intrude_table,
-        &tidepool_codegen::emit::ExternalEnv::new(),
-    ) {
+        &intrude_table,    ) {
         Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
         other => panic!("a suspended session must reject a new top-level run; got {other:?}"),
     }
@@ -366,7 +358,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
            pure (toJSON [p, a])",
     );
     match session
-        .run("verify", &verify_expr, &verify_table, &tidepool_codegen::emit::ExternalEnv::new())
+        .run("verify", &verify_expr, &verify_table)
         .expect("verify turn")
     {
         ResidentOutcome::Completed { result, .. } => {
@@ -408,9 +400,7 @@ fn plain_turns_reuse_the_machine() {
             .run(
                 "plain",
                 &expr,
-                &table,
-                &tidepool_codegen::emit::ExternalEnv::new(),
-            )
+                &table,            )
             .expect("plain turn runs")
         {
             ResidentOutcome::Completed { result, .. } => {
