@@ -37,6 +37,7 @@
 -- rather than silently doing the wrong thing.
 module Tidepool.Fork
   ( forkFilter
+  , forkAll
   , forkMap
   , forkMapSited
   , forkCata
@@ -55,6 +56,29 @@ forkFilter :: (a -> Text) -> [a] -> M [a]
 forkFilter mkPrompt xs = do
   verdicts <- returnControlFanout (map mkPrompt xs)
   pure (map fst (filter snd (zip xs verdicts)))
+
+-- | 'forkAll' — N sub-agents in parallel, @mapConcurrently@-shaped: one
+-- prompt per element, parked once, answered together as a typed batch in
+-- original order. The answer type @a@ is picked by an explicit type
+-- application at the call site (@forkAll \@T prompts@), exactly like a bare
+-- 'returnControlFanout' call — 'forkAll'\'s shape is structurally IDENTICAL
+-- to 'returnControlFanout'\'s, so extract's @Translate.hs@ recognizes it by
+-- name (mirroring 'returnControl'\/'returnControlFork'\/'returnControlFanout')
+-- and head-swaps every well-formed call site straight to the EXISTING
+-- 'returnControlFanoutSited' sibling — no separate @forkAllSited@ needed.
+--
+-- Dead at runtime, same discipline as 'forkMap' (see its haddock): every
+-- extractable call site is head-swapped before this body ever runs; the
+-- bottom site-id forces an immediate 'error' if reached anyway.
+{-# OPAQUE forkAll #-}
+forkAll :: forall a. [Text] -> M [a]
+forkAll prompts = returnControlFanoutSited unreachableSiteId prompts
+  where
+    unreachableSiteId = error
+      "forkAll: unreachable — extract must head-swap every well-formed \
+      \call site to returnControlFanoutSited; reaching this body means a \
+      \call site was not fully applied or its answer type was not resolved \
+      \to a concrete type, which extract should already have rejected"
 
 -- | 'forkMap' — one fanout over a CALLER-chosen answer type @b@: build one
 -- prompt per element, park once, and answer with the batch of typed

@@ -21,9 +21,14 @@
 module Tidepool.Form
   ( Form
   , FormError (..)
+  , prose
+  , code
   , textField
+  , textField'
   , multilineField
+  , multilineField'
   , choiceField
+  , multiChoiceField
   , boolField
   , intField
   , dialogForm
@@ -33,10 +38,11 @@ import Prelude
 import Data.Text (Text, pack, unpack)
 import Control.Lens ((^?))
 
-import Tidepool.Ui (Ui, card, keyedChoice, keyedText)
+import Tidepool.Ui (Ui, card, keyedChoice, keyedText, keyedTextInitial, keyedMultiChoice)
+import qualified Tidepool.Ui as U
 import Tidepool.Effects (M, dialogAsk)
 import Tidepool.Aeson.Value (Object, Value)
-import Tidepool.Aeson.FromJSON (Result (..), eitherDecode, (.:))
+import Tidepool.Aeson.FromJSON (Result (..), eitherDecode, (.:), (.:?), (.!=))
 import Tidepool.Aeson.Lens (key, _Object)
 
 -- | A form yielding an @a@. Build with the field constructors and '<$>'/'<*>'.
@@ -81,6 +87,17 @@ apR _ (Error e) = Error e
 keyName :: Int -> Text
 keyName i = pack ('f' : show i)
 
+-- | Markdown display context between fields — no input, consumes NO field
+-- index, so @prose "context" *> choiceField ...@ shows the prose then the
+-- choice field keeps the same @f<i>@ key a bare @choiceField@ would get.
+prose :: Text -> Form ()
+prose t = Form (\i -> ([U.prose t], i)) (\_ i -> (Success (), i))
+
+-- | A fenced source block — display context, same non-consuming shape as
+-- 'prose': language, then source text.
+code :: Text -> Text -> Form ()
+code lang src = Form (\i -> ([U.code lang src], i)) (\_ i -> (Success (), i))
+
 -- | A single-line text field.
 textField :: Text -> Form Text
 textField label =
@@ -88,11 +105,25 @@ textField label =
     (\i -> ([keyedText (keyName i) label False], i + 1))
     (\o i -> (o .: keyName i, i + 1))
 
+-- | A single-line text field seeded with an initial (editable) draft.
+textField' :: Text -> Text -> Form Text
+textField' label initial =
+  Form
+    (\i -> ([keyedTextInitial (keyName i) label False initial], i + 1))
+    (\o i -> (o .: keyName i, i + 1))
+
 -- | A multiline (textarea) text field.
 multilineField :: Text -> Form Text
 multilineField label =
   Form
     (\i -> ([keyedText (keyName i) label True], i + 1))
+    (\o i -> (o .: keyName i, i + 1))
+
+-- | A multiline (textarea) text field seeded with an initial (editable) draft.
+multilineField' :: Text -> Text -> Form Text
+multilineField' label initial =
+  Form
+    (\i -> ([keyedTextInitial (keyName i) label True initial], i + 1))
     (\o i -> (o .: keyName i, i + 1))
 
 -- | A radio choice over @(label-key, typed value)@ pairs. Renders the keys as a
@@ -107,6 +138,21 @@ choiceField label opts =
     decodeChoice (Success k) =
       maybe (Error "unknown option") Success (lookup k opts)
     decodeChoice (Error e) = Error e
+
+-- | A checkbox group over @(label-key, typed value)@ pairs — the operator
+-- picks a SUBSET. Renders the keys as checkboxes; decodes the checked keys
+-- (an array under @values.<key>@) back to their typed values. An unknown
+-- key is a decode 'Error'; no keys checked (the key absent from the
+-- submission) decodes to @[]@, not an error.
+multiChoiceField :: Text -> [(Text, a)] -> Form [a]
+multiChoiceField label opts =
+  Form
+    (\i -> ([keyedMultiChoice (keyName i) label [(k, k) | (k, _) <- opts]], i + 1))
+    (\o i -> (decodeMulti ((o .:? keyName i) .!= []), i + 1))
+  where
+    decodeMulti (Success ks) = traverse lookupOne (ks :: [Text])
+    decodeMulti (Error e) = Error e
+    lookupOne k = maybe (Error ("unknown option: " ++ unpack k)) Success (lookup k opts)
 
 -- | A Yes/No radio decoding to 'Bool'.
 boolField :: Text -> Form Bool

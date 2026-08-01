@@ -291,8 +291,14 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// added (harmless if unused) so `dialogAsk (card …)` resolves without the model
 /// having to remember the import (`Tidepool.Form`, for typed `dialogForm`, is
 /// likewise auto-imported by the turn preamble — see `preamble::pragmas_and_imports`).
+/// `prose`/`code` are HIDDEN from this import: `Tidepool.Form` (also always
+/// in scope) exports its own `prose`/`code` :: `Text -> Form ()` display
+/// combinators of the same bare name, and both being unqualified-imported
+/// would make either one an "Ambiguous occurrence" the instant a turn
+/// actually references it. `Tidepool.Ui.prose`/`.code` stay reachable
+/// qualified for a turn building a raw `dialogAsk` `Ui` tree by hand.
 pub fn split_imports(block: &str) -> (String, String) {
-    let mut imports = vec!["Tidepool.Ui".to_string()];
+    let mut imports = vec!["Tidepool.Ui hiding (prose, code)".to_string()];
     let mut body = Vec::new();
     let mut in_body = false;
     for line in block.lines() {

@@ -119,13 +119,16 @@ pub fn render_with_answer_url(ui: &Ui, answer_url: &str) -> Markup {
         },
         // A keyed widget standalone (no enclosing card): wrap it in its own
         // single-field form so it stays answerable.
-        Ui::TextIn { key: Some(_), .. } | Ui::Choice { key: Some(_), .. } => {
+        Ui::TextIn { key: Some(_), .. }
+        | Ui::Choice { key: Some(_), .. }
+        | Ui::MultiChoice { key: Some(_), .. } => {
             render_form("", std::slice::from_ref(ui), answer_url)
         }
         Ui::Choice {
             prompt,
             options,
             key: None,
+            ..
         } => html! {
             div class="ui-choice" {
                 p class="ui-choice-prompt" { (prompt) }
@@ -146,13 +149,32 @@ pub fn render_with_answer_url(ui: &Ui, answer_url: &str) -> Markup {
             prompt,
             multiline,
             key: None,
+            initial,
         } => html! {
             form class="ui-textin" data-on-submit=(format!("@post('{answer_url}')")) {
                 label for="ui-textin-input" { (prompt) }
                 @if *multiline {
-                    textarea id="ui-textin-input" name="value" data-bind="value" rows="4" {}
+                    textarea id="ui-textin-input" name="value" data-bind="value" rows="4" { (initial.as_deref().unwrap_or("")) }
                 } @else {
-                    input id="ui-textin-input" type="text" name="value" data-bind="value";
+                    input id="ui-textin-input" type="text" name="value" data-bind="value" value=[initial.clone()];
+                }
+                button type="submit" { "Submit" }
+            }
+        },
+        Ui::MultiChoice {
+            prompt,
+            options,
+            key: None,
+        } => html! {
+            form class="ui-multichoice" data-on-submit=(format!("@post('{answer_url}')")) {
+                p class="ui-choice-prompt" { (prompt) }
+                div class="ui-multichoice-options" {
+                    @for (optk, label) in options {
+                        label class="ui-checkbox-opt" {
+                            input type="checkbox" name=(optk) value=(optk) data-bind="value";
+                            " " (label)
+                        }
+                    }
                 }
                 button type="submit" { "Submit" }
             }
@@ -166,7 +188,9 @@ pub fn render_with_answer_url(ui: &Ui, answer_url: &str) -> Markup {
 /// True if `ui` (or a nested card's body) contains a keyed form field.
 fn has_form_fields(ui: &Ui) -> bool {
     match ui {
-        Ui::TextIn { key: Some(_), .. } | Ui::Choice { key: Some(_), .. } => true,
+        Ui::TextIn { key: Some(_), .. }
+        | Ui::Choice { key: Some(_), .. }
+        | Ui::MultiChoice { key: Some(_), .. } => true,
         Ui::Card { body, .. } => body.iter().any(has_form_fields),
         _ => false,
     }
@@ -196,13 +220,14 @@ fn render_form_field(ui: &Ui) -> Markup {
             prompt,
             multiline,
             key: Some(k),
+            initial,
         } => html! {
             div class="ui-field" {
                 label class="ui-field-label" { (prompt) }
                 @if *multiline {
-                    textarea class="ui-field-input" data-bind=(format!("values.{k}")) rows="3" {}
+                    textarea class="ui-field-input" data-bind=(format!("values.{k}")) rows="3" { (initial.as_deref().unwrap_or("")) }
                 } @else {
-                    input class="ui-field-input" type="text" data-bind=(format!("values.{k}"));
+                    input class="ui-field-input" type="text" data-bind=(format!("values.{k}")) value=[initial.clone()];
                 }
             }
         },
@@ -210,12 +235,28 @@ fn render_form_field(ui: &Ui) -> Markup {
             prompt,
             options,
             key: Some(k),
+            selected,
         } => html! {
             fieldset class="ui-field ui-radio" {
                 legend class="ui-field-label" { (prompt) }
                 @for (optk, label) in options {
                     label class="ui-radio-opt" {
-                        input type="radio" name=(k) value=(optk) data-bind=(format!("values.{k}"));
+                        input type="radio" name=(k) value=(optk) data-bind=(format!("values.{k}")) checked[selected.as_deref() == Some(optk.as_str())];
+                        " " (label)
+                    }
+                }
+            }
+        },
+        Ui::MultiChoice {
+            prompt,
+            options,
+            key: Some(k),
+        } => html! {
+            fieldset class="ui-field ui-checkbox-group" {
+                legend class="ui-field-label" { (prompt) }
+                @for (optk, label) in options {
+                    label class="ui-checkbox-opt" {
+                        input type="checkbox" name=(format!("{k}[]")) value=(optk) data-bind=(format!("values.{k}"));
                         " " (label)
                     }
                 }
@@ -236,7 +277,9 @@ fn render_form_field(ui: &Ui) -> Markup {
         },
         // Unkeyed interactive widgets inside a form aren't produced by
         // `Tidepool.Form`; render just the label (no submitting input).
-        Ui::TextIn { prompt, key: None, .. } | Ui::Choice { prompt, key: None, .. } => html! {
+        Ui::TextIn { prompt, key: None, .. }
+        | Ui::Choice { prompt, key: None, .. }
+        | Ui::MultiChoice { prompt, key: None, .. } => html! {
             div class="ui-field" { label class="ui-field-label" { (prompt) } }
         },
     }
@@ -294,6 +337,7 @@ mod tests {
                 ("reject".into(), "Reject".into()),
             ],
             key: None,
+            selected: None,
         };
         let rendered = render_with_answer_url(&ui, URL).into_string();
         assert_eq!(
@@ -346,6 +390,7 @@ mod tests {
             prompt: "p?".into(),
             options: vec![("x')//".into(), "Evil".into())],
             key: None,
+            selected: None,
         };
         let rendered = render_with_answer_url(&ui, URL).into_string();
         // The raw key must never appear unescaped inside the single-quoted target.
@@ -365,6 +410,7 @@ mod tests {
             prompt: "name?".into(),
             multiline: false,
             key: None,
+            initial: None,
         };
         let rendered = render_with_answer_url(&ui, URL).into_string();
         assert_eq!(
@@ -383,6 +429,7 @@ mod tests {
             prompt: "notes?".into(),
             multiline: true,
             key: None,
+            initial: None,
         };
         let rendered = render_with_answer_url(&ui, URL).into_string();
         assert_eq!(
@@ -407,11 +454,13 @@ mod tests {
                     prompt: "Notes".into(),
                     multiline: false,
                     key: Some("f0".into()),
+                    initial: None,
                 },
                 Ui::Choice {
                     prompt: "Lane".into(),
                     options: vec![("a".into(), "Alpha".into()), ("b".into(), "Beta".into())],
                     key: Some("f1".into()),
+                    selected: None,
                 },
             ],
         };
@@ -427,6 +476,81 @@ mod tests {
         assert!(r.contains("<button type=\"submit\">Submit</button>"));
         // NOT the standalone immediate-post buttons:
         assert!(!r.contains("ui-choice-option"), "no immediate-post buttons: {r}");
+    }
+
+    /// A keyed `MultiChoice` in a form renders as a checkbox group bound
+    /// under `values.<key>`, joining the SAME single-submit form as any
+    /// other keyed field.
+    #[test]
+    fn multichoice_keyed_renders_checkbox_group_bound_under_values_key() {
+        let ui = Ui::Card {
+            title: "Triage".into(),
+            body: vec![Ui::MultiChoice {
+                prompt: "Pick some".into(),
+                options: vec![("a".into(), "Alpha".into()), ("b".into(), "Beta".into())],
+                key: Some("f0".into()),
+            }],
+        };
+        let r = render_with_answer_url(&ui, URL).into_string();
+        assert_eq!(r.matches("<form").count(), 1, "exactly one form: {r}");
+        assert_eq!(r.matches("type=\"checkbox\"").count(), 2, "one checkbox per option: {r}");
+        assert!(r.contains("data-bind=\"values.f0\""), "checkboxes bound under values.f0: {r}");
+        assert!(r.contains("value=\"a\"") && r.contains("value=\"b\""));
+    }
+
+    /// `TextIn.initial` seeds the input's starting value: `value=` for a
+    /// single-line field, the textarea's BODY text for multiline.
+    #[test]
+    fn textin_prefill_renders_initial_value() {
+        let ui = Ui::Card {
+            title: "Draft".into(),
+            body: vec![
+                Ui::TextIn {
+                    prompt: "Title".into(),
+                    multiline: false,
+                    key: Some("f0".into()),
+                    initial: Some("draft title".into()),
+                },
+                Ui::TextIn {
+                    prompt: "Body".into(),
+                    multiline: true,
+                    key: Some("f1".into()),
+                    initial: Some("draft body".into()),
+                },
+            ],
+        };
+        let r = render_with_answer_url(&ui, URL).into_string();
+        assert!(
+            r.contains("value=\"draft title\""),
+            "single-line prefill via value=: {r}"
+        );
+        assert!(
+            r.contains(">draft body</textarea>"),
+            "multiline prefill via textarea body: {r}"
+        );
+    }
+
+    /// `Choice.selected` marks the matching radio `checked`.
+    #[test]
+    fn choice_selected_renders_checked_radio() {
+        let ui = Ui::Card {
+            title: "Lane".into(),
+            body: vec![Ui::Choice {
+                prompt: "Lane".into(),
+                options: vec![("a".into(), "Alpha".into()), ("b".into(), "Beta".into())],
+                key: Some("f0".into()),
+                selected: Some("b".into()),
+            }],
+        };
+        let r = render_with_answer_url(&ui, URL).into_string();
+        assert!(
+            r.contains("value=\"b\" data-bind=\"values.f0\" checked"),
+            "the selected option's radio is checked: {r}"
+        );
+        assert!(
+            !r.contains("value=\"a\" data-bind=\"values.f0\" checked"),
+            "the non-selected option's radio is NOT checked: {r}"
+        );
     }
 
     #[test]
@@ -455,6 +579,7 @@ mod tests {
                     prompt: "verdict?".into(),
                     options: vec![("approve".into(), "Approve".into())],
                     key: None,
+                    selected: None,
                 },
                 Ui::Badge {
                     label: "Exec, Fs".into(),
@@ -494,11 +619,13 @@ mod tests {
                 prompt: "a?".into(),
                 options: vec![],
                 key: None,
+                selected: None,
             },
             Ui::Choice {
                 prompt: "b?".into(),
                 options: vec![("x".into(), "X".into()), ("y".into(), "Y".into())],
                 key: None,
+                selected: None,
             },
             Ui::Card {
                 title: "outer".into(),
@@ -512,12 +639,14 @@ mod tests {
                             prompt: "c?".into(),
                             options: vec![],
                             key: None,
+                            selected: None,
                         }],
                     },
                     Ui::Choice {
                         prompt: "d?".into(),
                         options: vec![("k".into(), "K".into())],
                         key: None,
+                        selected: None,
                     },
                 ],
             },
