@@ -193,6 +193,19 @@ pub struct JitEffectMachine {
     /// [`Self::enter_nested_child`], decremented on guard drop; the stowed root
     /// is registered on 0→1 and deregistered on 1→0.
     nested_child_depth: usize,
+    /// W1b-redux: a value-plane bind whose fragment ran through the SUSPENDABLE
+    /// path (`run_fragment_suspendable_binding`/`resume_suspended_binding`) tenures
+    /// its `Done` result into old-space and stashes the persistent [`RootSlot`]
+    /// here, for the caller to read out AFTER the machine moves back off the eval
+    /// thread. Unlike the repl's `run_fragment_and_bind` (which returns the slot
+    /// directly on its pinned thread), the harness runs a bind on a scoped eval
+    /// thread and a `RootSlot` (`*mut *mut u8`) is `!Send`, so it cannot cross the
+    /// scope boundary as a bare value — it rides home INSIDE the machine (already
+    /// `Send` under stowed-XOR-running, same as `suspended_continuation`). `None`
+    /// except in the window between a bind fragment completing and the caller
+    /// taking it via [`Self::take_last_bound_root`]. A fork bind lands here on the
+    /// eventual `resume`, not the initial (suspending) run.
+    last_bound_root: Option<crate::old_space::RootSlot>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -447,6 +460,7 @@ impl JitEffectMachine {
             suspended_continuation: None,
             stowed_root_cell: None,
             nested_child_depth: 0,
+            last_bound_root: None,
         })
     }
 
@@ -481,6 +495,7 @@ impl JitEffectMachine {
             suspended_continuation: None,
             stowed_root_cell: None,
             nested_child_depth: 0,
+            last_bound_root: None,
         })
     }
 
@@ -684,7 +699,7 @@ impl JitEffectMachine {
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
         let func_id = self.func_id;
-        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag)
+        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, None)
     }
 
     /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
@@ -708,7 +723,26 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag)
+        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, None)
+    }
+
+    /// Value-plane BIND sibling of [`Self::run_fragment_suspendable`]: drive a
+    /// bind fragment (`x <- e`) through the same threadless suspend path, and — on
+    /// `Done` — tenure the result into old-space, stashing its [`RootSlot`] on the
+    /// machine (read via [`Self::take_last_bound_root`] after the machine moves off
+    /// the eval thread). `forced` deep-forces the result to NF first (Tier0 data)
+    /// vs tenuring a Tier1 closure as-is. A fork bind SUSPENDS here (no tenure yet);
+    /// its value is bound on the eventual [`Self::resume_suspended_binding`].
+    pub fn run_fragment_suspendable_binding<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        forced: bool,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, Some(forced))
     }
 
     /// Shared suspend-capable run body, parametrized by the entry `func_id`.
@@ -724,6 +758,7 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
         suspend_tag: u64,
+        bind_forced: Option<bool>,
     ) -> Result<SuspendableOutcome, JitError> {
         assert!(
             self.session.is_some(),
@@ -745,14 +780,14 @@ impl JitEffectMachine {
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         // SAFETY: machine_state outlives this run (owned by self).
         machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
-        // CompiledEffectMachine has no custom Drop so the bytes are valid when
-        // _guard drops (machine drops first but the frame is still live).
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
-        }
+        // Reclaim is armed LAST (after finish_suspendable), NOT here: a bind finish
+        // tenures into self.session, and arm_reclaim's stored *mut self.session
+        // would alias it (mirrors run_fragment_and_bind's arm-last ordering). Safe
+        // for the non-bind case too — nothing touches self.session before the arm,
+        // and the arm runs unconditionally (even on a run error) so the guard still
+        // reclaims the session buffer on drop.
         let yield_result = initial_step(&mut machine, "stepping main function");
-        let outcome = drive_effect_loop(
+        let finished = match drive_effect_loop(
             &mut machine,
             &self.cancel_flag,
             table,
@@ -761,8 +796,18 @@ impl JitEffectMachine {
             "",
             Some(suspend_tag),
             yield_result,
-        )?;
-        self.finish_suspendable(&mut machine, outcome)
+        ) {
+            Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+            Err(e) => Err(e),
+        };
+        // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
+        // CompiledEffectMachine has no custom Drop so the bytes are valid when
+        // _guard drops (machine drops first but the frame is still live). The
+        // guard's reclaim reads the post-run buffer/cursor back into self.session.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+        finished
     }
 
     /// Re-enter a turn suspended by [`Self::run_suspendable`], feeding the
@@ -785,6 +830,39 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         input: ResumeInput,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.resume_suspended_inner(table, handlers, user, suspend_tag, input, None)
+    }
+
+    /// Value-plane BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
+    /// bind turn (`x <- e` that stowed at a fork) and, on `Done`, tenure the bound
+    /// result — stashing its [`RootSlot`] on the machine
+    /// ([`Self::take_last_bound_root`]). `forced` deep-forces to NF (Tier0) vs
+    /// tenuring a Tier1 closure as-is.
+    pub fn resume_suspended_binding<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        forced: bool,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.resume_suspended_inner(table, handlers, user, suspend_tag, input, Some(forced))
+    }
+
+    /// Shared body of [`Self::resume_suspended`] /
+    /// [`Self::resume_suspended_binding`], parametrized by `bind_forced` (`None` →
+    /// plain resume; `Some(forced)` → tenure the completed result as a value-plane
+    /// bind).
+    fn resume_suspended_inner<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        bind_forced: Option<bool>,
     ) -> Result<SuspendableOutcome, JitError> {
         // PEEK the continuation — do NOT consume it yet. The A5 NF-force
         // (segment 40) rejects a bottom-bearing answer WITHOUT consuming the
@@ -831,10 +909,10 @@ impl JitEffectMachine {
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         // SAFETY: machine_state outlives this run (owned by self).
         machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // SAFETY: as in run_suspendable.
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
-        }
+        // Reclaim is armed LAST (after finish_suspendable), NOT here — see
+        // run_suspendable_with_entry: a bind finish tenures into self.session and
+        // arm_reclaim's *mut self.session would alias it. The abort branch arms
+        // explicitly before it returns (it never reaches the tail arm below).
 
         let answer = match input {
             ResumeInput::Answer(val) => val,
@@ -850,6 +928,15 @@ impl JitEffectMachine {
                 // machine-scoped state stays reachable, but this early return
                 // surfaces the error directly without touching the first-cause
                 // cell.
+                // Abort does not run the continuation, so it never reaches the
+                // tail arm; arm+drop the guard here to restore the session buffer
+                // exactly as the pre-W1b path did (which armed before this branch).
+                unsafe {
+                    _guard.arm_reclaim(
+                        &mut self.session as *mut _,
+                        machine.vmctx_mut() as *const _,
+                    );
+                }
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "ask aborted by caller: {reason}"
                 ))));
@@ -857,38 +944,117 @@ impl JitEffectMachine {
         };
 
         // Feed the answer as a Complete response through the SAME materialization
-        // + resume path the effect loop uses, then continue driving.
-        let yield_result = materialize_response_and_resume(
+        // + resume path the effect loop uses, then continue driving. Capture the
+        // result WITHOUT `?` so the tail arm runs on every path (a bind finish
+        // tenures into self.session, so the arm must follow finish_suspendable).
+        let finished = match materialize_response_and_resume(
             &mut machine,
             continuation,
             tidepool_effect::Response::Complete(answer),
             table,
             suspend_tag,
             "",
-        )?;
-        let outcome = drive_effect_loop(
-            &mut machine,
-            &self.cancel_flag,
-            table,
-            handlers,
-            user,
-            "",
-            Some(suspend_tag),
-            yield_result,
-        )?;
-        self.finish_suspendable(&mut machine, outcome)
+        ) {
+            Ok(yield_result) => match drive_effect_loop(
+                &mut machine,
+                &self.cancel_flag,
+                table,
+                handlers,
+                user,
+                "",
+                Some(suspend_tag),
+                yield_result,
+            ) {
+                Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        // SAFETY: machine.vmctx_mut() points into `machine` on this frame; the
+        // guard's reclaim reads the post-run buffer/cursor into self.session.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+        finished
     }
 
     /// Shared epilogue for the suspendable path: bridge a `Done` pointer to a
     /// `Value` (byte-identical to [`Self::run_with_entry`]'s epilogue), or stow
     /// the continuation on `self` and surface the suspension.
+    ///
+    /// `bind_forced` distinguishes a plain suspendable turn (`None` — bridge the
+    /// `Done` pointer, byte-identical to the pre-W1b epilogue) from a VALUE-PLANE
+    /// BIND (`Some(forced)` — tenure the `Done` result into old-space, stash its
+    /// [`RootSlot`] on `self.last_bound_root`, and bridge the tenured value). The
+    /// bind branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
+    /// have armed reclaim before this call (the guard's `*mut self.session` would
+    /// alias) — see `run_fragment_and_bind`'s arm-last ordering.
     fn finish_suspendable(
         &mut self,
         machine: &mut CompiledEffectMachine,
         outcome: DriveOutcome,
+        bind_forced: Option<bool>,
     ) -> Result<SuspendableOutcome, JitError> {
         match outcome {
             DriveOutcome::Done(done_ptr) => {
+                if let Some(forced) = bind_forced {
+                    if done_ptr.is_null() {
+                        return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                    }
+                    // Optionally deep-force to NF before tenuring (Tier0 data);
+                    // Tier1 closures tenure as-is (callable code, not data). Mirrors
+                    // `run_fragment_and_bind`'s K/E/D epilogue.
+                    let nf_ptr = if forced {
+                        let nf = unsafe {
+                            crate::signal_safety::with_signal_protection(|| {
+                                crate::host_fns::deep_force(
+                                    machine.vmctx_mut() as *mut VMContext,
+                                    done_ptr,
+                                )
+                            })
+                        }
+                        .map_err(JitError::Signal)?;
+                        if let Some(err) = crate::host_fns::take_runtime_error() {
+                            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                        }
+                        nf
+                    } else {
+                        done_ptr
+                    };
+                    let from = self
+                        .machine_state
+                        .gc_active_range()
+                        .expect("GC state installed for the suspendable bind run");
+                    let from_range = (from.0 as *const u8, unsafe {
+                        from.0.add(from.1) as *const u8
+                    });
+                    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                    // SAFETY: nf_ptr is a live heap object in the nursery from-range;
+                    // tenure evacuates its closure into old-space and registers the
+                    // returned slot as a persistent root valid for the machine's
+                    // life. `self.session` is unaliased (reclaim not yet armed).
+                    let slot = unsafe {
+                        self.session
+                            .as_mut()
+                            .expect("session machine for a bind tenure")
+                            .old_space
+                            .tenure(vmctx_ptr, nf_ptr, from_range)
+                    };
+                    self.last_bound_root = Some(slot);
+                    // Bridge the TENURED (rooted, stable) value for the turn's
+                    // rendered result. SAFETY: slot.current() is the live old-space
+                    // pointer; forcing is a no-op on the already-NF Tier0 case.
+                    let bridge_res = unsafe {
+                        let live = slot.current();
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::heap_to_value_forcing(live, vmctx_ptr)
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    let value =
+                        crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
+                    return Ok(SuspendableOutcome::Completed(value));
+                }
                 // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
                 // vmctx is valid for forcing thunks; signal protection guards
                 // against crashes.
@@ -911,6 +1077,15 @@ impl JitEffectMachine {
                 Ok(SuspendableOutcome::Suspended { request })
             }
         }
+    }
+
+    /// Take the [`RootSlot`] a value-plane bind tenured on its last suspendable
+    /// completion (`run_fragment_suspendable_binding`/`resume_suspended_binding`),
+    /// clearing it. `None` if the last run was not a bind or has already been
+    /// taken. The caller reads this AFTER the machine moves back off the eval
+    /// thread and records the `BindingEntry` against it.
+    pub fn take_last_bound_root(&mut self) -> Option<crate::old_space::RootSlot> {
+        self.last_bound_root.take()
     }
 
     /// Run a pure (non-effectful) program to completion.
