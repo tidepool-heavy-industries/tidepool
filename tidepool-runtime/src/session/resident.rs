@@ -264,9 +264,16 @@ where
     }
 
     /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
-    /// reference earlier value bindings. Empty until the first bind materializes.
+    /// reference earlier value bindings — ALL live gens (incl. shadowed).
     pub fn inject_val_modules(&self) -> Vec<String> {
         self.core.live_val_modules()
+    }
+
+    /// The CURRENT `Val.G<g>` module per still-live name — what a turn IMPORTS
+    /// (unqualified) so the reference typechecks. Excludes shadowed older gens
+    /// (those are injected but not imported, to avoid an ambiguous occurrence).
+    pub fn current_val_modules(&self) -> Vec<String> {
+        self.core.current_val_modules()
     }
 
     /// The continuation id this session is suspended on, if any.

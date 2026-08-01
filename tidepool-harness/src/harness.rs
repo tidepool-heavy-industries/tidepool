@@ -32,7 +32,7 @@
 //! resident-session steps so the tokio reactor is never blocked.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -41,9 +41,10 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tokio::sync::{mpsc, oneshot};
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
-use tidepool_repr::{DataConTable, SessionId};
+use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    classify_turn, ModuleEnv, ResidentError, ResidentOutcome, ResidentSession, SessionLib, TurnKind,
+    classify_turn, compile_session_turn, BoundBinder, ModuleEnv, ResidentError, ResidentOutcome,
+    ResidentSession, SessionBind, SessionLib, TurnKind,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -116,6 +117,11 @@ struct NodeConvo {
     /// bridge an answer Value against the same constructor set.
     suspend_table: Option<DataConTable>,
     suspend_asks: AsksSidecar,
+    /// When the SUSPENDED turn is a value-plane bind (`x <- fork …`), the binder
+    /// metadata + generation to materialize once the bind completes on resume.
+    /// `resume_parent` drives `resume_bind` (not `resume`) while this is `Some`,
+    /// and clears it when the bind finally lands (a completion, not a re-suspend).
+    pending_bind: Option<(BoundBinder, Generation)>,
 }
 
 #[derive(Clone)]
@@ -577,6 +583,7 @@ impl Harness {
                 pending: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
+                pending_bind: None,
             },
         );
         Ok(())
@@ -686,16 +693,16 @@ impl Harness {
         // expression; a classify failure falls through to the expression path,
         // which re-reports any real error.
         let block_owned = block.to_string();
-        let is_decl = {
+        let classification = {
             let b = block_owned.clone();
             tokio::task::spawn_blocking(move || classify_turn(&b))
                 .await
                 .map_err(|e| HarnessError::Resident(format!("classify task join: {e}")))?
-                .map(|c| c.kind == TurnKind::Decl)
-                .unwrap_or(false)
+                .ok()
         };
+        let kind = classification.as_ref().map(|c| c.kind);
 
-        if is_decl {
+        if kind == Some(TurnKind::Decl) {
             let mut session = self.take_session(node)?;
             let (session, res) = tokio::task::spawn_blocking(move || {
                 let r = session.define_scoped(&[&block_owned]);
@@ -717,6 +724,16 @@ impl Harness {
                     Err(HarnessError::Resident(e.to_string()))
                 }
             };
+        }
+
+        // A value-plane BIND turn (`x <- e`) materializes its result into the
+        // node's value plane so a later turn can reference it. Single-binder only
+        // for now (multi-bind is a follow-up); a bind with no parsed binder name
+        // falls through to the expression path below.
+        if kind == Some(TurnKind::Bind) {
+            if let Some(name) = classification.and_then(|c| c.binders.into_iter().next()) {
+                return self.run_bind_turn(node, block, imports, helpers, &name).await;
+            }
         }
 
         // Expression turn: make the compile session-aware — import the node's
@@ -760,27 +777,38 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("run task join: {e}")))?;
 
-        // Restore the session and record the turn's compile table.
-        self.put_session(node, session, Some(compiled.table.clone()), asks.clone());
+        // Restore the session, flush effects, and classify the outcome — shared
+        // with the value-plane bind path (`None` = this turn is not a bind).
+        self.finish_run(node, session, outcome, compiled.table, asks, None)
+    }
 
-        // Log the effects this turn ran (while the node is still `Running`,
-        // before any `node_done` below) so the observatory's trace pane shows
-        // them. Safe to call unconditionally — a no-op if the turn ran none.
+    /// Shared turn epilogue: restore the session, flush effects, and turn a
+    /// [`ResidentOutcome`] into a [`engine::TurnOutcome`] — `node_done` on
+    /// completion, publish + `set_pending` on suspension. `pending_bind` is
+    /// `Some` for a value-plane BIND turn that suspended (`x <- fork …`): it is
+    /// stashed so `resume_parent` drives `resume_bind` and the binding
+    /// materializes when the fork answers. A completion needs no `pending_bind`
+    /// handling — `run_bind` already materialized it.
+    fn finish_run(
+        &self,
+        node: NodeId,
+        session: Session,
+        outcome: Result<ResidentOutcome, ResidentError>,
+        table: DataConTable,
+        asks: AsksSidecar,
+        pending_bind: Option<(BoundBinder, Generation)>,
+    ) -> Result<engine::TurnOutcome, HarnessError> {
+        self.put_session(node, session, Some(table.clone()), asks.clone());
         self.flush_effects(node);
 
         match outcome {
             Ok(ResidentOutcome::Completed { result, .. }) => {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered.clone())?;
-                // Keep the resident session ALIVE past completion (don't
-                // `drop_session`): a Done root node can be reopened for a
-                // follow-up turn ([`Self::follow_up`]), and the persisted
-                // session carries its heap + bindings across turns — a true
-                // REPL continuation, not a restart.
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
-                let classified = engine::classify_hole(&request, &compiled.table, &asks);
+                let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
                     HoleRouting::Fork { ty, .. } | HoleRouting::ReturnControl { ty, .. } => {
@@ -808,20 +836,130 @@ impl Harness {
                         classified: classified.clone(),
                     },
                 );
+                // A suspended bind: remember the binder+gen so the resume path
+                // materializes it (via `resume_bind`) when the fork answers.
+                if let Some(pb) = pending_bind {
+                    let mut convos = self.convos.lock();
+                    if let Some(convo) = convos.get_mut(&node) {
+                        convo.pending_bind = Some(pb);
+                    }
+                }
                 Ok(engine::TurnOutcome::Suspended {
                     hole,
                     classified,
-                    table: compiled.table,
+                    table,
                 })
             }
             Err(e) => {
-                // A run-time fault (not a language error — compile already
-                // succeeded). Feed it back and let the caller decide; log a nudge.
                 let msg = format!("The eval failed at runtime: {e}");
                 self.push_user_turn(node, &msg)?;
                 Err(HarnessError::Resident(e.to_string()))
             }
         }
+    }
+
+    /// Peek a node's value-plane compile context WITHOUT checking the session
+    /// out (so a compile failure never leaks it): `(decl module import, live
+    /// `Val.G` inject modules, session root, the next value generation to mint)`.
+    /// `None` when the node has no session or no decl plane.
+    fn session_bind_context(
+        &self,
+        node: NodeId,
+    ) -> Option<(String, Vec<String>, PathBuf, Generation)> {
+        let convos = self.convos.lock();
+        let s = convos.get(&node).and_then(|c| c.session.as_ref())?;
+        let root = s.lib_include_dir()?;
+        // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module of
+        // each live name (newest gen only — shadowed gens are injected, not
+        // imported, to avoid an ambiguous occurrence). Injection (`--inject-val`)
+        // uses ALL live gens.
+        let mut import_lines: Vec<String> = Vec::new();
+        if let Some(m) = s.session_import_module() {
+            import_lines.push(m);
+        }
+        import_lines.extend(s.current_val_modules());
+        Some((
+            import_lines.join("\n"),
+            s.inject_val_modules(),
+            root,
+            s.val_gen().next(),
+        ))
+    }
+
+    /// Run a value-plane BIND turn (`x <- e`): compile it session-aware (the
+    /// extract's `--session-root`/`--inject-val`/`--session-bind` path via
+    /// `compile_session_turn`, so it resolves earlier value bindings and emits
+    /// binder metadata), then drive `run_bind`. A fork bind suspends here and its
+    /// value is materialized on resume (`finish_run` stashes the binder).
+    async fn run_bind_turn(
+        &self,
+        node: NodeId,
+        stmt: &str,
+        imports: &str,
+        helpers: &str,
+        binder_name: &str,
+    ) -> Result<engine::TurnOutcome, HarnessError> {
+        let Some((session_imports, inject, session_root, gen)) = self.session_bind_context(node)
+        else {
+            return Err(HarnessError::Resident(
+                "value-plane bind requires a node decl plane".into(),
+            ));
+        };
+        // Decls + current value modules are IMPORTED (name visibility); values
+        // are ALSO injected (`--inject-val`) so they resolve at runtime via the
+        // session's ExternalEnv.
+        let merged_imports = match (imports.is_empty(), session_imports.is_empty()) {
+            (_, true) => imports.to_string(),
+            (true, false) => session_imports,
+            (false, false) => format!("{imports}\n{session_imports}"),
+        };
+        let src = engine::template_session_bind(&self.cfg, stmt, binder_name, &merged_imports, helpers);
+        let mut include = self.cfg.include.clone();
+        include.push(session_root.clone());
+        let names = vec![binder_name.to_string()];
+        let g0 = gen.0;
+
+        // Compile off-reactor through the session-aware path.
+        let compiled = tokio::task::spawn_blocking(move || {
+            let include_refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
+            compile_session_turn(
+                &src,
+                &include_refs,
+                &session_root,
+                &inject,
+                Some(SessionBind {
+                    names: &names,
+                    gen: g0,
+                }),
+            )
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("bind compile join: {e}")))?
+        .map_err(|e| HarnessError::Compile(e.to_string()))?;
+
+        let binder = match compiled.binders.into_iter().next() {
+            Some(b) => b,
+            None => {
+                return Err(HarnessError::Resident(
+                    "session-bind emitted no binder metadata".into(),
+                ))
+            }
+        };
+        let asks = AsksSidecar::from_pairs(compiled.asks);
+        let table = compiled.table;
+        let expr = compiled.expr;
+
+        let mut session = self.take_session(node)?;
+        let binder_for_run = binder.clone();
+        let run_table = table.clone();
+        let (session, outcome) = tokio::task::spawn_blocking(move || {
+            let out = session.run_bind("bind", &expr, &run_table, &binder_for_run, gen);
+            (session, out)
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("bind run join: {e}")))?;
+
+        self.finish_run(node, session, outcome, table, asks, Some((binder, gen)))
     }
 
     /// Loop [`Self::drive_turn`] until the node SUSPENDS at a hole, COMPLETES,
@@ -1671,19 +1809,25 @@ impl Harness {
         // `run_block` resolves the first hole's. Snapshot it now (session is
         // about to be taken out) so the re-suspend arm below can classify the
         // next hole with real site/type instead of publishing `None`/`None`.
-        let (table, asks) = {
+        let (table, asks, pending_bind) = {
             let convos = self.convos.lock();
             let c = convos.get(&node);
             (
                 c.and_then(|c| c.suspend_table.clone()).unwrap_or_default(),
                 c.map(|c| c.suspend_asks.clone()).unwrap_or_default(),
+                c.and_then(|c| c.pending_bind.clone()),
             )
         };
 
         let mut session = self.take_session(node)?;
         let hole_str = hole.0.clone();
+        // A suspended value-plane bind resumes via `resume_bind` (which
+        // materializes the binding on completion); a plain hole via `resume`.
         let (session, outcome) = tokio::task::spawn_blocking(move || {
-            let out = session.resume(&hole_str, answer);
+            let out = match &pending_bind {
+                Some((binder, gen)) => session.resume_bind(&hole_str, answer, binder, *gen),
+                None => session.resume(&hole_str, answer),
+            };
             (session, out)
         })
         .await
@@ -1715,6 +1859,14 @@ impl Harness {
             ResidentOutcome::Completed { result, .. } => {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered)?;
+                // A suspended value-plane bind materialized on this completion
+                // (via `resume_bind`) — clear the stashed binder.
+                {
+                    let mut convos = self.convos.lock();
+                    if let Some(convo) = convos.get_mut(&node) {
+                        convo.pending_bind = None;
+                    }
+                }
                 // Keep the session ALIVE past completion (don't `drop_session`),
                 // same as `run_block`: a node that suspended on a hole and then
                 // resumed to Done is still a followable conversation — its

@@ -468,6 +468,81 @@ pub fn template_answer_turn(
     out
 }
 
+/// Wrap a value-plane BIND turn (`x <- e`) as a session module whose `__result`
+/// runs the bind statement and yields the bound name — the shape
+/// `compile_session_turn` expects (target `__result`, `Eff <stack> _` so GHC
+/// infers the bound type from the block). Mirrors the repl's `wrap_bind_source`;
+/// the harness preamble/effect-stack differ, the `__result`/session-bind contract
+/// is identical. `stmt` is the raw `x <- e` block; `binder` is the bound name.
+pub fn template_session_bind(
+    cfg: &EngineConfig,
+    stmt: &str,
+    binder: &str,
+    imports: &str,
+    helpers: &str,
+) -> String {
+    let decls = tidepool_mcp::standard_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let stack = cfg.effect_stack_type();
+
+    let mut out = String::new();
+    // Insert user imports right before the `default` decl (the same insertion
+    // point `template_haskell`/`template_answer_turn` use).
+    if imports.trim().is_empty() {
+        out.push_str(&preamble);
+    } else {
+        let insert = preamble.find("default (Int").unwrap_or(preamble.len());
+        out.push_str(&preamble[..insert]);
+        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str("import ");
+            out.push_str(imp);
+            out.push('\n');
+        }
+        out.push_str(&preamble[insert..]);
+    }
+    out.push_str("-- [user]\n");
+    if !helpers.trim().is_empty() {
+        out.push_str(helpers);
+        if !helpers.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("__result :: Eff {stack} _\n"));
+    out.push_str("__result = do {\n");
+    push_braced_stmt(&mut out, stmt);
+    out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    out
+}
+
+/// Embed a turn statement verbatim inside an explicit `do { }` block (mirrors the
+/// repl's `push_braced_stmt`): a bare `let x = e` gets explicit `let { }`
+/// brackets so an unindented continuation is legal; every other statement is
+/// embedded as-is. Explicit brackets suspend the layout algorithm so multi-line
+/// / quasiquote payloads keep byte fidelity.
+fn push_braced_stmt(out: &mut String, turn_text: &str) {
+    let trimmed = turn_text.trim_start();
+    let let_rest = trimmed
+        .strip_prefix("let")
+        .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
+    match let_rest {
+        Some(rest) if !rest.trim_start().starts_with('{') => {
+            out.push_str("let {");
+            out.push_str(rest);
+            if !rest.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(" }\n");
+        }
+        _ => {
+            out.push_str(turn_text);
+            if !turn_text.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("engine setup failed: {0}")]

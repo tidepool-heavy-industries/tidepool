@@ -40,6 +40,15 @@ pub struct AsksSidecar {
 }
 
 impl AsksSidecar {
+    /// Build a sidecar from `(site, type)` pairs — the shape
+    /// `tidepool_runtime`'s `compile_session_turn` returns (the harness reuses
+    /// that session-aware compile for value-plane bind turns).
+    pub fn from_pairs(pairs: Vec<(u32, String)>) -> Self {
+        AsksSidecar {
+            by_site: pairs.into_iter().collect(),
+        }
+    }
+
     /// The rendered answer type for a yield-site id, if the site is known.
     pub fn type_of(&self, site: u32) -> Option<&str> {
         self.by_site.get(&site).map(String::as_str)
