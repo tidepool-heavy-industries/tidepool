@@ -198,6 +198,13 @@ ill-typed field is `Left FormError`). Field constructors: `textField`/`multiline
 (`import Tidepool.Ui`) returns the raw `Value` submission — pass the `Ui` directly (e.g. \
 `dialogAsk (textIn \"note?\" True)`), NOT `toJSON` of it.\n\
 \n\
+The session PERSISTS across turns like GHCi: a value you bind with `x <- …` this turn \
+— a `returnControl`/`returnControlFork` answer, or a `dialogForm`/`dialogAsk` submission \
+— is a LIVE binding in your NEXT turn, so you can BRANCH on it. A branching dialogue is \
+exactly that: bind a choice, then next turn pick the follow-up from it. E.g. turn 1 \
+`lane <- returnControl @Text \"which lane — alpha or beta?\"`; turn 2 reads `lane` and \
+presents the form for that branch. Bind what you'll need later instead of re-asking.\n\
+\n\
 When you are answering a HOLE, your block's value IS the answer: write `resume expr` \
 where `expr :: T` matches the hole's declared type. `resume` is the identity here — \
 `resume Approve` just yields `Approve`.";

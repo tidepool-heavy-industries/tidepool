@@ -13,6 +13,33 @@ path through `compile_session_turn` too — deferred for expr-render parity);
 multi-bind `(a,b) <- e`. Steps 2 (decl-source fork inheritance) and 3 (value
 heap-clone on fork) remain per the main plan.
 
+## Fork inheritance (steps 2–3) — DEFERRED; decision recorded (2026-08-01)
+
+**"Good-enough fork" today:** the current fork/answerer flow (child inherits the
+parent's TRANSCRIPT, answers, resumes the parent — `golden_path`/`acceptance_forkall`
+green) is the good-enough state. Full session inheritance (a forked child seeing the
+parent's decls + value bindings as LIVE bindings) is deferred. Single-node work
+(resume + forms + value persistence — now landed) does not need it.
+
+**Snapshot mechanism = (B), re-bootstrap** (Inanna, 2026-08-01). "Bootstrap" =
+`JitEffectMachine::compile_session` builds a machine with its OWN JIT-compiled code
+module (the `pipeline`/Cranelift `JITModule`). **(A)** = the forked child SHARES the
+parent's one code module (cloned closures' code pointers stay valid, but two
+machines mutating one module while the parent is parked is fraught). **(B)** = the
+child RE-BOOTSTRAPS its own fresh machine/module from the boot seed. Chosen because
+it lets **N forked children each independently diverge** from the parent's context
+without stepping on each other or the parent — the multi-child-sharing-parent-ctx
+goal. Decomposition under (B), by substrate:
+- transcript → copy (trivial).
+- decl plane → the child re-imports the parent's `Lib.G` SOURCE and recompiles in
+  its own module (B-native; no heap surgery).
+- value plane Tier0 (forced data, e.g. `[Int]`) → clone the roots into the child's
+  fresh heap (no code pointers; `RootSlot` addrs rebase into the child's machine).
+- value plane Tier1 (a bound closure/PAP) → the ONE hard case: embeds a code pointer
+  into the PARENT's module. For v1, RESTRICT inheritance to Tier0 + decls (a forked
+  child cannot inherit a live parent closure) — loud, not silent — and revisit if a
+  real case needs it. This is the open detail to settle when steps 2–3 are built.
+
 ---
 
 Status: DESIGN COMPLETE, implementation in progress (single-threaded, by hand).
