@@ -87,14 +87,36 @@ method `take_last_bound_root() -> Option<RootSlot>` (delegates to `machine_mut`)
 
 ## STATUS
 
-- **jit_machine.rs layer: DONE + VERIFIED, committed `a38d33ee`.** New primitives
-  `run_fragment_suspendable_binding`/`resume_suspended_binding`/
-  `take_last_bound_root` + `finish_suspendable(bind_forced)`; arm_reclaim moved
-  after finish in both suspendable entries. 601/601 codegen tests pass under
-  `GC_POISON`+`HEAP_VERIFY` (incl. `nested_child_gc_rooting`). This is the hard
-  GC-critical part; the rest is plumbing.
-- Remaining: resident.rs `run_bind`/`resume_bind` + materialize; harness
-  compile-unification (below); harness bind-path + pending-bind threading; test.
+- **[DONE `a38d33ee`] jit_machine.rs primitives** — `run_fragment_suspendable_binding`
+  / `resume_suspended_binding` / `take_last_bound_root` + `finish_suspendable(bind_forced)`;
+  arm_reclaim moved after finish. 601/601 codegen under `GC_POISON`+`HEAP_VERIFY`.
+- **[DONE `1046c7c1`] resident.rs bind path** — `run_bind`/`resume_bind`/
+  `materialize_binder`; `run` seeds env internally; `val_gen`/`inject_val_modules`
+  accessors; `reenter` threads `(binder, gen)`. Verified: resident_session 4/4,
+  golden_path + cross_turn + form_widgets green (real extract).
+- **[DONE `0d4be565`] compile_session_turn returns `asks`** — SessionTurnResult
+  gains the typed-yield sidecar so the harness can adopt it.
+- **[REMAINING] the harness turn-path wiring** (the last mile — delicate, on the
+  working fork/dialog/decl path; verify with golden_path + cross_turn after each
+  change):
+  1. Expose the node's session_root on `ResidentSession` (the `SessionLib` root
+     `compile_session_turn` writes ifaces to) — a `session_root()` accessor over
+     `core.lib_include_dir()` (or the SessionLib root).
+  2. `run_block`: replace `compile::compile_turn` with `compile_session_turn`
+     (session_root + inject = decl module ++ `inject_val_modules()`), reading the
+     `asks` off `SessionTurnResult` for hole classification (replaces the bespoke
+     `compile.rs` path). Decl turns still go through `define_scoped` (unchanged).
+  3. Classify Bind (`classify_turn` → `TurnKind::Bind`): mint `g =
+     session.val_gen().next()`, wrap `__result = do { <stmt>; pure <names> }`,
+     compile with `SessionBind{names, gen: g.0}`, call `run_bind(.., binder, g)`.
+     On `Completed` → `TurnOutcome::Completed` (render "bound x"); on `Suspended`
+     → stash `(binder, g)` in `NodeConvo` beside `pending`, return `Suspended`.
+  4. `resume_parent` (the path `answer_fork`/`answer_fanout` call): if the node
+     has a stashed pending-bind, drive `resume_bind(cont, answer, binder, g)`
+     instead of `resume`; materialize lands on its `Completed`.
+  5. Acceptance test `acceptance_value_bind.rs` (real extract, `GC_POISON`):
+     turn 1 `steps <- fork @[Int] "…"` → answer `[1,2,3]`; turn 2
+     `pure (toJSON (sum steps))` renders `6`.
 
 ## REFINEMENT 1 — the value plane FORCES unifying harness compile onto `compile_session_turn`
 
