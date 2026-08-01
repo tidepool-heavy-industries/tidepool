@@ -79,6 +79,11 @@ pub struct SessionTurnResult {
     pub warnings: MetaWarnings,
     /// The binder(s) this turn introduced — non-empty only on a BIND turn.
     pub binders: Vec<BoundBinder>,
+    /// Typed-yield sites from the `asks.json` sidecar — `(site id, rendered
+    /// answer type)`. The harness reads these to classify a `fork`/`dialogAsk`
+    /// hole; the repl ignores them (its ask surface is untyped-site). Empty when
+    /// the turn has no yield sites (or the sidecar is absent — an older extract).
+    pub asks: Vec<(u32, String)>,
 }
 
 /// Arguments for the bind half of a turn (omit for an EXPR turn).
@@ -249,12 +254,36 @@ pub fn compile_session_turn(
         Vec::new()
     };
 
+    let asks = read_asks_sidecar(&temp.path().join("asks.json"))?;
+
     Ok(SessionTurnResult {
         expr,
         table,
         warnings,
         binders,
+        asks,
     })
+}
+
+/// Read the `asks.json` typed-yield sidecar the extract writes into the
+/// output-dir — `[{ "site": u32, "type": String }, …]`. A missing file yields
+/// an empty list (a turn with no yield sites, or an older extract); a present
+/// but malformed file is a hard error (a real sidecar-shape regression).
+fn read_asks_sidecar(path: &Path) -> Result<Vec<(u32, String)>, CompileError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(CompileError::Io(e)),
+    };
+    #[derive(serde::Deserialize)]
+    struct Site {
+        site: u32,
+        #[serde(rename = "type")]
+        ty: String,
+    }
+    let sites: Vec<Site> = serde_json::from_slice(&bytes)
+        .map_err(|e| CompileError::ExtractFailed(format!("invalid asks.json sidecar: {e}")))?;
+    Ok(sites.into_iter().map(|s| (s.site, s.ty)).collect())
 }
 
 fn parse_bound_binders(json: &str) -> Result<Vec<BoundBinder>, CompileError> {
