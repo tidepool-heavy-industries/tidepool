@@ -1563,16 +1563,19 @@ translate expr =
           _ -> error $ "tagToEnum# without resolvable type argument"
 
     -- returnControl @T prompt / returnControlFork @T prompt / returnControlFanout
-    -- @T prompts (#R0 typed-yield pass, returnControlFanout added in B1 widen):
+    -- @T prompts (#R0 typed-yield pass, returnControlFanout added in B1 widen) /
+    -- forkAll @T prompts (Tidepool.Fork's surface verb, structurally identical
+    -- to returnControlFanout so it rides the SAME arm and Sited sibling):
     -- detected the same way as the tagToEnum# arm above (a known Var applied to
-    -- [Type ty] + one value arg — for Fanout that one value arg is the `[Text]`
-    -- prompts list, same shape, translated like any other Core expression). The
-    -- ONLY Core synthesis permitted is the head-swap to the hidden *Sited
-    -- sibling (its varId resolved once, name-only, in 'translateModule') with a
-    -- fresh site-id literal prepended — the sibling's REAL body (which builds
-    -- the "typedSite"-tagged AskWith payload) then runs normally at JIT
-    -- runtime; we never construct that payload ourselves.
-    Var v | isReturnControlVar v || isReturnControlForkVar v || isReturnControlFanoutVar v
+    -- [Type ty] + one value arg — for Fanout/forkAll that one value arg is the
+    -- `[Text]` prompts list, same shape, translated like any other Core
+    -- expression). The ONLY Core synthesis permitted is the head-swap to the
+    -- hidden *Sited sibling (its varId resolved once, name-only, in
+    -- 'translateModule') with a fresh site-id literal prepended — the
+    -- sibling's REAL body (which builds the "typedSite"-tagged AskWith
+    -- payload) then runs normally at JIT runtime; we never construct that
+    -- payload ourselves.
+    Var v | isReturnControlVar v || isReturnControlForkVar v || isReturnControlFanoutVar v || isForkAllVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , [Type ty] <- typeArgs
           , [promptArg] <- args -> do
@@ -1606,7 +1609,7 @@ translate expr =
             -- type matches what actually resumes the parent; the harness
             -- derives the element type back by stripping the outer `[]`.
             let renderedTy = Tidepool.GhcPipeline.renderType ty
-                typeStr = if isReturnControlFanoutVar v
+                typeStr = if isReturnControlFanoutVar v || isForkAllVar v
                             then "[" ++ renderedTy ++ "]"
                             else renderedTy
             recordReturnControlSite siteId (T.pack typeStr)
@@ -2679,6 +2682,18 @@ isReturnControlForkVar v =
 isReturnControlFanoutVar :: Id -> Bool
 isReturnControlFanoutVar v =
   occNameString (nameOccName (idName v)) == "returnControlFanout"
+
+-- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
+-- verb) — same convention as 'isReturnControlVar' et al. @forkAll@'s shape
+-- (@forall a. [Text] -> M [a]@) is STRUCTURALLY IDENTICAL to
+-- @returnControlFanout@'s (one type arg, one @[Text]@ value arg, list-typed
+-- answer), so it reuses 'isReturnControlFanoutVar'\'s own head-swap arm
+-- verbatim rather than growing a parallel one: every call site this
+-- predicate matches head-swaps straight to the EXISTING
+-- @returnControlFanoutSited@ sibling — no new @forkAllSited@ needed.
+isForkAllVar :: Id -> Bool
+isForkAllVar v =
+  occNameString (nameOccName (idName v)) == "forkAll"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
 -- stubs, combinator-sites widen) — same convention as

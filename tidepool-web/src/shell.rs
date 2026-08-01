@@ -126,6 +126,10 @@ button.ghost:hover { border-color: var(--fg-dim); color: var(--fg); }
 .ui-radio { border: 1px solid var(--border); border-radius: var(--r); padding: var(--s2) var(--s3); }
 .ui-radio-opt { display: flex; align-items: center; gap: var(--s2); font-size: 13px; color: var(--fg); padding: 1px 0; cursor: pointer; }
 .ui-radio-opt input[type=radio] { accent-color: var(--accent); }
+.ui-checkbox-group { border: 1px solid var(--border); border-radius: var(--r); padding: var(--s2) var(--s3); }
+.ui-checkbox-opt { display: flex; align-items: center; gap: var(--s2); font-size: 13px; color: var(--fg); padding: 1px 0; cursor: pointer; }
+.ui-checkbox-opt input[type=checkbox] { accent-color: var(--accent); }
+.ui-multichoice-options { display: flex; flex-direction: column; gap: var(--s1); margin-bottom: var(--s3); }
 .ui-subcard { border-left: 2px solid var(--border-strong); padding-left: var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
 .ui-subcard-title { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-faint); }
 .ui-form > button[type=submit] { align-self: flex-start; }
@@ -270,14 +274,19 @@ pub const OBSERVATORY_JS: &str = r#"
         form.querySelectorAll('[data-bind]').forEach((f) => {
           // A radio group shares one data-bind; only the selected one counts.
           if (f.type === 'radio' && !f.checked) return;
+          // A checkbox group (multiChoiceField) shares one data-bind too;
+          // unchecked boxes are skipped, checked ones accumulate into an array.
+          if (f.type === 'checkbox' && !f.checked) return;
           const path = f.getAttribute('data-bind');
           const dot = path.indexOf('.');
-          if (dot > 0) {
-            // Nested field, e.g. `values.f0` → body.values.f0 (multi-field form).
-            const parent = path.slice(0, dot), child = path.slice(dot + 1);
-            (body[parent] = body[parent] || {})[child] = f.value;
+          const parent = dot > 0 ? path.slice(0, dot) : null;
+          const child = dot > 0 ? path.slice(dot + 1) : path;
+          // Nested field, e.g. `values.f0` → body.values.f0 (multi-field form).
+          const bucket = parent ? (body[parent] = body[parent] || {}) : body;
+          if (f.type === 'checkbox') {
+            (bucket[child] = bucket[child] || []).push(f.value);
           } else {
-            body[path] = f.value;
+            bucket[child] = f.value;
           }
         });
         post(parsePost(form.getAttribute('data-on-submit')), form, body, form);
