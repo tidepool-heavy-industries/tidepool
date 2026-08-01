@@ -85,14 +85,58 @@ method `take_last_bound_root() -> Option<RootSlot>` (delegates to `machine_mut`)
   stays in-process on the calling thread — fine; it never crosses `spawn_blocking`
   again because materialize records it into the Send BindingTable synchronously).
 
-## compile.rs
+## STATUS
 
-`compile_turn` must emit stmt-binder metadata for a bind turn (var_id, tier
-`ValueTier`, type_display) — mirror `tidepool-runtime`'s `compile_session_turn` /
-`SessionBind` extract flag. Add a `compile_bind_turn` (or a `binders: Option<&[..]>`
-param) that passes the flag and reads the binder cbor/json. Reuse
-`tidepool-runtime`/`tidepool-codegen` binder+tier types (widen to `pub` narrowly
-if needed) — do NOT duplicate.
+- **jit_machine.rs layer: DONE + VERIFIED, committed `a38d33ee`.** New primitives
+  `run_fragment_suspendable_binding`/`resume_suspended_binding`/
+  `take_last_bound_root` + `finish_suspendable(bind_forced)`; arm_reclaim moved
+  after finish in both suspendable entries. 601/601 codegen tests pass under
+  `GC_POISON`+`HEAP_VERIFY` (incl. `nested_child_gc_rooting`). This is the hard
+  GC-critical part; the rest is plumbing.
+- Remaining: resident.rs `run_bind`/`resume_bind` + materialize; harness
+  compile-unification (below); harness bind-path + pending-bind threading; test.
+
+## REFINEMENT 1 — the value plane FORCES unifying harness compile onto `compile_session_turn`
+
+The harness's own `compile.rs::compile_turn` (target `result`, no binders, no
+session-injection, but reads `asks.json`) CANNOT resolve value bindings: a `Val.G<g>`
+binding is a THIN IFACE resolved at runtime via `ExternalEnv`, needing the extract's
+`--inject-val <module>` (compile-side) + `seed_external_env` (runtime-side). Textual
+import (W1b's decl mechanism) can't carry a value. So the harness turn compile MUST
+adopt `tidepool-runtime::session::turn::compile_session_turn` (`--session-root` +
+`--inject-val` + `--session-bind`/`--emit-bound-binders`), the SAME path the repl
+uses — which IS the W1 unification goal, not a detour.
+- The node already has a `SessionLib` (from `node_decl_plane`) → its root is the
+  `session_root`; `current_val_modules`+`current_lib_module` → `inject_modules`.
+- `compile_session_turn` does NOT read `asks.json` today; the extract still WRITES
+  it to the temp dir. EXTEND `SessionTurnResult` with an `asks` field (read the
+  sidecar from the same temp dir, mirroring `compile.rs::load_asks`). Then the
+  harness gets binders + asks + session-injection from ONE call, and
+  `harness/src/compile.rs`'s bespoke path can retire (or shrink to the sidecar
+  parser it shares).
+- `classify_turn` (turn.rs, already `pub`) replaces the harness's decl-only check:
+  Decl → decl plane; Bind → value-plane bind path; Expr → session-aware expr.
+
+## REFINEMENT 2 — generation threading (compile-time gen == materialize gen)
+
+The `Val.G<g>` gen is minted BEFORE compile (`g = core.val_gen().next()`), passed
+as `SessionBind{ gen: g.0 }`, and the extract stamps `binder.module =
+"Tidepool.Session.Val.G<g>"`. Materialize MUST reuse that SAME `g`
+(`SessionModule::val(g)` + `set_val_gen(g)`), not re-mint. So the harness mints `g`
+at compile, threads it into `run_bind` AND (for a fork bind that suspends) into the
+remembered pending-bind for `resume_bind`. `run`/`run_bind` should SEED the external
+env internally from `self.core.bindings` (the session owns its env) rather than take
+an empty `ExternalEnv` param — that is what makes a turn-2 expr resolve `steps`.
+Materialize (in resident.rs, mirroring the repl's session.rs layer — NOT the core):
+take the RootSlot off the machine, `retract` any same-name decl (one-plane
+invariant), `bind(BindingEntry{ name, id: SessionVarId::from_extract(var_id),
+module: SessionModule::val(g), value: tier→BoundValue, type_display })`,
+`set_val_gen(g)`.
+
+## compile.rs (superseded by Refinement 1)
+
+Do NOT grow the bespoke `compile.rs`. Adopt `compile_session_turn` + extend it with
+`asks`. `compile.rs` keeps only what's still harness-specific (if anything).
 
 ## harness.rs
 
