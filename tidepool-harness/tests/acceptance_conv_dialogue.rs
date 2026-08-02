@@ -152,3 +152,76 @@ async fn a_speculative_dialogue_subtree_walks_locally() {
         "the summary carries both answers threaded through the walk, got: {rendered}"
     );
 }
+
+/// `finish` carries the collected answers back as STRUCTURED data (a `Value`),
+/// so a later turn can read them as fields instead of re-parsing a summary
+/// string. Same one-turn walk, but the terminal is `finish (object [...])`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_returns_structured_answers() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("conv_finish.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+
+    // `object`/`.=` come from the auto-imported `Tidepool.Prelude` — no extra
+    // import beyond `Tidepool.Conv`.
+    let block = "Collecting the order as data.\n\n\
+        ```haskell\n\
+        import Tidepool.Conv\n\
+        \n\
+        runConv (do\n\
+        \x20 drink <- pick \"What'll you have?\" [\"Ale\", \"Water\"]\n\
+        \x20 nights <- pick \"How many nights?\" [\"1\", \"2\", \"3+\"]\n\
+        \x20 finish (object [\"drink\" .= drink, \"nights\" .= nights]))\n\
+        ```";
+    let replies = vec![reply(block)];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness.create_root("order", "Collect an order.").unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to node 1");
+    harness
+        .answer_dialog(root, json!({ "values": { "f0": "Ale" }, "prose": "" }))
+        .await
+        .expect("answer drink");
+    harness
+        .answer_dialog(root, json!({ "values": { "f0": "2" }, "prose": "" }))
+        .await
+        .expect("answer nights");
+
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    let (_h, events) = LogReader::open(&log_path).expect("open log");
+    let rendered = events
+        .filter_map(Result::ok)
+        .find_map(|r| match r.event {
+            Event::NodeDone {
+                node,
+                result_rendered,
+            } if node == root => Some(result_rendered),
+            _ => None,
+        })
+        .expect("root NodeDone in log");
+    // The result is a structured object under `result` — the caller reads
+    // `drink`/`nights` as fields, not out of a prose summary.
+    assert!(
+        rendered.contains("result")
+            && rendered.contains("drink")
+            && rendered.contains("Ale")
+            && rendered.contains("nights")
+            && rendered.contains('2'),
+        "finish carries the collected answers as structured data, got: {rendered}"
+    );
+}

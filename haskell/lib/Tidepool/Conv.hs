@@ -37,6 +37,7 @@ module Tidepool.Conv
   , multi
   , reask
   , done
+  , finish
   , runConv
   ) where
 
@@ -65,8 +66,11 @@ data Conv a
     Multi Text [Text] ([Text] -> Conv a)
   | -- | hand control back to the model, with the answers so far
     Reask
-  | -- | end the dialogue with a summary
+  | -- | end the dialogue with a summary line
     Done Text
+  | -- | end the dialogue carrying a STRUCTURED result (the collected answers),
+    -- not just prose — the caller gets it back under @result@
+    Finish Value
 
 instance Functor Conv where
   fmap f c = c >>= (Pure . f)
@@ -84,6 +88,7 @@ instance Monad Conv where
   Multi p os f >>= k = Multi p os (\xs -> f xs >>= k)
   Reask >>= _ = Reask
   Done t >>= _ = Done t
+  Finish v >>= _ = Finish v
 
 -- | A narrated beat. Its prose is folded into the NEXT input node's card, so it
 -- costs no extra operator click (a trailing 'say' with no following input is
@@ -114,9 +119,22 @@ multi p os = Multi p os Pure
 reask :: Conv a
 reask = Reask
 
--- | End the dialogue with a summary line.
+-- | End the dialogue with a summary line. Use when the outcome is human prose;
+-- reach for 'finish' when a later turn needs the answers back as DATA.
 done :: Text -> Conv a
 done = Done
+
+-- | End the dialogue carrying a structured result — the collected answers as a
+-- 'Value', so the caller gets them back under @result@ instead of having to
+-- re-parse a summary string. This is what turns a @Conv@ from a UI script into
+-- an answer-collecting subroutine:
+--
+-- > runConv (do d <- pick "Drink?" ["Ale","Water"]
+-- >             n <- pick "Nights?" ["1","2"]
+-- >             finish (object ["drink" .= d, "nights" .= n]))
+-- >   -- caller sees {status:"done", result:{drink:"Ale", nights:"1"}}
+finish :: Value -> Conv a
+finish = Finish
 
 -- | Interpret a 'Conv' through the harness dialog machinery: one operator
 -- interaction per node (each a @dialogForm@ suspension), following branches by
@@ -133,6 +151,7 @@ runConv = go []
       Pure _ -> flush ps (statusObj "done" "")
       Say t k -> go (ps ++ [t]) k
       Done t -> flush ps (statusObj "done" t)
+      Finish v -> flush ps (resultObj v)
       Reask -> flush ps (statusObj "reask" "")
       Menu p bs -> do
         r <- F.dialogForm (withProse ps (F.choiceField p [(l, l) | (l, _) <- bs]))
@@ -169,3 +188,8 @@ runConv = go []
 
 statusObj :: Text -> Text -> Value
 statusObj st summary = object ["status" .= st, "summary" .= summary]
+
+-- | A structured terminal: the dialogue's collected answers, carried back to
+-- the caller under @result@ (vs 'statusObj's prose @summary@).
+resultObj :: Value -> Value
+resultObj v = object ["status" .= ("done" :: Text), "result" .= v]
