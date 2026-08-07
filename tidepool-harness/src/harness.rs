@@ -53,7 +53,7 @@ use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, RESUME_HELPER};
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
-use crate::provider::{DynModelProvider, Message, Role, StreamDelta};
+use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
 use crate::tree::{HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
@@ -120,6 +120,11 @@ struct NodeConvo {
     /// `resume_parent` drives `resume_bind` (not `resume`) while this is `Some`,
     /// and clears it when the bind finally lands (a completion, not a re-suspend).
     pending_bind: Option<(BoundBinder, Generation)>,
+    /// Running sum of every assistant turn's [`Usage`] on this node
+    /// (self-iterating-harness WS-E: the driver's emergency-compaction
+    /// trigger, [`Harness::node_usage`], sums this across every `runLLMTurn`
+    /// answerer / compaction node it drives per loop).
+    usage: Usage,
 }
 
 #[derive(Clone)]
@@ -598,6 +603,7 @@ impl Harness {
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
                 pending_bind: None,
+                usage: Usage::default(),
             },
         );
         Ok(())
@@ -677,6 +683,8 @@ impl Harness {
                 content: driven.reply.clone(),
             });
             convo.turn_seq += 1;
+            convo.usage.input_tokens += driven.usage.input_tokens;
+            convo.usage.output_tokens += driven.usage.output_tokens;
         }
 
         let Some(block) = driven.block else {
@@ -1134,7 +1142,21 @@ impl Harness {
     /// Errors if `node` has no live session, isn't suspended, or its pending
     /// hole isn't `Finalize`-routed.
     pub fn take_finalized_value(&self, node: NodeId) -> Result<Value, HarnessError> {
-        let value = {
+        self.take_finalized_value_with_table(node).map(|(v, _)| v)
+    }
+
+    /// Like [`Self::take_finalized_value`], but also returns the
+    /// [`DataConTable`] the finalized value's constructor ids resolve
+    /// against — needed by a caller that renders the raw value itself
+    /// (self-iterating-harness WS-E's forced compaction turn finalizes a
+    /// `Text`, then reads it out via [`tidepool_runtime::value_to_json`],
+    /// which needs the SAME table the value was compiled with) rather than
+    /// just feeding it opaquely into another suspended continuation.
+    pub fn take_finalized_value_with_table(
+        &self,
+        node: NodeId,
+    ) -> Result<(Value, DataConTable), HarnessError> {
+        let (value, table) = {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
             let pending = convo
@@ -1156,11 +1178,20 @@ impl Harness {
             let value = fields.get(1).cloned().ok_or_else(|| {
                 HarnessError::Resident("FinalizeWith missing its value field".into())
             })?;
+            let table = convo.suspend_table.clone().unwrap_or_default();
             convo.pending = None;
-            value
+            (value, table)
         };
         self.tree.node_cancelled(node, "finalized".to_string())?;
-        Ok(value)
+        Ok((value, table))
+    }
+
+    /// The running sum of every assistant turn's [`Usage`] logged on `node`
+    /// so far (self-iterating-harness WS-E: what the driver's emergency
+    /// compaction trigger accumulates across the `runLLMTurn` answerer nodes
+    /// it drives per loop). `None` if `node` has no live session.
+    pub fn node_usage(&self, node: NodeId) -> Option<Usage> {
+        self.convos.lock().get(&node).map(|c| c.usage)
     }
 
     /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
