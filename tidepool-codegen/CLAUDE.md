@@ -6,7 +6,7 @@ map and locked decisions.
 
 ## Nested child runs on a suspended machine (segment 40)
 
-A parent turn suspended at a typed yield (`returnControl`/`Ask`) can host
+A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host
 SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
 bindings zero-copy — while its stowed continuation is a REGISTERED GC ROOT. The
 full invariant is in the `jit_machine.rs` module docstring; the essentials:

@@ -343,7 +343,7 @@ mod tests {
             node: NodeId(0),
             turn: 1,
             role: Role::Assistant,
-            content: "```haskell\nreturnControlFork @Int \"n\"\n```".into(),
+            content: "```haskell\nrunLLMTurnFork @Int \"n\"\n```".into(),
             reasoning: None,
             usage: Some(Usage {
                 input_tokens: 10,

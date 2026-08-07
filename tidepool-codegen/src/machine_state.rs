@@ -85,7 +85,7 @@ pub struct MachineState {
     /// cleared only at machine teardown (`free_session_heap`).
     persistent_roots: RefCell<Vec<*mut *mut u8>>,
     /// STOWED GC roots (segment 40): the suspended continuation slot(s) of a
-    /// parent turn parked at a typed yield (`returnControl`/`Ask`), registered
+    /// parent turn parked at a typed yield (`runLLMTurn`/`Ask`), registered
     /// for the duration of a NESTED CHILD run so a child's collection evacuates
     /// the parent's stowed continuation tree instead of freeing it. Kept as a
     /// SEPARATE set from `persistent_roots` DELIBERATELY: intent must be

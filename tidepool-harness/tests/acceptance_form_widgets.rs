@@ -1,6 +1,6 @@
 //! Acceptance coverage for the `Tidepool.Form` widening (display elements,
 //! multi-select, field prefill) — through the real production path, same
-//! discipline as `acceptance_return_control.rs`'s `dialog_form_multi_field_...`
+//! discipline as `acceptance_run_llm_turn.rs`'s `dialog_form_multi_field_...`
 //! test. Record-replay, CI-shaped, zero live calls.
 //!
 //! One form composes ALL THREE new pieces:

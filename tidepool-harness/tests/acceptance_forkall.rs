@@ -1,11 +1,11 @@
 //! Acceptance coverage for `Tidepool.Fork.forkAll` — the `mapConcurrently`-shaped
-//! surface verb over the SAME `returnControlFanout` machinery `forkFilter`
+//! surface verb over the SAME `runLLMTurnFanout` machinery `forkFilter`
 //! already routes through (`Tidepool.Fork`'s haddock). Unlike `forkFilter`
 //! (fixed at `Bool`), `forkAll`'s answer type is CALLER-CHOSEN
 //! (`forkAll @T prompts`) — structurally identical to a bare
-//! `returnControlFanout @T` call, so `Translate.hs`'s existing
-//! `isReturnControlFanoutVar`-family recognizer (extended with `isForkAllVar`)
-//! head-swaps it straight to the EXISTING `returnControlFanoutSited` sibling,
+//! `runLLMTurnFanout @T` call, so `Translate.hs`'s existing
+//! `isRunLLMTurnFanoutVar`-family recognizer (extended with `isForkAllVar`)
+//! head-swaps it straight to the EXISTING `runLLMTurnFanoutSited` sibling,
 //! no new `forkAllSited` needed. Record-replay, CI-shaped, zero live calls,
 //! same discipline as `acceptance_fork_combinators.rs`.
 

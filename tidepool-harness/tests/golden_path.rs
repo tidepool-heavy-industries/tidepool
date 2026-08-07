@@ -5,7 +5,7 @@
 //! The thread (TARGET §3 / spike SPEC "THE GOLDEN PATH"):
 //!
 //!   force root → turn engine drives the (replayed) model → its block calls
-//!   `returnControlFork @Int "..."` → the node suspends on a FORK hole →
+//!   `runLLMTurnFork @Int "..."` → the node suspends on a FORK hole →
 //!   the fork answerer is forced → its transcript is the parent's, forked at
 //!   the checkpoint → ONE deliberate ill-typed attempt (`resume "nope"`)
 //!   exercises the GHC-verbatim retry (continuation NOT consumed) → a valid
@@ -76,7 +76,7 @@ fn golden_replies() -> Vec<RecordedReply> {
         r("I'll get a number from a sub-agent, confirm it, and finish.\n\n\
            ```haskell\n\
            do\n\
-           \x20 n <- returnControlFork @Int \"pick a number between 1 and 100\"\n\
+           \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
            \x20 _ <- dialogAsk (card \"Confirm\" [choice \"Proceed?\" [(\"yes\", \"Yes\"), (\"no\", \"No\")]])\n\
            \x20 pure (toJSON n)\n\
            ```"),
@@ -120,7 +120,7 @@ async fn golden_path_record_replay() {
                 classified.routing
             );
         }
-        other => panic!("root should suspend at returnControlFork, got a different outcome: {}", outcome_tag(&other)),
+        other => panic!("root should suspend at runLLMTurnFork, got a different outcome: {}", outcome_tag(&other)),
     }
     assert!(matches!(
         harness.tree().state(root),
@@ -211,7 +211,7 @@ async fn fork_only_resumes_to_completion() {
         usage: usage(),
     };
     let replies = vec![
-        r("```haskell\ndo\n  n <- returnControlFork @Int \"pick\"\n  pure (toJSON n)\n```"),
+        r("```haskell\ndo\n  n <- runLLMTurnFork @Int \"pick\"\n  pure (toJSON n)\n```"),
         r("```haskell\nresume \"nope\"\n```"), // ill-typed
         r("```haskell\nresume (7 :: Int)\n```"), // valid
     ];

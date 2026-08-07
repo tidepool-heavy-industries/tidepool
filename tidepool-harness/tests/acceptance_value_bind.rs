@@ -1,7 +1,7 @@
 //! W1b-redux step 1 acceptance: an EFFECTFUL value bind persists across turns.
 //!
 //! The motivating case the decl plane could NOT express: turn 1 binds a value
-//! via a FORK (`steps <- returnControlFork @[Int] …`) — an effectful bind that
+//! via a FORK (`steps <- runLLMTurnFork @[Int] …`) — an effectful bind that
 //! SUSPENDS at the fork — and turn 2 references `steps` as a live typed binding.
 //! `acceptance_cross_turn` only proves the weaker decl-plane property (a pure
 //! `steps = [1,2,3]` CAF); this proves the value plane end to end through the
@@ -90,7 +90,7 @@ async fn an_effectful_fork_bind_persists_into_the_next_turn() {
     let replies = vec![
         // Turn 1: an EFFECTFUL bind — the RHS forks, so the bind suspends and
         // materializes only when the fork is answered.
-        reply("I'll ask a sub-agent for the steps.\n\n```haskell\nsteps <- returnControlFork @[Int] \"give me [1,2,3]\"\n```"),
+        reply("I'll ask a sub-agent for the steps.\n\n```haskell\nsteps <- runLLMTurnFork @[Int] \"give me [1,2,3]\"\n```"),
         // The fork answerer (runs against the suspended parent): the raw [Int].
         reply("```haskell\nresume ([1, 2, 3] :: [Int])\n```"),
         // Turn 2: a pure bind that references the PERSISTED `steps`.

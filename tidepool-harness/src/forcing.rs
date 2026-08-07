@@ -31,7 +31,7 @@ use crate::tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId};
 
 /// What a fork request's shape tells us about child count BEFORE any child
 /// is materialized — the input to [`fan_badge`]. Extract-time information
-/// (a single `returnControlFork` vs. a statically bounded loop vs. a
+/// (a single `runLLMTurnFork` vs. a statically bounded loop vs. a
 /// runtime-length fan-out) maps onto this, not the other way around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkShape {
@@ -964,7 +964,7 @@ mod tests {
             .unwrap();
         tree.turn_start(parent, "parent turn".into(), None).unwrap();
 
-        // A `returnControlFork`-shaped request publishes a Thunk child —
+        // A `runLLMTurnFork`-shaped request publishes a Thunk child —
         // never a running one.
         let child = tree
             .create_node(

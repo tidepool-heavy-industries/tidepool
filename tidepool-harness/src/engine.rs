@@ -11,11 +11,11 @@
 //! SUSPENDS at an `AskWith` — which the engine classifies from the request
 //! payload:
 //!
-//! - `{typedSite, fork:true}` → `returnControlFork`: PARK. The parent stays
+//! - `{typedSite, fork:true}` → `runLLMTurnFork`: PARK. The parent stays
 //!   suspended; a child answerer node is registered (transcript forked at the
 //!   checkpoint) and, once forced, drives its own turn loop to produce a typed
 //!   answer that `run_child`s against the parent and resumes it.
-//! - `{typedSite}` (no fork) → `returnControl`: the SAME model answers in
+//! - `{typedSite}` (no fork) → `runLLMTurn`: the SAME model answers in
 //!   context by evaluating `resume expr :: T`.
 //! - `{ui}` → `dialogAsk`: OPERATOR routing — the `Ui` renders in the form
 //!   pane; the operator's submission resumes the turn.
@@ -48,10 +48,10 @@ use crate::tree::FanBadge;
 /// How a suspended `AskWith` request routes — decoded from its payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HoleRouting {
-    /// `returnControl @T` — the same calling model answers in context.
-    ReturnControl { site: u32, ty: Option<String> },
-    /// `returnControlFork @T` (`fan: None`) — park; a forked child answerer
-    /// produces the typed value. `returnControlFanout @T` (B1 widen,
+    /// `runLLMTurn @T` — the same calling model answers in context.
+    RunLLMTurn { site: u32, ty: Option<String> },
+    /// `runLLMTurnFork @T` (`fan: None`) — park; a forked child answerer
+    /// produces the typed value. `runLLMTurnFanout @T` (B1 widen,
     /// `fan: Some(_)`) — same payload-classification scheme (F3: "fan"
     /// joins additively), park; N thunk children each answer the element
     /// type. `ty` is the RENDERED answer type: the element type `T` for a
@@ -84,7 +84,7 @@ pub struct ClassifiedHole {
 /// The request is `Con(AskWith, [prompt :: Text, payload :: Value])`. The
 /// payload object's fields decide the routing: `fork` + `typedSite` →
 /// [`HoleRouting::Fork`] (additionally `fan` + `prompts` for a
-/// `returnControlFanout` site), `typedSite` alone → [`HoleRouting::ReturnControl`],
+/// `runLLMTurnFanout` site), `typedSite` alone → [`HoleRouting::RunLLMTurn`],
 /// `ui` → [`HoleRouting::Dialog`], else [`HoleRouting::Ask`]. `asks` resolves a
 /// `typedSite` to its rendered answer type.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -113,7 +113,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 prompts,
             }
         } else {
-            HoleRouting::ReturnControl { site, ty }
+            HoleRouting::RunLLMTurn { site, ty }
         }
     } else if let Some(ui) = payload.get("ui") {
         HoleRouting::Dialog { ui: ui.clone() }
@@ -124,7 +124,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
 }
 
 /// Strip one layer of `[...]` from a rendered type string — the FANOUT
-/// element-type derivation (F3: a `returnControlFanout` site's recorded
+/// element-type derivation (F3: a `runLLMTurnFanout` site's recorded
 /// asks.json type is the LIST type `[T]`; the harness recovers the
 /// per-child element type `T` by stripping the outer brackets). `None` if
 /// `ty` isn't bracket-wrapped.
@@ -165,7 +165,7 @@ pub const SYSTEM_FRAMING: &str = "\
 You drive a resident Haskell (tidepool) session. Your ONLY output that runs is a \
 single fenced ```haskell code block containing ONE expression of type `M a` — the \
 same effect-monad surface as tidepool eval (verbs like `run`, `grepGlob`, `readGlob`, \
-`llm`, `returnControl`, `returnControlFork`, `dialogAsk`). The LAST such block in your \
+`llm`, `runLLMTurn`, `runLLMTurnFork`, `dialogAsk`). The LAST such block in your \
 reply is compiled and run against the session; prose around it is ignored by the runtime.\n\
 \n\
 Verbs return typed DATA you unwrap — failures are `Either`, NOT exceptions. PREFER a typed \
@@ -185,8 +185,8 @@ extract with `v ^? key \"f\" . _Int` / `_String`.\n\
 Unwrap an `Either` via `Right x <- verb …` or `verb … >>= liftEither`. Avoid `read`-parsing — \
 use the typed verbs + optics.\n\
 \n\
-To SUSPEND for a typed answer, evaluate `returnControl @T \"prompt\"` (answered in your \
-own context) or `returnControlFork @T \"prompt\"` (answered by a forked sub-agent).\n\
+To SUSPEND for a typed answer, evaluate `runLLMTurn @T \"prompt\"` (answered in your \
+own context) or `runLLMTurnFork @T \"prompt\"` (answered by a forked sub-agent).\n\
 \n\
 To elicit an operator form, PREFER a TYPED form (`import Tidepool.Form`): build a \
 `Form a` applicatively and answer with `dialogForm form :: M (Either FormError a)` — \
@@ -199,10 +199,10 @@ ill-typed field is `Left FormError`). Field constructors: `textField`/`multiline
 `dialogAsk (textIn \"note?\" True)`), NOT `toJSON` of it.\n\
 \n\
 The session PERSISTS across turns like GHCi: a value you bind with `x <- …` this turn \
-— a `returnControl`/`returnControlFork` answer, or a `dialogForm`/`dialogAsk` submission \
+— a `runLLMTurn`/`runLLMTurnFork` answer, or a `dialogForm`/`dialogAsk` submission \
 — is a LIVE binding in your NEXT turn, so you can BRANCH on it. A branching dialogue is \
 exactly that: bind a choice, then next turn pick the follow-up from it. E.g. turn 1 \
-`lane <- returnControl @Text \"which lane — alpha or beta?\"`; turn 2 reads `lane` and \
+`lane <- runLLMTurn @Text \"which lane — alpha or beta?\"`; turn 2 reads `lane` and \
 presents the form for that branch. Bind what you'll need later instead of re-asking.\n\
 \n\
 When you are answering a HOLE, your block's value IS the answer: write `resume expr` \
@@ -337,7 +337,7 @@ pub struct EngineConfig {
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
-    /// Per-CHILD turn cap for a `returnControlFanout` answerer (B1 widen):
+    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer (B1 widen):
     /// each of the N children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
     /// way a single shared cap would. Plain fork/return-control answerers
@@ -413,7 +413,7 @@ pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &st
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —
 /// NOT `toJSON`'d. A fork/return answerer's block is `resume expr :: M T`, and
 /// the value fed to the parent's continuation must be the raw `T` (an `Int`,
-/// an ADT — whatever the hole's type is), because `returnControl`/`Fork`'s
+/// an ADT — whatever the hole's type is), because `runLLMTurn`/`Fork`'s
 /// `unsafeCoerce` relabels the SAME runtime bytes back to `T`. `template_turn`'s
 /// `toJSON _r` would instead hand back an Aeson `Value` (a `Number`, an
 /// `Object`), which the parent's `T`-typed continuation then case-traps on.
@@ -621,7 +621,7 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
 }
 
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
-/// `Value` (F3's RAW-value rule for a `returnControlFanout` resume — the
+/// `Value` (F3's RAW-value rule for a `runLLMTurnFanout` resume — the
 /// same "hand back the native representation, not an Aeson wrapper"
 /// discipline a single fork's `unsafeCoerce` relies on). `items` must
 /// already be in declaration order; `table` only needs to know the

@@ -617,55 +617,55 @@ macro_rules! ask_effect_def {
                        "schemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]",
                        "schemaToValue (SOpt s) = schemaToValue s",
                        "schemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]"] },
-                // returnControl (#R0 typed-yield pass, plans/harness-r0/10-extract-pass).
-                // `returnControl`/`returnControlFork`/`returnControlFanout` are the
+                // runLLMTurn (#R0 typed-yield pass, plans/harness-r0/10-extract-pass).
+                // `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` are the
                 // surface verbs: extract's Translate.hs intercepts their call sites
                 // (matched by name, mirroring the tagToEnum# arm) and head-swaps to the
                 // hidden *Sited sibling below with a fresh per-call-site literal Int
                 // prepended — so the OPAQUE bodies here never actually run; they exist
                 // only so GHC's typechecker accepts the call and so
-                // `returnControlSited`/`returnControlForkSited`/
-                // `returnControlFanoutSited` are reachable (referencing them here is
+                // `runLLMTurnSited`/`runLLMTurnForkSited`/
+                // `runLLMTurnFanoutSited` are reachable (referencing them here is
                 // what pulls their real, executing definitions into the closed
                 // program). OPAQUE keeps every one of the six un-inlined and
                 // un-w/w'd, so both the call-site match and the sibling lookup (by
                 // name, in Translate.hs) stay stable across -O2.
-                { raw ["{-# OPAQUE returnControl #-}",
-                       "returnControl :: forall a. Text -> M a",
-                       "returnControl prompt = returnControlSited 0 prompt"] },
-                { raw ["{-# OPAQUE returnControlFork #-}",
-                       "returnControlFork :: forall a. Text -> M a",
-                       "returnControlFork prompt = returnControlForkSited 0 prompt"] },
-                // returnControlFanout (B1, widen): one park, N thunk children — the
-                // SAME classification scheme as returnControlFork ("typedSite" +
+                { raw ["{-# OPAQUE runLLMTurn #-}",
+                       "runLLMTurn :: forall a. Text -> M a",
+                       "runLLMTurn prompt = runLLMTurnSited 0 prompt"] },
+                { raw ["{-# OPAQUE runLLMTurnFork #-}",
+                       "runLLMTurnFork :: forall a. Text -> M a",
+                       "runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt"] },
+                // runLLMTurnFanout (B1, widen): one park, N thunk children — the
+                // SAME classification scheme as runLLMTurnFork ("typedSite" +
                 // "fork" .= True), plus an ADDITIVE "fan" count and the individual
                 // per-child "prompts" (F3: additive payload fields are allowed).
                 // The answer type applied here (`@a`) is the PER-CHILD element type;
                 // the site's recorded asks.json type is the LIST type `[a]` (see
                 // Translate.hs's fanout interception arm) — the harness derives the
                 // element type back by stripping the outer `[]`.
-                { raw ["{-# OPAQUE returnControlFanout #-}",
-                       "returnControlFanout :: forall a. [Text] -> M [a]",
-                       "returnControlFanout prompts = returnControlFanoutSited 0 prompts"] },
+                { raw ["{-# OPAQUE runLLMTurnFanout #-}",
+                       "runLLMTurnFanout :: forall a. [Text] -> M [a]",
+                       "runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts"] },
                 // The Int arg is the site id extract substitutes at the call site (the
                 // literal `0` above is a placeholder, never the value that actually
                 // runs). `unsafeCoerce` is safe here ONLY because extract has already
-                // checked (Translate.hs's checkReturnControlType) that the site's
+                // checked (Translate.hs's checkRunLLMTurnType) that the site's
                 // answer type is monomorphic and function-free — the harness resumes
                 // this suspension with a value the caller validated against that exact
                 // type, so the coercion is a same-representation relabeling, not a
                 // genuine type change.
-                { raw ["{-# OPAQUE returnControlSited #-}",
-                       "returnControlSited :: forall a. Int -> Text -> M a",
-                       "returnControlSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid]))"] },
-                { raw ["{-# OPAQUE returnControlForkSited #-}",
-                       "returnControlForkSited :: forall a. Int -> Text -> M a",
-                       "returnControlForkSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
-                { raw ["{-# OPAQUE returnControlFanoutSited #-}",
-                       "returnControlFanoutSited :: forall a. Int -> [Text] -> M [a]",
-                       "returnControlFanoutSited sid prompts = unsafeCoerce <$> send (AskWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
+                { raw ["{-# OPAQUE runLLMTurnSited #-}",
+                       "runLLMTurnSited :: forall a. Int -> Text -> M a",
+                       "runLLMTurnSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid]))"] },
+                { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
+                       "runLLMTurnForkSited :: forall a. Int -> Text -> M a",
+                       "runLLMTurnForkSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
+                { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
+                       "runLLMTurnFanoutSited :: forall a. Int -> [Text] -> M [a]",
+                       "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (AskWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
                 // dialogAsk (harness Ui-elicitation surface, D2). Mechanically a
-                // hole with OPERATOR routing (not the returnControl family): it
+                // hole with OPERATOR routing (not the runLLMTurn family): it
                 // sends AskWith carrying a `"ui"` payload field the harness
                 // recognizes and renders in the observatory form pane. The
                 // submission (widget values + always-present prose channel) comes

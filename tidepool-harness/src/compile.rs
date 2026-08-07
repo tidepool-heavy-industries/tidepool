@@ -3,7 +3,7 @@
 //! The turn engine compiles each model-written eval block the same way the
 //! MCP server does (`template_haskell` wrapping + `tidepool-extract`), but the
 //! harness ALSO needs the `asks.json` sidecar (#R0 typed-yield pass) that maps
-//! a `returnControl`/`returnControlFork` site id to the rendered answer type.
+//! a `runLLMTurn`/`runLLMTurnFork` site id to the rendered answer type.
 //! `tidepool_runtime::compile_haskell` drops the extract tempdir before it
 //! returns, so this module invokes `tidepool-extract` directly into a
 //! kept-alive tempdir (mirroring `compile_haskell`'s own `Command`
@@ -32,7 +32,7 @@ pub struct AskSite {
 }
 
 /// The `asks.json` sidecar as a site-id → rendered-type map. Empty when the
-/// source has no `returnControl`/`returnControlFork` sites (the extract always
+/// source has no `runLLMTurn`/`runLLMTurnFork` sites (the extract always
 /// writes the file — loud absence beats a silent missing lookup).
 #[derive(Debug, Clone, Default)]
 pub struct AsksSidecar {
