@@ -40,7 +40,6 @@ use crate::compile::{self, CompiledTurn};
 use crate::engine::{self, EngineConfig, HoleRouting, TurnOutcome};
 use crate::harness::{Harness, HarnessError};
 use crate::log::Actor;
-use crate::provider::Usage;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{Event, Observer};
@@ -90,11 +89,12 @@ pub struct CycleOutcome {
     /// `render(state, lastCompaction)`'s text AFTER this cycle's `loop`
     /// completed — proves the new `State` reaches the next render.
     pub prompt_after: String,
-    /// The runtime-owned emergency compaction turn's `Text` (WS-E), if this
-    /// cycle's accumulated `runLLMTurn`-answerer usage crossed the
-    /// configured threshold; `None` otherwise. `prompt_after` already
-    /// reflects this (it is rendered with the updated `lastCompaction`) —
-    /// this field is what a caller/test asserts against directly, and what
+    /// The runtime-owned emergency compaction turn's `Text` (W2), if this
+    /// cycle's answerer session crossed the configured context-window
+    /// threshold MID-LOOP; `None` otherwise. When set, the loop CONTINUED
+    /// under the summary (in-place relief — no abort). `prompt_after` already
+    /// reflects it (rendered with the updated `lastCompaction`) — this field
+    /// is what a caller/test asserts against directly, and what
     /// [`SelfHarnessDriver::run_one_cycle`] carries forward as the NEXT
     /// cycle's `lastCompaction` (`self.last_compaction`, not a threaded
     /// parameter — see that method's doc).
@@ -164,23 +164,20 @@ fn not_bootstrapped() -> DriverError {
     DriverError::Session("outer session not bootstrapped (call run_loop/run_one_cycle)".into())
 }
 
-/// Default emergency-compaction threshold — 80% of `EngineConfig.max_tokens`
-/// (02-runtime.md LOCKED: "~80%"). Overridable per driver via
+/// Default emergency-compaction threshold — 80% of the CONTEXT-WINDOW budget
+/// ([`EngineConfig::context_window_tokens`], NOT `max_tokens`, which is the
+/// 2048 per-turn *output* cap; 02-runtime.md LOCKED: "~80% of a real
+/// context-window budget"). Overridable per driver via
 /// [`SelfHarnessDriver::set_compaction_threshold_percent`] (e.g. a test
 /// driving a low threshold to trip compaction deterministically off a
 /// single small turn's usage).
 const DEFAULT_COMPACTION_THRESHOLD_PERCENT: u64 = 80;
 
 /// The forced compaction turn's target summary length, expressed as a
-/// fraction of `max_tokens` (a quarter — big enough to carry real context,
-/// small enough to be a genuine compaction rather than a re-summarized
-/// transcript).
+/// fraction of the context-window budget (a quarter — big enough to carry
+/// real context, small enough to be a genuine compaction rather than a
+/// re-summarized transcript).
 const COMPACTION_TARGET_DIVISOR: u32 = 4;
-
-/// Fallback per-turn output-token budget when `EngineConfig.max_tokens` is
-/// unset (`EngineConfig::from_decls` always sets `Some(2048)` today, so this
-/// is only a defensive default).
-const FALLBACK_MAX_TOKENS: u32 = 2048;
 
 /// Per-hole SOFT cap (W1 runaway cap 1): after this many model rounds on a
 /// single `runLLMTurn` hole that did NOT finalize, nudge the answerer once
@@ -253,21 +250,28 @@ pub struct SelfHarnessDriver {
     agent: Arc<Harness>,
     lifecycle: SelfHarnessState,
     observer: Arc<dyn Observer>,
-    /// The prior cycle's emergency-compaction `Text` (WS-E), fed as the
-    /// NEXT [`Self::run_one_cycle`] call's `lastCompaction` — driver-owned
-    /// state rather than a threaded parameter, since 02-runtime.md LOCKS
-    /// the *runtime* (not the caller) as the owner of the compaction
-    /// lifecycle. `None` until the first compaction fires.
+    /// The LATEST emergency-compaction `Text` (W2), fed as the NEXT
+    /// [`Self::run_one_cycle`] call's `lastCompaction` — driver-owned state
+    /// rather than a threaded parameter, since 02-runtime.md LOCKS the
+    /// *runtime* (not the caller) as the owner of the compaction lifecycle.
+    /// Updated MID-LOOP by [`Self::maybe_compact_answerer`] the moment a
+    /// compaction fires (the loop then CONTINUES under the summary). `None`
+    /// until the first compaction fires.
     last_compaction: Option<String>,
-    /// Running [`Usage`] sum across the CURRENT loop's `runLLMTurn`-answerer
-    /// turns — reset at the start of every [`Self::run_loop_fragment`],
-    /// accumulated by [`Self::service_runllm_hole`], read by
-    /// [`Self::compaction_trigger`] once the fragment completes.
-    cycle_usage: Usage,
-    /// The emergency-compaction threshold, as a percentage of
-    /// `EngineConfig.max_tokens` (02-runtime.md: "~80%",
-    /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
-    /// [`Self::set_compaction_threshold_percent`].
+    /// The compaction `Text` produced DURING the current cycle's loop, if one
+    /// fired (W2, in-place mid-loop relief) — distinct from
+    /// [`Self::last_compaction`], which also carries a PRIOR cycle's summary
+    /// forward. Reset (`take`n) into [`CycleOutcome::compaction`] at the end of
+    /// [`Self::run_one_cycle`], so a test asserts on THIS cycle's compaction,
+    /// not a stale carried-forward one. Set by [`Self::maybe_compact_answerer`].
+    cycle_compaction: Option<String>,
+    /// The emergency-compaction threshold, as a percentage of the CONTEXT-
+    /// WINDOW budget ([`EngineConfig::context_window_tokens`], 02-runtime.md:
+    /// "~80%", [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
+    /// [`Self::set_compaction_threshold_percent`]. Checked MID-LOOP against the
+    /// answerer session's real accumulated context ([`Harness::node_usage`]),
+    /// not against `max_tokens` after the loop (the old, wrong-budget path;
+    /// review C3/D2).
     compaction_threshold_percent: u64,
     /// The CURRENT loop's answerer system framing: `render`'s pre-loop output
     /// followed by [`ANSWERER_FRAMING_SUFFIX`] (W1/C1). Set in
@@ -309,7 +313,7 @@ impl SelfHarnessDriver {
             lifecycle: SelfHarnessState::Idle,
             observer,
             last_compaction: None,
-            cycle_usage: Usage::default(),
+            cycle_compaction: None,
             compaction_threshold_percent: DEFAULT_COMPACTION_THRESHOLD_PERCENT,
             answerer_framing: None,
             answerer: None,
@@ -325,10 +329,11 @@ impl SelfHarnessDriver {
     }
 
     /// Override the emergency-compaction threshold (default
-    /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`], ~80% per 02-runtime.md).
-    /// Mainly for tests: a low percentage trips compaction deterministically
-    /// off a single small scripted turn's usage instead of needing a long
-    /// scripted reply sequence to organically cross 80% of `max_tokens`.
+    /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`], ~80% of the context-window
+    /// budget per 02-runtime.md). Mainly for tests: a low percentage trips
+    /// compaction deterministically off a single small scripted turn's usage
+    /// instead of needing a long scripted reply sequence to organically cross
+    /// 80% of [`EngineConfig::context_window_tokens`].
     pub fn set_compaction_threshold_percent(&mut self, percent: u64) {
         self.compaction_threshold_percent = percent;
     }
@@ -447,15 +452,16 @@ impl SelfHarnessDriver {
     /// `prior_state` is `None` only for the very first cycle (mirrors
     /// `render`'s `Maybe Text` compaction argument being `Nothing`
     /// pre-history). The `lastCompaction` fed to `render` is NOT a
-    /// parameter — it is `self.last_compaction`, the prior cycle's
-    /// emergency-compaction `Text` (WS-E) if one fired, carried forward
+    /// parameter — it is `self.last_compaction`, the latest
+    /// emergency-compaction `Text` (W2) if one has fired, carried forward
     /// automatically across repeated calls (by [`Self::run_loop`], or by a
     /// caller driving cycles by hand — see `acceptance_selfharness.rs`),
     /// since 02-runtime.md locks the *runtime*, not the caller, as the
     /// compaction lifecycle's owner. This cycle's OWN compaction (if
-    /// [`Self::run_loop_fragment`] forces one) updates `self.last_compaction`
-    /// before `prompt_after` is rendered, so `prompt_after` already reflects
-    /// it — proving the summary reaches the very next render.
+    /// [`Self::maybe_compact_answerer`] fires one MID-LOOP) updates
+    /// `self.last_compaction` before `prompt_after` is rendered, so
+    /// `prompt_after` already reflects it — proving the summary reaches the
+    /// very next render.
     pub fn run_one_cycle(
         &mut self,
         source: &HarnessSource,
@@ -477,10 +483,19 @@ impl SelfHarnessDriver {
         self.answerer_framing = Some(format!("{prompt_before}\n\n{ANSWERER_FRAMING_SUFFIX}"));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
-        let (value, table, compaction) = self.run_loop_fragment(prior_state)?;
+        let (value, table) = self.run_loop_fragment(prior_state)?;
         let state_json = state_cross::state_out(&value, &table);
 
-        self.last_compaction = compaction.clone();
+        // W2: any MID-LOOP compaction that fired during this loop has already
+        // set `self.cycle_compaction` (and `self.last_compaction`) IN PLACE —
+        // the loop CONTINUED under the summary rather than aborting. `None` if
+        // the context window never crossed threshold this loop.
+        let compaction = self.cycle_compaction.take();
+        // `self.last_compaction` carries the LATEST compaction summary forward
+        // to the next render regardless of which cycle produced it: this
+        // cycle's if one fired, else the prior cycle's (unchanged). Render
+        // `prompt_after` against it so the summary reaches the very next render
+        // (02-runtime.md: `render`'s `Maybe Text`).
         let next_compaction = self.last_compaction.clone();
         let prompt_after = self.render_framing(Some(&state_json), next_compaction.as_deref())?;
         self.lifecycle = SelfHarnessState::Idle;
@@ -546,20 +561,22 @@ impl SelfHarnessDriver {
     /// [`state_cross::state_in`]) as a suspendable fragment on the outer
     /// session, servicing every `runLLMTurn` hole it suspends on via
     /// [`Self::service_runllm_hole`] until it completes. Returns the
-    /// completed `State` value, the DataConTable its OWN compile produced
+    /// completed `State` value and the DataConTable its OWN compile produced
     /// (the table every hole along this same continuation classifies
     /// against — `resume` never recompiles, mirroring
-    /// `Harness::resume_parent`'s snapshot-the-table discipline), and this
-    /// cycle's emergency-compaction `Text` (WS-E) if
-    /// [`Self::compaction_trigger`] fired once the fragment completed
-    /// (`self.cycle_usage`, reset here, having crossed the configured
-    /// threshold).
+    /// `Harness::resume_parent`'s snapshot-the-table discipline).
+    ///
+    /// W2: emergency compaction no longer happens here at loop end — it fires
+    /// MID-LOOP via [`Self::maybe_compact_answerer`] (checked between the
+    /// answerer's holes/rounds against its real accumulated context), setting
+    /// `self.cycle_compaction`/`self.last_compaction` in place while the loop
+    /// continues under the summary.
     fn run_loop_fragment(
         &mut self,
         prior_state: Option<&Json>,
-    ) -> Result<(Value, DataConTable, Option<String>), DriverError> {
-        self.cycle_usage = Usage::default();
+    ) -> Result<(Value, DataConTable), DriverError> {
         self.loop_inference_calls = 0;
+        self.cycle_compaction = None;
 
         // W1/C2: create the ONE render-seeded answerer session for this whole
         // loop, up front — every `runLLMTurn` hole pushes onto it, so hole #2
@@ -587,13 +604,19 @@ impl SelfHarnessDriver {
 
     /// The body of [`Self::run_loop_fragment`] — run `loop`, service each
     /// `runLLMTurn` hole against the pre-created per-loop answerer
-    /// (`self.answerer`), and return the completed `State` + table +
-    /// compaction. Split out so [`Self::run_loop_fragment`] can retire the
-    /// answerer whether this succeeds or errors.
+    /// (`self.answerer`), and return the completed `State` + table. Split out
+    /// so [`Self::run_loop_fragment`] can retire the answerer whether this
+    /// succeeds or errors.
+    ///
+    /// W2 (mid-loop, in-place compaction): AFTER each hole is serviced — a
+    /// natural boundary between the answerer's holes — [`Self::maybe_compact_answerer`]
+    /// checks the answerer's real accumulated context against the threshold and,
+    /// if past it, summarizes + replaces the answerer's context IN PLACE so the
+    /// loop's REMAINING holes continue under a smaller window (no abort).
     fn run_loop_fragment_inner(
         &mut self,
         prior_state: Option<&Json>,
-    ) -> Result<(Value, DataConTable, Option<String>), DriverError> {
+    ) -> Result<(Value, DataConTable), DriverError> {
         let helpers = state_cross::state_in(prior_state);
         let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
         let compiled = self.compile_outer(&code, &helpers)?;
@@ -608,21 +631,7 @@ impl SelfHarnessDriver {
         loop {
             match outcome {
                 ResidentOutcome::Completed { result, .. } => {
-                    // Fold the per-loop answerer's CUMULATIVE usage (every hole +
-                    // round accumulated on the one reused node, C2) into
-                    // `cycle_usage` ONCE, while the node is still live. Read here
-                    // rather than per-hole to avoid double-counting the reused
-                    // node's running total.
-                    if let Some(node) = self.answerer {
-                        if let Some(u) = self.agent.node_usage(node) {
-                            self.cycle_usage.input_tokens += u.input_tokens;
-                            self.cycle_usage.output_tokens += u.output_tokens;
-                        }
-                    }
-                    let max_tokens = self.agent.cfg().max_tokens.unwrap_or(FALLBACK_MAX_TOKENS);
-                    let usage = self.cycle_usage;
-                    let compaction = self.compaction_trigger(&usage, max_tokens)?;
-                    return Ok((result.into_value(), compiled.table, compaction));
+                    return Ok((result.into_value(), compiled.table));
                 }
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
@@ -638,6 +647,10 @@ impl SelfHarnessDriver {
                     };
                     let answer =
                         self.service_runllm_hole(site, ty.as_deref(), &classified.prompt)?;
+                    // W2: between holes — if the answerer's accumulated context
+                    // has crossed threshold, compact + replace its context IN
+                    // PLACE now, so the NEXT hole drives under the smaller window.
+                    self.maybe_compact_answerer()?;
                     let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
                     outcome = outer
                         .session
@@ -709,11 +722,11 @@ impl SelfHarnessDriver {
         // same accumulating session — not `take_finalized_value`, which cancels.
         let value = self.agent.take_finalized_value_keep_open(node)?;
         self.emit(Event::Finalize { node });
-        // Usage is NOT accumulated here: the answerer node is REUSED across the
-        // loop's holes (C2), so `node_usage` returns the node's CUMULATIVE total
-        // — reading it per-hole would double-count earlier holes. The whole
-        // loop's answerer usage is read ONCE in `run_loop_fragment_inner`'s
-        // Completed branch (before the answerer is retired).
+        // W2: the answerer node is REUSED across the loop's holes (C2), so
+        // `node_usage` returns the node's CUMULATIVE context size. The
+        // MID-LOOP compaction check (`maybe_compact_answerer`) reads it BETWEEN
+        // holes, once per hole, right after this returns — never summed per-hole
+        // (that would double-count the reused node's running total).
         self.lifecycle = SelfHarnessState::RunningLoop;
         Ok(value)
     }
@@ -881,39 +894,92 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Runtime-owned emergency compaction check (02-runtime.md LOCKED: the
-    /// *runtime* owns this trigger, never the loop). At `usage` past the
-    /// configured threshold (`self.compaction_threshold_percent`, default
-    /// ~80% of `max_tokens`), force a "compact to text, target X tokens"
-    /// turn — a fresh Agent node driven to `finalize @Text summary` — and
-    /// return its `Text`; `None` under threshold. Called once per loop, by
-    /// [`Self::run_loop_fragment`] right after `loop` completes, against
-    /// `self.cycle_usage` (the sum of every `runLLMTurn`-answerer turn's
-    /// usage this loop, accumulated by [`Self::service_runllm_hole`]). The
-    /// returned `Text` becomes `self.last_compaction`, fed to the NEXT
-    /// [`Self::render_framing`] call as `lastCompaction`.
-    pub fn compaction_trigger(
-        &mut self,
-        usage: &Usage,
-        max_tokens: u32,
-    ) -> Result<Option<String>, DriverError> {
+    /// Runtime-owned MID-LOOP emergency compaction with IN-PLACE relief (W2 /
+    /// 02-runtime.md LOCKED: the *runtime* owns this trigger, never the loop;
+    /// "replace its context with the summary so the loop CONTINUES", NO
+    /// loop-abort). Called between the answerer's holes ([`Self::run_loop_fragment_inner`]).
+    ///
+    /// Watches the CURRENT loop's answerer session's REAL accumulated context
+    /// ([`Harness::node_usage`], summed across its holes/rounds — the fix for
+    /// review C3/D2: the old check watched `max_tokens`, the 2048 per-turn
+    /// *output* cap, not context) against the threshold
+    /// (`self.compaction_threshold_percent` of [`EngineConfig::context_window_tokens`],
+    /// default ~80%). Under threshold, or with the budget disabled (`None`) or
+    /// no live answerer, it is a no-op.
+    ///
+    /// Past threshold it:
+    /// 1. Summarizes the answerer's REAL transcript (not a fresh context-free
+    ///    node — that is what confabulated) by driving a fresh compaction node
+    ///    to `finalize @Text`.
+    /// 2. Replaces the answerer's context with that summary IN PLACE
+    ///    ([`Harness::replace_transcript_with_summary`]) — the loop's remaining
+    ///    holes continue under the smaller window.
+    /// 3. Records the summary as `self.cycle_compaction` (this cycle's, for
+    ///    [`CycleOutcome::compaction`]) and `self.last_compaction` (carried to
+    ///    the NEXT [`Self::render_framing`]'s `Maybe Text`).
+    fn maybe_compact_answerer(&mut self) -> Result<(), DriverError> {
+        let Some(budget) = self.agent.cfg().context_window_tokens else {
+            return Ok(());
+        };
+        let Some(answerer) = self.answerer else {
+            return Ok(());
+        };
+        let Some(usage) = self.agent.node_usage(answerer) else {
+            return Ok(());
+        };
         let total = usage.input_tokens + usage.output_tokens;
-        let threshold = (u64::from(max_tokens) * self.compaction_threshold_percent) / 100;
+        let threshold = (u64::from(budget) * self.compaction_threshold_percent) / 100;
         if total < threshold {
-            return Ok(None);
+            return Ok(());
         }
 
+        let summary = self.force_compaction_summary(answerer, budget, total)?;
+        // In-place relief: the answerer's context becomes the summary, so its
+        // remaining holes drive under the smaller window (loop CONTINUES).
+        self.agent
+            .replace_transcript_with_summary(answerer, &summary)?;
+
+        self.cycle_compaction = Some(summary.clone());
+        self.last_compaction = Some(summary);
+        self.lifecycle = SelfHarnessState::RunningLoop;
+        Ok(())
+    }
+
+    /// Drive a fresh compaction node to `finalize @Text summary`, summarizing
+    /// the answerer session's REAL transcript (`answerer`) so the summary is of
+    /// the actual work, not a confabulation (review C3). `budget`/`total` frame
+    /// the compaction instruction. Returns the finalized summary `Text`.
+    fn force_compaction_summary(
+        &mut self,
+        answerer: NodeId,
+        budget: u32,
+        total: u64,
+    ) -> Result<String, DriverError> {
         self.lifecycle = SelfHarnessState::Compacting;
         self.emit(Event::CompactionTrigger);
 
-        let target = (max_tokens / COMPACTION_TARGET_DIVISOR).max(1);
+        let transcript = self
+            .agent
+            .node_transcript(answerer)
+            .map(|msgs| {
+                msgs.iter()
+                    .map(|m| format!("{:?}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .unwrap_or_default();
+
+        let target = (budget / COMPACTION_TARGET_DIVISOR).max(1);
         let prompt = format!(
             "This work window has used approximately {total} tokens against a \
-             {max_tokens}-token budget — it is time to compact before continuing. Write a \
-             prose summary of what this loop's work accomplished and learned so far (not a \
-             transcript), targeting roughly {target} tokens. Answer by evaluating `finalize \
+             {budget}-token context-window budget — it is time to compact before \
+             continuing. Below is the transcript of the loop's work so far. Write a \
+             prose summary of what it accomplished and learned (not a transcript), \
+             targeting roughly {target} tokens; it will REPLACE the detailed \
+             transcript so the loop can continue under a smaller context, so preserve \
+             the load-bearing facts and decisions. Answer by evaluating `finalize \
              @Text (yourSummary :: Text)`, substituting your own summary text for \
-             `yourSummary`."
+             `yourSummary`.\n\n--- transcript ---\n{transcript}"
         );
 
         let node = self.agent.create_root("compaction", &prompt)?;
@@ -939,17 +1005,12 @@ impl SelfHarnessDriver {
 
         let (value, table) = self.agent.take_finalized_value_with_table(node)?;
         self.emit(Event::Finalize { node });
-        let text = match tidepool_runtime::value_to_json(&value, &table, 0) {
-            Json::String(s) => s,
-            other => {
-                return Err(DriverError::Session(format!(
-                    "compaction turn must finalize Text, got {other:?}"
-                )))
-            }
-        };
-
-        self.lifecycle = SelfHarnessState::RunningLoop;
-        Ok(Some(text))
+        match tidepool_runtime::value_to_json(&value, &table, 0) {
+            Json::String(s) => Ok(s),
+            other => Err(DriverError::Session(format!(
+                "compaction turn must finalize Text, got {other:?}"
+            ))),
+        }
     }
 
     /// Emit `event` to the configured [`Observer`] — the ONE place the
