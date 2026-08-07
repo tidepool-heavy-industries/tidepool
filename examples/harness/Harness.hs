@@ -17,8 +17,8 @@
 --
 --   * 'State' — any author-defined @(ToJSON s, FromJSON s) => s@. LOCKED.
 --     Small + typed ("bag of typed values": enums, levels, tag lists,
---     per-loop notes) — not an unbounded log; whether it accumulates
---     history is an author choice.
+--     per-loop notes, prior typed answers) — not an unbounded log; whether it
+--     accumulates history is an author choice.
 --   * 'render' @:: State -> Maybe Text -> Text@ — LOCKED signature. Invoked
 --     by the runtime at loop boundaries ONLY, never per-turn (the 'Maybe
 --     Text' is the prior loop's compaction summary, 'Nothing' only before
@@ -26,7 +26,20 @@
 --   * 'loop' @:: State -> Harness State@ — LOCKED signature. One context
 --     window's worth of orchestration, ending at a compaction boundary; the
 --     returned 'State' IS the durable memory carried into the next loop.
-module Harness (State (..), Mode (..), initialState, render, loop) where
+--
+-- The typed yield is the point: 'loop' asks for a 'Decision' (an ADT defined
+-- right here), NOT a 'Text' — proving the shared RunLLMTurn/finalize
+-- machinery (WS-B) carries any monomorphic @FromJSON a => a@ answer back
+-- through GHC-as-validator, so authors thread typed values, not strings.
+module Harness
+  ( State (..)
+  , Mode (..)
+  , Decision (..)
+  , Confidence (..)
+  , initialState
+  , render
+  , loop
+  ) where
 
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -40,14 +53,17 @@ import Tidepool.QQ (fmt)
 -- that effect lands.
 import Tidepool.Harness (Harness, runLLMTurn)
 
--- | The author-defined 'State' this harness threads through 'loop' and
--- reads in 'render'. A single-constructor record, per the
+-- | The author-defined 'State' this harness threads through 'loop' and reads
+-- in 'render'. A single-constructor record, per the
 -- @deriving (Generic, ToJSON, FromJSON)@ convention used throughout
--- @haskell/lib/Tidepool@ (structural, no Template Haskell).
+-- @haskell/lib/Tidepool@ (structural, no Template Haskell). Note it stores a
+-- typed 'Decision' ('lastDecision'), so a typed answer flows
+-- @runLLMTurn -> State -> (serialized across the loop boundary) -> render@.
 data State = State
-  { mode      :: Mode
-  , loopCount :: Int
-  , notes     :: [Text]
+  { mode         :: Mode
+  , loopCount    :: Int
+  , notes        :: [Text]
+  , lastDecision :: Maybe Decision
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -56,19 +72,39 @@ data State = State
 data Mode = Observing | Deciding | Acting
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
+-- | The typed answer 'loop' asks for via @runLLMTurn \@Decision@ — NOT a bare
+-- 'Text'. This is the whole point of the shared-code model: the RunLLMTurn /
+-- finalize machinery (WS-B) carries any monomorphic @FromJSON a => a@ answer
+-- back through GHC-as-validator (an ill-typed answer never consumes the
+-- continuation). Defined here alongside 'State'/'Mode', and it NESTS
+-- ('Confidence') to show structured answers cross whole, not just flat.
+data Decision = Decision
+  { action     :: Text        -- ^ the single next thing to do
+  , rationale  :: Text        -- ^ why, in one sentence
+  , confidence :: Confidence  -- ^ nested typed field — structured answers nest
+  }
+  deriving (Generic, ToJSON, FromJSON, Show)
+
+-- | A nested typed field of 'Decision' — proves an ADT-within-an-ADT answer
+-- round-trips through the typed yield.
+data Confidence = Low | Medium | High
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
 -- | The runtime's very first loop starts from this 'State' (before any
 -- persisted State exists to restore).
 initialState :: State
-initialState = State {mode = Observing, loopCount = 0, notes = []}
+initialState =
+  State {mode = Observing, loopCount = 0, notes = [], lastDecision = Nothing}
 
--- | @render :: State -> Maybe Text -> Text@. LOCKED signature. Plain
--- Haskell conditionals + the @[fmt|]@ quasiquoter over 'State' — no jinja,
--- no effects: this function cannot itself suspend or call 'runLLMTurn'
--- (that's what makes per-turn re-rendering unrepresentable by construction).
+-- | @render :: State -> Maybe Text -> Text@. LOCKED signature. Plain Haskell
+-- conditionals + the @[fmt|]@ quasiquoter over 'State' — no jinja, no effects:
+-- this function cannot itself suspend or call 'runLLMTurn' (that's what makes
+-- per-turn re-rendering unrepresentable by construction).
 render :: State -> Maybe Text -> Text
 render st lastCompaction =
   [fmt|You are a self-iterating agent, currently {modeLine}.
 Loop count so far: {loopCount st}.
+{lastDecisionBlock}
 {notesBlock}
 {compactionBlock}|]
   where
@@ -76,6 +112,11 @@ Loop count so far: {loopCount st}.
       Observing -> "observing" :: Text
       Deciding -> "deciding what to do next"
       Acting -> "acting on a prior decision"
+    lastDecisionBlock = case lastDecision st of
+      Nothing -> "No decision made yet." :: Text
+      Just d ->
+        "Last decision: " <> action d
+          <> " (confidence: " <> T.pack (show (confidence d)) <> ")"
     notesBlock
       | null (notes st) = "No notes carried forward yet."
       | otherwise =
@@ -85,23 +126,24 @@ Loop count so far: {loopCount st}.
       Nothing -> ""
       Just summary -> "Summary of the prior window:\n" <> summary
 
--- | @loop :: State -> Harness State@. LOCKED signature. One context
--- window's worth of work: ask the calling model one typed question via
--- 'runLLMTurn' (suspending 'loop' as a hole the self-harness driver
--- services — WS-A — by handing it to a nested Agent turn loop that answers
--- via @finalize@, WS-B), fold the typed answer into a fresh 'State', and
--- return it as this loop's durable memory.
+-- | @loop :: State -> Harness State@. LOCKED signature. One context window's
+-- work: ask the calling model for a TYPED 'Decision' via @runLLMTurn
+-- \@Decision@ (suspending 'loop' as a hole the driver services — WS-A — by
+-- handing it to a nested Agent turn loop that answers via @finalize@, WS-B,
+-- with GHC validating the answer AT 'Decision'), fold the typed decision into
+-- a fresh 'State', and return it as this loop's durable memory.
 loop :: State -> Harness State
 loop st = do
-  decision <-
-    runLLMTurn @Text
-      "Given the current state, decide the single next thing to do. \
-      \Reply with one short sentence."
+  d <-
+    runLLMTurn @Decision
+      "Given the current state, decide the single next thing to do. Give a \
+      \one-sentence rationale and your confidence (Low, Medium, or High)."
   pure
     st
       { mode = nextMode (mode st)
       , loopCount = loopCount st + 1
-      , notes = take 5 (decision : notes st)
+      , notes = take 5 (action d : notes st)
+      , lastDecision = Just d
       }
 
 nextMode :: Mode -> Mode
