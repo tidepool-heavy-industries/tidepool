@@ -305,6 +305,12 @@ pub struct SelfHarnessDriver {
     /// Per-hole hard cap, default [`ANSWERER_MAX_ROUNDS`]. See
     /// [`Self::set_answerer_round_caps`].
     answerer_max_rounds: u32,
+    /// Per-loop total inference-call cap (W1 runaway cap 2), default
+    /// [`LOOP_INFERENCE_CALL_CAP`] (1024). Configurable via
+    /// [`Self::set_loop_inference_call_cap`] so a test can prove a specific
+    /// model call — e.g. the compaction summarize turn (review C-2) — counts
+    /// against it with a small cap instead of scripting 1024 real turns.
+    loop_inference_call_cap: u32,
     /// W3: the `State` json persistence path — [`Self::run_loop`] restores
     /// from this file on start (falling back to `initialState` if absent,
     /// same as the very first cycle ever) and saves the returned `State`
@@ -313,6 +319,14 @@ pub struct SelfHarnessDriver {
     /// override via [`Self::set_state_path`] (mainly for tests, which point
     /// it at a scratch dir rather than the real cache dir).
     state_path: PathBuf,
+    /// The compaction-summary sidecar path (review C-3): the LATEST
+    /// `self.last_compaction` is persisted here every time a compaction fires
+    /// ([`Self::set_last_compaction`]) and reloaded on start by
+    /// [`Self::run_loop`], so a crash-and-restart preserves the summary the
+    /// next render depends on rather than rolling `last_compaction` back to
+    /// `None`. Default [`persistence::default_compaction_path`]; override via
+    /// [`Self::set_compaction_path`] (mainly for tests).
+    compaction_path: PathBuf,
 }
 
 impl SelfHarnessDriver {
@@ -335,7 +349,9 @@ impl SelfHarnessDriver {
             loop_inference_calls: 0,
             answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
+            loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
             state_path: persistence::default_state_path(),
+            compaction_path: persistence::default_compaction_path(),
         }
     }
 
@@ -364,6 +380,14 @@ impl SelfHarnessDriver {
         self.answerer_max_rounds = max;
     }
 
+    /// Override the per-loop total inference-call cap (default
+    /// [`LOOP_INFERENCE_CALL_CAP`], 1024). Mainly for tests: a small cap proves
+    /// a specific model call — e.g. the compaction summarize turn (review
+    /// C-2) — is counted against it without scripting 1024 real turns.
+    pub fn set_loop_inference_call_cap(&mut self, cap: u32) {
+        self.loop_inference_call_cap = cap;
+    }
+
     /// Override the `State` json persistence path (W3; default
     /// [`persistence::default_state_path`]). Mainly for tests: point it at a
     /// scratch dir so a test's persisted `State` never touches the real
@@ -376,6 +400,27 @@ impl SelfHarnessDriver {
     /// The current `State` json persistence path (W3).
     pub fn state_path(&self) -> &Path {
         &self.state_path
+    }
+
+    /// Override the compaction-summary sidecar path (review C-3; default
+    /// [`persistence::default_compaction_path`]). Mainly for tests: point it at
+    /// a scratch dir so a "simulated restart" (a second driver pointed at the
+    /// same path) restores the summary the first one persisted.
+    pub fn set_compaction_path(&mut self, path: PathBuf) {
+        self.compaction_path = path;
+    }
+
+    /// The current compaction-summary sidecar path (review C-3).
+    pub fn compaction_path(&self) -> &Path {
+        &self.compaction_path
+    }
+
+    /// The latest compaction summary the driver holds (`self.last_compaction`)
+    /// — what the next render receives as `lastCompaction`. Reflects a
+    /// reload from [`Self::compaction_path`] after [`Self::run_loop`] starts,
+    /// or the most recent mid-loop compaction. `None` before any has fired.
+    pub fn last_compaction(&self) -> Option<&str> {
+        self.last_compaction.as_deref()
     }
 
     /// Bootstrap the outer `PersistentSession<Threadless>` (via
@@ -554,8 +599,24 @@ impl SelfHarnessDriver {
     /// misbehaving harness from running away across loops. `auto` (the
     /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
     /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
+    /// Reload persisted durable state from [`Self::state_path`] and
+    /// [`Self::compaction_path`] (review C-3), returning the restored `State`
+    /// JSON (or `None` for a first-ever run). Restores `self.last_compaction`
+    /// as a side effect, so the first render after a restart feeds the same
+    /// `lastCompaction` the prior process distilled rather than starting from
+    /// `None` (which would silently drop the summary). Called by
+    /// [`Self::run_loop`] at start; exposed so a restart-durability test can
+    /// drive the same reload path without entering the forever-loop.
+    pub fn restore(&mut self) -> Result<Option<Json>, DriverError> {
+        let state_json = persistence::load_state(&self.state_path)?;
+        if let Some(summary) = persistence::load_compaction(&self.compaction_path)? {
+            self.last_compaction = Some(summary);
+        }
+        Ok(state_json)
+    }
+
     pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
-        let mut state_json: Option<Json> = persistence::load_state(&self.state_path)?;
+        let mut state_json: Option<Json> = self.restore()?;
         let mut first = true;
         loop {
             if !first && !auto {
@@ -683,6 +744,15 @@ impl SelfHarnessDriver {
                     // W2: between holes — if the answerer's accumulated context
                     // has crossed threshold, compact + replace its context IN
                     // PLACE now, so the NEXT hole drives under the smaller window.
+                    //
+                    // D-2: this runs only AFTER `service_runllm_hole` has already
+                    // finalized THIS hole's answer (`take_finalized_value_keep_open`
+                    // consumed the finalize continuation and returned the session
+                    // to idle — harness.rs `take_finalized_value_keep_open`). So
+                    // the summarize turn `maybe_compact_answerer` drives sees the
+                    // last answer already IN the transcript and cannot drop it: a
+                    // future refactor that moves this call BEFORE the answer is
+                    // taken would compact a mid-finalize session — do not.
                     self.maybe_compact_answerer()?;
                     let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
                     outcome = outer
@@ -785,9 +855,10 @@ impl SelfHarnessDriver {
         let mut rounds: u32 = 0;
         let mut nudged = false;
         loop {
-            if self.loop_inference_calls >= LOOP_INFERENCE_CALL_CAP {
+            let cap = self.loop_inference_call_cap;
+            if self.loop_inference_calls >= cap {
                 return Err(DriverError::Session(format!(
-                    "per-loop inference-call cap ({LOOP_INFERENCE_CALL_CAP}) reached — \
+                    "per-loop inference-call cap ({cap}) reached — \
                      hard-stopping the loop (a runaway harness)"
                 )));
             }
@@ -932,24 +1003,32 @@ impl SelfHarnessDriver {
     /// "replace its context with the summary so the loop CONTINUES", NO
     /// loop-abort). Called between the answerer's holes ([`Self::run_loop_fragment_inner`]).
     ///
-    /// Watches the CURRENT loop's answerer session's REAL accumulated context
-    /// ([`Harness::node_usage`], summed across its holes/rounds — the fix for
-    /// review C3/D2: the old check watched `max_tokens`, the 2048 per-turn
-    /// *output* cap, not context) against the threshold
+    /// Watches the CURRENT loop's answerer session's REAL context size —
+    /// [`Harness::node_last_input_tokens`], the LAST turn's `input_tokens`
+    /// high-water mark (review C-1: NOT [`Harness::node_usage`]'s summed
+    /// `input_tokens`, which super-linearly over-counts across a multi-round
+    /// hole because each round's provider `input_tokens` already re-includes
+    /// the whole re-sent transcript) — against the threshold
     /// (`self.compaction_threshold_percent` of [`EngineConfig::context_window_tokens`],
     /// default ~80%). Under threshold, or with the budget disabled (`None`) or
     /// no live answerer, it is a no-op.
     ///
-    /// Past threshold it:
-    /// 1. Summarizes the answerer's REAL transcript (not a fresh context-free
-    ///    node — that is what confabulated) by driving a fresh compaction node
-    ///    to `finalize @Text`.
-    /// 2. Replaces the answerer's context with that summary IN PLACE
+    /// Past threshold it (the SIMPLE mechanism — no separate node, no
+    /// `finalize`, no transcript serialized into a prompt; the answerer already
+    /// HAS the full context):
+    /// 1. Pushes ONE plain "summarize everything above" turn onto the EXISTING
+    ///    answerer session and captures the model's prose reply
+    ///    ([`Harness::summarize_turn`]) — that model call counts against the
+    ///    per-loop [`LOOP_INFERENCE_CALL_CAP`] (review C-2).
+    /// 2. Replaces the answerer's context with `[system + summary]` IN PLACE
     ///    ([`Harness::replace_transcript_with_summary`]) — the loop's remaining
     ///    holes continue under the smaller window.
     /// 3. Records the summary as `self.cycle_compaction` (this cycle's, for
     ///    [`CycleOutcome::compaction`]) and `self.last_compaction` (carried to
-    ///    the NEXT [`Self::render_framing`]'s `Maybe Text`).
+    ///    the NEXT [`Self::render_framing`]'s `Maybe Text`, and persisted for
+    ///    restart durability — review C-3).
+    /// 4. Emits [`Event::CompactionTrigger`] with its payload (summary, pre/post
+    ///    context size, node — review C-4).
     fn maybe_compact_answerer(&mut self) -> Result<(), DriverError> {
         let Some(budget) = self.agent.cfg().context_window_tokens else {
             return Ok(());
@@ -957,93 +1036,85 @@ impl SelfHarnessDriver {
         let Some(answerer) = self.answerer else {
             return Ok(());
         };
-        let Some(usage) = self.agent.node_usage(answerer) else {
+        let Some(context_tokens) = self.agent.node_last_input_tokens(answerer) else {
             return Ok(());
         };
-        let total = usage.input_tokens + usage.output_tokens;
         let threshold = (u64::from(budget) * self.compaction_threshold_percent) / 100;
-        if total < threshold {
+        if context_tokens < threshold {
             return Ok(());
         }
 
-        let summary = self.force_compaction_summary(answerer, budget, total)?;
-        // In-place relief: the answerer's context becomes the summary, so its
-        // remaining holes drive under the smaller window (loop CONTINUES).
+        self.lifecycle = SelfHarnessState::Compacting;
+
+        // C-2: the summarize turn is a real model call — count it against the
+        // per-loop inference cap before driving it, exactly like an answerer
+        // round, so compaction can never escape the 1024-call runaway guard.
+        let cap = self.loop_inference_call_cap;
+        if self.loop_inference_calls >= cap {
+            return Err(DriverError::Session(format!(
+                "per-loop inference-call cap ({cap}) reached during \
+                 compaction — hard-stopping the loop (a runaway harness)"
+            )));
+        }
+        self.loop_inference_calls += 1;
+
+        // J-2: the target is a fraction of the budget, but clamp it against the
+        // REAL current window (`context_tokens`) so a summary is never asked to
+        // GROW context — under a low test threshold (or a tiny window) the flat
+        // budget/DIVISOR could exceed what is actually there. Target strictly
+        // below the current size keeps compaction a genuine reduction.
+        let budget_target = u64::from(budget / COMPACTION_TARGET_DIVISOR);
+        let target = budget_target.min(context_tokens.saturating_sub(1)).max(1);
+        let prompt = format!(
+            "This work window has grown to roughly {context_tokens} tokens against a \
+             {budget}-token context-window budget — it is time to compact before \
+             continuing. Summarize EVERYTHING above (the whole conversation so far) \
+             into a compact form you can continue from: a prose summary of what this \
+             loop's work has accomplished and learned, targeting roughly {target} \
+             tokens, preserving the load-bearing facts and decisions. Your reply will \
+             REPLACE the detailed transcript above, so write it as the context you \
+             will carry forward. Reply with the summary text directly (no code block)."
+        );
+
+        // The SIMPLE mechanism: one ordinary turn on the EXISTING answerer
+        // session, which already holds the full context — no second node, no
+        // `finalize`, no hand-serialized transcript. The model summarizes
+        // itself, so it cannot confabulate.
+        let (summary, post_usage) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.summarize_turn(answerer, &prompt))
+        })?;
+        let summary = summary.trim().to_string();
+
+        // In-place relief: the answerer's context becomes `[system + summary]`,
+        // so its remaining holes drive under the smaller window (loop CONTINUES).
         self.agent
             .replace_transcript_with_summary(answerer, &summary)?;
 
+        // C-4: the trigger event now carries what compaction produced — the
+        // summary, the pre/post context size, and the node it fired on.
+        self.emit(Event::CompactionTrigger {
+            node: answerer,
+            summary: summary.clone(),
+            pre_input_tokens: context_tokens,
+            post_input_tokens: post_usage.input_tokens,
+        });
+
         self.cycle_compaction = Some(summary.clone());
-        self.last_compaction = Some(summary);
+        self.set_last_compaction(summary)?;
         self.lifecycle = SelfHarnessState::RunningLoop;
         Ok(())
     }
 
-    /// Drive a fresh compaction node to `finalize @Text summary`, summarizing
-    /// the answerer session's REAL transcript (`answerer`) so the summary is of
-    /// the actual work, not a confabulation (review C3). `budget`/`total` frame
-    /// the compaction instruction. Returns the finalized summary `Text`.
-    fn force_compaction_summary(
-        &mut self,
-        answerer: NodeId,
-        budget: u32,
-        total: u64,
-    ) -> Result<String, DriverError> {
-        self.lifecycle = SelfHarnessState::Compacting;
-        self.emit(Event::CompactionTrigger);
-
-        let transcript = self
-            .agent
-            .node_transcript(answerer)
-            .map(|msgs| {
-                msgs.iter()
-                    .map(|m| format!("{:?}: {}", m.role, m.content))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            })
-            .unwrap_or_default();
-
-        let target = (budget / COMPACTION_TARGET_DIVISOR).max(1);
-        let prompt = format!(
-            "This work window has used approximately {total} tokens against a \
-             {budget}-token context-window budget — it is time to compact before \
-             continuing. Below is the transcript of the loop's work so far. Write a \
-             prose summary of what it accomplished and learned (not a transcript), \
-             targeting roughly {target} tokens; it will REPLACE the detailed \
-             transcript so the loop can continue under a smaller context, so preserve \
-             the load-bearing facts and decisions. Answer by evaluating `finalize \
-             @Text (yourSummary :: Text)`, substituting your own summary text for \
-             `yourSummary`.\n\n--- transcript ---\n{transcript}"
-        );
-
-        let node = self.agent.create_root("compaction", &prompt)?;
-        self.agent.force(node, Actor::Operator)?;
-        self.emit(Event::TurnStart { node });
-
-        let outcome = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.run_to_hole_or_done(node))
-        })?;
-        self.emit(Event::TurnEnd { node });
-
-        let is_finalize = matches!(
-            &outcome,
-            TurnOutcome::Suspended { classified, .. }
-                if matches!(classified.routing, HoleRouting::Finalize { .. })
-        );
-        if !is_finalize {
-            return Err(DriverError::Session(format!(
-                "compaction node {node:?} did not suspend on finalize (got {})",
-                turn_outcome_tag(&outcome)
-            )));
-        }
-
-        let (value, table) = self.agent.take_finalized_value_with_table(node)?;
-        self.emit(Event::Finalize { node });
-        match tidepool_runtime::value_to_json(&value, &table, 0) {
-            Json::String(s) => Ok(s),
-            other => Err(DriverError::Session(format!(
-                "compaction turn must finalize Text, got {other:?}"
-            ))),
-        }
+    /// Record `summary` as the latest compaction (`self.last_compaction`, fed to
+    /// the next render's `Maybe Text`) AND persist it to
+    /// [`Self::compaction_path`] so a crash-and-restart preserves the summary
+    /// (review C-3): the in-memory field alone rolls back to `None` on restart,
+    /// losing the summary the next render depends on. [`Self::run_loop`] reloads
+    /// it on start alongside the persisted `State`.
+    fn set_last_compaction(&mut self, summary: String) -> Result<(), DriverError> {
+        persistence::save_compaction(&self.compaction_path, &summary)?;
+        self.last_compaction = Some(summary);
+        Ok(())
     }
 
     /// Emit `event` to the configured [`Observer`] — the ONE place the

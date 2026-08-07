@@ -125,6 +125,15 @@ struct NodeConvo {
     /// trigger, [`Harness::node_usage`], sums this across every `runLLMTurn`
     /// answerer / compaction node it drives per loop).
     usage: Usage,
+    /// The MOST RECENT turn's `input_tokens` (overwritten every turn, not
+    /// summed) — the provider's per-round input token count already includes
+    /// the whole re-sent transcript, so the latest value IS the node's real
+    /// current context size (a high-water mark). The self-iterating-harness
+    /// driver's compaction threshold reads THIS (review C-1) rather than the
+    /// running [`Self::usage`] sum, which super-linearly over-counts across a
+    /// multi-round hole (each round's input re-counts every prior round's
+    /// transcript). `0` before the node's first turn.
+    last_input_tokens: u64,
     /// This node's OWN system message, overriding the default
     /// [`engine::SYSTEM_FRAMING`] when set (self-iterating-harness W1/C1: the
     /// per-loop answerer session's framing is `render`'s output — the
@@ -633,6 +642,7 @@ impl Harness {
                 suspend_asks: AsksSidecar::default(),
                 pending_bind: None,
                 usage: Usage::default(),
+                last_input_tokens: 0,
                 framing,
             },
         );
@@ -722,6 +732,12 @@ impl Harness {
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
             convo.usage.output_tokens += driven.usage.output_tokens;
+            // C-1: the latest turn's input_tokens IS the node's real context
+            // size (the provider re-sends the whole transcript each round, so
+            // its input count already includes every prior turn). Overwrite,
+            // don't accumulate — this is the high-water the compaction
+            // threshold reads.
+            convo.last_input_tokens = driven.usage.input_tokens;
         }
 
         let Some(block) = driven.block else {
@@ -733,6 +749,65 @@ impl Harness {
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
         self.run_block(node, &body, &imports, "").await
+    }
+
+    /// Drive ONE plain model turn on `node`: push `prompt` as a User message,
+    /// call the provider, log the assistant reply, and return its RAW TEXT plus
+    /// that single turn's [`Usage`] — WITHOUT compiling or running any Haskell
+    /// block. Unlike [`Self::drive_turn`], the model's answer is captured as
+    /// prose, not executed; the node's session is untouched (still idle), so it
+    /// can keep driving afterward.
+    ///
+    /// This is the self-iterating harness's simplified compaction primitive
+    /// (review C-2/H-1/J-1): compaction is ONE ordinary turn on the answerer
+    /// session that ALREADY holds the full context — "summarize everything
+    /// above" — no second node, no `finalize`, no serializing the transcript
+    /// into a prompt (the model has it in context). The caller then resets the
+    /// session's context to the returned summary via
+    /// [`Self::replace_transcript_with_summary`].
+    pub async fn summarize_turn(
+        &self,
+        node: NodeId,
+        prompt: &str,
+    ) -> Result<(String, Usage), HarnessError> {
+        // Push the summarize request, then snapshot the transcript + framing.
+        self.push_user_turn(node, prompt)?;
+        let (transcript, turn_seq, framing) = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+            (
+                convo.transcript.clone(),
+                convo.turn_seq,
+                convo.framing.clone(),
+            )
+        };
+
+        self.tree.turn_start(node, "model".to_string(), None)?;
+        let driven = self
+            .stream_turn(node, &transcript, framing.as_deref())
+            .await?;
+        self.tree.turn_delta_reasoned(
+            node,
+            turn_seq,
+            Role::Assistant,
+            driven.reply.clone(),
+            Some(driven.usage),
+            driven.reasoning.clone(),
+        )?;
+        self.finish_live_turn(node);
+        {
+            let mut convos = self.convos.lock();
+            let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+            convo.transcript.push(Message {
+                role: Role::Assistant,
+                content: driven.reply.clone(),
+            });
+            convo.turn_seq += 1;
+            convo.usage.input_tokens += driven.usage.input_tokens;
+            convo.usage.output_tokens += driven.usage.output_tokens;
+            convo.last_input_tokens = driven.usage.input_tokens;
+        }
+        Ok((driven.reply, driven.usage))
     }
 
     /// Compile a `block` (with optional imports/helpers) and run it against
@@ -1314,6 +1389,18 @@ impl Harness {
     /// it drives per loop). `None` if `node` has no live session.
     pub fn node_usage(&self, node: NodeId) -> Option<Usage> {
         self.convos.lock().get(&node).map(|c| c.usage)
+    }
+
+    /// The MOST RECENT turn's `input_tokens` on `node` — the node's real
+    /// current context size (the provider re-sends the whole transcript each
+    /// round, so its per-round input count already includes every prior turn).
+    /// This is a HIGH-WATER mark, not a running sum: the self-iterating
+    /// harness's compaction threshold reads THIS (review C-1), never
+    /// [`Self::node_usage`]'s summed `input_tokens`, which super-linearly
+    /// over-counts across a multi-round hole. `Some(0)` before the node's
+    /// first turn; `None` if `node` has no live session.
+    pub fn node_last_input_tokens(&self, node: NodeId) -> Option<u64> {
+        self.convos.lock().get(&node).map(|c| c.last_input_tokens)
     }
 
     /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
@@ -2294,16 +2381,6 @@ impl Harness {
         }
     }
 
-    /// A snapshot of `node`'s current transcript (every user + assistant turn
-    /// so far). The self-iterating harness driver reads this to build the
-    /// MID-LOOP compaction prompt from the answerer's REAL accumulated context
-    /// (W2 / 02-runtime.md Compaction) — the fix for the old between-loops
-    /// compaction, which summarized a fresh context-free node and confabulated
-    /// (review C3). `None` if `node` has no live convo.
-    pub(crate) fn node_transcript(&self, node: NodeId) -> Option<Vec<Message>> {
-        self.convos.lock().get(&node).map(|c| c.transcript.clone())
-    }
-
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
@@ -2335,8 +2412,11 @@ impl Harness {
         convo.turn_seq += 1;
         // Reset the running context-size meter: the live context is now just
         // this summary, so the driver's budget check must see the small
-        // compacted window, not the pre-compaction cumulative total.
+        // compacted window, not the pre-compaction cumulative total. Both the
+        // summed `usage` and the high-water `last_input_tokens` (review C-1)
+        // reset — the next turn's input_tokens re-establishes the real size.
         convo.usage = Usage::default();
+        convo.last_input_tokens = 0;
         drop(convos);
         self.tree
             .turn_delta(node, turn, Role::User, content, None)?;

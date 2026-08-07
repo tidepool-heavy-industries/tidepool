@@ -61,6 +61,18 @@ pub fn default_transcript_path() -> PathBuf {
         .join("transcript.jsonl")
 }
 
+/// Default compaction-summary path: `<cache_dir>/selfharness/compaction.txt`
+/// (review C-3). The driver's `last_compaction` is otherwise in-memory only,
+/// so a crash after a mid-loop compaction would lose the summary the next
+/// render depends on and roll it back to `None`. Persisting it as a sidecar
+/// (plain text, not a DB — same "local files" discipline as `State`) lets a
+/// restarted process reload the latest summary alongside the persisted `State`.
+pub fn default_compaction_path() -> PathBuf {
+    tidepool_runtime::paths::cache_dir()
+        .join("selfharness")
+        .join("compaction.txt")
+}
+
 /// Restore the persisted `State` JSON from `path`, if any file exists there
 /// yet — `Ok(None)` (NOT an error) when the file is simply absent, which is
 /// the expected case for the very first run: [`crate::selfharness::driver::SelfHarnessDriver::run_loop`]
@@ -101,6 +113,43 @@ pub fn save_state(path: &Path, state: &Json) -> Result<(), PersistenceError> {
     })?;
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, path).map_err(|source| PersistenceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Restore the persisted compaction summary from `path`, if a file exists
+/// there yet (review C-3) — `Ok(None)` (NOT an error) when absent, the
+/// expected case before any compaction has fired. Mirrors [`load_state`]'s
+/// missing-file-is-none contract.
+pub fn load_compaction(path: &Path) -> Result<Option<String>, PersistenceError> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(PersistenceError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Persist the latest compaction `summary` to `path` (review C-3), creating
+/// the containing directory if needed. Same atomic `.tmp`-then-rename write as
+/// [`save_state`], so a kill mid-write never leaves a half-written summary that
+/// a restart would reload.
+pub fn save_compaction(path: &Path, summary: &str) -> Result<(), PersistenceError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| PersistenceError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    std::fs::write(&tmp, summary.as_bytes()).map_err(|source| PersistenceError::Io {
         path: tmp.clone(),
         source,
     })?;
@@ -203,12 +252,35 @@ mod tests {
     }
 
     #[test]
+    fn load_compaction_missing_file_is_none_not_error() {
+        let dir = tempfile_dir();
+        let path = dir.join("none").join("compaction.txt");
+        assert_eq!(load_compaction(&path).expect("missing is Ok(None)"), None);
+    }
+
+    #[test]
+    fn save_then_load_compaction_round_trips() {
+        // C-3: the persisted summary survives a "restart" (a fresh read).
+        let dir = tempfile_dir();
+        let path = dir.join("nested").join("compaction.txt");
+        let summary = "loop 3 distilled: decided X, learned Y";
+        save_compaction(&path, summary).expect("save_compaction");
+        let loaded = load_compaction(&path).expect("load").expect("some");
+        assert_eq!(loaded, summary);
+    }
+
+    #[test]
     fn jsonl_observer_appends_one_line_per_event() {
         let dir = tempfile_dir();
         let path = dir.join("transcript.jsonl");
         let observer = JsonlObserver::create(&path).expect("create");
         observer.on_event(&Event::LoopBoundary);
-        observer.on_event(&Event::CompactionTrigger);
+        observer.on_event(&Event::CompactionTrigger {
+            node: crate::tree::NodeId(7),
+            summary: "distilled work summary".to_string(),
+            pre_input_tokens: 900,
+            post_input_tokens: 120,
+        });
         drop(observer);
 
         let contents = std::fs::read_to_string(&path).expect("read transcript");
@@ -216,6 +288,10 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("loop_boundary"));
         assert!(lines[1].contains("compaction_trigger"));
+        // C-4: the jsonl line carries WHAT compaction produced, not just that
+        // it fired — the summary and the pre/post context sizes.
+        assert!(lines[1].contains("distilled work summary"));
+        assert!(lines[1].contains("900"));
     }
 
     #[test]
@@ -230,7 +306,12 @@ mod tests {
             // Simulates a restart: a fresh JsonlObserver over the same path
             // must not truncate the prior line.
             let observer = JsonlObserver::create(&path).expect("re-create");
-            observer.on_event(&Event::CompactionTrigger);
+            observer.on_event(&Event::CompactionTrigger {
+                node: crate::tree::NodeId(1),
+                summary: "s".to_string(),
+                pre_input_tokens: 1,
+                post_input_tokens: 1,
+            });
         }
         let contents = std::fs::read_to_string(&path).expect("read transcript");
         assert_eq!(contents.lines().count(), 2);
