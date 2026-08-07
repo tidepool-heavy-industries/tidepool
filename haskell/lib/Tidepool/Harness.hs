@@ -22,13 +22,16 @@ module Tidepool.Harness
   ( Harness
   , HarnessEff
   , runLLMTurn
-  , runLLMTurnWithRequiredResp
   ) where
 
 import Control.Monad.Freer (Eff)
-import Data.Text (Text)
-import qualified Tidepool.Effects as Effects
-import Tidepool.Effects (M, RunLLMTurn)
+-- 'runLLMTurn' is RE-EXPORTED verbatim from 'Tidepool.Effects' (see below) —
+-- NOT wrapped. A local wrapper @runLLMTurn = Effects.runLLMTurn@ would compile
+-- once as a polymorphic binding, so the extract's typed-yield site-id pass sees
+-- its INTERNAL @Effects.runLLMTurn \@a@ call at a bare type VARIABLE and rejects
+-- it ("polymorphic runLLMTurn site"). A re-export has no such internal site: a
+-- call @runLLMTurn \@Text@ IS @Effects.runLLMTurn \@Text@ directly, concrete.
+import Tidepool.Effects (M, RunLLMTurn, runLLMTurn)
 
 -- | The self-iterating harness's orchestration monad — see the module
 -- haddock for why this is an alias for @M@, not a literal effect list.
@@ -51,24 +54,12 @@ type Harness = M
 -- follow @M@ as base effects are appended.
 type HarnessEff = Eff '[RunLLMTurn]
 
--- | Suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@): the driver
--- answers by driving a nested Agent turn loop (a fresh multi-turn
+-- 'runLLMTurn' — suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@):
+-- the driver answers by driving a nested Agent turn loop (a fresh multi-turn
 -- sub-session over the SAME calling model) to a @finalize@
--- (self-iterating-harness WS-A/B), whose value resumes this hole. GHC
--- validates the answer against @T@ before it resumes the continuation — an
--- ill-typed answer never consumes it. Re-exports
--- 'Tidepool.Effects.runLLMTurn' under this module's own name, matching the
--- @examples\/harness\/Harness.hs@ target contract's
--- @import Tidepool.Harness (Harness, runLLMTurn)@.
-runLLMTurn :: forall a. Text -> Harness a
-runLLMTurn = Effects.runLLMTurn
-
--- | Alias for 'runLLMTurn' — the "required response" framing
--- (07-impl-orchestration.md\/03-agent-surface.md's proposed shape,
--- @runLLMTurnWithRequiredResp :: ... -> Harness a@) names the SAME verb: v1
--- has no separate "no required response" variant (that would mirror
--- @Tidepool.Effects.runLLMTurn :: forall a. Text -> M ()@ instantiated at
--- @()@, unused today), so both names resolve identically until one is
--- needed.
-runLLMTurnWithRequiredResp :: forall a. Text -> Harness a
-runLLMTurnWithRequiredResp = Effects.runLLMTurn
+-- (self-iterating-harness WS-A/B), whose value resumes this hole. GHC validates
+-- the answer against @T@ before it resumes the continuation, so an ill-typed
+-- answer never consumes it. Re-exported straight from 'Tidepool.Effects' (in the
+-- import above) to match the @examples\/harness\/Harness.hs@ target contract's
+-- @import Tidepool.Harness (Harness, runLLMTurn)@ — see the import haddock for
+-- why it is a re-export and not a wrapper.
