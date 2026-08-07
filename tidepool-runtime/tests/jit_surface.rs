@@ -997,10 +997,18 @@ fn works_parse_iso8601_format_day_roundtrip() {
 /// carries no semantics and neither side depends on it.
 #[test]
 fn works_ui() {
+    // `Tidepool.Form` (`Text -> Text -> Form ()`) is auto-imported unqualified
+    // by the standard preamble whenever `Ask` is in the effect stack (always,
+    // here), and it exports its own `code`/`prose` display combinators of the
+    // same bare name as `Tidepool.Ui`'s (`Text -> Text -> Ui`) — importing
+    // `Tidepool.Ui` unqualified alone makes bare `code` an "Ambiguous
+    // occurrence". `Tidepool.Ui.code` stays reachable qualified, exactly the
+    // pattern `tidepool_harness::engine::split_imports` documents for a turn
+    // building a raw `Ui` tree by hand.
     works_with_imports(
-        "Tidepool.Ui",
+        "Tidepool.Ui\nqualified Tidepool.Ui as U",
         r#"pure (card "hole"
-             [ code "haskell" "resume :: Verdict -> M ()"
+             [ U.code "haskell" "resume :: Verdict -> M ()"
              , choice "verdict?" [("approve", "Approve")]
              , badge "Exec, Fs" EffectRow
              ])"#,
