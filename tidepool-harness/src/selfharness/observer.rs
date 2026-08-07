@@ -36,8 +36,19 @@ pub enum Event {
     /// An Agent turn resolved the pending hole via `finalize` (WS-B),
     /// resuming the parent `loop`.
     Finalize { node: NodeId },
-    /// The runtime-owned ~80% emergency compaction trigger fired (WS-E).
-    CompactionTrigger,
+    /// The runtime-owned ~80% emergency compaction fired on `node` (the
+    /// per-loop answerer). Carries WHAT compaction produced (review C-4: the
+    /// event was payload-free, so the jsonl transcript — the distillation
+    /// substrate — recorded only THAT it fired, never the summary): the
+    /// `summary` text, and the answerer's context size (last-turn
+    /// `input_tokens`) `pre_input_tokens` (which crossed threshold) and
+    /// `post_input_tokens` (the summarizing turn's own input, for the record).
+    CompactionTrigger {
+        node: NodeId,
+        summary: String,
+        pre_input_tokens: u64,
+        post_input_tokens: u64,
+    },
 }
 
 /// A subscriber the driver emits [`Event`]s to. Implementations MUST NOT

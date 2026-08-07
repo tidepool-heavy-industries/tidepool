@@ -1,20 +1,28 @@
 //! W2 acceptance coverage for the self-iterating harness driver's
 //! runtime-owned MID-LOOP, IN-PLACE compaction (`plans/self-iterating-harness/
-//! 02-runtime.md` Compaction section; `08-wave1-correctness.md` W2):
+//! 02-runtime.md` Compaction; `08-wave1-correctness.md` W2) — as SIMPLIFIED by
+//! the wave1-compaction-fixes review (operator directive):
 //!
-//! A low context-window budget trips the driver's `~80%` check off the
-//! answerer session's REAL accumulated context BETWEEN the loop's two holes.
-//! The runtime forces a compact-to-text turn (summarizing the answerer's real
-//! transcript, not a fresh context-free node — the review C3 fix), then
-//! REPLACES the answerer's context with that summary IN PLACE so the loop's
-//! SECOND hole continues under the smaller window (no loop-abort). The test
-//! asserts:
-//!   1. the compaction `Text` is produced (`CycleOutcome::compaction`),
-//!   2. it reaches the next `render`'s `Maybe Text` (`prompt_after` shows the
-//!      fixture's "Summary of the prior window:" block),
-//!   3. IN-PLACE relief: the SECOND hole's answerer transcript carries the
-//!      SUMMARY, not the raw first-hole exchange — the loop CONTINUED under the
-//!      replaced context.
+//! Compaction is now ONE ordinary turn on the EXISTING answerer session (which
+//! already holds the full context): the driver pushes a "summarize everything
+//! above" User turn, captures the model's PLAIN-TEXT reply as the summary, then
+//! resets that session's context to `[system + summary]`. No separate node, no
+//! `finalize @Text`, no transcript serialized into a prompt. This dissolves H-1
+//! (no second drive-to-finalize loop) and J-1 (no hand-serialized transcript)
+//! by construction.
+//!
+//! These tests exercise the review's fixes on the simplified mechanism:
+//!   - C-1: the threshold measures the answerer's context as the LAST turn's
+//!     `input_tokens` (a high-water mark), NOT a running SUM across rounds — a
+//!     multi-round hole whose SUMMED input crosses the budget but whose LATEST
+//!     input does not must NOT trip compaction.
+//!   - C-2: the summarize turn's model call counts against the per-loop 1024
+//!     inference-call cap.
+//!   - the in-place relief property: the second hole runs under the summary,
+//!     and the summary reaches the next render.
+//!
+//! (C-3 restart durability and C-4 jsonl payload have their own test files /
+//! unit tests; see `selfharness_compaction_fixes.rs` and `persistence.rs`.)
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
@@ -63,24 +71,47 @@ fn header() -> LogHeader {
     }
 }
 
-/// The compaction summary the scripted compaction turn finalizes. A unique
-/// sentinel so the test can prove it (a) reached the next render and (b)
-/// replaced the second hole's context in place.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "selfharness-compaction-{}-{}",
+        std::process::id(),
+        name
+    ));
+    // Clear any stale contents so a re-run's `LogWriter::create` (which refuses
+    // an existing file) starts fresh rather than tripping AlreadyExists.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// A summarize turn is recognizable by its prompt (see `driver.rs`
+/// `maybe_compact_answerer`): it asks the model to "Summarize EVERYTHING above"
+/// and to reply with the summary text directly. The scripted providers detect
+/// that and reply with a plain-text summary.
+fn is_summarize_prompt(user: &str) -> bool {
+    user.contains("Summarize EVERYTHING above")
+}
+
+/// The plain-text summary the scripted providers reply with on a summarize
+/// turn. A unique sentinel so a test can prove it reached the next render and
+/// replaced the answerer's context in place.
 const SUMMARY_SENTINEL: &str = "COMPACTED-SUMMARY-chose-a-fruit-first";
 
-/// A provider that:
-/// - answers the compaction request (its prompt asks to `finalize @Text
-///   (yourSummary`) with a fixed [`SUMMARY_SENTINEL`] summary,
-/// - answers the two `runLLMTurn @Text` holes with `apple` / `blue`,
-/// - and, when it services the SECOND hole, records whether the transcript it
-///   was handed carries the SUMMARY (in-place relief) rather than the raw
-///   first-hole exchange (`apple`) — the W2 property.
-struct CompactionProbeProvider {
+// ---------------------------------------------------------------------------
+// Mechanism test: in-place relief + summary reaches the next render.
+// ---------------------------------------------------------------------------
+
+/// Provider for the in-place-relief test. First hole answers `apple` with a
+/// large single-turn input (high-water crosses threshold); the summarize turn
+/// replies with a plain-text summary; the second hole answers `blue` and
+/// records whether the transcript it was handed carries the SUMMARY (in-place
+/// relief) rather than the raw first-hole exchange (`apple`).
+struct InPlaceProbeProvider {
     /// `Some((saw_summary, saw_raw_first))` once the second hole is serviced.
     second_hole: Arc<Mutex<Option<(bool, bool)>>>,
 }
 
-impl ModelProvider for CompactionProbeProvider {
+impl ModelProvider for InPlaceProbeProvider {
     async fn complete(
         &self,
         req: TurnRequest,
@@ -94,15 +125,12 @@ impl ModelProvider for CompactionProbeProvider {
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
-        // The forced compaction turn: its prompt asks for `finalize @Text
-        // (yourSummary`. Emit a big summary so it is unambiguous.
-        if latest_user.contains("yourSummary") {
+        // The summarize turn: reply with the plain-text summary (no code block).
+        if is_summarize_prompt(&latest_user) {
             return Ok(TurnResponse {
-                text: format!(
-                    "```haskell\n(finalize @Text (\"{SUMMARY_SENTINEL}\" :: Text) :: M ())\n```"
-                ),
+                text: SUMMARY_SENTINEL.to_string(),
                 usage: Usage {
-                    input_tokens: 5,
+                    input_tokens: 20,
                     output_tokens: 5,
                 },
                 reasoning: None,
@@ -118,66 +146,57 @@ impl ModelProvider for CompactionProbeProvider {
                 .collect::<Vec<_>>()
                 .join("\n");
             let saw_summary = joined.contains(SUMMARY_SENTINEL);
-            // The raw first-hole answer ("apple") must be GONE from the
-            // transcript once the context has been compacted in place.
+            // The raw first-hole answer ("apple") must be GONE once the context
+            // has been compacted in place.
             let saw_raw_first = joined.contains("apple");
             *self.second_hole.lock().unwrap() = Some((saw_summary, saw_raw_first));
         }
 
         let answer = if is_second { "blue" } else { "apple" };
-        // Large per-turn usage so the FIRST hole alone crosses the (low) test
-        // context-window budget, tripping compaction between the two holes.
+        // Large single-turn input so the FIRST hole's LAST-turn input_tokens
+        // (the C-1 high-water measure) alone crosses the (low) threshold.
         Ok(TurnResponse {
             text: format!("```haskell\n(finalize @Text (\"{answer}\" :: Text) :: M ())\n```"),
             usage: Usage {
-                input_tokens: 400,
-                output_tokens: 100,
+                input_tokens: 600,
+                output_tokens: 50,
             },
             reasoning: None,
         })
     }
 }
 
-/// Mid-loop, in-place compaction: with a low context-window budget, the
-/// answerer's real context crosses ~80% after the FIRST hole; the runtime
-/// compacts to text, replaces the answerer's context in place, and the SECOND
-/// hole runs under the summary. The summary reaches the next render.
+/// Mid-loop, in-place compaction on the SIMPLE mechanism: the answerer's
+/// last-turn input crosses ~80% after the FIRST hole; the runtime pushes ONE
+/// summarize turn onto the same answerer, resets its context to the summary,
+/// and the SECOND hole runs under it. The summary reaches the next render.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
 
     let second_hole = Arc::new(Mutex::new(None));
-    let provider: Arc<dyn DynModelProvider> = Arc::new(CompactionProbeProvider {
+    let provider: Arc<dyn DynModelProvider> = Arc::new(InPlaceProbeProvider {
         second_hole: second_hole.clone(),
     });
 
     let mut agent_cfg =
         EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
             .expect("answerer engine config");
-    // A LOW context-window budget (1000 tokens) so the first hole's ~500-token
-    // usage crosses the 80% threshold (800) only AFTER the second hole would
-    // push it over — set threshold to 50% (500) so the first hole alone
-    // (400+100 = 500) trips it, tripping compaction BETWEEN the two holes.
     agent_cfg.context_window_tokens = Some(1000);
 
-    let writer = tidepool_harness::log::LogWriter::create(
-        &std::env::temp_dir().join(format!(
-            "selfharness-compaction-{}.jsonl",
-            std::process::id()
-        )),
-        &header(),
-    )
-    .expect("log writer");
+    let writer =
+        tidepool_harness::log::LogWriter::create(&scratch("inplace").join("log.jsonl"), &header())
+            .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    // 50% of the 1000-token budget = 500 tokens: the first hole's 500-token
-    // usage trips compaction between the holes, deterministically.
+    driver.set_state_path(scratch("inplace").join("state.json"));
+    driver.set_compaction_path(scratch("inplace").join("compaction.txt"));
+    // 50% of 1000 = 500: the first hole's 600-token LAST-turn input trips
+    // compaction between the holes, deterministically.
     driver.set_compaction_threshold_percent(50);
     let source = load_harness_source(&fixtures_dir().join("CompactionHarness.hs"))
         .expect("compaction harness source loads");
@@ -190,13 +209,13 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     let compaction = outcome
         .compaction
         .as_deref()
-        .expect("usage past the (lowered) threshold must force a mid-loop compaction turn");
+        .expect("last-turn input past the (lowered) threshold must force a mid-loop compaction");
     assert!(
         compaction.contains(SUMMARY_SENTINEL),
-        "the compaction Text must be the forced turn's finalized summary, got: {compaction:?}"
+        "the compaction Text must be the summarize turn's plain-text reply, got: {compaction:?}"
     );
 
-    // Both holes still ran to completion — the loop CONTINUED, no abort.
+    // Both holes ran to completion — the loop CONTINUED, no abort.
     let answers = outcome
         .state_json
         .get("answers")
@@ -226,20 +245,168 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     );
 
     // (3) IN-PLACE relief: the second hole's answerer transcript carried the
-    // SUMMARY and NOT the raw first-hole exchange — the context was replaced in
-    // place, and the loop's remaining hole drove under the smaller window.
+    // SUMMARY and NOT the raw first-hole exchange.
     let (saw_summary, saw_raw_first) = second_hole
         .lock()
         .unwrap()
         .expect("the second hole must have been serviced");
     assert!(
         saw_summary,
-        "the second hole's answerer context must carry the compaction summary \
-         (the replaced-in-place window)"
+        "the second hole's answerer context must carry the compaction summary"
     );
     assert!(
         !saw_raw_first,
         "the second hole's answerer context must NOT still carry the raw first-hole \
          exchange (`apple`) — it was compacted away in place"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C-1: high-water measure, not a running sum, across a MULTI-ROUND hole.
+// ---------------------------------------------------------------------------
+
+/// Provider that drives the FIRST hole across THREE rounds before finalizing,
+/// each round with a MODEST last-turn input (`per_round_input`), and answers a
+/// summarize turn (should never be asked here) with a sentinel. Records whether
+/// a summarize turn was ever requested.
+struct MultiRoundProvider {
+    per_round_input: u64,
+    saw_summarize: Arc<Mutex<bool>>,
+    first_hole_rounds: Arc<Mutex<u32>>,
+}
+
+impl ModelProvider for MultiRoundProvider {
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        let latest_user = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        if is_summarize_prompt(&latest_user) {
+            *self.saw_summarize.lock().unwrap() = true;
+            return Ok(TurnResponse {
+                text: "UNEXPECTED-SUMMARY".to_string(),
+                usage: Usage {
+                    input_tokens: self.per_round_input,
+                    output_tokens: 5,
+                },
+                reasoning: None,
+            });
+        }
+
+        let is_second = latest_user.contains("SECOND-HOLE");
+        let usage = Usage {
+            input_tokens: self.per_round_input,
+            output_tokens: 20,
+        };
+        if is_second {
+            // The second hole finalizes immediately.
+            return Ok(TurnResponse {
+                text: "```haskell\n(finalize @Text (\"blue\" :: Text) :: M ())\n```".to_string(),
+                usage,
+                reasoning: None,
+            });
+        }
+
+        // FIRST hole: reply with a plain non-finalize turn for the first two
+        // rounds (a wasted round → corrective re-prompt), then finalize on the
+        // third. Every round's input is `per_round_input` — the SUMMED input
+        // across the three rounds far exceeds it, but the LATEST (high-water)
+        // is only `per_round_input`.
+        let mut rounds = self.first_hole_rounds.lock().unwrap();
+        *rounds += 1;
+        let this_round = *rounds;
+        drop(rounds);
+        if this_round < 3 {
+            // A plain-text (NoBlock) reply is a wasted round, re-prompted toward
+            // finalize by the driver — it does not resolve the hole.
+            Ok(TurnResponse {
+                text: "thinking about fruit...".to_string(),
+                usage,
+                reasoning: None,
+            })
+        } else {
+            Ok(TurnResponse {
+                text: "```haskell\n(finalize @Text (\"apple\" :: Text) :: M ())\n```".to_string(),
+                usage,
+                reasoning: None,
+            })
+        }
+    }
+}
+
+/// C-1: across a THREE-round first hole, each round's input is 300 tokens. The
+/// OLD summed-usage measure would see ~900 input and trip a 500-token
+/// threshold; the CORRECT high-water measure sees only the latest 300 and must
+/// NOT compact. Proves the threshold reads the last-turn input, not the sum.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c1_multiround_highwater_does_not_overcount() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
+        return;
+    }
+
+    let saw_summarize = Arc::new(Mutex::new(false));
+    let provider: Arc<dyn DynModelProvider> = Arc::new(MultiRoundProvider {
+        per_round_input: 300,
+        saw_summarize: saw_summarize.clone(),
+        first_hole_rounds: Arc::new(Mutex::new(0)),
+    });
+
+    let mut agent_cfg =
+        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
+            .expect("answerer engine config");
+    agent_cfg.context_window_tokens = Some(1000);
+
+    let writer =
+        tidepool_harness::log::LogWriter::create(&scratch("c1").join("log.jsonl"), &header())
+            .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver.set_state_path(scratch("c1").join("state.json"));
+    driver.set_compaction_path(scratch("c1").join("compaction.txt"));
+    // 50% of 1000 = 500. Summed 3×300 = 900 > 500 (would over-trip); the
+    // high-water 300 < 500 (must NOT trip).
+    driver.set_compaction_threshold_percent(50);
+    // Allow up to 6 rounds/hole so the 3-round first hole is not itself capped.
+    driver.set_answerer_round_caps(5, 6);
+    let source = load_harness_source(&fixtures_dir().join("CompactionHarness.hs"))
+        .expect("compaction harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .expect("two-hole cycle, multi-round first hole, NO compaction");
+
+    assert!(
+        !*saw_summarize.lock().unwrap(),
+        "no summarize turn may fire: the high-water input (300) is below the 500 threshold — \
+         the OLD summed measure (~900) would have wrongly tripped it"
+    );
+    assert!(
+        outcome.compaction.is_none(),
+        "C-1: a multi-round hole whose SUMMED input crosses the budget but whose LATEST input \
+         does not must NOT compact, got: {:?}",
+        outcome.compaction
+    );
+    // The loop still completed correctly.
+    let answers = outcome
+        .state_json
+        .get("answers")
+        .and_then(|v| v.as_array())
+        .expect("answers array");
+    assert_eq!(
+        answers
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect::<Vec<_>>(),
+        vec!["apple", "blue"]
     );
 }
