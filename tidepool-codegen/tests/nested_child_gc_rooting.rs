@@ -215,7 +215,7 @@ fn suspend_parent(
         .run_suspendable(table, &mut handler, &(), ASK_TAG)
         .expect("parent run_suspendable");
     match outcome {
-        SuspendableOutcome::Suspended { request } => {
+        SuspendableOutcome::Suspended { request, .. } => {
             // The bridged ask request carries the I# req literal.
             assert_eq!(
                 expect_int(&request),

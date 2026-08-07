@@ -206,6 +206,15 @@ pub struct JitEffectMachine {
     /// taking it via [`Self::take_last_bound_root`]. A fork bind lands here on the
     /// eventual `resume`, not the initial (suspending) run.
     last_bound_root: Option<crate::old_space::RootSlot>,
+    /// W4 finalize-by-reference: the persistent root slot of a suspended
+    /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
+    /// tenured at suspend time by [`Self::tenure_finalized_payload`]. `Some`
+    /// only while suspended on a closure-valued finalize; read out by
+    /// [`Self::take_finalized_root`] when the harness applies the closure by
+    /// reference. Rides inside the machine (already `Send` under stow-XOR-run),
+    /// like `last_bound_root`, because a `RootSlot` (`*mut *mut u8`) is `!Send`
+    /// and cannot cross the eval-thread scope boundary as a bare value.
+    suspended_finalized_root: Option<crate::old_space::RootSlot>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -461,6 +470,7 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
+            suspended_finalized_root: None,
         })
     }
 
@@ -496,6 +506,7 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
+            suspended_finalized_root: None,
         })
     }
 
@@ -1069,12 +1080,78 @@ impl JitEffectMachine {
             }
             DriveOutcome::Suspended {
                 request,
+                request_ptr,
                 continuation,
             } => {
+                // W4 finalize-by-reference: when the bridged request carries a
+                // CLOSURE_SENTINEL placeholder, its value field (field 1 of the
+                // request Con) is a live closure with no data representation.
+                // Tenure it into old-space NOW — while we still hold the run's
+                // active GC range and a valid vmctx — so it survives any later
+                // child GC as a persistent root, and hand the slot up so the
+                // harness can apply it by reference via `run_child`.
+                let has_finalized_closure = request_carries_closure_sentinel(&request);
+                if has_finalized_closure {
+                    let slot = self.tenure_finalized_payload(machine, request_ptr)?;
+                    self.suspended_finalized_root = Some(slot);
+                }
                 self.suspended_continuation = Some(continuation);
-                Ok(SuspendableOutcome::Suspended { request })
+                Ok(SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                })
             }
         }
+    }
+
+    /// Tenure the finalized VALUE (field 1) out of a suspended `finalize @T x`
+    /// request Con into old-space, returning its persistent GC root slot (W4).
+    /// The finalized value stays LIVE in the session heap (never deep-forced to
+    /// data) and is applied later by reference. Runs during the suspending turn,
+    /// so `gc_active_range`/`vmctx` are valid.
+    fn tenure_finalized_payload(
+        &mut self,
+        machine: &mut CompiledEffectMachine,
+        request_ptr: *mut u8,
+    ) -> Result<crate::old_space::RootSlot, JitError> {
+        if request_ptr.is_null() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+        }
+        // FinalizeWith(site, value): the value is field index 1. Read its pointer
+        // out of the (WHNF Con) request. SAFETY: request_ptr is the rooted request
+        // Con from the suspend arm; a `FinalizeWith` always has >= 2 fields.
+        let value_ptr = unsafe {
+            let nf = *(request_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+                as usize;
+            if nf < 2 {
+                return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                    crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                        "finalize request Con has {nf} fields, expected >= 2 (FinalizeWith site value)"
+                    )),
+                )));
+            }
+            *(request_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+        };
+        let from = self
+            .machine_state
+            .gc_active_range()
+            .expect("GC state installed for the suspending finalize run");
+        let from_range = (from.0 as *const u8, unsafe {
+            from.0.add(from.1) as *const u8
+        });
+        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+        // SAFETY: value_ptr is a live heap object in the nursery from-range; tenure
+        // evacuates it into old-space and registers the returned slot as a
+        // persistent root valid for the machine's life. `self.session` is
+        // unaliased (reclaim not yet armed on the suspend path).
+        let slot = unsafe {
+            self.session
+                .as_mut()
+                .expect("session machine for a finalize tenure")
+                .old_space
+                .tenure(vmctx_ptr, value_ptr, from_range)
+        };
+        Ok(slot)
     }
 
     /// Take the [`RootSlot`] a value-plane bind tenured on its last suspendable
@@ -1084,6 +1161,16 @@ impl JitEffectMachine {
     /// thread and records the `BindingEntry` against it.
     pub fn take_last_bound_root(&mut self) -> Option<crate::old_space::RootSlot> {
         self.last_bound_root.take()
+    }
+
+    /// Take the persistent root slot of a suspended `finalize @T closure`'s
+    /// finalized VALUE (W4 finalize-by-reference), tenured at suspend time. The
+    /// slot stays a registered persistent root for the machine's life (taking
+    /// it here only removes the machine's own handle, not the registration), so
+    /// a subsequent `run_child` that references it by slot address is GC-safe.
+    /// `None` unless the machine suspended on a closure-valued finalize.
+    pub fn take_finalized_root(&mut self) -> Option<crate::old_space::RootSlot> {
+        self.suspended_finalized_root.take()
     }
 
     /// Run a pure (non-effectful) program to completion.
@@ -2155,8 +2242,31 @@ enum DriveOutcome {
     Done(*mut u8),
     Suspended {
         request: tidepool_eval::value::Value,
+        /// The raw heap pointer to the request `Con` (rooted for the arm). W4:
+        /// a `finalize`'s value field crosses by reference, so `finish_suspendable`
+        /// reaches back into this Con to tenure the finalized value when the
+        /// bridged `request` carries a [`heap_bridge::CLOSURE_SENTINEL`] placeholder.
+        request_ptr: *mut u8,
         continuation: *mut u8,
     },
+}
+
+/// Whether a bridged suspend request carries a [`heap_bridge::CLOSURE_SENTINEL`]
+/// placeholder among its top-level Con fields — the tolerant bridge's marker
+/// that a field was a live closure it declined to materialize (W4). Only the
+/// direct fields of the request Con are checked: a `finalize`'s value is field
+/// 1 of `FinalizeWith`, and no other suspend request (`Ask`/`RunLLMTurn`) can
+/// legally contain a closure, so a nested sentinel would itself be a bug.
+fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bool {
+    match request {
+        tidepool_eval::value::Value::Con(_, fields) => fields.iter().any(|f| {
+            matches!(
+                f,
+                tidepool_eval::value::Value::Con(id, _) if *id == heap_bridge::CLOSURE_SENTINEL
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// Result of a suspendable turn ([`JitEffectMachine::run_suspendable`] /
@@ -2170,6 +2280,15 @@ pub enum SuspendableOutcome {
     /// request; the machine holds the continuation internally.
     Suspended {
         request: tidepool_eval::value::Value,
+        /// W4 finalize-by-reference: `true` when the suspend request was a
+        /// `finalize @T closure` — the finalized VALUE (field 1 of the request
+        /// Con) has been tenured into old-space and its persistent root slot
+        /// stashed on the machine ([`JitEffectMachine::take_finalized_root`]).
+        /// The bridged `request` carries a [`heap_bridge::CLOSURE_SENTINEL`] in
+        /// that field's place. `false` for an ordinary `Ask`/`RunLLMTurn`
+        /// suspension (or a `finalize` of a plain DATA value, which bridges
+        /// fully and needs no by-reference handoff).
+        has_finalized_closure: bool,
     },
 }
 
@@ -2303,11 +2422,31 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                         &mut continuation as *mut *mut u8,
                     );
                 }
+                // Root the raw request pointer too, alongside the continuation:
+                // a suspended `finalize @T closure` (self-iterating-harness W4)
+                // passes the finalized value by REFERENCE, so the harness reaches
+                // BACK into this request Con's value field live after the suspend.
+                // The bridge below may itself GC (thunk forcing); registering the
+                // request slot keeps field(1)'s subtree evacuated + GC-updated.
+                let mut request = request;
+                // SAFETY: the slot lives on this frame until the arm ends; the
+                // request subtree is also reachable from the rooted continuation,
+                // so it survives the suspension regardless.
+                unsafe {
+                    crate::host_fns::register_rust_root(vmctx_ptr, &mut request as *mut *mut u8);
+                }
                 // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
+                // A suspend request uses the TOLERANT bridge: a `finalize`'s value
+                // field may be a closure (`TAG_CLOSURE`), which has no data `Value`
+                // representation — the tolerant bridge substitutes a placeholder
+                // (`CLOSURE_SENTINEL`) so the leading `site`/`prompt` fields still
+                // bridge for the classifier, while the real closure crosses by
+                // reference (`request_ptr` below). `Ask`/`RunLLMTurn` requests carry
+                // no closure, so the policy is behavior-preserving for them.
                 let bridge_res = unsafe {
                     let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                     crate::signal_safety::with_signal_protection(|| {
-                        heap_bridge::heap_to_value_forcing(request, vmctx_ptr)
+                        heap_bridge::heap_to_value_forcing_tolerant(request, vmctx_ptr)
                     })
                 }
                 .map_err(JitError::Signal)?;
@@ -2339,6 +2478,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 if suspend_tag.is_some_and(|t| tag >= t) {
                     return Ok(DriveOutcome::Suspended {
                         request: req_val,
+                        request_ptr: request,
                         continuation,
                     });
                 }

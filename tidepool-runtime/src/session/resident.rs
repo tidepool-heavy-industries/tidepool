@@ -457,6 +457,104 @@ where
         }
     }
 
+    /// Apply a `finalize`d closure BY REFERENCE (self-iterating-harness W4) to a
+    /// boxed `Int` argument, returning the (data) result. The finalized value —
+    /// a closure of type `Int -> Int`, say — was tenured into old-space at
+    /// suspend time and its persistent root slot stashed on the machine
+    /// ([`JitEffectMachine::take_finalized_root`]); this seeds that slot into a
+    /// per-call [`ExternalEnv`] and drives a synthesized `App(Var, I# arg)`
+    /// fragment against the SAME suspended heap via the `run_child` path — the
+    /// closure is never bridged to a data `Value`, never leaves the heap. Proves
+    /// the "code as a value" round-trip: an answerer `finalize`s a function and
+    /// the harness runs it in place.
+    ///
+    /// Errors if the session is not suspended on a closure-valued finalize (no
+    /// finalized root was stashed), or the session table has no `I#` constructor
+    /// to box the argument with.
+    ///
+    /// `i_hash` is the `I#` constructor id to box `arg` with — it MUST be the
+    /// id the finalized closure was compiled against (its `case x of I# n#`
+    /// unboxing alt), i.e. the id from the SUSPEND turn's table, so the boxed
+    /// argument's tag matches. `None` falls back to the accumulated session
+    /// table's `I#`, which is only correct when that agrees with the closure's.
+    pub fn apply_finalized(
+        &mut self,
+        arg: i64,
+        i_hash: Option<tidepool_repr::DataConId>,
+        run_table: Option<&DataConTable>,
+    ) -> Result<EvalResult, ResidentError> {
+        // A child (this apply is one) requires a suspended parent.
+        if self.pending.is_none() {
+            return Err(ResidentError::NotSuspended);
+        }
+        // Take the finalized closure's persistent root slot off the machine. It
+        // stays a registered GC root for the machine's life (taking only removes
+        // the machine's own handle), so referencing it by slot address below is
+        // GC-safe across the child run.
+        let slot = self
+            .core
+            .machine_mut()
+            .and_then(|m| m.take_finalized_root())
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    "no finalized closure to apply (session is not suspended on a \
+                     closure-valued finalize)"
+                        .into(),
+                ))))
+            })?;
+        // Box the argument as `I#(LitInt arg)` so the closure (which binds a
+        // boxed `Int`) receives the shape it expects. The `I#` constructor id is
+        // read from the accumulated session table (the boot stack always carries
+        // it). SAFETY of the reference: `slot.addr()` is a stable persistent-root
+        // address for the machine's life.
+        let i_hash = match i_hash {
+            Some(id) => id,
+            None => self
+                .core
+                .session_table()
+                .get_by_name_arity("I#", 1)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                        "session table has no I# constructor to box the finalize argument".into(),
+                    ))))
+                })?,
+        };
+
+        // Synthesize `App(Var(FINALIZED_VAR), I#(arg))`. FINALIZED_VAR is any
+        // VarId not otherwise bound in this childless fragment — the JIT Var-miss
+        // arm keys the external override on ExternalEnv MEMBERSHIP, not the id's
+        // tag, so a plain id resolves through the seeded slot.
+        let _ = i_hash;
+        const FINALIZED_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0001);
+        let mut b = tidepool_repr::TreeBuilder::new();
+        let f = b.push(tidepool_repr::CoreFrame::Var(FINALIZED_VAR));
+        // Pass the argument as a BARE unboxed literal and let codegen box it with
+        // the run table's `I#` lit-wrapper convention at the application site —
+        // matching the closure's own unboxing, which a hand-built `Con(I#, [lit])`
+        // (whose tag came from a possibly-different table entry) did not.
+        let arg_node = b.push(tidepool_repr::CoreFrame::Lit(
+            tidepool_repr::Literal::LitInt(arg),
+        ));
+        let _app = b.push(tidepool_repr::CoreFrame::App {
+            fun: f,
+            arg: arg_node,
+        });
+        let expr = b.build();
+
+        let mut env = ExternalEnv::new();
+        env.insert(FINALIZED_VAR, slot.addr());
+
+        // Compile the apply fragment against the SAME table the finalized closure
+        // was compiled with (the suspend turn's table, passed as `run_table`), so
+        // the fragment's `I#` lit-wrapper boxing (`LitWrapperIds::from_table`)
+        // uses the EXACT `I#` id the closure's own `case x of I# n#` unboxing
+        // carries. Falls back to the accumulated session table.
+        let table = run_table
+            .cloned()
+            .unwrap_or_else(|| self.core.session_table().clone());
+        self.run_child("apply_finalized", &expr, &table, &env)
+    }
+
     /// Resume the suspended turn with `answer`, driving the fragment to its next
     /// suspension or completion. Atomic validate-before-consume: `cont_id` must
     /// match the pending continuation or the pending one is untouched
@@ -641,7 +739,14 @@ where
                     result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
                 }
             }
-            SuspendableOutcome::Suspended { request } => {
+            SuspendableOutcome::Suspended {
+                request,
+                // W4: the finalized closure's root is stashed on the machine
+                // (read out at apply time via `apply_finalized`); the harness
+                // detects the by-reference case from the `CLOSURE_SENTINEL` in
+                // `request`, so nothing extra needs to ride out through here.
+                has_finalized_closure: _,
+            } => {
                 let hole = self.next_cont_id();
                 self.pending = Some(hole.clone());
                 let output = self.captured.snapshot();
