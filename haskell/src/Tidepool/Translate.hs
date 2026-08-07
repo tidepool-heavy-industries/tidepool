@@ -1705,21 +1705,40 @@ translate expr =
             xsIdx <- translate xsArg
             emitNode $ NApp appFn xsIdx
 
-    -- Any OTHER shape at a forkMap/forkCata head (partial application, a
-    -- type-argument count that doesn't match [answer, element/tree], a
-    -- mis-arity value-arg list — OR a Var that merely shares the occurrence
-    -- name with the real Tidepool.Fork combinator, e.g. a user's own local
-    -- helper) is deliberately NOT special-cased here, mirroring the
-    -- runLLMTurn/runLLMTurnFork/runLLMTurnFanout arm above: no
-    -- catch-all error, just fall through to ordinary Var/App translation
-    -- below. isForkMapVar/isForkCataVar match by unqualified occurrence
-    -- name only (see their haddock), so a hard failure here would abort the
-    -- WHOLE eval on any user binding named forkMap/forkCata, not just a
-    -- genuine misuse of the real combinator. A genuinely mis-shaped call to
-    -- the REAL forkMap/forkCata still fails — just via the ordinary
-    -- composition-wall error surfaced once its (OPAQUE, dead-at-runtime)
-    -- stub body is reached, same as any other un-rewritten site; that is an
-    -- acceptable, real-misuse failure, not a regression.
+    -- A mis-shaped occurrence (partial application, a type-argument count
+    -- that doesn't match [answer, element/tree], a mis-arity value-arg
+    -- list) of the REAL Tidepool.Fork forkMap/forkCata: Fork.hs's own
+    -- module haddock is explicit that these combinators have "no runtime
+    -- fallback" — every well-formed call site head-swaps to the *Sited
+    -- sibling, and a call extract genuinely cannot rewrite must fail HERE,
+    -- naming the site, rather than silently falling through to the
+    -- (OPAQUE, dead-at-runtime) stub. Gated on the Var's own DEFINING
+    -- MODULE (not just its occurrence name, which isForkMapVar/
+    -- isForkCataVar alone can't disambiguate) so this stays disjoint from
+    -- the fallthrough below: a user's own same-named-but-different-module
+    -- forkMap/forkCata (see `user_defined_forkmap_does_not_abort_extract`,
+    -- fork-catchall-fallthrough) is never actually defined in
+    -- "Tidepool.Fork", so it can never match 'isTidepoolForkVar' and always
+    -- falls through untouched.
+    Var v | (isForkMapVar v || isForkCataVar v), isTidepoolForkVar v -> do
+        binder <- gets tsCurrentBinder
+        let siteDesc = maybe "<top level>" T.unpack binder
+            which = if isForkMapVar v then "forkMap" else "forkCata" :: String
+        error $ which ++ " site in " ++ siteDesc
+              ++ " is not fully applied or its answer type is not a concrete "
+              ++ "monomorphic type at this call site — apply it to both of "
+              ++ "its arguments and ensure the answer type is instantiated "
+              ++ "here (partial application and un-instantiated type "
+              ++ "variables cannot be extracted)."
+
+    -- Any OTHER shape at a forkMap/forkCata head sharing only the
+    -- OCCURRENCE name with the real Tidepool.Fork combinator (e.g. a user's
+    -- own project-local helper) is deliberately NOT special-cased here,
+    -- mirroring the runLLMTurn/runLLMTurnFork/runLLMTurnFanout arm above:
+    -- no catch-all error, just fall through to ordinary Var/App
+    -- translation below. A hard failure here would abort the WHOLE eval on
+    -- any user binding merely named forkMap/forkCata, not just a genuine
+    -- misuse of the real combinator.
 
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
@@ -2755,6 +2774,17 @@ isForkMapVar v =
 isForkCataVar :: Id -> Bool
 isForkCataVar v =
   occNameString (nameOccName (idName v)) == "forkCata"
+
+-- | Is @v@ actually DEFINED in "Tidepool.Fork" (not merely occurrence-name-
+-- alike)? Distinguishes a genuine misuse of the real forkMap/forkCata
+-- (Fork.hs's own haddock: OPAQUE stubs with "no runtime fallback") from a
+-- user's own, differently-moduled, same-named function — the
+-- fork-catchall-fallthrough regression test needs that case to keep falling
+-- through untouched.
+isTidepoolForkVar :: Id -> Bool
+isTidepoolForkVar v =
+  maybe False ((== "Tidepool.Fork") . moduleNameString . moduleName)
+        (nameModule_maybe (idName v))
 
 -- | Recognize @finalize@ (the @Tidepool.Effects@ OPAQUE surface verb,
 -- self-iterating-harness WS-B) — same convention as 'isRunLLMTurnVar' et al.
