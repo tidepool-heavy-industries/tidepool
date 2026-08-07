@@ -471,7 +471,24 @@ pub struct EngineConfig {
     pub max_child_turns: u32,
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
+    /// The context-window budget (in tokens) the runtime watches for MID-LOOP
+    /// emergency compaction (self-iterating-harness W2 / 02-runtime.md
+    /// Compaction). DISTINCT from [`Self::max_tokens`], which is the ~2048
+    /// per-turn *output* cap — this is the whole answerer session's
+    /// accumulated *context* size, summed across its turns. At ~80% of this,
+    /// the driver forces a compact-to-text summary of the answerer transcript
+    /// and replaces its context IN PLACE so the loop continues under a smaller
+    /// window ([`crate::selfharness::driver::SelfHarnessDriver`]'s
+    /// `maybe_compact_answerer`). `None` disables the emergency trigger
+    /// (structural compaction alone).
+    pub context_window_tokens: Option<u32>,
 }
+
+/// Default context-window budget the emergency-compaction trigger watches
+/// (self-iterating-harness W2). A representative small-model context window;
+/// distinct from [`EngineConfig::max_tokens`] (the 2048 per-turn output cap).
+/// The driver's `compaction_threshold_percent` (~80%) is taken against THIS.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
 
 /// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
 /// RunLLMTurn) with `Finalize` (self-iterating-harness WS-B) appended last —
@@ -546,6 +563,7 @@ impl EngineConfig {
             max_turns: 8,
             max_child_turns: 4,
             max_tokens: Some(2048),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
         })
     }
 

@@ -2294,6 +2294,55 @@ impl Harness {
         }
     }
 
+    /// A snapshot of `node`'s current transcript (every user + assistant turn
+    /// so far). The self-iterating harness driver reads this to build the
+    /// MID-LOOP compaction prompt from the answerer's REAL accumulated context
+    /// (W2 / 02-runtime.md Compaction) — the fix for the old between-loops
+    /// compaction, which summarized a fresh context-free node and confabulated
+    /// (review C3). `None` if `node` has no live convo.
+    pub(crate) fn node_transcript(&self, node: NodeId) -> Option<Vec<Message>> {
+        self.convos.lock().get(&node).map(|c| c.transcript.clone())
+    }
+
+    /// Replace `node`'s transcript with a single summary message IN PLACE,
+    /// keeping the resident session, per-node framing (`render`'s output), and
+    /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
+    /// in-place compaction relief (W2 / 02-runtime.md LOCKED: "replace its
+    /// context with the summary so the loop CONTINUES", NO loop-abort). The
+    /// accumulated exchange is collapsed to one User-role message carrying
+    /// `summary` as prior-window context; the node's running [`Usage`] is reset
+    /// (`node_usage` now reflects only the small compacted window, so the
+    /// driver's threshold check does not immediately re-fire). The next hole
+    /// (or the current hole's next round) drives on under the smaller context.
+    pub(crate) fn replace_transcript_with_summary(
+        &self,
+        node: NodeId,
+        summary: &str,
+    ) -> Result<(), HarnessError> {
+        let mut convos = self.convos.lock();
+        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+        let content = format!(
+            "[Prior context compacted to relieve the context window.] Summary of \
+             the work you have done in this loop so far:\n\n{summary}\n\nContinue \
+             from here; the detailed transcript above has been replaced by this \
+             summary."
+        );
+        let turn = convo.turn_seq;
+        convo.transcript = vec![Message {
+            role: Role::User,
+            content: content.clone(),
+        }];
+        convo.turn_seq += 1;
+        // Reset the running context-size meter: the live context is now just
+        // this summary, so the driver's budget check must see the small
+        // compacted window, not the pre-compaction cumulative total.
+        convo.usage = Usage::default();
+        drop(convos);
+        self.tree
+            .turn_delta(node, turn, Role::User, content, None)?;
+        Ok(())
+    }
+
     /// Append a User-role message to `node`'s transcript (and log it), without
     /// driving a turn. The self-iterating harness driver pushes each
     /// `runLLMTurn` hole card onto the SAME per-loop answerer node this way, so
