@@ -35,6 +35,18 @@ fi
 
 if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
   echo "==> TIDEPOOL_EXTRACT not set — building the dev tidepool-extract-bin"
+  # The locally-built binary needs the with-packages GHC (supplying lens/
+  # freer-simple) on PATH at runtime, or extraction fails with "Could not find
+  # module Control.Lens". The deployed nix wrapper hard-codes that GHC's path;
+  # reuse it so a bare `nix develop` run works without manual PATH surgery.
+  _w="$HOME/.nix-profile/bin/tidepool-extract"
+  if [ -x "$_w" ]; then
+    _ghc="$(grep -oE '/nix/store/[^:"]*-with-packages/bin' "$_w" | head -1)"
+    if [ -n "${_ghc:-}" ] && [ -d "$_ghc" ]; then
+      export PATH="$_ghc:$PATH"
+      echo "==> prepended with-packages GHC to PATH ($_ghc)"
+    fi
+  fi
   ( cd haskell && cabal build tidepool-extract-bin )
   # Split assignment from export: `export VAR="$(cmd)"` masks the command's
   # exit status (SC2155), so a failed list-bin would proceed with an empty var.
