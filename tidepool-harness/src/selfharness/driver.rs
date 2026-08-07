@@ -28,7 +28,7 @@
 //! bridge is `tokio::task::block_in_place` + `Handle::current().block_on`,
 //! which requires the multi-thread runtime flavor.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value as Json;
@@ -43,6 +43,7 @@ use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{Event, Observer};
+use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::tree::NodeId;
 
@@ -59,6 +60,12 @@ pub enum DriverError {
     /// [`state_cross::STATE_DECODE_SENTINEL`]. Carries the Aeson decode error.
     #[error("self-harness State decode failed (ToJSON/FromJSON State not inverse): {0}")]
     StateDecode(String),
+    /// W3: `State` json save/restore failed (disk full, permissions, or a
+    /// malformed persisted file) — distinct from [`DriverError::StateDecode`],
+    /// which is the author's `FromJSON State` instance rejecting otherwise
+    /// well-formed JSON.
+    #[error("self-harness persistence: {0}")]
+    Persistence(#[from] PersistenceError),
 }
 
 /// Map an outer-session run error string to a typed [`DriverError`]: a message
@@ -298,6 +305,14 @@ pub struct SelfHarnessDriver {
     /// Per-hole hard cap, default [`ANSWERER_MAX_ROUNDS`]. See
     /// [`Self::set_answerer_round_caps`].
     answerer_max_rounds: u32,
+    /// W3: the `State` json persistence path — [`Self::run_loop`] restores
+    /// from this file on start (falling back to `initialState` if absent,
+    /// same as the very first cycle ever) and saves the returned `State`
+    /// here after every cycle, so a killed-and-restarted process resumes
+    /// where it left off. Default [`persistence::default_state_path`];
+    /// override via [`Self::set_state_path`] (mainly for tests, which point
+    /// it at a scratch dir rather than the real cache dir).
+    state_path: PathBuf,
 }
 
 impl SelfHarnessDriver {
@@ -320,6 +335,7 @@ impl SelfHarnessDriver {
             loop_inference_calls: 0,
             answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
+            state_path: persistence::default_state_path(),
         }
     }
 
@@ -346,6 +362,20 @@ impl SelfHarnessDriver {
     pub fn set_answerer_round_caps(&mut self, nudge: u32, max: u32) {
         self.answerer_nudge_rounds = nudge.min(max);
         self.answerer_max_rounds = max;
+    }
+
+    /// Override the `State` json persistence path (W3; default
+    /// [`persistence::default_state_path`]). Mainly for tests: point it at a
+    /// scratch dir so a test's persisted `State` never touches the real
+    /// cache dir, and so a "simulated restart" (a second, fresh driver
+    /// pointed at the same path) can restore what the first one wrote.
+    pub fn set_state_path(&mut self, path: PathBuf) {
+        self.state_path = path;
+    }
+
+    /// The current `State` json persistence path (W3).
+    pub fn state_path(&self) -> &Path {
+        &self.state_path
     }
 
     /// Bootstrap the outer `PersistentSession<Threadless>` (via
@@ -509,12 +539,14 @@ impl SelfHarnessDriver {
     }
 
     /// Bootstrap the outer session over `source`, restore the last
-    /// persisted `State` if any is available (none in-process, so the very
-    /// first cycle always starts from `initialState`), then run
-    /// [`Self::run_one_cycle`] FOREVER, threading each cycle's `state_json`
-    /// into the next. Production entry point — see the module doc for why
-    /// this (and everything it calls) must run on a thread with an active
-    /// multi-thread tokio runtime.
+    /// persisted `State` from [`Self::state_path`] if a file is there yet
+    /// (W3 restart-reload — falls back to `initialState`, exactly the
+    /// in-process very-first-cycle case, when no file has been written
+    /// yet), then run [`Self::run_one_cycle`] FOREVER, persisting each
+    /// cycle's returned `State` back to [`Self::state_path`] and threading
+    /// it into the next cycle. Production entry point — see the module doc
+    /// for why this (and everything it calls) must run on a thread with an
+    /// active multi-thread tokio runtime.
     ///
     /// Between-loops human gate (W1 runaway cap 3): before each new cycle
     /// AFTER the first, unless `auto` is set, print "press Enter to continue"
@@ -523,7 +555,7 @@ impl SelfHarnessDriver {
     /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
     /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
     pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
-        let mut state_json: Option<Json> = None;
+        let mut state_json: Option<Json> = persistence::load_state(&self.state_path)?;
         let mut first = true;
         loop {
             if !first && !auto {
@@ -531,6 +563,7 @@ impl SelfHarnessDriver {
             }
             first = false;
             let outcome = self.run_one_cycle(source, state_json.as_ref())?;
+            persistence::save_state(&self.state_path, &outcome.state_json)?;
             state_json = Some(outcome.state_json);
         }
     }

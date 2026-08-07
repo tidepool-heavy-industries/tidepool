@@ -30,7 +30,8 @@ pub use harness::{Escalation, Harness, HarnessError, HeapSummary, NodeSummary, O
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
     answerer_decls, load_harness_source, DriverError, Event, GuiObserver, HarnessSource,
-    HarnessSourceError, LogObserver, Observer, ReactiveHook, SelfHarnessDriver, SelfHarnessState,
+    HarnessSourceError, JsonlObserver, LogObserver, Observer, PersistenceError, ReactiveHook,
+    SelfHarnessDriver, SelfHarnessState,
 };
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};

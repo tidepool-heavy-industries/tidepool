@@ -8,13 +8,18 @@
 //! this is the outer render/loop hylo's analogue, in-memory and pluggable
 //! rather than durable and fixed-schema.
 
+use serde::Serialize;
+
 use crate::tree::NodeId;
 
 /// One lifecycle event the driver emits, at the granularity of the outer
 /// render/loop hylo (§01/02) — NOT a duplicate of `crate::forcing::Event`
 /// (which logs one Agent node's turn/effect/hole history durably); this is
 /// the loop-boundary + hole-servicing story layered above it.
-#[derive(Debug, Clone)]
+/// `Serialize` (W3): [`crate::selfharness::persistence::JsonlObserver`]
+/// appends each event as one transcript jsonl line.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event {
     /// A `render` → `loop` boundary: a fresh loop is starting, having just
     /// evaluated `render(state, lastCompaction)` for its system prompt.
