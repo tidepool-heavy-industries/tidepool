@@ -72,7 +72,7 @@ fn reply(content: &str) -> RecordedReply {
 
 fn decision_reply(action: &str, confidence: &str) -> RecordedReply {
     reply(&format!(
-        "```haskell\nimport Harness (Decision (..), Confidence (..))\n\n\
+        "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
          (finalize @Decision (Decision {{ action = \"{action}\", rationale = \"because\", \
          confidence = {confidence} }}) :: M ())\n```"
     ))

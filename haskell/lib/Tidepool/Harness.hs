@@ -14,10 +14,19 @@
 -- compiles its @Tidepool.Effects@ against exactly the @RunLLMTurn@-only decl
 -- list (@tidepool_mcp::runllmturn_decl()@, no base effects — v1's LOCKED
 -- scope, base effects appended later, as needed), so @M@ — and therefore
--- 'Harness' — resolves to @Eff '[RunLLMTurn]@ in THAT context. An Agent
--- turn's own compile (base effects + @Ask@ + @RunLLMTurn@ + @Finalize@) sees
--- a different @M@; this module works unmodified against either, because it
--- never names the effect list itself.
+-- 'Harness' — resolves to @Eff '[RunLLMTurn]@ in THAT context.
+--
+-- This module is imported ONLY from that one context in practice
+-- (@examples\/harness\/Harness.hs@'s @loop@ and the analogous test
+-- fixtures) — the self-iterating harness's nested ANSWERER turn never
+-- imports it: its own compile excludes @RunLLMTurn@ entirely (see
+-- @tidepool_harness::selfharness::driver::answerer_decls@ and
+-- 'Tidepool.Agent', the answerer's own capability-boundary module). A
+-- general (non-self-harness) Agent turn's compile (base effects + @Ask@ +
+-- @RunLLMTurn@ + @Finalize@, @tidepool_harness::engine@'s private
+-- @agent_decls@) is a THIRD, unrelated context this module happens to also
+-- work against unmodified, since it never names the effect list itself —
+-- only 'HarnessEff' does.
 module Tidepool.Harness
   ( Harness
   , HarnessEff
@@ -44,14 +53,16 @@ type Harness = M
 -- LOAD-BEARING (H1): 'HarnessEff' and 'Harness' (@= 'M'@) name the SAME type
 -- in ONE context only — the self-iterating harness driver's OUTER session
 -- (@tidepool_mcp::runllmturn_decl()@-only, so @M = Eff \'[RunLLMTurn]@). They
--- DIVERGE everywhere else: an Agent turn's compile (the nested answerer:
--- @[Ask, RunLLMTurn, Finalize]@, or the full @EngineConfig::standard@ stack)
--- resolves @M@ — and therefore 'Harness' — to a DIFFERENT, wider effect row,
--- while 'HarnessEff' stays pinned to @\'[RunLLMTurn]@. This module works
--- unmodified against either because its verbs are written in terms of 'M'
--- ('Harness'), never the literal row; reach for 'HarnessEff' ONLY at a decl
--- site that genuinely means the outer @\'[RunLLMTurn]@ boundary and must NOT
--- follow @M@ as base effects are appended.
+-- DIVERGE everywhere else: the nested ANSWERER turn's compile
+-- (@Eff \'[Ask, Finalize]@, see 'Tidepool.Agent') EXCLUDES @RunLLMTurn@
+-- entirely and never imports this module at all; a general (non-self-harness)
+-- Agent turn's compile (the full @EngineConfig::standard@ stack) resolves
+-- @M@ — and therefore 'Harness' — to a DIFFERENT, wider effect row, while
+-- 'HarnessEff' stays pinned to @\'[RunLLMTurn]@. This module works unmodified
+-- against that general-Agent context because its verbs are written in terms
+-- of 'M' ('Harness'), never the literal row; reach for 'HarnessEff' ONLY at a
+-- decl site that genuinely means the outer @\'[RunLLMTurn]@ boundary and must
+-- NOT follow @M@ as base effects are appended.
 type HarnessEff = Eff '[RunLLMTurn]
 
 -- 'runLLMTurn' — suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@):

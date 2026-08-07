@@ -137,34 +137,44 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// `Ask` (gui: `dialogForm`/`dialogAsk`) + `Finalize` (`finalize`), the answer
 /// path.
 ///
-/// # Why `RunLLMTurn` stays in the ROW (but not the framing)
+/// # `RunLLMTurn` is STRUCTURALLY excluded — a compile error, not a prompt rule
 ///
-/// The intent is "no recursive model-spawning": the answerer must not usefully
-/// call `runLLMTurn`. This is enforced by the narrow answerer FRAMING
-/// ([`ANSWERER_FRAMING_SUFFIX`]), which never advertises `runLLMTurn`/`run` —
-/// the model is told to answer with `finalize` and gather input with
-/// `dialogForm`, nothing else. `RunLLMTurn` cannot be dropped from the ROW,
-/// though, because the effect verbs are `M`-monomorphic (`runLLMTurn :: Text
-/// -> M a`, not `Member`-polymorphic) and the frozen authored-harness contract
-/// (`examples/harness/Harness.hs`) defines its answer types (`Decision`, …) in
-/// the SAME module whose `loop` calls `runLLMTurn` — so the answerer, which
-/// `import`s that module to construct the typed answer, only compiles if
-/// `runLLMTurn` typechecks there, which needs `RunLLMTurn ∈ M`. Full
-/// row-exclusion of `RunLLMTurn` therefore waits on splitting the harness
-/// contract's answer types into a `runLLMTurn`-free module (a follow-up); v1
-/// scopes it behaviorally (framing) while dropping the base effects
-/// structurally. This is the first real slice of the per-context-effect-set
-/// goal (§03).
+/// "No recursive model-spawning" used to be enforced only BEHAVIORALLY (the
+/// narrow answerer FRAMING, [`ANSWERER_FRAMING_SUFFIX`], simply never
+/// advertised `runLLMTurn`) because `RunLLMTurn` had to stay in this row for
+/// an unrelated reason: the frozen authored-harness contract
+/// (`examples/harness/Harness.hs`) used to define its answer types
+/// (`Decision`, …) in the SAME module as `loop` (which calls `runLLMTurn`) —
+/// so the answerer, which imports that module to construct a typed
+/// `finalize @Decision (...)` reply, would only compile if `runLLMTurn`
+/// typechecked there too, which needed `RunLLMTurn` in this decl list
+/// regardless of whether the verb was monomorphic or `Member`-polymorphic
+/// (GHC compiles a module as a whole, not just the names an importer uses).
+///
+/// The harness contract now splits that dependency: `examples/harness/
+/// HarnessTypes.hs` holds `State`/`Mode`/`Decision`/`Confidence`/
+/// `initialState`/`render` with NO reference to `Tidepool.Harness`/
+/// `runLLMTurn`, and `examples/harness/Harness.hs` (which still defines
+/// `loop`) re-exports them. The answerer imports `HarnessTypes` directly, so
+/// its compile never pulls in `loop` — `RunLLMTurn` can now be dropped from
+/// this row entirely. `RunLLMTurn`'s GADT/verbs are then simply UNDECLARED
+/// in the answerer's generated `Tidepool.Effects` (see
+/// `tidepool_mcp::effects_module_source`, which only emits an effect's GADT
+/// and helpers for decls actually passed in) — a stray `runLLMTurn` call in
+/// an answerer turn is a GHC "not in scope" error, the Member-polymorphic
+/// verbs (siteid-plugin) making that possible without extract/JIT changes:
+/// `runLLMTurn`/`finalize` no longer need to be compiled against one hardcoded
+/// closed `M`, so a narrower per-compile decl list is all that's needed to
+/// shrink the row. This is the harness/agent structural split (see
+/// `Tidepool.Agent` in the stdlib for the answerer's own named boundary,
+/// mirroring `Tidepool.Harness`'s `HarnessEff`).
 ///
 /// `Ask` comes first: [`EngineConfig::from_decls`] takes the FIRST interposed
-/// effect (`Ask`|`RunLLMTurn`|`Finalize`) as the suspend threshold, so all
-/// three sit at or past that boundary and suspend rather than dispatch.
+/// effect (`Ask`|`RunLLMTurn`|`Finalize`) as the suspend threshold — with
+/// `RunLLMTurn` gone from this row, `Ask` is simply first among the two that
+/// remain.
 pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    vec![
-        tidepool_mcp::ask_decl(),
-        tidepool_mcp::runllmturn_decl(),
-        tidepool_mcp::finalize_decl(),
-    ]
+    vec![tidepool_mcp::ask_decl(), tidepool_mcp::finalize_decl()]
 }
 
 fn not_bootstrapped() -> DriverError {
@@ -209,12 +219,12 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// the per-loop answerer session's system message (W1/C1). Deliberately
 /// scoped to the answerer's INTENDED surface — gui (`dialogForm`/`Ask`) plus
 /// `finalize` — NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
-/// advertises (`runLLMTurn`/`run`/git/http/…). The base-effect verbs (`run`
-/// et al.) genuinely don't compile against the answerer's scoped stack
-/// ([`answerer_decls`]); `runLLMTurn` technically does (it stays in the row
-/// for a harness-contract reason — see [`answerer_decls`]), so NOT advertising
-/// it here is what keeps the answerer from recursively spawning models. This
-/// is the first real slice of the per-context-effect-set goal (§03).
+/// advertises (`runLLMTurn`/`run`/git/http/…). This is now belt-and-braces
+/// rather than the enforcement mechanism: every verb `SYSTEM_FRAMING`
+/// advertises but this framing omits genuinely does NOT compile against the
+/// answerer's scoped stack ([`answerer_decls`]) — `RunLLMTurn` included, now
+/// that it's excluded from the row (see [`answerer_decls`]'s doc). This is
+/// the first real slice of the per-context-effect-set goal (§03).
 const ANSWERER_FRAMING_SUFFIX: &str = "\
 ---\n\
 You are the answering agent for a self-iterating harness loop. The system \

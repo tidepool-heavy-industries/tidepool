@@ -59,7 +59,7 @@ fn header() -> LogHeader {
 /// `Confidence` constructors.
 fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedReply {
     let content = format!(
-        "```haskell\nimport Harness (Decision (..), Confidence (..))\n\n\
+        "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
          (finalize @Decision (Decision {{ action = \"{action}\", rationale = \"{rationale}\", \
          confidence = {confidence} }}) :: M ())\n```"
     );

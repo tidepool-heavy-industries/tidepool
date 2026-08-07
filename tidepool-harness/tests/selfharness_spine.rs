@@ -90,7 +90,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
     )
     .expect("answerer engine config");
     let replies = vec![reply(
-        "```haskell\nimport Harness (Decision (..), Confidence (..))\n\n\
+        "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
          (finalize @Decision (Decision { action = \"observe\", rationale = \"first loop\", \
          confidence = Medium }) :: M ())\n```",
     )];
