@@ -22,6 +22,9 @@
 //! - [`observer`] (WS-H) — the pluggable event-observer extension point
 //!   `driver` emits to; ships a `LogObserver`, stubs a future GUI subscriber
 //!   + reactive hooks.
+//! - [`persistence`] (W3) — local-file `State` json persist/restore +
+//!   transcript-jsonl [`Observer`] impl (D5: "State-to-disk +
+//!   restart-reload").
 //!
 //! `crate::engine::HoleRouting::Finalize` is the other half of the S3 freeze
 //! (routing for the `finalize` effect WS-B adds); it lives in `engine.rs`
@@ -31,10 +34,12 @@ pub mod driver;
 pub mod harness_source;
 pub mod lifecycle;
 pub mod observer;
+pub mod persistence;
 pub mod state_cross;
 
 pub use driver::{answerer_decls, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, GuiObserver, LogObserver, Observer, ReactiveHook};
+pub use persistence::{JsonlObserver, PersistenceError};
 pub use state_cross::{state_in, state_out};
