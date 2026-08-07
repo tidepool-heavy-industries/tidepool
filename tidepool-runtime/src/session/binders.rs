@@ -27,7 +27,8 @@ fn wrap_decls(decl_text: &str) -> String {
         "{{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, \
          ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, \
          MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, \
-         DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications #-}}\n\
+         DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, \
+         QuasiQuotes #-}}\n\
          module SessionDecls where\n{decl_text}\n"
     )
 }

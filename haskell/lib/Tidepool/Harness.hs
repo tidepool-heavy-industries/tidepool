@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The self-iterating harness's own orchestration monad
@@ -19,17 +20,28 @@
 -- never names the effect list itself.
 module Tidepool.Harness
   ( Harness
+  , HarnessEff
   , runLLMTurn
   , runLLMTurnWithRequiredResp
   ) where
 
+import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import qualified Tidepool.Effects as Effects
-import Tidepool.Effects (M)
+import Tidepool.Effects (M, RunLLMTurn)
 
 -- | The self-iterating harness's orchestration monad — see the module
 -- haddock for why this is an alias for @M@, not a literal effect list.
 type Harness = M
+
+-- | The LITERAL capability-boundary spelling of 'Harness': @'Eff'
+-- \'[RunLLMTurn]@, written out rather than resolved through 'M'\'s
+-- context-dependent alias. Names the SAME type as 'Harness' in the only
+-- context 'Harness' is compiled against today (the self-iterating harness
+-- driver's outer session, @tidepool_mcp::runllmturn_decl()@-only) — a
+-- decl site that wants the effect row spelled out explicitly, rather than
+-- resolved through 'M', can use this instead.
+type HarnessEff = Eff '[RunLLMTurn]
 
 -- | Suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@): the driver
 -- answers by driving a nested Agent turn loop (a fresh multi-turn

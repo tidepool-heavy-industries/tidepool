@@ -26,7 +26,7 @@ openai-auth = { version = "1", default-features = false, features = ["async", "c
 reqwest = { version = "0.13", features = ["json", "form", "stream"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
 parking_lot = "0.12"
 tempfile = "3"
 

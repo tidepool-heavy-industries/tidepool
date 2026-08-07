@@ -427,6 +427,15 @@ pub struct EngineConfig {
     pub include: Vec<PathBuf>,
     pub effect_names: Vec<String>,
     pub ask_tag: u64,
+    /// The stdlib include dir this config was built from (`include[0]`,
+    /// carried separately so a caller building a NARROWER decls list against
+    /// the same stdlib — e.g. the self-iterating harness's outer `Eff
+    /// '[RunLLMTurn]` compile, WS-A — doesn't have to reverse-engineer it out
+    /// of `include`).
+    pub prelude_dir: PathBuf,
+    /// The project-lib dir this config was built from, if any (see
+    /// `prelude_dir`'s doc).
+    pub project_lib: Option<PathBuf>,
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
@@ -468,22 +477,36 @@ impl EngineConfig {
         prelude_dir: PathBuf,
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        let decls = agent_decls();
+        Self::from_decls(agent_decls(), prelude_dir, project_lib)
+    }
+
+    /// Build a config for an EXPLICIT decls list — not necessarily the full
+    /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
+    /// driver (WS-A) uses this for its `Eff '[RunLLMTurn]`-only compile
+    /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
+    /// to the literal single-effect row 02-runtime.md locks in, rather than
+    /// the full Agent stack.
+    pub fn from_decls(
+        decls: Vec<tidepool_mcp::EffectDecl>,
+        prelude_dir: PathBuf,
+        project_lib: Option<PathBuf>,
+    ) -> Result<Self, EngineError> {
         // `ask_tag` is the suspend THRESHOLD: the index of the first
-        // interposed effect (Ask). Every tag at or beyond it (Ask, RunLLMTurn,
-        // Finalize — all appended consecutively after the base9 handled
-        // effects) suspends through the same JIT arm; found by name, not by
-        // position, since Ask is no longer necessarily the list's last entry.
+        // interposed effect. For the full Agent stack that's `Ask`; for a
+        // narrower stack (e.g. RunLLMTurn-only) there is no `Ask` entry at
+        // all, so fall back to the first of the other interposed effects —
+        // found by name, not by position, since none of them is necessarily
+        // the list's last entry.
         let ask_tag = decls
             .iter()
-            .position(|d| d.type_name == "Ask")
-            .expect("agent_decls always contains Ask") as u64;
+            .position(|d| matches!(d.type_name, "Ask" | "RunLLMTurn" | "Finalize"))
+            .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
-        let mut include = vec![prelude_dir];
-        if let Some(lib) = project_lib {
-            include.push(lib);
+        let mut include = vec![prelude_dir.clone()];
+        if let Some(lib) = &project_lib {
+            include.push(lib.clone());
         }
         include.push(effects_dir);
         let extract_bin =
@@ -493,6 +516,8 @@ impl EngineConfig {
             include,
             effect_names,
             ask_tag,
+            prelude_dir,
+            project_lib,
             max_turns: 8,
             max_child_turns: 4,
             max_tokens: Some(2048),
@@ -520,8 +545,22 @@ impl EngineConfig {
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
-    let decls = agent_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    template_turn_for(&agent_decls(), cfg, code, imports, helpers)
+}
+
+/// Like [`template_turn`], but for an EXPLICIT decls list rather than the
+/// hardcoded Agent stack — the self-iterating harness driver's outer `Eff
+/// '[RunLLMTurn]` compile (WS-A) needs a preamble matching ITS OWN (narrower)
+/// decls, not the Agent's; `cfg` must be the [`EngineConfig`] built from the
+/// SAME `decls` (its `effect_stack_type` must match).
+pub fn template_turn_for(
+    decls: &[tidepool_mcp::EffectDecl],
+    cfg: &EngineConfig,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+) -> String {
+    let preamble = tidepool_mcp::build_preamble(decls, false);
     let stack = cfg.effect_stack_type();
     tidepool_mcp::template_haskell(&preamble, &stack, code, imports, helpers, None, None)
 }

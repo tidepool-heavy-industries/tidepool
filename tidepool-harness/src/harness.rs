@@ -413,6 +413,16 @@ impl Harness {
         &self.tree
     }
 
+    /// This harness's engine config — the self-iterating harness driver
+    /// (WS-A) reads `prelude_dir`/`project_lib` off it to build the OUTER
+    /// session's own (narrower) `EngineConfig`, so the outer `Eff
+    /// '[RunLLMTurn]` compile and this nested Agent's compile resolve
+    /// author-defined types (e.g. a harness's own `Decision`) from the SAME
+    /// module — required for a value to cross between them via `resume`.
+    pub fn cfg(&self) -> &EngineConfig {
+        &self.cfg
+    }
+
     /// A flat snapshot of the tree for the observatory tree pane, in DFS
     /// (parent-before-child, creation order) order. Each entry carries enough
     /// to render a node row: id, parent, state, and — when suspended —

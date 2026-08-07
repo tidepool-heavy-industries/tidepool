@@ -11,14 +11,38 @@
 //!   function `crate::engine::decode_askwith` already uses to pull an
 //!   `AskWith` payload out of a suspended request.
 //! - **inbound** (`state_in`): splice the prior loop's JSON as a Haskell
-//!   literal bound to `state :: State`, mirroring
+//!   literal bound to `__selfHarnessState :: State`, mirroring
 //!   `tidepool_mcp::eval_prep::input_binding_source`'s `input :: Aeson.Value`
 //!   splice — except decoded through the author's `FromJSON State` instance
-//!   (via `eitherDecode`) rather than left as a bare `Aeson.Value`.
+//!   (via `Aeson.eitherDecode`, always in scope: `import qualified
+//!   Tidepool.Aeson as Aeson` is in every harness turn's default preamble)
+//!   rather than left as a bare `Aeson.Value`. `None` (the very first loop)
+//!   splices a reference to the harness's own `initialState` instead of a
+//!   decode — there is no prior JSON to decode yet.
+//!
+//! # Why `__selfHarnessState`, not `state`, and `Loaded.` qualification
+//!
+//! A turn's default preamble always brings `Tidepool.Prelude` into scope
+//! UNQUALIFIED, which exports (among other things) a `state` record field
+//! (`StatusEntry.state`) and a `render` function (`Tidepool.Render.render`)
+//! — the exact names an authored harness module also defines. GHC treats a
+//! same-named top-level binding in the SAME compiled turn as an "ambiguous
+//! occurrence" against a colliding unqualified import (no automatic local
+//! shadowing for top-level names). [`driver::SelfHarnessDriver`] sidesteps
+//! this for the harness module's OWN names by importing its decl-plane
+//! module QUALIFIED as [`LOADED_QUALIFIER`] (`Loaded.render`, `Loaded.loop`,
+//! `Loaded.State`, `Loaded.initialState`) rather than unqualified; this
+//! module's own splice avoids it for `state`/`compaction` specifically by
+//! using collision-unlikely names instead.
 
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
+
+/// The qualifier every harness-source reference (`render`, `loop`, `State`,
+/// `initialState`) is imported under — see this module's doc for why
+/// qualified, not unqualified.
+pub(crate) const LOADED_QUALIFIER: &str = "Loaded";
 
 /// Outbound: `loop`'s returned `State` Haskell value → JSON, via
 /// `tidepool_runtime::value_to_json(value, table, 0)`. Called once per loop
@@ -27,24 +51,80 @@ use tidepool_repr::DataConTable;
 /// `render(state, lastCompaction)` call receives after being re-spliced by
 /// [`state_in`].
 pub fn state_out(value: &Value, table: &DataConTable) -> Json {
-    let _ = (value, table);
-    unimplemented!(
-        "WS-C: tidepool_runtime::value_to_json(value, table, 0) — outbound State \
-         crossing at a loop boundary"
-    )
+    tidepool_runtime::value_to_json(value, table, 0)
 }
 
 /// Inbound: splice the prior loop's `State` JSON as a Haskell source
-/// fragment declaring `state :: State`, decoded via `eitherDecode` against
-/// the author's `FromJSON State` instance — the source text to prepend to
-/// the next `loop`/`render` turn (mirrors
+/// fragment declaring `__selfHarnessState :: Loaded.State`, decoded via
+/// `Aeson.eitherDecode` against the author's `FromJSON State` instance — the
+/// source text to prepend to the next `loop`/`render` turn (mirrors
 /// `tidepool_mcp::eval_prep::input_binding_source`'s splice shape, targeting
 /// a typed `State` rather than a bare `Aeson.Value`). `None` only for the
 /// very first loop, before any `State` has been produced (mirrors
-/// `render`'s `Maybe Text` compaction argument being `Nothing` pre-history).
+/// `render`'s `Maybe Text` compaction argument being `Nothing` pre-history)
+/// — that case references the harness's own `initialState` instead of
+/// decoding anything.
 pub fn state_in(state_json: Option<&Json>) -> String {
-    let _ = state_json;
-    unimplemented!(
-        "WS-C: splice state_json as a `state :: State` literal, decoded via eitherDecode"
-    )
+    match state_json {
+        None => format!(
+            "__selfHarnessState :: {q}.State\n__selfHarnessState = {q}.initialState\n",
+            q = LOADED_QUALIFIER
+        ),
+        Some(json) => {
+            let literal = haskell_string_literal(&json.to_string());
+            format!(
+                "__selfHarnessState :: {q}.State\n__selfHarnessState = case Aeson.eitherDecode \
+                 {literal} of {{ Right s -> s; Left e -> error e }}\n",
+                q = LOADED_QUALIFIER
+            )
+        }
+    }
+}
+
+/// Render `s` as a double-quoted Haskell `Text` literal (via
+/// `OverloadedStrings`, always on in a harness turn's default pragma set).
+/// Shared by [`state_in`] and `driver::render_framing`'s compaction splice.
+pub(crate) fn haskell_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:x};", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_in_none_references_initial_state() {
+        assert_eq!(
+            state_in(None),
+            "__selfHarnessState :: Loaded.State\n__selfHarnessState = Loaded.initialState\n"
+        );
+    }
+
+    #[test]
+    fn state_in_some_splices_an_eitherdecode_literal() {
+        let json = serde_json::json!({"loopCount": 3});
+        let src = state_in(Some(&json));
+        assert!(src.starts_with("__selfHarnessState :: Loaded.State\n"));
+        assert!(src.contains("Aeson.eitherDecode"));
+        assert!(src.contains("\\\"loopCount\\\":3"));
+    }
+
+    #[test]
+    fn haskell_string_literal_escapes_quotes_and_backslashes() {
+        assert_eq!(haskell_string_literal("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
 }
