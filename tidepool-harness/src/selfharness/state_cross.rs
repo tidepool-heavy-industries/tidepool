@@ -44,6 +44,15 @@ use tidepool_repr::DataConTable;
 /// qualified, not unqualified.
 pub(crate) const LOADED_QUALIFIER: &str = "Loaded";
 
+/// The stable sentinel prefix the [`state_in`] decode splice raises when the
+/// prior loop's `State` JSON fails the author's `FromJSON State` instance
+/// (J1). The driver matches a fragment run-error carrying this prefix and
+/// surfaces it as a typed [`crate::selfharness::driver::DriverError::StateDecode`]
+/// rather than an opaque "loop run failed" — a decode failure means the
+/// author's `ToJSON`/`FromJSON` are not inverse, which is a distinct,
+/// actionable failure mode from a general run error.
+pub(crate) const STATE_DECODE_SENTINEL: &str = "TIDEPOOL_STATE_DECODE_FAILED: ";
+
 /// Outbound: `loop`'s returned `State` Haskell value → JSON, via
 /// `tidepool_runtime::value_to_json(value, table, 0)`. Called once per loop
 /// boundary, after `loop state` completes with a new `State`; the result is
@@ -72,10 +81,17 @@ pub fn state_in(state_json: Option<&Json>) -> String {
         ),
         Some(json) => {
             let literal = haskell_string_literal(&json.to_string());
+            // J1: on decode failure raise with a stable sentinel prefix the
+            // driver recognizes and turns into a typed `DriverError::StateDecode`
+            // — a decode failure means the author's `ToJSON`/`FromJSON State`
+            // are not inverse, a distinct actionable failure, not a generic run
+            // error. `error` is our JIT-safe `Text -> a` (Prelude), reached only
+            // on that author-contract violation.
             format!(
                 "__selfHarnessState :: {q}.State\n__selfHarnessState = case Aeson.eitherDecode \
-                 {literal} of {{ Right s -> s; Left e -> error e }}\n",
-                q = LOADED_QUALIFIER
+                 {literal} of {{ Right s -> s; Left e -> error ({sentinel} <> e) }}\n",
+                q = LOADED_QUALIFIER,
+                sentinel = haskell_string_literal(STATE_DECODE_SENTINEL),
             )
         }
     }
@@ -84,22 +100,13 @@ pub fn state_in(state_json: Option<&Json>) -> String {
 /// Render `s` as a double-quoted Haskell `Text` literal (via
 /// `OverloadedStrings`, always on in a harness turn's default pragma set).
 /// Shared by [`state_in`] and `driver::render_framing`'s compaction splice.
+/// J2: reuses the input-lane escaper
+/// ([`tidepool_mcp::escape_haskell_string`]) for the body rather than
+/// hand-rolling the same escape table, so every generated Haskell string
+/// literal (eval `input`, `State`, compaction) escapes control chars
+/// identically.
 pub(crate) fn haskell_string_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:x};", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    format!("\"{}\"", tidepool_mcp::escape_haskell_string(s))
 }
 
 #[cfg(test)]

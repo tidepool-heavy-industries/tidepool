@@ -34,13 +34,21 @@ import Tidepool.Effects (M, RunLLMTurn)
 -- haddock for why this is an alias for @M@, not a literal effect list.
 type Harness = M
 
--- | The LITERAL capability-boundary spelling of 'Harness': @'Eff'
--- \'[RunLLMTurn]@, written out rather than resolved through 'M'\'s
--- context-dependent alias. Names the SAME type as 'Harness' in the only
--- context 'Harness' is compiled against today (the self-iterating harness
--- driver's outer session, @tidepool_mcp::runllmturn_decl()@-only) — a
--- decl site that wants the effect row spelled out explicitly, rather than
--- resolved through 'M', can use this instead.
+-- | The LITERAL capability-boundary spelling of the OUTER Harness-monad
+-- session: @'Eff' \'[RunLLMTurn]@, written out rather than resolved through
+-- 'M'\'s context-dependent alias.
+--
+-- LOAD-BEARING (H1): 'HarnessEff' and 'Harness' (@= 'M'@) name the SAME type
+-- in ONE context only — the self-iterating harness driver's OUTER session
+-- (@tidepool_mcp::runllmturn_decl()@-only, so @M = Eff \'[RunLLMTurn]@). They
+-- DIVERGE everywhere else: an Agent turn's compile (the nested answerer:
+-- @[Ask, RunLLMTurn, Finalize]@, or the full @EngineConfig::standard@ stack)
+-- resolves @M@ — and therefore 'Harness' — to a DIFFERENT, wider effect row,
+-- while 'HarnessEff' stays pinned to @\'[RunLLMTurn]@. This module works
+-- unmodified against either because its verbs are written in terms of 'M'
+-- ('Harness'), never the literal row; reach for 'HarnessEff' ONLY at a decl
+-- site that genuinely means the outer @\'[RunLLMTurn]@ boundary and must NOT
+-- follow @M@ as base effects are appended.
 type HarnessEff = Eff '[RunLLMTurn]
 
 -- | Suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@): the driver

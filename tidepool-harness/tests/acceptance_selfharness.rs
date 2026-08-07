@@ -18,7 +18,9 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeId;
-use tidepool_harness::{load_harness_source, Harness, LogObserver, SelfHarnessDriver};
+use tidepool_harness::{
+    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+};
 
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
@@ -90,8 +92,12 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
         return;
     }
 
-    let agent_cfg = EngineConfig::standard(prelude_dir(), Some(examples_harness_dir()))
-        .expect("agent engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
     let replies = vec![
         decision_reply("observe", "first loop", "Medium"),
         decision_reply("decide", "second loop", "High"),

@@ -307,13 +307,24 @@ where `expr :: T` matches the hole's declared type. `resume` is the identity her
 /// the answerer turn's `helpers` so `resume` is in scope.
 pub const RESUME_HELPER: &str = "resume :: a -> M a\nresume = pure";
 
-/// Assemble the provider request from a transcript and framing. The system
-/// message is always first; the transcript follows in order.
-pub fn assemble_request(transcript: &[Message], max_tokens: Option<u32>) -> TurnRequest {
+/// Assemble the provider request from a transcript and per-node framing. The
+/// system message is always first; the transcript follows in order.
+///
+/// `framing` is the node's own system message — the self-iterating harness's
+/// per-loop answerer session passes `render`'s output here (wired end-to-end
+/// so the distilled `render` conditional actually reaches the model, not just
+/// the observational `CycleOutcome`). `None` falls back to the default
+/// [`SYSTEM_FRAMING`] that teaches the full eval surface — the shape every
+/// ordinary Agent node still uses.
+pub fn assemble_request(
+    transcript: &[Message],
+    max_tokens: Option<u32>,
+    framing: Option<&str>,
+) -> TurnRequest {
     let mut messages = Vec::with_capacity(transcript.len() + 1);
     messages.push(Message {
         role: Role::System,
-        content: SYSTEM_FRAMING.to_string(),
+        content: framing.unwrap_or(SYSTEM_FRAMING).to_string(),
     });
     messages.extend_from_slice(transcript);
     TurnRequest {
@@ -426,7 +437,20 @@ pub struct EngineConfig {
     pub extract_bin: String,
     pub include: Vec<PathBuf>,
     pub effect_names: Vec<String>,
-    pub ask_tag: u64,
+    /// The full [`EffectDecl`]s this config was built from — the SOURCE of both
+    /// the turn preamble (the effect verb helpers) and `effect_names`. Carried
+    /// so a turn templates its preamble against the config's ACTUAL effect set,
+    /// not a hardcoded Agent stack: the self-iterating harness's answerer
+    /// session is built from [`crate::selfharness::driver::answerer_decls`]
+    /// (gui + finalize only), and its turns must NOT advertise verbs
+    /// (`run`/`runLLMTurn`/…) it cannot compile (W1 effect-scoping).
+    pub decls: Vec<tidepool_mcp::EffectDecl>,
+    /// The suspend THRESHOLD: the tag (position) of the FIRST interposed
+    /// effect (`Ask`|`RunLLMTurn`|`Finalize`) in [`Self::decls`] — every effect
+    /// at or past this tag suspends the machine rather than dispatching to a
+    /// handler (H3: named for what it is, the suspend threshold, not just
+    /// `Ask`, since `RunLLMTurn`/`Finalize` share the same suspend path).
+    pub suspend_tag: u64,
     /// The stdlib include dir this config was built from (`include[0]`,
     /// carried separately so a caller building a NARROWER decls list against
     /// the same stdlib — e.g. the self-iterating harness's outer `Eff
@@ -491,13 +515,13 @@ impl EngineConfig {
         prelude_dir: PathBuf,
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        // `ask_tag` is the suspend THRESHOLD: the index of the first
+        // `suspend_tag` is the suspend THRESHOLD: the index of the first
         // interposed effect. For the full Agent stack that's `Ask`; for a
         // narrower stack (e.g. RunLLMTurn-only) there is no `Ask` entry at
         // all, so fall back to the first of the other interposed effects —
         // found by name, not by position, since none of them is necessarily
         // the list's last entry.
-        let ask_tag = decls
+        let suspend_tag = decls
             .iter()
             .position(|d| matches!(d.type_name, "Ask" | "RunLLMTurn" | "Finalize"))
             .unwrap_or(decls.len()) as u64;
@@ -515,7 +539,8 @@ impl EngineConfig {
             extract_bin,
             include,
             effect_names,
-            ask_tag,
+            decls,
+            suspend_tag,
             prelude_dir,
             project_lib,
             max_turns: 8,
@@ -545,7 +570,7 @@ impl EngineConfig {
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
-    template_turn_for(&agent_decls(), cfg, code, imports, helpers)
+    template_turn_for(&cfg.decls, cfg, code, imports, helpers)
 }
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
@@ -582,8 +607,7 @@ pub fn template_answer_turn(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = agent_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
 
     let mut out = String::new();
@@ -639,8 +663,7 @@ pub fn template_session_bind(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = agent_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
 
     let mut out = String::new();
@@ -744,14 +767,16 @@ pub struct DrivenTurn {
 }
 
 /// Call the provider once with the assembled transcript and extract the block.
+/// `framing` is the node's per-turn system message (see [`assemble_request`]);
 /// `sink`, when `Some`, receives streaming deltas as the provider reads them.
 pub async fn drive_model_turn(
     provider: &dyn DynModelProvider,
     transcript: &[Message],
     max_tokens: Option<u32>,
+    framing: Option<&str>,
     sink: Option<StreamSink>,
 ) -> Result<DrivenTurn, EngineError> {
-    let req = assemble_request(transcript, max_tokens);
+    let req = assemble_request(transcript, max_tokens, framing);
     let TurnResponse {
         text,
         usage,
@@ -802,3 +827,47 @@ pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value
 /// Shared handle to a provider, so the engine and its forked answerers all use
 /// the same signed-in client.
 pub type SharedProvider = Arc<dyn DynModelProvider>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Message, Role};
+
+    fn user(content: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: content.to_string(),
+        }
+    }
+
+    /// W1/C1: a `Some(framing)` becomes the request's System message verbatim,
+    /// NOT the default `SYSTEM_FRAMING` — the render output actually reaching
+    /// the model is the whole thesis this wave wires.
+    #[test]
+    fn assemble_request_uses_framing_as_system_message() {
+        let framing = "RENDERED: you are in Deciding mode, loop 3.";
+        let transcript = [user("answer me")];
+        let req = assemble_request(&transcript, Some(2048), Some(framing));
+
+        assert_eq!(req.messages[0].role, Role::System);
+        assert_eq!(
+            req.messages[0].content, framing,
+            "the framing must be the System message verbatim"
+        );
+        assert_ne!(
+            req.messages[0].content, SYSTEM_FRAMING,
+            "a Some(framing) must OVERRIDE the default SYSTEM_FRAMING"
+        );
+        // The transcript follows the system message in order.
+        assert_eq!(req.messages[1].content, "answer me");
+    }
+
+    /// A `None` framing falls back to the default full-surface `SYSTEM_FRAMING`
+    /// — the shape every ordinary Agent node still uses.
+    #[test]
+    fn assemble_request_none_framing_falls_back_to_default() {
+        let req = assemble_request(&[user("hi")], Some(2048), None);
+        assert_eq!(req.messages[0].role, Role::System);
+        assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+}
