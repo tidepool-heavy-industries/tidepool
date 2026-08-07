@@ -437,7 +437,20 @@ pub struct EngineConfig {
     pub extract_bin: String,
     pub include: Vec<PathBuf>,
     pub effect_names: Vec<String>,
-    pub ask_tag: u64,
+    /// The full [`EffectDecl`]s this config was built from — the SOURCE of both
+    /// the turn preamble (the effect verb helpers) and `effect_names`. Carried
+    /// so a turn templates its preamble against the config's ACTUAL effect set,
+    /// not a hardcoded Agent stack: the self-iterating harness's answerer
+    /// session is built from [`crate::selfharness::driver::answerer_decls`]
+    /// (gui + finalize only), and its turns must NOT advertise verbs
+    /// (`run`/`runLLMTurn`/…) it cannot compile (W1 effect-scoping).
+    pub decls: Vec<tidepool_mcp::EffectDecl>,
+    /// The suspend THRESHOLD: the tag (position) of the FIRST interposed
+    /// effect (`Ask`|`RunLLMTurn`|`Finalize`) in [`Self::decls`] — every effect
+    /// at or past this tag suspends the machine rather than dispatching to a
+    /// handler (H3: named for what it is, the suspend threshold, not just
+    /// `Ask`, since `RunLLMTurn`/`Finalize` share the same suspend path).
+    pub suspend_tag: u64,
     /// The stdlib include dir this config was built from (`include[0]`,
     /// carried separately so a caller building a NARROWER decls list against
     /// the same stdlib — e.g. the self-iterating harness's outer `Eff
@@ -502,13 +515,13 @@ impl EngineConfig {
         prelude_dir: PathBuf,
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        // `ask_tag` is the suspend THRESHOLD: the index of the first
+        // `suspend_tag` is the suspend THRESHOLD: the index of the first
         // interposed effect. For the full Agent stack that's `Ask`; for a
         // narrower stack (e.g. RunLLMTurn-only) there is no `Ask` entry at
         // all, so fall back to the first of the other interposed effects —
         // found by name, not by position, since none of them is necessarily
         // the list's last entry.
-        let ask_tag = decls
+        let suspend_tag = decls
             .iter()
             .position(|d| matches!(d.type_name, "Ask" | "RunLLMTurn" | "Finalize"))
             .unwrap_or(decls.len()) as u64;
@@ -526,7 +539,8 @@ impl EngineConfig {
             extract_bin,
             include,
             effect_names,
-            ask_tag,
+            decls,
+            suspend_tag,
             prelude_dir,
             project_lib,
             max_turns: 8,
@@ -556,7 +570,7 @@ impl EngineConfig {
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
-    template_turn_for(&agent_decls(), cfg, code, imports, helpers)
+    template_turn_for(&cfg.decls, cfg, code, imports, helpers)
 }
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
@@ -593,8 +607,7 @@ pub fn template_answer_turn(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = agent_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
 
     let mut out = String::new();
@@ -650,8 +663,7 @@ pub fn template_session_bind(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = agent_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
 
     let mut out = String::new();

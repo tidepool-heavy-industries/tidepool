@@ -29,8 +29,8 @@ pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, Tr
 pub use harness::{Escalation, Harness, HarnessError, HeapSummary, NodeSummary, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
-    load_harness_source, DriverError, Event, GuiObserver, HarnessSource, HarnessSourceError,
-    LogObserver, Observer, ReactiveHook, SelfHarnessDriver, SelfHarnessState,
+    answerer_decls, load_harness_source, DriverError, Event, GuiObserver, HarnessSource,
+    HarnessSourceError, LogObserver, Observer, ReactiveHook, SelfHarnessDriver, SelfHarnessState,
 };
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};

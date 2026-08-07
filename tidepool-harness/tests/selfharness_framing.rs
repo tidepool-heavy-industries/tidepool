@@ -18,7 +18,9 @@ use tidepool_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, Role, StreamSink, TurnRequest, TurnResponse,
     Usage,
 };
-use tidepool_harness::{load_harness_source, Harness, LogObserver, SelfHarnessDriver};
+use tidepool_harness::{
+    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+};
 
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
@@ -94,8 +96,12 @@ async fn render_output_is_the_answerer_system_message() {
             .to_string(),
     });
 
-    let agent_cfg = EngineConfig::standard(prelude_dir(), Some(examples_harness_dir()))
-        .expect("agent engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
     let writer = tidepool_harness::log::LogWriter::create(
         &std::env::temp_dir().join(format!("selfharness-framing-{}.jsonl", std::process::id())),
         &header(),

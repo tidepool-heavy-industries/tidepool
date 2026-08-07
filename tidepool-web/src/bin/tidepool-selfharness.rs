@@ -21,7 +21,9 @@ use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
 use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider};
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
-use tidepool_harness::{load_harness_source, Harness, LogObserver, SelfHarnessDriver};
+use tidepool_harness::{
+    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,10 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key_env = arg_str(&args, "--api-key");
     let harness_source_path =
         arg_value(&args, "--harness").unwrap_or_else(default_harness_source_path);
+    // Skip the between-loops "press Enter" human gate (W1 runaway cap 3) — for
+    // CI/replay/unattended runs. Replay mode implies `--auto` (no operator to
+    // press Enter against a recorded run).
+    let auto = args.iter().any(|a| a == "--yes" || a == "--auto") || replay_log.is_some();
 
     let prelude_dir = prelude_dir();
     let project_lib = project_lib_dir();
-    let cfg = EngineConfig::standard(prelude_dir, project_lib)?;
+    // The nested answerer's SCOPED stack (gui + finalize, base effects dropped
+    // — W1 effect-scoping), not the full Agent stack.
+    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?;
 
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
         (Some(log), _) => {
@@ -79,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         harness_source_path.display()
     );
     let source = load_harness_source(&harness_source_path)?;
-    driver.run_loop(&source)?;
+    driver.run_loop(&source, auto)?;
 
     Ok(())
 }

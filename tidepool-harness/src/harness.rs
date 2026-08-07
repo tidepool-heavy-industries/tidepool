@@ -576,7 +576,7 @@ impl Harness {
             &self.boot.expr,
             self.boot.table.clone(),
             stack,
-            self.cfg.ask_tag,
+            self.cfg.suspend_tag,
             self.cfg.effect_names.clone(),
             CapturedOutput::new(),
             self.cfg.include.clone(),
@@ -1182,45 +1182,130 @@ impl Harness {
         self.take_finalized_value_with_table(node).map(|(v, _)| v)
     }
 
+    /// Extract the finalized value + its compile table out of `node`'s pending
+    /// `Finalize` hole, clearing the pending hole but NOT terminating the node.
+    /// The caller decides the node's next state (cancel via
+    /// [`Self::take_finalized_value_with_table`], or keep it reopenable via
+    /// [`Self::take_finalized_value_keep_open`]).
+    fn take_finalized_value_core(
+        &self,
+        node: NodeId,
+    ) -> Result<(Value, DataConTable), HarnessError> {
+        let mut convos = self.convos.lock();
+        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+        let pending = convo
+            .pending
+            .as_ref()
+            .ok_or(HarnessError::NotSuspended(node))?;
+        if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+            return Err(HarnessError::RoutingMismatch {
+                node,
+                routing: "Finalize",
+                actual: format!("{:?}", pending.classified.routing),
+            });
+        }
+        let Value::Con(_, fields) = &pending.raw_request else {
+            return Err(HarnessError::Resident(
+                "finalize request was not a Con".into(),
+            ));
+        };
+        let value = fields
+            .get(1)
+            .cloned()
+            .ok_or_else(|| HarnessError::Resident("FinalizeWith missing its value field".into()))?;
+        // C5: a finalize suspension without its compile table is an
+        // inconsistency — fail LOUD rather than defaulting to an empty
+        // table, which would silently misrender the finalized value's
+        // constructor ids.
+        let table = convo.suspend_table.clone().ok_or_else(|| {
+            HarnessError::Resident(
+                "finalize suspension has no compile table (cannot resolve the value's \
+                 constructor ids)"
+                    .into(),
+            )
+        })?;
+        convo.pending = None;
+        Ok((value, table))
+    }
+
     /// Like [`Self::take_finalized_value`], but also returns the
     /// [`DataConTable`] the finalized value's constructor ids resolve
     /// against — needed by a caller that renders the raw value itself
     /// (self-iterating-harness WS-E's forced compaction turn finalizes a
     /// `Text`, then reads it out via [`tidepool_runtime::value_to_json`],
     /// which needs the SAME table the value was compiled with) rather than
-    /// just feeding it opaquely into another suspended continuation.
+    /// just feeding it opaquely into another suspended continuation. TERMINATES
+    /// the node (`Cancelled`) — the finalized node is done.
     pub fn take_finalized_value_with_table(
         &self,
         node: NodeId,
     ) -> Result<(Value, DataConTable), HarnessError> {
-        let (value, table) = {
-            let mut convos = self.convos.lock();
-            let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
-            let pending = convo
-                .pending
-                .as_ref()
-                .ok_or(HarnessError::NotSuspended(node))?;
-            if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
-                return Err(HarnessError::RoutingMismatch {
-                    node,
-                    routing: "Finalize",
-                    actual: format!("{:?}", pending.classified.routing),
-                });
-            }
-            let Value::Con(_, fields) = &pending.raw_request else {
-                return Err(HarnessError::Resident(
-                    "finalize request was not a Con".into(),
-                ));
-            };
-            let value = fields.get(1).cloned().ok_or_else(|| {
-                HarnessError::Resident("FinalizeWith missing its value field".into())
-            })?;
-            let table = convo.suspend_table.clone().unwrap_or_default();
-            convo.pending = None;
-            (value, table)
-        };
+        let (value, table) = self.take_finalized_value_core(node)?;
         self.tree.node_cancelled(node, "finalized".to_string())?;
         Ok((value, table))
+    }
+
+    /// Like [`Self::take_finalized_value`], but keeps the node + its resident
+    /// session LIVE and reusable instead of cancelling — the self-iterating
+    /// harness's per-loop answerer (W1/C2) reuses ONE node across the loop's
+    /// holes so the model's transcript (the accumulating context window)
+    /// persists, and hole #2 sees hole #1's exchange.
+    ///
+    /// Two things must happen for the reuse to work: (1) the TREE state goes
+    /// `Suspended` → `Running` (`hole_consumed`) so a new turn is representable;
+    /// (2) the RESIDENT SESSION's parked finalize continuation is ABORTED so it
+    /// returns to idle — a suspended session REJECTS a new top-level turn
+    /// (`ResidentError::Suspended`), and `finalize`'s continuation is terminal
+    /// (nothing meaningful runs after it), so discarding it is exactly right.
+    /// Without (2) the next hole's `drive_turn` cannot run a fresh block on the
+    /// same session. Returns the finalized value (already read out of the
+    /// suspended request by `take_finalized_value_core`, so aborting the
+    /// continuation does not lose it).
+    pub(crate) fn take_finalized_value_keep_open(
+        &self,
+        node: NodeId,
+    ) -> Result<Value, HarnessError> {
+        // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
+        let hole = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+            convo
+                .pending
+                .as_ref()
+                .ok_or(HarnessError::NotSuspended(node))?
+                .hole
+                .clone()
+        };
+        let (value, _table) = self.take_finalized_value_core(node)?;
+
+        // Abort the resident session's parked finalize continuation so the
+        // session returns to idle and can run the NEXT hole's turn. `abort`
+        // consumes the stowed continuation (clearing `pending` up front) and
+        // then surfaces the abort as a terminal error outcome — that Err IS the
+        // expected "continuation discarded" signal, not a failure, so it is
+        // deliberately ignored. What matters is the session is now idle.
+        let mut session = self.take_session(node)?;
+        let _ = session.abort(&hole.0, "finalize consumed (answerer reused)".to_string());
+        debug_assert!(
+            session.is_idle(),
+            "session must be idle after aborting the finalize continuation"
+        );
+        self.put_session(node, session, None, AsksSidecar::default());
+
+        // Tree state: Suspended → Running, so the reused node accepts a new turn.
+        self.tree.hole_consumed(node, hole)?;
+        Ok(value)
+    }
+
+    /// Reopen a `Done` answerer node (`Done` → `Running`) for another turn —
+    /// the self-iterating harness's bounded answerer drive (W1) reuses ONE
+    /// per-loop node, and a `Completed` (non-finalize) turn leaves it `Done`,
+    /// so a corrective re-prompt must reopen it first. Mirrors
+    /// [`Self::follow_up`]'s reopen step. No-op-safe only from `Done`
+    /// ([`crate::forcing::NodeTree::reopen`] refuses other states).
+    pub(crate) fn reopen_node(&self, node: NodeId) -> Result<(), HarnessError> {
+        self.tree.reopen(node)?;
+        Ok(())
     }
 
     /// The running sum of every assistant turn's [`Usage`] logged on `node`
@@ -2194,7 +2279,10 @@ impl Harness {
         }
     }
 
-    fn drop_session(&self, node: NodeId) {
+    /// Drop `node`'s live convo (transcript + session). The self-iterating
+    /// harness driver calls this at loop end to retire the per-loop answerer
+    /// session, so the next loop gets a fresh render-seeded one (W1/C2).
+    pub(crate) fn drop_session(&self, node: NodeId) {
         let mut convos = self.convos.lock();
         convos.remove(&node);
     }
@@ -2206,7 +2294,13 @@ impl Harness {
         }
     }
 
-    fn push_user_turn(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
+    /// Append a User-role message to `node`'s transcript (and log it), without
+    /// driving a turn. The self-iterating harness driver pushes each
+    /// `runLLMTurn` hole card onto the SAME per-loop answerer node this way, so
+    /// hole #2 sees hole #1's exchange (W1/C2: the accumulating context
+    /// window). Also the corrective-retry mechanism inside
+    /// [`Self::run_to_hole_or_done`].
+    pub(crate) fn push_user_turn(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
         let mut convos = self.convos.lock();
         let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
         let turn = convo.turn_seq;

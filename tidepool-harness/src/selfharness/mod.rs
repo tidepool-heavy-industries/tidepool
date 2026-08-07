@@ -33,7 +33,7 @@ pub mod lifecycle;
 pub mod observer;
 pub mod state_cross;
 
-pub use driver::{DriverError, SelfHarnessDriver};
+pub use driver::{answerer_decls, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, GuiObserver, LogObserver, Observer, ReactiveHook};

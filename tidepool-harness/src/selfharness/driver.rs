@@ -45,6 +45,7 @@ use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{Event, Observer};
 use crate::selfharness::state_cross;
+use crate::tree::NodeId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
@@ -52,6 +53,26 @@ pub enum DriverError {
     Session(String),
     #[error(transparent)]
     Agent(#[from] HarnessError),
+    /// The prior loop's `State` JSON failed the author's `FromJSON State`
+    /// instance when re-spliced (J1) — a distinct, actionable failure (the
+    /// author's `ToJSON`/`FromJSON State` are not inverse) rather than an
+    /// opaque "loop run failed". Detected via
+    /// [`state_cross::STATE_DECODE_SENTINEL`]. Carries the Aeson decode error.
+    #[error("self-harness State decode failed (ToJSON/FromJSON State not inverse): {0}")]
+    StateDecode(String),
+}
+
+/// Map an outer-session run error string to a typed [`DriverError`]: a message
+/// carrying [`state_cross::STATE_DECODE_SENTINEL`] becomes
+/// [`DriverError::StateDecode`] (J1), everything else a generic
+/// [`DriverError::Session`] with `ctx` for locus.
+fn map_run_error(ctx: &str, msg: String) -> DriverError {
+    if let Some(idx) = msg.find(state_cross::STATE_DECODE_SENTINEL) {
+        let detail = &msg[idx + state_cross::STATE_DECODE_SENTINEL.len()..];
+        DriverError::StateDecode(detail.trim().to_string())
+    } else {
+        DriverError::Session(format!("{ctx}: {msg}"))
+    }
 }
 
 /// One full `render` → `loop` → (service each `runLLMTurn` hole) → `render`
@@ -98,6 +119,47 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![tidepool_mcp::runllmturn_decl()]
 }
 
+/// The nested answerer Agent's SCOPED decl list (W1 effect-scoping;
+/// 08-wave1-correctness.md: "The Agent's effects = gui + finalize, NOT
+/// runLLMTurn — no recursive model-spawning"). Mirrors [`outer_decls`] — a
+/// narrow, purpose-built stack rather than the full `EngineConfig::standard`
+/// Agent row: it DROPS all NINE base effects (`Console`/`KV`/`Fs`/`Lsp`/
+/// `Http`/`Exec`/`Git`/`Time`/`Meta`), so the answerer structurally CANNOT
+/// `run` a shell command, read files, or hit the network — its turn compiles
+/// against a `Tidepool.Effects` that never defines those verbs. It keeps
+/// `Ask` (gui: `dialogForm`/`dialogAsk`) + `Finalize` (`finalize`), the answer
+/// path.
+///
+/// # Why `RunLLMTurn` stays in the ROW (but not the framing)
+///
+/// The intent is "no recursive model-spawning": the answerer must not usefully
+/// call `runLLMTurn`. This is enforced by the narrow answerer FRAMING
+/// ([`ANSWERER_FRAMING_SUFFIX`]), which never advertises `runLLMTurn`/`run` —
+/// the model is told to answer with `finalize` and gather input with
+/// `dialogForm`, nothing else. `RunLLMTurn` cannot be dropped from the ROW,
+/// though, because the effect verbs are `M`-monomorphic (`runLLMTurn :: Text
+/// -> M a`, not `Member`-polymorphic) and the frozen authored-harness contract
+/// (`examples/harness/Harness.hs`) defines its answer types (`Decision`, …) in
+/// the SAME module whose `loop` calls `runLLMTurn` — so the answerer, which
+/// `import`s that module to construct the typed answer, only compiles if
+/// `runLLMTurn` typechecks there, which needs `RunLLMTurn ∈ M`. Full
+/// row-exclusion of `RunLLMTurn` therefore waits on splitting the harness
+/// contract's answer types into a `runLLMTurn`-free module (a follow-up); v1
+/// scopes it behaviorally (framing) while dropping the base effects
+/// structurally. This is the first real slice of the per-context-effect-set
+/// goal (§03).
+///
+/// `Ask` comes first: [`EngineConfig::from_decls`] takes the FIRST interposed
+/// effect (`Ask`|`RunLLMTurn`|`Finalize`) as the suspend threshold, so all
+/// three sit at or past that boundary and suspend rather than dispatch.
+pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
+    vec![
+        tidepool_mcp::ask_decl(),
+        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::finalize_decl(),
+    ]
+}
+
 fn not_bootstrapped() -> DriverError {
     DriverError::Session("outer session not bootstrapped (call run_loop/run_one_cycle)".into())
 }
@@ -120,14 +182,35 @@ const COMPACTION_TARGET_DIVISOR: u32 = 4;
 /// is only a defensive default).
 const FALLBACK_MAX_TOKENS: u32 = 2048;
 
+/// Per-hole SOFT cap (W1 runaway cap 1): after this many model rounds on a
+/// single `runLLMTurn` hole that did NOT finalize, nudge the answerer once
+/// ("approaching max tool calls, finalize now with `@T`") and keep driving.
+/// 08-wave1-correctness.md LOCKED: "up to 16 tool-call rounds ... at 16 the
+/// runtime nudges".
+const ANSWERER_NUDGE_ROUNDS: u32 = 16;
+
+/// Per-hole HARD cap (W1 runaway cap 1): after this many non-finalize model
+/// rounds on one hole, hard-fail the `runLLMTurn` effect with a
+/// [`DriverError`]. 08-wave1-correctness.md LOCKED: "at 32 it hard-fails the
+/// runLLMTurn effect".
+const ANSWERER_MAX_ROUNDS: u32 = 32;
+
+/// Per-LOOP hard cap on TOTAL model inference calls across every hole + round
+/// (W1 runaway cap 2; 08-wave1-correctness.md LOCKED: "Per-loop total
+/// inference-call cap = 1024 — hard-stop the loop"). Keeps a misbehaving
+/// harness from running away regardless of per-hole budgets or compaction.
+const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
+
 /// The narrow answerer instruction appended after `render`'s output to form
 /// the per-loop answerer session's system message (W1/C1). Deliberately
-/// scoped to the answerer's ACTUAL capability set — gui (`dialogForm`/`Ask`)
-/// plus `finalize`, NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
-/// advertises (`runLLMTurn`/`run`/…). The answerer's decls are
-/// [`answerer_decls`], so mentioning `runLLMTurn`/`run` here would advertise
-/// verbs it cannot compile. This is the first real slice of the
-/// per-context-effect-set goal (§03).
+/// scoped to the answerer's INTENDED surface — gui (`dialogForm`/`Ask`) plus
+/// `finalize` — NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
+/// advertises (`runLLMTurn`/`run`/git/http/…). The base-effect verbs (`run`
+/// et al.) genuinely don't compile against the answerer's scoped stack
+/// ([`answerer_decls`]); `runLLMTurn` technically does (it stays in the row
+/// for a harness-contract reason — see [`answerer_decls`]), so NOT advertising
+/// it here is what keeps the answerer from recursively spawning models. This
+/// is the first real slice of the per-context-effect-set goal (§03).
 const ANSWERER_FRAMING_SUFFIX: &str = "\
 ---\n\
 You are the answering agent for a self-iterating harness loop. The system \
@@ -186,11 +269,31 @@ pub struct SelfHarnessDriver {
     /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
     /// [`Self::set_compaction_threshold_percent`].
     compaction_threshold_percent: u64,
-    /// The CURRENT loop's answerer system framing = `render`'s pre-loop output
-    /// + [`ANSWERER_FRAMING_SUFFIX`] (W1/C1). Set in [`Self::run_one_cycle`]
-    /// right after the pre-loop `render`, read when the answerer session is
-    /// created. `None` before the first loop's render.
+    /// The CURRENT loop's answerer system framing: `render`'s pre-loop output
+    /// followed by [`ANSWERER_FRAMING_SUFFIX`] (W1/C1). Set in
+    /// [`Self::run_one_cycle`] right after the pre-loop `render`, read when the
+    /// answerer session is created. `None` before the first loop's render.
     answerer_framing: Option<String>,
+    /// The CURRENT loop's single render-seeded answerer node (W1/C2): created
+    /// ONCE per loop in [`Self::run_loop_fragment`], reused for every
+    /// `runLLMTurn` hole so hole #2's answerer sees hole #1's exchange (the
+    /// accumulating context window — the fused hylo intermediate). Retired
+    /// (dropped) at loop end so the next loop gets a fresh render-seeded
+    /// session. `None` between loops.
+    answerer: Option<NodeId>,
+    /// Total model inference calls across the CURRENT loop's holes + rounds
+    /// (W1 runaway cap 2): reset in [`Self::run_loop_fragment`], incremented
+    /// per answerer `drive_turn`. The loop hard-stops with a [`DriverError`]
+    /// if it reaches [`LOOP_INFERENCE_CALL_CAP`].
+    loop_inference_calls: u32,
+    /// Per-hole soft cap (nudge threshold), default [`ANSWERER_NUDGE_ROUNDS`].
+    /// Configurable via [`Self::set_answerer_round_caps`] so a test can trip
+    /// the nudge/hard-fail deterministically with a few small scripted turns
+    /// instead of the full 16/32 (each round is a real GHC compile).
+    answerer_nudge_rounds: u32,
+    /// Per-hole hard cap, default [`ANSWERER_MAX_ROUNDS`]. See
+    /// [`Self::set_answerer_round_caps`].
+    answerer_max_rounds: u32,
 }
 
 impl SelfHarnessDriver {
@@ -209,6 +312,10 @@ impl SelfHarnessDriver {
             cycle_usage: Usage::default(),
             compaction_threshold_percent: DEFAULT_COMPACTION_THRESHOLD_PERCENT,
             answerer_framing: None,
+            answerer: None,
+            loop_inference_calls: 0,
+            answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
+            answerer_max_rounds: ANSWERER_MAX_ROUNDS,
         }
     }
 
@@ -224,6 +331,16 @@ impl SelfHarnessDriver {
     /// scripted reply sequence to organically cross 80% of `max_tokens`.
     pub fn set_compaction_threshold_percent(&mut self, percent: u64) {
         self.compaction_threshold_percent = percent;
+    }
+
+    /// Override the per-hole answerer round caps (default
+    /// [`ANSWERER_NUDGE_ROUNDS`]/[`ANSWERER_MAX_ROUNDS`], 16/32 per
+    /// 08-wave1-correctness.md). Mainly for tests: small caps (e.g. 3/6) trip
+    /// the nudge + hard-fail with a few scripted turns instead of 16/32 real
+    /// GHC compiles. `nudge` is clamped below `max`.
+    pub fn set_answerer_round_caps(&mut self, nudge: u32, max: u32) {
+        self.answerer_nudge_rounds = nudge.min(max);
+        self.answerer_max_rounds = max;
     }
 
     /// Bootstrap the outer `PersistentSession<Threadless>` (via
@@ -272,7 +389,7 @@ impl SelfHarnessDriver {
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         };
-        // Never actually dispatched to: `outer_cfg.ask_tag == 0` means the
+        // Never actually dispatched to: `outer_cfg.suspend_tag == 0` means the
         // ONE declared effect (RunLLMTurn) always suspends before reaching a
         // handler. Reused verbatim from `Harness::build_stack` for the same
         // well-tested concrete stack type.
@@ -283,7 +400,7 @@ impl SelfHarnessDriver {
             &boot.expr,
             boot.table,
             stack,
-            outer_cfg.ask_tag,
+            outer_cfg.suspend_tag,
             outer_cfg.effect_names.clone(),
             tidepool_mcp::CapturedOutput::new(),
             outer_cfg.include.clone(),
@@ -321,28 +438,6 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))
     }
 
-    /// `pure Loaded.initialState`'s JSON — used only for the very first
-    /// cycle's `render_framing` call (no persisted `State` yet to pass it
-    /// directly).
-    fn initial_state_json(&mut self) -> Result<Json, DriverError> {
-        let code = format!("pure {}.initialState", state_cross::LOADED_QUALIFIER);
-        let compiled = self.compile_outer(&code, "")?;
-        let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-        let outcome = outer
-            .session
-            .run("initial-state", &compiled.expr, &compiled.table)
-            .map_err(|e| DriverError::Session(format!("initialState run failed: {e}")))?;
-        match outcome {
-            ResidentOutcome::Completed { result, .. } => Ok(state_cross::state_out(
-                &result.into_value(),
-                &compiled.table,
-            )),
-            ResidentOutcome::Suspended { .. } => Err(DriverError::Session(
-                "initialState suspended unexpectedly — it must be a pure value".into(),
-            )),
-        }
-    }
-
     /// Run ONE `render` → `loop` → (service each `runLLMTurn` hole) →
     /// `render` cycle: bootstrap the outer session if needed, render the
     /// pre-loop prompt, run `loop state` as a suspendable fragment
@@ -369,16 +464,12 @@ impl SelfHarnessDriver {
         self.bootstrap(source)?;
         self.emit(Event::LoopBoundary);
 
-        let initial_json;
-        let pre_state: &Json = match prior_state {
-            Some(j) => j,
-            None => {
-                initial_json = self.initial_state_json()?;
-                &initial_json
-            }
-        };
+        // D4: render the pre-loop prompt directly against `prior_state` — `None`
+        // (the very first cycle) splices `Loaded.initialState` in the `render`
+        // helpers (`state_cross::state_in(None)`), so no redundant
+        // `pure initialState` compile + round-trip through JSON is needed.
         let prior_compaction = self.last_compaction.clone();
-        let prompt_before = self.render_framing(pre_state, prior_compaction.as_deref())?;
+        let prompt_before = self.render_framing(prior_state, prior_compaction.as_deref())?;
 
         // W1/C1: the pre-loop render IS the answerer session's system message.
         // Compose it with the narrow answerer instruction and stash it for
@@ -391,7 +482,7 @@ impl SelfHarnessDriver {
 
         self.last_compaction = compaction.clone();
         let next_compaction = self.last_compaction.clone();
-        let prompt_after = self.render_framing(&state_json, next_compaction.as_deref())?;
+        let prompt_after = self.render_framing(Some(&state_json), next_compaction.as_deref())?;
         self.lifecycle = SelfHarnessState::Idle;
 
         Ok(CycleOutcome {
@@ -409,12 +500,46 @@ impl SelfHarnessDriver {
     /// into the next. Production entry point — see the module doc for why
     /// this (and everything it calls) must run on a thread with an active
     /// multi-thread tokio runtime.
-    pub fn run_loop(&mut self, source: &HarnessSource) -> Result<(), DriverError> {
+    ///
+    /// Between-loops human gate (W1 runaway cap 3): before each new cycle
+    /// AFTER the first, unless `auto` is set, print "press Enter to continue"
+    /// and block on a line from stdin — a human checkpoint that keeps a
+    /// misbehaving harness from running away across loops. `auto` (the
+    /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
+    /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
+    pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
         let mut state_json: Option<Json> = None;
+        let mut first = true;
         loop {
+            if !first && !auto {
+                self.between_loops_gate()?;
+            }
+            first = false;
             let outcome = self.run_one_cycle(source, state_json.as_ref())?;
             state_json = Some(outcome.state_json);
         }
+    }
+
+    /// The between-loops human checkpoint: prompt on stderr and block for a
+    /// line from stdin. Transitions to [`SelfHarnessState::Closing`] and
+    /// returns a [`DriverError`] on EOF (stdin closed — e.g. the operator hit
+    /// Ctrl-D), so the loop tears down rather than spinning.
+    fn between_loops_gate(&mut self) -> Result<(), DriverError> {
+        use std::io::{BufRead, Write};
+        eprint!("[self-harness] press Enter to run the next loop (Ctrl-D to stop)... ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let n = std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| DriverError::Session(format!("between-loops gate stdin: {e}")))?;
+        if n == 0 {
+            self.lifecycle = SelfHarnessState::Closing;
+            return Err(DriverError::Session(
+                "between-loops gate: stdin closed (operator stopped the harness)".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Drive `Loaded.loop __selfHarnessState` (spliced via
@@ -434,6 +559,41 @@ impl SelfHarnessDriver {
         prior_state: Option<&Json>,
     ) -> Result<(Value, DataConTable, Option<String>), DriverError> {
         self.cycle_usage = Usage::default();
+        self.loop_inference_calls = 0;
+
+        // W1/C2: create the ONE render-seeded answerer session for this whole
+        // loop, up front — every `runLLMTurn` hole pushes onto it, so hole #2
+        // sees hole #1's exchange (the accumulating context window). Retired
+        // in `retire_answerer` once the loop completes (or errors out).
+        let answerer =
+            self.agent
+                .create_root_framed("loop answerer", "", self.answerer_framing.clone())?;
+        self.agent.force(answerer, Actor::Operator)?;
+        self.answerer = Some(answerer);
+
+        let result = self.run_loop_fragment_inner(prior_state);
+        self.retire_answerer();
+        result
+    }
+
+    /// Drop the current loop's answerer session (W1/C2), so the next loop
+    /// starts from a fresh render-seeded one. Idempotent — a no-op if no
+    /// answerer is live.
+    fn retire_answerer(&mut self) {
+        if let Some(node) = self.answerer.take() {
+            self.agent.drop_session(node);
+        }
+    }
+
+    /// The body of [`Self::run_loop_fragment`] — run `loop`, service each
+    /// `runLLMTurn` hole against the pre-created per-loop answerer
+    /// (`self.answerer`), and return the completed `State` + table +
+    /// compaction. Split out so [`Self::run_loop_fragment`] can retire the
+    /// answerer whether this succeeds or errors.
+    fn run_loop_fragment_inner(
+        &mut self,
+        prior_state: Option<&Json>,
+    ) -> Result<(Value, DataConTable, Option<String>), DriverError> {
         let helpers = state_cross::state_in(prior_state);
         let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
         let compiled = self.compile_outer(&code, &helpers)?;
@@ -443,11 +603,22 @@ impl SelfHarnessDriver {
             outer
                 .session
                 .run("loop", &compiled.expr, &compiled.table)
-                .map_err(|e| DriverError::Session(format!("loop run failed: {e}")))?
+                .map_err(|e| map_run_error("loop run failed", e.to_string()))?
         };
         loop {
             match outcome {
                 ResidentOutcome::Completed { result, .. } => {
+                    // Fold the per-loop answerer's CUMULATIVE usage (every hole +
+                    // round accumulated on the one reused node, C2) into
+                    // `cycle_usage` ONCE, while the node is still live. Read here
+                    // rather than per-hole to avoid double-counting the reused
+                    // node's running total.
+                    if let Some(node) = self.answerer {
+                        if let Some(u) = self.agent.node_usage(node) {
+                            self.cycle_usage.input_tokens += u.input_tokens;
+                            self.cycle_usage.output_tokens += u.output_tokens;
+                        }
+                    }
                     let max_tokens = self.agent.cfg().max_tokens.unwrap_or(FALLBACK_MAX_TOKENS);
                     let usage = self.cycle_usage;
                     let compaction = self.compaction_trigger(&usage, max_tokens)?;
@@ -479,12 +650,19 @@ impl SelfHarnessDriver {
 
     /// Service one `runLLMTurn @A` suspension (`site`/`ty` from
     /// [`crate::engine::HoleRouting::RunLLMTurn`], `prompt` the hole's
-    /// human-facing text): register + force a fresh node on `self.agent`,
-    /// drive it (`run_to_hole_or_done`) until it resolves via `finalize`
-    /// (WS-B's effect — terminates the Agent turn loop rather than resuming
-    /// it, per 03-agent-surface.md), then feed the finalized value straight
-    /// into the OUTER session's `resume` to answer `loop`'s parked
-    /// continuation.
+    /// human-facing text) against the CURRENT loop's SINGLE render-seeded
+    /// answerer session (`self.answerer`, W1/C2): push the hole card as a User
+    /// turn onto that persistent node — so hole #2 sees hole #1's exchange
+    /// (the accumulating context window) — then drive it as a bounded
+    /// multi-turn interaction to `finalize` (WS-B's effect — terminates the
+    /// Agent turn loop rather than resuming it, per 03-agent-surface.md). The
+    /// finalized value feeds straight into the OUTER session's `resume` to
+    /// answer `loop`'s parked continuation.
+    ///
+    /// Bounded (W1 runaway caps): each non-finalize model round counts against
+    /// a per-hole budget — at [`ANSWERER_NUDGE_ROUNDS`] the answerer is nudged
+    /// to finalize, at [`ANSWERER_MAX_ROUNDS`] the hole hard-fails — and
+    /// against the per-loop [`LOOP_INFERENCE_CALL_CAP`] total.
     pub fn service_runllm_hole(
         &mut self,
         site: u32,
@@ -497,21 +675,21 @@ impl SelfHarnessDriver {
             ty: ty.map(String::from),
         });
 
+        let node = self.answerer.ok_or_else(|| {
+            DriverError::Session(
+                "service_runllm_hole called with no per-loop answerer (run_loop_fragment \
+                 must create it first)"
+                    .into(),
+            )
+        })?;
+
+        // Push the hole card onto the EXISTING answerer node, accumulating
+        // context rather than spawning a fresh one.
         let child_prompt = engine::hole_card(prompt, ty);
-        // W1/C1: seed the answerer node with `render`'s output as its system
-        // message (via `answerer_framing`), not the default full-surface
-        // framing.
-        let node = self.agent.create_root_framed(
-            "runLLMTurn answerer",
-            &child_prompt,
-            self.answerer_framing.clone(),
-        )?;
-        self.agent.force(node, Actor::Operator)?;
+        self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
-        let outcome = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.run_to_hole_or_done(node))
-        })?;
+        let outcome = self.drive_answerer_to_finalize(node, ty)?;
         self.emit(Event::TurnEnd { node });
 
         let is_finalize = matches!(
@@ -526,25 +704,151 @@ impl SelfHarnessDriver {
             )));
         }
 
-        let value = self.agent.take_finalized_value(node)?;
+        // W1/C2: take the finalized value AND keep the node live (consume the
+        // finalize hole, Suspended→Running) so the NEXT hole can push onto the
+        // same accumulating session — not `take_finalized_value`, which cancels.
+        let value = self.agent.take_finalized_value_keep_open(node)?;
         self.emit(Event::Finalize { node });
-        if let Some(u) = self.agent.node_usage(node) {
-            self.cycle_usage.input_tokens += u.input_tokens;
-            self.cycle_usage.output_tokens += u.output_tokens;
-        }
+        // Usage is NOT accumulated here: the answerer node is REUSED across the
+        // loop's holes (C2), so `node_usage` returns the node's CUMULATIVE total
+        // — reading it per-hole would double-count earlier holes. The whole
+        // loop's answerer usage is read ONCE in `run_loop_fragment_inner`'s
+        // Completed branch (before the answerer is retired).
         self.lifecycle = SelfHarnessState::RunningLoop;
         Ok(value)
+    }
+
+    /// Drive `node` (the per-loop answerer, already seeded with this hole's
+    /// card) turn-by-turn until it suspends on `finalize`, applying the W1
+    /// runaway caps: count each non-finalize model round; at
+    /// [`ANSWERER_NUDGE_ROUNDS`] push a one-time "finalize now" nudge; at
+    /// [`ANSWERER_MAX_ROUNDS`] hard-fail the hole; and abort the whole loop if
+    /// the per-loop [`LOOP_INFERENCE_CALL_CAP`] is hit. A `Completed`
+    /// (non-finalize) or `NoBlock` turn is treated as a wasted round —
+    /// re-prompted toward `finalize` — rather than accepted, since the
+    /// answerer's contract is to resolve the hole via `finalize`, not return a
+    /// plain value.
+    fn drive_answerer_to_finalize(
+        &mut self,
+        node: NodeId,
+        ty: Option<&str>,
+    ) -> Result<TurnOutcome, DriverError> {
+        let ty_label = ty.unwrap_or("A");
+        let max_rounds = self.answerer_max_rounds;
+        let nudge_rounds = self.answerer_nudge_rounds;
+        let mut rounds: u32 = 0;
+        let mut nudged = false;
+        loop {
+            if self.loop_inference_calls >= LOOP_INFERENCE_CALL_CAP {
+                return Err(DriverError::Session(format!(
+                    "per-loop inference-call cap ({LOOP_INFERENCE_CALL_CAP}) reached — \
+                     hard-stopping the loop (a runaway harness)"
+                )));
+            }
+            if rounds >= max_rounds {
+                return Err(DriverError::Session(format!(
+                    "runLLMTurn answerer exceeded {max_rounds} rounds without \
+                     finalizing — hard-failing the hole"
+                )));
+            }
+            if rounds == nudge_rounds && !nudged {
+                self.agent.push_user_turn(
+                    node,
+                    &format!(
+                        "You are approaching the maximum number of tool calls for this \
+                         request. Finalize now: evaluate `finalize @{ty_label} (value :: \
+                         {ty_label})` with your best answer."
+                    ),
+                )?;
+                nudged = true;
+            }
+
+            self.loop_inference_calls += 1;
+            rounds += 1;
+            let outcome = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.agent.drive_turn(node))
+            });
+            match outcome {
+                Ok(out @ TurnOutcome::Suspended { .. }) => {
+                    // A Finalize suspension is the answer; any other suspension
+                    // (the scoped answerer can only reach `Ask`/`Finalize`, so
+                    // this is an `Ask`/`dialogForm` mid-interaction) is handled
+                    // by the caller — return it and let `service_runllm_hole`
+                    // classify. Only `Finalize` ends the drive.
+                    if let TurnOutcome::Suspended { classified, .. } = &out {
+                        if matches!(classified.routing, HoleRouting::Finalize { .. }) {
+                            return Ok(out);
+                        }
+                    }
+                    // A non-finalize suspension (an operator form): the answerer
+                    // is mid-interaction and has parked awaiting operator input,
+                    // which the self-harness driver has no operator to answer.
+                    // Treat it as a hard error rather than silently hanging.
+                    return Err(DriverError::Session(format!(
+                        "runLLMTurn answerer suspended on a non-finalize hole \
+                         ({:?}) — the self-harness driver has no operator to answer it",
+                        match &out {
+                            TurnOutcome::Suspended { classified, .. } =>
+                                format!("{:?}", classified.routing),
+                            _ => "unknown".to_string(),
+                        }
+                    )));
+                }
+                // A plain value: the block ran to completion WITHOUT
+                // `finalize`, so the node is now `Done`. Reopen it
+                // (`Done`→`Running`) before the corrective re-prompt, so the
+                // same accumulating node keeps driving toward `finalize` (a
+                // wasted round, already counted).
+                Ok(TurnOutcome::Completed { .. }) => {
+                    self.agent.reopen_node(node)?;
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "That did not resolve the request. Answer by evaluating \
+                             `finalize @{ty_label} (value :: {ty_label})`."
+                        ),
+                    )?;
+                }
+                // An empty turn (no haskell block): the node is still `Running`
+                // (no block ran), so no reopen — just re-prompt.
+                Ok(TurnOutcome::NoBlock { .. }) => {
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "Reply with a single ```haskell block that evaluates \
+                             `finalize @{ty_label} (value :: {ty_label})`."
+                        ),
+                    )?;
+                }
+                // A compile error: feed it back so the answerer can correct,
+                // same as the corrective-retry loop in `run_to_hole_or_done`.
+                Err(HarnessError::Compile(msg)) => {
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "That Haskell did not compile. Fix it and reply with a corrected \
+                             single ```haskell block that evaluates `finalize @{ty_label} \
+                             (value :: {ty_label})`.\n\nGHC error:\n{msg}"
+                        ),
+                    )?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// Evaluate `render(state, lastCompaction)` against the outer session
     /// and return its `Text` result — the next loop's system prompt.
     /// Runtime-invoked at loop boundaries ONLY (02-runtime.md LOCKED).
+    /// `state_json` is `None` only for the very first cycle — then the render
+    /// splice references `Loaded.initialState` directly (no JSON to decode),
+    /// per [`state_cross::state_in`] (D4).
     pub fn render_framing(
         &mut self,
-        state_json: &Json,
+        state_json: Option<&Json>,
         last_compaction: Option<&str>,
     ) -> Result<String, DriverError> {
-        let state_decl = state_cross::state_in(Some(state_json));
+        let state_decl = state_cross::state_in(state_json);
         let compaction_decl = match last_compaction {
             None => "__selfHarnessCompaction :: Maybe Text\n__selfHarnessCompaction = Nothing"
                 .to_string(),
@@ -563,7 +867,7 @@ impl SelfHarnessDriver {
         let outcome = outer
             .session
             .run("render", &compiled.expr, &compiled.table)
-            .map_err(|e| DriverError::Session(format!("render run failed: {e}")))?;
+            .map_err(|e| map_run_error("render run failed", e.to_string()))?;
         match outcome {
             ResidentOutcome::Completed { result, .. } => match result.to_json() {
                 Json::String(s) => Ok(s),
