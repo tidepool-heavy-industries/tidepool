@@ -1351,24 +1351,18 @@ impl Harness {
                 actual: format!("{:?}", self.pending_hole(node).map(|c| c.routing)),
             });
         }
-        // Box the argument with the `I#` id from the SUSPEND turn's table — the
-        // one the finalized closure's own `case x of I# n#` unboxing was compiled
-        // against, so the boxed argument's tag matches. Falls back to the session
-        // table's `I#` (via `None`) if the suspend table lacks it.
-        // The suspend turn's table — the closure was compiled against it, so the
-        // apply fragment must box its argument with the SAME table's `I#` for the
-        // closure's `case x of I# n#` unboxing to match.
+        // The suspend turn's table, passed through so the apply fragment's
+        // compile merges the closure's own defining constructors into the
+        // accumulated session table (see `ResidentSession::apply_finalized`'s
+        // doc for why no `I#`-id matching is needed here).
         let suspend_table = self
             .convos
             .lock()
             .get(&node)
             .and_then(|c| c.suspend_table.clone());
-        let i_hash = suspend_table
-            .as_ref()
-            .and_then(|t| t.get_by_name_arity("I#", 1));
         let mut session = self.take_session(node)?;
         let (session, out) = tokio::task::spawn_blocking(move || {
-            let out = session.apply_finalized(arg, i_hash, suspend_table.as_ref());
+            let out = session.apply_finalized(arg, suspend_table.as_ref());
             (session, out)
         })
         .await
