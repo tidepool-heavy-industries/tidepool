@@ -47,8 +47,9 @@ module Tidepool.Fork
 
 import Prelude
 import Data.Text (Text)
+import Control.Monad.Freer (Eff, Member)
 
-import Tidepool.Effects (M, runLLMTurnFanout, runLLMTurnFanoutSited)
+import Tidepool.Effects (M, RunLLMTurn, runLLMTurnFanout, runLLMTurnFanoutSited)
 
 -- | One fanout over 'Bool' verdicts; keep the elements whose verdict is
 -- 'True', in the original order.
@@ -70,8 +71,19 @@ forkFilter mkPrompt xs = do
 -- Dead at runtime, same discipline as 'forkMap' (see its haddock): every
 -- extractable call site is head-swapped before this body ever runs; the
 -- bottom site-id forces an immediate 'error' if reached anyway.
+--
+-- Member-polymorphic (siteid-plugin), MUST MATCH 'runLLMTurnFanoutSited's
+-- OWN constraint exactly: extract's head-swap re-applies whatever dictionary
+-- arguments the ORIGINAL (this) call site carried, verbatim, to the *Sited
+-- sibling it swaps to (see Translate.hs's 'splitTrailingArgs' — it does not
+-- (cannot, being untyped at this stage) independently re-derive what
+-- constraint the sibling needs). Leaving 'forkAll' fixed to the closed `M`
+-- stack while 'runLLMTurnFanoutSited' gained a `Member` constraint broke
+-- this silently at RUNTIME (not extraction) — a case-trap tag mismatch, from
+-- calling the sibling's now-4-lambda closure with only the 2 args this call
+-- site used to supply.
 {-# OPAQUE forkAll #-}
-forkAll :: forall a. [Text] -> M [a]
+forkAll :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [a]
 forkAll prompts = runLLMTurnFanoutSited unreachableSiteId prompts
   where
     unreachableSiteId = error
