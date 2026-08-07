@@ -90,7 +90,7 @@ async fn render_output_is_the_answerer_system_message() {
     let systems = Arc::new(Mutex::new(Vec::<String>::new()));
     let provider: Arc<dyn DynModelProvider> = Arc::new(CapturingProvider {
         systems: systems.clone(),
-        reply: "```haskell\nimport Harness (Decision (..), Confidence (..))\n\n\
+        reply: "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
                 (finalize @Decision (Decision { action = \"observe\", rationale = \"first loop\", \
                 confidence = Medium }) :: M ())\n```"
             .to_string(),
