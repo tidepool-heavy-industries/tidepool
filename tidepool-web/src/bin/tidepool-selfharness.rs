@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, Some(env_var)) => {
             let model =
-                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
             eprintln!("[boot] API-key mode ({env_var}), model {model}");
             Arc::new(ApiKeyProvider::new(ApiKeyConfig::new(
                 env_var.clone(),
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, None) => {
             let model =
-                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
             Arc::new(OauthProvider::new(OauthConfig::new(model)))
         }
     };
