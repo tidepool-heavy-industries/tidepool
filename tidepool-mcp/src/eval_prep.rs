@@ -352,11 +352,13 @@ fn template_haskell_impl(
     out
 }
 
-/// Escape a string for inclusion in a generated Haskell string literal.
-/// Control characters matter: an unescaped newline in the payload is a
-/// LEXICAL ERROR in the generated module (bit the eval `input` channel
-/// for every multi-line payload).
-fn escape_haskell_string(s: &str) -> String {
+/// Escape a string for inclusion in a generated Haskell string literal (the
+/// BODY only — no surrounding quotes). Control characters matter: an
+/// unescaped newline in the payload is a LEXICAL ERROR in the generated module
+/// (bit the eval `input` channel for every multi-line payload). Shared with
+/// the self-iterating harness's `State`/compaction splice (J2), so every
+/// code path that emits a Haskell string literal escapes it identically.
+pub fn escape_haskell_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
