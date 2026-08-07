@@ -1082,7 +1082,7 @@ tyConToDCMeta tc = case tyConDataCons_maybe tc of
 
 translate :: CoreExpr -> TransM Int
 translate expr =
-  let (hd, allArgs) = collectArgs expr
+  let (hd, allArgs) = stripNospecSpine (collectArgs expr)
       args = filter isValueArg allArgs
   in case hd of
     -- Intercept eitherDecodeValue :: Text -> Either Text Value. Lower the applied
@@ -1538,16 +1538,12 @@ translate expr =
       body <- emitNode $ NApp argRef tokIdx
       emitNode $ NLam argId body
 
-    -- nospec :: a -> a  (GHC.Magic) — the identity, inserted by the specializer
-    -- (once Opt_Specialise is on) to block over-specialization of dictionary /
-    -- class-method code. It has no unfolding, so the JIT can't link it; desugar
-    -- `nospec @t f x...` → `f x...` (drop the wrapper, apply its first value arg
-    -- to the rest).
-    Var v | isNospecVar v
-          , (f:rest) <- args -> do
-      fIdx <- translate f
-      restIdxs <- mapM translate rest
-      foldM (\acc aIdx -> emitNode $ NApp acc aIdx) fIdx restIdxs
+    -- An applied `nospec` (`(f:rest) <- args`) never reaches this arm: it is
+    -- unwrapped upfront by 'stripNospecSpine' (see its haddock — needed so a
+    -- named-Var interception arm below sees a `Member <Eff> effs`
+    -- dictionary's call site as ONE flat spine, not split across a nospec
+    -- boundary). Only the bare, zero-arg occurrence (point-free `nospec`)
+    -- survives to reach 'translateHead's own eta-expansion arm.
 
     -- tagToEnum# @T arg → case arg of { 0# → C0; 1# → C1; ... }
     -- We desugar here because type information is erased downstream.
@@ -1582,8 +1578,10 @@ translate expr =
     -- payload ourselves.
     Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v
           , let typeArgs = filter (not . isValueArg) allArgs
-          , [Type ty] <- typeArgs
-          , [promptArg] <- args -> do
+          , (Type ty : _) <- typeArgs
+          -- Trailing 1 value arg is the prompt; anything before it is 0+
+          -- leading `Member <Eff> effs` dictionaries (see 'splitTrailingArgs').
+          , Just (dictArgs, [promptArg]) <- splitTrailingArgs 1 args -> do
         checkRunLLMTurnType ty
         let sitedField
               | isRunLLMTurnVar v = tsRunLLMTurnSitedId
@@ -1600,9 +1598,11 @@ translate expr =
           -- 'collectUsedDataCons'/'collectTransitiveDCons' rescanning
           -- 'reachBinds' for the meta.cbor constructor table) — those callers
           -- discard 'tsNodes' entirely, so emitting a poison here (mirroring
-          -- 'emitFfiPoison') is harmless; still translate the prompt so its
-          -- own DataCon usage isn't missed by that scan.
+          -- 'emitFfiPoison') is harmless; still translate the prompt (and any
+          -- dictionary args) so their own DataCon usage isn't missed by that
+          -- scan.
           Nothing -> do
+            mapM_ translate dictArgs
             _ <- translate promptArg
             emitFfiPoison
           Just sitedVarId -> do
@@ -1619,8 +1619,15 @@ translate expr =
                             else renderedTy
             recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
+            -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
+            -- their original order, before the injected site-id literal —
+            -- the *Sited sibling has the SAME dictionary parameters (it's
+            -- declared with the identical `Member` constraint) at the same
+            -- position in its own application spine.
+            dictIdxs <- mapM translate dictArgs
+            withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
-            appLit <- emitNode $ NApp sitedRef litIdx
+            appLit <- emitNode $ NApp withDicts litIdx
             promptIdx <- translate promptArg
             emitNode $ NApp appLit promptIdx
 
@@ -1641,8 +1648,8 @@ translate expr =
           -- TWO explicit Core type arguments, not runLLMTurn's one. `ty` is
           -- the FIRST (`v`, what `@T` fixes); the second (`a`) is discarded —
           -- it never crosses the suspend boundary, only `ty` does.
-          , [Type ty, Type _phantomRet] <- typeArgs
-          , [valueArg] <- args -> do
+          , (Type ty : Type _phantomRet : _) <- typeArgs
+          , Just (dictArgs, [valueArg]) <- splitTrailingArgs 1 args -> do
         checkFinalizeType ty
         sitedIdM <- gets tsFinalizeSitedId
         case sitedIdM of
@@ -1650,6 +1657,7 @@ translate expr =
           -- fires only for throwaway, unseeded TransState scans that discard
           -- tsNodes entirely.
           Nothing -> do
+            mapM_ translate dictArgs
             _ <- translate valueArg
             emitFfiPoison
           Just sitedVarId -> do
@@ -1657,8 +1665,10 @@ translate expr =
             let typeStr = Tidepool.GhcPipeline.renderType ty
             recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
+            dictIdxs <- mapM translate dictArgs
+            withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
-            appLit <- emitNode $ NApp sitedRef litIdx
+            appLit <- emitNode $ NApp withDicts litIdx
             valueIdx <- translate valueArg
             emitNode $ NApp appLit valueIdx
 
@@ -1681,8 +1691,8 @@ translate expr =
     -- fanout (see Tidepool.Fork's haddock).
     Var v | isForkMapVar v || isForkCataVar v
           , let typeArgs = filter (not . isValueArg) allArgs
-          , [Type tyAns, Type _tyElem] <- typeArgs
-          , [fnArg, xsArg] <- args -> do
+          , (Type tyAns : Type _tyElem : _) <- typeArgs
+          , Just (dictArgs, [fnArg, xsArg]) <- splitTrailingArgs 2 args -> do
         checkRunLLMTurnType tyAns
         let sitedField
               | isForkMapVar v = tsForkMapSitedId
@@ -1690,6 +1700,7 @@ translate expr =
         sitedIdM <- gets sitedField
         case sitedIdM of
           Nothing -> do
+            mapM_ translate dictArgs
             _ <- translate fnArg
             _ <- translate xsArg
             emitFfiPoison
@@ -1698,8 +1709,10 @@ translate expr =
             let typeStr = "[" ++ Tidepool.GhcPipeline.renderType tyAns ++ "]"
             recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
+            dictIdxs <- mapM translate dictArgs
+            withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
-            appLit <- emitNode $ NApp sitedRef litIdx
+            appLit <- emitNode $ NApp withDicts litIdx
             fnIdx <- translate fnArg
             appFn <- emitNode $ NApp appLit fnIdx
             xsIdx <- translate xsArg
@@ -2162,6 +2175,58 @@ isValueArg :: CoreExpr -> Bool
 isValueArg (Type _) = False
 isValueArg (Coercion _) = False
 isValueArg _ = True
+
+-- | Split a typed-yield call site's (already 'isValueArg'-filtered) value-arg
+-- list into "0+ leading extra args" and "the trailing @n@ args the verb's own
+-- non-Member signature always had" (e.g. @[prompt]@ for runLLMTurn,
+-- @[fn, xs]@ for forkMap). Generalizes what used to be an exact-arity list
+-- pattern (@[promptArg] <- args@) so a `Member <Eff> effs` dictionary now
+-- threaded ahead of the real arguments (once the typed-yield verbs are
+-- Member-polymorphic — see 'checkRunLLMTurnType' callers) doesn't break the
+-- match: the dictionary rides along as an ordinary extra leading value arg,
+-- re-applied verbatim to the *Sited sibling in 'splitTrailingArgs's caller.
+-- 'Nothing' when there are fewer than @n@ args (mis-arity / partial
+-- application) — callers fall through to the existing "not fully applied"
+-- error arm, unchanged.
+splitTrailingArgs :: Int -> [a] -> Maybe ([a], [a])
+splitTrailingArgs n xs
+  | length xs >= n = Just (splitAt (length xs - n) xs)
+  | otherwise = Nothing
+
+-- | Re-flatten a `nospec`-wrapped call site into ONE spine, headed by
+-- whatever `nospec` was protecting. GHC's specializer wraps a
+-- class-constrained call `f \@T $dInstance x...` as
+-- `nospec \@ty (f \@T) $dInstance x...` whenever the dictionary is a
+-- statically-known top-level instance (see 'isNospecVar') — now common at
+-- typed-yield call sites once the verbs carry a `Member <Eff> effs`
+-- constraint. 'collectArgs' peels the WHOLE @App@ spine down to `nospec`
+-- itself, so `f \@T` (nospec's own function argument) ends up as ONE opaque,
+-- still-partially-applied argument sitting BEFORE the dictionary/value args
+-- that logically belong to `f` — e.g. @nospec \@ty (runLLMTurn \@Bool
+-- \@effs) $dMember "gate"@, where `f = runLLMTurn \@Bool \@effs` carries
+-- runLLMTurn's own two type args but ZERO value args yet. Left alone, the
+-- runLLMTurn/finalize/forkMap interception arms below (which match on the
+-- combined type-arg-then-value-arg shape of a single spine) never see the
+-- dictionary or the prompt in the same place as the answer type, and the
+-- site silently falls through untranslated.
+--
+-- Recursively re-collects `f`'s own spine and splices it in front of
+-- `rest`, discarding nospec's own (always-irrelevant) type argument — this
+-- reconstructs EXACTLY the spine that would exist if `nospec` had never
+-- been inserted, so every existing by-name interception arm (and the
+-- ordinary fallthrough App-translation case) sees one uniform shape
+-- regardless of whether the specializer wrapped the call. Terminates: each
+-- recursive step strictly shrinks the expression (peels one `nospec`
+-- layer); a nested `nospec` (however unlikely) is handled by re-checking
+-- the new head. A bare, zero-value-arg `nospec` (point-free) is left
+-- untouched here — 'translateHead's own eta-expansion arm handles it.
+stripNospecSpine :: (CoreExpr, [CoreExpr]) -> (CoreExpr, [CoreExpr])
+stripNospecSpine (hd, allArgs)
+  | Var v <- hd, isNospecVar v
+  , (f : rest) <- filter isValueArg allArgs
+  , (fHd, fArgs) <- collectArgs (stripTicksAndCasts f)
+  = stripNospecSpine (fHd, fArgs ++ rest)
+  | otherwise = (hd, allArgs)
 
 -- | Strip a single-field box constructor from a wrapper DataCon arg.
 -- When a DataCon wrapper is applied, its args are boxed:

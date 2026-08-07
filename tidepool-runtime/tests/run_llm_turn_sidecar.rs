@@ -240,6 +240,106 @@ fn runllmturn_site_ids_match_under_branch_and_loop() {
     }
 }
 
+/// Records every dispatched `RunLLMTurn` request's `"typedSite"` payload
+/// field and answers EVERY dispatch with `Approve` (a `Verdict` DataCon) —
+/// unlike `SiteRecorder` above, which is tailored to the Bool-gate/Verdict/
+/// Outcome shape of `verdict_code` and answers subsequent dispatches with a
+/// bare `LitInt`. A `Verdict`-only scenario needs a `Verdict`-shaped answer
+/// on every dispatch, not just the first.
+struct VerdictRecorder {
+    sites: Vec<i64>,
+}
+
+impl DispatchEffect<()> for VerdictRecorder {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &Value,
+        cx: &EffectContext<'_, ()>,
+    ) -> Result<Response, EffectError> {
+        if tag != RUN_LLM_TURN_TAG {
+            return Err(EffectError::UnhandledEffect { tag });
+        }
+        let Value::Con(_con_id, fields) = request else {
+            return Err(EffectError::Handler(format!(
+                "expected RunLLMTurnWith Con, got {request:?}"
+            )));
+        };
+        let payload = fields
+            .get(1)
+            .ok_or_else(|| EffectError::Handler("RunLLMTurnWith missing payload field".into()))?;
+        let json = tidepool_runtime::value_to_json(payload, cx.table(), 0);
+        let site = json
+            .get("typedSite")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| {
+                EffectError::Handler(format!("AskWith payload missing typedSite: {json}"))
+            })?;
+        self.sites.push(site);
+        let approve_id = cx
+            .table()
+            .get_by_name("Approve")
+            .ok_or_else(|| EffectError::Handler("no Approve DataCon in table".into()))?;
+        Ok(Response::Complete(Value::Con(approve_id, vec![])))
+    }
+}
+
+/// siteid-plugin: `runLLMTurn` is now Member-polymorphic (`Member RunLLMTurn
+/// effs => Text -> Eff effs a`, not fixed to the closed `M` stack — see
+/// effect_defs.rs's RunLLMTurn helpers comment), so a REUSABLE helper can be
+/// written generically over `effs` instead of needing the whole concrete
+/// stack. Two DISTINCT top-level helpers (not two calls to the SAME helper —
+/// that would legitimately CSE into one static site) each wrap one
+/// `runLLMTurn @Verdict` call; asserts BOTH the runtime dispatch order and
+/// the asks.json sidecar carry two DISTINCT site ids (the historical bug:
+/// both collapsed to the placeholder `0`, this yielded `[0, 0]` instead of
+/// `[0, 1]`).
+#[test]
+fn runllmturn_member_polymorphic_helper_gets_distinct_site_ids() {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let helpers = "data Verdict = Approve | Reject deriving (Show)\n\
+                   helper1 :: Member RunLLMTurn effs => Text -> Eff effs Verdict\n\
+                   helper1 p = runLLMTurn @Verdict (p <> \"-one\")\n\
+                   helper2 :: Member RunLLMTurn effs => Text -> Eff effs Verdict\n\
+                   helper2 p = runLLMTurn @Verdict (p <> \"-two\")\n";
+    let code = "do\n  \
+                 a <- helper1 \"ask\"\n  \
+                 b <- helper2 \"ask\"\n  \
+                 pure (toJSON (show a <> show b))\n";
+    let src = tidepool_mcp::template_haskell(&pre, &stack, code, "", helpers, None, None);
+
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .with_extract_env();
+    let (outcome, recorder) = harness.run_owned(&src, "result", VerdictRecorder { sites: vec![] });
+    outcome
+        .into_result()
+        .unwrap_or_else(|e| panic!("expected the eval to run to completion, got: {e}"));
+
+    assert_eq!(
+        recorder.sites.len(),
+        2,
+        "expected 2 dispatches (helper1 + helper2), got {:?}",
+        recorder.sites
+    );
+    assert_ne!(
+        recorder.sites[0], recorder.sites[1],
+        "the two Member-polymorphic helper call sites must carry DISTINCT ids \
+         (the historical bug collapsed both to the placeholder 0), got {:?}",
+        recorder.sites
+    );
+
+    let asks = compile_and_read_asks(&src, "result");
+    assert_eq!(
+        asks.as_array().map(|a| a.len()),
+        Some(2),
+        "expected 2 runLLMTurn sites in the asks.json sidecar, got {asks}"
+    );
+}
+
 #[test]
 fn runllmturn_rejects_polymorphic_site() {
     // `@a` needs a real ScopedTypeVariables binder to be in scope (a bare `@a`

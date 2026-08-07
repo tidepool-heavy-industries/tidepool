@@ -698,11 +698,40 @@ macro_rules! runllmturn_effect_def {
                 // program). OPAQUE keeps every one of the six un-inlined and
                 // un-w/w'd, so both the call-site match and the sibling lookup (by
                 // name, in Translate.hs) stay stable across -O2.
+                //
+                // Member-polymorphic (siteid-plugin spike, GHC-verified): each verb
+                // carries `Member RunLLMTurn effs =>` instead of being fixed to the
+                // closed `M` stack, so a reusable helper can be written generically
+                // over `effs` — `helper :: Member RunLLMTurn effs => Text -> Eff
+                // effs T; helper p = runLLMTurn @T p` — and still get a distinct
+                // site id per call site once specialized. This is SAFE with
+                // by-name/by-arity interception because OPAQUE genuinely survives
+                // -O2 (verified empirically: the closed Core still names the Var
+                // `runLLMTurn` at every call site, dictionary argument and all —
+                // GHC's specializer never clones or renames an OPAQUE binding). Two
+                // extract-side generalizations were needed, both in Translate.hs:
+                // (1) the interception arms match "first type arg, trailing N value
+                // args" (`splitTrailingArgs`) instead of an exact arity, since a
+                // `Member` dictionary now rides as 0+ EXTRA leading value args
+                // (re-applied verbatim to the *Sited sibling, which carries the
+                // identical constraint); (2) at a call site where the dictionary is
+                // a statically-known top-level instance (i.e. NOT inside a still-
+                // generic helper), GHC's specializer additionally wraps the call in
+                // `nospec @ty (runLLMTurn @T) $dInstance prompt` to block
+                // over-specialization — `stripNospecSpine` re-flattens this back
+                // into one spine before interception runs, so both the
+                // still-abstract (inside-a-helper) and the fully-resolved
+                // (top-level, concrete-dictionary) call shapes intercept
+                // identically. No GHC plugin, no `-fplugin`, no earlier Core-to-Core
+                // pass was needed — the existing post-`-O2` by-name scan already
+                // runs before extract does anything else with the Core, and OPAQUE
+                // was already sufficient protection; the bug was purely in the
+                // pattern-matching arity assumption, not in *when* the swap ran.
                 { raw ["{-# OPAQUE runLLMTurn #-}",
-                       "runLLMTurn :: forall a. Text -> M a",
+                       "runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
                        "runLLMTurn prompt = runLLMTurnSited 0 prompt"] },
                 { raw ["{-# OPAQUE runLLMTurnFork #-}",
-                       "runLLMTurnFork :: forall a. Text -> M a",
+                       "runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
                        "runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt"] },
                 // runLLMTurnFanout (B1, widen): one park, N thunk children — the
                 // SAME classification scheme as runLLMTurnFork ("typedSite" +
@@ -713,7 +742,7 @@ macro_rules! runllmturn_effect_def {
                 // Translate.hs's fanout interception arm) — the harness derives the
                 // element type back by stripping the outer `[]`.
                 { raw ["{-# OPAQUE runLLMTurnFanout #-}",
-                       "runLLMTurnFanout :: forall a. [Text] -> M [a]",
+                       "runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [a]",
                        "runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts"] },
                 // The Int arg is the site id extract substitutes at the call site (the
                 // literal `0` above is a placeholder, never the value that actually
@@ -724,13 +753,13 @@ macro_rules! runllmturn_effect_def {
                 // type, so the coercion is a same-representation relabeling, not a
                 // genuine type change.
                 { raw ["{-# OPAQUE runLLMTurnSited #-}",
-                       "runLLMTurnSited :: forall a. Int -> Text -> M a",
+                       "runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
                 { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
-                       "runLLMTurnForkSited :: forall a. Int -> Text -> M a",
+                       "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
                 { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
-                       "runLLMTurnFanoutSited :: forall a. Int -> [Text] -> M [a]",
+                       "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
             ],
         }
@@ -792,13 +821,23 @@ macro_rules! finalize_effect_def {
                 // function type, to satisfy that constraint). `finalize @T x`
                 // therefore desugars to TWO explicit Core type arguments
                 // (`@T @inferred`), not one — Translate.hs's detection arm
-                // matches `[Type ty, Type _phantom]`, not runLLMTurn's
-                // single-tyvar `[Type ty]` shape.
+                // matches on the first two type args, not runLLMTurn's
+                // single-tyvar shape.
+                //
+                // `effs` (siteid-plugin spike) is a THIRD, trailing forall'd
+                // tyvar — appended LAST so `finalize @T x`'s explicit `@T`
+                // still binds `v`, not `effs` (visible type application binds
+                // in forall-declaration order). Translate.hs's detection arm
+                // only reads the first two type args and ignores any beyond
+                // them, so this addition needed no change there; see the
+                // RunLLMTurn helpers' comment above for the shared mechanism
+                // (`splitTrailingArgs` + `stripNospecSpine`) that makes the
+                // `Member` dictionary argument transparent to the head-swap.
                 { raw ["{-# OPAQUE finalize #-}",
-                       "finalize :: forall v a. v -> M a",
+                       "finalize :: forall v a effs. Member Finalize effs => v -> Eff effs a",
                        "finalize v = finalizeSited 0 v"] },
                 { raw ["{-# OPAQUE finalizeSited #-}",
-                       "finalizeSited :: forall v a. Int -> v -> M a",
+                       "finalizeSited :: forall v a effs. Member Finalize effs => Int -> v -> Eff effs a",
                        "finalizeSited sid v = send (FinalizeWith sid v)"] },
             ],
         }
