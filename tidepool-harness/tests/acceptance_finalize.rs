@@ -342,8 +342,6 @@ async fn finalize_closure_crosses_by_reference() {
 /// its expected wrapper id, or the apply fragment compiled through the extract
 /// so GHC boxes it identically), which is beyond a bridge tweak. Un-ignore once
 /// that lands.
-#[ignore = "W4 surfaced gap: boxed-argument I# tag must match the JIT-compiled \
-            closure's unboxing id (codegen-level, not a bridge tweak)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_full_round_trip() {
     if !extract_available() {
