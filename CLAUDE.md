@@ -124,6 +124,38 @@ export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
 ```
 `scripts/battery.sh` does this automatically when `TIDEPOOL_EXTRACT` is unset.
 
+### Test tiers
+
+This environment hard-kills background processes at ~380s, and a full-workspace
+GHC battery is HOURS (every GHC-heavy test forks a real `tidepool-extract`
+compile, capped at 4 concurrent, and a handful of suites alone run ~900s).
+Bare `scripts/battery.sh` WILL get killed mid-run. Four tiers, from fastest to
+most exhaustive:
+
+1. **Fast default** — `cargo nextest run`. Pure-Rust crates only
+   (`.config/nextest.toml`'s `default-filter` skips every GHC-extract-heavy
+   crate). This is the inner-loop tier; safe to run unattended.
+2. **Targeted** — `scripts/battery.sh -p <crate> -E 'binary(<x>)'` (or
+   `-E 'test(<name>)'`). One GHC-heavy crate, one test/binary, via
+   `--ignore-default-filter`. The right tier for "does my change to crate X
+   still pass".
+3. **Sharded-full** — `scripts/battery-shard.sh <crate>`. Runs one entire
+   GHC-heavy crate's tests (`--ignore-default-filter -p <crate>`), sized to
+   finish inside the ~380s budget. Chain shards (one crate per invocation) to
+   walk full coverage without tripping the environment's kill.
+4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
+   <crate>` (or targeted per-test). A handful of multi-hundred-second suites
+   (`lazy_consumption_property_suite`, `effectful_lazy_ab_x8`,
+   `corpus_report`, `haskell_suite_differential`,
+   `tidepool-testing::haskell_verified`) early-return with a
+   `SKIPPED (expensive)` line unless `TIDEPOOL_EXPENSIVE_TESTS=1` is set —
+   this holds even under `--ignore-default-filter`, so tier 3 alone never
+   accidentally triggers them. Run these deliberately, one at a time, outside
+   the ~380s assumption (`lazy_consumption_property_suite` alone is ~900s).
+
+Never run bare `scripts/battery.sh` (tier 0, unbounded) expecting it to
+complete here — use tier 2 or 3.
+
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
 `scripts/redeploy.sh` — deploy extract + both servers + cache clear; see `haskell/CLAUDE.md` for what each step does

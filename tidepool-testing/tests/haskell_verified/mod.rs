@@ -61,6 +61,10 @@ pub fn run_template_with_imports<S: Strategy<Value = (String, serde_json::Value)
     strategy: S,
     extra_imports: &[&str],
 ) {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     let imports_str = extra_imports.join("\n");
     let mut runner = TestRunner::new(Config::with_cases(cases));
     let res = runner.run(&strategy, |(src, expected)| {

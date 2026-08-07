@@ -1374,6 +1374,10 @@ mod committed {
     /// A/B oracle on the effect path. Cap stays ≤30 per task boundary.
     #[test]
     fn effectful_lazy_ab_x8() {
+        if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+            eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+            return;
+        }
         let mut runner = TestRunner::new(Config { cases: 8, ..cfg() });
         runner
             .run(&any::<u64>(), |seed| {

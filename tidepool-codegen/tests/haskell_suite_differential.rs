@@ -31,6 +31,10 @@ fn should_skip(name: &str) -> bool {
 
 #[test]
 fn haskell_suite_differential() {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     tidepool_testing::watchdog::arm();
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

@@ -1168,6 +1168,10 @@ fn smoke_subprocess_roundtrip() {
 
 #[test]
 fn lazy_consumption_property_suite() {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     warm_cache();
 
     let phases = [

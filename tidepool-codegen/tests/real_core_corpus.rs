@@ -220,6 +220,10 @@ const KNOWN: &[(&str, &str, &str)] = &[
 
 #[test]
 fn corpus_report() {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     tidepool_testing::watchdog::arm();
     let dir = corpus_dir();
     let meta = std::fs::read(dir.join("meta.cbor")).expect("meta.cbor — run regen-corpus.sh");
