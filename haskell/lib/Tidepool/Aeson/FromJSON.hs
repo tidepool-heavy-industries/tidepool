@@ -5,6 +5,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE KindSignatures #-}
 -- | Structural @FromJSON@: decode an already-parsed 'Value' into a typed result.
 --
 -- This is PURE Haskell over the vendored Double-based 'Value' — it carries none
@@ -39,6 +41,7 @@ import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
 import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific, toBoundedInteger)
+import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
@@ -64,9 +67,12 @@ instance Monad Result where
 -- | Types decodable from a JSON 'Value'. @parseJSON@ pattern-matches the
 -- structural shape; mismatches return 'Error' (no exceptions).
 --
--- The default method decodes a single-constructor record generically via
--- 'GHC.Generics' — @data Rec = Rec {..} deriving (Generic, FromJSON)@ decodes a
--- field-name-keyed JSON object into the record. Sum types are rejected at
+-- The default method decodes generically via 'GHC.Generics':
+-- @data Rec = Rec {..} deriving (Generic, FromJSON)@ decodes a
+-- field-name-keyed JSON object into the record; @data Mode = Observing |
+-- Deciding | Acting deriving (Generic, FromJSON)@ (a nullary sum — every
+-- constructor has no fields, i.e. an enum) decodes from the constructor-name
+-- string. A sum with any non-nullary constructor is still rejected at
 -- compile time; write an explicit instance for those.
 class FromJSON a where
   parseJSON :: Value -> Result a
@@ -79,8 +85,9 @@ fromJSON :: FromJSON a => Value -> Result a
 fromJSON = parseJSON
 
 -- | Decode a single-constructor record from a JSON object, keyed by exact
--- selector name. This is the implementation behind the 'FromJSON' default
--- method: @deriving (Generic, FromJSON)@ resolves @parseJSON@ to this.
+-- selector name, or a nullary-sum (enum) from its constructor-name string.
+-- This is the implementation behind the 'FromJSON' default method:
+-- @deriving (Generic, FromJSON)@ resolves @parseJSON@ to this.
 genericParseJSON :: (Generic a, GFromJSON (Rep a)) => Value -> Result a
 genericParseJSON v = to <$> gParseJSON v
 
@@ -120,11 +127,64 @@ instance (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R c)) where
 instance GFromRecord U1 where
   gParseRecord _ = Success U1
 
--- Sum types have no field-name-keyed object form under this decoder.
+-- Sum types: no field-name-keyed object form, but a NULLARY sum (every
+-- constructor has no fields — an enum) decodes from its constructor-name
+-- string via 'GSumNullaryFromJSON'. 'IsNullarySum' decides which branch of
+-- 'GFromJSONSum' applies; a sum with any non-nullary constructor still hits
+-- the ''False' branch's TypeError below.
+instance GFromJSONSum (IsNullarySum (a :+: b)) (a :+: b) => GFromJSON (a :+: b) where
+  gParseJSON = gParseJSONSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
+
+-- | Does every constructor reachable through this sum skeleton carry zero
+-- fields (@M1 C c U1@)? Computed structurally over the '(:+:)' tree so it
+-- works for any number of constructors, not just two. (Mirrors
+-- 'Tidepool.Aeson.Value.IsNullarySum' — duplicated rather than shared, same
+-- as the rest of this module's generic machinery vs. 'ToJSON'\'s.)
+type family IsNullarySum (f :: Type -> Type) :: Bool where
+  IsNullarySum (a :+: b) = IsNullarySumAnd (IsNullarySum a) (IsNullarySum b)
+  IsNullarySum (M1 C c U1) = 'True
+  IsNullarySum (M1 C c f) = 'False
+
+type family IsNullarySumAnd (a :: Bool) (b :: Bool) :: Bool where
+  IsNullarySumAnd 'True 'True = 'True
+  IsNullarySumAnd a b = 'False
+
+-- | Dispatch on whether a sum is all-nullary: 'True' routes to the
+-- constructor-name decoder, 'False' to a compile-time rejection.
+class GFromJSONSum (allNullary :: Bool) f where
+  gParseJSONSum :: Proxy allNullary -> Value -> Result (f a)
+
+instance GSumNullaryFromJSON f => GFromJSONSum 'True f where
+  gParseJSONSum _ = gSumNullaryFromJSON
+
 instance TypeError ('Text "deriving FromJSON via GHC.Generics supports single-constructor records only; "
                     ':<>: 'Text "this type has multiple constructors. Write an explicit FromJSON instance.")
-    => GFromJSON (a :+: b) where
-  gParseJSON = error "unreachable: sum FromJSON is a compile-time TypeError"
+    => GFromJSONSum 'False f where
+  gParseJSONSum _ _ = error "unreachable: non-nullary sum FromJSON is a compile-time TypeError"
+
+-- | Decode a nullary-constructors-only sum leaf/branch by matching a JSON
+-- string against each constructor's name. Only reachable once
+-- 'IsNullarySum' has established every constructor in the sum is nullary.
+class GSumNullaryFromJSON f where
+  gSumNullaryFromJSON :: Value -> Result (f a)
+  gSumNullaryConNames :: Proxy f -> [String]
+
+instance (GSumNullaryFromJSON a, GSumNullaryFromJSON b) => GSumNullaryFromJSON (a :+: b) where
+  gSumNullaryFromJSON v = case gSumNullaryFromJSON v of
+    Success l -> Success (L1 l)
+    Error _   -> case gSumNullaryFromJSON v of
+      Success r -> Success (R1 r)
+      Error _   -> Error ("expected one of " ++ show allNames)
+    where allNames = gSumNullaryConNames (Proxy :: Proxy a) ++ gSumNullaryConNames (Proxy :: Proxy b)
+  gSumNullaryConNames _ =
+    gSumNullaryConNames (Proxy :: Proxy a) ++ gSumNullaryConNames (Proxy :: Proxy b)
+
+instance Constructor c => GSumNullaryFromJSON (M1 C c U1) where
+  gSumNullaryFromJSON v = case v of
+    String t | t == T.pack name -> Success (M1 U1)
+    _ -> Error ("expected constructor name " ++ show name)
+    where name = conName (M1 U1 :: M1 C c U1 ())
+  gSumNullaryConNames _ = [conName (M1 U1 :: M1 C c U1 ())]
 
 -- | Project a 'Result' to 'Either', carrying the error as 'Text'.
 resultToEither :: Result a -> Either Text a

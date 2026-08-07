@@ -75,23 +75,12 @@ data State = State
 -- | An example small, typed State field — the "enum/level/mode" shape
 -- 02-runtime.md calls out, not a free-form blob.
 --
--- Generic 'ToJSON'\/'FromJSON' deriving only covers single-constructor
--- records (Tidepool's vendored Aeson rejects a multi-constructor sum at
--- compile time — @Tidepool.Aeson.Value@'s 'ToJSON'\/'FromJSON' haddocks say
--- so directly); a nullary sum like this one needs an explicit instance.
+-- A nullary sum (every constructor has no fields — an enum) derives
+-- 'ToJSON'\/'FromJSON' via 'GHC.Generics': Tidepool's vendored Aeson encodes
+-- each constructor as its bare name string (@Observing -> "Observing"@) and
+-- decodes back the same way.
 data Mode = Observing | Deciding | Acting
-  deriving (Generic, Show, Eq)
-
-instance ToJSON Mode where
-  toJSON Observing = String "Observing"
-  toJSON Deciding = String "Deciding"
-  toJSON Acting = String "Acting"
-
-instance FromJSON Mode where
-  parseJSON (String "Observing") = Success Observing
-  parseJSON (String "Deciding") = Success Deciding
-  parseJSON (String "Acting") = Success Acting
-  parseJSON _ = Error "expected one of \"Observing\", \"Deciding\", \"Acting\""
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The typed answer 'loop' asks for via @runLLMTurn \@Decision@ — NOT a bare
 -- 'Text'. This is the whole point of the shared-code model: the RunLLMTurn /
@@ -107,21 +96,10 @@ data Decision = Decision
   deriving (Generic, ToJSON, FromJSON, Show)
 
 -- | A nested typed field of 'Decision' — proves an ADT-within-an-ADT answer
--- round-trips through the typed yield. Explicit 'ToJSON'\/'FromJSON' for the
--- same reason as 'Mode' above (a nullary sum, not a single-constructor record).
+-- round-trips through the typed yield. A nullary sum, so 'ToJSON'\/'FromJSON'
+-- derive via 'GHC.Generics' the same way 'Mode' does above.
 data Confidence = Low | Medium | High
-  deriving (Generic, Show, Eq)
-
-instance ToJSON Confidence where
-  toJSON Low = String "Low"
-  toJSON Medium = String "Medium"
-  toJSON High = String "High"
-
-instance FromJSON Confidence where
-  parseJSON (String "Low") = Success Low
-  parseJSON (String "Medium") = Success Medium
-  parseJSON (String "High") = Success High
-  parseJSON _ = Error "expected one of \"Low\", \"Medium\", \"High\""
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The runtime's very first loop starts from this 'State' (before any
 -- persisted State exists to restore).

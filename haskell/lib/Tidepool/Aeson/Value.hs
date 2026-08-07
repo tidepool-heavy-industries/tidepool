@@ -5,6 +5,9 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- | Vendored aeson Value type with construction.
 --
 -- This module provides the core JSON Value type and construction helpers.
@@ -51,6 +54,8 @@ import qualified Data.Set as Set
 import Tidepool.Aeson.Scientific
   ( Scientific, scientific, coefficient, base10Exponent
   , fromFloatDigits, toRealFloat, isFiniteDouble )
+import Data.Kind (Type)
+import Data.Proxy (Proxy(..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
@@ -133,16 +138,20 @@ eitherDecodeValue _ = Left T.empty
 
 -- | A class for types that can be converted to JSON Value.
 --
--- The default method encodes a single-constructor record generically via
--- 'GHC.Generics' — @data Rec = Rec {..} deriving (Generic, ToJSON)@ builds a
--- field-name-keyed JSON object. Sum types are rejected at compile time.
+-- The default method encodes generically via 'GHC.Generics':
+-- @data Rec = Rec {..} deriving (Generic, ToJSON)@ builds a field-name-keyed
+-- JSON object; @data Mode = Observing | Deciding | Acting deriving (Generic,
+-- ToJSON)@ (a nullary sum — every constructor has no fields, i.e. an enum)
+-- encodes each constructor as its bare name string. A sum with any
+-- non-nullary constructor is still rejected at compile time.
 class ToJSON a where
   toJSON :: a -> Value
   default toJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
   toJSON = genericToJSON
 
--- | Encode a single-constructor record as a field-name-keyed JSON object. This
--- is the implementation behind the 'ToJSON' default method.
+-- | Encode a single-constructor record as a field-name-keyed JSON object, or
+-- a nullary-sum (enum) as its constructor-name string. This is the
+-- implementation behind the 'ToJSON' default method.
 genericToJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
 genericToJSON = gToJSON . from
 
@@ -175,11 +184,51 @@ instance (Selector s, ToJSON c) => GToRecord (M1 S s (K1 R c)) where
 instance GToRecord U1 where
   gToRecord _ = []
 
--- Sum types have no field-name-keyed object form under this encoder.
+-- Sum types: no field-name-keyed object form, but a NULLARY sum (every
+-- constructor has no fields — an enum) encodes as its constructor-name
+-- string via 'GSumNullaryToJSON'. 'IsNullarySum' decides which branch of
+-- 'GToJSONSum' applies; a sum with any non-nullary constructor still hits the
+-- ''False' branch's TypeError below.
+instance GToJSONSum (IsNullarySum (a :+: b)) (a :+: b) => GToJSON (a :+: b) where
+  gToJSON = gToJSONSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
+
+-- | Does every constructor reachable through this sum skeleton carry zero
+-- fields (@M1 C c U1@)? Computed structurally over the '(:+:)' tree so it
+-- works for any number of constructors, not just two.
+type family IsNullarySum (f :: Type -> Type) :: Bool where
+  IsNullarySum (a :+: b) = IsNullarySumAnd (IsNullarySum a) (IsNullarySum b)
+  IsNullarySum (M1 C c U1) = 'True
+  IsNullarySum (M1 C c f) = 'False
+
+type family IsNullarySumAnd (a :: Bool) (b :: Bool) :: Bool where
+  IsNullarySumAnd 'True 'True = 'True
+  IsNullarySumAnd a b = 'False
+
+-- | Dispatch on whether a sum is all-nullary: 'True' routes to the
+-- constructor-name encoder, 'False' to a compile-time rejection.
+class GToJSONSum (allNullary :: Bool) f where
+  gToJSONSum :: Proxy allNullary -> f a -> Value
+
+instance GSumNullaryToJSON f => GToJSONSum 'True f where
+  gToJSONSum _ = gSumNullaryToJSON
+
 instance TypeError ('Text "deriving ToJSON via GHC.Generics supports single-constructor records only; "
                     ':<>: 'Text "this type has multiple constructors. Write an explicit ToJSON instance.")
-    => GToJSON (a :+: b) where
-  gToJSON = error "unreachable: sum ToJSON is a compile-time TypeError"
+    => GToJSONSum 'False f where
+  gToJSONSum _ = error "unreachable: non-nullary sum ToJSON is a compile-time TypeError"
+
+-- | Encode a nullary-constructors-only sum leaf/branch as its constructor
+-- name. Only reachable once 'IsNullarySum' has established every constructor
+-- in the sum is nullary.
+class GSumNullaryToJSON f where
+  gSumNullaryToJSON :: f a -> Value
+
+instance (GSumNullaryToJSON a, GSumNullaryToJSON b) => GSumNullaryToJSON (a :+: b) where
+  gSumNullaryToJSON (L1 x) = gSumNullaryToJSON x
+  gSumNullaryToJSON (R1 x) = gSumNullaryToJSON x
+
+instance Constructor c => GSumNullaryToJSON (M1 C c U1) where
+  gSumNullaryToJSON m = String (T.pack (conName m))
 
 instance ToJSON Value where
   toJSON = id
