@@ -1297,6 +1297,88 @@ impl Harness {
         Ok(value)
     }
 
+    /// Whether `node`'s pending finalize hole carries a CLOSURE value
+    /// (self-iterating-harness W4): the tolerant suspend bridge substituted a
+    /// `CLOSURE_SENTINEL` placeholder for field 1, so the finalized value is a
+    /// live closure kept in-heap (applied by reference), not data. `false` for a
+    /// plain-data finalize, or when `node` isn't suspended on a finalize hole.
+    pub fn finalize_is_closure(&self, node: NodeId) -> bool {
+        let convos = self.convos.lock();
+        let Some(convo) = convos.get(&node) else {
+            return false;
+        };
+        let Some(pending) = convo.pending.as_ref() else {
+            return false;
+        };
+        if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+            return false;
+        }
+        matches!(
+            &pending.raw_request,
+            Value::Con(_, fields)
+                if fields.get(1).is_some_and(|f| matches!(
+                    f,
+                    Value::Con(id, cf)
+                        if id.0 == u64::MAX && cf.is_empty()
+                ))
+        )
+    }
+
+    /// Apply a `finalize`d CLOSURE by reference (self-iterating-harness W4):
+    /// `node` must be suspended on a `finalize @(Int -> Int) f` hole whose value
+    /// was kept LIVE in the shared heap (never deep-forced). This runs `f arg`
+    /// in place against that same suspended heap — the "code as a value"
+    /// round-trip — and returns the (data) result `Value`. The node stays
+    /// suspended on its finalize hole afterward (the apply is a child run, like
+    /// [`Self::eval_in_binding`]); the caller terminates it via
+    /// [`Self::take_finalized_value`] when done.
+    pub async fn apply_finalized_closure(
+        &self,
+        node: NodeId,
+        arg: i64,
+    ) -> Result<Value, HarnessError> {
+        // Require the node to be suspended on a Finalize hole — the resident
+        // session's parked continuation is what makes the child run (the apply)
+        // legal, and the finalized closure's root was stashed on suspend.
+        let is_finalize = matches!(
+            self.pending_hole(node).map(|c| c.routing),
+            Some(HoleRouting::Finalize { .. })
+        );
+        if !is_finalize {
+            return Err(HarnessError::RoutingMismatch {
+                node,
+                routing: "Finalize",
+                actual: format!("{:?}", self.pending_hole(node).map(|c| c.routing)),
+            });
+        }
+        // Box the argument with the `I#` id from the SUSPEND turn's table — the
+        // one the finalized closure's own `case x of I# n#` unboxing was compiled
+        // against, so the boxed argument's tag matches. Falls back to the session
+        // table's `I#` (via `None`) if the suspend table lacks it.
+        // The suspend turn's table — the closure was compiled against it, so the
+        // apply fragment must box its argument with the SAME table's `I#` for the
+        // closure's `case x of I# n#` unboxing to match.
+        let suspend_table = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.suspend_table.clone());
+        let i_hash = suspend_table
+            .as_ref()
+            .and_then(|t| t.get_by_name_arity("I#", 1));
+        let mut session = self.take_session(node)?;
+        let (session, out) = tokio::task::spawn_blocking(move || {
+            let out = session.apply_finalized(arg, i_hash, suspend_table.as_ref());
+            (session, out)
+        })
+        .await
+        .map_err(|e| HarnessError::Resident(format!("apply_finalized join: {e}")))?;
+        self.put_session(node, session, None, AsksSidecar::default());
+        self.flush_effects(node);
+        out.map(|r| r.into_value())
+            .map_err(|e| HarnessError::Resident(e.to_string()))
+    }
+
     /// Reopen a `Done` answerer node (`Done` → `Running`) for another turn —
     /// the self-iterating harness's bounded answerer drive (W1) reuses ONE
     /// per-loop node, and a `Completed` (non-finalize) turn leaves it `Done`,

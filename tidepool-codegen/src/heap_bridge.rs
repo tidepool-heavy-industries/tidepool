@@ -67,7 +67,7 @@ pub enum BridgeError {
 /// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
 pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
     // SAFETY: Caller guarantees ptr is a valid HeapObject from the JIT nursery.
-    heap_to_value_inner(ptr, 0, std::ptr::null_mut())
+    heap_to_value_inner(ptr, 0, std::ptr::null_mut(), ClosurePolicy::Reject)
 }
 
 /// Convert a heap-allocated object to a Value, forcing any unevaluated thunks
@@ -82,7 +82,55 @@ pub unsafe fn heap_to_value_forcing(
     vmctx: *mut VMContext,
 ) -> Result<Value, BridgeError> {
     // SAFETY: Caller guarantees ptr is a valid HeapObject and vmctx is a valid VMContext.
-    heap_to_value_inner(ptr, 0, vmctx)
+    heap_to_value_inner(ptr, 0, vmctx, ClosurePolicy::Reject)
+}
+
+/// The reserved `DataConId` a tolerant bridge (see [`heap_to_value_forcing_tolerant`])
+/// substitutes for a `TAG_CLOSURE` heap object it declines to reject. A
+/// closure has no data representation — the JIT already lowered its body to
+/// machine code — so it cannot be re-materialized as a `Value`. Under the
+/// tolerant policy the bridge emits this childless sentinel `Con` in its place,
+/// letting the SURROUNDING structure bridge (e.g. `FinalizeWith(site, closure)`
+/// bridges `site` and the classifier reads it, while the closure field is only
+/// a placeholder). The REAL closure stays live in the JIT heap and is applied
+/// by REFERENCE (self-iterating-harness W4), never through this `Value`.
+///
+/// `u64::MAX` is deliberately out of the extract's `DataConId` range, so a
+/// consumer that inspects the bridged value can tell a placeholder apart from
+/// a genuine constructor.
+pub const CLOSURE_SENTINEL: DataConId = DataConId(u64::MAX);
+
+/// How the bridge treats a `TAG_CLOSURE` heap object it encounters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClosurePolicy {
+    /// The default: closures are opaque and must not appear as a bridge result
+    /// (`core-shapes.md §8`). Errors with `UnexpectedHeapTag(TAG_CLOSURE)`.
+    Reject,
+    /// Substitute [`CLOSURE_SENTINEL`] for any `TAG_CLOSURE` object rather than
+    /// erroring — the W4 finalize-by-reference path, where a finalized closure
+    /// value crosses in-heap and only the surrounding metadata needs bridging.
+    Substitute,
+}
+
+/// Like [`heap_to_value_forcing`], but a `TAG_CLOSURE` object encountered
+/// anywhere in the traversal becomes a [`CLOSURE_SENTINEL`] placeholder Con
+/// instead of an error. Used ONLY on the `Finalize` suspend path
+/// (self-iterating-harness W4): the finalized value may be a closure, which has
+/// no data `Value` representation, so it is passed by REFERENCE (the raw heap
+/// pointer stays live in the suspended session, applied via `run_child`) while
+/// this bridge produces a `Value` shell the classifier reads the leading `site`
+/// field out of.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
+/// `vmctx` must point to a valid VMContext (required for forcing thunks).
+pub unsafe fn heap_to_value_forcing_tolerant(
+    ptr: *const u8,
+    vmctx: *mut VMContext,
+) -> Result<Value, BridgeError> {
+    // SAFETY: Caller guarantees ptr is a valid HeapObject and vmctx is a valid VMContext.
+    heap_to_value_inner(ptr, 0, vmctx, ClosurePolicy::Substitute)
 }
 
 const MAX_DEPTH: usize = 10_000;
@@ -158,6 +206,7 @@ unsafe fn heap_to_value_inner(
     ptr: *const u8,
     depth: usize,
     vmctx: *mut VMContext,
+    closures: ClosurePolicy,
 ) -> Result<Value, BridgeError> {
     // SAFETY: ptr is a valid HeapObject from the JIT nursery (checked non-null below).
     // All field reads use known layout offsets. Recursion depth is bounded by MAX_DEPTH.
@@ -282,7 +331,7 @@ unsafe fn heap_to_value_inner(
                         let arr_now = (*(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const i64))
                             as *const u8;
                         let elem_ptr = *(arr_now.add(8 + 8 * i) as *const *const u8);
-                        elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx)?);
+                        elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx, closures)?);
                     }
                     // SmallArray#/Array# carry no per-array DataConId. The wrapping Con (e.g.
                     // Vector's Array constructor) supplies type context to downstream consumers.
@@ -334,7 +383,7 @@ unsafe fn heap_to_value_inner(
                     }
                     let cell_tag = *(cur.add(layout::CON_TAG_OFFSET as usize) as *const u64);
                     let head = *(cur.add(layout::CON_FIELDS_OFFSET as usize) as *const *const u8);
-                    let hv = heap_to_value_inner(head, depth + 1, vmctx)?;
+                    let hv = heap_to_value_inner(head, depth + 1, vmctx, closures)?;
                     elems.push((cell_tag, hv));
                     // Re-read the tail AFTER the head conversion (which may
                     // have collected and moved this cell).
@@ -344,7 +393,7 @@ unsafe fn heap_to_value_inner(
                 }
                 // `cur` is the terminator: nil, a non-pair Con, a literal —
                 // or a shape the recursion will reject with the right error.
-                let mut acc = heap_to_value_inner(cur, depth + 1, vmctx)?;
+                let mut acc = heap_to_value_inner(cur, depth + 1, vmctx, closures)?;
                 while let Some((cell_tag, hv)) = elems.pop() {
                     acc = Value::Con(DataConId(cell_tag), vec![hv, acc]);
                 }
@@ -359,7 +408,7 @@ unsafe fn heap_to_value_inner(
                     // forced (and collected), moving this Con.
                     let field_ptr =
                         *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
-                    heap_to_value_inner(field_ptr, depth + 1, vmctx)
+                    heap_to_value_inner(field_ptr, depth + 1, vmctx, closures)
                 })
                 .collect::<Result<_, _>>()?;
             Ok(Value::Con(DataConId(con_tag), fields))
@@ -372,13 +421,13 @@ unsafe fn heap_to_value_inner(
                     let target = unsafe {
                         *(ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8)
                     };
-                    heap_to_value_inner(target, depth + 1, vmctx)
+                    heap_to_value_inner(target, depth + 1, vmctx, closures)
                 }
                 _ if !vmctx.is_null() => {
                     // Force the thunk via heap_force when vmctx is available
                     let forced = crate::host_fns::heap_force(vmctx, ptr as *mut u8);
                     if !forced.is_null() && !std::ptr::eq(forced, ptr) {
-                        heap_to_value_inner(forced as *const u8, depth + 1, vmctx)
+                        heap_to_value_inner(forced as *const u8, depth + 1, vmctx, closures)
                     } else {
                         Err(BridgeError::UnevaluatedThunk)
                     }
@@ -388,11 +437,15 @@ unsafe fn heap_to_value_inner(
                 _ => Err(BridgeError::UnknownThunkState(state)),
             }
         }
-        t if t == layout::TAG_CLOSURE => {
+        t if t == layout::TAG_CLOSURE => match closures {
             // core-shapes.md §8: Closures are opaque and should not appear as top-level bridge results.
             // If we hit one, it indicates an unforced thunk leaked through or an invalid shape.
-            Err(BridgeError::UnexpectedHeapTag(layout::TAG_CLOSURE))
-        }
+            ClosurePolicy::Reject => Err(BridgeError::UnexpectedHeapTag(layout::TAG_CLOSURE)),
+            // W4 finalize-by-reference: emit a placeholder Con so the SURROUNDING
+            // structure bridges. The real closure stays live in the JIT heap and
+            // is applied by reference, never through this `Value`.
+            ClosurePolicy::Substitute => Ok(Value::Con(CLOSURE_SENTINEL, Vec::new())),
+        },
 
         other => Err(BridgeError::UnexpectedHeapTag(other)),
     }
@@ -767,6 +820,61 @@ mod tests {
                 res,
                 Err(BridgeError::UnexpectedHeapTag(layout::TAG_CLOSURE))
             ));
+        }
+    }
+
+    /// W4: the tolerant bridge substitutes a `CLOSURE_SENTINEL` placeholder for a
+    /// bare `TAG_CLOSURE` where the default bridge errors — so a
+    /// `FinalizeWith(site, closure)` request bridges (leaving the closure live
+    /// in-heap, applied by reference) instead of failing the whole suspend.
+    #[test]
+    fn tolerant_bridge_substitutes_closure_sentinel() {
+        let mut nursery = Nursery::new(1024);
+        let mut vmctx = nursery.make_vmctx(mock_gc_trigger);
+        unsafe {
+            let ptr = bump_alloc_from_vmctx(&mut vmctx, 8);
+            *ptr = layout::TAG_CLOSURE;
+            let res = heap_to_value_forcing_tolerant(ptr, &mut vmctx as *mut _)
+                .expect("tolerant bridge must not error on a closure");
+            assert!(
+                matches!(res, Value::Con(id, ref fields) if id == CLOSURE_SENTINEL && fields.is_empty()),
+                "expected a childless CLOSURE_SENTINEL Con, got {res:?}"
+            );
+        }
+    }
+
+    /// The tolerant bridge substitutes the sentinel ONLY for closures — an
+    /// ordinary `Con(site, closure)` bridges its data field normally and the
+    /// closure field to the sentinel, so the surrounding structure survives.
+    #[test]
+    fn tolerant_bridge_keeps_data_fields_alongside_a_closure() {
+        let (_nursery, mut vmctx) = setup_vmctx(2048);
+        unsafe {
+            // Build Con(7, [I#-ish Lit(41), <closure>]) by hand: the data field
+            // bridges, the closure field becomes the sentinel.
+            let site = value_to_heap(&Value::Lit(Literal::LitInt(41)), &mut vmctx).unwrap();
+            let closure = bump_alloc_from_vmctx(&mut vmctx, 8);
+            *closure = layout::TAG_CLOSURE;
+            let size = 24 + 8 * 2;
+            let con = bump_alloc_from_vmctx(&mut vmctx, size);
+            tidepool_heap::layout::write_header(con, layout::TAG_CON, size as u32);
+            *(con.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = 7;
+            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 2;
+            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = site;
+            *(con.add(layout::CON_FIELDS_OFFSET as usize + 8) as *mut *mut u8) = closure;
+
+            let res = heap_to_value_forcing_tolerant(con, &mut vmctx as *mut _)
+                .expect("tolerant bridge must not error");
+            let Value::Con(id, ref fields) = res else {
+                panic!("expected a Con, got {res:?}");
+            };
+            assert_eq!(id.0, 7);
+            assert!(matches!(fields[0], Value::Lit(Literal::LitInt(41))));
+            assert!(
+                matches!(&fields[1], Value::Con(cid, cf) if *cid == CLOSURE_SENTINEL && cf.is_empty()),
+                "the closure field must be the sentinel, got {:?}",
+                fields[1]
+            );
         }
     }
 }

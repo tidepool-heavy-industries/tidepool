@@ -393,7 +393,10 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
             table,
             warnings.warnings,
         ))),
-        SuspendableOutcome::Suspended { request } => Ok(SuspendableRun::Suspended {
+        SuspendableOutcome::Suspended {
+            request,
+            has_finalized_closure: _,
+        } => Ok(SuspendableRun::Suspended {
             machine,
             table,
             request,
@@ -428,7 +431,10 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
                 Vec::new(),
             )))
         }
-        SuspendableOutcome::Suspended { request } => Ok(ResumedRun::Suspended { request }),
+        SuspendableOutcome::Suspended {
+            request,
+            has_finalized_closure: _,
+        } => Ok(ResumedRun::Suspended { request }),
     }
 }
 
