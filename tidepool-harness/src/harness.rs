@@ -125,6 +125,13 @@ struct NodeConvo {
     /// trigger, [`Harness::node_usage`], sums this across every `runLLMTurn`
     /// answerer / compaction node it drives per loop).
     usage: Usage,
+    /// This node's OWN system message, overriding the default
+    /// [`engine::SYSTEM_FRAMING`] when set (self-iterating-harness W1/C1: the
+    /// per-loop answerer session's framing is `render`'s output — the
+    /// distilled conditional the whole thesis rests on, wired to the model
+    /// here rather than left observational). `None` for an ordinary Agent
+    /// node (the default full-surface framing).
+    framing: Option<String>,
 }
 
 #[derive(Clone)]
@@ -245,10 +252,12 @@ pub struct Harness {
     /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
     /// Compiled once, reused for every node's bootstrap.
     boot: Arc<compile::CompiledTurn>,
-    /// A just-created root's opening prompt, staged between `create_root` and
-    /// `force` (a thunk node has no live `NodeConvo` to hold it yet). Removed
-    /// once consumed at force time.
-    seeds: Mutex<HashMap<NodeId, String>>,
+    /// A just-created root's opening prompt PLUS its optional per-node framing
+    /// (the system message override — [`NodeConvo::framing`]), staged between
+    /// `create_root`/`create_root_framed` and `force` (a thunk node has no
+    /// live `NodeConvo` to hold either yet). Removed once consumed at force
+    /// time.
+    seeds: Mutex<HashMap<NodeId, (String, Option<String>)>>,
     /// A just-registered fork/fanout child's inherited transcript (parent
     /// prefix + hole card), staged between `register_fork_child` and `force`
     /// for the same reason as `seeds`. Removed once consumed at force time.
@@ -334,11 +343,12 @@ impl Harness {
         &self,
         node: NodeId,
         transcript: &[Message],
+        framing: Option<&str>,
     ) -> Result<engine::DrivenTurn, HarnessError> {
         let (tx, mut rx) = mpsc::unbounded_channel::<StreamDelta>();
         let provider = self.provider.as_ref();
         let drive_fut =
-            engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, Some(tx));
+            engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, framing, Some(tx));
         tokio::pin!(drive_fut);
         let mut last_notify: Option<std::time::Instant> = None;
         let result = loop {
@@ -515,9 +525,24 @@ impl Harness {
         })
     }
 
-    /// Create a ROOT node as a thunk. `title` seeds the teaser + first user
-    /// turn; `effect_row` is the branch's static effect capability.
+    /// Create a ROOT node as a thunk with the DEFAULT system framing
+    /// ([`engine::SYSTEM_FRAMING`]). `title` seeds the teaser + first user
+    /// turn. Equivalent to [`Self::create_root_framed`] with `framing: None`.
     pub fn create_root(&self, title: &str, prompt: &str) -> Result<NodeId, HarnessError> {
+        self.create_root_framed(title, prompt, None)
+    }
+
+    /// Create a ROOT node as a thunk with an EXPLICIT per-node system message
+    /// `framing` (overriding the default [`engine::SYSTEM_FRAMING`] once the
+    /// node is forced). `title` seeds the teaser + first user turn.
+    /// The self-iterating harness's per-loop answerer session uses this to
+    /// install `render`'s output as the answerer's system prompt (W1/C1).
+    pub fn create_root_framed(
+        &self,
+        title: &str,
+        prompt: &str,
+        framing: Option<String>,
+    ) -> Result<NodeId, HarnessError> {
         let node = self.tree.create_node(
             None,
             title,
@@ -525,12 +550,12 @@ impl Harness {
             ForkShape::Exact(0),
             false,
         )?;
-        // Seed the (not-yet-live) transcript with the operator's opening prompt.
-        // The convo entry is created lazily at force time; stash the prompt in a
-        // pending seed map via the transcript on force. Here we just remember it
-        // by re-deriving from the prompt at force. Keep it simple: store the seed
-        // prompt keyed by node until forced.
-        self.seeds.lock().insert(node, prompt.to_string());
+        // Seed the (not-yet-live) transcript with the operator's opening prompt
+        // and the node's framing. The convo entry is created lazily at force
+        // time; stash both in the pending seed map until then.
+        self.seeds
+            .lock()
+            .insert(node, (prompt.to_string(), framing));
         Ok(node)
     }
 
@@ -570,25 +595,29 @@ impl Harness {
         // opening prompt.
         let mut convos = self.convos.lock();
         let inherited = self.forked_transcripts.lock().remove(&node);
-        let transcript = match inherited {
+        let (transcript, framing) = match inherited {
             // A fork/fanout answerer inherits its parent's transcript, whose
-            // turns are already in the log — nothing to re-log.
-            Some(t) => t,
+            // turns are already in the log — nothing to re-log. Fork answerers
+            // are not render-seeded, so they keep the default framing.
+            Some(t) => (t, None),
             // A plain root: log its opening prompt as a User turn so the
             // transcript shows what was asked, not just the model's reply
             // (symmetric with the assistant `turn_delta` in `drive_turn`).
             None => {
-                let seed = self
+                let (seed, framing) = self
                     .seeds
                     .lock()
                     .remove(&node)
-                    .unwrap_or_else(|| "Begin.".to_string());
+                    .unwrap_or_else(|| ("Begin.".to_string(), None));
                 self.tree
                     .turn_delta(node, 0, Role::User, seed.clone(), None)?;
-                vec![Message {
-                    role: Role::User,
-                    content: seed,
-                }]
+                (
+                    vec![Message {
+                        role: Role::User,
+                        content: seed,
+                    }],
+                    framing,
+                )
             }
         };
         convos.insert(
@@ -604,6 +633,7 @@ impl Harness {
                 suspend_asks: AsksSidecar::default(),
                 pending_bind: None,
                 usage: Usage::default(),
+                framing,
             },
         );
         Ok(())
@@ -653,11 +683,16 @@ impl Harness {
     /// This is the inner step of the turn loop; [`Self::run_to_hole_or_done`]
     /// loops it until the node suspends, completes, or hits the turn cap.
     pub async fn drive_turn(&self, node: NodeId) -> Result<engine::TurnOutcome, HarnessError> {
-        // Snapshot the transcript under the lock, then release before the await.
-        let (transcript, turn_seq) = {
+        // Snapshot the transcript AND the node's framing under the lock, then
+        // release before the await.
+        let (transcript, turn_seq, framing) = {
             let convos = self.convos.lock();
             let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
-            (convo.transcript.clone(), convo.turn_seq)
+            (
+                convo.transcript.clone(),
+                convo.turn_seq,
+                convo.framing.clone(),
+            )
         };
 
         self.tree.turn_start(node, "model".to_string(), None)?;
@@ -665,7 +700,9 @@ impl Harness {
         // Stream the provider call into `node`'s live-turn buffer (rendered
         // token-by-token), then log the completed turn with its thinking and
         // swap the buffer for the durable turn in one frame.
-        let driven = self.stream_turn(node, &transcript).await?;
+        let driven = self
+            .stream_turn(node, &transcript, framing.as_deref())
+            .await?;
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -1651,14 +1688,20 @@ impl Harness {
             attempts += 1;
 
             // One provider turn on the answerer.
-            let (transcript, turn_seq) = {
+            let (transcript, turn_seq, framing) = {
                 let convos = self.convos.lock();
                 let convo = convos
                     .get(&answerer)
                     .ok_or(HarnessError::NoSession(answerer))?;
-                (convo.transcript.clone(), convo.turn_seq)
+                (
+                    convo.transcript.clone(),
+                    convo.turn_seq,
+                    convo.framing.clone(),
+                )
             };
-            let driven = self.stream_turn(answerer, &transcript).await?;
+            let driven = self
+                .stream_turn(answerer, &transcript, framing.as_deref())
+                .await?;
             self.tree.turn_delta_reasoned(
                 answerer,
                 turn_seq,

@@ -120,6 +120,33 @@ const COMPACTION_TARGET_DIVISOR: u32 = 4;
 /// is only a defensive default).
 const FALLBACK_MAX_TOKENS: u32 = 2048;
 
+/// The narrow answerer instruction appended after `render`'s output to form
+/// the per-loop answerer session's system message (W1/C1). Deliberately
+/// scoped to the answerer's ACTUAL capability set — gui (`dialogForm`/`Ask`)
+/// plus `finalize`, NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
+/// advertises (`runLLMTurn`/`run`/…). The answerer's decls are
+/// [`answerer_decls`], so mentioning `runLLMTurn`/`run` here would advertise
+/// verbs it cannot compile. This is the first real slice of the
+/// per-context-effect-set goal (§03).
+const ANSWERER_FRAMING_SUFFIX: &str = "\
+---\n\
+You are the answering agent for a self-iterating harness loop. The system \
+context above is your working brief (it is re-rendered from the loop's durable \
+State each loop). Each request below asks you for ONE typed value.\n\
+\n\
+Your ONLY runnable output is a single fenced ```haskell block containing one \
+expression of type `M a`. To gather operator input across turns, evaluate a \
+typed form: `dialogForm form :: M (Either FormError a)` (build a `Form a` \
+applicatively from `textField`/`choiceField`/`boolField`/`intField`; `import \
+Tidepool.Form`) or a raw `dialogAsk ui` (`import Tidepool.Ui`). A value you \
+bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
+on it.\n\
+\n\
+When you have the answer, COMMIT it by evaluating `finalize @T (value :: T)` \
+— this ends your turn and hands the typed value back to the loop. `T` is the \
+type named in the request. Do not call any other effect to answer; `finalize` \
+is how you resolve the request.";
+
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
         TurnOutcome::Completed { .. } => "Completed",
@@ -159,6 +186,11 @@ pub struct SelfHarnessDriver {
     /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
     /// [`Self::set_compaction_threshold_percent`].
     compaction_threshold_percent: u64,
+    /// The CURRENT loop's answerer system framing = `render`'s pre-loop output
+    /// + [`ANSWERER_FRAMING_SUFFIX`] (W1/C1). Set in [`Self::run_one_cycle`]
+    /// right after the pre-loop `render`, read when the answerer session is
+    /// created. `None` before the first loop's render.
+    answerer_framing: Option<String>,
 }
 
 impl SelfHarnessDriver {
@@ -176,6 +208,7 @@ impl SelfHarnessDriver {
             last_compaction: None,
             cycle_usage: Usage::default(),
             compaction_threshold_percent: DEFAULT_COMPACTION_THRESHOLD_PERCENT,
+            answerer_framing: None,
         }
     }
 
@@ -347,6 +380,11 @@ impl SelfHarnessDriver {
         let prior_compaction = self.last_compaction.clone();
         let prompt_before = self.render_framing(pre_state, prior_compaction.as_deref())?;
 
+        // W1/C1: the pre-loop render IS the answerer session's system message.
+        // Compose it with the narrow answerer instruction and stash it for
+        // `run_loop_fragment` to seed the per-loop answerer node (C2).
+        self.answerer_framing = Some(format!("{prompt_before}\n\n{ANSWERER_FRAMING_SUFFIX}"));
+
         self.lifecycle = SelfHarnessState::RunningLoop;
         let (value, table, compaction) = self.run_loop_fragment(prior_state)?;
         let state_json = state_cross::state_out(&value, &table);
@@ -460,9 +498,14 @@ impl SelfHarnessDriver {
         });
 
         let child_prompt = engine::hole_card(prompt, ty);
-        let node = self
-            .agent
-            .create_root("runLLMTurn answerer", &child_prompt)?;
+        // W1/C1: seed the answerer node with `render`'s output as its system
+        // message (via `answerer_framing`), not the default full-surface
+        // framing.
+        let node = self.agent.create_root_framed(
+            "runLLMTurn answerer",
+            &child_prompt,
+            self.answerer_framing.clone(),
+        )?;
         self.agent.force(node, Actor::Operator)?;
         self.emit(Event::TurnStart { node });
 
