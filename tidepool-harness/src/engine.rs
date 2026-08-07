@@ -45,7 +45,9 @@ use crate::provider::{
 };
 use crate::tree::FanBadge;
 
-/// How a suspended `AskWith` request routes — decoded from its payload.
+/// How a suspended request routes — decoded from its constructor name +
+/// payload (self-iterating-harness WS-B: `Ask`, `RunLLMTurn`, and `Finalize`
+/// are each their own GADT/union-tag now, see [`classify_hole`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HoleRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
@@ -70,11 +72,13 @@ pub enum HoleRouting {
     /// `finalize @T x` (self-iterating-harness WS-B) — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
-    /// does. Routing placeholder ONLY: WS-B adds the `Finalize` effect (its
-    /// own union tag + payload shape, sharing `Ask`'s suspend/classify/resume
-    /// machinery per the plan, not `AskWith`'s `typedSite` field) and wires
-    /// this arm's classification for real; `site`/`ty` mirror `RunLLMTurn`'s
-    /// shape so the self-harness driver (WS-A) can freeze against it now.
+    /// does. Its own GADT/union-tag (`Finalize`/`FinalizeWith`), decoded by
+    /// [`classify_hole`] from `FinalizeWith`'s own wire shape (`Con(_, [site
+    /// :: Int, value])`) — NOT `AskWith`'s `typedSite` field. `site`/`ty`
+    /// mirror `RunLLMTurn`'s shape (same asks.json sidecar lookup); the raw
+    /// finalized VALUE is not carried here (it crosses in-heap, may be
+    /// non-serializable) — the caller recovers it from the original
+    /// suspended request `Value`.
     Finalize { site: u32, ty: Option<String> },
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
@@ -88,62 +92,85 @@ pub struct ClassifiedHole {
     pub prompt: String,
 }
 
-/// Decode a suspended `AskWith` request Value into a [`ClassifiedHole`].
+/// Decode a suspended request `Value` into a [`ClassifiedHole`] — the ONE
+/// shared classify path `Ask`, `RunLLMTurn`, and `Finalize` all go through
+/// (self-iterating-harness WS-B: each is now its own GADT/union-tag, so this
+/// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
+/// constructor's own wire shape):
 ///
-/// The request is `Con(AskWith, [prompt :: Text, payload :: Value])`. The
-/// payload object's fields decide the routing: `fork` + `typedSite` →
-/// [`HoleRouting::Fork`] (additionally `fan` + `prompts` for a
-/// `runLLMTurnFanout` site), `typedSite` alone → [`HoleRouting::RunLLMTurn`],
-/// `ui` → [`HoleRouting::Dialog`], else [`HoleRouting::Ask`]. `asks` resolves a
-/// `typedSite` to its rendered answer type. [`HoleRouting::Finalize`] is a
-/// routing placeholder (WS-B wires its real payload + classification).
+/// - `RunLLMTurnWith` (prompt, payload) — the SAME `typedSite`/`fork`/`fan`/
+///   `prompts` payload shape `AskWith` used to carry for this family, now on
+///   its own constructor: `fork` → [`HoleRouting::Fork`], else
+///   [`HoleRouting::RunLLMTurn`]. `asks` resolves `typedSite` to its rendered
+///   answer type.
+/// - `FinalizeWith` (site, value) — [`HoleRouting::Finalize`]. The VALUE field
+///   is never JSON-decoded here (it crosses in-heap, may be non-serializable —
+///   e.g. a closure); only the leading `Int` site id is. `asks` resolves the
+///   site the same way as `RunLLMTurn`. The raw value itself is recovered from
+///   the original request `Value` by the caller (`Harness` retains it), not
+///   through this JSON-shaped `ClassifiedHole`.
+/// - `AskWith` (prompt, payload) — `ui` → [`HoleRouting::Dialog`], else plain
+///   [`HoleRouting::Ask`] (a structured `ask schema prompt`).
+/// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
+///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
-    let (prompt, payload) = decode_askwith(request, table);
-    let routing = if let Some(site) = payload.get("typedSite").and_then(Json::as_u64) {
-        let site = site as u32;
-        let ty = asks.type_of(site).map(str::to_string);
-        if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
-            let fan = payload
-                .get("fan")
-                .and_then(Json::as_u64)
-                .map(|n| FanBadge::Exact { n: n as u32 });
-            let prompts = payload
-                .get("prompts")
-                .and_then(Json::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            HoleRouting::Fork {
-                site,
-                ty,
-                fan,
-                prompts,
+    match con_name(request, table) {
+        Some("RunLLMTurnWith") => {
+            let (prompt, payload) = decode_prompt_payload(request, table);
+            ClassifiedHole {
+                routing: classify_runllmturn_payload(&payload, asks),
+                prompt,
             }
-        } else if payload
-            .get("finalize")
-            .and_then(Json::as_bool)
-            .unwrap_or(false)
-        {
-            // Placeholder routing arm (S3 scaffold): no Haskell path emits a
-            // `finalize` payload yet — WS-B adds the `Finalize` effect and its
-            // real payload shape (not `AskWith`'s `typedSite`+`finalize`
-            // flag), then replaces this arm with the real classification.
-            unimplemented!(
-                "WS-B: Finalize effect classification — own payload shape, \
-                 shares Ask's suspend/classify machinery per the plan"
-            )
-        } else {
-            HoleRouting::RunLLMTurn { site, ty }
         }
-    } else if let Some(ui) = payload.get("ui") {
-        HoleRouting::Dialog { ui: ui.clone() }
+        Some("FinalizeWith") => {
+            let (site, ty) = decode_finalize_site(request, table, asks);
+            ClassifiedHole {
+                routing: HoleRouting::Finalize { site, ty },
+                prompt: String::new(),
+            }
+        }
+        _ => {
+            let (prompt, payload) = decode_askwith(request, table);
+            let routing = if let Some(ui) = payload.get("ui") {
+                HoleRouting::Dialog { ui: ui.clone() }
+            } else {
+                HoleRouting::Ask { payload }
+            };
+            ClassifiedHole { routing, prompt }
+        }
+    }
+}
+
+/// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
+/// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
+/// its shape (identical to what `AskWith` used to carry for this family) is
+/// documented once.
+fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
+    let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
+    let ty = asks.type_of(site).map(str::to_string);
+    if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
+        let fan = payload
+            .get("fan")
+            .and_then(Json::as_u64)
+            .map(|n| FanBadge::Exact { n: n as u32 });
+        let prompts = payload
+            .get("prompts")
+            .and_then(Json::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        HoleRouting::Fork {
+            site,
+            ty,
+            fan,
+            prompts,
+        }
     } else {
-        HoleRouting::Ask { payload }
-    };
-    ClassifiedHole { routing, prompt }
+        HoleRouting::RunLLMTurn { site, ty }
+    }
 }
 
 /// Strip one layer of `[...]` from a rendered type string — the FANOUT
@@ -155,17 +182,26 @@ pub fn strip_list_type(ty: &str) -> Option<&str> {
     ty.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
 }
 
-/// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
-/// Mirrors `tidepool_repl::ask::extract_ask_request`, but keeps the payload as
-/// structured JSON (not opaque) so the engine can classify it.
-fn decode_askwith(request: &Value, table: &DataConTable) -> (String, Json) {
-    let Value::Con(con_id, fields) = request else {
+/// The request `Value`'s constructor name, when it is a `Con` — `None` for
+/// any other `Value` shape (a suspended Ask/RunLLMTurn/Finalize request is
+/// always a `Con`, by construction of their `*With` GADT constructors).
+fn con_name<'a>(request: &Value, table: &'a DataConTable) -> Option<&'a str> {
+    let Value::Con(con_id, _) = request else {
+        return None;
+    };
+    table.name_of(*con_id)
+}
+
+/// Pull `(prompt, payload)` out of a `Con(_, [prompt :: Text, payload ::
+/// Value])`-shaped request — the wire shape `AskWith` and `RunLLMTurnWith`
+/// both use (this is the shared decode `Ask` and `RunLLMTurn` consume; only
+/// the constructor NAME differs, checked by the caller via [`con_name`]
+/// before dispatching here). `Finalize`'s wire shape is different (its value
+/// field is never JSON-decoded) and has its own decode, [`decode_finalize_site`].
+fn decode_prompt_payload(request: &Value, table: &DataConTable) -> (String, Json) {
+    let Value::Con(_, fields) = request else {
         return (String::new(), Json::Null);
     };
-    let name = table.name_of(*con_id).unwrap_or("<unknown>");
-    if name != "AskWith" {
-        return (String::new(), Json::Null);
-    }
     let prompt = fields
         .first()
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
@@ -176,6 +212,40 @@ fn decode_askwith(request: &Value, table: &DataConTable) -> (String, Json) {
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .unwrap_or(Json::Null);
     (prompt, payload)
+}
+
+/// Pull `(site, ty)` out of a `FinalizeWith`-shaped request (`Con(_, [site ::
+/// Int, value])`). Only the leading `Int` site id is JSON-decoded — the
+/// value field crosses in-heap and is deliberately left untouched here (see
+/// [`classify_hole`]'s doc); `asks` resolves the site to its rendered type
+/// the same way [`classify_runllmturn_payload`] does.
+fn decode_finalize_site(
+    request: &Value,
+    table: &DataConTable,
+    asks: &AsksSidecar,
+) -> (u32, Option<String>) {
+    let Value::Con(_, fields) = request else {
+        return (0, None);
+    };
+    let site = fields
+        .first()
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_u64())
+        .unwrap_or(0) as u32;
+    let ty = asks.type_of(site).map(str::to_string);
+    (site, ty)
+}
+
+/// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
+/// Mirrors `tidepool_repl::ask::extract_ask_request`, but keeps the payload as
+/// structured JSON (not opaque) so the engine can classify it. A non-`AskWith`
+/// Con (or any other request shape) decodes to an empty prompt / `Null`
+/// payload — the same fallback [`classify_hole`] uses for an unrecognized Con.
+fn decode_askwith(request: &Value, table: &DataConTable) -> (String, Json) {
+    if con_name(request, table) != Some("AskWith") {
+        return (String::new(), Json::Null);
+    }
+    decode_prompt_payload(request, table)
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +440,22 @@ pub struct EngineConfig {
     pub max_tokens: Option<u32>,
 }
 
+/// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
+/// RunLLMTurn) with `Finalize` (self-iterating-harness WS-B) appended last —
+/// its own interposed effect/tag, sharing `Ask`/`RunLLMTurn`'s suspend path
+/// (see `jit_machine::drive_effect_loop`'s `suspend_tag` threshold: every tag
+/// from the FIRST interposed effect onward suspends, so appending a third
+/// interposed effect here needs no further Rust-side dispatch change).
+/// `Agent` isn't a literal Haskell type anywhere — it's this decl list, used
+/// wherever an Agent turn (an Agent node driven by `Harness::run_to_hole_or_done`,
+/// including the self-iterating-harness's nested Agent sessions answering a
+/// `runLLMTurn` hole via `finalize`) is compiled.
+fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::finalize_decl());
+    decls
+}
+
 impl EngineConfig {
     /// The canonical effect stack's decls + ask tag + effect names, resolving
     /// the extract binary from `TIDEPOOL_EXTRACT` (falling back to
@@ -382,9 +468,16 @@ impl EngineConfig {
         prelude_dir: PathBuf,
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        let decls = tidepool_mcp::standard_decls();
-        // Ask is last in standard_decls (index len-1).
-        let ask_tag = (decls.len() as u64) - 1;
+        let decls = agent_decls();
+        // `ask_tag` is the suspend THRESHOLD: the index of the first
+        // interposed effect (Ask). Every tag at or beyond it (Ask, RunLLMTurn,
+        // Finalize — all appended consecutively after the base9 handled
+        // effects) suspends through the same JIT arm; found by name, not by
+        // position, since Ask is no longer necessarily the list's last entry.
+        let ask_tag = decls
+            .iter()
+            .position(|d| d.type_name == "Ask")
+            .expect("agent_decls always contains Ask") as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
@@ -427,7 +520,7 @@ impl EngineConfig {
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
-    let decls = tidepool_mcp::standard_decls();
+    let decls = agent_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = cfg.effect_stack_type();
     tidepool_mcp::template_haskell(&preamble, &stack, code, imports, helpers, None, None)
@@ -450,7 +543,7 @@ pub fn template_answer_turn(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = tidepool_mcp::standard_decls();
+    let decls = agent_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = cfg.effect_stack_type();
 
@@ -507,7 +600,7 @@ pub fn template_session_bind(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let decls = tidepool_mcp::standard_decls();
+    let decls = agent_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = cfg.effect_stack_type();
 

@@ -617,11 +617,79 @@ macro_rules! ask_effect_def {
                        "schemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]",
                        "schemaToValue (SOpt s) = schemaToValue s",
                        "schemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]"] },
-                // runLLMTurn (#R0 typed-yield pass, plans/harness-r0/10-extract-pass).
-                // `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` are the
-                // surface verbs: extract's Translate.hs intercepts their call sites
-                // (matched by name, mirroring the tagToEnum# arm) and head-swaps to the
-                // hidden *Sited sibling below with a fresh per-call-site literal Int
+                // dialogAsk (harness Ui-elicitation surface, D2). Mechanically a
+                // hole with OPERATOR routing (not the runLLMTurn family): it
+                // sends AskWith carrying a `"ui"` payload field the harness
+                // recognizes and renders in the observatory form pane. The
+                // submission (widget values + always-present prose channel) comes
+                // back as the returned Value. TYPED as `Ui -> M Value`: the arg
+                // IS the `Tidepool.Ui` eDSL, not an untyped Value — so a wrong
+                // shape (e.g. a bare `toJSON "question"`) is a GHC error the
+                // model self-corrects from, not a payload that dead-ends in the
+                // renderer. Build it with the `Tidepool.Ui` smart constructors
+                // (`import Tidepool.Ui`), e.g. `dialogAsk (textIn "one rough
+                // spot?" True)` or `dialogAsk (card "Pick" [choice "verdict?"
+                // [("a","A")]])`. The generated Effects module imports `Ui` (see
+                // `eval_prep::effects_module_source`); the constructors ride the
+                // per-eval import list.
+                { raw ["-- | Elicit an operator answer via a RAW `Ui` form (rendered in the",
+                       "-- observatory form pane), returning the untyped {values, prose}",
+                       "-- submission `Value`. This is the escape hatch — for a TYPED result",
+                       "-- prefer `dialogForm` (`import Tidepool.Form`), which builds a form",
+                       "-- applicatively and decodes the submission into your type. Build `ui`",
+                       "-- with the `Tidepool.Ui` constructors (`import Tidepool.Ui`), e.g.",
+                       "-- `dialogAsk (textIn \"your note?\" True)`.",
+                       "dialogAsk :: Ui -> M Value",
+                       "dialogAsk ui = send (AskWith \"\" (object [\"ui\" .= ui]))"] },
+            ],
+        }
+    };
+}
+
+/// RunLLMTurn effect — single definition (self-iterating-harness WS-B).
+///
+/// Split OUT of [`ask_effect_def!`]: `runLLMTurn`/`runLLMTurnFork`/
+/// `runLLMTurnFanout` used to be verbs riding `Ask`'s own `AskWith`
+/// constructor; they now have their own GADT/union-tag (`RunLLMTurnWith`,
+/// structurally IDENTICAL to `AskWith` — same `Text -> Value -> M Value`
+/// shape, same `typedSite`/`fork`/`fan`/`prompts` payload scheme) so `Ask`
+/// and `RunLLMTurn` are independently interposed effects sharing the JIT's
+/// one suspend-tag-threshold path (`tidepool-codegen::jit_machine::drive_effect_loop`)
+/// rather than one effect doing double duty. Like `Ask`, this has no
+/// `tidepool-handlers` handler — its dispatcher is server/harness machinery
+/// (`tidepool-harness::engine::classify_hole`, the eval/repl servers' own
+/// suspend paths) — so only [`effect_decl_projection!`] consumes this
+/// definition; the `handler`/`req`/`method` slots name types that are never
+/// generated (same convention as `ask_effect_def!`'s own doc comment).
+#[macro_export]
+macro_rules! runllmturn_effect_def {
+    ($project:path) => {
+        $project! {
+            effect RunLLMTurn,
+            handler RunLLMTurnHandler,
+            req RunLLMTurnReq,
+            decl_fn runllmturn_decl,
+            description [
+                "Suspend for a TYPED answer. `runLLMTurn \\@T prompt` (same calling ",
+                "model answers in context) / `runLLMTurnFork \\@T prompt` (a forked ",
+                "sub-agent answers) / `runLLMTurnFanout \\@T prompts` (N forked ",
+                "sub-agents, one per prompt, answered as a batch `[T]`) — GHC ",
+                "validates the answer against `T` before it resumes the continuation ",
+                "(an ill-typed answer never consumes it).",
+            ],
+            type_defs [],
+            verbs [
+                { ctor RunLLMTurnWith, method run_llm_turn_with,
+                  args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
+                  ret "Value" },
+            ],
+            helpers [
+                // #R0 typed-yield pass, plans/harness-r0/10-extract-pass; split out of
+                // Ask by self-iterating-harness WS-B (07-impl-orchestration.md).
+                // `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` are the surface
+                // verbs: extract's Translate.hs intercepts their call sites (matched
+                // by name, mirroring the tagToEnum# arm) and head-swaps to the hidden
+                // *Sited sibling below with a fresh per-call-site literal Int
                 // prepended — so the OPAQUE bodies here never actually run; they exist
                 // only so GHC's typechecker accepts the call and so
                 // `runLLMTurnSited`/`runLLMTurnForkSited`/
@@ -657,37 +725,81 @@ macro_rules! ask_effect_def {
                 // genuine type change.
                 { raw ["{-# OPAQUE runLLMTurnSited #-}",
                        "runLLMTurnSited :: forall a. Int -> Text -> M a",
-                       "runLLMTurnSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid]))"] },
+                       "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
                 { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
                        "runLLMTurnForkSited :: forall a. Int -> Text -> M a",
-                       "runLLMTurnForkSited sid p = unsafeCoerce <$> send (AskWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
+                       "runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
                 { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
                        "runLLMTurnFanoutSited :: forall a. Int -> [Text] -> M [a]",
-                       "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (AskWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
-                // dialogAsk (harness Ui-elicitation surface, D2). Mechanically a
-                // hole with OPERATOR routing (not the runLLMTurn family): it
-                // sends AskWith carrying a `"ui"` payload field the harness
-                // recognizes and renders in the observatory form pane. The
-                // submission (widget values + always-present prose channel) comes
-                // back as the returned Value. TYPED as `Ui -> M Value`: the arg
-                // IS the `Tidepool.Ui` eDSL, not an untyped Value — so a wrong
-                // shape (e.g. a bare `toJSON "question"`) is a GHC error the
-                // model self-corrects from, not a payload that dead-ends in the
-                // renderer. Build it with the `Tidepool.Ui` smart constructors
-                // (`import Tidepool.Ui`), e.g. `dialogAsk (textIn "one rough
-                // spot?" True)` or `dialogAsk (card "Pick" [choice "verdict?"
-                // [("a","A")]])`. The generated Effects module imports `Ui` (see
-                // `eval_prep::effects_module_source`); the constructors ride the
-                // per-eval import list.
-                { raw ["-- | Elicit an operator answer via a RAW `Ui` form (rendered in the",
-                       "-- observatory form pane), returning the untyped {values, prose}",
-                       "-- submission `Value`. This is the escape hatch — for a TYPED result",
-                       "-- prefer `dialogForm` (`import Tidepool.Form`), which builds a form",
-                       "-- applicatively and decodes the submission into your type. Build `ui`",
-                       "-- with the `Tidepool.Ui` constructors (`import Tidepool.Ui`), e.g.",
-                       "-- `dialogAsk (textIn \"your note?\" True)`.",
-                       "dialogAsk :: Ui -> M Value",
-                       "dialogAsk ui = send (AskWith \"\" (object [\"ui\" .= ui]))"] },
+                       "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
+            ],
+        }
+    };
+}
+
+/// Finalize effect — single definition (self-iterating-harness WS-B).
+///
+/// The Agent-side terminal handoff: `finalize \@T x` hands a typed value UP
+/// to the parent `runLLMTurn` hole and TERMINATES the current Agent turn
+/// loop — it does NOT resume (unlike `Ask`/`RunLLMTurn`, whose continuation
+/// the caller's answer resumes). The value crosses IN-HEAP via `run_child`
+/// (no JSON round-trip), so — RELAXED from `runLLMTurn`'s rule — it may be a
+/// closure or other non-serializable value; `FinalizeWith`'s payload field is
+/// therefore the raw polymorphic answer type, not `Data.Aeson.Value`. Shares
+/// `Ask`/`RunLLMTurn`'s suspend/classify machinery (its own GADT/union-tag,
+/// caught by the same JIT suspend-tag threshold) — no duplicated plumbing,
+/// only the wire shape differs where finalize's semantics genuinely differ.
+/// No `tidepool-handlers` handler (harness-serviced only, same convention as
+/// `Ask`/`RunLLMTurn` — see their doc comments); only
+/// [`effect_decl_projection!`] consumes this definition.
+#[macro_export]
+macro_rules! finalize_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Finalize,
+            handler FinalizeHandler,
+            req FinalizeReq,
+            decl_fn finalize_decl,
+            description [
+                "Terminate the current Agent turn loop and hand a typed value UP to ",
+                "the parent `runLLMTurn` hole, in-heap (no JSON round-trip — the value ",
+                "may be a closure or other non-serializable value). `finalize x` never ",
+                "resumes; the harness driver reads the value directly and resolves the ",
+                "parent hole via `run_child`.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor FinalizeWith, method finalize_with,
+                  args { site: "Int" as i64, value: "v" as tidepool_eval::value::Value },
+                  ret "a" },
+            ],
+            helpers [
+                // The Int arg is the site id extract substitutes at the call site
+                // (mirrors runLLMTurn's *Sited convention — the literal `0` below is
+                // a placeholder, never the value that actually runs). No
+                // `unsafeCoerce` here: unlike runLLMTurn's answer (which crosses as
+                // `Data.Aeson.Value` and must be relabeled back to `T`), `finalize`'s
+                // value is carried at its own native representation the whole way —
+                // `FinalizeWith`'s payload field is `v` itself, not `Value`.
+                //
+                // TWO forall'd type variables, deliberately: `v` (the finalized
+                // value's own type, what `@T` fixes) and `a` (finalize's "return
+                // type" — it never actually returns, the send diverges via
+                // suspension — left INDEPENDENT of `v` on purpose, so a caller
+                // needing to satisfy some OTHER constraint downstream, e.g. a
+                // `toJSON`-wrapping template around a turn that never reaches it,
+                // can pin `a` separately without needing `v` itself, e.g. a
+                // function type, to satisfy that constraint). `finalize @T x`
+                // therefore desugars to TWO explicit Core type arguments
+                // (`@T @inferred`), not one — Translate.hs's detection arm
+                // matches `[Type ty, Type _phantom]`, not runLLMTurn's
+                // single-tyvar `[Type ty]` shape.
+                { raw ["{-# OPAQUE finalize #-}",
+                       "finalize :: forall v a. v -> M a",
+                       "finalize v = finalizeSited 0 v"] },
+                { raw ["{-# OPAQUE finalizeSited #-}",
+                       "finalizeSited :: forall v a. Int -> v -> M a",
+                       "finalizeSited sid v = send (FinalizeWith sid v)"] },
             ],
         }
     };

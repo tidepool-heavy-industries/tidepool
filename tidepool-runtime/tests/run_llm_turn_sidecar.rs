@@ -25,10 +25,15 @@ use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{effects_include, extract_env, prelude_path, EvalHarness};
 
-/// Ask's position in the standard effect stack: 9 base effects (Console, KV,
-/// Fs, Http, Exec, Lsp, Llm, Git, Time — `base_effects!`'s order) at tags
-/// 0..8, with Ask interposed last at tag 9 (`standard_decls()`'s doc).
-const ASK_TAG: u64 = 9;
+/// RunLLMTurn's position in the standard effect stack: 9 base effects
+/// (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time — `base_effects!`'s
+/// order) at tags 0..8, `Ask` interposed at tag 9, `RunLLMTurn` interposed
+/// right after it at tag 10 (`standard_decls()`'s doc — self-iterating-
+/// harness WS-B split `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` out
+/// of `Ask` into their own effect/tag, same `typedSite`/`fork`/`fan`/
+/// `prompts` payload shape, now riding a `RunLLMTurnWith` Con instead of
+/// `AskWith`).
+const RUN_LLM_TURN_TAG: u64 = 10;
 
 fn verdict_helpers() -> &'static str {
     "{-# NOINLINE loopCount #-}\n\
@@ -82,17 +87,17 @@ impl DispatchEffect<()> for SiteRecorder {
         request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        if tag != ASK_TAG {
+        if tag != RUN_LLM_TURN_TAG {
             return Err(EffectError::UnhandledEffect { tag });
         }
         let Value::Con(_con_id, fields) = request else {
             return Err(EffectError::Handler(format!(
-                "expected AskWith Con, got {request:?}"
+                "expected RunLLMTurnWith Con, got {request:?}"
             )));
         };
         let payload = fields
             .get(1)
-            .ok_or_else(|| EffectError::Handler("AskWith missing payload field".into()))?;
+            .ok_or_else(|| EffectError::Handler("RunLLMTurnWith missing payload field".into()))?;
         let json = tidepool_runtime::value_to_json(payload, cx.table(), 0);
         let site = json
             .get("typedSite")

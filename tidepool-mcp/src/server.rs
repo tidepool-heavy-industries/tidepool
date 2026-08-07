@@ -681,6 +681,7 @@ where
         let mut decls = H::collect_decls();
         let ask_tag = decls.len() as u64;
         decls.push(ask_decl());
+        decls.push(runllmturn_decl());
         let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
         // The generated Tidepool.Effects module must be on the include path
         // for every eval (the preamble imports it). Keep its source so the

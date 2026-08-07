@@ -77,8 +77,19 @@ impl<H: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<H> {
     }
 }
 
-// `Ask` is the last effect in the base stack (index 9).
-const ASK_TAG: u64 = (mock::EFFECT_NAMES.len() as u64) - 1;
+/// `Ask`'s position in `mock::EFFECT_NAMES` — found by name, not
+/// `len() - 1`: self-iterating-harness WS-B appended `RunLLMTurn` after
+/// `Ask` (its own interposed effect/tag now), so `Ask` is no longer the
+/// stack's last entry. This is still the right SUSPEND threshold for these
+/// `ask`-only tests: the JIT's suspend-tag check is `tag >= threshold`
+/// (`jit_machine::drive_effect_loop`), and nothing here ever dispatches
+/// `RunLLMTurn`'s tag, so catching it too (it's `>= Ask`'s tag) is inert.
+fn ask_tag() -> u64 {
+    mock::EFFECT_NAMES
+        .iter()
+        .position(|&n| n == "Ask")
+        .expect("mock::EFFECT_NAMES always contains Ask") as u64
+}
 
 /// Compile one turn's Haskell body (a `result :: M a` expression, wrapped in the
 /// mock 10-effect preamble) into Core + its DataConTable.
@@ -106,7 +117,7 @@ fn bootstrap(
         &expr,
         table,
         AsSink(mock::min_stack()),
-        ASK_TAG,
+        ask_tag(),
         effect_names,
         TestSink::default(),
         Vec::new(),
@@ -258,7 +269,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
         &expr,
         table,
         AsSink(mock::min_stack()),
-        ASK_TAG,
+        ask_tag(),
         effect_names,
         TestSink::default(),
         Vec::new(),

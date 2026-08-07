@@ -123,6 +123,15 @@ crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
+// RunLLMTurn effect (self-iterating-harness WS-B, split out of Ask):
+// `runllmturn_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::runllmturn_effect_def!(crate::effect_defs::effect_decl_projection);
+
+// Finalize effect (self-iterating-harness WS-B): `finalize_decl()` is
+// generated from the single-source definition (`effect_defs.rs`).
+crate::finalize_effect_def!(crate::effect_defs::effect_decl_projection);
+
 // Llm effect: `llm_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);

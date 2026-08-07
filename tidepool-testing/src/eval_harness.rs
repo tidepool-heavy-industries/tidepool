@@ -401,7 +401,17 @@ pub mod mock {
     /// `mock_stack_matches_production` asserts this equals
     /// `tidepool_mcp::standard_decls()`'s type names.
     pub const EFFECT_NAMES: &[&str] = &[
-        "Console", "KV", "Fs", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
+        "Console",
+        "KV",
+        "Fs",
+        "Http",
+        "Exec",
+        "Lsp",
+        "Llm",
+        "Git",
+        "Time",
+        "Ask",
+        "RunLLMTurn",
     ];
 
     /// The standard MCP module preamble: LANGUAGE pragmas, `module Expr`, the
@@ -470,8 +480,10 @@ data Time a where
   TimeNow :: Time Int
 data Ask a where
   Ask :: Text -> Ask Value
+data RunLLMTurn a where
+  RunLLMTurnStub :: Text -> RunLLMTurn Value
 
-type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
+type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
@@ -766,9 +778,30 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
         }
     }
 
+    // 10: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
+    // Ask; this mock harness dispatches every tag through the handler HList
+    // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
+    #[derive(FromCore)]
+    #[allow(dead_code)]
+    pub enum RunLLMTurnReq {
+        #[core(name = "RunLLMTurnStub")]
+        RunLLMTurnStub(String),
+    }
+    pub struct MockRunLLMTurn;
+    impl EffectHandler for MockRunLLMTurn {
+        type Request = RunLLMTurnReq;
+        fn handle(
+            &mut self,
+            _req: RunLLMTurnReq,
+            cx: &EffectContext,
+        ) -> Result<Response, EffectError> {
+            cx.respond(serde_json::json!("stub_response"))
+        }
+    }
+
     /// The base-stack mock handler HList, in stack order (matches
     /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
-    /// Ask]` — pass straight to [`super::EvalHarness::run`].
+    /// Ask, RunLLMTurn]` — pass straight to [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
         MockKv,
@@ -779,7 +812,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
         MockLlm,
         MockGit,
         MockTime,
-        MockAsk
+        MockAsk,
+        MockRunLLMTurn
     ) {
         frunk::hlist![
             MockConsole,
@@ -791,7 +825,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]
             MockLlm,
             MockGit,
             MockTime,
-            MockAsk
+            MockAsk,
+            MockRunLLMTurn
         ]
     }
 }

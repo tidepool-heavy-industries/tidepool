@@ -114,7 +114,13 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>> ReplAskDispat
         request: &Value,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
-        if tag == self.ask_tag {
+        // Threshold, not exact match: `ask_tag` is the FIRST interposed tag
+        // (from `base_decls_with_ask`) — self-iterating-harness WS-B split
+        // `runLLMTurn` out of `Ask` into its own tag, appended right after,
+        // so every tag from `ask_tag` on is interposed and parks the same
+        // way (mirrors the JIT's own suspend-tag threshold,
+        // `jit_machine::drive_effect_loop`).
+        if tag >= self.ask_tag {
             let (prompt, meta) =
                 extract_ask_request(request, cx.table()).map_err(EffectError::Handler)?;
             let _ = self
@@ -150,9 +156,12 @@ pub fn extract_ask_request(
         ));
     };
     let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
-    if con_name != "AskWith" {
+    // `runLLMTurn` suspends via the sibling RunLLMTurnWith (its own
+    // effect/tag now, self-iterating-harness WS-B — same field shape as
+    // AskWith), caught by the same threshold `dispatch_inner` now uses.
+    if con_name != "AskWith" && con_name != "RunLLMTurnWith" {
         return Err(format!(
-            "ask received unexpected constructor {con_name:?} (expected AskWith)"
+            "ask received unexpected constructor {con_name:?} (expected AskWith or RunLLMTurnWith)"
         ));
     }
     let Some(prompt_val) = fields.first() else {

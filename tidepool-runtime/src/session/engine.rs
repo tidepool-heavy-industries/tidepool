@@ -1225,9 +1225,12 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
     }
 }
 
-/// Extract the prompt (+ optional `AskWith` metadata) from an `Ask` request.
-/// The request is `Con(AskWith, [prompt_val, meta_val])`, dispatched by
-/// constructor name.
+/// Extract the prompt (+ optional metadata) from an `Ask`/`RunLLMTurn`
+/// request. The request is `Con(AskWith|RunLLMTurnWith, [prompt_val,
+/// meta_val])` — both constructors share this exact field shape (self-
+/// iterating-harness WS-B split `runLLMTurn` out of `Ask` into its own
+/// effect/tag, but its wire shape is unchanged), dispatched by constructor
+/// name.
 fn extract_ask_request(
     request: &tidepool_eval::value::Value,
     table: &tidepool_repr::DataConTable,
@@ -1241,12 +1244,15 @@ fn extract_ask_request(
     };
     let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
     // `ask` always suspends via AskWith (carrying the schema); the bare `Ask`
-    // constructor was reaped with the structured-Ask collapse.
+    // constructor was reaped with the structured-Ask collapse. `runLLMTurn`
+    // suspends via the sibling RunLLMTurnWith (its own effect/tag now, same
+    // field shape) — the JIT's suspend-tag threshold (`jit_machine::
+    // drive_effect_loop`) already catches both, so this parser accepts both.
     match con_name {
-        "AskWith" => {}
+        "AskWith" | "RunLLMTurnWith" => {}
         other => {
             return Err(format!(
-                "ask received unexpected constructor {other:?} (expected AskWith)"
+                "ask received unexpected constructor {other:?} (expected AskWith or RunLLMTurnWith)"
             ))
         }
     }

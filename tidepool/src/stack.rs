@@ -14,18 +14,28 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 }
 
 /// The debug decl list: base effects (Console..Time, `base_effects!` order)
-/// with Meta appended, then Ask appended last. This is the SAME order
-/// `build_debug_stack`'s handler HList wires (Ask is interposed separately by
-/// `TidepoolMcpServer::new`, which pushes `ask_decl()` onto whatever
+/// with Meta appended, then the interposed effects (Ask, RunLLMTurn) appended
+/// last. This is the SAME order `build_debug_stack`'s handler HList wires
+/// (the interposed effects are appended separately by `TidepoolMcpServer::new`,
+/// which pushes `ask_decl()`/`runllmturn_decl()` onto whatever
 /// `H::collect_decls()` reports) — so a `TidepoolMcpServer` built on
 /// `build_debug_stack`'s handlers reproduces this exact list independently,
 /// and `effect_names`/`helper_sigs` (derived from it below) can never drift
 /// from the real dispatch order again (that drift was F1).
+///
+/// Splits off everything from `Ask` onward (found by name, not a fixed
+/// count) rather than popping exactly one — self-iterating-harness WS-B
+/// appends `RunLLMTurn` after `Ask` in `standard_decls()`, and both must stay
+/// interposed, after Meta, for the JIT's suspend-tag threshold to hold.
 fn debug_decls() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = tidepool_mcp::standard_decls();
-    let ask = decls.pop().expect("standard_decls always ends with Ask");
+    let ask_idx = decls
+        .iter()
+        .position(|d| d.type_name == "Ask")
+        .expect("standard_decls always contains Ask");
+    let interposed = decls.split_off(ask_idx);
     decls.push(tidepool_mcp::meta_decl());
-    decls.push(ask);
+    decls.extend(interposed);
     decls
 }
 
@@ -89,7 +99,18 @@ mod tests {
     use super::*;
 
     const EXPECTED_ORDER: &[&str] = &[
-        "Console", "KV", "Fs", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Meta", "Ask",
+        "Console",
+        "KV",
+        "Fs",
+        "Http",
+        "Exec",
+        "Lsp",
+        "Llm",
+        "Git",
+        "Time",
+        "Meta",
+        "Ask",
+        "RunLLMTurn",
     ];
 
     #[test]
@@ -140,8 +161,8 @@ mod tests {
         assert_eq!(collected_names, EXPECTED_ORDER);
         assert_eq!(
             ask_tag as usize,
-            EXPECTED_ORDER.len() - 1,
-            "Ask must land after Meta, at the very end"
+            EXPECTED_ORDER.len() - 2,
+            "Ask must land after Meta, followed only by RunLLMTurn"
         );
     }
 }

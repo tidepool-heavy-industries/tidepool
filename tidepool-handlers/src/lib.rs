@@ -162,16 +162,21 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
     frunk::hlist![ConsoleHandler]
 }
 
-/// Collect effect declarations from a base stack and append the Ask effect.
+/// Collect effect declarations from a base stack and append the interposed
+/// effects (`Ask`, then `RunLLMTurn` — self-iterating-harness WS-B split
+/// `runLLMTurn` out of `Ask` into its own effect/tag, appended right after).
 ///
-/// Returns `(decls, ask_tag)` where `ask_tag` is the index of the Ask effect
-/// in `decls`. Mirrors `TidepoolMcpServer::new`'s internal logic so Wave B
-/// servers can build the same declaration list without constructing a full
+/// Returns `(decls, ask_tag)` where `ask_tag` is the index of the FIRST
+/// interposed effect (`Ask`) in `decls` — the suspend threshold every tag at
+/// or beyond it shares (see `jit_machine::drive_effect_loop`'s `suspend_tag`
+/// doc). Mirrors `TidepoolMcpServer::new`'s internal logic so Wave B servers
+/// can build the same declaration list without constructing a full
 /// `TidepoolMcpServer`.
 pub fn base_decls_with_ask<H: CollectEffectDecls>(_stack: &H) -> (Vec<EffectDecl>, u64) {
     let mut decls = H::collect_decls();
     let ask_tag = decls.len() as u64;
     decls.push(tidepool_mcp::ask_decl());
+    decls.push(tidepool_mcp::runllmturn_decl());
     (decls, ask_tag)
 }
 
@@ -207,7 +212,17 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console", "KV", "Fs", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
+        "Console",
+        "KV",
+        "Fs",
+        "Http",
+        "Exec",
+        "Lsp",
+        "Llm",
+        "Git",
+        "Time",
+        "Ask",
+        "RunLLMTurn",
     ];
 
     #[test]

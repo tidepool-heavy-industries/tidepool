@@ -2251,9 +2251,13 @@ fn initial_step(machine: &mut CompiledEffectMachine, exec_start: &str) -> Yield 
 /// The shared freer-simple effect step loop, factored out of [`drive_to_done`]
 /// so the same body serves the non-suspending run AND threadless suspension.
 ///
-/// `suspend_tag = Some(t)`: a `Yield::Request` with `tag == t` unwinds as
+/// `suspend_tag = Some(t)`: a `Yield::Request` with `tag >= t` unwinds as
 /// [`DriveOutcome::Suspended`] (after bridging the request and while the
-/// continuation is still valid), instead of dispatching to a handler.
+/// continuation is still valid), instead of dispatching to a handler. `t` is
+/// the first INTERPOSED (unhandled) tag — every tag from there on is
+/// unhandled by construction, so this threshold test is what lets
+/// `Ask`/`RunLLMTurn`/`Finalize` (self-iterating-harness WS-B) share this one
+/// suspend arm without each needing its own comparison.
 /// `suspend_tag = None`: every effect dispatches exactly as the pre-E2 inline
 /// loop did — the non-suspend path is byte-identical.
 ///
@@ -2312,8 +2316,18 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 let req_val =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
                 log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
-                // E2 threadless suspension: if this is the caller's suspend tag
-                // (the ask boundary), unwind carrying the bridged request + the
+                // E2 threadless suspension: `suspend_tag` is the FIRST interposed
+                // (unhandled) tag — the position right after the last effect with
+                // a real handler. Every tag at or beyond it is unhandled by
+                // construction (Ask, and — self-iterating-harness WS-B —
+                // RunLLMTurn/Finalize, always appended consecutively after the
+                // handled stack), so the threshold test `tag >= suspend_tag`
+                // catches ALL of them through this one arm: no per-effect
+                // duplication, `Ask`/`RunLLMTurn`/`Finalize` share this exact
+                // suspend path. A stack with only one interposed effect (the
+                // pre-WS-B norm, and today's ordinary eval/repl stacks) has
+                // `suspend_tag` as the only tag >= it, so this is behavior-
+                // preserving there. Unwind carrying the bridged request + the
                 // continuation instead of dispatching. `continuation` here is the
                 // post-request-bridge value (the arm's `register_rust_root`
                 // updated it in place through any GC during forcing). The arm's
@@ -2322,7 +2336,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 // retained across the suspension (no GC runs while stowed), and
                 // `resume_suspended` re-roots it before its answer materialization
                 // can collect.
-                if suspend_tag == Some(tag) {
+                if suspend_tag.is_some_and(|t| tag >= t) {
                     return Ok(DriveOutcome::Suspended {
                         request: req_val,
                         continuation,

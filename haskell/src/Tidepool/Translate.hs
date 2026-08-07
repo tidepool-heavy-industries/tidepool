@@ -138,6 +138,10 @@ data TransState = TransState
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
   , tsRunLLMTurnSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
+  -- finalize (self-iterating-harness WS-B): varId of finalize's hidden Sited
+  -- sibling, resolved the same way as the runLLMTurn family's (Nothing when
+  -- the Finalize effect's helper text isn't in the closed program).
+  , tsFinalizeSitedId :: !(Maybe Word64)
   }
 
 type TransM = State TransState
@@ -401,7 +405,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -409,7 +413,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -446,6 +450,7 @@ translateModule allBinds targetName unresolvedIds =
                     (findAuxVarId "forkMapSited" allBinds)
                     (findAuxVarId "forkCataSited" allBinds)
                     0 Seq.empty Nothing
+                    (findAuxVarId "finalizeSited" allBinds)
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsRunLLMTurnSites finalState)
   where
@@ -977,11 +982,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1618,6 +1623,44 @@ translate expr =
             appLit <- emitNode $ NApp sitedRef litIdx
             promptIdx <- translate promptArg
             emitNode $ NApp appLit promptIdx
+
+    -- finalize @T x (self-iterating-harness WS-B): detected exactly like the
+    -- runLLMTurn family above (a known Var applied to [Type ty] + one value
+    -- arg), head-swapped to the hidden finalizeSited sibling with a fresh
+    -- site-id literal prepended — same shared-machinery shape, DIFFERENT
+    -- type check: checkFinalizeType skips the function-arrow rejection
+    -- (finalize's value crosses in-heap via run_child, never through JSON, so
+    -- it may carry a closure) but still rejects a polymorphic (non-monomorphic)
+    -- site, same as runLLMTurn.
+    Var v | isFinalizeVar v
+          , let typeArgs = filter (not . isValueArg) allArgs
+          -- finalize :: forall v a. v -> M a — TWO forall'd tyvars (`v`, the
+          -- finalized value's own type; `a`, its independent "never returns"
+          -- placeholder — see effect_defs.rs's finalize_effect_def! for why
+          -- they're kept independent), so a `finalize @T x` call site carries
+          -- TWO explicit Core type arguments, not runLLMTurn's one. `ty` is
+          -- the FIRST (`v`, what `@T` fixes); the second (`a`) is discarded —
+          -- it never crosses the suspend boundary, only `ty` does.
+          , [Type ty, Type _phantomRet] <- typeArgs
+          , [valueArg] <- args -> do
+        checkFinalizeType ty
+        sitedIdM <- gets tsFinalizeSitedId
+        case sitedIdM of
+          -- See the runLLMTurn arm above for why this branch is harmless: it
+          -- fires only for throwaway, unseeded TransState scans that discard
+          -- tsNodes entirely.
+          Nothing -> do
+            _ <- translate valueArg
+            emitFfiPoison
+          Just sitedVarId -> do
+            siteId <- freshSiteId
+            let typeStr = Tidepool.GhcPipeline.renderType ty
+            recordRunLLMTurnSite siteId (T.pack typeStr)
+            sitedRef <- emitNode $ NVar sitedVarId
+            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
+            appLit <- emitNode $ NApp sitedRef litIdx
+            valueIdx <- translate valueArg
+            emitNode $ NApp appLit valueIdx
 
     -- forkMap @b f xs / forkCata @b combine tree (combinator-sites widen):
     -- library-defined recursion-scheme combinators (Tidepool.Fork) over
@@ -2713,23 +2756,49 @@ isForkCataVar :: Id -> Bool
 isForkCataVar v =
   occNameString (nameOccName (idName v)) == "forkCata"
 
--- | The two extract-time rejections for a runLLMTurn/runLLMTurnFork
--- site's answer type (spec step 4): a leftover type variable (the site isn't
--- monomorphic) or a function arrow anywhere in the type's structure (R0 has
--- no way to serialize a function-typed answer across the suspend boundary).
--- Both raise via plain 'error', mirroring every other hard-failure in this
--- file (e.g. the tagToEnum# arm above) — caught by 'processFile's `try` and
--- rendered as a diagnostic, not a pipeline crash.
-checkRunLLMTurnType :: Type -> TransM ()
-checkRunLLMTurnType ty = do
+-- | Recognize @finalize@ (the @Tidepool.Effects@ OPAQUE surface verb,
+-- self-iterating-harness WS-B) — same convention as 'isRunLLMTurnVar' et al.
+isFinalizeVar :: Id -> Bool
+isFinalizeVar v =
+  occNameString (nameOccName (idName v)) == "finalize"
+
+-- | The shared extract-time rejection every typed-yield site (runLLMTurn
+-- family, finalize) applies: a leftover type variable means the site isn't
+-- monomorphic. Raises via plain 'error', mirroring every other hard-failure
+-- in this file (e.g. the tagToEnum# arm above) — caught by 'processFile's
+-- `try` and rendered as a diagnostic, not a pipeline crash. `what` names the
+-- verb in the error message (e.g. "runLLMTurn", "finalize").
+checkMonomorphicSite :: String -> Type -> TransM ()
+checkMonomorphicSite what ty = do
   binder <- gets tsCurrentBinder
   let siteDesc = maybe "<top level>" T.unpack binder
       typeStr = Tidepool.GhcPipeline.renderType ty
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
-    error $ "polymorphic runLLMTurn site in " ++ siteDesc ++ ": " ++ typeStr
+    error $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
+
+-- | The two extract-time rejections for a runLLMTurn/runLLMTurnFork
+-- site's answer type (spec step 4): a leftover type variable (the site isn't
+-- monomorphic, via 'checkMonomorphicSite') or a function arrow anywhere in
+-- the type's structure (R0 has no way to serialize a function-typed answer
+-- across the suspend boundary — the answer crosses as JSON). Both raise via
+-- plain 'error'.
+checkRunLLMTurnType :: Type -> TransM ()
+checkRunLLMTurnType ty = do
+  checkMonomorphicSite "runLLMTurn" ty
+  binder <- gets tsCurrentBinder
+  let siteDesc = maybe "<top level>" T.unpack binder
+      typeStr = Tidepool.GhcPipeline.renderType ty
   when (typeHasFunctionArrow ty) $
     error $ "function-typed answers not supported in R0 (site in "
           ++ siteDesc ++ "): " ++ typeStr
+
+-- | 'finalize's extract-time rejection (self-iterating-harness WS-B): ONLY
+-- the monomorphism check ('checkMonomorphicSite') — deliberately NOT
+-- 'typeHasFunctionArrow'. 'finalize's value crosses in-heap via 'run_child'
+-- (no JSON round-trip, no 'unsafeCoerce' relabeling), so — unlike
+-- 'runLLMTurn' — it may carry a closure or other non-serializable value.
+checkFinalizeType :: Type -> TransM ()
+checkFinalizeType = checkMonomorphicSite "finalize"
 
 -- | Does @ty@ contain a function arrow anywhere in its structure — either
 -- directly, in a type-application argument, or nested inside a field of some

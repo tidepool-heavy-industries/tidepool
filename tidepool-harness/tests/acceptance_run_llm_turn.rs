@@ -119,7 +119,9 @@ fn event_node(e: &Event) -> Option<NodeId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -151,7 +153,9 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
         .await
         .expect("root drives to a hole");
     let hole_before = match outcome {
-        tidepool_harness::TurnOutcome::Suspended { hole, classified, .. } => {
+        tidepool_harness::TurnOutcome::Suspended {
+            hole, classified, ..
+        } => {
             match &classified.routing {
                 HoleRouting::RunLLMTurn { ty, .. } => {
                     assert_eq!(
@@ -164,7 +168,10 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
             }
             hole
         }
-        other => panic!("root should suspend at runLLMTurn, got {}", outcome_tag(&other)),
+        other => panic!(
+            "root should suspend at runLLMTurn, got {}",
+            outcome_tag(&other)
+        ),
     };
     assert!(matches!(
         harness.tree().state(root),
@@ -196,10 +203,18 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
         "exactly one hole is ever published on this node — the ill-typed \
          attempt must NOT re-publish or mint a new hole, got {published:?}"
     );
-    let Event::HolePublished { hole: published_hole, ty, .. } = published[0] else {
+    let Event::HolePublished {
+        hole: published_hole,
+        ty,
+        ..
+    } = published[0]
+    else {
         unreachable!()
     };
-    assert_eq!(published_hole.0, hole_before, "published hole id matches the classified outcome");
+    assert_eq!(
+        published_hole.0, hole_before,
+        "published hole id matches the classified outcome"
+    );
     assert_eq!(ty.as_deref(), Some("Int"));
 
     let attempts: Vec<&Event> = events
@@ -219,7 +234,10 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     else {
         panic!("first attempt must be Rejected, got {:?}", attempts[0]);
     };
-    assert_eq!(h0.0, hole_before, "the rejected attempt references the SAME hole (not consumed)");
+    assert_eq!(
+        h0.0, hole_before,
+        "the rejected attempt references the SAME hole (not consumed)"
+    );
     // The rejected attempt's logged error is the GHC compiler's OWN
     // diagnostic (extract's stdout+stderr), not a harness-synthesized
     // message — it must name the mismatched types.
@@ -236,13 +254,20 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     else {
         panic!("second attempt must be Consumed, got {:?}", attempts[1]);
     };
-    assert_eq!(h1.0, hole_before, "the consuming attempt is on the SAME hole the node suspended on");
+    assert_eq!(
+        h1.0, hole_before,
+        "the consuming attempt is on the SAME hole the node suspended on"
+    );
 
     let consumed: Vec<&Event> = events
         .iter()
         .filter(|e| matches!(e, Event::HoleConsumed { .. }))
         .collect();
-    assert_eq!(consumed.len(), 1, "hole consumed exactly once, and only by the valid attempt");
+    assert_eq!(
+        consumed.len(),
+        1,
+        "hole consumed exactly once, and only by the valid attempt"
+    );
 
     // The retry prompt fed back to the model is the error VERBATIM (F3: "GHC
     // error text is the retry prompt, verbatim") — find the next User turn
@@ -271,6 +296,141 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     assert!(
         events.iter().any(|e| matches!(e, Event::NodeDone { .. })),
         "the node reaches NodeDone after the valid answer"
+    );
+}
+
+/// A tiny user module declaring a NESTED typed answer — an outer record
+/// (`Decision`) with a sum-typed field (`Confidence`) — in its own tempdir,
+/// mirroring `examples/harness/Harness.hs`'s own `Decision`/`Confidence`
+/// shape (the self-iterating-harness target reference module). Returns the
+/// tempdir (whose lifetime the caller must hold) and its path as the
+/// harness's `project_lib` include entry.
+fn decision_lib_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Decision.hs"),
+        "module Decision where\n\n\
+         data Confidence = Low | Medium | High deriving (Show, Eq)\n\
+         data Decision = Decision { action :: String, confidence :: Confidence } \
+         deriving (Show)\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `runLLMTurn @Decision` (self-iterating-harness WS-B) — a NESTED typed
+/// answer: `Decision` is a record whose `confidence` field is itself a sum
+/// type (`Confidence`), not a flat enum like the `Int`/`Bool` cases above.
+/// Proves the split-out `RunLLMTurn` effect (its own GADT/union-tag now,
+/// `runLLMTurn @T` no longer riding `Ask`'s `AskWith`) carries a whole nested
+/// ADT through GHC-as-validator exactly like a flat type: an ill-typed
+/// answer (`42 :: Int` where a `Decision` is wanted) does NOT consume the
+/// continuation, and the corrected nested-record answer resumes it. Same
+/// production entry point (`Harness::answer_run_llm_turn`) and event-log
+/// assertions as `run_llm_turn_end_to_end_type_retry_and_answer`, condensed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_llm_turn_nested_adt_type_retry_and_answer() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("rc-nested.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let lib_dir = decision_lib_dir();
+    let cfg = EngineConfig::standard(prelude_dir(), Some(lib_dir.path().to_path_buf()))
+        .expect("engine config");
+
+    let replies = vec![
+        reply(
+            "```haskell\nimport Decision\n\ndo\n  d <- runLLMTurn @Decision \"decide\"\n  \
+             pure (toJSON (show (d :: Decision)))\n```",
+        ),
+        // Deliberately ill-typed: a bare Int where a Decision record is wanted.
+        reply("```haskell\nimport Decision\nresume (42 :: Int)\n```"),
+        // Corrected: a whole Decision, its `confidence` field a NESTED enum value.
+        reply(
+            "Right, a Decision.\n\n```haskell\nimport Decision\n\
+             resume (Decision { action = \"proceed\", confidence = High })\n```",
+        ),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root("nested rc root", "Decide with a nested Confidence, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to a hole");
+    match &outcome {
+        tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
+            HoleRouting::RunLLMTurn { ty, .. } => {
+                assert_eq!(
+                    ty.as_deref(),
+                    Some("Decision"),
+                    "the published hole must carry the RENDERED nested-ADT answer type, got {ty:?}"
+                );
+            }
+            other => panic!("expected a RunLLMTurn hole, got {other:?}"),
+        },
+        other => panic!(
+            "root should suspend at runLLMTurn, got {}",
+            outcome_tag(other)
+        ),
+    }
+
+    harness
+        .answer_run_llm_turn(root)
+        .await
+        .expect("nested-ADT answer resolved end to end incl. the GHC retry");
+
+    assert_eq!(
+        harness.tree().state(root),
+        Some(NodeState::Done),
+        "the node completes once the corrected nested-ADT answer resumes it"
+    );
+
+    // The ill-typed attempt must not have consumed the continuation: exactly
+    // one Rejected then one Consumed HoleAnswerAttempt on the SAME hole, same
+    // discipline as the flat-Int case above.
+    let events = events_for(&log_path, root);
+    let attempts: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HoleAnswerAttempt { .. }))
+        .collect();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one rejected attempt, one consuming attempt, got {attempts:?}"
+    );
+    assert!(
+        matches!(
+            attempts[0],
+            Event::HoleAnswerAttempt {
+                outcome: AnswerOutcome::Rejected { .. },
+                ..
+            }
+        ),
+        "first attempt must be Rejected, got {:?}",
+        attempts[0]
+    );
+    assert!(
+        matches!(
+            attempts[1],
+            Event::HoleAnswerAttempt {
+                outcome: AnswerOutcome::Consumed,
+                ..
+            }
+        ),
+        "second attempt must be Consumed, got {:?}",
+        attempts[1]
     );
 }
 
@@ -309,9 +469,7 @@ async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
 
     let replies = vec![
-        reply(
-            "```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number\"\n  pure (toJSON n)\n```",
-        ),
+        reply("```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number\"\n  pure (toJSON n)\n```"),
         // Type-checks (Int), but forcing it is a Haskell `error` call — a
         // RUNTIME fault, not a compile rejection.
         reply("```haskell\nresume (error \"boom\")\n```"),
@@ -321,12 +479,20 @@ async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
-    let root = harness.create_root("bottom root", "Get a number, finish.").unwrap();
+    let root = harness
+        .create_root("bottom root", "Get a number, finish.")
+        .unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to hole");
     let hole_before = match outcome {
         tidepool_harness::TurnOutcome::Suspended { hole, .. } => hole,
-        other => panic!("root should suspend at runLLMTurn, got {}", outcome_tag(&other)),
+        other => panic!(
+            "root should suspend at runLLMTurn, got {}",
+            outcome_tag(&other)
+        ),
     };
 
     harness
@@ -345,21 +511,53 @@ async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
     // Not consumed by the bottom answer: exactly one HolePublished (never
     // re-published), exactly one HoleConsumed (only the final valid answer),
     // and it references the SAME hole the node originally suspended on.
-    let published: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::HolePublished { .. })).collect();
-    assert_eq!(published.len(), 1, "hole published exactly once, got {published:?}");
-    let Event::HolePublished { hole: published_hole, .. } = published[0] else { unreachable!() };
+    let published: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HolePublished { .. }))
+        .collect();
+    assert_eq!(
+        published.len(),
+        1,
+        "hole published exactly once, got {published:?}"
+    );
+    let Event::HolePublished {
+        hole: published_hole,
+        ..
+    } = published[0]
+    else {
+        unreachable!()
+    };
     assert_eq!(published_hole.0, hole_before);
 
-    let consumed: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::HoleConsumed { .. })).collect();
-    assert_eq!(consumed.len(), 1, "hole consumed exactly once — the bottom attempt must not consume, got {consumed:?}");
-    let Event::HoleConsumed { hole: consumed_hole, .. } = consumed[0] else { unreachable!() };
-    assert_eq!(consumed_hole.0, hole_before, "the SAME hole survives the bottom-answer fault to be consumed by the valid retry");
+    let consumed: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HoleConsumed { .. }))
+        .collect();
+    assert_eq!(
+        consumed.len(),
+        1,
+        "hole consumed exactly once — the bottom attempt must not consume, got {consumed:?}"
+    );
+    let Event::HoleConsumed {
+        hole: consumed_hole,
+        ..
+    } = consumed[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        consumed_hole.0, hole_before,
+        "the SAME hole survives the bottom-answer fault to be consumed by the valid retry"
+    );
 
     // FIXED (B1 widen): the runtime-fault attempt now logs a Rejected
     // HoleAnswerAttempt too — one Rejected for the bottom-answer fault, one
     // Consumed for the valid retry — closing the audit-trail gap the
     // compile-failure path never had.
-    let attempts: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::HoleAnswerAttempt { .. })).collect();
+    let attempts: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::HoleAnswerAttempt { .. }))
+        .collect();
     assert_eq!(
         attempts.len(),
         2,
@@ -371,25 +569,39 @@ async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
         ..
     } = attempts[0]
     else {
-        panic!("first attempt must be Rejected (the runtime fault), got {:?}", attempts[0]);
+        panic!(
+            "first attempt must be Rejected (the runtime fault), got {:?}",
+            attempts[0]
+        );
     };
-    assert_eq!(h0.0, hole_before, "the rejected attempt references the SAME hole (not consumed)");
+    assert_eq!(
+        h0.0, hole_before,
+        "the rejected attempt references the SAME hole (not consumed)"
+    );
     assert!(
         error.contains("boom"),
         "the logged rejection must name the runtime fault, got:\n{error}"
     );
     assert!(matches!(
         attempts[1],
-        Event::HoleAnswerAttempt { outcome: AnswerOutcome::Consumed, .. }
+        Event::HoleAnswerAttempt {
+            outcome: AnswerOutcome::Consumed,
+            ..
+        }
     ));
 
     // The retry prompt the answerer actually saw names the runtime fault.
-    let saw_retry_prompt = events.iter().any(|e| matches!(
-        e,
-        Event::TurnDelta { role: tidepool_harness::provider::Role::User, content, .. }
-            if content.contains("failed at runtime") && content.contains("boom")
-    ));
-    assert!(saw_retry_prompt, "the answerer must see the runtime fault as its next turn");
+    let saw_retry_prompt = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::TurnDelta { role: tidepool_harness::provider::Role::User, content, .. }
+                if content.contains("failed at runtime") && content.contains("boom")
+        )
+    });
+    assert!(
+        saw_retry_prompt,
+        "the answerer must see the runtime fault as its next turn"
+    );
 
     assert!(events.iter().any(|e| matches!(e, Event::NodeDone { .. })));
 }
@@ -416,9 +628,14 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
-    let root = harness.create_root("dialog root", "Confirm, finish.").unwrap();
+    let root = harness
+        .create_root("dialog root", "Confirm, finish.")
+        .unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to hole");
     assert!(matches!(
         outcome,
         tidepool_harness::TurnOutcome::Suspended {
@@ -474,7 +691,10 @@ async fn dialog_prose_answer_resumes_directly_without_elaboration() {
 
     let root = harness.create_root("dialog root", "Ask, finish.").unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let _ = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    let _ = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to hole");
 
     // Free-text prose answer — the case that used to elaborate.
     harness
@@ -514,7 +734,10 @@ async fn dialog_form_multi_field_decodes_typed_value() {
 
     let root = harness.create_root("form root", "Fill the form.").unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to hole");
     assert!(matches!(
         outcome,
         tidepool_harness::TurnOutcome::Suspended { .. }
@@ -573,9 +796,14 @@ async fn follow_up_after_dialog_resume_to_done() {
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
-    let root = harness.create_root("followup root", "Ask, then finish.").unwrap();
+    let root = harness
+        .create_root("followup root", "Ask, then finish.")
+        .unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to hole");
     assert!(matches!(
         outcome,
         tidepool_harness::TurnOutcome::Suspended { .. }
@@ -593,7 +821,10 @@ async fn follow_up_after_dialog_resume_to_done() {
         .follow_up(root, "now do it again")
         .await
         .expect("follow_up after a resume-to-done must succeed (session kept alive)");
-    assert!(matches!(out, tidepool_harness::TurnOutcome::Completed { .. }));
+    assert!(matches!(
+        out,
+        tidepool_harness::TurnOutcome::Completed { .. }
+    ));
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
 }
 
@@ -609,7 +840,9 @@ async fn follow_up_after_dialog_resume_to_done() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_second_sequential_hole_carries_its_type() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -648,7 +881,10 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
             }
             other => panic!("expected a RunLLMTurn hole, got {other:?}"),
         },
-        other => panic!("root should suspend at the first runLLMTurn, got {}", outcome_tag(other)),
+        other => panic!(
+            "root should suspend at the first runLLMTurn, got {}",
+            outcome_tag(other)
+        ),
     }
 
     // Answer the FIRST hole. This drives the resumed continuation straight

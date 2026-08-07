@@ -126,6 +126,11 @@ struct NodeConvo {
 struct PendingHole {
     hole: HoleId,
     classified: ClassifiedHole,
+    /// The raw suspended request `Value`, kept alongside `classified` (which
+    /// is JSON-shaped, lossy for a `Finalize` hole — its carried value may be
+    /// non-serializable, e.g. a closure). `Harness::take_finalized_value`
+    /// reads the finalize payload straight out of this, never through JSON.
+    raw_request: Value,
 }
 
 /// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
@@ -812,15 +817,15 @@ impl Harness {
                 let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
-                    HoleRouting::Fork { ty, .. } | HoleRouting::RunLLMTurn { ty, .. } => {
-                        ty.clone()
-                    }
+                    HoleRouting::Fork { ty, .. }
+                    | HoleRouting::RunLLMTurn { ty, .. }
+                    | HoleRouting::Finalize { ty, .. } => ty.clone(),
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. } | HoleRouting::RunLLMTurn { site, .. } => {
-                        Some(crate::tree::SiteId(*site))
-                    }
+                    HoleRouting::Fork { site, .. }
+                    | HoleRouting::RunLLMTurn { site, .. }
+                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -836,6 +841,7 @@ impl Harness {
                     PendingHole {
                         hole: HoleId(hole.clone()),
                         classified: classified.clone(),
+                        raw_request: request,
                     },
                 );
                 // A suspended bind: remember the binder+gen so the resume path
@@ -1091,6 +1097,60 @@ impl Harness {
         let table = convo.suspend_table.clone()?;
         drop(convos);
         crate::uiof::ui_of(&table, &ty)
+    }
+
+    /// The harness-level primitive `service_runllm_hole` (self-iterating-
+    /// harness WS-A, `selfharness/driver.rs`) calls once a nested Agent node
+    /// suspends on `finalize @T x` (self-iterating-harness WS-B): read the
+    /// finalized value straight out of the suspended request `Value` (NEVER
+    /// through JSON — it may carry a closure or other non-serializable
+    /// value, per `finalize`'s relaxed function-arrow rule) and terminate
+    /// the node.
+    ///
+    /// `finalize` does NOT resume the Agent (unlike answering a
+    /// `RunLLMTurn`/`Fork` hole via [`Self::drive_answerer_to_value`]) — it
+    /// TERMINATES the node's turn loop and hands the value UP, so this uses
+    /// [`NodeTree::node_cancelled`] (a `Suspended` node has no `node_done`
+    /// transition — that one is reserved for a turn that ran to completion
+    /// from `Running`; `Cancelled` is the tree's only terminal-from-Suspended
+    /// move) with a `"finalized"` reason — a SUCCESSFUL termination, not a
+    /// failure, even though the tree's own state name reads that way; the
+    /// node's session is kept alive past this call, same as any other
+    /// terminal node, so the observatory can still show it. The caller is
+    /// expected to `run_child` the returned `Value` into the OUTER
+    /// (Harness-monad) session to resolve the parent `runLLMTurn` hole,
+    /// zero-copy.
+    ///
+    /// Errors if `node` has no live session, isn't suspended, or its pending
+    /// hole isn't `Finalize`-routed.
+    pub fn take_finalized_value(&self, node: NodeId) -> Result<Value, HarnessError> {
+        let value = {
+            let mut convos = self.convos.lock();
+            let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+            let pending = convo
+                .pending
+                .as_ref()
+                .ok_or(HarnessError::NotSuspended(node))?;
+            if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+                return Err(HarnessError::RoutingMismatch {
+                    node,
+                    routing: "Finalize",
+                    actual: format!("{:?}", pending.classified.routing),
+                });
+            }
+            let Value::Con(_, fields) = &pending.raw_request else {
+                return Err(HarnessError::Resident(
+                    "finalize request was not a Con".into(),
+                ));
+            };
+            let value = fields.get(1).cloned().ok_or_else(|| {
+                HarnessError::Resident("FinalizeWith missing its value field".into())
+            })?;
+            convo.pending = None;
+            value
+        };
+        self.tree.node_cancelled(node, "finalized".to_string())?;
+        Ok(value)
     }
 
     /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
@@ -1895,15 +1955,15 @@ impl Harness {
                 let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
-                    HoleRouting::Fork { ty, .. } | HoleRouting::RunLLMTurn { ty, .. } => {
-                        ty.clone()
-                    }
+                    HoleRouting::Fork { ty, .. }
+                    | HoleRouting::RunLLMTurn { ty, .. }
+                    | HoleRouting::Finalize { ty, .. } => ty.clone(),
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. } | HoleRouting::RunLLMTurn { site, .. } => {
-                        Some(crate::tree::SiteId(*site))
-                    }
+                    HoleRouting::Fork { site, .. }
+                    | HoleRouting::RunLLMTurn { site, .. }
+                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -1919,6 +1979,7 @@ impl Harness {
                     PendingHole {
                         hole: HoleId(hole),
                         classified,
+                        raw_request: request,
                     },
                 );
                 Ok(())

@@ -57,12 +57,25 @@ macro_rules! base_effects {
 }
 
 /// All standard effects in canonical order (the base stack + the interposed
-/// `Ask` effect appended last). Derived from the single-source [`base_effects!`]
-/// list — do not hand-maintain a parallel order here.
+/// `Ask`/`RunLLMTurn` effects appended last, in that order). Derived from the
+/// single-source [`base_effects!`] list — do not hand-maintain a parallel
+/// order here.
+///
+/// `RunLLMTurn` (self-iterating-harness WS-B) was split OUT of `Ask` into its
+/// own effect/union-tag, but stays appended here (not opt-in) so ordinary
+/// eval/repl sessions keep the exact `runLLMTurn`/`runLLMTurnFork`/
+/// `runLLMTurnFanout`/`forkAll`/`forkMap`/`forkCata` availability they had
+/// when those verbs lived inside `Ask`'s helpers — only the wire constructor
+/// (`RunLLMTurnWith` instead of `AskWith`) changed. Both are UNHANDLED
+/// (interposed) tags: no `tidepool-handlers` entry, serviced by each server's
+/// own suspend machinery (see `tidepool-codegen::jit_machine::drive_effect_loop`'s
+/// `suspend_tag` threshold — every tag from the first interposed effect
+/// onward suspends, so appending a second interposed effect here needs no
+/// Rust-side dispatch change).
 pub fn standard_decls() -> Vec<EffectDecl> {
     macro_rules! std_decls_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
-            vec![ $( $crate::$decl() ),*, $crate::ask_decl() ]
+            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl() ]
         };
     }
     crate::base_effects!(std_decls_rows)
@@ -609,8 +622,12 @@ mod tests {
         assert_eq!(a, b);
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
-        assert_eq!(a.last(), Some(&"Ask"));
-        assert_eq!(a.len(), 10);
+        // Ask and RunLLMTurn are both interposed (self-iterating-harness
+        // WS-B split runLLMTurn out of Ask into its own effect), appended in
+        // that order after the base stack — RunLLMTurn is last now, not Ask.
+        assert_eq!(a[9], "Ask");
+        assert_eq!(a.last(), Some(&"RunLLMTurn"));
+        assert_eq!(a.len(), 11);
         // SG was cut (friction #37); the stack must NOT contain it.
         assert!(
             !a.contains(&"SG"),
