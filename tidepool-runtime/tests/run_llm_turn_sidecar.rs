@@ -1,7 +1,7 @@
-//! returnControl (#R0 typed-yield pass, plans/harness-r0/10-extract-pass):
+//! runLLMTurn (#R0 typed-yield pass, plans/harness-r0/10-extract-pass):
 //! extract-side interception + asks.json sidecar tests.
 //!
-//! Positive: a monomorphic `returnControl @Verdict` site under both a branch
+//! Positive: a monomorphic `runLLMTurn @Verdict` site under both a branch
 //! (an opaque NOINLINE'd `Bool`, so GHC can't const-fold away the untaken
 //! arm) and a `mapM` loop (an opaque NOINLINE'd loop bound, so GHC can't
 //! unroll the list literal into separate static call sites) — asserts the
@@ -15,7 +15,7 @@
 //!
 //! Run with the worktree extract binary, e.g.:
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
-//!   cargo test -p tidepool-runtime --test return_control_sidecar
+//!   cargo test -p tidepool-runtime --test run_llm_turn_sidecar
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -39,7 +39,7 @@ fn verdict_helpers() -> &'static str {
 }
 
 fn verdict_code() -> &'static str {
-    // The branch condition is itself an ask reply (`returnControl @Bool
+    // The branch condition is itself an ask reply (`runLLMTurn @Bool
     // "gate"`), NOT a NOINLINE'd top-level CAF: GHC's simplifier turned out
     // to still constant-fold `case someNoinlineCaf of {...}` WITHIN THE SAME
     // module (NOINLINE only blocks CROSS-module inlining of the unfolding,
@@ -48,28 +48,28 @@ fn verdict_code() -> &'static str {
     // NOINLINE). An effect result is genuinely opaque to the simplifier
     // (dispatch happens outside GHC's view), so it can't be folded away.
     //
-    // The two downstream branches instantiate returnControl at DIFFERENT
+    // The two downstream branches instantiate runLLMTurn at DIFFERENT
     // answer types (Verdict vs Outcome): same-type branches
-    // (`returnControl @Verdict a` vs `returnControl @Verdict b`) are one
+    // (`runLLMTurn @Verdict a` vs `runLLMTurn @Verdict b`) are one
     // opaque function applied to two different value arguments, which the
     // simplifier is free to float into ONE call site
-    // (`returnControl @Verdict (if c then a else b)`), merging what source
+    // (`runLLMTurn @Verdict (if c then a else b)`), merging what source
     // looks like two occurrences into one. Differing answer types block that
     // merge (Core has no value-level case over types) — this is also why the
     // spec's own example uses `@A`/`@B`, not `@A`/`@A`. Both branches are
     // voided to `M ()` (`>> pure ()`) since `if`/`then`/`else` needs one
     // unifiable type and Verdict/Outcome differ on purpose.
     "do\n\
-     \x20 gate <- returnControl @Bool \"gate\"\n\
-     \x20 _ <- if gate then (returnControl @Verdict \"branch-true\" >> pure ()) else (returnControl @Outcome \"branch-false\" >> pure ())\n\
-     \x20 _ <- mapM (\\i -> returnControl @Verdict (T.pack (show (i :: Int)))) [1 .. loopCount]\n\
+     \x20 gate <- runLLMTurn @Bool \"gate\"\n\
+     \x20 _ <- if gate then (runLLMTurn @Verdict \"branch-true\" >> pure ()) else (runLLMTurn @Outcome \"branch-false\" >> pure ())\n\
+     \x20 _ <- mapM (\\i -> runLLMTurn @Verdict (T.pack (show (i :: Int)))) [1 .. loopCount]\n\
      \x20 pure (toJSON (42 :: Int))\n"
 }
 
 /// Records every dispatched Ask request's `"typedSite"` payload field.
 /// Answers the FIRST dispatch (the `Bool` gate, which IS pattern-matched by
 /// `if gate then ...`) with a real `True` Con looked up from the table;
-/// every other dispatch's returnControl bind is discarded (`_ <-`) so a
+/// every other dispatch's runLLMTurn bind is discarded (`_ <-`) so a
 /// throwaway `Value` never gets forced.
 struct SiteRecorder {
     sites: Vec<i64>,
@@ -115,7 +115,7 @@ impl DispatchEffect<()> for SiteRecorder {
 }
 
 #[test]
-fn returncontrol_site_ids_match_under_branch_and_loop() {
+fn runllmturn_site_ids_match_under_branch_and_loop() {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -142,7 +142,7 @@ fn returncontrol_site_ids_match_under_branch_and_loop() {
     assert_eq!(
         recorder.sites.len(),
         5,
-        "expected 5 returnControl dispatches (gate + branch + 3 loop), got {:?}",
+        "expected 5 runLLMTurn dispatches (gate + branch + 3 loop), got {:?}",
         recorder.sites
     );
     let (gate_and_branch, loop_sites) = recorder.sites.split_at(2);
@@ -175,7 +175,7 @@ fn returncontrol_site_ids_match_under_branch_and_loop() {
     assert_eq!(
         asks.as_array().map(|a| a.len()),
         Some(4),
-        "expected 4 returnControl sites (gate, branch-true, branch-false, loop), got {asks}"
+        "expected 4 runLLMTurn sites (gate, branch-true, branch-false, loop), got {asks}"
     );
     let mut sidecar_sites = Vec::new();
     let mut sidecar_types = Vec::new();
@@ -236,27 +236,27 @@ fn returncontrol_site_ids_match_under_branch_and_loop() {
 }
 
 #[test]
-fn returncontrol_rejects_polymorphic_site() {
+fn runllmturn_rejects_polymorphic_site() {
     // `@a` needs a real ScopedTypeVariables binder to be in scope (a bare `@a`
     // in `code` is just an out-of-scope type variable, a Haskell scoping
     // error unrelated to this feature) — a NOINLINE wrapper with its own
-    // `forall a` gives `returnControl` a genuinely free type variable at its
-    // call site, exactly the shape `checkReturnControlType` must reject.
+    // `forall a` gives `runLLMTurn` a genuinely free type variable at its
+    // call site, exactly the shape `checkRunLLMTurnType` must reject.
     let helpers = "{-# NOINLINE polySite #-}\n\
                    polySite :: forall a. Text -> M a\n\
-                   polySite prompt = returnControl @a prompt\n";
-    let err = try_compile_returncontrol("polySite \"poly\"", helpers)
-        .expect_err("a polymorphic returnControl site must fail extract");
+                   polySite prompt = runLLMTurn @a prompt\n";
+    let err = try_compile_runllmturn("polySite \"poly\"", helpers)
+        .expect_err("a polymorphic runLLMTurn site must fail extract");
     assert!(
-        err.contains("polymorphic returnControl site"),
+        err.contains("polymorphic runLLMTurn site"),
         "expected the polymorphic-site error text, got:\n{err}"
     );
 }
 
 #[test]
-fn returncontrol_rejects_function_typed_site() {
-    let err = try_compile_returncontrol("returnControl @(Int -> Int) \"fn\"", "")
-        .expect_err("a function-typed returnControl site must fail extract");
+fn runllmturn_rejects_function_typed_site() {
+    let err = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "")
+        .expect_err("a function-typed runLLMTurn site must fail extract");
     assert!(
         err.contains("function-typed answers not supported in R0"),
         "expected the function-typed-site error text, got:\n{err}"
@@ -264,9 +264,9 @@ fn returncontrol_rejects_function_typed_site() {
 }
 
 #[test]
-fn returncontrol_accepts_monomorphic_data_site() {
-    let src_result = try_compile_returncontrol(
-        "returnControl @Verdict \"ok\"",
+fn runllmturn_accepts_monomorphic_data_site() {
+    let src_result = try_compile_runllmturn(
+        "runLLMTurn @Verdict \"ok\"",
         "data Verdict = Approve | Reject deriving (Show)",
     );
     assert!(
@@ -276,11 +276,11 @@ fn returncontrol_accepts_monomorphic_data_site() {
     );
 }
 
-/// Compile `hole` (an expression using `returnControl`, `>>= const (pure ())`'d
+/// Compile `hole` (an expression using `runLLMTurn`, `>>= const (pure ())`'d
 /// away so its polymorphic/never-forced result never needs a concrete
 /// instantiation beyond the explicit `@T`) via the REAL eval pipeline,
 /// returning the classified error message on failure.
-fn try_compile_returncontrol(hole: &str, helpers: &str) -> Result<(), String> {
+fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -304,7 +304,7 @@ fn try_compile_returncontrol(hole: &str, helpers: &str) -> Result<(), String> {
 // Tidepool.Translate's forkMap/forkCata case arm for the implementation.
 // ---------------------------------------------------------------------------
 
-/// Same as `try_compile_returncontrol`, but imports `Tidepool.Fork` so
+/// Same as `try_compile_runllmturn`, but imports `Tidepool.Fork` so
 /// `forkMap`/`forkCata` are in scope.
 fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
     let decls = tidepool_mcp::standard_decls();
@@ -337,9 +337,9 @@ fn forkmap_accepts_monomorphic_answer_type() {
 }
 
 /// The forkMap @Verdict call site's asks.json entry is INDISTINGUISHABLE in
-/// shape from a bare `returnControlFanout @Verdict` site — same "[Verdict]"
+/// shape from a bare `runLLMTurnFanout @Verdict` site — same "[Verdict]"
 /// type string, same single-entry sidecar — because forkMapSited routes
-/// through exactly one returnControlFanoutSited dispatch.
+/// through exactly one runLLMTurnFanoutSited dispatch.
 #[test]
 fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
     let decls = tidepool_mcp::standard_decls();
@@ -375,7 +375,7 @@ fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
 
 #[test]
 fn forkmap_rejects_polymorphic_answer_type() {
-    // Mirrors `returncontrol_rejects_polymorphic_site`: a NOINLINE wrapper
+    // Mirrors `runllmturn_rejects_polymorphic_site`: a NOINLINE wrapper
     // with its own `forall b` gives forkMap a genuinely free type variable
     // at its call site.
     let helpers = "{-# NOINLINE polyForkMap #-}\n\
@@ -384,7 +384,7 @@ fn forkmap_rejects_polymorphic_answer_type() {
     let err = try_compile_forkmap("polyForkMap (\\x -> T.pack (show x)) [1, 2, 3]", helpers)
         .expect_err("a polymorphic forkMap site must fail extract");
     assert!(
-        err.contains("polymorphic returnControl site"),
+        err.contains("polymorphic runLLMTurn site"),
         "expected the (shared) polymorphic-site error text, got:\n{err}"
     );
 }

@@ -1,14 +1,14 @@
-//! PRD §11 acceptance coverage for the IN-CONTEXT `returnControl` path
-//! (`Harness::answer_return_control`) — spec-flagged as "built but not
+//! PRD §11 acceptance coverage for the IN-CONTEXT `runLLMTurn` path
+//! (`Harness::answer_run_llm_turn`) — spec-flagged as "built but not
 //! test-exercised" (FREEZES.md "Known-thin"). Record-replay, CI-shaped, zero
 //! live calls — same harness (production entry point), same GHC-tier gate as
 //! `golden_path.rs`.
 //!
 //! Coverage map (plans/harness-r0/PRD.md §11 / WIDEN.md §A3):
-//!   - hole publishes with rendered type -> return_control_end_to_end_...
-//!   - ill-typed resume rejected verbatim, continuation intact -> return_control_end_to_end_...
-//!   - answer_return_control exercised end-to-end -> return_control_end_to_end_...
-//!   - bottom answer does not consume -> return_control_bottom_answer_...
+//!   - hole publishes with rendered type -> run_llm_turn_end_to_end_...
+//!   - ill-typed resume rejected verbatim, continuation intact -> run_llm_turn_end_to_end_...
+//!   - answer_run_llm_turn exercised end-to-end -> run_llm_turn_end_to_end_...
+//!   - bottom answer does not consume -> run_llm_turn_bottom_answer_...
 //!     (this one surfaced a production-path finding — see its doc comment)
 
 use std::sync::Arc;
@@ -97,18 +97,18 @@ fn event_node(e: &Event) -> Option<NodeId> {
     }
 }
 
-/// `returnControl @Int "..."` (NOT `returnControlFork`) — the same node
-/// answers in its own context. `answer_return_control` has never been
-/// exercised by any existing test (golden_path.rs and return_control_sidecar.rs
+/// `runLLMTurn @Int "..."` (NOT `runLLMTurnFork`) — the same node
+/// answers in its own context. `answer_run_llm_turn` has never been
+/// exercised by any existing test (golden_path.rs and run_llm_turn_sidecar.rs
 /// both drive the FORK verb, or the extract-only rejection paths).
 ///
 /// This test drives the full arc through the Harness (the production entry
 /// point, not `fold_tree_state` or a hand-built `NodeTree`):
 ///
-///   1. root suspends on a `returnControl @Int` hole — asserts the published
+///   1. root suspends on a `runLLMTurn @Int` hole — asserts the published
 ///      hole's routing carries the RENDERED type ("Int") from the asks.json
 ///      sidecar (A1).
-///   2. `answer_return_control` drives the SAME node's own turn loop to an
+///   2. `answer_run_llm_turn` drives the SAME node's own turn loop to an
 ///      answer. Its first attempt (`resume "nope"`) is ill-typed — asserts
 ///      the retry is a REJECTED `HoleAnswerAttempt` (continuation intact: no
 ///      `HoleConsumed` yet, same hole id throughout) whose logged error text
@@ -117,7 +117,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
 ///   3. the corrected attempt (`resume (42 :: Int)`) compiles, resumes the
 ///      parent, and the node completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn return_control_end_to_end_type_retry_and_answer() {
+async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
         return;
@@ -130,7 +130,7 @@ async fn return_control_end_to_end_type_retry_and_answer() {
 
     let replies = vec![
         reply(
-            "```haskell\ndo\n  n <- returnControl @Int \"pick a number between 1 and 100\"\n  \
+            "```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number between 1 and 100\"\n  \
              pure (toJSON n)\n```",
         ),
         // Deliberately ill-typed: a String where Int is wanted.
@@ -153,18 +153,18 @@ async fn return_control_end_to_end_type_retry_and_answer() {
     let hole_before = match outcome {
         tidepool_harness::TurnOutcome::Suspended { hole, classified, .. } => {
             match &classified.routing {
-                HoleRouting::ReturnControl { ty, .. } => {
+                HoleRouting::RunLLMTurn { ty, .. } => {
                     assert_eq!(
                         ty.as_deref(),
                         Some("Int"),
                         "the published hole must carry the RENDERED answer type from asks.json, got {ty:?}"
                     );
                 }
-                other => panic!("expected a ReturnControl hole, got {other:?}"),
+                other => panic!("expected a RunLLMTurn hole, got {other:?}"),
             }
             hole
         }
-        other => panic!("root should suspend at returnControl, got {}", outcome_tag(&other)),
+        other => panic!("root should suspend at runLLMTurn, got {}", outcome_tag(&other)),
     };
     assert!(matches!(
         harness.tree().state(root),
@@ -173,7 +173,7 @@ async fn return_control_end_to_end_type_retry_and_answer() {
 
     // Drive the in-context answer: ill-typed retry, then the valid answer.
     harness
-        .answer_return_control(root)
+        .answer_run_llm_turn(root)
         .await
         .expect("return-control answered end to end incl. the GHC retry");
 
@@ -274,7 +274,7 @@ async fn return_control_end_to_end_type_retry_and_answer() {
     );
 }
 
-/// A deliberately BOTTOM answer (`error "boom"`) to a `returnControl @Int`
+/// A deliberately BOTTOM answer (`error "boom"`) to a `runLLMTurn @Int`
 /// hole. `error "boom" :: Int` TYPE-CHECKS (extract accepts it — `error` is
 /// `forall a. ... -> a`), so this is NOT the ill-typed-retry path (that one's
 /// covered above); the fault is a RUNTIME error.
@@ -297,7 +297,7 @@ async fn return_control_end_to_end_type_retry_and_answer() {
 /// audit trail now shows every attempt (bottom answers included), not just
 /// the one that eventually consumes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
+async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available");
         return;
@@ -310,7 +310,7 @@ async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
 
     let replies = vec![
         reply(
-            "```haskell\ndo\n  n <- returnControl @Int \"pick a number\"\n  pure (toJSON n)\n```",
+            "```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number\"\n  pure (toJSON n)\n```",
         ),
         // Type-checks (Int), but forcing it is a Haskell `error` call — a
         // RUNTIME fault, not a compile rejection.
@@ -326,11 +326,11 @@ async fn return_control_bottom_answer_faults_before_consumption_and_retries() {
     let outcome = harness.run_to_hole_or_done(root).await.expect("drives to hole");
     let hole_before = match outcome {
         tidepool_harness::TurnOutcome::Suspended { hole, .. } => hole,
-        other => panic!("root should suspend at returnControl, got {}", outcome_tag(&other)),
+        other => panic!("root should suspend at runLLMTurn, got {}", outcome_tag(&other)),
     };
 
     harness
-        .answer_return_control(root)
+        .answer_run_llm_turn(root)
         .await
         .expect("recovers via retry after the runtime fault");
 
@@ -597,17 +597,17 @@ async fn follow_up_after_dialog_resume_to_done() {
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
 }
 
-/// A SECOND, sequential `returnControl` hole in the SAME compiled turn — the
+/// A SECOND, sequential `runLLMTurn` hole in the SAME compiled turn — the
 /// resumed continuation (`Session::resume`) hits another `AskWith` before the
 /// do-block completes. This is the re-suspend arm of `resume_parent`: it must
-/// classify + publish the second hole's REAL site + type (`HoleRouting::ReturnControl
+/// classify + publish the second hole's REAL site + type (`HoleRouting::RunLLMTurn
 /// { ty: Some("Bool"), .. }`), not the `None`/`None` a stale re-suspend used to
 /// carry. Also proves the typed-answer path works on hole 2: the mechanical
 /// `Ui::Choice` form is derivable from the SAME `Bool` type via
 /// `pending_derived_ui`, and answering it (in-context, via
-/// `answer_return_control` again) resumes the continuation to completion.
+/// `answer_run_llm_turn` again) resumes the continuation to completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn return_control_second_sequential_hole_carries_its_type() {
+async fn run_llm_turn_second_sequential_hole_carries_its_type() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
         return;
@@ -619,10 +619,10 @@ async fn return_control_second_sequential_hole_carries_its_type() {
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
 
     let replies = vec![
-        // Root turn: two SEQUENTIAL returnControl holes in one compiled block.
+        // Root turn: two SEQUENTIAL runLLMTurn holes in one compiled block.
         reply(
-            "```haskell\ndo\n  n <- returnControl @Int \"pick a number between 1 and 100\"\n  \
-             b <- returnControl @Bool \"is it even?\"\n  pure (toJSON (n, b))\n```",
+            "```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number between 1 and 100\"\n  \
+             b <- runLLMTurn @Bool \"is it even?\"\n  pure (toJSON (n, b))\n```",
         ),
         // Answers the FIRST hole (Int).
         reply("```haskell\nresume (42 :: Int)\n```"),
@@ -643,18 +643,18 @@ async fn return_control_second_sequential_hole_carries_its_type() {
         .expect("root drives to its first hole");
     match &outcome {
         tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::ReturnControl { ty, .. } => {
+            HoleRouting::RunLLMTurn { ty, .. } => {
                 assert_eq!(ty.as_deref(), Some("Int"), "first hole carries Int");
             }
-            other => panic!("expected a ReturnControl hole, got {other:?}"),
+            other => panic!("expected a RunLLMTurn hole, got {other:?}"),
         },
-        other => panic!("root should suspend at the first returnControl, got {}", outcome_tag(other)),
+        other => panic!("root should suspend at the first runLLMTurn, got {}", outcome_tag(other)),
     }
 
     // Answer the FIRST hole. This drives the resumed continuation straight
-    // into the SECOND returnControl — the re-suspend arm under test.
+    // into the SECOND runLLMTurn — the re-suspend arm under test.
     harness
-        .answer_return_control(root)
+        .answer_run_llm_turn(root)
         .await
         .expect("first hole answered; resume hits the second hole");
 
@@ -669,8 +669,8 @@ async fn return_control_second_sequential_hole_carries_its_type() {
         .pending_hole(root)
         .expect("root is suspended on the second hole");
     let (second_site, second_ty) = match &second_pending.routing {
-        HoleRouting::ReturnControl { site, ty } => (*site, ty.clone()),
-        other => panic!("second hole must also be a ReturnControl, got {other:?}"),
+        HoleRouting::RunLLMTurn { site, ty } => (*site, ty.clone()),
+        other => panic!("second hole must also be a RunLLMTurn, got {other:?}"),
     };
     assert_eq!(
         second_ty.as_deref(),
@@ -717,7 +717,7 @@ async fn return_control_second_sequential_hole_carries_its_type() {
     // Answer the SECOND hole and drive the program to completion — proves the
     // typed-answer path is not just classified correctly but actually usable.
     harness
-        .answer_return_control(root)
+        .answer_run_llm_turn(root)
         .await
         .expect("second hole answered; the program completes");
     assert_eq!(

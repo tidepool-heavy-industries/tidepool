@@ -4,7 +4,7 @@
 -- | Recursion-scheme fork combinators (Wave C — TARGET.md §1 D1 ruling: the
 -- agent-facing parallel surface is park-at-fork plus recursion-scheme
 -- combinators, the LspGraph idiom — scheme traverses, forked answerers
--- judge). Pure composition over 'returnControlFanout' (F3) — no new effect
+-- judge). Pure composition over 'runLLMTurnFanout' (F3) — no new effect
 -- verbs, no new 'Ask' constructors.
 --
 -- __'forkMap'\/'forkCata' (combinator-sites widen).__ These need a
@@ -12,26 +12,26 @@
 -- did. That used to be a hard extraction-pipeline wall — see the
 -- combinator-sites plan's evidence trail — because a caller-generic
 -- wrapper's own definition necessarily has @b@ free (universally
--- quantified), and extract rejects a 'returnControlFanout' occurrence whose
+-- quantified), and extract rejects a 'runLLMTurnFanout' occurrence whose
 -- answer type still carries a free type variable. The wall is closed by a
 -- NEW extract-level mechanism (@Tidepool.Translate@ recognizes 'forkMap'\/
--- 'forkCata' by name, exactly like 'returnControl'\/'returnControlFork'\/
--- 'returnControlFanout' themselves), so the answer type is captured at the
+-- 'forkCata' by name, exactly like 'runLLMTurn'\/'runLLMTurnFork'\/
+-- 'runLLMTurnFanout' themselves), so the answer type is captured at the
 -- USER CALL SITE — where the type application is concrete — instead of
 -- inside these combinators' own (necessarily still-generic) bodies.
 --
 -- 'forkMap'\/'forkCata' are therefore OPAQUE stubs, dead at runtime by
 -- construction: every well-formed call site gets head-swapped by extract to
--- the @*Sited@ sibling below (mirroring 'returnControl'\/
--- 'returnControlSited'). A call site extract CANNOT rewrite (partial
+-- the @*Sited@ sibling below (mirroring 'runLLMTurn'\/
+-- 'runLLMTurnSited'). A call site extract CANNOT rewrite (partial
 -- application, or the answer type still a free type variable at that call
 -- site) fails AT EXTRACT, naming the site — there is no runtime fallback:
 -- each stub's own body DOES call its @*Sited@ sibling (needed so the
 -- sibling stays reachable from a real call site — extract's own
 -- reachability walk runs over ORIGINAL, pre-interception Core, so it has no
 -- way to know a head-swap is coming; the sibling must already be
--- transitively referenced, exactly how 'returnControl' keeps
--- 'returnControlSited' reachable), but the site-id argument it passes is
+-- transitively referenced, exactly how 'runLLMTurn' keeps
+-- 'runLLMTurnSited' reachable), but the site-id argument it passes is
 -- 'error' — a bottom value, forced (as ordinary 'Int' JSON payload data) the
 -- instant this path is ever actually reached, so it still fails loudly
 -- rather than silently doing the wrong thing.
@@ -48,35 +48,35 @@ module Tidepool.Fork
 import Prelude
 import Data.Text (Text)
 
-import Tidepool.Effects (M, returnControlFanout, returnControlFanoutSited)
+import Tidepool.Effects (M, runLLMTurnFanout, runLLMTurnFanoutSited)
 
 -- | One fanout over 'Bool' verdicts; keep the elements whose verdict is
 -- 'True', in the original order.
 forkFilter :: (a -> Text) -> [a] -> M [a]
 forkFilter mkPrompt xs = do
-  verdicts <- returnControlFanout (map mkPrompt xs)
+  verdicts <- runLLMTurnFanout (map mkPrompt xs)
   pure (map fst (filter snd (zip xs verdicts)))
 
 -- | 'forkAll' — N sub-agents in parallel, @mapConcurrently@-shaped: one
 -- prompt per element, parked once, answered together as a typed batch in
 -- original order. The answer type @a@ is picked by an explicit type
 -- application at the call site (@forkAll \@T prompts@), exactly like a bare
--- 'returnControlFanout' call — 'forkAll'\'s shape is structurally IDENTICAL
--- to 'returnControlFanout'\'s, so extract's @Translate.hs@ recognizes it by
--- name (mirroring 'returnControl'\/'returnControlFork'\/'returnControlFanout')
+-- 'runLLMTurnFanout' call — 'forkAll'\'s shape is structurally IDENTICAL
+-- to 'runLLMTurnFanout'\'s, so extract's @Translate.hs@ recognizes it by
+-- name (mirroring 'runLLMTurn'\/'runLLMTurnFork'\/'runLLMTurnFanout')
 -- and head-swaps every well-formed call site straight to the EXISTING
--- 'returnControlFanoutSited' sibling — no separate @forkAllSited@ needed.
+-- 'runLLMTurnFanoutSited' sibling — no separate @forkAllSited@ needed.
 --
 -- Dead at runtime, same discipline as 'forkMap' (see its haddock): every
 -- extractable call site is head-swapped before this body ever runs; the
 -- bottom site-id forces an immediate 'error' if reached anyway.
 {-# OPAQUE forkAll #-}
 forkAll :: forall a. [Text] -> M [a]
-forkAll prompts = returnControlFanoutSited unreachableSiteId prompts
+forkAll prompts = runLLMTurnFanoutSited unreachableSiteId prompts
   where
     unreachableSiteId = error
       "forkAll: unreachable — extract must head-swap every well-formed \
-      \call site to returnControlFanoutSited; reaching this body means a \
+      \call site to runLLMTurnFanoutSited; reaching this body means a \
       \call site was not fully applied or its answer type was not resolved \
       \to a concrete type, which extract should already have rejected"
 
@@ -84,7 +84,7 @@ forkAll prompts = returnControlFanoutSited unreachableSiteId prompts
 -- prompt per element, park once, and answer with the batch of typed
 -- verdicts in original order. The answer type @b@ is the FIRST type
 -- argument (mirrors a single explicit @forkMap \@T@ application, exactly
--- like 'Tidepool.Effects.returnControl'); the element type @a@ is inferred
+-- like 'Tidepool.Effects.runLLMTurn'); the element type @a@ is inferred
 -- from the list argument and is never checked at extract — it never
 -- crosses the suspend boundary, only @b@ does.
 --
@@ -105,14 +105,14 @@ forkMap mkPrompt xs = forkMapSited unreachableSiteId mkPrompt xs
 
 -- | The real 'forkMap' logic, reached ONLY via extract's head-swap (a fresh
 -- literal site-id prepended at the ORIGINAL 'forkMap' call site — never
--- synthesized here). Routes through exactly ONE 'returnControlFanoutSited'
+-- synthesized here). Routes through exactly ONE 'runLLMTurnFanoutSited'
 -- dispatch, so every AskWith payload this site's id ever tags really does
--- carry the same @[b]@-shaped fanout a bare 'returnControlFanout' site
+-- carry the same @[b]@-shaped fanout a bare 'runLLMTurnFanout' site
 -- would — the asks.json sidecar entry extract records for the ORIGINAL call
 -- site describes this dispatch precisely.
 {-# OPAQUE forkMapSited #-}
 forkMapSited :: forall b a. Int -> (a -> Text) -> [a] -> M [b]
-forkMapSited sid mkPrompt xs = returnControlFanoutSited sid (map mkPrompt xs)
+forkMapSited sid mkPrompt xs = runLLMTurnFanoutSited sid (map mkPrompt xs)
 
 -- | Multi-way tree for 'forkCata'. A distinct constructor name from
 -- @Data.Tree@'s @Node@ — which collides with freer-simple's always-in-scope
@@ -142,7 +142,7 @@ forkCata mkPrompt t = forkCataSited unreachableSiteId mkPrompt t
 
 -- | The real 'forkCata' logic, reached ONLY via extract's head-swap (see
 -- 'forkMapSited'). A node's DIRECT children are batched into ONE
--- 'returnControlFanoutSited' call — each child's own prompt is built by
+-- 'runLLMTurnFanoutSited' call — each child's own prompt is built by
 -- first recursively resolving ITS children the same way, so a level always
 -- fans out only once its dependencies (its own children's verdicts) are
 -- ready. This node's own prompt (built from the already-known batch of
@@ -155,7 +155,7 @@ forkCata mkPrompt t = forkCataSited unreachableSiteId mkPrompt t
 forkCataSited :: forall b a. Int -> (a -> [b] -> Text) -> RoseTree a -> M b
 forkCataSited sid mkPrompt root = do
   prompt <- promptFor root
-  answers <- returnControlFanoutSited sid [prompt]
+  answers <- runLLMTurnFanoutSited sid [prompt]
   case answers of
     [ans] -> pure ans
     _     -> error "forkCataSited: singleton fanout returned a non-singleton batch"
@@ -166,5 +166,5 @@ forkCataSited sid mkPrompt root = do
         [] -> pure []
         cs -> do
           childPrompts <- mapM promptFor cs
-          returnControlFanoutSited sid childPrompts
+          runLLMTurnFanoutSited sid childPrompts
       pure (mkPrompt x childAnswers)

@@ -35,7 +35,7 @@ use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
 /// Ask's position in the standard effect stack (see
-/// `return_control_sidecar.rs`'s `ASK_TAG` doc: 9 base effects at tags 0..8,
+/// `run_llm_turn_sidecar.rs`'s `ASK_TAG` doc: 9 base effects at tags 0..8,
 /// Ask interposed last at tag 9).
 const ASK_TAG: u64 = 9;
 
@@ -1079,9 +1079,9 @@ choice missing colon
 // Tidepool.Fork (Wave C) — forkFilter compiles and runs on the JIT.
 //
 // `forkMap`/`forkCata` (a CALLER-chosen answer type `b`) are NOT shipped:
-// extract statically rejects a `returnControlFanout` occurrence whose
+// extract statically rejects a `runLLMTurnFanout` occurrence whose
 // answer type still carries a free type variable
-// (`Tidepool.Translate.checkReturnControlType`), and closing that gap for a
+// (`Tidepool.Translate.checkRunLLMTurnType`), and closing that gap for a
 // library-defined generic wrapper would require GHC to duplicate the
 // wrapper's definition (type-substituted) into every call site before
 // extract ever sees the Core — empirically, neither `{-# INLINE #-}` nor an
@@ -1090,11 +1090,11 @@ choice missing colon
 // generic, un-inlined top-level binding). See `Tidepool.Fork`'s module
 // haddock for the full finding. `forkFilter` has no such requirement — its
 // fanout always answers a fixed `Bool` — so it's the one combinator that
-// composes over `returnControlFanout` cleanly.
+// composes over `runLLMTurnFanout` cleanly.
 //
 // Unlike `works`/`works_with_imports` (NullDispatcher), a
-// `returnControlFanout` site genuinely dispatches an `Ask` effect (tag 9,
-// same as `return_control_sidecar.rs`'s `ASK_TAG`) — this probe answers it
+// `runLLMTurnFanout` site genuinely dispatches an `Ask` effect (tag 9,
+// same as `run_llm_turn_sidecar.rs`'s `ASK_TAG`) — this probe answers it
 // with a scripted `DispatchEffect` so the eval runs straight through to a
 // final value, exactly as a harness-driven `answer_fanout` would.
 // ---------------------------------------------------------------------------
@@ -1139,7 +1139,7 @@ impl DispatchEffect<()> for BoolListOnce {
 }
 
 /// `forkFilter` (`Tidepool.Fork`, Wave C) runs on the JIT: answers a REAL
-/// `returnControlFanout` dispatch (not a NullDispatcher stub), keeping only
+/// `runLLMTurnFanout` dispatch (not a NullDispatcher stub), keeping only
 /// the elements whose scripted verdict is `True`, in original order.
 #[test]
 fn works_fork() {
@@ -1175,7 +1175,7 @@ impl DispatchEffect<()> for IntListOnce {
 
 /// `forkMap` (`Tidepool.Fork`, combinator-sites widen) runs end to end on the
 /// JIT: a CALLER-chosen answer type (`@Int`, not forkFilter's fixed `Bool`)
-/// reaches a REAL `returnControlFanout`-shaped dispatch — the mechanism
+/// reaches a REAL `runLLMTurnFanout`-shaped dispatch — the mechanism
 /// `Tidepool.Fork`'s module haddock and `works_fork`'s doc comment describe
 /// as the previously-blocked wall, closed by the combinator-sites extract
 /// pass.

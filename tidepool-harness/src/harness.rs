@@ -812,13 +812,13 @@ impl Harness {
                 let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
-                    HoleRouting::Fork { ty, .. } | HoleRouting::ReturnControl { ty, .. } => {
+                    HoleRouting::Fork { ty, .. } | HoleRouting::RunLLMTurn { ty, .. } => {
                         ty.clone()
                     }
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. } | HoleRouting::ReturnControl { site, .. } => {
+                    HoleRouting::Fork { site, .. } | HoleRouting::RunLLMTurn { site, .. } => {
                         Some(crate::tree::SiteId(*site))
                     }
                     _ => None,
@@ -1074,7 +1074,7 @@ impl Harness {
     }
 
     /// The SERVER-DERIVED `Ui` form (§6 D6, `uiof::ui_of`) for a
-    /// `returnControl`/`returnControlFork` hole on `node`, when the answer
+    /// `runLLMTurn`/`runLLMTurnFork` hole on `node`, when the answer
     /// type maps mechanically — what the hole card renders IN ADDITION TO
     /// the raw Code+eval card, when `Some`. `None` when the node isn't
     /// suspended on such a hole, its answer type is unknown, or `uiof::ui_of`
@@ -1084,7 +1084,7 @@ impl Harness {
         let convo = convos.get(&node)?;
         let pending = convo.pending.as_ref()?;
         let ty = match &pending.classified.routing {
-            HoleRouting::ReturnControl { ty: Some(ty), .. }
+            HoleRouting::RunLLMTurn { ty: Some(ty), .. }
             | HoleRouting::Fork { ty: Some(ty), .. } => ty.clone(),
             _ => return None,
         };
@@ -1143,7 +1143,7 @@ impl Harness {
     }
 
     /// Force + drive a FORK answerer for `node`'s pending fork hole (a plain
-    /// `returnControlFork`, `fan: None` — a `returnControlFanout` hole
+    /// `runLLMTurnFork`, `fan: None` — a `runLLMTurnFanout` hole
     /// routes to [`Self::answer_fanout`] instead). Registers a child node
     /// (transcript forked at the parent's current turn), forces it, drives
     /// its turn loop until it produces an answering block, runs that block
@@ -1193,7 +1193,7 @@ impl Harness {
     }
 
     /// Force + drive a FANOUT answerer set for `node`'s pending fanout hole
-    /// (`returnControlFanout @T`, `HoleRouting::Fork` with `fan: Some(_)`).
+    /// (`runLLMTurnFanout @T`, `HoleRouting::Fork` with `fan: Some(_)`).
     /// One park, N thunk children — each registered under `node` (transcript
     /// forked at the checkpoint, same discipline as [`Self::answer_fork`]),
     /// forced, and driven to an answering value IN DECLARATION ORDER: children
@@ -1274,10 +1274,10 @@ impl Harness {
         Ok(children)
     }
 
-    /// Answer an in-context `returnControl` hole: the SAME node's model writes
+    /// Answer an in-context `runLLMTurn` hole: the SAME node's model writes
     /// `resume expr`, which runs via `run_child` against the (suspended) node's
     /// own session to produce the Value, then resumes it. No child node.
-    pub async fn answer_return_control(&self, node: NodeId) -> Result<(), HarnessError> {
+    pub async fn answer_run_llm_turn(&self, node: NodeId) -> Result<(), HarnessError> {
         let pending = self
             .convos
             .lock()
@@ -1285,11 +1285,11 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         let ty = match &pending.classified.routing {
-            HoleRouting::ReturnControl { ty, .. } => ty.clone(),
+            HoleRouting::RunLLMTurn { ty, .. } => ty.clone(),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
-                    routing: "return_control",
+                    routing: "run_llm_turn",
                     actual: format!("{other:?}"),
                 })
             }
@@ -1307,7 +1307,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Answer a `returnControl`/`returnControlFork` hole MECHANICALLY (§6 D6)
+    /// Answer a `runLLMTurn`/`runLLMTurnFork` hole MECHANICALLY (§6 D6)
     /// from its server-derived form ([`Self::pending_derived_ui`]): ZERO model
     /// turns. `submission` is F1's `{values, prose}` answer encoding; a
     /// non-empty `prose` is NOT mechanical (that's the elaboration path's
@@ -1317,10 +1317,10 @@ impl Harness {
     /// derived `Ui`; the result is compiled as `resume <expr>` (specialized
     /// to the hole's answer type, same as the model-driven answerer) and run
     /// via `run_child` against `node`'s own suspended session, then resumes
-    /// it — the same discipline [`Self::answer_return_control`] uses, minus
+    /// it — the same discipline [`Self::answer_run_llm_turn`] uses, minus
     /// the model loop. Any failure to derive a form or map the submission is
     /// [`HarnessError::NoDerivedForm`] — the caller falls back to
-    /// [`Self::answer_return_control`]/[`Self::answer_fork`].
+    /// [`Self::answer_run_llm_turn`]/[`Self::answer_fork`].
     pub async fn answer_mechanical(
         &self,
         node: NodeId,
@@ -1333,7 +1333,7 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         let ty = match &pending.classified.routing {
-            HoleRouting::ReturnControl { ty: Some(ty), .. }
+            HoleRouting::RunLLMTurn { ty: Some(ty), .. }
             | HoleRouting::Fork { ty: Some(ty), .. } => ty.clone(),
             other => {
                 return Err(HarnessError::RoutingMismatch {
@@ -1895,13 +1895,13 @@ impl Harness {
                 let classified = engine::classify_hole(&request, &table, &asks);
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
-                    HoleRouting::Fork { ty, .. } | HoleRouting::ReturnControl { ty, .. } => {
+                    HoleRouting::Fork { ty, .. } | HoleRouting::RunLLMTurn { ty, .. } => {
                         ty.clone()
                     }
                     _ => None,
                 };
                 let site = match &classified.routing {
-                    HoleRouting::Fork { site, .. } | HoleRouting::ReturnControl { site, .. } => {
+                    HoleRouting::Fork { site, .. } | HoleRouting::RunLLMTurn { site, .. } => {
                         Some(crate::tree::SiteId(*site))
                     }
                     _ => None,

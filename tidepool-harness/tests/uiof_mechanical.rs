@@ -1,4 +1,4 @@
-//! GHC-tier: a `returnControl @Verdict` hole answered MECHANICALLY (§6 D6,
+//! GHC-tier: a `runLLMTurn @Verdict` hole answered MECHANICALLY (§6 D6,
 //! `uiof`) from its server-derived `Choice` form — zero model turns for the
 //! answer. Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run; see `tests/golden_path.rs` for the env
@@ -6,7 +6,7 @@
 //!
 //! The thread: force root → the (replayed) model's block `import`s a small
 //! user module declaring `data Verdict = GO | PARTIAL | NOGO` and suspends on
-//! `returnControl @Verdict` → `pending_derived_ui` resolves to a `Choice` over
+//! `runLLMTurn @Verdict` → `pending_derived_ui` resolves to a `Choice` over
 //! the three constructors, in declaration order → `answer_mechanical` with a
 //! `"NOGO"` submission compiles+runs `resume NOGO` against the SAME node's
 //! suspended session (no forked child, no second model turn) and resumes it →
@@ -62,7 +62,7 @@ fn verdict_lib_dir() -> tempfile::TempDir {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mechanical_choice_answer_resumes_return_control_to_completion() {
+async fn mechanical_choice_answer_resumes_run_llm_turn_to_completion() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
         return;
@@ -76,7 +76,7 @@ async fn mechanical_choice_answer_resumes_return_control_to_completion() {
     let cfg = EngineConfig::standard(prelude_dir(), Some(lib_dir.path().to_path_buf()))
         .expect("engine config");
 
-    // ONE scripted reply: the root turn suspends at `returnControl @Verdict`.
+    // ONE scripted reply: the root turn suspends at `runLLMTurn @Verdict`.
     // No further scripted replies — the answer is MECHANICAL, no second model
     // turn drives the answer.
     let replies = vec![tidepool_harness::replay::RecordedReply {
@@ -86,7 +86,7 @@ async fn mechanical_choice_answer_resumes_return_control_to_completion() {
                   ```haskell\n\
                   import Verdict\n\n\
                   do\n\
-                  \x20 v <- returnControl @Verdict \"pick GO, PARTIAL, or NOGO\"\n\
+                  \x20 v <- runLLMTurn @Verdict \"pick GO, PARTIAL, or NOGO\"\n\
                   \x20 pure (toJSON (show v))\n\
                   ```"
             .to_string(),
@@ -112,9 +112,9 @@ async fn mechanical_choice_answer_resumes_return_control_to_completion() {
             assert!(
                 matches!(
                     &classified.routing,
-                    HoleRouting::ReturnControl { ty: Some(ty), .. } if ty == "Verdict"
+                    HoleRouting::RunLLMTurn { ty: Some(ty), .. } if ty == "Verdict"
                 ),
-                "root should suspend on a returnControl @Verdict hole, got {:?}",
+                "root should suspend on a runLLMTurn @Verdict hole, got {:?}",
                 classified.routing
             );
         }

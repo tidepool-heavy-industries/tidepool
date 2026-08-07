@@ -1,8 +1,8 @@
-//! B1 widen acceptance coverage for `returnControlFanout @T :: [Text] -> M [T]`
+//! B1 widen acceptance coverage for `runLLMTurnFanout @T :: [Text] -> M [T]`
 //! (`Harness::answer_fanout`) — one park, N thunk children, answers collected
 //! in declaration order, resume with `[T]`. Record-replay, CI-shaped, zero
 //! live calls — same production-path discipline as `golden_path.rs` /
-//! `acceptance_return_control.rs`.
+//! `acceptance_run_llm_turn.rs`.
 //!
 //! Coverage: a fan of 3 prompts over `@Int`; the middle child's first
 //! attempt is deliberately ill-typed (exercises the GHC-verbatim retry,
@@ -90,7 +90,7 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
             "I'll fan out three prompts for numbers.\n\n\
              ```haskell\n\
              do\n\
-             \x20 ns <- returnControlFanout @Int [\"pick 1\", \"pick 2\", \"pick 3\"]\n\
+             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\", \"pick 2\", \"pick 3\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),
@@ -225,7 +225,7 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
         reply(
             "```haskell\n\
              do\n\
-             \x20 ns <- returnControlFanout @Int [\"pick 1\", \"pick 2\"]\n\
+             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\", \"pick 2\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),
@@ -300,7 +300,7 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
         reply(
             "```haskell\n\
              do\n\
-             \x20 ns <- returnControlFanout @Int [\"pick 1\"]\n\
+             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),

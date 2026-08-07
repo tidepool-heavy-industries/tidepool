@@ -3,7 +3,7 @@
 //!
 //! # Nested child runs on a suspended machine (segment 40)
 //!
-//! A parent turn suspended at a typed yield (`returnControl`/`Ask`) can host an
+//! A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host an
 //! arbitrary number of SEQUENTIAL child fragment runs — including ones that
 //! force GC and heap doubling — and resume correctly afterward. Two invariants
 //! make this memory-safe:
@@ -1932,7 +1932,7 @@ impl JitEffectMachine {
     // ----------------------------------------------------------------------
     // Segment 40 — nested child runs on a suspended machine.
     //
-    // While a parent turn is suspended at a typed yield (`returnControl`/`Ask`,
+    // While a parent turn is suspended at a typed yield (`runLLMTurn`/`Ask`,
     // `suspended_continuation` is `Some`), CHILD fragment runs can execute
     // against the SAME machine — reading the parent's bindings zero-copy —
     // provided the parent's stowed continuation is a REGISTERED GC ROOT so a

@@ -2,7 +2,7 @@
 //!
 //! A NODE is a branch of the cognition tree — a thunk until forced (C1:
 //! forcing is the only way work begins), a resident session once running.
-//! A HOLE is a published typed suspension (`returnControl @T`): the model's
+//! A HOLE is a published typed suspension (`runLLMTurn @T`): the model's
 //! next task, the operator's next form, and the approval gate, all at once.
 
 use serde::{Deserialize, Serialize};

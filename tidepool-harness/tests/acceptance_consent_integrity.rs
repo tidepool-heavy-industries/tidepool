@@ -2,7 +2,7 @@
 //! point. `forcing.rs`'s own unit tests already prove "a fork request
 //! materializes only a Thunk child, zero events until Forced" at the
 //! `NodeTree` layer with a hand-built `FakeMachine` — this test drives the
-//! SAME invariant through the actual compiled Haskell `returnControlFork`
+//! SAME invariant through the actual compiled Haskell `runLLMTurnFork`
 //! request and the real turn engine (record-replay, zero live calls), and
 //! audits the DURABLE LOG, not just in-memory state.
 //!
@@ -72,7 +72,7 @@ fn all_events(log_path: &std::path::Path) -> Vec<Event> {
     events.map(|r| r.expect("well-formed record").event).collect()
 }
 
-/// A real `returnControlFork @Int` REQUEST — compiled and run through the
+/// A real `runLLMTurnFork @Int` REQUEST — compiled and run through the
 /// engine — suspends the parent on a Fork hole. Nothing else in the system
 /// reacts to that suspension automatically (`autoForce = never`, C1): no
 /// child node is materialized, so the log contains ZERO events referencing
@@ -100,7 +100,7 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
         RecordedReply {
             node: NodeId(0),
             turn: 0,
-            content: "```haskell\nreturnControlFork @Int \"pick a number\"\n```".to_string(),
+            content: "```haskell\nrunLLMTurnFork @Int \"pick a number\"\n```".to_string(),
             usage: usage(),
         },
         // The fork answerer's own turn, once `answer_fork` is (later) called.
@@ -179,7 +179,7 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
     // No turn/effect event for the child precedes its own Forced event —
     // exactly the invariant `forcing.rs` enforces structurally at the
     // NodeTree layer, now confirmed to hold when the trigger is a REAL
-    // compiled `returnControlFork` request driven through the turn engine.
+    // compiled `runLLMTurnFork` request driven through the turn engine.
     let forced_idx = child_events
         .iter()
         .position(|e| matches!(e, Event::Forced { .. }))

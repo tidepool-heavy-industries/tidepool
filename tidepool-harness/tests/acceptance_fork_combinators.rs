@@ -4,18 +4,18 @@
 //! live calls.
 //!
 //! `forkFilter` always answers at a fixed `Bool`, so it composes over
-//! `returnControlFanout` (the SAME merged verb `acceptance_fanout.rs`
+//! `runLLMTurnFanout` (the SAME merged verb `acceptance_fanout.rs`
 //! exercises directly) with no extra machinery.
 //!
 //! `forkMap`/`forkCata` need a CALLER-chosen answer type — that used to be a
 //! hard extraction-pipeline wall (a library-defined wrapper's own
 //! definition necessarily has that type free; extract rejects a
-//! `returnControlFanout` occurrence whose answer type still carries a free
+//! `runLLMTurnFanout` occurrence whose answer type still carries a free
 //! type variable — verified against the real extract binary with both
 //! `INLINE` and an explicit call-site `SPECIALIZE` pragma, neither closed
 //! the gap). Closed by the combinator-sites extract pass: `Translate.hs`
 //! recognizes `forkMap`/`forkCata` by name (mirroring
-//! `returnControl`/`returnControlFork`/`returnControlFanout`), capturing
+//! `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout`), capturing
 //! the answer type at the USER CALL SITE — see `Tidepool.Fork`'s module
 //! haddock and `jit_surface.rs`'s `works_fork_map` for the JIT-tier half of
 //! this coverage.
@@ -23,7 +23,7 @@
 //! Coverage:
 //! - `forkFilter` over 3 elements ("1", "2", "3") with scripted verdicts
 //!   `[True, False, True]` — the harness answers the SAME
-//!   `returnControlFanout` fanout hole `acceptance_fanout.rs` pins directly
+//!   `runLLMTurnFanout` fanout hole `acceptance_fanout.rs` pins directly
 //!   (fan badge, per-child prompts in declaration order), and the
 //!   combinator's own `zip`/`filter` keeps only the `True`-verdict
 //!   elements, in original order, regardless of which child the harness
@@ -38,14 +38,14 @@
 //!   fired and fed the right values through.
 //! - A user's OWN `forkMap` — an unrelated, monomorphic local helper that
 //!   merely shares the combinator's occurrence name (never imports
-//!   `Tidepool.Fork`, never calls `returnControlFanout`) — must NOT abort
+//!   `Tidepool.Fork`, never calls `runLLMTurnFanout`) — must NOT abort
 //!   extract. `Translate.hs`'s recognizer matches by unqualified occurrence
 //!   name only, so before the fork-catchall-fallthrough fix ANY Var named
 //!   `forkMap`/`forkCata` that didn't match the exact recognized shape
 //!   ([Type, Type] + 2 value args) hit a catch-all `error`, aborting the
 //!   WHOLE eval. The recognizer now falls through to ordinary Var/App
 //!   translation for a mis-shaped occurrence, mirroring the
-//!   `returnControl`/`returnControlFork`/`returnControlFanout` arm's own
+//!   `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` arm's own
 //!   fall-through convention.
 
 use std::sync::Arc;
@@ -231,7 +231,7 @@ async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
 /// captured once, at forkCata's own call site). Leaf 1's first attempt is
 /// deliberately ill-typed, exercising the SAME GHC-verbatim retry a plain
 /// fork/fanout uses (`acceptance_fanout.rs`) — proving forkCata's
-/// head-swapped call site retries exactly like a bare returnControlFanout
+/// head-swapped call site retries exactly like a bare runLLMTurnFanout
 /// site, not some new mechanism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
@@ -447,7 +447,7 @@ async fn user_defined_forkmap_does_not_abort_extract() {
 
     let replies = vec![reply(
         "This is my own project's `forkMap` — a plain recursive map, \
-         nothing to do with `Tidepool.Fork`. No `returnControlFanout` \
+         nothing to do with `Tidepool.Fork`. No `runLLMTurnFanout` \
          involved.\n\n\
          ```haskell\n\
          import MyLib (forkMap)\n\
@@ -486,6 +486,6 @@ async fn user_defined_forkmap_does_not_abort_extract() {
         harness.tree().state(root),
         Some(NodeState::Done),
         "the root completes normally — the name collision with Tidepool.Fork's \
-         forkMap never touches the returnControlFanout suspend machinery"
+         forkMap never touches the runLLMTurnFanout suspend machinery"
     );
 }

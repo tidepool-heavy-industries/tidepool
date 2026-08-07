@@ -127,16 +127,16 @@ data TransState = TransState
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
-  -- returnControl (#R0 typed-yield pass): varIds of the hidden Sited siblings
+  -- runLLMTurn (#R0 typed-yield pass): varIds of the hidden Sited siblings
   -- (Nothing when the Ask effect's helper text isn't in the closed program —
   -- an interception site with no sibling available is an extract-pipeline bug).
-  , tsReturnControlSitedId :: !(Maybe Word64)
-  , tsReturnControlForkSitedId :: !(Maybe Word64)
-  , tsReturnControlFanoutSitedId :: !(Maybe Word64)  -- B1 widen: returnControlFanout's sibling
+  , tsRunLLMTurnSitedId :: !(Maybe Word64)
+  , tsRunLLMTurnForkSitedId :: !(Maybe Word64)
+  , tsRunLLMTurnFanoutSitedId :: !(Maybe Word64)  -- B1 widen: runLLMTurnFanout's sibling
   , tsForkMapSitedId :: !(Maybe Word64)      -- combinator-sites widen: forkMap's hidden sibling
   , tsForkCataSitedId :: !(Maybe Word64)     -- combinator-sites widen: forkCata's hidden sibling
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
-  , tsReturnControlSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
+  , tsRunLLMTurnSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
   }
 
@@ -162,7 +162,7 @@ recordDC :: DataCon -> TransM ()
 recordDC dc = modify' $ \s ->
   s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
--- | Fresh site id for a returnControl/returnControlFork call site (#R0):
+-- | Fresh site id for a runLLMTurn/runLLMTurnFork call site (#R0):
 -- a plain per-'translateModule'-run counter, distinct from 'freshSynthVarId'
 -- (this counter's values travel as literal 'Int' payload data, not VarIds).
 freshSiteId :: TransM Word64
@@ -172,10 +172,10 @@ freshSiteId = do
   put s { tsSiteCounter = c + 1 }
   return c
 
--- | Record one returnControl/returnControlFork site for the asks.json sidecar.
-recordReturnControlSite :: Word64 -> Text -> TransM ()
-recordReturnControlSite siteId typeStr = modify' $ \s ->
-  s { tsReturnControlSites = tsReturnControlSites s |> (siteId, typeStr) }
+-- | Record one runLLMTurn/runLLMTurnFork site for the asks.json sidecar.
+recordRunLLMTurnSite :: Word64 -> Text -> TransM ()
+recordRunLLMTurnSite siteId typeStr = modify' $ \s ->
+  s { tsRunLLMTurnSites = tsRunLLMTurnSites s |> (siteId, typeStr) }
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
@@ -432,7 +432,7 @@ translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
-      -- returnControl (#R0): the hidden Sited siblings are ordinary home-module
+      -- runLLMTurn (#R0): the hidden Sited siblings are ordinary home-module
       -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text),
       -- so a name-only scan over the FULL (pre-reachability) bind pool finds
       -- their real Ids — mirroring findTargetId's own name lookup. `translate`
@@ -440,14 +440,14 @@ translateModule allBinds targetName unresolvedIds =
       -- IO), so both varIds are resolved ONCE here and threaded through
       -- TransState for the interception arm to consult.
       initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
-                    (findAuxVarId "returnControlSited" allBinds)
-                    (findAuxVarId "returnControlForkSited" allBinds)
-                    (findAuxVarId "returnControlFanoutSited" allBinds)
+                    (findAuxVarId "runLLMTurnSited" allBinds)
+                    (findAuxVarId "runLLMTurnForkSited" allBinds)
+                    (findAuxVarId "runLLMTurnFanoutSited" allBinds)
                     (findAuxVarId "forkMapSited" allBinds)
                     (findAuxVarId "forkCataSited" allBinds)
                     0 Seq.empty Nothing
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
-  in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsReturnControlSites finalState)
+  in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsRunLLMTurnSites finalState)
   where
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
@@ -469,7 +469,7 @@ translateModule allBinds targetName unresolvedIds =
 
     -- | Name-only lookup for a helper binding that may or may not be present
     -- (unlike 'findTargetId', absence is not an error — it just means the
-    -- corresponding returnControl/returnControlFork interception can't fire).
+    -- corresponding runLLMTurn/runLLMTurnFork interception can't fire).
     findAuxVarId :: String -> [CoreBind] -> Maybe Word64
     findAuxVarId name binds =
       case filter isMatch (concatMap bindersOf binds) of
@@ -631,8 +631,8 @@ data ClosedModule = ClosedModule
     -- ^ The reachable binds actually compiled — the meta walks run over this.
   , cmVarNames   :: [(Word64, Text)]
     -- ^ varId → human name for runtime unresolved-error naming (friction #12).
-  , cmReturnControlSites :: [(Word64, Text)]
-    -- ^ returnControl/returnControlFork {site, type} pairs (#R0), for the
+  , cmRunLLMTurnSites :: [(Word64, Text)]
+    -- ^ runLLMTurn/runLLMTurnFork {site, type} pairs (#R0), for the
     -- asks.json sidecar 'writeWholeModuleClosed' writes next to meta.cbor.
   }
 
@@ -705,7 +705,7 @@ translateModuleClosed hscEnv allBinds targetName = do
         _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds, returnControlSites) = translateModule closedBinds targetName unresolvedIds
+      (nodes, usedDCs, reachBinds, runLLMTurnSites) = translateModule closedBinds targetName unresolvedIds
   let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
@@ -779,7 +779,7 @@ translateModuleClosed hscEnv allBinds targetName = do
     , cmUnresolved = trulyUnresolved
     , cmReachBinds = reachBinds
     , cmVarNames   = varNames
-    , cmReturnControlSites = Data.Foldable.toList returnControlSites
+    , cmRunLLMTurnSites = Data.Foldable.toList runLLMTurnSites
     }
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
@@ -1562,10 +1562,10 @@ translate expr =
             emitNode $ NCase argIdx 0 altData
           _ -> error $ "tagToEnum# without resolvable type argument"
 
-    -- returnControl @T prompt / returnControlFork @T prompt / returnControlFanout
-    -- @T prompts (#R0 typed-yield pass, returnControlFanout added in B1 widen) /
+    -- runLLMTurn @T prompt / runLLMTurnFork @T prompt / runLLMTurnFanout
+    -- @T prompts (#R0 typed-yield pass, runLLMTurnFanout added in B1 widen) /
     -- forkAll @T prompts (Tidepool.Fork's surface verb, structurally identical
-    -- to returnControlFanout so it rides the SAME arm and Sited sibling):
+    -- to runLLMTurnFanout so it rides the SAME arm and Sited sibling):
     -- detected the same way as the tagToEnum# arm above (a known Var applied to
     -- [Type ty] + one value arg — for Fanout/forkAll that one value arg is the
     -- `[Text]` prompts list, same shape, translated like any other Core
@@ -1575,15 +1575,15 @@ translate expr =
     -- sibling's REAL body (which builds the "typedSite"-tagged AskWith
     -- payload) then runs normally at JIT runtime; we never construct that
     -- payload ourselves.
-    Var v | isReturnControlVar v || isReturnControlForkVar v || isReturnControlFanoutVar v || isForkAllVar v
+    Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , [Type ty] <- typeArgs
           , [promptArg] <- args -> do
-        checkReturnControlType ty
+        checkRunLLMTurnType ty
         let sitedField
-              | isReturnControlVar v = tsReturnControlSitedId
-              | isReturnControlForkVar v = tsReturnControlForkSitedId
-              | otherwise = tsReturnControlFanoutSitedId
+              | isRunLLMTurnVar v = tsRunLLMTurnSitedId
+              | isRunLLMTurnForkVar v = tsRunLLMTurnForkSitedId
+              | otherwise = tsRunLLMTurnFanoutSitedId
         sitedIdM <- gets sitedField
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, name-only, by a scan over
@@ -1602,17 +1602,17 @@ translate expr =
             emitFfiPoison
           Just sitedVarId -> do
             siteId <- freshSiteId
-            -- returnControlFanout's answer type is `[T]` (a fanout of N
+            -- runLLMTurnFanout's answer type is `[T]` (a fanout of N
             -- children each answering T), but `ty` here is the per-child
             -- element type `T` applied at the call site (`@T`) — record the
             -- LIST type in the asks.json sidecar so the harness's rendered
             -- type matches what actually resumes the parent; the harness
             -- derives the element type back by stripping the outer `[]`.
             let renderedTy = Tidepool.GhcPipeline.renderType ty
-                typeStr = if isReturnControlFanoutVar v || isForkAllVar v
+                typeStr = if isRunLLMTurnFanoutVar v || isForkAllVar v
                             then "[" ++ renderedTy ++ "]"
                             else renderedTy
-            recordReturnControlSite siteId (T.pack typeStr)
+            recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
             appLit <- emitNode $ NApp sitedRef litIdx
@@ -1621,8 +1621,8 @@ translate expr =
 
     -- forkMap @b f xs / forkCata @b combine tree (combinator-sites widen):
     -- library-defined recursion-scheme combinators (Tidepool.Fork) over
-    -- returnControlFanout, recognized by name exactly like
-    -- returnControl/returnControlFork/returnControlFanout above. Two
+    -- runLLMTurnFanout, recognized by name exactly like
+    -- runLLMTurn/runLLMTurnFork/runLLMTurnFanout above. Two
     -- differences from that arm: the value-arg arity is 2 (not 1), and the
     -- answer type is the FIRST type argument, not the only one — forkMap/
     -- forkCata are each quantified `forall b a. ...` so a single explicit
@@ -1630,17 +1630,17 @@ translate expr =
     -- type a is inferred from the second value argument and is NEVER
     -- checked here: it never crosses the suspend boundary, only b does).
     -- Head-swap target is the hidden *Sited sibling (resolved once by name
-    -- in 'translateModule', same as the returnControl siblings); the
-    -- sidecar records the SAME "[b]" shape a bare returnControlFanout site
+    -- in 'translateModule', same as the runLLMTurn siblings); the
+    -- sidecar records the SAME "[b]" shape a bare runLLMTurnFanout site
     -- records — forkMap/forkCata's *Sited body routes through exactly one
-    -- returnControlFanoutSited dispatch per answer, so every AskWith
+    -- runLLMTurnFanoutSited dispatch per answer, so every AskWith
     -- payload this site's id ever tags really does carry a `[b]`-shaped
     -- fanout (see Tidepool.Fork's haddock).
     Var v | isForkMapVar v || isForkCataVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , [Type tyAns, Type _tyElem] <- typeArgs
           , [fnArg, xsArg] <- args -> do
-        checkReturnControlType tyAns
+        checkRunLLMTurnType tyAns
         let sitedField
               | isForkMapVar v = tsForkMapSitedId
               | otherwise = tsForkCataSitedId
@@ -1653,7 +1653,7 @@ translate expr =
           Just sitedVarId -> do
             siteId <- freshSiteId
             let typeStr = "[" ++ Tidepool.GhcPipeline.renderType tyAns ++ "]"
-            recordReturnControlSite siteId (T.pack typeStr)
+            recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
             appLit <- emitNode $ NApp sitedRef litIdx
@@ -1667,7 +1667,7 @@ translate expr =
     -- mis-arity value-arg list — OR a Var that merely shares the occurrence
     -- name with the real Tidepool.Fork combinator, e.g. a user's own local
     -- helper) is deliberately NOT special-cased here, mirroring the
-    -- returnControl/returnControlFork/returnControlFanout arm above: no
+    -- runLLMTurn/runLLMTurnFork/runLLMTurnFanout arm above: no
     -- catch-all error, just fall through to ordinary Var/App translation
     -- below. isForkMapVar/isForkCataVar match by unqualified occurrence
     -- name only (see their haddock), so a hard failure here would abort the
@@ -2666,42 +2666,42 @@ isParseISO8601Var :: Id -> Bool
 isParseISO8601Var v =
   occNameString (nameOccName (idName v)) == "parseISO8601"
 
--- | Recognize @returnControl@/@returnControlFork@ (the stdlib OPAQUE surface
+-- | Recognize @runLLMTurn@/@runLLMTurnFork@ (the stdlib OPAQUE surface
 -- verbs in ask_effect_def!'s helper text, Tidepool.Effects). OPAQUE keeps
 -- their calls un-inlined (matched here by unqualified occurrence name, same
 -- convention as eitherDecodeValue/parseISO8601) so the type application at
 -- each call site survives to this interception.
-isReturnControlVar :: Id -> Bool
-isReturnControlVar v =
-  occNameString (nameOccName (idName v)) == "returnControl"
+isRunLLMTurnVar :: Id -> Bool
+isRunLLMTurnVar v =
+  occNameString (nameOccName (idName v)) == "runLLMTurn"
 
-isReturnControlForkVar :: Id -> Bool
-isReturnControlForkVar v =
-  occNameString (nameOccName (idName v)) == "returnControlFork"
+isRunLLMTurnForkVar :: Id -> Bool
+isRunLLMTurnForkVar v =
+  occNameString (nameOccName (idName v)) == "runLLMTurnFork"
 
-isReturnControlFanoutVar :: Id -> Bool
-isReturnControlFanoutVar v =
-  occNameString (nameOccName (idName v)) == "returnControlFanout"
+isRunLLMTurnFanoutVar :: Id -> Bool
+isRunLLMTurnFanoutVar v =
+  occNameString (nameOccName (idName v)) == "runLLMTurnFanout"
 
 -- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
--- verb) — same convention as 'isReturnControlVar' et al. @forkAll@'s shape
+-- verb) — same convention as 'isRunLLMTurnVar' et al. @forkAll@'s shape
 -- (@forall a. [Text] -> M [a]@) is STRUCTURALLY IDENTICAL to
--- @returnControlFanout@'s (one type arg, one @[Text]@ value arg, list-typed
--- answer), so it reuses 'isReturnControlFanoutVar'\'s own head-swap arm
+-- @runLLMTurnFanout@'s (one type arg, one @[Text]@ value arg, list-typed
+-- answer), so it reuses 'isRunLLMTurnFanoutVar'\'s own head-swap arm
 -- verbatim rather than growing a parallel one: every call site this
 -- predicate matches head-swaps straight to the EXISTING
--- @returnControlFanoutSited@ sibling — no new @forkAllSited@ needed.
+-- @runLLMTurnFanoutSited@ sibling — no new @forkAllSited@ needed.
 isForkAllVar :: Id -> Bool
 isForkAllVar v =
   occNameString (nameOccName (idName v)) == "forkAll"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
 -- stubs, combinator-sites widen) — same convention as
--- 'isReturnControlVar' et al. Their hidden @*Sited@ siblings
+-- 'isRunLLMTurnVar' et al. Their hidden @*Sited@ siblings
 -- ('forkMapSited'\/'forkCataSited') are matched by NEITHER this predicate
 -- NOR any other arm in this file (disjoint names), so occurrences of the
 -- Sited siblings — the head-swap target's own real logic, referencing
--- @returnControlFanoutSited@, itself a third, also-unmatched name — always
+-- @runLLMTurnFanoutSited@, itself a third, also-unmatched name — always
 -- fall through to ordinary Var/App translation. No separate "pass-through"
 -- arm is needed: it holds by construction of the naming, not by an extra
 -- runtime check.
@@ -2713,20 +2713,20 @@ isForkCataVar :: Id -> Bool
 isForkCataVar v =
   occNameString (nameOccName (idName v)) == "forkCata"
 
--- | The two extract-time rejections for a returnControl/returnControlFork
+-- | The two extract-time rejections for a runLLMTurn/runLLMTurnFork
 -- site's answer type (spec step 4): a leftover type variable (the site isn't
 -- monomorphic) or a function arrow anywhere in the type's structure (R0 has
 -- no way to serialize a function-typed answer across the suspend boundary).
 -- Both raise via plain 'error', mirroring every other hard-failure in this
 -- file (e.g. the tagToEnum# arm above) — caught by 'processFile's `try` and
 -- rendered as a diagnostic, not a pipeline crash.
-checkReturnControlType :: Type -> TransM ()
-checkReturnControlType ty = do
+checkRunLLMTurnType :: Type -> TransM ()
+checkRunLLMTurnType ty = do
   binder <- gets tsCurrentBinder
   let siteDesc = maybe "<top level>" T.unpack binder
       typeStr = Tidepool.GhcPipeline.renderType ty
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
-    error $ "polymorphic returnControl site in " ++ siteDesc ++ ": " ++ typeStr
+    error $ "polymorphic runLLMTurn site in " ++ siteDesc ++ ": " ++ typeStr
   when (typeHasFunctionArrow ty) $
     error $ "function-typed answers not supported in R0 (site in "
           ++ siteDesc ++ "): " ++ typeStr

@@ -111,7 +111,7 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
     // `Tidepool.Aeson.Value`, so this import is cheap and non-circular.
     out.push_str("import Tidepool.Ui (Ui)\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
-    // returnControl/returnControlFork's hidden *Sited siblings (#R0) coerce the
+    // runLLMTurn/runLLMTurnFork's hidden *Sited siblings (#R0) coerce the
     // ask reply back to the caller's answer type after extract has statically
     // checked it's monomorphic and function-free — see ask_effect_def!'s helper
     // text (effect_defs.rs) for why that's safe.

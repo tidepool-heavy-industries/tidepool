@@ -302,7 +302,7 @@ writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe T
 writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
                , cmReachBinds = reachBinds, cmVarNames = varNames
-               , cmReturnControlSites = returnControlSites
+               , cmRunLLMTurnSites = runLLMTurnSites
                } <- translateModuleClosed hscEnv binds targetName
   if not (null unresolved) then do
     let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
@@ -332,13 +332,13 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
   BS.writeFile metaFile metaCbor
   hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
-  -- returnControl (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
-  -- written (empty list when the module has no returnControl/returnControlFork
+  -- runLLMTurn (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
+  -- written (empty list when the module has no runLLMTurn/runLLMTurnFork
   -- sites) — loud absence beats a silently-missing file for the Rust-side
   -- consumer (segment 30) to distinguish "no sites" from "extract too old".
   let asksFile = outDir </> "asks.json"
-  writeFile asksFile (renderAsksJson returnControlSites)
-  hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length returnControlSites) ++ " sites)"
+  writeFile asksFile (renderAsksJson runLLMTurnSites)
+  hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length runLLMTurnSites) ++ " sites)"
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
@@ -483,7 +483,7 @@ jsonString str = '"' : concatMap esc str ++ "\""
       | otherwise  = [c]
     pad4 s = replicate (4 - length s) '0' ++ s
 
--- | returnControl/returnControlFork {site, type} pairs (#R0) as the asks.json
+-- | runLLMTurn/runLLMTurnFork {site, type} pairs (#R0) as the asks.json
 -- sidecar: @[{"site": <u32>, "type": "<rendered>"}]@. @site@ is a bare JSON
 -- number (extract's own monotonic per-module counter, well inside u32 range).
 renderAsksJson :: [(Word64, Text)] -> String
