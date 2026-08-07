@@ -67,6 +67,15 @@ pub enum HoleRouting {
     /// `dialogAsk ui` — operator routing; the `Ui` value renders in the form
     /// pane.
     Dialog { ui: Json },
+    /// `finalize @T x` (self-iterating-harness WS-B) — an Agent turn hands a
+    /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
+    /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
+    /// does. Routing placeholder ONLY: WS-B adds the `Finalize` effect (its
+    /// own union tag + payload shape, sharing `Ask`'s suspend/classify/resume
+    /// machinery per the plan, not `AskWith`'s `typedSite` field) and wires
+    /// this arm's classification for real; `site`/`ty` mirror `RunLLMTurn`'s
+    /// shape so the self-harness driver (WS-A) can freeze against it now.
+    Finalize { site: u32, ty: Option<String> },
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
@@ -86,7 +95,8 @@ pub struct ClassifiedHole {
 /// [`HoleRouting::Fork`] (additionally `fan` + `prompts` for a
 /// `runLLMTurnFanout` site), `typedSite` alone → [`HoleRouting::RunLLMTurn`],
 /// `ui` → [`HoleRouting::Dialog`], else [`HoleRouting::Ask`]. `asks` resolves a
-/// `typedSite` to its rendered answer type.
+/// `typedSite` to its rendered answer type. [`HoleRouting::Finalize`] is a
+/// routing placeholder (WS-B wires its real payload + classification).
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
     let (prompt, payload) = decode_askwith(request, table);
     let routing = if let Some(site) = payload.get("typedSite").and_then(Json::as_u64) {
@@ -112,6 +122,19 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 fan,
                 prompts,
             }
+        } else if payload
+            .get("finalize")
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+        {
+            // Placeholder routing arm (S3 scaffold): no Haskell path emits a
+            // `finalize` payload yet — WS-B adds the `Finalize` effect and its
+            // real payload shape (not `AskWith`'s `typedSite`+`finalize`
+            // flag), then replaces this arm with the real classification.
+            unimplemented!(
+                "WS-B: Finalize effect classification — own payload shape, \
+                 shares Ask's suspend/classify machinery per the plan"
+            )
         } else {
             HoleRouting::RunLLMTurn { site, ty }
         }

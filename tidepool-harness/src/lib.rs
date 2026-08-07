@@ -16,6 +16,7 @@ pub mod log;
 pub mod provider;
 pub mod registry;
 pub mod replay;
+pub mod selfharness;
 pub mod tree;
 pub mod ui;
 pub mod uiof;
@@ -27,6 +28,10 @@ pub use engine::{
 pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
 pub use harness::{Escalation, Harness, HarnessError, HeapSummary, NodeSummary, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
+pub use selfharness::{
+    load_harness_source, DriverError, Event, GuiObserver, HarnessSource, HarnessSourceError,
+    LogObserver, Observer, ReactiveHook, SelfHarnessDriver, SelfHarnessState,
+};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};
 pub use uiof::{defining_module, resume_expr_from_submission, ui_of};
