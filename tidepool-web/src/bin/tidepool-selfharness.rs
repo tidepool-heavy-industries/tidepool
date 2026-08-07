@@ -4,26 +4,31 @@
 //! `plans/self-iterating-harness/07-impl-orchestration.md`.
 //!
 //! Modeled on `tidepool-harness.rs` (this crate's other binary)'s boot
-//! sequence — provider select (OAuth default, `--replay`), engine config,
-//! a fresh run log — but drives [`tidepool_harness::SelfHarnessDriver::run_loop`]
-//! instead of serving the observatory. STUB PHASE (S1 scaffold): the driver
-//! itself is `unimplemented!()` behind this wiring until WS-A lands.
+//! sequence — provider select (OAuth default, `--replay <log>` for
+//! deterministic replay, `--api-key <ENV_VAR>` for a non-interactive
+//! API-key provider), engine config, a fresh run log — but drives
+//! [`tidepool_harness::SelfHarnessDriver::run_loop`] instead of serving the
+//! observatory. Multi-thread tokio runtime required: `run_loop` services
+//! each `runLLMTurn` hole via `block_in_place` + `Handle::current().block_on`
+//! (see `driver.rs`'s module doc).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
+use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
 use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider};
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::{load_harness_source, Harness, LogObserver, SelfHarnessDriver};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
     let replay_log = arg_value(&args, "--replay");
+    let api_key_env = arg_str(&args, "--api-key");
     let harness_source_path =
         arg_value(&args, "--harness").unwrap_or_else(default_harness_source_path);
 
@@ -31,12 +36,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_lib = project_lib_dir();
     let cfg = EngineConfig::standard(prelude_dir, project_lib)?;
 
-    let provider: Arc<dyn DynModelProvider> = match &replay_log {
-        Some(log) => {
+    let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
+        (Some(log), _) => {
             eprintln!("[boot] replay mode over {}", log.display());
             Arc::new(ReplayProvider::from_log(log)?)
         }
-        None => {
+        (None, Some(env_var)) => {
+            let model =
+                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+            eprintln!("[boot] API-key mode ({env_var}), model {model}");
+            Arc::new(ApiKeyProvider::new(ApiKeyConfig::new(
+                env_var.clone(),
+                model,
+            )))
+        }
+        (None, None) => {
             let model =
                 std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
             Arc::new(OauthProvider::new(OauthConfig::new(model)))
@@ -71,8 +85,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
+    arg_str(args, flag).map(PathBuf::from)
+}
+
+fn arg_str(args: &[String], flag: &str) -> Option<String> {
     let idx = args.iter().position(|a| a == flag)?;
-    args.get(idx + 1).map(PathBuf::from)
+    args.get(idx + 1).cloned()
 }
 
 fn default_harness_source_path() -> PathBuf {
