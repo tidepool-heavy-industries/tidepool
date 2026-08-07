@@ -193,8 +193,16 @@ child node).
 5. **WS-G** — integrates last (binary + generic-assistant acceptance).
    (WS-F `fork` deferred to a later wave.)
 
-Gate after every fold: `cargo check --workspace` + targeted nextest over touched
-crates; `scripts/battery.sh` at the scaffold and at the final WS-G merge.
+**Verification (wave policy).** This environment hard-kills background processes
+at ~380s, and a full-workspace GHC battery is *hours* (every test forks a GHC
+extract, capped at 4 concurrent, incl. ~900s proptest suites; every
+`Translate.hs`/`effect_defs.rs` change invalidates the compiled-artifact cache
+→ cold recompiles). So the per-fold gate is **`cargo check --workspace` + a
+TARGETED slice** — `scripts/battery.sh -p <crate> -E 'binary(<x>)'` (it forwards
+`$@` to nextest and keeps the extract-env guard, so a narrowed run finishes in
+minutes). **Do NOT gate on bare `scripts/battery.sh`** (full `--workspace`).
+Full coverage runs deliberately — sharded per-crate or on a quiet box / CI (see
+the test-infra follow-up). Confirm any failure reproduces on the pre-change base.
 Parallel worktrees touch shared files (`effect_defs.rs`, `Translate.hs`,
 `engine.rs`, `harness.rs`) — folds are serial with a build check between.
 
