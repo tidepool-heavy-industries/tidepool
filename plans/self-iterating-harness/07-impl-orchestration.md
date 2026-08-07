@@ -47,9 +47,11 @@ shape (`typedSite`/`fork`/`fan`/`prompts`, `AskWith`, `asks.json`) unchanged.
 Verify: `scripts/battery.sh` green (rename is behavior-preserving).
 
 **S3 — Freeze contracts as stubs (`unimplemented!()` / typed holes):**
-- Harness effect stack decl: `type Harness = Eff '[...]` with `runLLMTurn`,
-  `finalize`, `fork` verbs (extend `effect_defs.rs`; `runLLMTurn` = renamed
-  `returnControl`).
+- Effect stacks (two distinct rows): **Harness** = `Eff '[runLLMTurn]` —
+  orchestration-only for v1 (base effects added later, as needed, never
+  prematurely). **Agent** = the existing full base stack + `Ask` + the new
+  `finalize`. `runLLMTurn` = renamed `returnControl`; `fork` deferred to a later
+  wave.
 - `finalize`: factor the common suspend / payload-classify / resume code out of
   the `Ask` path, then add a new interposed `finalize` effect (own GADT
   constructor + tag alongside `Ask`) that CONSUMES the shared code; `Translate.hs`
@@ -82,7 +84,7 @@ Each spec: **READ FIRST** (from recon) · **ANTI-PATTERNS** · **STEPS** · **VE
   suspendable fragment; on a `runLLMTurn @A` suspension, drive a nested Agent
   session (reuse the existing turn loop) to a `finalize` (WS-B) and `run_child`
   the value back to resume `loop`; alternate `render`→`loop`; own the outer
-  lifecycle enum.
+  lifecycle enum; emit lifecycle events to the WS-H `Observer`.
 - VERIFY: `cargo nextest -p tidepool-harness --ignore-default-filter` new
   `selfharness_spine` test: a trivial `loop` with one `runLLMTurn` answered via
   `finalize` completes and re-renders.
@@ -143,32 +145,46 @@ Each spec: **READ FIRST** (from recon) · **ANTI-PATTERNS** · **STEPS** · **VE
 - VERIFY: a loop that overruns triggers a forced text-compaction fed to render.
 - DONE: emergency compaction fires at threshold and the summary reaches `render`.
 
-### WS-F — `fork` in Harness  · **sonnet**
-- READ: `harness.rs:1154-1324` (answer_fork/answer_fanout), `Fork.hs`,
-  `effect_defs.rs:647-666`, `engine.rs:623-645` (build_list_value).
-- ANTI-PATTERNS: don't spawn model-driven child *nodes* with their own chat loop
-  — a `fork` target is a `Harness` computation; reuse the `run_child` primitive,
-  rebuild the orchestration.
-- STEPS: expose `fork` as a Harness verb; split the agent session into logical
-  threads off one context window; reassemble results.
-- VERIFY: a `loop` forking 2 sub-computations gathers both.
-- DONE: `fork` runs N Harness threads off one window and joins.
+### WS-F — `fork` in Harness  · **DEFERRED to a later wave** (operator decision)
+Not in this v1 wave. When it lands: reshape the existing fanout machinery
+(`harness.rs:1154-1324`, `Fork.hs`, `engine.rs:623-645` build_list_value) into a
+Harness-level `fork` verb — reuse the `run_child` primitive, rebuild the
+orchestration (a `fork` target is a `Harness` computation, not a model-driven
+child node).
+
+### WS-H — Event-observer extension point  · **sonnet** (foundational — WS-A emits to it)
+- READ: `tidepool-harness/src/forcing.rs` (existing `Event`/`NodeTree` log),
+  `harness.rs:374` (flush_effects).
+- ANTI-PATTERNS: don't hardwire logging or the GUI into the driver — emit to a
+  generic `Observer`/`EventSink` trait with pluggable subscribers.
+- STEPS: define an `Observer` trait the driver calls at each event (loop
+  boundary, turn start/end, `runLLMTurn` hole, `finalize`, compaction trigger);
+  ship a `LogObserver` v1 subscriber; leave stub seams for a future Datastar-GUI
+  subscriber AND for reactive hooks (the distillation loop's future event
+  reactions — this is the "observe and react to events" extension point).
+- VERIFY: a run emits the full event sequence to the log subscriber.
+- DONE: events flow through a pluggable `Observer`; logging is one subscriber;
+  GUI + reactive seams stubbed.
 
 ### WS-G — Binary + provider wiring + acceptance  · **sonnet (opus for the acceptance judgment)** · integrates LAST
 - READ: `tidepool-web/src/bin/tidepool-harness.rs:49-71` (provider select),
   `provider/oauth.rs`, `replay.rs`.
 - STEPS: the `tidepool-selfharness` binary; provider select (OAuth default,
-  `--replay`, optional API-key flag); an end-to-end acceptance test through the
-  production path (a real render/loop run answering one `runLLMTurn` via `finalize`).
-- DONE: `scripts/battery.sh` + a green `acceptance_selfharness` golden path.
+  `--replay`, optional API-key flag); a **generic-assistant** example harness
+  (an observe/decide/act `loop` over an input, **no file-edit effects**) + an
+  end-to-end acceptance test through the production path (render/loop answering
+  `runLLMTurn`(s) via `finalize`, State surviving a loop boundary).
+- DONE: `scripts/battery.sh` + a green `acceptance_selfharness` golden path
+  driving the generic-assistant harness.
 
 ## Merge order + gates
 
 1. **Scaffold (S1–S4)** — root, first (includes the rename; battery green).
-2. **WS-B (finalize)** — merge early (WS-A integrates against it, not the stub).
+2. **WS-B (finalize)** + **WS-H (observer)** — merge early (WS-A integrates against them).
 3. **WS-A (driver spine)** — the foundation; `cargo check` + `selfharness_spine`.
-4. **WS-C / WS-D / WS-E / WS-F** — any order after WS-A; build + targeted test per fold.
-5. **WS-G** — integrates last (binary + acceptance through the production path).
+4. **WS-C / WS-D / WS-E** — any order after WS-A; build + targeted test per fold.
+5. **WS-G** — integrates last (binary + generic-assistant acceptance).
+   (WS-F `fork` deferred to a later wave.)
 
 Gate after every fold: `cargo check --workspace` + targeted nextest over touched
 crates; `scripts/battery.sh` at the scaffold and at the final WS-G merge.
@@ -177,6 +193,10 @@ Parallel worktrees touch shared files (`effect_defs.rs`, `Translate.hs`,
 
 ## Out of scope for this wave (deferred, per §06)
 
-Distillation-loop tooling (manual claude-code on the repo for now), per-context
-effect sets (v1 = the fixed full stack + Ask), the Datastar observatory as more
-than an optional debug view, State-format migration, live hot-reload.
+`fork` / subagent branching (deferred to a later wave); file-edit / write
+effects (v1 Agent is read/reason only — may grow toward a coding agent later);
+distillation-loop tooling (manual claude-code on the repo for now); per-context
+effect sets (v1 Harness = `runLLMTurn` only, grown as needed; Agent = base + Ask
++ `finalize`); the Datastar-GUI observatory (v1 emits events to a pluggable
+`Observer` wired to logging — GUI subscriber comes later); State-format
+migration; live hot-reload.
