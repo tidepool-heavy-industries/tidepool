@@ -24,11 +24,12 @@ a build gate after each fold.
 - **Placement:** new modules *inside* `tidepool-harness` (needs `pub(crate)`
   reach into `drive_turn`, `run_child`, `classify_hole`, the providers) + a new
   binary. Not a new crate (would force pub-exporting half the internals).
-- **`finalize` wiring:** a new verb/helper inside the existing `Ask` effect def,
-  reusing the `AskWith` constructor with a `"finalize"` payload discriminant +
-  a new `HoleRouting::Finalize` arm — **not** a new union-tag effect (avoids a
-  new positional stack slot; consistent with how `dialogAsk`/`returnControl*`
-  already share `AskWith`).
+- **`finalize` wiring:** a **new, distinct interposed effect** (its own GADT
+  constructor + union-tag, appended alongside `Ask`, serviced by the harness —
+  no `tidepool-handlers` handler). It is semantically distinct (a terminal
+  handoff, not an elicitation), so it earns its own effect — but it **shares**
+  `Ask`'s suspend-as-data / payload-classify / resume machinery rather than
+  copying it. **Code shared, not duplicated.**
 
 ## Scaffold phase (root; sequential; one commit, conflict-free)
 
@@ -49,11 +50,12 @@ Verify: `scripts/battery.sh` green (rename is behavior-preserving).
 - Harness effect stack decl: `type Harness = Eff '[...]` with `runLLMTurn`,
   `finalize`, `fork` verbs (extend `effect_defs.rs`; `runLLMTurn` = renamed
   `returnControl`).
-- `finalize`: `effect_defs.rs` helper stub + `Translate.hs` detection stub
-  (mirror `isReturnControlVar`, capture `@a` via the existing `[Type ty] <- typeArgs`
-  idiom, **skip the `typeHasFunctionArrow` rejection**) + `"finalize"` wire
-  discriminant + `HoleRouting::Finalize { value }` variant in
-  `engine.rs:82-124` + a `classify_hole` arm stub.
+- `finalize`: factor the common suspend / payload-classify / resume code out of
+  the `Ask` path, then add a new interposed `finalize` effect (own GADT
+  constructor + tag alongside `Ask`) that CONSUMES the shared code; `Translate.hs`
+  detection stub (mirror `isReturnControlVar`, capture `@a` via
+  `[Type ty] <- typeArgs`, **skip the `typeHasFunctionArrow` rejection**) +
+  `HoleRouting::Finalize { value }` in `engine.rs:82-124`.
 - Runtime driver interface (Rust) as stubs: the outer lifecycle enum (model on
   `tidepool-repl/src/state.rs:56-72`), and signatures for `run_loop`,
   `service_runllm_hole`, `state_out`/`state_in` (JSON crossing),
@@ -88,18 +90,24 @@ Each spec: **READ FIRST** (from recon) · **ANTI-PATTERNS** · **STEPS** · **VE
 
 ### WS-B — `finalize` effect  · **opus** (cross-layer extract + harness handler)
 - READ: recon C (returnControl end-to-end), `Translate.hs:1578-1663,2723-2762`,
-  `effect_defs.rs:620-690`, `engine.rs:82-124`, `harness.rs:1596-1691`.
-- ANTI-PATTERNS: don't add a new union-tag effect (reuse `AskWith`); don't apply
-  the function-arrow rejection to `finalize`; don't resume the Agent — `finalize`
-  *terminates* the Agent turn-loop and hands the value UP to the `loop` hole.
-- STEPS: fill the S3 finalize stubs — the `finalizeSited` body building
-  `AskWith p {finalize:true, typedSite}`, the `Translate` detection + `@a`
-  capture (no arrow check), the `HoleRouting::Finalize` classify arm, and the
-  harness handler that ends the Agent session and yields the value to WS-A's
-  `service_runllm_hole`.
+  `effect_defs.rs:576-694` (Ask def), `effect_glue.rs:23-79`,
+  `eval_prep.rs:43-69` (base_effects!/interposed Ask), `engine.rs:82-124`,
+  `harness.rs:1596-1691`.
+- ANTI-PATTERNS: **do NOT copy Ask's code — SHARE it.** Factor the suspend-as-data
+  + payload-classify + resume machinery into a common path both `Ask` and the new
+  `finalize` effect consume; don't apply the function-arrow rejection to
+  `finalize`; don't resume the Agent — `finalize` *terminates* the Agent turn-loop
+  and hands the value UP to the `loop` hole.
+- STEPS: (1) factor the shared suspend/classify/resume code out of the `Ask` path;
+  (2) add a new interposed `finalize` effect (own GADT constructor + tag alongside
+  `Ask`, harness-serviced) consuming that shared code; (3) `Translate` detection +
+  `@a` capture (no arrow check); (4) the `HoleRouting::Finalize` classify arm;
+  (5) the harness handler that ends the Agent session and yields the value to
+  WS-A's `service_runllm_hole` via `run_child`.
 - VERIFY: a test where an Agent turn returns a closure via `finalize` and the
-  Harness side receives+applies it.
-- DONE: `finalize @A x` inside an Agent turn resolves the parent `runLLMTurn @A` hole.
+  Harness side receives+applies it; grep confirms no duplicated Ask machinery.
+- DONE: `finalize @A x` inside an Agent turn resolves the parent `runLLMTurn @A`
+  hole, with Ask's suspend/classify code shared, not copied.
 
 ### WS-C — Typed `State` threading  · **sonnet**
 - READ: recon B §5 (`value_to_json` engine.rs:1267 / session.rs:900;
