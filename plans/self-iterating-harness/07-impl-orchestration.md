@@ -47,17 +47,20 @@ shape (`typedSite`/`fork`/`fan`/`prompts`, `AskWith`, `asks.json`) unchanged.
 Verify: `scripts/battery.sh` green (rename is behavior-preserving).
 
 **S3 — Freeze contracts as stubs (`unimplemented!()` / typed holes):**
-- Effect stacks (two distinct rows): **Harness** = `Eff '[runLLMTurn]` —
-  orchestration-only for v1 (base effects added later, as needed, never
-  prematurely). **Agent** = the existing full base stack + `Ask` + the new
-  `finalize`. `runLLMTurn` = renamed `returnControl`; `fork` deferred to a later
-  wave.
-- `finalize`: factor the common suspend / payload-classify / resume code out of
-  the `Ask` path, then add a new interposed `finalize` effect (own GADT
-  constructor + tag alongside `Ask`) that CONSUMES the shared code; `Translate.hs`
-  detection stub (mirror `isReturnControlVar`, capture `@a` via
-  `[Type ty] <- typeArgs`, **skip the `typeHasFunctionArrow` rejection**) +
-  `HoleRouting::Finalize { value }` in `engine.rs:82-124`.
+- Effect-stack SHAPE (frozen as a contract; the effect *declarations* + the
+  Ask-machinery factoring are **WS-B**, not scaffold): **Harness** =
+  `Eff '[RunLLMTurn]` — orchestration-only for v1 (base effects appended later,
+  as needed, never prematurely). **Agent** = the existing full base stack +
+  `Ask` + `Finalize`. `RunLLMTurn` and `Finalize` are **distinct effects that
+  SHARE `Ask`'s suspend/classify machinery** (`runLLMTurn` is split OUT of `Ask`,
+  where the rename left it as a verb). `fork` deferred. Scaffold freezes only the
+  **Rust seams** (next bullet); WS-B builds the Haskell effects.
+- Rust seam for `finalize` (the Haskell `Finalize` effect + Ask factoring are
+  WS-B): add a `HoleRouting::Finalize { site, ty }` variant in
+  `engine.rs:82-124` + a placeholder `classify_hole` arm (`unimplemented!()`), so
+  the driver + classifier compile against it. `runLLMTurn`'s routing already
+  exists (the renamed former `returnControl` path); WS-B adjusts it when it
+  splits `runLLMTurn` out of `Ask`.
 - Runtime driver interface (Rust) as stubs: the outer lifecycle enum (model on
   `tidepool-repl/src/state.rs:56-72`), and signatures for `run_loop`,
   `service_runllm_hole`, `state_out`/`state_in` (JSON crossing),
@@ -90,26 +93,30 @@ Each spec: **READ FIRST** (from recon) · **ANTI-PATTERNS** · **STEPS** · **VE
   `finalize` completes and re-renders.
 - DONE: one full render→loop→runLLMTurn→finalize→render cycle runs end to end.
 
-### WS-B — `finalize` effect  · **opus** (cross-layer extract + harness handler)
-- READ: recon C (returnControl end-to-end), `Translate.hs:1578-1663,2723-2762`,
-  `effect_defs.rs:576-694` (Ask def), `effect_glue.rs:23-79`,
-  `eval_prep.rs:43-69` (base_effects!/interposed Ask), `engine.rs:82-124`,
-  `harness.rs:1596-1691`.
+### WS-B — Shared suspend machinery + `RunLLMTurn` + `Finalize` effects  · **opus**
+- READ: recon C (the runLLMTurn/former-returnControl mechanism end-to-end),
+  `Translate.hs:1578-1663,2723-2762`, `effect_defs.rs:576-694` (Ask def),
+  `effect_glue.rs:23-79`, `eval_prep.rs:43-69` (base_effects!/interposed Ask),
+  `engine.rs:82-124`, `harness.rs:1596-1691`.
 - ANTI-PATTERNS: **do NOT copy Ask's code — SHARE it.** Factor the suspend-as-data
-  + payload-classify + resume machinery into a common path both `Ask` and the new
-  `finalize` effect consume; don't apply the function-arrow rejection to
-  `finalize`; don't resume the Agent — `finalize` *terminates* the Agent turn-loop
-  and hands the value UP to the `loop` hole.
-- STEPS: (1) factor the shared suspend/classify/resume code out of the `Ask` path;
-  (2) add a new interposed `finalize` effect (own GADT constructor + tag alongside
-  `Ask`, harness-serviced) consuming that shared code; (3) `Translate` detection +
-  `@a` capture (no arrow check); (4) the `HoleRouting::Finalize` classify arm;
-  (5) the harness handler that ends the Agent session and yields the value to
-  WS-A's `service_runllm_hole` via `run_child`.
-- VERIFY: a test where an Agent turn returns a closure via `finalize` and the
-  Harness side receives+applies it; grep confirms no duplicated Ask machinery.
-- DONE: `finalize @A x` inside an Agent turn resolves the parent `runLLMTurn @A`
-  hole, with Ask's suspend/classify code shared, not copied.
+  + payload-classify + resume machinery into ONE common path that `Ask`,
+  `RunLLMTurn`, and `Finalize` all consume; don't apply the function-arrow
+  rejection to `finalize`; `finalize` does NOT resume the Agent — it *terminates*
+  the Agent turn-loop and hands the value UP to the `loop` hole.
+- STEPS: (1) factor the shared suspend/classify/resume code out of `Ask`;
+  (2) **split `runLLMTurn` OUT of `Ask` into its own interposed `RunLLMTurn`
+  effect** consuming the shared code (the rename left it an Ask verb) — so
+  `Harness = Eff '[RunLLMTurn]`; (3) add the `Finalize` effect the same way (own
+  tag, shared code, `@a` capture with NO arrow check, in-heap value); (4) the
+  `HoleRouting::Finalize` arm (+ adjust `RunLLMTurn` routing after the split);
+  (5) the harness handler that ends the Agent session and yields `finalize`'s
+  value to WS-A's `service_runllm_hole` via `run_child`.
+- VERIFY: `runLLMTurn @A` (from a Harness `loop`) and `finalize @A x` (from an
+  Agent turn) both work; an Agent turn returning a closure via `finalize` is
+  received+applied Harness-side; grep confirms no duplicated Ask machinery.
+- DONE: `Harness = Eff '[RunLLMTurn]`, `Agent = base + Ask + Finalize`, all three
+  sharing one factored suspend/classify path; `finalize @A x` resolves the parent
+  `runLLMTurn @A` hole.
 
 ### WS-C — Typed `State` threading  · **sonnet**
 - READ: recon B §5 (`value_to_json` engine.rs:1267 / session.rs:900;
