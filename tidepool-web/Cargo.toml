@@ -1,6 +1,6 @@
 [package]
 name = "tidepool-web"
-description = "Protocol server (HTTP+SSE) + Datastar observatory over tidepool-harness"
+description = "Minimal operator GUI (HTTP+SSE, Datastar) for the self-iterating harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,20 +15,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 maud = "0.27"
 datastar = { version = "0.3", features = ["axum"] }
-pulldown-cmark = "0.13"
-percent-encoding = "2"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures-core = "0.3"
-
-[dev-dependencies]
-tempfile = "3"
-
-[[bin]]
-name = "tidepool-harness"
-path = "src/bin/tidepool-harness.rs"
 
 [[bin]]
 name = "tidepool-selfharness"
 path = "src/bin/tidepool-selfharness.rs"
+
+[[bin]]
+name = "tidepool-selfharness-web"
+path = "src/bin/tidepool-selfharness-web.rs"

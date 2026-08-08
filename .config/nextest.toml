@@ -76,9 +76,6 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # fails the compile, so the filter is the real tier boundary.)
 # `acceptance_run_llm_turn` (A3, PRD §11) is the same shape as
 # `golden_path`: record-replay through the real Harness, real GHC extracts.
-# `tidepool-web`'s `kill9_restart` acceptance test spawns the real
-# `tidepool-harness` binary, which itself drives real GHC extracts — GHC-tier
-# for the same reason even though tidepool-web has no other GHC dependency.
 # `uiof_mechanical` (A1, uiOf server-derived forms) is the same shape again: a
 # real GHC extract of a user `Verdict` module, driven through the real Harness.
 # `acceptance_fanout` (B1, runLLMTurnFanout) is the same shape again: a fan
@@ -91,7 +88,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # shape again: a real GHC extract of a root + fork-answerer child through the
 # real Harness, this time with a `Harness::splice` call injected mid-answer to
 # prove the spliced content reaches the child's next scripted prompt.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice)) | (package(tidepool-web) & binary(kill9_restart)))'
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice)))'
 
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
@@ -108,5 +105,5 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 max-threads = 4
 
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice)) | (package(tidepool-web) & binary(kill9_restart))'
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice))'
 test-group = 'ghc-heavy'
