@@ -1051,10 +1051,6 @@ pub async fn drive_model_turn(
         reasoning,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
-    match &block {
-        Some(b) => tracing::info!("model haskell block:\n{b}"),
-        None => tracing::info!("model turn had no haskell block (prose-only)"),
-    }
     Ok(DrivenTurn {
         reply: text,
         usage,
