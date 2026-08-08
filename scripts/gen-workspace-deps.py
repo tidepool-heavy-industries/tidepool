@@ -292,27 +292,49 @@ def main():
             if len(versioned) > 1:
                 raise SystemExit(f"internal dep `{name}` has inconsistent versions across crates: {versioned}")
             version = next(iter(versioned)) if versioned else None
-            # A member declaring this internal dep with NO version (a bare
-            # `{ path = ... }`) is not requirement-identical to the versioned
-            # majority — leave it fully local rather than silently widening
-            # its requirement from unconstrained to `version`.
+            # Two shapes are NOT requirement-identical to the versioned
+            # majority, and centralizing either would silently change what that
+            # occurrence asks for:
+            #   - no version at all (a bare `{ path = ... }`): centralizing
+            #     widens it from unconstrained to `version`.
+            #   - `default-features = false`: the workspace reference renders as
+            #     `workspace = true` plus extra features (render_workspace_ref
+            #     has no way to say "and keep default features off"), so
+            #     centralizing re-enables default features.
+            # Both are left fully local. The external branch below excludes the
+            # second for the same reason.
+            unpinned = [o for o in occs if o.version is None]
+            no_defaults = [o for o in occs if o.default_features is False]
             if version is not None:
-                group = [o for o in occs if o.version == version]
-                skipped = [o for o in occs if o.version is None]
-                if skipped:
-                    print(
-                        f"note: `{name}` is missing its version pin in {[o.member for o in skipped]} "
-                        f"(bare `{{ path = ... }}`, not `{{ version = \"{version}\", path = ... }}` like "
-                        f"every other consumer) — left fully local, NOT centralized, since adding the "
-                        f"version there would change that occurrence's requirement",
-                        file=sys.stderr,
-                    )
+                group = [o for o in occs if o.version == version and o.default_features is not False]
             else:
-                group = occs
+                group = [o for o in occs if o.default_features is not False]
+            # Only a skip when there IS a pinned majority to be excluded from:
+            # if nothing pins this dep (a `publish = false` crate consumed by
+            # path alone), every occurrence is unpinned and all of them are
+            # centralized together — nothing was left behind to report.
+            if unpinned and version is not None:
+                print(
+                    f"note: `{name}` is missing its version pin in {[o.member for o in unpinned]} "
+                    f"(bare `{{ path = ... }}`, not `{{ version = \"{version}\", path = ... }}` like "
+                    f"every other consumer) — left fully local, NOT centralized, since adding the "
+                    f"version there would change that occurrence's requirement",
+                    file=sys.stderr,
+                )
+            if no_defaults:
+                print(
+                    f"note: `{name}` is declared `default-features = false` in "
+                    f"{[o.member for o in no_defaults]} — left fully local, NOT centralized, since "
+                    f"a `workspace = true` reference cannot carry that flag and would re-enable "
+                    f"default features",
+                    file=sys.stderr,
+                )
+            if not group:
+                continue
             member_dir = crate_name_to_member.get(name)
             if member_dir is None:
                 raise SystemExit(f"internal dep `{name}` does not match any workspace member's package name")
-            base_features = set.intersection(*(o.features for o in group)) if group else set()
+            base_features = set.intersection(*(o.features for o in group))
             ws_entries[name] = {"version": version, "path": member_dir, "features": base_features}
             chosen_group[name] = set(id(o) for o in group)
             continue
