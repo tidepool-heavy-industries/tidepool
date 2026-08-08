@@ -755,6 +755,12 @@ fn run_tidepool_extract(
 /// needs — every rustc process in one build converges on the same directory.
 /// `deps` must already be sorted by path (callers own the sort so the same
 /// input set always hashes to the same key regardless of resolution order).
+///
+/// `DefaultHasher`'s output is NOT guaranteed stable across Rust versions,
+/// so these keys — and the `target/tidepool-{cbor,inline}/` dir names built
+/// from them — are toolchain-local by construction: a toolchain bump changes
+/// every key, which is a full miss (safe — never a stale hit) but leaves the
+/// old dirs on disk and re-extracts everything once.
 fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
