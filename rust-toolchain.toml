@@ -1,0 +1,7 @@
+# Single source of truth for the Rust toolchain: flake.nix reads this file
+# (rust-bin.fromRustupToolchainFile) instead of pinning a version separately,
+# so `nix develop` and any rustup-managed ambient shell resolve to the same
+# compiler. Must stay >= the workspace MSRV (`rust-version` in Cargo.toml).
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
