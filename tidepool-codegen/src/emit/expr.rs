@@ -627,230 +627,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 args.sess.oom_func,
                 arg,
             );
-
-            // Force thunked function values. Case alt binders can be
-            // thunks (lazy fields), so when one is applied as a function,
-            // we must force it to get the underlying closure.
-            let fun_tag = args
-                .builder
-                .ins()
-                .load(types::I8, MemFlags::trusted(), raw_fun_ptr, 0);
-            let is_thunk = args.builder.ins().icmp_imm(
-                IntCC::Equal,
-                fun_tag,
-                tidepool_heap::layout::TAG_THUNK as i64,
-            );
-
-            let force_fun_block = args.builder.create_block();
-            let fun_ready_block = args.builder.create_block();
-            args.builder.append_block_param(fun_ready_block, types::I64);
-
-            args.builder.ins().brif(
-                is_thunk,
-                force_fun_block,
-                &[],
-                fun_ready_block,
-                &[BlockArg::Value(raw_fun_ptr)],
-            );
-
-            args.builder.switch_to_block(force_fun_block);
-            args.builder.seal_block(force_fun_block);
-
-            let force_fn = args
-                .sess
-                .pipeline
-                .module
-                .declare_function(
-                    "heap_force",
-                    Linkage::Import,
-                    &crate::emit::heap_force_sig(args.sess.pipeline.isa.default_call_conv()),
-                )
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let force_ref = args
-                .sess
-                .pipeline
-                .module
-                .declare_func_in_func(force_fn, args.builder.func);
-            let force_call = args
-                .builder
-                .ins()
-                .call(force_ref, &[args.sess.vmctx, raw_fun_ptr]);
-            let forced_fun = args.builder.inst_results(force_call)[0];
-            args.builder.declare_value_needs_stack_map(forced_fun);
-            args.builder
-                .ins()
-                .jump(fun_ready_block, &[BlockArg::Value(forced_fun)]);
-
-            args.builder.switch_to_block(fun_ready_block);
-            args.builder.seal_block(fun_ready_block);
-            let fun_ptr = args.builder.block_params(fun_ready_block)[0];
-            args.builder.declare_value_needs_stack_map(fun_ptr);
-
-            // Debug: call host fn to validate fun_ptr tag before call_indirect.
-            // Returns 0 (null) if ok, or a poison pointer if call should be skipped.
-            let check_fn = args
-                .sess
-                .pipeline
-                .module
-                .declare_function("debug_app_check", Linkage::Import, &{
-                    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.params.push(AbiParam::new(types::I64)); // fun_ptr
-                    sig.returns.push(AbiParam::new(types::I64)); // 0 = ok, non-zero = poison
-                    sig
-                })
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let check_ref = args
-                .sess
-                .pipeline
-                .module
-                .declare_func_in_func(check_fn, args.builder.func);
-            let check_inst = args
-                .builder
-                .ins()
-                .call(check_ref, &[args.sess.vmctx, fun_ptr]);
-            let check_result = args.builder.inst_results(check_inst)[0];
-
-            // If debug_app_check returned non-zero (poison), short-circuit
-            let call_block = args.builder.create_block();
-            let merge_block = args.builder.create_block();
-            args.builder.append_block_param(merge_block, types::I64);
-
-            let is_zero = args.builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
-            args.builder.ins().brif(
-                is_zero,
-                call_block,
-                &[],
-                merge_block,
-                &[BlockArg::Value(check_result)],
-            );
-
-            // call_block: normal function call
-            args.builder.switch_to_block(call_block);
-            args.builder.seal_block(call_block);
-
-            let code_ptr = args.builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                fun_ptr,
-                CLOSURE_CODE_PTR_OFFSET,
-            );
-
-            let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-            sig.params.push(AbiParam::new(types::I64)); // vmctx
-            sig.params.push(AbiParam::new(types::I64)); // self
-            sig.params.push(AbiParam::new(types::I64)); // arg
-            sig.returns.push(AbiParam::new(types::I64));
-            let call_sig = args.builder.import_signature(sig);
-
-            let inst = args.builder.ins().call_indirect(
-                call_sig,
-                code_ptr,
-                &[args.sess.vmctx, fun_ptr, arg_ptr],
-            );
-            let ret_val = args.builder.inst_results(inst)[0];
-
-            // TCO null check: if callee returned null, it might be a tail call
-            let ret_is_null = args.builder.ins().icmp_imm(IntCC::Equal, ret_val, 0);
-            let null_check_block = args.builder.create_block();
-            let ret_ok_block = args.builder.create_block();
-
-            args.builder
-                .ins()
-                .brif(ret_is_null, null_check_block, &[], ret_ok_block, &[]);
-
-            // ret_ok_block: normal return, jump to merge
-            args.builder.switch_to_block(ret_ok_block);
-            args.builder.seal_block(ret_ok_block);
-            args.builder
-                .ins()
-                .jump(merge_block, &[BlockArg::Value(ret_val)]);
-
-            // null_check_block: check if VMContext has a pending tail call
-            args.builder.switch_to_block(null_check_block);
-            args.builder.seal_block(null_check_block);
-
-            let tail_callee = args.builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                args.sess.vmctx,
-                VMCTX_TAIL_CALLEE_OFFSET,
-            );
-            let has_tail_call = args.builder.ins().icmp_imm(IntCC::NotEqual, tail_callee, 0);
-
-            let resolve_block = args.builder.create_block();
-            let null_propagate_block = args.builder.create_block();
-
-            args.builder
-                .ins()
-                .brif(has_tail_call, resolve_block, &[], null_propagate_block, &[]);
-
-            // null_propagate_block: no tail call pending, propagate null (error)
-            args.builder.switch_to_block(null_propagate_block);
-            args.builder.seal_block(null_propagate_block);
-            let null_val = args.builder.ins().iconst(types::I64, 0);
-            args.builder
-                .ins()
-                .jump(merge_block, &[BlockArg::Value(null_val)]);
-
-            // resolve_block: call trampoline_resolve to execute the pending tail call
-            args.builder.switch_to_block(resolve_block);
-            args.builder.seal_block(resolve_block);
-
-            let resolve_fn = args
-                .sess
-                .pipeline
-                .module
-                .declare_function("trampoline_resolve", Linkage::Import, &{
-                    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.returns.push(AbiParam::new(types::I64)); // result
-                    sig
-                })
-                .map_err(|e: cranelift_module::ModuleError| {
-                    EmitError::CraneliftError(e.to_string())
-                })?;
-            let resolve_ref = args
-                .sess
-                .pipeline
-                .module
-                .declare_func_in_func(resolve_fn, args.builder.func);
-            let resolve_inst = args.builder.ins().call(resolve_ref, &[args.sess.vmctx]);
-            let resolved_val = args.builder.inst_results(resolve_inst)[0];
-            args.builder.declare_value_needs_stack_map(resolved_val);
-            args.builder
-                .ins()
-                .jump(merge_block, &[BlockArg::Value(resolved_val)]);
-
-            // merge_block: result from any path. Pair debug_app_check's
-            // increment with a decrement here — every exit from this App
-            // node (the poison short-circuit and the post-call/post-TCO-
-            // resolution path) converges here, so call_depth tracks live
-            // nesting instead of a running total (Finding 5).
-            args.builder.switch_to_block(merge_block);
-            args.builder.seal_block(merge_block);
-            let merged_val = args.builder.block_params(merge_block)[0];
-            args.builder.declare_value_needs_stack_map(merged_val);
-
-            let return_fn = args
-                .sess
-                .pipeline
-                .module
-                .declare_function("debug_app_return", Linkage::Import, &{
-                    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.returns.push(AbiParam::new(types::I64));
-                    sig
-                })
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let return_ref = args
-                .sess
-                .pipeline
-                .module
-                .declare_func_in_func(return_fn, args.builder.func);
-            args.builder.ins().call(return_ref, &[args.sess.vmctx]);
-
-            Ok(SsaVal::HeapPtr(merged_val))
+            crate::emit::apply::runtime_apply(args.sess, args.builder, raw_fun_ptr, arg_ptr)
         }
         EmitFrame::Lam { binder, body_idx } => emit_lam(
             EmitArgs {
@@ -1446,6 +1223,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
         free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
+        function_imports: FunctionImports::default(),
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1674,6 +1452,7 @@ fn emit_thunk_promised(
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
         free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
+        function_imports: FunctionImports::default(),
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1916,6 +1695,7 @@ pub fn compile_expr(
         tree,
         lit_wrappers,
         free_vars_idx,
+        function_imports: FunctionImports::default(),
     };
 
     let result = EmitContext::emit_node(
@@ -2918,6 +2698,7 @@ impl EmitContext {
                 tree: &lam_body_tree,
                 lit_wrappers: args.sess.lit_wrappers,
                 free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&lam_body_tree),
+                function_imports: FunctionImports::default(),
             };
             let body_result = EmitContext::emit_node(
                 EmitArgs {

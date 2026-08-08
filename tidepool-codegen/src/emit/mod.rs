@@ -1,8 +1,11 @@
+pub mod apply;
 pub mod case;
 pub mod expr;
 pub mod free_vars_index;
 pub mod join;
 pub mod primop;
+
+pub(crate) use apply::FunctionImports;
 
 use cranelift_codegen::ir::{FuncRef, SigRef, Value};
 use rustc_hash::FxHashMap;
@@ -119,6 +122,16 @@ pub struct EmitSession<'a> {
     /// the four `EmitSession` construction sites in `emit/expr.rs` builds
     /// this from its own `tree` right there, so the two can never drift.
     pub free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex,
+    /// Per-function cache of the `FuncRef`s the application protocol imports
+    /// (`heap_force`/`debug_app_check`/`trampoline_resolve`/`debug_app_return`;
+    /// see `apply::FunctionImports`). A `FuncRef` from `declare_func_in_func`
+    /// is only valid inside the specific Cranelift `Function` it was declared
+    /// into, so this cache lives here rather than anywhere longer-lived: like
+    /// `free_vars_idx`, it is fresh at every one of the four `EmitSession`
+    /// construction sites (one per Cranelift `Function` built) and is dropped
+    /// with the session at the end of that function's emission, never reused
+    /// across functions.
+    pub(crate) function_imports: FunctionImports,
 }
 
 /// SSA value with boxed/unboxed tracking.
