@@ -323,6 +323,7 @@ static HEAP_VERIFY_FORCE: AtomicBool = AtomicBool::new(false);
 #[doc(hidden)]
 pub fn set_heap_verify(on: bool) {
     HEAP_VERIFY_FORCE.store(on, Ordering::Relaxed);
+    tidepool_heap::gc::raw::set_checked_scanning(on);
 }
 
 /// Kill-switched fail-loud mode: `TIDEPOOL_HEAP_VERIFY=1` (or `set_heap_verify`)

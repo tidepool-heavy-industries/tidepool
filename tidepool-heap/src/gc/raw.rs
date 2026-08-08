@@ -1,6 +1,8 @@
 //! Cheney's semi-space copying GC for raw HeapObjects.
 
 use crate::layout::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 /// Result of a Cheney copying collection, containing statistics about the collection.
 pub struct CopyResult {
@@ -9,6 +11,70 @@ pub struct CopyResult {
 
 fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
+}
+
+/// Process-global test override for `checked_scanning_enabled`. `env::set_var`
+/// is racy against the `OnceLock`-cached env read below (it latches the FIRST
+/// read); this atomic gives tests a reliable, safe way to force checked
+/// scanning on/off without touching the environment.
+static CHECKED_SCANNING_FORCE: AtomicBool = AtomicBool::new(false);
+
+/// Test-only: force diagnostic checked scanning on (or back off), independent
+/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
+#[doc(hidden)]
+pub fn set_checked_scanning(on: bool) {
+    CHECKED_SCANNING_FORCE.store(on, Ordering::Relaxed);
+}
+
+/// Diagnostic mode: a size/count containment violation panics with full
+/// detail instead of degrading silently. `tidepool-heap` must not depend on
+/// `tidepool-codegen`, so this mirrors (rather than shares) the
+/// `heap_verify_enabled` `AtomicBool`+`OnceLock` pattern in
+/// `tidepool-codegen/src/host_fns/gc.rs`; codegen's `set_heap_verify` forwards
+/// here so flipping one knob enables both.
+fn checked_scanning_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
+        || CHECKED_SCANNING_FORCE.load(Ordering::Relaxed)
+}
+
+/// Handle a size/count containment violation discovered before constructing
+/// raw field-slot pointers from a derived count. In diagnostic mode
+/// (`checked_scanning_enabled`) this PANICS with the object's tag, size, the
+/// offending relationship, and its first bytes — turning corrupted metadata
+/// into a loud, diagnosable failure instead of undefined behavior during the
+/// copy. In normal mode it emits an always-on stderr breadcrumb and returns,
+/// leaving the caller to degrade safely (skip the object's fields, or clamp
+/// its size to guarantee scan progress) rather than trust the bogus count.
+///
+/// # Safety
+///
+/// `obj` must be valid for reads of at least `HEADER_SIZE` bytes (every
+/// object is written with at least a tag+size header before it becomes
+/// reachable, so this holds even when `size` itself is the corrupted value).
+unsafe fn report_violation(obj: *const u8, tag: u8, size: usize, what: &str) {
+    // Never dump fewer than the always-valid header, and never more than 32
+    // bytes — `size` itself may be the corrupted value under inspection.
+    let dump_len = size.clamp(HEADER_SIZE, 32);
+    // SAFETY: obj is valid for at least HEADER_SIZE bytes per this fn's
+    // safety contract; dump_len is clamped to [HEADER_SIZE, 32].
+    let bytes = std::slice::from_raw_parts(obj, dump_len);
+    if checked_scanning_enabled() {
+        panic!(
+            "[GC RAW] malformed heap object: {what}\n  tag={tag} size={size}\n  first {dump_len} bytes: {bytes:02x?}"
+        );
+    }
+    eprintln!(
+        "[GC RAW BUG] {what} (tag={tag} size={size}) — skipping rather than trusting the \
+         bogus count; first {dump_len} bytes: {bytes:02x?}"
+    );
+}
+
+/// `base + count.checked_mul(FIELD_STRIDE)`, or `None` on overflow.
+fn field_region_end(base: usize, count: usize) -> Option<usize> {
+    count
+        .checked_mul(FIELD_STRIDE)
+        .and_then(|span| base.checked_add(span))
 }
 
 /// Copy a single heap object from `old_ptr` to `to_base + *free` and install a
@@ -29,6 +95,21 @@ unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut
     }
     // SAFETY: old_ptr is a valid, non-forwarded heap object; size is at offset 1.
     let size = read_size(old_ptr) as usize;
+    // A degenerate size (< the 8-byte header) can never legitimately occur —
+    // clamp it to HEADER_SIZE so the copy below always makes forward
+    // progress instead of risking a zero-length "copy" that leaves free
+    // unchanged and corrupts subsequent Cheney-scan bookkeeping.
+    let size = if size < HEADER_SIZE {
+        report_violation(
+            old_ptr,
+            tag,
+            size,
+            "size below header minimum during evacuate",
+        );
+        HEADER_SIZE
+    } else {
+        size
+    };
     let aligned = size.checked_add(7).unwrap_or(size) & !7;
     // SAFETY: to_base + *free is within tospace bounds (caller guarantees sufficient capacity).
     let new_ptr = to_base.add(*free);
@@ -57,21 +138,65 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
     // SAFETY: obj is a valid heap object per caller's contract; tag and size are in the header.
     let tag = read_tag(obj);
     let size = read_size(obj) as usize;
+    // Always-on, one-compare containment floor: every object carries at
+    // least a written tag+size header, so a smaller size is corrupted
+    // metadata, not a legal shape — reject before trusting any derived
+    // offset below.
+    if size < HEADER_SIZE {
+        report_violation(obj, tag, size, "size below header minimum");
+        return;
+    }
     match tag {
         TAG_CLOSURE => {
             // SAFETY: Closure layout: num_captured at CLOSURE_NUM_CAPTURED_OFFSET,
             // followed by n pointer-sized capture slots starting at CLOSURE_CAPTURED_OFFSET.
             let n = *(obj.add(CLOSURE_NUM_CAPTURED_OFFSET) as *const u16) as usize;
-            for i in 0..n {
-                f(obj.add(CLOSURE_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
+            match field_region_end(CLOSURE_CAPTURED_OFFSET, n) {
+                Some(needed) if needed <= size => {
+                    for i in 0..n {
+                        f(obj.add(CLOSURE_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
+                    }
+                }
+                Some(needed) => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    &format!(
+                        "Closure num_captured={n} needs {needed} bytes but object size is {size}"
+                    ),
+                ),
+                None => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    &format!(
+                        "Closure num_captured={n} overflows the capture-region size computation"
+                    ),
+                ),
             }
         }
         TAG_CON => {
             // SAFETY: Con layout: num_fields at CON_NUM_FIELDS_OFFSET,
             // followed by n pointer-sized field slots starting at CON_FIELDS_OFFSET.
             let n = *(obj.add(CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
-            for i in 0..n {
-                f(obj.add(CON_FIELDS_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
+            match field_region_end(CON_FIELDS_OFFSET, n) {
+                Some(needed) if needed <= size => {
+                    for i in 0..n {
+                        f(obj.add(CON_FIELDS_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
+                    }
+                }
+                Some(needed) => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    &format!("Con num_fields={n} needs {needed} bytes but object size is {size}"),
+                ),
+                None => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    &format!("Con num_fields={n} overflows the field-region size computation"),
+                ),
             }
         }
         TAG_THUNK => {
@@ -87,16 +212,39 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                 THUNK_UNEVALUATED | THUNK_BLACKHOLE => {
                     // SAFETY: Thunk captures are pointer slots from
                     // THUNK_CAPTURED_OFFSET to end of object (determined by
-                    // size). saturating_sub: a header-only blackhole (size 16)
-                    // has no capture region at all.
-                    let n = size.saturating_sub(THUNK_CAPTURED_OFFSET) / FIELD_STRIDE;
+                    // size). Unlike Con/Closure there is no SEPARATE stored
+                    // count to disagree with `size` here — the capture count
+                    // is derived FROM size, so it is self-consistent by
+                    // construction. A header-only thunk (size <
+                    // THUNK_CAPTURED_OFFSET) is legal — a blackhole with no
+                    // captures yet visited — so checked_sub degrading to zero
+                    // captures is the correct behavior, not a violation.
+                    let n = size
+                        .checked_sub(THUNK_CAPTURED_OFFSET)
+                        .map_or(0, |rem| rem / FIELD_STRIDE);
                     for i in 0..n {
                         f(obj.add(THUNK_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
                     }
                 }
                 THUNK_EVALUATED => {
-                    // SAFETY: Evaluated thunk stores indirection pointer at THUNK_INDIRECTION_OFFSET.
-                    f(obj.add(THUNK_INDIRECTION_OFFSET) as *mut *mut u8);
+                    // SAFETY: Evaluated thunk stores indirection pointer at
+                    // THUNK_INDIRECTION_OFFSET. Unlike the unevaluated case,
+                    // an evaluated thunk MUST have this slot — there is no
+                    // legitimate smaller size, so a shortfall here is a real
+                    // containment violation.
+                    let needed = THUNK_INDIRECTION_OFFSET + FIELD_STRIDE;
+                    if size >= needed {
+                        f(obj.add(THUNK_INDIRECTION_OFFSET) as *mut *mut u8);
+                    } else {
+                        report_violation(
+                            obj,
+                            tag,
+                            size,
+                            &format!(
+                                "Thunk (Evaluated) size {size} < required {needed} (indirection slot missing)"
+                            ),
+                        );
+                    }
                 }
                 // Invalid states are left untouched here; the post-GC verifier
                 // (TIDEPOOL_HEAP_VERIFY=1) flags them loudly.
@@ -104,29 +252,62 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
             }
         }
         TAG_LIT => {
-            // SAFETY: Lit layout: lit_tag byte at LIT_TAG_OFFSET. For
-            // SmallArray#/Array#, the value field (LIT_VALUE_OFFSET) holds a
-            // pointer to a malloc'd, GC-external payload buffer
-            // `[u64 len][ptr0..ptrN]` (`runtime_new_boxed_array`) — the
-            // buffer itself is stable and never evacuated (it isn't a
-            // from-space heap object), but its SLOT CONTENTS are ordinary
-            // heap pointers and must be visible to the collector exactly
-            // like a Con field or Closure capture. `cheney_copy`'s
-            // from-space range check makes tracing these slots safe even
-            // though the buffer lives outside both semispaces.
-            let lit_tag = *obj.add(LIT_TAG_OFFSET);
-            if lit_tag == LitTag::SmallArray as u8 || lit_tag == LitTag::Array as u8 {
-                // SAFETY: value field is a valid pointer into a live
-                // `runtime_new_boxed_array` allocation per the caller's
-                // contract on `obj`.
-                let payload = *(obj.add(LIT_VALUE_OFFSET) as *const *mut u8);
-                if !payload.is_null() {
-                    // SAFETY: payload's first 8 bytes are the array length,
-                    // written by `runtime_new_boxed_array` before the array
-                    // becomes reachable.
-                    let len = *(payload as *const u64) as usize;
-                    for i in 0..len {
-                        f(payload.add(8 + i * FIELD_STRIDE) as *mut *mut u8);
+            // SAFETY: Lit layout: lit_tag byte at LIT_TAG_OFFSET, value field
+            // at LIT_VALUE_OFFSET — reading either requires size >= LIT_SIZE.
+            if size < LIT_SIZE {
+                report_violation(
+                    obj,
+                    tag,
+                    size,
+                    &format!("Lit size {size} < LIT_SIZE ({LIT_SIZE})"),
+                );
+            } else {
+                // For SmallArray#/Array#, the value field holds a pointer to
+                // a malloc'd, GC-external payload buffer
+                // `[u64 len][ptr0..ptrN]` (`runtime_new_boxed_array`) — the
+                // buffer itself is stable and never evacuated (it isn't a
+                // from-space heap object), but its SLOT CONTENTS are ordinary
+                // heap pointers and must be visible to the collector exactly
+                // like a Con field or Closure capture. `cheney_copy`'s
+                // from-space range check makes tracing these slots safe even
+                // though the buffer lives outside both semispaces.
+                let lit_tag = *obj.add(LIT_TAG_OFFSET);
+                if lit_tag == LitTag::SmallArray as u8 || lit_tag == LitTag::Array as u8 {
+                    // SAFETY: value field is a valid pointer into a live
+                    // `runtime_new_boxed_array` allocation per the caller's
+                    // contract on `obj`.
+                    let payload = *(obj.add(LIT_VALUE_OFFSET) as *const *mut u8);
+                    if !payload.is_null() {
+                        // SAFETY: payload's first 8 bytes are the array length,
+                        // written by `runtime_new_boxed_array` before the array
+                        // becomes reachable.
+                        let len = *(payload as *const u64) as usize;
+                        // The malloc'd payload carries no recorded capacity
+                        // field to cross-check `len` against — only the
+                        // length prefix itself — so unlike Con/Closure there
+                        // is no second source of truth to validate against.
+                        // Array lengths are also legitimately
+                        // user-controlled and can be large by design, so an
+                        // invented magic cap would just produce false
+                        // positives on big-but-real arrays. The one
+                        // containment invariant enforceable without a second
+                        // source of truth is that the derived byte span must
+                        // not overflow pointer-sized arithmetic.
+                        match len.checked_mul(FIELD_STRIDE).and_then(|s| s.checked_add(8)) {
+                            Some(_) => {
+                                for i in 0..len {
+                                    f(payload.add(8 + i * FIELD_STRIDE) as *mut *mut u8);
+                                }
+                            }
+                            None => report_violation(
+                                obj,
+                                tag,
+                                size,
+                                &format!(
+                                    "boxed array len {len} overflows its byte-span computation (8 + len*{FIELD_STRIDE})"
+                                ),
+                            ),
+                        }
                     }
                 }
             }
@@ -173,7 +354,24 @@ pub unsafe fn cheney_copy(
         // SAFETY: scan offset is within [0, free) which is the initialized portion of tospace.
         let obj = to_base.add(scan);
         // SAFETY: obj is a valid, fully-copied heap object in tospace.
+        let obj_tag = read_tag(obj);
         let obj_size = read_size(obj) as usize;
+        // Same degenerate-size guard as `evacuate`: a size below the header
+        // minimum would otherwise leave `aligned` at 0, so `scan` never
+        // advances and this loop spins forever on the same bogus object.
+        // Clamping to HEADER_SIZE guarantees forward progress every
+        // iteration.
+        let obj_size = if obj_size < HEADER_SIZE {
+            report_violation(
+                obj,
+                obj_tag,
+                obj_size,
+                "size below header minimum during Cheney scan",
+            );
+            HEADER_SIZE
+        } else {
+            obj_size
+        };
         let aligned = obj_size.checked_add(7).unwrap_or(obj_size) & !7;
         // SAFETY: obj is a valid heap object; for_each_pointer_field reads its layout.
         // The closure evacuates any from-space pointer fields into tospace.
