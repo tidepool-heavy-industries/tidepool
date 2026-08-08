@@ -275,8 +275,9 @@ pub struct CompiledTurn {
 #[derive(Debug)]
 pub enum TurnResult {
     /// A top-level declaration. Does not compile: `items` is the decl's
-    /// export items, harvested by the extract's whole-module decl parse (the
-    /// payload `--emit-binders` used to produce before Phase B).
+    /// export items, harvested by the extract's whole-module decl parse —
+    /// NOT by the statement parse that serves the verdict, which cannot cover
+    /// a multi-declaration batch.
     Decl {
         /// The declared names (GHC-sourced).
         binders: Vec<String>,
@@ -785,8 +786,7 @@ fn decode_turn_out(bytes: &[u8]) -> Result<DecodedTurnOut, CompileError> {
     }
 }
 
-/// One parse-only extract spawn classifying N items in order — the batch
-/// replacement for the old per-turn `--emit-stmt-binders` spawn. A repl block
+/// One parse-only extract spawn classifying N items in order. A repl block
 /// runner needs verdicts for a whole block before compiling any item (it
 /// segments consecutive decl-shaped items into one generation, and a
 /// statement item may reference decls earlier in the same block), so it
