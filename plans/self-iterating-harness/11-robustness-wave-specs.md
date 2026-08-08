@@ -90,8 +90,13 @@ struct Checkpoint {
 
 Rules:
 
-- **One writer, one boundary.** The checkpoint commits at cycle end only, with
-  the cycle's state and the compaction summary in force at that moment. A
+- **One writer, one boundary.** The checkpoint commits at the end of
+  `run_one_cycle`, on its success path — every COMPLETED cycle commits,
+  whichever entry point drove it, so the acceptance path (which drives
+  `run_one_cycle` directly, not the forever-loop) is durable too. `run_loop`
+  keeps no save call of its own; it threads the returned state forward. The
+  committed record carries that cycle's state and the compaction summary in
+  force at that moment. A
   mid-loop compaction updates `self.last_compaction` in memory (the loop already
   continues under it) but does NOT commit on its own — so a crash mid-loop
   restarts from generation N's state AND generation N's summary, never a mixed
