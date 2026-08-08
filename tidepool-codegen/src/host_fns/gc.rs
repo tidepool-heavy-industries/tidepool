@@ -22,7 +22,7 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::machine_state::{machine_state, machine_state_opt};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use super::cancel::check_cancel_and_set_error;
 
@@ -536,142 +536,159 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
         // SAFETY: vmctx is valid; machine_state was installed before entering
         // JIT code (same contract as the stack_map_registry read above).
         let ms = unsafe { machine_state(vmctx) };
-        {
-            let mut gc_state = ms.gc_state_mut();
-            if let Some(state) = gc_state.as_mut() {
-                // M3 (deep_force): a real collection is about to run — bump
-                // so callers holding an address-keyed cache across this call
-                // (e.g. deep_force's visited set) know to invalidate it.
-                ms.bump_gc_generation();
-                let from_start = state.active_start;
-                let from_size = state.active_size;
-                // SAFETY: from_start + from_size stays within the active GC region.
-                let from_end = unsafe { from_start.add(from_size) };
+        // The `GcState` is TAKEN out of its cell for the duration of the
+        // copy, not borrowed: a fault (SIGSEGV/SIGILL) anywhere in this
+        // block siglongjmps out of this frame, abandoning the owned
+        // `state`/`tospace`/`root_slots` locals on the dead stack — they
+        // leak, nothing double-frees — and the cell is left EMPTY rather
+        // than permanently marked mutably borrowed. Every teardown path
+        // (`reclaim_session_heap`, `clear_run_scratch`, `free_session_heap`)
+        // already treats an empty cell as the ordinary "no GC state" case.
+        if let Some(mut state) = ms.take_gc_state() {
+            // M3 (deep_force): a real collection is about to run — bump
+            // so callers holding an address-keyed cache across this call
+            // (e.g. deep_force's visited set) know to invalidate it.
+            ms.bump_gc_generation();
+            let from_start = state.active_start;
+            let from_size = state.active_size;
+            // SAFETY: from_start + from_size stays within the active GC region.
+            let from_end = unsafe { from_start.add(from_size) };
 
-                let mut tospace = alloc_aligned_zeroed(from_size);
+            let mut tospace = alloc_aligned_zeroed(from_size);
 
-                // Convert StackRoot to raw slot pointers
-                let mut root_slots: Vec<*mut *mut u8> = roots
-                    .iter()
-                    .map(|r| r.stack_slot_addr as *mut *mut u8)
-                    .collect();
+            // Convert StackRoot to raw slot pointers
+            let mut root_slots: Vec<*mut *mut u8> = roots
+                .iter()
+                .map(|r| r.stack_slot_addr as *mut *mut u8)
+                .collect();
 
-                // Append Rust-registered roots (from apply_cont_heap k2_stack, etc.)
-                ms.extend_rust_roots(&mut root_slots);
+            // Append Rust-registered roots (from apply_cont_heap k2_stack, etc.)
+            ms.extend_rust_roots(&mut root_slots);
 
-                // Append session-scoped persistent roots (Wave 1.A, component D).
-                // These survive across runs and are cleared only at machine drop.
-                ms.extend_persistent_roots(&mut root_slots);
+            // Append session-scoped persistent roots (Wave 1.A, component D).
+            // These survive across runs and are cleared only at machine drop.
+            ms.extend_persistent_roots(&mut root_slots);
 
-                // Append stowed roots (segment 40): the parent's suspended
-                // continuation cell(s), registered for the duration of a nested
-                // child run so this (child-triggered) collection evacuates the
-                // parent's stowed continuation tree and rewrites the cell in
-                // place. Empty in the non-nested case — a plain run/resume never
-                // registers one, so this is a no-op there.
-                ms.extend_stowed_roots(&mut root_slots);
+            // Append stowed roots (segment 40): the parent's suspended
+            // continuation cell(s), registered for the duration of a nested
+            // child run so this (child-triggered) collection evacuates the
+            // parent's stowed continuation tree and rewrites the cell in
+            // place. Empty in the non-nested case — a plain run/resume never
+            // registers one, so this is a no-op there.
+            ms.extend_stowed_roots(&mut root_slots);
 
-                // Defense-in-depth: trace VMContext tail_callee/tail_arg
-                // SAFETY: vmctx is valid and these fields are heap pointers.
-                unsafe {
-                    let tc = &mut (*vmctx).tail_callee as *mut *mut u8;
-                    let ta = &mut (*vmctx).tail_arg as *mut *mut u8;
-                    if !(*tc).is_null() {
-                        root_slots.push(tc);
-                    }
-                    if !(*ta).is_null() {
-                        root_slots.push(ta);
-                    }
+            // Defense-in-depth: trace VMContext tail_callee/tail_arg
+            // SAFETY: vmctx is valid and these fields are heap pointers.
+            unsafe {
+                let tc = &mut (*vmctx).tail_callee as *mut *mut u8;
+                let ta = &mut (*vmctx).tail_arg as *mut *mut u8;
+                if !(*tc).is_null() {
+                    root_slots.push(tc);
                 }
+                if !(*ta).is_null() {
+                    root_slots.push(ta);
+                }
+            }
 
-                // SAFETY: root_slots point to valid stack locations from walk_frames.
-                // from_start..from_end is the active nursery region. tospace is freshly
-                // allocated with the same size, which always suffices: live data is a
-                // subset of from-space and objects are copied at identical sizes.
-                let result = unsafe {
+            // Test-only one-shot fault injection (see `arm_gc_fault`): this
+            // is exactly the window that used to hold a live `RefMut<GcState>`.
+            maybe_raise_gc_fault(GcFaultPoint::DuringCopy);
+
+            // SAFETY: root_slots point to valid stack locations from walk_frames.
+            // from_start..from_end is the active nursery region. tospace is freshly
+            // allocated with the same size, which always suffices: live data is a
+            // subset of from-space and objects are copied at identical sizes.
+            let result = unsafe {
+                tidepool_heap::gc::raw::cheney_copy(
+                    &root_slots,
+                    from_start as *const u8,
+                    from_end as *const u8,
+                    as_bytes_mut(&mut tospace),
+                )
+            };
+
+            maybe_raise_gc_fault(GcFaultPoint::AfterCopy);
+
+            // Heap growth: a fixed-size heap turns large live sets into
+            // premature OOM after GC thrash. When utilization is high,
+            // immediately re-evacuate into a doubled space. The root slot
+            // ADDRESSES collected above remain valid; their values now
+            // point into `tospace`, so a second Cheney pass with
+            // from = tospace relocates everything and re-updates them.
+            let max_heap = max_heap_bytes();
+            let mut active = tospace;
+            let mut live_bytes = result.bytes_copied;
+            let mut new_size = from_size;
+            if live_bytes * 4 > from_size * 3 && from_size < max_heap {
+                new_size = (from_size * 2).min(max_heap);
+                let mut bigger = alloc_aligned_zeroed(new_size);
+                // SAFETY: same contract as above; from-space is the live
+                // prefix of `active`, disjoint from `bigger`.
+                let second = unsafe {
+                    let active_start = active.as_ptr() as *const u8;
                     tidepool_heap::gc::raw::cheney_copy(
                         &root_slots,
-                        from_start as *const u8,
-                        from_end as *const u8,
-                        as_bytes_mut(&mut tospace),
+                        active_start,
+                        active_start.add(live_bytes),
+                        as_bytes_mut(&mut bigger),
                     )
                 };
-
-                // Heap growth: a fixed-size heap turns large live sets into
-                // premature OOM after GC thrash. When utilization is high,
-                // immediately re-evacuate into a doubled space. The root slot
-                // ADDRESSES collected above remain valid; their values now
-                // point into `tospace`, so a second Cheney pass with
-                // from = tospace relocates everything and re-updates them.
-                let max_heap = max_heap_bytes();
-                let mut active = tospace;
-                let mut live_bytes = result.bytes_copied;
-                let mut new_size = from_size;
-                if live_bytes * 4 > from_size * 3 && from_size < max_heap {
-                    new_size = (from_size * 2).min(max_heap);
-                    let mut bigger = alloc_aligned_zeroed(new_size);
-                    // SAFETY: same contract as above; from-space is the live
-                    // prefix of `active`, disjoint from `bigger`.
-                    let second = unsafe {
-                        let active_start = active.as_ptr() as *const u8;
-                        tidepool_heap::gc::raw::cheney_copy(
-                            &root_slots,
-                            active_start,
-                            active_start.add(live_bytes),
-                            as_bytes_mut(&mut bigger),
-                        )
-                    };
-                    live_bytes = second.bytes_copied;
-                    if gc_poison_enabled() {
-                        // The intermediate to-space is a second (untracked)
-                        // from-space; poison it so anything left dangling into
-                        // it fails loudly (see `gc_poison_enabled`).
-                        active.iter_mut().for_each(|w| *w = 0xDDDD_DDDD_DDDD_DDDD);
-                    }
-                    active = bigger; // drops the intermediate tospace
-                }
-
+                live_bytes = second.bytes_copied;
                 if gc_poison_enabled() {
-                    // SAFETY: from_start..from_size is the pre-collection
-                    // nursery — still allocated here (the buffer is freed only
-                    // when `state.active_buffer` is replaced below, or is the
-                    // machine-owned initial nursery). All live data has been
-                    // evacuated; any pointer still aimed here is a GC bug this
-                    // poison makes deterministic.
-                    unsafe { std::ptr::write_bytes(from_start, 0xDD, from_size) };
+                    // The intermediate to-space is a second (untracked)
+                    // from-space; poison it so anything left dangling into
+                    // it fails loudly (see `gc_poison_enabled`).
+                    active.iter_mut().for_each(|w| *w = 0xDDDD_DDDD_DDDD_DDDD);
                 }
+                active = bigger; // drops the intermediate tospace
+            }
 
-                // Update GcState: swap to the surviving space
-                let to_start = active.as_mut_ptr() as *mut u8;
-                state.active_start = to_start;
-                state.active_size = new_size;
-                state.active_buffer = Some(active); // drops old buffer if any
+            if gc_poison_enabled() {
+                // SAFETY: from_start..from_size is the pre-collection
+                // nursery — still allocated here (the buffer is freed only
+                // when `state.active_buffer` is replaced below, or is the
+                // machine-owned initial nursery). All live data has been
+                // evacuated; any pointer still aimed here is a GC bug this
+                // poison makes deterministic.
+                unsafe { std::ptr::write_bytes(from_start, 0xDD, from_size) };
+            }
 
-                // SAFETY: vmctx is a valid pointer passed from JIT code. to_start points
-                // to the new active buffer which is now the nursery.
+            // Update the owned GcState: swap to the surviving space.
+            let to_start = active.as_mut_ptr() as *mut u8;
+            state.active_start = to_start;
+            state.active_size = new_size;
+            state.active_buffer = Some(active); // drops old buffer if any
+
+            // Put the state back BEFORE the post-GC verifier: the verifier
+            // panics by design on an invariant violation, and that unwind
+            // must not skip the restore the way a signal-triggered
+            // siglongjmp would.
+            ms.put_gc_state(state);
+
+            // SAFETY: vmctx is a valid pointer passed from JIT code. to_start points
+            // to the new active buffer which is now the nursery.
+            unsafe {
+                (*vmctx).alloc_ptr = to_start.add(live_bytes);
+                (*vmctx).alloc_limit = to_start.add(new_size) as *const u8;
+            }
+
+            // Fail-loud heap invariant walk (TIDEPOOL_HEAP_VERIFY=1).
+            // Runs while from-space is still distinguishable, so a
+            // surviving from-space pointer — a dangling evacuation —
+            // is detected HERE, not three collections later as a
+            // SIGSEGV. (plans/future-plans.md item D)
+            if heap_verify_enabled() {
+                // SAFETY: to_start..+live_bytes is the packed live set
+                // cheney_copy just produced; from range was the
+                // pre-collection nursery (old buffer still alive in
+                // state.active_buffer's predecessor scope).
                 unsafe {
-                    (*vmctx).alloc_ptr = to_start.add(live_bytes);
-                    (*vmctx).alloc_limit = to_start.add(new_size) as *const u8;
-                }
-
-                // Fail-loud heap invariant walk (TIDEPOOL_HEAP_VERIFY=1).
-                // Runs while from-space is still distinguishable, so a
-                // surviving from-space pointer — a dangling evacuation —
-                // is detected HERE, not three collections later as a
-                // SIGSEGV. (plans/future-plans.md item D)
-                if heap_verify_enabled() {
-                    // SAFETY: to_start..+live_bytes is the packed live set
-                    // cheney_copy just produced; from range was the
-                    // pre-collection nursery (old buffer still alive in
-                    // state.active_buffer's predecessor scope).
-                    unsafe {
-                        verify_heap_post_gc(
-                            to_start,
-                            live_bytes,
-                            from_start as *const u8,
-                            from_end as *const u8,
-                        );
-                    }
+                    verify_heap_post_gc(
+                        to_start,
+                        live_bytes,
+                        from_start as *const u8,
+                        from_end as *const u8,
+                    );
                 }
             }
         }
@@ -684,6 +701,62 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 // These use atomics to be thread-safe during parallel test execution.
 static GC_TRIGGER_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 static GC_TRIGGER_LAST_VMCTX: AtomicUsize = AtomicUsize::new(0);
+
+/// A point inside `perform_gc`'s Cheney-copy body where a one-shot fault can
+/// be injected via [`arm_gc_fault`]. Test instrumentation — NOT part of the
+/// public API.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GcFaultPoint {
+    None,
+    /// After the `GcState` is taken out of its cell and to-space is
+    /// allocated, immediately before `cheney_copy` — the window that used to
+    /// hold a live `RefMut<GcState>`.
+    DuringCopy,
+    /// After `cheney_copy` returns and before the `GcState` is put back.
+    AfterCopy,
+}
+
+impl GcFaultPoint {
+    fn to_u8(self) -> u8 {
+        match self {
+            GcFaultPoint::None => 0,
+            GcFaultPoint::DuringCopy => 1,
+            GcFaultPoint::AfterCopy => 2,
+        }
+    }
+}
+
+/// Process-global one-shot GC fault arm point. Test instrumentation — NOT
+/// part of the public API.
+static GC_FAULT_POINT: AtomicU8 = AtomicU8::new(0);
+
+/// Test-only: arm a one-shot fault at `point`. The next `perform_gc` pass
+/// that reaches `point` disarms (stores `None`) before raising `SIGILL`, so
+/// one `arm_gc_fault` call fires exactly one fault. Not part of the public
+/// API.
+#[doc(hidden)]
+pub fn arm_gc_fault(point: GcFaultPoint) {
+    GC_FAULT_POINT.store(point.to_u8(), Ordering::SeqCst);
+}
+
+/// Check-and-fire the fault armed for `point`, if any. `SIGILL` via
+/// `libc::raise` is delivered synchronously to the calling thread before
+/// `raise` returns and involves no UB, unlike an inline trap instruction
+/// whose undefined behavior the optimizer is free to exploit.
+fn maybe_raise_gc_fault(point: GcFaultPoint) {
+    if point == GcFaultPoint::None {
+        return;
+    }
+    let armed = GC_FAULT_POINT.compare_exchange(
+        point.to_u8(),
+        GcFaultPoint::None.to_u8(),
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+    if armed.is_ok() {
+        unsafe { libc::raise(libc::SIGILL) };
+    }
+}
 
 /// Reset test counters. Only call from tests.
 pub fn reset_test_counters() {
