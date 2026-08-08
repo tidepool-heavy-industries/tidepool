@@ -14,7 +14,6 @@
 //! Binder names come from GHC (see `super::binders`), never a Rust-side Haskell
 //! parser — this module only *renders* the structured items.
 
-use serde_json::Value as Json;
 use tidepool_repr::{Generation, SessionModule};
 
 /// A name a declaration turn brings into scope, as classified by GHC.
@@ -84,43 +83,6 @@ impl ExportItem {
             ExportItem::Type { name, .. } => format!("{}(..)", op_wrap(name)),
             // A class always exports with `(..)` so methods are visible to instances.
             ExportItem::Class { name, .. } => format!("{}(..)", op_wrap(name)),
-        }
-    }
-
-    /// Parse one item from the binder-extractor JSON object
-    /// (`{"kind":"value","name":"slug"}` / `{"kind":"type","name":"Foo",
-    /// "cons":["A","B"]}` / `{"kind":"class","name":"C","methods":["m"]}`).
-    /// Returns `None` for a malformed entry.
-    pub(crate) fn from_json(v: &Json) -> Option<ExportItem> {
-        let kind = v.get("kind")?.as_str()?;
-        let name = v.get("name")?.as_str()?.to_string();
-        match kind {
-            "value" => Some(ExportItem::Value { name }),
-            "type" => {
-                let cons = v
-                    .get("cons")
-                    .and_then(Json::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|c| c.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(ExportItem::Type { name, cons })
-            }
-            "class" => {
-                let methods = v
-                    .get("methods")
-                    .and_then(Json::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|c| c.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(ExportItem::Class { name, methods })
-            }
-            _ => None,
         }
     }
 }
@@ -1083,22 +1045,6 @@ mod tests {
             "import must be stripped from declaration body:\n{}",
             r.source
         );
-    }
-
-    #[test]
-    fn export_item_from_json_roundtrips() {
-        let j: Json = serde_json::from_str(
-            r#"{"items":[{"kind":"value","name":"slug"},
-                        {"kind":"type","name":"Foo","cons":["A","B"]}]}"#,
-        )
-        .unwrap();
-        let items: Vec<ExportItem> = j["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(ExportItem::from_json)
-            .collect();
-        assert_eq!(items, vec![val("slug"), ty("Foo", &["A", "B"])]);
     }
 
     // --- Retraction (a name leaving the decl plane on decl→value migration) ---

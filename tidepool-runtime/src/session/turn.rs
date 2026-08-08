@@ -1657,6 +1657,45 @@ mod tests {
         binders.iter().map(String::as_str).collect()
     }
 
+    /// What a DECL case's `TurnResult::Decl` must carry, spelled out per case
+    /// from the documented rules rather than read back off a run — the corpus
+    /// is a check ON the decl path, so an expectation derived from that path's
+    /// own output would assert nothing. `(binders, export-item heads)`:
+    ///
+    /// - `binders` is `classifyTurn`'s verdict names where it has any (rules
+    ///   2/3), and otherwise — rule 5, a declaration with no term-level name —
+    ///   the head names the whole-module parse harvested, per `TurnOut`'s
+    ///   `TDecl` doc. That fallback is why `data`/`class` report a head here
+    ///   while their verdict alone reports nothing.
+    /// - heads come from `Tidepool.Binders.declItems`, which reports a `ValD`'s
+    ///   binders and a `TyClD`'s head and NOTHING else. So a standalone
+    ///   signature harvests no items at all even though `SigD` does yield a
+    ///   verdict name, and an `instance` harvests none because it introduces
+    ///   no exportable head — the two columns are genuinely independent.
+    const DECL_EXPECTATIONS: &[(&str, &[&str], &[&str])] = &[
+        ("fn_decl", &["sq"], &["sq"]),
+        ("value_decl", &["x"], &["x"]),
+        ("pattern_decl", &["a", "b"], &["a", "b"]),
+        ("standalone_signature", &["sq"], &[]),
+        ("data_decl", &["Foo"], &["Foo"]),
+        ("class_decl", &["MyClass"], &["MyClass"]),
+        ("instance_decl", &[], &[]),
+        ("lambda_case_decl", &["f"], &["f"]),
+        ("quasiquote_decl", &["greet"], &["greet"]),
+        ("multi_way_if_decl", &["f"], &["f"]),
+    ];
+
+    /// Look up a decl case's expectations. A decl case absent from
+    /// [`DECL_EXPECTATIONS`] is a hard failure, so adding one to [`CORPUS`]
+    /// forces stating what it should produce instead of silently skipping it.
+    fn decl_expectations(name: &str) -> (&'static [&'static str], &'static [&'static str]) {
+        DECL_EXPECTATIONS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, binders, heads)| (*binders, *heads))
+            .unwrap_or_else(|| panic!("decl corpus case {name:?} has no DECL_EXPECTATIONS entry"))
+    }
+
     /// Insert an `import Tidepool.QQ (…)` line before the preamble's
     /// `default (…)` decl — the same injection point `tidepool-repl`'s
     /// `insert_imports` uses — so the quasiquote corpus entry has `fmt` in
@@ -1779,24 +1818,17 @@ mod tests {
                         .unwrap_or_else(|e| panic!("{}: run_turn failed: {e}", case.name));
                     match (case.kind, result) {
                         (TurnKind::Decl, TurnResult::Decl { binders, items }) => {
-                            // The protocol's fourth closed gap: when the
-                            // supplied verdict's own binders are empty (a
-                            // data/class/instance decl — classifyTurn rule 5
-                            // has no term-level name to report), the extract
-                            // derives `TDecl`'s binders from the harvested
-                            // items' head names instead of echoing the empty
-                            // list, so the single-turn and batch decl paths
-                            // agree. An `instance` decl still yields no items
-                            // (no exportable head name), so it stays `[]`.
-                            let expected: Vec<&str> = if case.binders.is_empty() {
-                                items.iter().map(ExportItem::head_name).collect()
-                            } else {
-                                case.binders.to_vec()
-                            };
+                            let (want_binders, want_heads) = decl_expectations(case.name);
                             assert_eq!(
                                 binder_names(&binders),
-                                expected,
+                                want_binders,
                                 "{}: new-path decl binders mismatch",
+                                case.name
+                            );
+                            assert_eq!(
+                                items.iter().map(ExportItem::head_name).collect::<Vec<_>>(),
+                                want_heads,
+                                "{}: harvested export-item heads mismatch",
                                 case.name
                             );
                         }
