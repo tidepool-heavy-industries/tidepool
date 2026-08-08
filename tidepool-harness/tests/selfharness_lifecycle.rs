@@ -99,6 +99,7 @@ impl ModelProvider for FlakyProvider {
                 output_tokens: 10,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }

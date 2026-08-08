@@ -823,15 +823,23 @@ impl Harness {
                     .lock()
                     .remove(&node)
                     .unwrap_or_else(|| ("Begin.".to_string(), None));
-                self.tree
-                    .turn_delta(node, 0, Role::User, seed.clone(), None)?;
-                (
+                // An empty seed (the self-iterating harness's framing-only
+                // answerer, `create_root_framed(_, "", _)`) has no opening
+                // user turn to log or carry — its context comes from
+                // `framing` alone. Logging/transcribing an empty turn would
+                // be a false record.
+                let transcript = if seed.is_empty() {
+                    Vec::new()
+                } else {
+                    self.tree
+                        .turn_delta(node, 0, Role::User, seed.clone(), None)?;
                     vec![Message {
                         role: Role::User,
                         content: seed,
-                    }],
-                    framing,
-                )
+                        reasoning_items: Vec::new(),
+                    }]
+                };
+                (transcript, framing)
             }
         };
         convos.insert(
@@ -1024,6 +1032,7 @@ impl Harness {
             convo.transcript.push(Message {
                 role: Role::Assistant,
                 content: driven.reply.clone(),
+                reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
@@ -1114,6 +1123,7 @@ impl Harness {
             convo.transcript.push(Message {
                 role: Role::Assistant,
                 content: driven.reply.clone(),
+                reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
@@ -2420,6 +2430,7 @@ impl Harness {
                 convo.transcript.push(Message {
                     role: Role::Assistant,
                     content: driven.reply.clone(),
+                    reasoning_items: driven.reasoning_items.clone(),
                 });
                 convo.turn_seq += 1;
             }
@@ -2847,6 +2858,7 @@ impl Harness {
         transcript.push(Message {
             role: Role::User,
             content: engine::hole_card(prompt, ty),
+            reasoning_items: Vec::new(),
         });
         self.forked_transcripts
             .lock()
@@ -2890,6 +2902,7 @@ impl Harness {
         convo.transcript.push(Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         });
         convo.turn_seq += 1;
         drop(convos);
@@ -3087,6 +3100,7 @@ impl Harness {
         convo.transcript = vec![Message {
             role: Role::User,
             content: content.clone(),
+            reasoning_items: Vec::new(),
         }];
         convo.turn_seq += 1;
         // Reset the running context-size meter: the live context is now just
@@ -3115,6 +3129,7 @@ impl Harness {
         convo.transcript.push(Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         });
         convo.turn_seq += 1;
         drop(convos);

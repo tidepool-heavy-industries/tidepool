@@ -120,6 +120,7 @@ impl ModelProvider for ReplayProvider {
             text: reply.content,
             usage: reply.usage,
             reasoning: None,
+            reasoning_items: Vec::new(), // replay never has live reasoning data
         })
     }
 }
@@ -230,7 +231,11 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
                 .transcripts
                 .entry(node)
                 .or_default()
-                .push(Message { role, content });
+                .push(Message {
+                    role,
+                    content,
+                    reasoning_items: Vec::new(), // the durable log never carries them
+                });
         }
         Event::TurnForked {
             node,
@@ -252,7 +257,11 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
                 .transcripts
                 .entry(node)
                 .or_default()
-                .push(Message { role, content });
+                .push(Message {
+                    role,
+                    content,
+                    reasoning_items: Vec::new(), // the durable log never carries them
+                });
         }
         // TurnStart / Effect / HoleAnswerAttempt do not change tree STATE (they
         // are within-turn detail the replayer substitutes against, not folded

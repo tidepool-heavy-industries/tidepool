@@ -134,6 +134,7 @@ impl ModelProvider for InPlaceProbeProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -162,6 +163,7 @@ impl ModelProvider for InPlaceProbeProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -299,6 +301,7 @@ impl ModelProvider for MultiRoundProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -313,6 +316,7 @@ impl ModelProvider for MultiRoundProvider {
                 text: "```haskell\n(finalize @Text (\"blue\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -332,12 +336,14 @@ impl ModelProvider for MultiRoundProvider {
                 text: "thinking about fruit...".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         } else {
             Ok(TurnResponse {
                 text: "```haskell\n(finalize @Text (\"apple\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         }
     }

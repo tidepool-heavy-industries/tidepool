@@ -81,6 +81,7 @@ impl ModelProvider for GatedProvider {
             text: OK_REPLY.to_string(),
             usage: usage(),
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -104,6 +105,7 @@ impl ModelProvider for FailFirstProvider {
             text: OK_REPLY.to_string(),
             usage: usage(),
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }

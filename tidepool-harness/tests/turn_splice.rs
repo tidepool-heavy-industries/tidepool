@@ -112,6 +112,7 @@ impl ModelProvider for SpliceProbeProvider {
                 .to_string(),
                 usage: usage(),
                 reasoning: None,
+                reasoning_items: Vec::new(),
             }),
             // 1. Child's FIRST turn: splice an operator note into the CHILD's
             //    own transcript, then answer ill-typed (forcing a GHC-verbatim
@@ -126,6 +127,7 @@ impl ModelProvider for SpliceProbeProvider {
                     text: "```haskell\nresume \"forty-two\"\n```".to_string(),
                     usage: usage(),
                     reasoning: None,
+                    reasoning_items: Vec::new(),
                 })
             }
             // 2. Child's SECOND turn: capture the outbound prompt (the
@@ -137,6 +139,7 @@ impl ModelProvider for SpliceProbeProvider {
                     text: "Right, an Int.\n\n```haskell\nresume (42 :: Int)\n```".to_string(),
                     usage: usage(),
                     reasoning: None,
+                    reasoning_items: Vec::new(),
                 })
             }
             other => Err(ProviderError::Api(format!(

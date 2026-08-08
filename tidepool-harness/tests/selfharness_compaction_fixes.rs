@@ -110,6 +110,7 @@ impl ModelProvider for CompactingProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -125,6 +126,7 @@ impl ModelProvider for CompactingProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }

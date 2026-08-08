@@ -210,6 +210,7 @@ fn sample_req() -> TurnRequest {
         messages: vec![Message {
             role: Role::User,
             content: "ping".into(),
+            reasoning_items: Vec::new(),
         }],
         max_tokens: None,
     }

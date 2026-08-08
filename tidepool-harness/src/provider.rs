@@ -25,19 +25,38 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One reasoning item exactly as the Responses API returns it in the
+/// `output` array when `include: ["reasoning.encrypted_content"]` is
+/// requested (`type: "reasoning"`, carrying `id`/`encrypted_content`/
+/// `summary`). Opaque by design — never parsed or reshaped, only carried
+/// from the SSE stream that produced it back into the next request's
+/// `input`, in original position, so a stateless Responses call gets its
+/// prior thinking back. `PartialEq` only: the wrapped `Value` may hold a
+/// float, which has no `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningItem(pub serde_json::Value);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Encrypted reasoning items the provider surfaced for THIS assistant
+    /// turn — empty for user/system messages and for providers that never
+    /// produce them. In-memory only: `#[serde(skip)]` so it never reaches
+    /// the durable log (`Event::TurnDelta` has its own fields, never a
+    /// `Message`), and never needs to survive a process restart (a restart
+    /// already loses the parked session).
+    #[serde(skip, default)]
+    pub reasoning_items: Vec<ReasoningItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRequest {
     pub messages: Vec<Message>,
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnResponse {
     pub text: String,
     pub usage: Usage,
@@ -47,6 +66,12 @@ pub struct TurnResponse {
     /// is the "thinking" shown in the observatory, distinct from the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// The encrypted reasoning items this turn produced (see
+    /// [`ReasoningItem`]) — distinct from `reasoning` above, which is the
+    /// human-facing summary text, not the item the backend wants echoed
+    /// back. Empty for providers that never produce them.
+    #[serde(skip, default)]
+    pub reasoning_items: Vec<ReasoningItem>,
 }
 
 /// Recorded into the event log / meters per turn.

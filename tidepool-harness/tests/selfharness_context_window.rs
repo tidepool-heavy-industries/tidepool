@@ -100,6 +100,7 @@ impl ModelProvider for ContextCapturingProvider {
                 output_tokens: 5,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }

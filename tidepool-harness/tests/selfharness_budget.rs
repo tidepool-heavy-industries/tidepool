@@ -99,6 +99,7 @@ impl ModelProvider for NeverFinalizeProvider {
                 output_tokens: 2,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }

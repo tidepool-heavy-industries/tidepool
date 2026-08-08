@@ -42,7 +42,8 @@ use tidepool_repr::DataConTable;
 
 use crate::compile::AsksSidecar;
 use crate::provider::{
-    DynModelProvider, Message, ProviderError, Role, StreamSink, TurnRequest, TurnResponse, Usage,
+    DynModelProvider, Message, ProviderError, ReasoningItem, Role, StreamSink, TurnRequest,
+    TurnResponse, Usage,
 };
 use crate::tree::FanBadge;
 
@@ -440,6 +441,7 @@ pub fn assemble_request(
     messages.push(Message {
         role: Role::System,
         content: framing.unwrap_or(SYSTEM_FRAMING).to_string(),
+        reasoning_items: Vec::new(), // the synthetic system message never carries any
     });
     messages.extend_from_slice(transcript);
     TurnRequest {
@@ -1058,6 +1060,9 @@ pub struct DrivenTurn {
     pub usage: Usage,
     /// The turn's reasoning-summary ("thinking"), when the provider surfaced one.
     pub reasoning: Option<String>,
+    /// The encrypted reasoning items the provider surfaced for this turn (see
+    /// [`ReasoningItem`]) — distinct from `reasoning` above.
+    pub reasoning_items: Vec<ReasoningItem>,
     pub block: Option<String>,
 }
 
@@ -1076,12 +1081,14 @@ pub async fn drive_model_turn(
         text,
         usage,
         reasoning,
+        reasoning_items,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
     Ok(DrivenTurn {
         reply: text,
         usage,
         reasoning,
+        reasoning_items,
         block,
     })
 }
@@ -1132,6 +1139,7 @@ mod tests {
         Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         }
     }
 
