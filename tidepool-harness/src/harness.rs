@@ -93,6 +93,8 @@ pub enum HarnessError {
     Aborted { node: NodeId, reason: String },
     #[error("node {0:?} has no pending operator escalation to resolve")]
     NoPendingEscalation(NodeId),
+    #[error("node {0:?} already has a turn in flight")]
+    TurnInFlight(NodeId),
 }
 
 /// What a node must produce to resolve the hole it is answering, and what its
@@ -171,6 +173,30 @@ struct NodeConvo {
     /// here rather than left observational). `None` for an ordinary Agent
     /// node (the default full-surface framing).
     framing: Option<String>,
+    /// Set while a turn-owning operation (`drive_turn`/`summarize_turn`/an
+    /// `answer_*` method) holds this node's [`TurnLease`] — guards the
+    /// snapshot → provider await → log append → resident run → outcome
+    /// publish span against a second concurrent turn on the SAME node.
+    /// Cleared by `TurnLease::drop`, so every exit path (success, `?`, panic
+    /// unwind) releases it.
+    turn_lease: bool,
+}
+
+/// An RAII hold on [`NodeConvo::turn_lease`], returned by
+/// [`Harness::acquire_turn_lease`]. `Drop` clears the flag under the
+/// `convos` lock, so success, an early `?` return, and a panic unwind all
+/// release it — a node is never left permanently unleasable by a failed turn.
+struct TurnLease<'a> {
+    harness: &'a Harness,
+    node: NodeId,
+}
+
+impl Drop for TurnLease<'_> {
+    fn drop(&mut self) {
+        if let Some(convo) = self.harness.convos.lock().get_mut(&self.node) {
+            convo.turn_lease = false;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -466,14 +492,20 @@ impl Harness {
 
     /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
     /// captured effect (mapping the stack tag to its effect name). Called after
-    /// a turn's block runs, while the node is still `Running`. Requires the node
-    /// to be `Running` (the tree's `effect` guard); a drained record that fails
-    /// to log is dropped rather than aborting the turn.
-    fn flush_effects(&self, node: NodeId) {
-        let (records, mut seq) = {
+    /// a turn's block runs, while the node is still `Running`.
+    ///
+    /// The durable log is the audit contract: on the first append failure,
+    /// this stops, restores the failed record and every record after it
+    /// (in their original order, ahead of anything a concurrent path has
+    /// pushed into `effect_trace` since the drain) back into the node's
+    /// trace, and returns the error — `effect_seq` only ever advances past
+    /// the records that actually landed in the log. A caller propagates the
+    /// error rather than treating the turn as complete.
+    fn flush_effects(&self, node: NodeId) -> Result<(), HarnessError> {
+        let (records, seq0) = {
             let mut convos = self.convos.lock();
             let Some(convo) = convos.get_mut(&node) else {
-                return;
+                return Ok(());
             };
             let records: Vec<EffectRecord> = convo
                 .effect_trace
@@ -483,21 +515,69 @@ impl Harness {
             (records, convo.effect_seq)
         };
         if records.is_empty() {
-            return;
+            return Ok(());
         }
-        for rec in records {
+
+        let mut seq = seq0;
+        let mut iter = records.into_iter();
+        let mut failure: Option<HarnessError> = None;
+        while let Some(rec) = iter.next() {
             let tag = self
                 .cfg
                 .effect_names
                 .get(rec.tag as usize)
                 .cloned()
                 .unwrap_or_else(|| format!("tag{}", rec.tag));
-            let _ = self.tree.effect(node, seq, tag, rec.req, rec.resp);
-            seq += 1;
+            match self
+                .tree
+                .effect(node, seq, tag, rec.req.clone(), rec.resp.clone())
+            {
+                Ok(()) => seq += 1,
+                Err(e) => {
+                    let mut unwritten = vec![rec];
+                    unwritten.extend(iter);
+                    if let Some(convo) = self.convos.lock().get_mut(&node) {
+                        if let Ok(mut trace) = convo.effect_trace.lock() {
+                            unwritten.append(&mut trace);
+                            *trace = unwritten;
+                        }
+                    }
+                    failure = Some(e.into());
+                    break;
+                }
+            }
         }
+
         if let Some(convo) = self.convos.lock().get_mut(&node) {
             convo.effect_seq = seq;
         }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Acquire `node`'s per-node turn lease, serializing the snapshot →
+    /// provider await → log append → resident run → outcome publish span of
+    /// one turn-owning operation against a second concurrent one on the SAME
+    /// node. Errors with [`HarnessError::TurnInFlight`] if another turn
+    /// already holds it. Acquire at exactly one layer per turn — a leaf
+    /// orchestration entry point that owns a whole turn (`drive_turn`,
+    /// `summarize_turn`, an `answer_*` method) — never inside a loop over one
+    /// of those, and never twice on the same node within one call chain: a
+    /// nested acquire on a still-held lease deadlocks the node against
+    /// itself, since this fails fast rather than blocking.
+    fn acquire_turn_lease(&self, node: NodeId) -> Result<TurnLease<'_>, HarnessError> {
+        let mut convos = self.convos.lock();
+        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
+        if convo.turn_lease {
+            return Err(HarnessError::TurnInFlight(node));
+        }
+        convo.turn_lease = true;
+        Ok(TurnLease {
+            harness: self,
+            node,
+        })
     }
 
     /// Read-only handle to the node tree (state/children/parent queries for the
@@ -715,6 +795,7 @@ impl Harness {
                 usage: Usage::default(),
                 last_input_tokens: 0,
                 framing,
+                turn_lease: false,
             },
         );
         Ok(())
@@ -764,6 +845,12 @@ impl Harness {
     /// This is the inner step of the turn loop; [`Self::run_to_hole_or_done`]
     /// loops it until the node suspends, completes, or hits the turn cap.
     pub async fn drive_turn(&self, node: NodeId) -> Result<engine::TurnOutcome, HarnessError> {
+        // Hold the node's turn lease for this whole turn — snapshot,
+        // provider await, log append, resident run, and outcome publish are
+        // all below, and a second concurrent turn on the same node must fail
+        // fast rather than race the snapshot-then-release-then-await window.
+        let _lease = self.acquire_turn_lease(node)?;
+
         // Snapshot the transcript AND the node's framing under the lock, then
         // release before the await.
         let (transcript, turn_seq, framing) = {
@@ -854,6 +941,9 @@ impl Harness {
         node: NodeId,
         prompt: &str,
     ) -> Result<(String, Usage), HarnessError> {
+        // Same whole-turn lease discipline as `drive_turn`.
+        let _lease = self.acquire_turn_lease(node)?;
+
         // Push the summarize request, then snapshot the transcript + framing.
         self.push_user_turn(node, prompt)?;
         let (transcript, turn_seq, framing) = {
@@ -929,7 +1019,7 @@ impl Harness {
             .await
             .map_err(|e| HarnessError::Resident(format!("declare task join: {e}")))?;
             self.put_session(node, session, None, AsksSidecar::default());
-            self.flush_effects(node);
+            self.flush_effects(node)?;
             return match res {
                 Ok(gen) => {
                     let rendered = format!("declared (gen {})", gen.0);
@@ -1039,7 +1129,7 @@ impl Harness {
         pending_bind: Option<(BoundBinder, Generation)>,
     ) -> Result<engine::TurnOutcome, HarnessError> {
         self.put_session(node, session, Some(table.clone()), asks.clone());
-        self.flush_effects(node);
+        self.flush_effects(node)?;
 
         match outcome {
             Ok(ResidentOutcome::Completed { result, .. }) => {
@@ -1583,7 +1673,7 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("apply_finalized join: {e}")))?;
         self.put_session(node, session, None, AsksSidecar::default());
-        self.flush_effects(node);
+        self.flush_effects(node)?;
         out.map(|r| r.into_value())
             .map_err(|e| HarnessError::Resident(e.to_string()))
     }
@@ -1697,6 +1787,9 @@ impl Harness {
     /// path exercises the GHC-verbatim retry here (a compile failure feeds back
     /// as the child's next user turn; the parent's continuation is untouched).
     pub async fn answer_fork(&self, node: NodeId, actor: Actor) -> Result<NodeId, HarnessError> {
+        // `node` (the parent) owns this whole answer — force+drive the
+        // child, then `resume_parent` — as one turn-owning operation.
+        let _lease = self.acquire_turn_lease(node)?;
         let pending = self
             .convos
             .lock()
@@ -1785,6 +1878,11 @@ impl Harness {
         node: NodeId,
         actor: Actor,
     ) -> Result<Vec<NodeId>, HarnessError> {
+        // `node` (the fanout parent) owns this whole answer — force+drive
+        // every child in turn, then `resume_parent` once — as one
+        // turn-owning operation. Each child gets its own fresh `NodeConvo`
+        // (no lease to acquire on it here); only `node`'s lease is held.
+        let _lease = self.acquire_turn_lease(node)?;
         let pending = self
             .convos
             .lock()
@@ -1882,6 +1980,12 @@ impl Harness {
     /// `resume expr`, which runs via `run_child` against the (suspended) node's
     /// own session to produce the Value, then resumes it. No child node.
     pub async fn answer_run_llm_turn(&self, node: NodeId) -> Result<(), HarnessError> {
+        // `node` answers its OWN hole here (`answerer == target == node` in
+        // `drive_answerer_to_value` below) — one lease covers the whole
+        // multi-round answer, exactly as `drive_turn`'s covers one round;
+        // `drive_answerer_to_value` never acquires on its own, so this is the
+        // one and only acquire in this call chain.
+        let _lease = self.acquire_turn_lease(node)?;
         let pending = self
             .convos
             .lock()
@@ -1930,6 +2034,9 @@ impl Harness {
         node: NodeId,
         submission: Json,
     ) -> Result<(), HarnessError> {
+        // Compiles + runs + publishes on `node` in one shot (no model
+        // loop) — one lease for the whole method.
+        let _lease = self.acquire_turn_lease(node)?;
         let pending = self
             .convos
             .lock()
@@ -2002,7 +2109,7 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
         self.put_session(node, session, None, AsksSidecar::default());
-        self.flush_effects(node);
+        self.flush_effects(node)?;
 
         let value = out
             .map_err(|e| HarnessError::Resident(e.to_string()))?
@@ -2017,6 +2124,9 @@ impl Harness {
     /// Value with zero model turns. (Typed structure is the caller's job, via
     /// `Tidepool.Form` / `dialogForm`, not a harness-side interpretation step.)
     pub async fn answer_dialog(&self, node: NodeId, submission: Json) -> Result<(), HarnessError> {
+        // `resume_parent` below is this method's whole job — one lease for
+        // the call.
+        let _lease = self.acquire_turn_lease(node)?;
         let pending = self
             .convos
             .lock()
@@ -2096,7 +2206,7 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
         self.put_session(node, session, None, AsksSidecar::default());
-        self.flush_effects(node);
+        self.flush_effects(node)?;
 
         out.map(|r| r.to_string_pretty())
             .map_err(|e| HarnessError::Resident(e.to_string()))
@@ -2269,7 +2379,7 @@ impl Harness {
             .await
             .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
             self.put_session(target, session, None, AsksSidecar::default());
-            self.flush_effects(target);
+            self.flush_effects(target)?;
 
             match child_out {
                 Ok(result) => {
@@ -2491,7 +2601,7 @@ impl Harness {
         // is actually compiled against, not silently-preserved first-suspend
         // state.
         self.put_session(node, session, Some(table.clone()), asks.clone());
-        self.flush_effects(node);
+        self.flush_effects(node)?;
 
         // Only log the hole as Consumed (and clear it from `pending`) once the
         // resume has ACTUALLY SUCCEEDED — a fault here (e.g. `error` forced
@@ -2794,5 +2904,189 @@ impl Harness {
         self.tree
             .turn_delta(node, turn, Role::User, content.to_string(), None)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::LogHeader;
+    use crate::provider::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
+    use tidepool_repr::CoreExpr;
+
+    /// Never actually called: `flush_effects` touches `self.tree`,
+    /// `self.convos`, and `self.cfg.effect_names` only, so a `Harness` built
+    /// for this suite needs no live provider.
+    struct UnusedProvider;
+
+    impl ModelProvider for UnusedProvider {
+        async fn complete(
+            &self,
+            _req: TurnRequest,
+            _sink: Option<StreamSink>,
+        ) -> Result<TurnResponse, ProviderError> {
+            Err(ProviderError::Api("UnusedProvider was called".into()))
+        }
+    }
+
+    fn test_engine_cfg() -> EngineConfig {
+        EngineConfig {
+            extract_bin: "unused".to_string(),
+            include: Vec::new(),
+            effect_names: vec!["Console".to_string()],
+            decls: Vec::new(),
+            suspend_tag: 0,
+            prelude_dir: PathBuf::from("."),
+            project_lib: None,
+            max_turns: 1,
+            max_child_turns: 1,
+            max_tokens: None,
+            context_window_tokens: None,
+        }
+    }
+
+    /// A `Harness` built without `Harness::new`/`Harness::force` (both need a
+    /// real `tidepool-extract` compile) — every field is filled directly with
+    /// an inert placeholder, since `flush_effects` never reads `boot`,
+    /// `provider`, or the seed/escalation maps. This keeps `flush_effects`'
+    /// unit coverage in the pure-Rust fast tier.
+    fn test_harness() -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = LogWriter::create(
+            dir.path().join("test.jsonl"),
+            &LogHeader {
+                prelude_hash: "test".into(),
+                extract_fingerprint: "test".into(),
+                harness_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let provider: Arc<dyn DynModelProvider> = Arc::new(UnusedProvider);
+        Harness {
+            tree: NodeTree::new(writer),
+            cfg: test_engine_cfg(),
+            child_cfg: test_engine_cfg(),
+            provider,
+            convos: Mutex::new(HashMap::new()),
+            live_turns: Mutex::new(HashMap::new()),
+            notifier: std::sync::OnceLock::new(),
+            boot: Arc::new(compile::CompiledTurn {
+                expr: CoreExpr { nodes: Vec::new() },
+                table: DataConTable::default(),
+                asks: AsksSidecar::default(),
+            }),
+            seeds: Mutex::new(HashMap::new()),
+            forked_transcripts: Mutex::new(HashMap::new()),
+            escalations: Mutex::new(HashMap::new()),
+            operator_decisions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn insert_convo(harness: &Harness, node: NodeId, effect_trace: EffectTrace) {
+        harness.convos.lock().insert(
+            node,
+            NodeConvo {
+                session: None,
+                transcript: Vec::new(),
+                turn_seq: 0,
+                effect_trace,
+                effect_seq: 0,
+                pending: None,
+                answer_contract: None,
+                suspend_table: None,
+                suspend_asks: AsksSidecar::default(),
+                pending_bind: None,
+                usage: Usage::default(),
+                last_input_tokens: 0,
+                framing: None,
+                turn_lease: false,
+            },
+        );
+    }
+
+    /// A real `TreeError` from `self.tree.effect(...)` — the node is
+    /// `Suspended`, not `Running`, so the durable log's own guard rejects the
+    /// append before ever touching the log file. `flush_effects` must not
+    /// advance `effect_seq` past that failure, and must restore both
+    /// unwritten records into the node's trace, in their original order.
+    #[test]
+    fn flush_effects_does_not_advance_seq_or_lose_records_on_append_failure() {
+        let harness = test_harness();
+        let node = harness
+            .tree()
+            .create_node(
+                None,
+                "test",
+                vec!["Console".to_string()],
+                ForkShape::Exact(0),
+                false,
+            )
+            .unwrap();
+        harness.tree().force(node, Actor::Operator, ()).unwrap();
+
+        let rec_a = EffectRecord {
+            tag: 0,
+            req: serde_json::json!({"call": "a"}),
+            resp: serde_json::json!({"result": "a"}),
+        };
+        let rec_b = EffectRecord {
+            tag: 0,
+            req: serde_json::json!({"call": "b"}),
+            resp: serde_json::json!({"result": "b"}),
+        };
+        let effect_trace: EffectTrace =
+            Arc::new(std::sync::Mutex::new(vec![rec_a.clone(), rec_b.clone()]));
+        insert_convo(&harness, node, effect_trace);
+
+        // Suspend the node: `NodeTree::effect` requires `Running`, so the
+        // next flush's very first append hits a genuine `TreeError` straight
+        // out of the durable log's own guard — no seam, no fabricated
+        // failure mode.
+        harness
+            .tree()
+            .hole_published(
+                node,
+                HoleId("h0".into()),
+                None,
+                None,
+                "prompt".to_string(),
+                false,
+            )
+            .unwrap();
+
+        let result = harness.flush_effects(node);
+        assert!(
+            matches!(result, Err(HarnessError::Tree(TreeError::NotRunning(..)))),
+            "expected a TreeError::NotRunning, got {result:?}"
+        );
+
+        let convos = harness.convos.lock();
+        let convo = convos.get(&node).unwrap();
+        assert_eq!(
+            convo.effect_seq, 0,
+            "effect_seq must not advance past the failed append"
+        );
+        let restored = convo.effect_trace.lock().unwrap();
+        assert_eq!(
+            restored.iter().map(|r| r.req.clone()).collect::<Vec<_>>(),
+            vec![rec_a.req.clone(), rec_b.req.clone()],
+            "both unwritten records must be restored, in their original order"
+        );
+    }
+
+    /// A flush with nothing traced is a no-op success, not an error — the
+    /// common case (an answerer/outer stack that declares no base effects).
+    #[test]
+    fn flush_effects_is_a_noop_when_the_trace_is_empty() {
+        let harness = test_harness();
+        let node = harness
+            .tree()
+            .create_node(None, "test", Vec::new(), ForkShape::Exact(0), false)
+            .unwrap();
+        harness.tree().force(node, Actor::Operator, ()).unwrap();
+        insert_convo(&harness, node, Arc::new(std::sync::Mutex::new(Vec::new())));
+
+        assert!(harness.flush_effects(node).is_ok());
+        assert_eq!(harness.convos.lock().get(&node).unwrap().effect_seq, 0);
     }
 }
