@@ -31,4 +31,11 @@ fi
 HARNESS="${1:-harness-dogfooding/wizard/Harness.hs}"
 echo "==> launching: $HARNESS  ($PROFILE)  (open the printed 127.0.0.1 URL)"
 export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
+# Private dogfood cache (2026-08-08): 12 of 13 harness test files write the
+# DEFAULT ~/.cache/tidepool/selfharness/, so any swarm test shard can poison a
+# live session's checkpoint mid-run (it did, twice in one day — the
+# StateDecode boot deaths). A dedicated XDG_CACHE_HOME makes dogfood state
+# unreachable from tests regardless of what the box is running.
+export XDG_CACHE_HOME="${TIDEPOOL_DOGFOOD_CACHE:-$HOME/.cache/tidepool-dogfood}"
+echo "==> dogfood cache: $XDG_CACHE_HOME/tidepool/selfharness"
 exec "./target/$PROFILE/tidepool-selfharness" --harness "$HARNESS"
