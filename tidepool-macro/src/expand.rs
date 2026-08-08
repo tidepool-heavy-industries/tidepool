@@ -98,16 +98,18 @@ fn resolve_hs_path(
         }
     };
 
-    // `run_tidepool_extract` never passes `--include`, so the extractor's GHC
+    // `resolve_hs_path` has no include feature today, so the extractor's GHC
     // session resolves every non-entry import against `importPaths = ["."]`
     // (the extractor subprocess's cwd, inherited unchanged from this process
     // — see `extractionDynFlags` in haskell/src/Tidepool/GhcPipeline.hs). The
     // cache key must walk the SAME search order or it can miss a real input.
     //
-    // RESIDUAL GAP: `[cwd]` below is that search order ONLY because no
-    // includes are passed today — that coupling is not enforced by anything
-    // in this function. See the `run_tidepool_extract` doc comment before
-    // ever adding `--include` support to either this macro or that call.
+    // `extra_includes` is the ONE list that widens both: fed to
+    // `resolve_transitive_hs_deps` below (as `roots`, alongside `cwd`) AND to
+    // `run_tidepool_extract` (as `--include`). It's empty today; if this
+    // macro ever grows an `include = "…"` parameter for `.hs` paths, extend
+    // THIS binding, not two independently-maintained ones.
+    let extra_includes: Vec<PathBuf> = Vec::new();
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -118,6 +120,8 @@ fn resolve_hs_path(
             .to_compile_error());
         }
     };
+    let mut roots = vec![cwd];
+    roots.extend(extra_includes.iter().cloned());
     let entry_imports = import_module_names(&String::from_utf8_lossy(&src_bytes));
     let mut seen = BTreeSet::new();
     seen.insert(
@@ -125,7 +129,7 @@ fn resolve_hs_path(
             .canonicalize()
             .unwrap_or_else(|_| abs_hs_path.clone()),
     );
-    let mut deps = match resolve_transitive_hs_deps(&entry_imports, &[cwd], &mut seen) {
+    let mut deps = match resolve_transitive_hs_deps(&entry_imports, &roots, &mut seen) {
         Ok(d) => d,
         Err((path, e)) => {
             return Err(syn::Error::new(
@@ -163,6 +167,7 @@ fn resolve_hs_path(
         &output_dir,
         binding_name.as_deref(),
         Path::new(&manifest_dir),
+        &extra_includes,
     ) {
         return Err(syn::Error::new(path_lit.span(), msg).to_compile_error());
     }
@@ -385,21 +390,22 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     );
 
     // Same import-search mirroring as `resolve_hs_path`: `run_tidepool_extract`
-    // never passes `--include` for the inline path either, so any import
-    // left in `all_imports` after filtering out inlined siblings resolves
-    // only against the extractor subprocess's cwd. Splicing already folds
-    // every included file's own content into `full_source` (and thus into
-    // the hash below); this closes the remaining gap — an import that
+    // is called below with `extra_includes = &[]` for the inline path too, so
+    // any import left in `all_imports` after filtering out inlined siblings
+    // resolves only against the extractor subprocess's cwd. Splicing already
+    // folds every included file's own content into `full_source` (and thus
+    // into the hash below); this closes the remaining gap — an import that
     // survives filtering and points at a local (non-package) module.
     //
-    // RESIDUAL GAP: `[cwd]` below is the search order ONLY because
-    // `include_dirs` (validated above) is never forwarded to
-    // `run_tidepool_extract` as `--include` — it is a text-splicing input
-    // here, not a GHC search path. That's an easy trap: passing
-    // `include_dirs`'s paths to `run_tidepool_extract` for extra robustness
-    // WITHOUT also adding them to the `roots` slice below would silently
-    // reopen the exact bug this file exists to close. See the
-    // `run_tidepool_extract` doc comment.
+    // NOTE: `include_dirs` (validated above) is a text-splicing input here,
+    // not a GHC search path — deliberately kept OUT of `extra_includes`.
+    // Passing `include_dirs`'s paths as `--include` too, for extra
+    // robustness, is a real behavior change (it would widen what GHC itself
+    // resolves, on top of what's already spliced verbatim), not just a
+    // plumbing one — if that's ever wanted, extend `extra_includes` (which
+    // feeds both `roots` below and `run_tidepool_extract`), not one or the
+    // other.
+    let extra_includes: Vec<PathBuf> = Vec::new();
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -410,9 +416,11 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
             .to_compile_error();
         }
     };
+    let mut roots = vec![cwd];
+    roots.extend(extra_includes.iter().cloned());
     let remaining_imports = import_module_names(&all_imports.join("\n"));
     let mut seen = BTreeSet::new();
-    let mut extra_deps = match resolve_transitive_hs_deps(&remaining_imports, &[cwd], &mut seen) {
+    let mut extra_deps = match resolve_transitive_hs_deps(&remaining_imports, &roots, &mut seen) {
         Ok(d) => d,
         Err((path, e)) => {
             return syn::Error::new(
@@ -469,6 +477,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         &output_dir,
         Some(&parsed.target),
         Path::new(&manifest_dir),
+        &extra_includes,
     ) {
         return syn::Error::new(parsed.source.span(), msg).to_compile_error();
     }
@@ -608,23 +617,22 @@ fn capitalize(s: &str) -> String {
 /// redundant (and slower) nix re-run that would only reproduce the same
 /// error (#F3).
 ///
-/// RESIDUAL GAP (named, not enforced): neither invocation below passes
-/// `--include`, so both callers' `resolve_transitive_hs_deps` roots are
-/// exactly `[cwd]` today — that's a load-bearing assumption this function's
-/// signature does NOT enforce. If this function ever grows an
-/// `extra_includes: &[PathBuf]` parameter to pass `--include <dir>` here,
-/// EVERY caller must extend the exact same `roots` list it already passes to
-/// `resolve_transitive_hs_deps` — not a separately-maintained list — or the
-/// cache key silently stops covering the real input set again, which is the
-/// exact bug this file exists to close. There is no compiler-enforced
-/// coupling between "what GHC searches" and "what gets hashed"; whoever adds
-/// `--include` here owns re-establishing it by construction (single source
-/// list), not by remembering to update two places.
+/// `extra_includes` becomes `--include <dir>` for each entry, on both the
+/// direct-binary and nix-fallback invocations below. Every caller passes
+/// `&[]` today — neither `resolve_hs_path` nor `expand_inline` widens the
+/// extractor's search path yet — but the parameter exists so that WHEN one
+/// does, it is the exact same `Vec<PathBuf>` binding the caller already
+/// built its `roots` (for `resolve_transitive_hs_deps`) from, not a second,
+/// separately-maintained list. That does not make the coupling
+/// type-enforced — nothing stops a future caller from building two
+/// different lists — but it collapses "which function do I even touch" to
+/// one parameter, with the callers' comments pointing straight at it.
 fn run_tidepool_extract(
     hs_path: &Path,
     output_dir: &Path,
     target: Option<&str>,
     manifest_dir: &Path,
+    extra_includes: &[PathBuf],
 ) -> Result<(), String> {
     // The output dir name already encodes the resolved input set (entry file
     // plus every transitively resolved local import — see
@@ -678,6 +686,10 @@ fn run_tidepool_extract(
         cmd.arg("--target");
         cmd.arg(name);
     }
+    for dir in extra_includes {
+        cmd.arg("--include");
+        cmd.arg(dir);
+    }
 
     match cmd.output() {
         Ok(output) if output.status.success() => return publish_extract_dir(&tmp_dir, output_dir),
@@ -721,6 +733,10 @@ fn run_tidepool_extract(
     if let Some(name) = target {
         cmd.arg("--target");
         cmd.arg(name);
+    }
+    for dir in extra_includes {
+        cmd.arg("--include");
+        cmd.arg(dir);
     }
 
     match cmd.output() {
