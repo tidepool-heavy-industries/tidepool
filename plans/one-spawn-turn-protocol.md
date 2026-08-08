@@ -335,6 +335,54 @@ extract splices the right-hand side from the parsed statement, whereas
 happens to hold for the shapes seen so far, but it is a text scan standing in for
 a parse.
 
+## The extract lags the Rust side — three gaps to close before any caller is wired
+
+The `--turn` mode exists and works for the shapes it covers, but three things the
+Rust side already does are not yet in it. All three must land before the shim is
+swapped, because each one silently degrades rather than failing at the boundary.
+
+**1. The decl path narrows the language surface.** `--turn`'s decl branch hands
+the RAW turn text to the whole-module parse. The path it replaces does not: Rust's
+`wrap_decls` wraps decl text in `module SessionDecls where` behind a 17-extension
+pragma block (GADTs, LambdaCase, RecordWildCards, QuasiQuotes, TypeApplications,
+…). Reproduced against the built extract:
+
+```
+f = \case { 0 -> 1 ; _ -> 2 }
+
+--turn --turn-verdict decl   →  error [GHC-51179] Illegal \case   (turn fails)
+--emit-binders, wrap_decls   →  {"items":[{"kind":"value","name":"f"}]}
+```
+
+So any declaration needing one of those extensions parses today and stops parsing
+through the turn mode. `QuasiQuotes` makes this concrete rather than theoretical:
+a `[fmt|…|]` turn already caused a live classification regression once.
+
+Fix: `--turn-template decl=<file>`, the caller supplying the decl *parse* wrapper
+the same way it supplies bind and expr wrappers. That keeps the pragma set
+authored in exactly one place instead of copied into the extract where it would
+drift, and it reuses the splice machinery already there. It also repairs
+something currently accidental: `extractBinders` selects the module summary named
+`SessionDecls` and falls back to `head summaries` otherwise, so the raw-text path
+works by luck rather than by the name match the function was written around.
+
+**2. `{{TURN_STMT}}` is not implemented in the extract.** It recognizes `{{TURN}}`
+only, so a bind template using statement placement would leave the placeholder
+literal in the module it compiles. The Rust side depends on this placement for the
+`let`-at-column-1 case.
+
+**3. The discarding-bind template kind is missing.** The extract's template kinds
+are `bind` and `expr`; the Rust selector has `Bind`, `BindDiscard`, and `Expr`.
+A discarding bind currently has no kind to select.
+
+Gaps 2 and 3 postdate the extract work's spec and were flagged by its author
+rather than quietly skipped. Gap 1 was found by probing the built binary.
+
+One smaller thing, worth fixing while in there: with `--turn-verdict decl` the
+`Decl` variant echoes the supplied (empty) binder list while `declItems` carries
+the real names, so `binders` is unreliable on the batch path. Derive `Decl`'s
+binders from the harvested items' head names when the verdict supplies none.
+
 ## Rust side
 
 `tidepool-runtime/src/session/turn.rs` grows the request/result pair the
