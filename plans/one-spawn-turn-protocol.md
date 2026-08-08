@@ -191,6 +191,52 @@ Read that table as spawn *count*, not as time saved. The spawns it removes are
 the parse-only ones at 33–75ms each; the ~6.8s compile spawn is still there in
 every row.
 
+## Rebasing onto the timing instrumentation
+
+The base now threads a `timing :: Bool` through the extract, gating
+`Tidepool.Timing`'s stderr phase lines. It changes the signature of everything
+the turn mode calls:
+
+| Function | New signature |
+|---|---|
+| `extractStmtBinders` | `Bool -> String -> IO StmtBinders` |
+| `emitStmtBinders` | `Bool -> FilePath -> FilePath -> IO ()` |
+| `writeWholeModuleClosed` | `Bool -> FilePath -> …` (timing first) |
+| `processFile` | `Bool -> Args -> FilePath -> IO ()` |
+
+So the turn mode will not compile until each call threads the flag, and
+`writeWholeModuleClosed` needs a deliberate merge rather than taking one side:
+the base added a leading `Bool` and internal timing sections, while this branch
+changed its return type to yield the asks sites. Keep both.
+
+**The turn mode has to emit phases, not merely accept the flag.** Two reasons,
+and the second is the one that bites:
+
+1. Phase B's acceptance is a before/after bench. A `--turn` path that accepts
+   `timing` and emits nothing produces a bench with no attribution — a single
+   opaque total, which cannot show where the time went or that nothing
+   regressed.
+2. The measurement that reframed this whole workstream came from the parse-only
+   lane's phase lines: `extractStmtBinders`' `ghc_session` isolates GHC-API boot
+   cost precisely because that lane runs no typecheck, which is how classify was
+   established at 33–75ms against a ~6.8s compile. **Deleting the classify spawn
+   deletes that isolation.** Once classify happens inside the compile process,
+   nothing separates the two costs unless the turn mode emits its own phase for
+   the in-process classify. Losing that would mean losing the ability to check
+   the claim this design rests on, right at the moment the design changes.
+
+So the turn mode emits a phase around its classify step, and keeps the existing
+`translate`/`cbor_encode`/`write` sections it inherits through
+`writeWholeModuleClosed`. Reproducing the stage table through the new entry point
+is part of Phase B, not a follow-up.
+
+Recognizer qualification needs no work here, and the reason is worth stating: the
+turn mode reaches `translateModuleClosed` through the shared
+`writeWholeModuleClosed`, so the base's recognizer and module-qualification
+hardening applies to the new entry point automatically. That is the payoff of
+refusing to duplicate the emission path — a fidelity fix made in the shared code
+cannot regress through a second one, because there is no second one.
+
 ## Acceptance
 
 Because the removed spawns are cheap, the bench is a **regression guard, not a
