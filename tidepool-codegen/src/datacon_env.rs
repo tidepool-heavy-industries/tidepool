@@ -278,4 +278,103 @@ mod tests {
         let actual: std::collections::BTreeSet<VarId> = wrapped_fvs.into_iter().collect();
         assert_eq!(actual, expected);
     }
+
+    /// A constructor's binder id, shadowed by an inner `LetNonRec` in the
+    /// fragment itself: `let dc_var = <free var> in dc_var`. Because the
+    /// whole fragment IS that let, `VarId(dc.id.0)` is bound at the fragment's
+    /// own top level — `free_vars` correctly reports it as NOT free, so the
+    /// filter binds no wrapper for it.
+    ///
+    /// That is the right answer, not a dropped reference. Emission resolves
+    /// `Var(VarId(dc.id.0))` in the body against the INNER binder either way —
+    /// the shadowing is in the fragment, not introduced by the prune. Pre-prune,
+    /// an outer wrapper was still emitted here, but nothing in the fragment
+    /// could ever reach it: it was immediately shadowed into dead code by the
+    /// inner let. So the set of wrappers actually consulted was empty both
+    /// before and after the prune; only the population of dead ones changed.
+    #[test]
+    fn shadowed_binder_is_not_wrapped() {
+        let dc_id = 7u64;
+        let table = table_with([make_datacon(dc_id, 0)]);
+
+        // let VarId(7) = Var(999) in Var(7)  — 999 is an ordinary free var,
+        // not any constructor in the table.
+        let mut b = TreeBuilder::new();
+        let rhs = b.push(CoreFrame::Var(VarId(999)));
+        let body = b.push(CoreFrame::Var(VarId(dc_id)));
+        b.push(CoreFrame::LetNonRec {
+            binder: VarId(dc_id),
+            rhs,
+            body,
+        });
+        let fragment = b.build();
+
+        let wrapped = wrap_with_datacon_env(fragment, &table);
+
+        let actual: std::collections::BTreeSet<DataConId> =
+            wrapped.wraps.iter().map(|w| w.tag).collect();
+        let expected: std::collections::BTreeSet<DataConId> = std::collections::BTreeSet::new();
+        assert_eq!(
+            actual, expected,
+            "the constructor's own binder id is bound by an inner let inside the \
+             fragment, so it is not free in the fragment as a whole and must not \
+             be wrapped — a wrapper here would be shadowed, dead code, exactly as \
+             it was pre-prune"
+        );
+    }
+
+    /// A constructor mentioned ONLY as a saturated `Con` frame's tag, and only
+    /// as a `Case` alternative's `AltCon::DataAlt`, never as a `Var`. Neither
+    /// use needs the constructor's function-value wrapper: a saturated `Con`
+    /// frame is emitted directly from its tag, and a `DataAlt` is matched
+    /// directly against a scrutinee's tag. Both are baked into the frame at
+    /// emission time, not resolved through `VarId(dc.id.0)`.
+    ///
+    /// This pins the semantic heart of the prune against a specific, plausible
+    /// regression: someone later widening the filter to also union in `Con`
+    /// tags and `DataAlt` ids — which reads as a safety improvement ("what if
+    /// we missed a reference") but would silently restore most of the
+    /// quadratic behaviour the prune removes, since nearly every constructor
+    /// in a real fragment appears as a `Con` tag or a `DataAlt` somewhere.
+    ///
+    /// The pre-wrap diagnostic walk at `jit_machine.rs` ~1313 counts exactly
+    /// this Con/DataAlt set — a DIFFERENT set from the wrapper set, by design.
+    /// The two are not meant to agree, and this test does not compare them.
+    #[test]
+    fn constructor_used_only_as_con_tag_or_data_alt_is_not_wrapped() {
+        let con_tag_id = 30u64;
+        let alt_id = 31u64;
+        let table = table_with([make_datacon(con_tag_id, 0), make_datacon(alt_id, 0)]);
+
+        // case Var(100) of { DataAlt(alt_id) -> Con { tag: con_tag_id, [] } }
+        let mut b = TreeBuilder::new();
+        let scrutinee = b.push(CoreFrame::Var(VarId(100)));
+        let con_frame = b.push(CoreFrame::Con {
+            tag: DataConId(con_tag_id),
+            fields: vec![],
+        });
+        b.push(CoreFrame::Case {
+            scrutinee,
+            binder: VarId(101),
+            alts: vec![tidepool_repr::Alt {
+                con: tidepool_repr::AltCon::DataAlt(DataConId(alt_id)),
+                binders: vec![],
+                body: con_frame,
+            }],
+        });
+        let fragment = b.build();
+
+        let wrapped = wrap_with_datacon_env(fragment, &table);
+
+        let actual: std::collections::BTreeSet<DataConId> =
+            wrapped.wraps.iter().map(|w| w.tag).collect();
+        let expected: std::collections::BTreeSet<DataConId> = std::collections::BTreeSet::new();
+        assert_eq!(
+            actual, expected,
+            "a constructor referenced only as a Con tag or a DataAlt id must not \
+             be wrapped — neither use is a Var reference to VarId(dc.id.0), and \
+             widening the filter to catch these would restore most of the \
+             quadratic wrapping the prune exists to remove"
+        );
+    }
 }
