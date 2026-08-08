@@ -98,12 +98,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // The per-node durable log, colocated with transcript.jsonl and state.json
-    // under <cache>/selfharness/ so `tail -f .../selfharness/log.jsonl` works.
-    let log_path = persistence::default_log_path();
-    if let Some(dir) = log_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
+    // The per-node durable log sits beside transcript.jsonl + state.json under
+    // <cache>/selfharness/. LogWriter refuses to overwrite an existing run's
+    // log, so each run gets a fresh timestamped file; tail the newest.
+    let log_dir = persistence::default_log_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let log_path = log_dir.join(format!("log-{ts}.jsonl"));
     let header = LogHeader {
         prelude_hash: "self-harness".to_string(),
         extract_fingerprint: cfg.extract_bin.clone(),
