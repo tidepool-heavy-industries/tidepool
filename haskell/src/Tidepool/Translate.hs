@@ -442,12 +442,17 @@ translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
       -- runLLMTurn (#R0): the hidden Sited siblings are ordinary home-module
-      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text),
-      -- so a name-only scan over the FULL (pre-reachability) bind pool finds
-      -- their real Ids — mirroring findTargetId's own name lookup. `translate`
-      -- can't do an HscEnv/environment lookup itself (TransM is pure State, no
-      -- IO), so both varIds are resolved ONCE here and threaded through
-      -- TransState for the interception arm to consult.
+      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text,
+      -- or Tidepool.Fork's own forkMapSited/forkCataSited), so a name-only
+      -- scan over the FULL (pre-reachability) bind pool finds their real Ids
+      -- — mirroring findTargetId's own name lookup. `translate` can't do an
+      -- HscEnv/environment lookup itself (TransM is pure State, no IO), so
+      -- both varIds are resolved ONCE here and threaded through TransState
+      -- for the interception arm to consult. Each lookup is qualified on the
+      -- sibling's own defining module (auxVerbModules), same discipline as
+      -- 'isIntrinsicVerb' for the call-site predicates: a user binding that
+      -- merely shares one of these names is never picked as a head-swap
+      -- target.
       initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
                     (findAuxVarId "runLLMTurnSited" allBinds)
                     (findAuxVarId "runLLMTurnForkSited" allBinds)
@@ -479,18 +484,45 @@ translateModule allBinds targetName unresolvedIds =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
 
-    -- | Name-only lookup for a helper binding that may or may not be present
-    -- (unlike 'findTargetId', absence is not an error — it just means the
-    -- corresponding runLLMTurn/runLLMTurnFork interception can't fire).
+    -- | (occurrence name, defining module) for every hidden *Sited helper
+    -- 'findAuxVarId' looks up. A *Sited binder reaches this scan as an
+    -- ordinary top-level Id in the closed bind pool (resolveExternals does
+    -- not rename Ids, and every *Sited binder is exported with no hiding
+    -- from its home module), so 'nameModule_maybe' reports its true
+    -- defining module here exactly as it does for the call-site Vars
+    -- 'isIntrinsicVerb' already relies on.
+    auxVerbModules :: [(String, String)]
+    auxVerbModules =
+      [ ("runLLMTurnSited",       "Tidepool.Effects")
+      , ("runLLMTurnForkSited",   "Tidepool.Effects")
+      , ("runLLMTurnFanoutSited", "Tidepool.Effects")
+      , ("finalizeSited",         "Tidepool.Effects")
+      , ("forkSited",             "Tidepool.Effects")
+      , ("forkAllSited",          "Tidepool.Effects")
+      , ("forkMapSited",          "Tidepool.Fork")
+      , ("forkCataSited",         "Tidepool.Fork")
+      ]
+
+    -- | Lookup for a hidden *Sited helper binding that may or may not be
+    -- present (unlike 'findTargetId', absence is not an error — it just
+    -- means the corresponding head-swap can't fire). Qualified on the
+    -- binder's own defining module ('auxVerbModules'), same discipline as
+    -- 'isIntrinsicVerb': a user binding that merely shares a *Sited
+    -- occurrence name is never picked as a head-swap target.
     findAuxVarId :: String -> [CoreBind] -> Maybe Word64
     findAuxVarId name binds =
       case filter isMatch (concatMap bindersOf binds) of
         (b:_) -> Just (varId b)
         []    -> Nothing
       where
+        expectedModule = lookup name auxVerbModules
         isMatch b =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
+          && case expectedModule of
+               Just m  -> maybe False ((== m) . moduleNameString . moduleName)
+                                (nameModule_maybe (idName b))
+               Nothing -> False
 
     bindersOf (NonRec b _) = [b]
     bindersOf (Rec pairs)  = map fst pairs
@@ -1734,15 +1766,14 @@ translate expr =
     -- fallback" — every well-formed call site head-swaps to the *Sited
     -- sibling, and a call extract genuinely cannot rewrite must fail HERE,
     -- naming the site, rather than silently falling through to the
-    -- (OPAQUE, dead-at-runtime) stub. Gated on the Var's own DEFINING
-    -- MODULE (not just its occurrence name, which isForkMapVar/
-    -- isForkCataVar alone can't disambiguate) so this stays disjoint from
-    -- the fallthrough below: a user's own same-named-but-different-module
-    -- forkMap/forkCata (see `user_defined_forkmap_does_not_abort_extract`,
-    -- fork-catchall-fallthrough) is never actually defined in
-    -- "Tidepool.Fork", so it can never match 'isTidepoolForkVar' and always
+    -- (OPAQUE, dead-at-runtime) stub. isForkMapVar/isForkCataVar already
+    -- gate on the Var's own DEFINING MODULE (not just its occurrence name),
+    -- so this stays disjoint from the fallthrough below: a user's own
+    -- same-named-but-different-module forkMap/forkCata (see
+    -- `user_defined_forkmap_does_not_abort_extract`,
+    -- fork-catchall-fallthrough) never matches either predicate and always
     -- falls through untouched.
-    Var v | (isForkMapVar v || isForkCataVar v), isTidepoolForkVar v -> do
+    Var v | isForkMapVar v || isForkCataVar v -> do
         binder <- gets tsCurrentBinder
         let siteDesc = maybe "<top level>" T.unpack binder
             which = if isForkMapVar v then "forkMap" else "forkCata" :: String
@@ -2785,39 +2816,65 @@ isShowDoubleVar v =
   in name == "showDouble" || name == "showDouble'"
      || name == "$fShowDouble_$cshow"
 
+-- | (occurrence name, defining module) for every intrinsic verb this file
+-- either lowers directly to a primop or head-swaps to a hidden @*Sited@
+-- sibling. GHC preserves a Name's defining module across re-exports, so a
+-- verb reaching user code through the generated @Tidepool.Effects@ module
+-- or a stdlib import still qualifies here; a user's own function that
+-- merely shares one of these occurrence names, defined anywhere else, does
+-- not.
+intrinsicVerbModules :: [(String, String)]
+intrinsicVerbModules =
+  [ ("eitherDecodeValue", "Tidepool.Aeson.Value")
+  , ("parseISO8601",      "Tidepool.Data.Time")
+  , ("runLLMTurn",        "Tidepool.Effects")
+  , ("runLLMTurnFork",    "Tidepool.Effects")
+  , ("runLLMTurnFanout",  "Tidepool.Effects")
+  , ("finalize",          "Tidepool.Effects")
+  , ("fork",              "Tidepool.Fork")
+  , ("forkAll",           "Tidepool.Fork")
+  , ("forkMap",           "Tidepool.Fork")
+  , ("forkCata",          "Tidepool.Fork")
+  ]
+
+-- | Is @v@ the intrinsic verb named @name@: its occurrence name matches AND
+-- it is actually DEFINED in 'intrinsicVerbModules's paired module, read
+-- from @v@'s ORIGINAL defining module ('nameModule_maybe') — not merely
+-- occurrence-name-alike. Distinguishes the real stdlib/generated verb from
+-- a user's own, differently-moduled, same-named function.
+isIntrinsicVerb :: String -> Id -> Bool
+isIntrinsicVerb name v =
+  occNameString (nameOccName (idName v)) == name
+  && case lookup name intrinsicVerbModules of
+       Just m  -> maybe False ((== m) . moduleNameString . moduleName)
+                        (nameModule_maybe (idName v))
+       Nothing -> False
+
 -- | Recognize @eitherDecodeValue@ (the stdlib stub in Tidepool.Aeson.Value). Its
 -- calls are lowered to the pure @JsonDecode@ primop; the OPAQUE stub body
 -- itself is dead. The surface @eitherDecode@ is a pure wrapper over it, so it
--- lowers through the same primop. Matched by unqualified occurrence name (same
--- convention as showDouble); OPAQUE keeps that name stable against -O2 w/w.
+-- lowers through the same primop.
 isEitherDecodeValueVar :: Id -> Bool
-isEitherDecodeValueVar v =
-  occNameString (nameOccName (idName v)) == "eitherDecodeValue"
+isEitherDecodeValueVar = isIntrinsicVerb "eitherDecodeValue"
 
 -- | Recognize @parseISO8601@ (the stdlib OPAQUE stub in Tidepool.Data.Time).
 -- Its calls are lowered to the pure @ParseISO8601@ primop (Rust chrono);
--- the stub body itself is dead. Matched by unqualified occurrence name (same
--- convention as eitherDecodeValue); OPAQUE keeps the name stable against -O2 w/w.
+-- the stub body itself is dead.
 isParseISO8601Var :: Id -> Bool
-isParseISO8601Var v =
-  occNameString (nameOccName (idName v)) == "parseISO8601"
+isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 
 -- | Recognize @runLLMTurn@/@runLLMTurnFork@ (the stdlib OPAQUE surface
 -- verbs in ask_effect_def!'s helper text, Tidepool.Effects). OPAQUE keeps
--- their calls un-inlined (matched here by unqualified occurrence name, same
--- convention as eitherDecodeValue/parseISO8601) so the type application at
--- each call site survives to this interception.
+-- their calls un-inlined so the type application at each call site
+-- survives to this interception.
 isRunLLMTurnVar :: Id -> Bool
-isRunLLMTurnVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurn"
+isRunLLMTurnVar = isIntrinsicVerb "runLLMTurn"
 
 isRunLLMTurnForkVar :: Id -> Bool
-isRunLLMTurnForkVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurnFork"
+isRunLLMTurnForkVar = isIntrinsicVerb "runLLMTurnFork"
 
 isRunLLMTurnFanoutVar :: Id -> Bool
-isRunLLMTurnFanoutVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurnFanout"
+isRunLLMTurnFanoutVar = isIntrinsicVerb "runLLMTurnFanout"
 
 -- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
 -- verb) — same convention as 'isRunLLMTurnVar' et al. @forkAll@'s shape
@@ -2826,8 +2883,7 @@ isRunLLMTurnFanoutVar v =
 -- answer), so it rides the SAME head-swap arm, but resolves its own
 -- @forkAllSited@ sibling (riding the @Fork@ effect, not @RunLLMTurn@).
 isForkAllVar :: Id -> Bool
-isForkAllVar v =
-  occNameString (nameOccName (idName v)) == "forkAll"
+isForkAllVar = isIntrinsicVerb "forkAll"
 
 -- | Recognize @fork@ (@Tidepool.Fork@'s singleton-answerer surface verb) —
 -- same convention as 'isForkAllVar'. @fork@'s shape (@forall a. Text -> M
@@ -2836,8 +2892,7 @@ isForkAllVar v =
 -- but resolves its own @forkSited@ sibling (riding the @Fork@ effect, not
 -- @RunLLMTurn@).
 isForkVar :: Id -> Bool
-isForkVar v =
-  occNameString (nameOccName (idName v)) == "fork"
+isForkVar = isIntrinsicVerb "fork"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
 -- stubs) — same convention as 'isRunLLMTurnVar' et al. Their hidden
@@ -2849,29 +2904,15 @@ isForkVar v =
 -- "pass-through" arm is needed: it holds by construction of the naming,
 -- not by an extra runtime check.
 isForkMapVar :: Id -> Bool
-isForkMapVar v =
-  occNameString (nameOccName (idName v)) == "forkMap"
+isForkMapVar = isIntrinsicVerb "forkMap"
 
 isForkCataVar :: Id -> Bool
-isForkCataVar v =
-  occNameString (nameOccName (idName v)) == "forkCata"
-
--- | Is @v@ actually DEFINED in "Tidepool.Fork" (not merely occurrence-name-
--- alike)? Distinguishes a genuine misuse of the real forkMap/forkCata
--- (Fork.hs's own haddock: OPAQUE stubs with "no runtime fallback") from a
--- user's own, differently-moduled, same-named function — the
--- fork-catchall-fallthrough regression test needs that case to keep falling
--- through untouched.
-isTidepoolForkVar :: Id -> Bool
-isTidepoolForkVar v =
-  maybe False ((== "Tidepool.Fork") . moduleNameString . moduleName)
-        (nameModule_maybe (idName v))
+isForkCataVar = isIntrinsicVerb "forkCata"
 
 -- | Recognize @finalize@ (the @Tidepool.Effects@ OPAQUE surface verb,
 -- self-iterating-harness WS-B) — same convention as 'isRunLLMTurnVar' et al.
 isFinalizeVar :: Id -> Bool
-isFinalizeVar v =
-  occNameString (nameOccName (idName v)) == "finalize"
+isFinalizeVar = isIntrinsicVerb "finalize"
 
 -- | The shared extract-time rejection every typed-yield site (runLLMTurn
 -- family, finalize) applies: a leftover type variable means the site isn't
