@@ -6,8 +6,13 @@ in git history rather than here.
 
 ## Active work
 
-- [One-spawn turn protocol](one-spawn-turn-protocol.md): Phase B extraction
-  and turn-classification contract.
+- [One-spawn turn protocol](one-spawn-turn-protocol.md) + [Phase B
+  contract](one-spawn-turn-protocol-phase-b.md): LANDED, both phases. One
+  extract spawn per turn on every caller; `--emit-stmt-binders` and
+  `--emit-binders` deleted (a WIRE BREAK — `scripts/redeploy.sh` must ship
+  extract and servers together); the extract-side `classify` phase live and
+  `classify_extract` retired. Read the Phase B contract for the classify
+  lane's surviving per-BLOCK shape.
 - [GHCi affordances](ghci-affordances-todo.md): deferred `:t` and multi-item
   turn support, revisited after Phase B.
 - [Post-restart execution](post-restart/): the current implementation lanes,

@@ -6,12 +6,36 @@
 > This document stays the design authority; that one is what the code is
 > written against.
 
-## State of the branch (Phase A complete; Phase B not started)
+## State of the branch (Phase A and Phase B both complete)
 
-Phase A landed the protocol, the Rust seam, the extract mode, and the corpus. The
-two sides are deliberately **not wired to each other**: every Rust caller still
-runs the old two-spawn path, and `--turn` has no Rust caller at all. Phase B
-connects them and deletes what it replaces.
+**Phase B has landed.** The two sides are wired: `run_turn` is one
+`tidepool-extract --turn` spawn that classifies and compiles together,
+`--emit-stmt-binders` and `--emit-binders` are deleted from both sides, the
+extract emits a `classify` phase, and `classify_extract` is retired from
+`RUST_STAGES`. Read
+[`one-spawn-turn-protocol-phase-b.md`](one-spawn-turn-protocol-phase-b.md) for
+what was built and the four decisions that shaped it; the sections below are
+the design record that produced it, kept because the reasoning (especially the
+measurement that reframed the work, and rule 2's NO-GO) outlives the change.
+
+Two things a reader should carry forward rather than rediscover:
+
+- **The classify lane still exists, as a per-BLOCK spawn** (`--classify` /
+  `classify_block`). The per-turn classify is gone; `tidepool-repl`'s block
+  runner cannot fuse its verdicts into a compile, for the reasons in Decision 1
+  of the contract doc. The spawn-count table below already said this.
+- **The remaining turn cost is `core`, not spawn count.** The open gap in
+  `plans/self-iterating-harness/11-turn-latency-contract.md` is now closed by a
+  post-swap measurement: 60–66% of a turn's extract spawn is GHC's Core
+  pipeline, 26–32% is session boot, and under 6% is typecheck. Anyone picking up
+  turn latency should start there.
+
+### What Phase A left (historical)
+
+Phase A landed the protocol, the Rust seam, the extract mode, and the corpus,
+deliberately **not wired to each other**: every Rust caller still ran the old
+two-spawn path, and `--turn` had no Rust caller at all. Phase B connected them
+and deleted what it replaced.
 
 ### What exists
 
