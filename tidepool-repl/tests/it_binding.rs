@@ -90,8 +90,8 @@ async fn trailing_named_bind_does_not_bind_it() {
 }
 
 /// CASE 4 — a discard bind (`_ <- e`) also does NOT bind `it` (it is
-/// implemented as a bind, not a bare expression, even though the RHS runs on
-/// the same reference path — see `Session::run_eval`'s `[] =>` arm).
+/// implemented as a bind, not a bare expression, even though it compiles as a
+/// whole `do`-block statement that yields `()` — see `Session::run_bind_discard`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discard_bind_does_not_bind_it() {
     if !extract_available() {
@@ -108,6 +108,92 @@ async fn discard_bind_does_not_bind_it() {
         t.is_error,
         "`it` must be unbound after only a discard bind (`_ <- e`), got: {}",
         t.text
+    );
+}
+
+/// CASE 4B — a discard bind actually RUNS its statement's effect (not merely
+/// "does not bind `it`", CASE 4's narrower claim), for both the single-`_`
+/// and the flat-tuple `(_, _)` discard patterns: a KV write behind either
+/// form is observably visible on a later turn. Needs the KV effect (full
+/// stack, like the no-double-execution suite below).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discard_bind_runs_its_effect_both_forms() {
+    if !extract_available() {
+        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = build_full_server(tmp.path().to_path_buf(), "discard-effect", false);
+
+    // Single-`_` form.
+    let (is_error, text) = run_single(
+        &server,
+        r#"_ <- kvSet "discard_single" (toJSON (1 :: Int))"#,
+        None,
+    )
+    .await;
+    assert!(!is_error, "single discard bind turn errored: {text}");
+    let (is_error, text) = run_single(&server, r#"kvGet "discard_single""#, None).await;
+    assert!(!is_error, "kvGet \"discard_single\" errored: {text}");
+    assert!(
+        text.contains('1'),
+        "single discard bind's kvSet must have actually run, got: {text}"
+    );
+
+    // Flat-tuple `(_, _)` form.
+    let (is_error, text) = run_single(
+        &server,
+        r#"(_, _) <- (,) <$> kvSet "discard_tuple_a" (toJSON (2 :: Int)) <*> kvSet "discard_tuple_b" (toJSON (3 :: Int))"#,
+        None,
+    )
+    .await;
+    assert!(!is_error, "tuple discard bind turn errored: {text}");
+    let (is_error, text) = run_single(&server, r#"kvGet "discard_tuple_a""#, None).await;
+    assert!(!is_error, "kvGet \"discard_tuple_a\" errored: {text}");
+    assert!(
+        text.contains('2'),
+        "tuple discard bind's first kvSet must have actually run, got: {text}"
+    );
+    let (is_error, text) = run_single(&server, r#"kvGet "discard_tuple_b""#, None).await;
+    assert!(!is_error, "kvGet \"discard_tuple_b\" errored: {text}");
+    assert!(
+        text.contains('3'),
+        "tuple discard bind's second kvSet must have actually run, got: {text}"
+    );
+}
+
+/// CASE 4C — a discard bind introduces NO binding, for either form: `:bindings`
+/// is byte-identical before and after (no name, no generation bump — a
+/// discard bind mints no session value, unlike a real `x <- e` bind).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discard_bind_introduces_no_binding_either_form() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    let before = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings before any discard bind")
+        .to_string();
+
+    repl.eval("_ <- pure (5 :: Int)")
+        .await
+        .expect_ok("single discard bind");
+    repl.eval("(_, _) <- pure (1 :: Int, 2 :: Int)")
+        .await
+        .expect_ok("tuple discard bind");
+
+    let after = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings after both discard bind forms")
+        .to_string();
+
+    assert_eq!(
+        before, after,
+        "a discard bind (either form) must add no binding and bump no generation counter"
     );
 }
 

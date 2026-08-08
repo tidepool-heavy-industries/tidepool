@@ -30,8 +30,9 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, subtract_import_list_names, ModuleEnv, ParkedThread,
-    PersistentSession, SessionBind, SessionError, SessionLib, TurnKind, ValueTier,
+    classify_block, compile_session_turn, subtract_import_list_names, ModuleEnv, ParkedThread,
+    PersistentSession, SessionBind, SessionError, SessionLib, TurnClassification, TurnKind,
+    ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -133,15 +134,6 @@ struct ItemRun {
     outcome: TurnOutcome,
 }
 
-/// How a reference fragment is executed: `Effectful` runs the effect tree via
-/// `run_fragment`; `Pure` runs it with no effects via `run_fragment_pure`.
-/// Replaces the `pure: bool` flag `run_reference_fragment` used to take.
-#[derive(Clone, Copy)]
-enum EvalMode {
-    Effectful,
-    Pure,
-}
-
 /// Map a binder's [`ValueTier`] to the [`BoundValue`] wrapping its root slot —
 /// the single source of truth for the tier → bound-value expansion (was a bool
 /// round-trip at each bind site).
@@ -149,6 +141,16 @@ fn bound_value(tier: ValueTier, slot: RootSlot) -> BoundValue {
     match tier {
         ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
         ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+    }
+}
+
+/// The text of an item [`Session::run_block`]'s batch classify needs a verdict
+/// for (`Auto`/`Stmt`), or `None` for a `Decl`/`Meta` item (unambiguous
+/// already, no GHC verdict needed).
+fn block_item_text(item: &BlockItem) -> Option<&str> {
+    match item {
+        BlockItem::Auto(e) | BlockItem::Stmt(e) => Some(&e.0),
+        BlockItem::Decl(_) | BlockItem::Meta(_) => None,
     }
 }
 
@@ -284,7 +286,16 @@ impl Session {
         self.reset_cancel();
         match cmd {
             SessionCommand::Def(decl) => self.run_def(&decl.0),
-            SessionCommand::Eval(expr) => self.run_eval(&expr.0, handlers, captured),
+            SessionCommand::Eval(expr) => {
+                // No block context here (single-command dispatch, not
+                // `run_block`'s batch path) — classify this one item with a
+                // one-item `classify_block` slice, exactly the pattern its doc
+                // names for a caller needing a single verdict.
+                let verdict = classify_block(&[expr.0.as_str()])
+                    .ok()
+                    .and_then(|v| v.into_iter().next());
+                self.run_eval(&expr.0, verdict.as_ref(), handlers, captured)
+            }
             SessionCommand::Cmd(meta) => self.run_meta(meta),
             SessionCommand::Block { items, verbose } => {
                 self.run_block(items, handlers, captured, *verbose)
@@ -300,21 +311,25 @@ impl Session {
     /// The declaration text of an item that is a top-level DECLARATION (and so
     /// batches into a decl run), or `None` for a bind/expression/meta (a
     /// singleton). A keyword decl is one lexically; an `Auto` item is one iff
-    /// GHC's parser — the single authority (`Tidepool.Binders.classifyTurn`,
-    /// decl+stmt contexts) — classifies it as a declaration. This parse verdict,
-    /// not the coarse `Auto` tag, is what excludes a trailing call from a decl
-    /// batch. On a classify failure (extractor unavailable), the `Auto` item is
-    /// NOT decl-shaped so it takes the resilient per-item path.
+    /// its precomputed verdict — GHC's parser, the single authority
+    /// (`Tidepool.Binders.classifyTurn`, decl+stmt contexts), from the block's
+    /// one batch [`classify_block`] spawn (`run_block`) — says `Decl`. This
+    /// parse verdict, not the coarse `Auto` tag, is what excludes a trailing
+    /// call from a decl batch. A missing verdict (batch classify unavailable)
+    /// means the `Auto` item is NOT decl-shaped, so it takes the resilient
+    /// per-item path.
     ///
     /// Returning the text (rather than a bool) lets the segment scan CARRY the
     /// decl sources as it walks, so the batch path never re-derives "this is a
     /// Decl/Auto" with a panicking match.
-    fn decl_shaped_text<'a>(&self, item: &'a BlockItem) -> Option<&'a str> {
+    fn decl_shaped_text<'a>(
+        &self,
+        item: &'a BlockItem,
+        verdict: Option<&TurnClassification>,
+    ) -> Option<&'a str> {
         match item {
             BlockItem::Decl(d) => Some(&d.0),
-            BlockItem::Auto(e) if classify_turn(&e.0).is_ok_and(|c| c.kind == TurnKind::Decl) => {
-                Some(&e.0)
-            }
+            BlockItem::Auto(e) if verdict.is_some_and(|v| v.kind == TurnKind::Decl) => Some(&e.0),
             BlockItem::Auto(_) | BlockItem::Stmt(_) | BlockItem::Meta(_) => None,
         }
     }
@@ -348,6 +363,34 @@ impl Session {
         // an unrelated item re-derived by some other heuristic.
         let mut last_value_pos: Option<usize> = None;
 
+        // Batch-classify every item whose kind `decl_shaped_text`/`run_eval`
+        // would otherwise classify on its own (`Auto`/`Stmt`) in ONE extract
+        // spawn, regardless of block length — `Decl`/`Meta` items need no
+        // verdict. Verdicts are mapped back onto their original indices so the
+        // segment scan and `run_one_item` below can look one up per item
+        // without re-classifying. A batch failure (extractor unavailable)
+        // degrades exactly as a per-item classify failure did: every verdict
+        // stays `None`, `decl_shaped_text` treats an unclassifiable `Auto` as
+        // not decl-shaped, and `run_eval` falls back to `run_plain_eval`.
+        let verdict_indices: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| block_item_text(it).is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let mut verdicts: Vec<Option<TurnClassification>> = vec![None; items.len()];
+        if !verdict_indices.is_empty() {
+            let texts: Vec<&str> = verdict_indices
+                .iter()
+                .map(|&i| block_item_text(&items[i]).expect("filtered to Auto/Stmt above"))
+                .collect();
+            if let Ok(classified) = classify_block(&texts) {
+                for (slot, v) in verdict_indices.into_iter().zip(classified) {
+                    verdicts[slot] = Some(v);
+                }
+            }
+        }
+
         // Process items, batching maximal runs of consecutive decl-shaped
         // items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC
         // split across items typecheck TOGETHER (whole-block decl elaboration).
@@ -365,14 +408,16 @@ impl Session {
             // OUT of the decl batch: it classifies as an expression, ends the run,
             // and lands on the stmt path (the tool's "define then call in one
             // block" idiom).
-            let segment: Vec<ItemRun> = if let Some(first) = self.decl_shaped_text(&items[index]) {
+            let segment: Vec<ItemRun> = if let Some(first) =
+                self.decl_shaped_text(&items[index], verdicts[index].as_ref())
+            {
                 // Carry the decl sources as we scan the maximal decl-shaped run,
                 // so the batch path never re-matches items to recover their text.
                 let start = index;
                 let mut texts: Vec<String> = vec![first.to_string()];
                 let mut end = index + 1;
                 while end < items.len() {
-                    match self.decl_shaped_text(&items[end]) {
+                    match self.decl_shaped_text(&items[end], verdicts[end].as_ref()) {
                         Some(t) => {
                             // Within-block REDEFINITION ends the segment: if this
                             // item defines a head an earlier item in the segment
@@ -424,7 +469,12 @@ impl Session {
                         // the first error (matched by the outer break).
                         let mut out = Vec::with_capacity(texts.len());
                         for (k, it) in items[start..end].iter().enumerate() {
-                            let (kind, outcome) = self.run_one_item(it, handlers, captured);
+                            let (kind, outcome) = self.run_one_item(
+                                it,
+                                verdicts[start + k].as_ref(),
+                                handlers,
+                                captured,
+                            );
                             let err = outcome.is_error();
                             out.push(ItemRun {
                                 index: start + k,
@@ -439,7 +489,8 @@ impl Session {
                     }
                 }
             } else {
-                let (kind, outcome) = self.run_one_item(&items[index], handlers, captured);
+                let (kind, outcome) =
+                    self.run_one_item(&items[index], verdicts[index].as_ref(), handlers, captured);
                 index += 1;
                 vec![ItemRun {
                     index: index - 1,
@@ -715,16 +766,23 @@ impl Session {
     }
 
     /// Run a single block item (no batching): the per-item dispatch used both
-    /// for stmt/meta items and as the fallback when a decl batch fails.
+    /// for stmt/meta items and as the fallback when a decl batch fails. `verdict`
+    /// is this item's precomputed classify verdict from `run_block`'s batch
+    /// spawn (`None` for `Decl`/`Meta`, or when the batch classify failed);
+    /// only `run_eval` (on the `Stmt`/`Auto` paths) consumes it.
     fn run_one_item<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         item: &BlockItem,
+        verdict: Option<&TurnClassification>,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> (ItemKind, TurnOutcome) {
         match item {
             BlockItem::Decl(decl) => (ItemKind::Decl, self.run_def(&decl.0)),
-            BlockItem::Stmt(expr) => (ItemKind::Stmt, self.run_eval(&expr.0, handlers, captured)),
+            BlockItem::Stmt(expr) => (
+                ItemKind::Stmt,
+                self.run_eval(&expr.0, verdict, handlers, captured),
+            ),
             BlockItem::Meta(meta) => (ItemKind::Meta, self.run_meta(meta)),
             BlockItem::Auto(expr) => {
                 // Try-cascade: attempt as declaration first. On a GHC parse
@@ -733,48 +791,45 @@ impl Session {
                 // means it IS a declaration, just broken — surface the error.
                 let def_result = self.run_def(&expr.0);
                 match def_result {
-                    TurnOutcome::Error(ref msg) if is_parse_error(msg) => {
-                        (ItemKind::Stmt, self.run_eval(&expr.0, handlers, captured))
-                    }
+                    TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
+                        ItemKind::Stmt,
+                        self.run_eval(&expr.0, verdict, handlers, captured),
+                    ),
                     other => (ItemKind::Decl, other),
                 }
             }
         }
     }
 
-    /// Expression/bind handler. GHC's parser classifies the turn
-    /// (bind vs expr); a BIND (`x <- e` / `let x = e`) roots a value on the live
-    /// heap, a reference-with-live-bindings injects the session ifaces, and a
-    /// plain expression (no bindings) stays on the proven Wave-2 path.
+    /// Expression/bind handler. `verdict` is this item's precomputed classify
+    /// verdict — GHC's parser classifies bind vs expr, never a Rust scanner —
+    /// from `run_block`'s one batch [`classify_block`] spawn for the whole
+    /// block; a BIND (`x <- e` / `let x = e`) roots a value on the live heap, a
+    /// reference-with-live-bindings injects the session ifaces, and a plain
+    /// expression (no bindings) stays on the proven Wave-2 path.
     fn run_eval<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
+        verdict: Option<&TurnClassification>,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
-        // Bind-vs-expr + bound names come from GHC (parse-only), never a Rust
-        // scanner. A classify failure (e.g. extractor unavailable) falls back to
-        // the plain path, where GHC re-reports any real error.
-        let classification = match classify_turn(expr_text) {
-            Ok(c) => c,
-            Err(_) => return self.run_plain_eval(expr_text, handlers, captured),
+        // Bind-vs-expr + bound names come from GHC (parse-only, via the
+        // block's batch classify). A missing verdict (batch classify failed —
+        // e.g. extractor unavailable) falls back to the plain path, where GHC
+        // re-reports any real error.
+        let classification = match verdict {
+            Some(c) => c,
+            None => return self.run_plain_eval(expr_text, handlers, captured),
         };
 
         if classification.kind == TurnKind::Bind {
             match classification.binders.as_slice() {
                 // A bind whose pattern binds NO name (`_ <- e`, `(_,_) <- e`):
-                // run the RHS effect and discard. Compiling the raw `_ <- e` as
-                // an expression fails "parse error on input '<-'" — strip the
-                // discarding pattern and route the RHS `e` like a bare effectful
-                // expression. (#321)
-                [] => {
-                    let rhs = split_discard_bind(expr_text).unwrap_or(expr_text);
-                    if !self.core.bindings().is_empty() || self.core.lib().generation().0 > 0 {
-                        self.run_session_reference(rhs, handlers, captured)
-                    } else {
-                        self.run_plain_eval(rhs, handlers, captured)
-                    }
-                }
+                // compile the whole statement inside a `do` block that discards
+                // its result and yields `()` — `_ <- e` is an ordinary
+                // do-statement there, no pattern-stripping needed. (#321)
+                [] => self.run_bind_discard(expr_text, handlers, captured),
                 [name] => {
                     let name = name.clone();
                     // "A pure binding is a declaration": a PURE bind (`let x = e`,
@@ -1075,6 +1130,43 @@ impl Session {
         }
     }
 
+    /// DISCARD-BIND path (`_ <- e`, `(_, _) <- e`): wraps the whole statement
+    /// into an `Eff`-typed `__result = do { <stmt>; pure () }` — the same
+    /// `{{TURN_STMT}}` placement `run_bind` uses, but yielding `()` and
+    /// splicing no binder — and compiles it with no [`SessionBind`] (a
+    /// discarding bind mints no session value, so it must not flow through
+    /// `SessionBind`: the extract rejects an empty `--bind-name` list). Runs
+    /// through [`Self::run_reference_fragment`] exactly like a session
+    /// reference, reporting `()` as the value — the statement's own effects
+    /// fire exactly once, and nothing is bound.
+    fn run_bind_discard<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        turn_text: &str,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> TurnOutcome {
+        let preamble = self.patched_preamble();
+        let inject = self.live_val_modules();
+        let imports = self.turn_imports(turn_text);
+        let eval_input = self.eval_input.clone();
+        let wrapped = wrap_bind_discard_source(
+            &preamble,
+            &self.cfg.effect_stack,
+            &imports,
+            turn_text,
+            eval_input.as_ref(),
+        );
+
+        let include = self.turn_include();
+        let user_lines = user_code_line_range(&wrapped, turn_text);
+        let turn =
+            match compile_session_turn(&wrapped, &include, self.session_root(), &inject, None) {
+                Ok(t) => t,
+                Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
+            };
+        self.run_reference_fragment(turn, Some("()".to_string()), handlers, captured)
+    }
+
     /// MULTI-BIND path: `(a, b) <- action` / `let (x, y) = e`. Wraps the turn as
     /// `__result = do { <stmt>; pure (a, b, …) }` so the fragment yields ONE tuple
     /// Con, then projects each field individually, tenures each as a separate root,
@@ -1190,99 +1282,16 @@ impl Session {
         TurnOutcome::MultiBound { components }
     }
 
-    /// REFERENCE path (a bare expression mentioning session bindings). Try the
-    /// `Eff` wrap first (so `pure (...)` / effectful references work exactly like
-    /// Wave-2); on a type error, retry as a PURE value (`result = <expr>`, run
-    /// purely) so bare references like `x + 1` / `f 10` / `v ^? key …` resolve.
-    /// Both wraps inject the live `Val` ifaces so the reference typechecks.
-    fn run_session_reference<H: DispatchEffect<CapturedOutput>>(
-        &mut self,
-        expr_text: &str,
-        handlers: &mut H,
-        captured: &CapturedOutput,
-    ) -> TurnOutcome {
-        let preamble = self.patched_preamble();
-        let inject = self.live_val_modules();
-        let imports = self.turn_imports(expr_text);
-        // Clone (not take): `input` stays in scope for EVERY item in the block
-        // — including items that run after an in-block `ask`/resume — and for the
-        // type-probe recompiles below. The worker resets `eval_input` per job.
-        let eval_input = self.eval_input.clone();
-
-        // Eff-first (show-default: REPL renders via Show/toWire, not toJSON).
-        let eff_src = wrap_eff_reference_source(
-            &preamble,
-            &self.cfg.effect_stack,
-            &imports,
-            expr_text,
-            eval_input.as_ref(),
-        );
-        // Block-scope `include` so the borrow on `self.cfg.base_include` is
-        // released before we call `query_inner_type` (which needs `&mut self`).
-        let eff_result = {
-            let include = self.turn_include();
-            compile_session_turn(&eff_src, &include, self.session_root(), &inject, None)
-        };
-        match eff_result {
-            Ok(turn) => {
-                // Eff-first succeeded: `captured_type` is `Eff '[…] a`; query inner `a`.
-                let inner_type = self.query_inner_type(expr_text);
-                self.run_reference_fragment(
-                    turn,
-                    inner_type,
-                    EvalMode::Effectful,
-                    handlers,
-                    captured,
-                )
-            }
-            Err(_eff_err) => {
-                // Pure fallback. The Eff-first wrap is an internal routing detail
-                // (§run_session_reference): for a pure expression it ALWAYS fails
-                // with `Couldn't match … with Eff …` noise against the internal
-                // `do _r <- __user; paginateResult …` scaffold. When the pure
-                // wrap ALSO fails, its error is the faithful one — `result =
-                // <expr>` is the minimal framing, so the genuine cause (scope /
-                // type error) maps straight to the user's `<item>` with no Eff
-                // wrapper leaking through. So we surface `pure_err`, never
-                // `_eff_err`, and drop the old "(also failed as a pure value)"
-                // suffix (which itself leaked the dual-wrap detail).
-                let pure_src =
-                    wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
-                let user_lines = user_code_line_range(&pure_src, expr_text);
-                let pure_result = {
-                    let include = self.turn_include();
-                    compile_session_turn(&pure_src, &include, self.session_root(), &inject, None)
-                };
-                match pure_result {
-                    Ok(turn) => {
-                        // Pure path: `captured_type` IS the inner type (`result = <expr>`
-                        // has no Eff wrapper, so GHC infers the expression type directly).
-                        let inner_type = turn.warnings.captured_type.clone();
-                        self.run_reference_fragment(
-                            turn,
-                            inner_type,
-                            EvalMode::Pure,
-                            handlers,
-                            captured,
-                        )
-                    }
-                    Err(pure_err) => {
-                        TurnOutcome::Error(compile_fail(&pure_err, &pure_src, user_lines))
-                    }
-                }
-            }
-        }
-    }
-
     /// Run a compiled reference fragment on the resident machine, resolving any
     /// session binders through the seeded `ExternalEnv` (load-through-slot).
     /// `inner_type` is the caller-resolved inner value type (`a` in `M a`).
-    /// `mode` selects effectful (`run_fragment`) vs pure (`run_fragment_pure`).
+    /// Always runs effectfully (`run_fragment`) — [`Self::run_bind_discard`] is
+    /// the sole caller, and a discard-bind's statement is always an `Eff`
+    /// action, never a pure reference.
     fn run_reference_fragment<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         turn: tidepool_runtime::session::SessionTurnResult,
         inner_type: Option<String>,
-        mode: EvalMode,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
@@ -1292,9 +1301,6 @@ impl Session {
         if let Err(e) = self.merge_table(&turn.table) {
             return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
         }
-        // Seed the machine from an Eff fragment first, so its table has the
-        // freer cons even when THIS fragment is pure (a pure fragment omits
-        // `Val` etc.; a later Eff fragment would then fail).
         self.ensure_effect_machine();
         if !self.core.is_bootstrapped() {
             if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
@@ -1308,13 +1314,10 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
         };
-        let run_result = match mode {
-            EvalMode::Pure => self.core.run_funcid_pure(fid),
-            EvalMode::Effectful => self
-                .core
-                .run_funcid_session(fid, handlers, captured)
-                .map(expect_completed),
-        };
+        let run_result = self
+            .core
+            .run_funcid_session(fid, handlers, captured)
+            .map(expect_completed);
         match run_result {
             Ok(value) => {
                 let rendered = value_to_json(&value, self.core.session_table(), 0);
@@ -1326,7 +1329,7 @@ impl Session {
 
     /// GHCi-style `it`: a confirmed bare final EXPRESSION (never a bind or a
     /// discard-bind RHS — those keep the unchanged `run_plain_eval`/
-    /// `run_session_reference` path) is bound to `it`, rebinding on every such
+    /// `run_bind_discard` path) is bound to `it`, rebinding on every such
     /// turn. The expression's effects (if any) fire EXACTLY ONCE.
     ///
     /// **Single compile, single run:** wraps `expr_text` as a MATERIALIZING
@@ -1922,7 +1925,7 @@ impl Session {
         self.core.drop_machine();
     }
 
-    /// Store the per-turn input payload so `run_plain_eval` / `run_session_reference`
+    /// Store the per-turn input payload so `run_plain_eval` / `run_bind_discard`
     /// can inject it into `template_haskell`. Called by the worker before each turn.
     fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
         self.eval_input = input;
@@ -2460,6 +2463,25 @@ fn wrap_bind_source(
     out
 }
 
+/// Wrap a DISCARD-BIND turn (`_ <- e`, `(_, _) <- e`) into an `Eff`-typed
+/// module whose `__result` runs the whole statement for its effects and
+/// yields `()` — shaped identically to [`wrap_bind_source`] but with no
+/// binder spliced, since a discarding bind mints no session value.
+fn wrap_bind_discard_source(
+    preamble: &str,
+    effect_stack: &str,
+    imports: &str,
+    turn_text: &str,
+    input: Option<&serde_json::Value>,
+) -> String {
+    let mut out = begin_user_module(preamble, imports, input);
+    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+    out.push_str("__result = do {\n");
+    push_braced_stmt(&mut out, turn_text);
+    out.push_str(" ; pure ()\n }\n");
+    out
+}
+
 /// Wrap a MULTI-BIND turn into an `Eff`-typed module whose `__result` runs the
 /// bind statement and yields a tuple of all bound names. For `(a, b) <- action`
 /// with `names = ["a", "b"]` this emits:
@@ -2571,31 +2593,6 @@ fn wrap_pure_ref_source(
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
     push_verbatim_binding(&mut out, "__result", expr_text);
-    out
-}
-
-/// Wrap an expression for `run_session_reference`'s "Eff-first" attempt: the
-/// same `__user`/`toWire`/`paginateResult`-`Value` shape as
-/// `tidepool_mcp::template_haskell_show_default`'s Eff-typed target, but
-/// naming the compile target `__result`. Deliberately NOT that shared
-/// function — it always compiles its target as literally `result`, matching
-/// its OTHER callers (`run_plain_eval`, the stateless `eval` tool), which go
-/// through the plain `compile_haskell_salted` path; THIS call compiles via
-/// `compile_session_turn`, whose extractor invocation always targets
-/// `__result` (see `turn.rs`) so a later turn's own wrapper can never collide
-/// with a user's own binding of that name promoted into a session-lib import.
-fn wrap_eff_reference_source(
-    preamble: &str,
-    effect_stack: &str,
-    imports: &str,
-    expr_text: &str,
-    input: Option<&serde_json::Value>,
-) -> String {
-    let mut out = begin_user_module(preamble, imports, input);
-    push_verbatim_binding(&mut out, "__user", expr_text);
-    out.push('\n');
-    out.push_str(&format!("__result :: Eff {effect_stack} Value\n"));
-    out.push_str("__result = do {\n _r <- __user ;\n paginateResult 4096 (toWire _r)\n }\n");
     out
 }
 
@@ -2726,15 +2723,6 @@ fn defines_head(text: &str, head: &str) -> bool {
             None => false,
         }
     })
-}
-
-/// For a discarding bind `pat <- e` (whose pattern binds no name, e.g. `_ <- e`
-/// or `(_,_) <- e`), return the RHS `e` so it can run as a plain effectful
-/// expression. The classifier has already confirmed a top-level `<-`, and a
-/// pattern can't contain `<-`, so the first `<-` is the bind arrow. (#321)
-fn split_discard_bind(text: &str) -> Option<&str> {
-    let idx = text.find("<-")?;
-    Some(text[idx + 2..].trim())
 }
 
 /// Strip leading blank lines and `--` line comments so `decl_head` extracts
@@ -2962,9 +2950,7 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 mod slim_tests {
     use super::self_referential_monadic_pure_bind;
     use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
-    use super::{
-        decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind, strip_leading_comments,
-    };
+    use super::{decl_head, pure_bind_to_decl, slim_item_result, strip_leading_comments};
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
     /// helper (so the sig line is not the first line) and a multi-sentence
@@ -3187,23 +3173,6 @@ mod slim_tests {
         assert!(!defines_head("rfoo x = 1", "rf"));
         // Multi-clause single item defines (once).
         assert!(defines_head("f 0 = 0\nf n = n", "f"));
-    }
-
-    #[test]
-    fn split_discard_bind_strips_pattern() {
-        assert_eq!(
-            split_discard_bind("_ <- pure (5 :: Int)"),
-            Some("pure (5 :: Int)")
-        );
-        assert_eq!(
-            split_discard_bind("(_, _) <- pure (1, 2)"),
-            Some("pure (1, 2)")
-        );
-        assert_eq!(
-            split_discard_bind("_ <- run \"echo hi\""),
-            Some("run \"echo hi\"")
-        );
-        assert_eq!(split_discard_bind("no arrow here"), None);
     }
 
     #[test]
