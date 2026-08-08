@@ -358,6 +358,22 @@ So any declaration needing one of those extensions parses today and stops parsin
 through the turn mode. `QuasiQuotes` makes this concrete rather than theoretical:
 a `[fmt|…|]` turn already caused a live classification regression once.
 
+This is the severe one of the three, and it is worth naming why rather than
+leaving it as a bug report. It is an instance of the dialect criterion — the
+project's strict-superset rule — applied at the compile boundary: **a valid
+canonical declaration must never stop compiling through a new path.** Invalid
+canonical input may be accepted where intent is clear, but valid canonical input
+never changes behavior and never fails. A new path that silently supports fewer
+extensions than the one it replaces breaks that rule at the only place it is
+load-bearing.
+
+The corpus is what enforces it. Extension-bearing decl shapes (a `\case` decl, a
+`[fmt|…|]` decl, and a few more) belong in the equivalence corpus *now*, while
+they still pass — the corpus validates the old path against the new interface
+while `run_turn` still two-spawns, so extract-side narrowing is invisible until
+the swap. Adding them before the swap makes it gated by a failing test instead of
+by someone remembering. The note documents; the corpus enforces.
+
 Fix: `--turn-template decl=<file>`, the caller supplying the decl *parse* wrapper
 the same way it supplies bind and expr wrappers. That keeps the pragma set
 authored in exactly one place instead of copied into the extract where it would
