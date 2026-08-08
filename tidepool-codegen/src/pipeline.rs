@@ -95,6 +95,14 @@ pub struct CodegenPipeline {
     /// across turns on the same session means constructor closures are being
     /// re-declared and re-compiled every turn rather than reused.
     functions_defined: u64,
+    /// Session-lifetime count of Cranelift IR blocks across every
+    /// successfully compiled function (summed at each
+    /// [`Self::define_function`] call, from `ctx.func.layout.blocks().count()`
+    /// of the function just compiled). Never reset, so the delta across one
+    /// `add_function` call is the total block count Cranelift emitted for
+    /// that turn's functions — read it the same snapshot-before/diff-after
+    /// way as [`Self::functions_defined`].
+    blocks_emitted: u64,
     /// Accumulated stats for the `LetNonRec` DCE probe in `emit_node_impl`.
     /// See [`DceScanStats`] for the snapshot-and-diff contract.
     pub dce_scan: DceScanStats,
@@ -153,6 +161,7 @@ impl CodegenPipeline {
             lambda_names: Vec::new(),
             lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
+            blocks_emitted: 0,
             dce_scan: DceScanStats::default(),
         })
     }
@@ -161,6 +170,12 @@ impl CodegenPipeline {
     /// See the `functions_defined` field doc for how to read a delta.
     pub fn functions_defined(&self) -> u64 {
         self.functions_defined
+    }
+
+    /// Session-lifetime count of Cranelift IR blocks emitted. See the
+    /// `blocks_emitted` field doc for how to read a delta.
+    pub fn blocks_emitted(&self) -> u64 {
+        self.blocks_emitted
     }
 
     /// Create the standard function signature for compiled tidepool functions.
@@ -222,6 +237,7 @@ impl CodegenPipeline {
 
         self.pending_stack_maps.push((func_id, func_size, raw_maps));
         self.functions_defined += 1;
+        self.blocks_emitted += ctx.func.layout.blocks().count() as u64;
         Ok(())
     }
 

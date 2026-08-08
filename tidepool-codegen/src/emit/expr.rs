@@ -1732,6 +1732,45 @@ pub fn compile_expr(
         }
     }
 
+    // Fragment-level structural stats: one pass over the (already-normalized)
+    // flat node vector. Correlates with jit_machine.rs's `add_function` log
+    // line by `name=`, but emitted separately here (rather than added to that
+    // line) because that file is off-limits while a sibling agent has
+    // uncommitted work in it.
+    {
+        let mut core_cons: FxHashSet<DataConId> = FxHashSet::default();
+        let mut app_nodes = 0u64;
+        let mut con_nodes = 0u64;
+        let mut lam_nodes = 0u64;
+        let mut case_nodes = 0u64;
+        for node in &tree.nodes {
+            match node {
+                CoreFrame::App { .. } => app_nodes += 1,
+                CoreFrame::Lam { .. } => lam_nodes += 1,
+                CoreFrame::Con { tag, .. } => {
+                    con_nodes += 1;
+                    core_cons.insert(*tag);
+                }
+                CoreFrame::Case { alts, .. } => {
+                    case_nodes += 1;
+                    for alt in alts {
+                        if let AltCon::DataAlt(id) = alt.con {
+                            core_cons.insert(id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        log::debug!(
+            target: "tidepool::codegen",
+            "fragment_stats name={name} core_cons={core_cons} app_nodes={app_nodes} \
+             con_nodes={con_nodes} lam_nodes={lam_nodes} case_nodes={case_nodes} nodes={nodes}",
+            core_cons = core_cons.len(),
+            nodes = tree.nodes.len(),
+        );
+    }
+
     let sig = pipeline.make_func_signature();
     let func_id = pipeline.declare_function(name)?;
 
