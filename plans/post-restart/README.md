@@ -24,6 +24,11 @@ context window.
 6. Dogfood launch (release-profile binaries) once the golden_path verdict
    and the open-intermittent triage below permit.
 
+Also queued: retire-or-wire decision on the observatory-orphan API cluster
+(Harness::first_operator_hole / live_turn / pending_dialog_ui /
+tree_snapshot / tree_snapshot_page — pub, zero callers; architectural
+call, fits harness-lifecycle's scope).
+
 ## Open threads that gate or shadow the dogfood
 
 - **Intermittent garbage con_tag** (`selfharness_compaction`, open):
