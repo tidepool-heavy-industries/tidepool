@@ -17,7 +17,7 @@ Module map:
 - `harness` — `Harness`: the orchestrator. Owns a `NodeTree<()>` for tree
   bookkeeping and a separate `convos` map holding the real resident sessions
   (see Machine lifecycle below); drives the turn loop, hole classification,
-  fork/fanout registration, elaborator proposal confirm/reject (B2).
+  fork/fanout registration, elaborator proposal confirm/reject.
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
   the last fenced Haskell block, classify a suspension (`AskWith`/
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
@@ -196,7 +196,7 @@ model round, but left uncapped it composes with a non-interactive gate at EOF
 into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
-(FROZEN — consume it, never redefine it there): `present_form(&FormSpec) ->
+— consume it, never redefine it there: `present_form(&FormSpec) ->
 Submission` and `await_continue()`, both SYNC-BLOCKING by design (the driver
 already runs its turn loop via `block_in_place`/`block_on`, not `async fn`).
 `SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`, defaulting to
@@ -218,19 +218,19 @@ AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
 stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
 unifies against the wider generated row.
 
-## WS4 — tailing the durable log
+## Tailing the durable log
 
 Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
 `selfharness::persistence`):
 
 - **`transcript.jsonl`** (`default_transcript_path`, written by `JsonlObserver`
-  over the WS-H `Observer` seam) — the LOOP-level story: `LoopBoundary`,
+  over the `Observer` seam) — the LOOP-level story: `LoopBoundary`,
   `RunLLMTurnHole`, `TurnStart`/`TurnEnd`/`Finalize` (node ids only),
   `CompactionTrigger{summary,…}`. One line per driver `Event`.
 - **`log.jsonl`** (`default_log_path`, the durable per-NODE `crate::log`
   written by the answerer `Harness`'s `LogWriter`) — the fine-grained story:
-  `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell — WS4/finding
-  2, so `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
+  `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell, so
+  `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
   the exact blocks the answerer ran), `TurnDelta` (the full model reply),
   `HolePublished`/`HoleConsumed` (each `askUser`/`finalize` suspension +
   answer), `NodeDone`. `Event::Effect` appears here only for a node whose stack
