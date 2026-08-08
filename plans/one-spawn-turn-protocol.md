@@ -10,13 +10,37 @@ A session-eval turn costs 2–3 `tidepool-extract` process spawns:
 | 2 | `extract <Wrapped.hs> --session-root … --inject-val …` | Core CBOR + meta + `asks.json` |
 | 3 | `extract <SessionDecls.hs> --emit-binders <out>` (decl turns) | export items for the selective re-export |
 
-Each spawn pays a flat GHC-session boot floor (~6–8s) independent of block
-size, so turn latency is dominated by spawn count, not by the work.
-
 The classification in spawn 1 exists only so the *Rust* side can pick which
 wrapper module to build for spawn 2. GHC already has the parse in hand at
 spawn 1 and a booted session at spawn 2; the round trip through Rust is the
 only reason they are two processes.
+
+**This is not a latency problem.** An earlier draft of this document claimed
+every spawn pays a flat ~6–8s GHC boot floor, making turn latency a function of
+spawn count. Measurement says otherwise: the compile spawn is ~6.8s (~70% of a
+turn) and JIT codegen ~2.7s (~28%), while the parse-only classify is **33–75ms**.
+Spawns 1 and 3 are parse-only — they build no module graph, load no package DB,
+and typecheck nothing — so collapsing them buys tens of milliseconds, not
+seconds. The premise was wrong because the boot floor belongs to the *compile*
+spawn, which this work does not remove and could not.
+
+So the justification is conceptual, and it is worth stating plainly rather than
+dressing a cleanup as an optimization:
+
+- one verdict source instead of two parses that can be handed different inputs
+  (the bug class recorded below, which was live, not hypothetical);
+- one emission path that cannot drift from a second one;
+- both `--emit-*` flags and their parallel channels deleted;
+- the verdict's four real shapes handled by selection rather than by a text scan
+  standing in for a parse.
+
+One piece of this design *is* latency-relevant, and it is not the classify
+collapse: the repl compiles an expression turn as effectful and, on a type error,
+recompiles it as pure — a second **compile** spawn, ~6.8s, on every turn that
+hits it. Folding that retry into one booted session (see *Variant retry*) is the
+only place real time is available here. It is unproven, conditional on GHC
+tolerating two pipeline runs per process, and explicitly not what justifies this
+work.
 
 ## Decision
 
@@ -162,6 +186,24 @@ The block runner segments items by verdict before running any of them, so it
 needs verdicts for the whole list up front. One batch classify covers that,
 and each item's `--turn` run then carries `--turn-verdict` so nothing
 re-parses.
+
+Read that table as spawn *count*, not as time saved. The spawns it removes are
+the parse-only ones at 33–75ms each; the ~6.8s compile spawn is still there in
+every row.
+
+## Acceptance
+
+Because the removed spawns are cheap, the bench is a **regression guard, not a
+win condition**:
+
+- the contract corpus green end-to-end through the one-spawn path — byte-identical
+  verdicts, binder names, and wrapped modules against the path it replaces;
+- the repl suite and the harness acceptance batch green with the two-spawn shim
+  gone;
+- before/after turn latency showing **no regression**. A delta of tens of
+  milliseconds either way is the expected and correct result. Do not spend effort
+  chasing latency here; if a turn gets meaningfully faster, suspect the
+  measurement before believing it.
 
 ## One input shape; where harvested data may come from
 
