@@ -40,6 +40,16 @@ atomic load, not the walk it would otherwise pay for on every compile:
   restriction (that restriction existed earlier in this task and no
   longer does).
 
+Timing hygiene: `core_cons_prewrap`'s walk necessarily sits inside
+`add_function`'s `shape_start`..`shape_ms` window (it needs the pre-wrap
+tree, which `wrap_with_datacon_env` consumes right after). Its own elapsed
+time is measured separately and subtracted out of `shape_ms`, so the
+diagnostic walk does not inflate the one timing bucket this whole wave is
+trying to reduce. The set-building loop also avoids the per-node `Vec`
+allocation an earlier `flat_map` version had (a 3000-node tree was doing
+~3000 short-lived allocations to build a ~24-element set) — a direct
+insert loop, matching `fragment_stats`'s shape.
+
 ## THE RATIO — metadata constructors vs. constructors reachable from the fragment's own Core
 
 Real numbers, real GHC-extracted session (`resident_session::

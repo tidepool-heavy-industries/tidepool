@@ -1307,27 +1307,33 @@ impl JitEffectMachine {
         // construction and cannot answer that question. Gated on the target
         // being enabled: an unconditional walk + HashSet allocation on every
         // compile would tax the hot path this instrument exists to measure.
+        // Timed separately and subtracted out of `shape_ms` below so the
+        // diagnostic walk doesn't inflate the metric it reports.
+        let walk_start = std::time::Instant::now();
         let core_cons_prewrap_count = if log::log_enabled!(target: "tidepool::codegen", log::Level::Debug)
         {
-            let set: rustc_hash::FxHashSet<tidepool_repr::DataConId> = expr
-                .nodes
-                .iter()
-                .flat_map(|node| match node {
-                    tidepool_repr::CoreFrame::Con { tag, .. } => vec![*tag],
-                    tidepool_repr::CoreFrame::Case { alts, .. } => alts
-                        .iter()
-                        .filter_map(|alt| match alt.con {
-                            tidepool_repr::AltCon::DataAlt(id) => Some(id),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => vec![],
-                })
-                .collect();
+            let mut set: rustc_hash::FxHashSet<tidepool_repr::DataConId> =
+                rustc_hash::FxHashSet::default();
+            for node in &expr.nodes {
+                match node {
+                    tidepool_repr::CoreFrame::Con { tag, .. } => {
+                        set.insert(*tag);
+                    }
+                    tidepool_repr::CoreFrame::Case { alts, .. } => {
+                        for alt in alts {
+                            if let tidepool_repr::AltCon::DataAlt(id) = alt.con {
+                                set.insert(id);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             set.len()
         } else {
             0
         };
+        let walk_elapsed = walk_start.elapsed();
         let crate::datacon_env::WrappedExpr { expr, wraps } =
             crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
@@ -1350,7 +1356,10 @@ impl JitEffectMachine {
             self.time_con_ids = Some(ids);
         }
         let nodes = expr.nodes.len();
-        let shape_ms = shape_start.elapsed();
+        // Subtract the pre-wrap diagnostic walk's own time: it sits inside this
+        // window (it needs the pre-wrap tree, which wrap_with_datacon_env then
+        // consumes) but is not part of the shaping work this bucket measures.
+        let shape_ms = shape_start.elapsed() - walk_elapsed;
 
         let functions_defined_before = self.pipeline.functions_defined();
         let blocks_emitted_before = self.pipeline.blocks_emitted();
