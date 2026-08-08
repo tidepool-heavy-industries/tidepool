@@ -1636,17 +1636,14 @@ impl Harness {
     ///
     /// `finalize` does NOT resume the Agent (unlike answering a
     /// `RunLLMTurn`/`Fork` hole via [`Self::drive_answerer_to_value`]) — it
-    /// TERMINATES the node's turn loop and hands the value UP, so this uses
-    /// [`NodeTree::node_cancelled`] (a `Suspended` node has no `node_done`
-    /// transition — that one is reserved for a turn that ran to completion
-    /// from `Running`; `Cancelled` is the tree's only terminal-from-Suspended
-    /// move) with a `"finalized"` reason — a SUCCESSFUL termination, not a
-    /// failure, even though the tree's own state name reads that way; the
-    /// node's session is kept alive past this call, same as any other
-    /// terminal node, so the observatory can still show it. The caller is
-    /// expected to `run_child` the returned `Value` into the OUTER
-    /// (Harness-monad) session to resolve the parent `runLLMTurn` hole,
-    /// zero-copy.
+    /// TERMINATES the node's turn loop and hands the value UP, so this
+    /// retires the node via [`Self::terminate_node`] with a `"finalized"`
+    /// reason — a SUCCESSFUL termination, not a failure, even though the
+    /// tree's own state name (`Cancelled`; a `Suspended` node has no
+    /// `node_done` transition — that one is reserved for a turn that ran to
+    /// completion from `Running`) reads that way. The caller is expected to
+    /// `run_child` the returned `Value` into the OUTER (Harness-monad)
+    /// session to resolve the parent `runLLMTurn` hole, zero-copy.
     ///
     /// Errors if `node` has no live session, isn't suspended, or its pending
     /// hole isn't `Finalize`-routed.
@@ -1706,14 +1703,15 @@ impl Harness {
     /// (the self-iterating harness's forced compaction turn finalizes a
     /// `Text`, then reads it out via [`tidepool_runtime::value_to_json`],
     /// which needs the SAME table the value was compiled with) rather than
-    /// just feeding it opaquely into another suspended continuation. TERMINATES
-    /// the node (`Cancelled`) — the finalized node is done.
+    /// just feeding it opaquely into another suspended continuation.
+    /// TERMINATES the node via [`Self::terminate_node`] (`Cancelled`,
+    /// session + convo retired) — the finalized node is done.
     pub fn take_finalized_value_with_table(
         &self,
         node: NodeId,
     ) -> Result<(Value, DataConTable), HarnessError> {
         let (value, table) = self.take_finalized_value_core(node)?;
-        self.tree.node_cancelled(node, "finalized".to_string())?;
+        self.terminate_node(node, "finalized")?;
         Ok((value, table))
     }
 
