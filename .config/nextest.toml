@@ -138,8 +138,15 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # worktree on the box) — it bounds nextest's own concurrency within a single
 # run, it is not itself the host guarantee, and taking a slot is still
 # required before launching GHC-heavy work (scripts/battery.sh and
-# scripts/battery-shard.sh now take one for you). Matched to the 3-slot host
-# cap; raise it only alongside a matching ghc-slots.sh SLOTS change.
+# scripts/battery-shard.sh now take one for you).
+#
+# 3 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh is at 5
+# and moves with box capacity). The two numbers answer different questions:
+# slots bound how many GHC-heavy RUNS proceed at once, this bounds how many
+# extract compiles ONE run fans out to. Worst case is their product, so
+# raising this multiplies against every slot — the incident budget is "one
+# run under one slot stays at ~4 or below", which 3 satisfies with room. Raise
+# it only with a measurement, not to track a slot-count change.
 [test-groups.ghc-heavy]
 max-threads = 3
 
