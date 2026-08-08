@@ -29,8 +29,8 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 
 ## Crate Responsibilities
 
-- **`tidepool-repr`**: Defines the Core IR, `Value` types, and handles CBOR serialization/deserialization.
-- **`tidepool-eval`**: A tree-walking interpreter for evaluating Core expressions without JIT overhead, used for testing and as a reference implementation.
+- **`tidepool-repr`**: Defines the extracted Core IR (`CoreExpr`, `DataConTable`) and handles CBOR serialization/deserialization.
+- **`tidepool-eval`**: A tree-walking interpreter for evaluating Core expressions without JIT overhead, used for testing and as a reference implementation. Owns the runtime `Value` type (`tidepool-eval/src/value.rs`).
 - **`tidepool-heap`**: Implements the manual memory layout (raw byte buffers) and the copying garbage collector used by the JIT runtime.
 - **`tidepool-bignum`**: Native `ghc-bignum` shims — `Integer` arithmetic without GMP.
 - **`tidepool-optimize`**: Contains optimization passes like beta reduction, dead code elimination (DCE), inlining, and case reduction.
@@ -45,6 +45,8 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 - **`tidepool-mcp`**: MCP server library, generic over effect handlers.
 - **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls).
 - **`tidepool-lsp`**: LSP client + workspace daemon (call graph, hover, references).
+- **`tidepool-harness`**: Typed-yield session tree over the eval substrate — forcing, event log, provider-driven turns.
+- **`tidepool-web`**: Minimal operator GUI (HTTP+SSE, Datastar) for the self-iterating harness.
 - **`tidepool`**: Facade crate + the `tidepool` MCP server binary.
 - **`tidepool-testing`**: Internal utilities and property-based generators for testing the compiler and runtime.
 
@@ -54,5 +56,5 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 2.  `tidepool-runtime` invokes `tidepool-extract` to get CBOR.
 3.  `tidepool-repr` parses CBOR into `CoreExpr`.
 4.  `tidepool-optimize` simplifies the `CoreExpr`.
-5.  `tidepool-codegen` emits Cranelift IR, compiles to machine code, and allocates a `JitEffectMachine` on the `tidepool-heap`.
+5.  `tidepool-codegen` emits Cranelift IR, compiles to machine code, and constructs a `JitEffectMachine`, which owns and manages its own heap (built on `tidepool-heap`'s copying GC).
 6.  `vm.run()` executes the machine, yielding effects to `EffectHandler`s until completion.
