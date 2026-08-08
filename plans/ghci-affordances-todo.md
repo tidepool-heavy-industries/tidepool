@@ -1,5 +1,18 @@
 # TODO: GHCi affordances for harness turns (`:t`, multi-item turns)
 
+## Priority 0 (Inanna, same session): types IN the prompt beat `:t`
+
+For CORE types — tidepool-native surface a model cannot know from
+training data (Form fields, Fork/Finalize verbs, effect records, answer
+contract types) — the signature belongs in the prompt so no probe round
+trip is ever needed. `:t` is the fallback for the long tail, not the
+mechanism for the core. Landed for Form fields in d82cf099
+(`ANSWERER_FRAMING_SUFFIX`). Remaining mechanism idea: the hole-card
+already knows the answer type's `DataConTable` — it could render the
+full `data` declaration automatically (the `uiOf` machinery proves the
+table carries enough), instead of relying on harness authors to paste
+the type by hand as the wizard does.
+
 Inanna, 2026-08-08, during live dogfooding: "we _kinda_ want to encourage
 ghci-style usage of the tool — maybe we could support `:t`? and support up
 to N lines? … or that's a thing that makes more sense as just giving models
