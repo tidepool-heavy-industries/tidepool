@@ -152,7 +152,7 @@ fn wrong_typed_finalize_is_a_compile_error() {
 /// applied to `Finalize` in the row, never by an unconstrained `v` — so the
 /// control is not "no pin", it is a DIFFERENT pin: the same wrong-typed-for-
 /// `Decision` block compiles fine when the row instead names `Finalize Text`.
-/// This proves `wrong_typed_finalize_is_a_compile_error`'s rejections come
+/// Asserts `wrong_typed_finalize_is_a_compile_error`'s rejections come
 /// from the row PARAMETER selecting which type is admitted, not from some
 /// unrelated compile breakage that would reject the block regardless of what
 /// the row names.

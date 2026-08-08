@@ -856,7 +856,7 @@ impl Harness {
         let root = node_session_dir(&self.run_id, node);
         // Fresh: clear any stale gen modules left by a prior run of THIS
         // instance at this node id. Scoped under `run_id`, so this can never
-        // reach into another live Harness's node dir (F3).
+        // reach into another live Harness's node dir.
         let _ = std::fs::remove_dir_all(&root);
         SessionLib::open(SessionId(node.0), &root, ModuleEnv::standalone_default())
             .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
@@ -868,9 +868,9 @@ impl Harness {
 /// `<cache>/harness-sessions/<run_id>/node-<node-id>`. `run_id` scopes the
 /// whole subtree to ONE `Harness` instance (see [`generate_run_id`]), so two
 /// Harnesses sharing a cache root — two processes, or two instances in one
-/// process — never resolve to the same node directory (F3: without this,
+/// process — never resolve to the same node directory: without this scoping,
 /// both number nodes from 0 and `node_decl_plane`'s `remove_dir_all` on
-/// node-0 creation would delete the survivor's live declarations).
+/// node-0 creation would delete the survivor's live declarations.
 fn node_session_dir(run_id: &str, node: NodeId) -> PathBuf {
     tidepool_runtime::paths::cache_dir()
         .join("harness-sessions")
