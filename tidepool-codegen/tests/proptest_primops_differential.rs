@@ -1184,11 +1184,19 @@ fn jitbug_int64_to_word64_result_tag() {
 fn cfg_int() -> Config {
     let mut c = Config::with_cases(350);
     c.max_shrink_iters = 5000;
+    // The `proptest!` macro sets this implicitly from `file!()`; a hand-built
+    // Config driven through TestRunner does not, and FileFailurePersistence::
+    // SourceParallel (the default) silently resolves to NO PATH without it —
+    // counterexamples would stop persisting/replaying with no test failure to
+    // report it. Must be set at THIS call site, not a shared helper, so
+    // `file!()` expands to this lane's own path.
+    c.source_file = Some(file!());
     c
 }
 
 fn cfg_float() -> Config {
     let mut c = Config::with_cases(400);
     c.max_shrink_iters = 5000;
+    c.source_file = Some(file!());
     c
 }

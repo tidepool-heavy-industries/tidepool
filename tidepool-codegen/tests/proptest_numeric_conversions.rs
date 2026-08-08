@@ -389,6 +389,12 @@ fn arb_chain() -> impl Strategy<Value = ConvSpec> {
 fn cfg(cases: u32) -> Config {
     let mut c = Config::with_cases(cases);
     c.max_shrink_iters = 8000;
+    // The `proptest!` macro sets this implicitly from `file!()`; a hand-built
+    // Config driven through TestRunner does not, and FileFailurePersistence::
+    // SourceParallel (the default) silently resolves to NO PATH without it.
+    // `file!()` here expands to THIS file (cfg is local to it, called only
+    // from this file's own properties, not a cross-file shared helper).
+    c.source_file = Some(file!());
     c
 }
 
