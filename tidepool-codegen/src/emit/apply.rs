@@ -217,10 +217,14 @@ fn force_and_check_callee(
 ///
 /// `raw_fun_ptr`/`arg_ptr` are the already-evaluated function and argument
 /// heap pointers (the hylomorphism evaluates App's `fun`/`arg` children before
-/// this runs — see `emit/expr.rs`'s `EmitFrame::App` doc). The caller is
-/// responsible for `ctx.declare_env` beforehand, matching the pre-refactor
-/// site (this asymmetry with `runtime_tail_apply`, which never calls
-/// `declare_env`, is preserved verbatim — see the characterization commit).
+/// this runs — see `emit/expr.rs`'s `EmitFrame::App` doc). Every heap pointer
+/// this function's internal safepoints (`heap_force`/`trampoline_resolve`
+/// calls) can see live is marked at its own point of creation — allocation,
+/// closure/thunk capture load, or block param — not swept in here; Cranelift's
+/// stack-map liveness is a whole-function dataflow analysis (see
+/// `cranelift-frontend`'s `declare_value_needs_stack_map`), so a mark made
+/// anywhere earlier in this Cranelift `Function` is already visible at every
+/// safepoint in it.
 pub(crate) fn runtime_apply(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -342,9 +346,8 @@ pub(crate) fn runtime_apply(
 /// Tail function application: force the callee, validate it, then hand off to
 /// the trampoline — store callee+arg into `VMContext` and return null — rather
 /// than calling directly. See the characterization commit for the full diff
-/// against `runtime_apply`: no `call_indirect`, no TCO null-check/merge, and
-/// (asymmetry preserved verbatim, not fixed by this refactor) no
-/// `ctx.declare_env` call.
+/// against `runtime_apply`: no `call_indirect`, no TCO null-check/merge. Same
+/// mark-at-creation coverage argument as `runtime_apply` above applies here.
 pub(crate) fn runtime_tail_apply(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,

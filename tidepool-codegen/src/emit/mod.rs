@@ -300,7 +300,7 @@ impl ScopedEnv {
         }
     }
 
-    /// Iterate over all entries (for declare_env, compute_captures, etc.)
+    /// Iterate over all entries (for compute_captures etc.)
     pub fn iter(&self) -> impl Iterator<Item = (&VarId, &SsaVal)> {
         self.inner.iter()
     }
@@ -458,21 +458,6 @@ impl EmitContext {
             current_fn: prefix.clone(),
             prefix,
             letrec_states: Vec::new(),
-        }
-    }
-
-    /// Re-declare all heap pointers currently in the environment as needing
-    /// stack map entries. Should be called after switching to a new block
-    /// (e.g., merge blocks, join points, case alternatives) to ensure
-    /// liveness is tracked correctly across block boundaries.
-    pub fn declare_env(&self, builder: &mut cranelift_frontend::FunctionBuilder) {
-        // Collect and sort keys for deterministic IR output (useful for debugging/tests)
-        let mut keys: Vec<_> = self.env.keys().collect();
-        keys.sort_by_key(|v| v.0);
-        for &k in keys {
-            if let Some(SsaVal::HeapPtr(v)) = self.env.get(&k) {
-                builder.declare_value_needs_stack_map(*v);
-            }
         }
     }
 

@@ -618,7 +618,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             primop::emit_primop(args.sess, args.builder, op, &forced_args)
         }
         EmitFrame::App { fun, arg } => {
-            args.ctx.declare_env(args.builder);
             let raw_fun_ptr = fun.value();
             let arg_ptr = ensure_heap_ptr(
                 args.builder,

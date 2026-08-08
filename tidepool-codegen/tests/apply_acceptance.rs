@@ -246,19 +246,13 @@ fn apply_gc_during_application_relocates_forced_callee() {
     });
 
     // Noise AFTER the App call, as a SIBLING PrimOp argument rather than
-    // through a Case/Let binder: `IntAdd(real_case, noise_case)`. This
-    // matters because every Case alt entry re-declares the WHOLE live env as
-    // needing stack maps (case.rs:130/295/367/571/599's `declare_env` calls)
-    // — routing the App's result through a case binder would have that
-    // blanket safety net redundantly re-cover merged_val regardless of
-    // whether apply.rs's OWN declare survived the refactor, making the test
-    // blind to exactly the mutation it's meant to catch. A PrimOp argument is
-    // a bare SSA value passed straight through the hylomorphism with no env
-    // insertion and no declare_env call, so `real_case`'s result (15) is
-    // live ONLY because of runtime_apply's own stack-map declares while its
-    // sibling operand (`noise_case`) builds a large noisy Con — forcing a GC
-    // that must relocate it correctly with no other safety net to fall back
-    // on.
+    // through a Case/Let binder: `IntAdd(real_case, noise_case)`. A PrimOp
+    // argument is a bare SSA value passed straight through the hylomorphism
+    // with no env insertion, so `real_case`'s result (15) is live ONLY
+    // because of `runtime_apply`'s own stack-map declares (its
+    // force/call-result marks) while its sibling operand (`noise_case`)
+    // builds a large noisy Con — forcing a GC that must relocate it correctly
+    // with no other creation-site mark to fall back on.
     let noise_tag = DataConId(2);
     let n_noise_fields = 100;
     let mut noise_field_idxs = Vec::new();

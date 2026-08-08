@@ -151,7 +151,6 @@ pub fn emit_join(
 
     // 6. Switch to join block, emit rhs
     args.builder.switch_to_block(join_block);
-    args.ctx.declare_env(args.builder);
 
     // Bind params to block params
     let block_params = args.builder.block_params(join_block).to_vec();
@@ -196,7 +195,6 @@ pub fn emit_join(
     args.builder.switch_to_block(merge_block);
     let result = args.builder.block_params(merge_block)[0];
     args.builder.declare_value_needs_stack_map(result); // CRITICAL
-    args.ctx.declare_env(args.builder);
 
     // 9. Clean up
     args.ctx.join_blocks.remove(label);
