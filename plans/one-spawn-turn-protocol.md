@@ -297,6 +297,18 @@ payload does not vary with the verdict, so the caller bakes it into
 pragma block, imports, helpers, and effect stack. Anything knowable before the
 verdict belongs in the template source, not in a placeholder.
 
+**The two placement modes must not be substituted independently.** Whichever
+placement a template uses, the turn text has to be spliced exactly once and
+last, because the turn text is arbitrary user Haskell that may itself contain
+literal placeholder syntax. Substituting `{{TURN_STMT}}` and then `{{TURN}}` as
+two chained replacements re-scans the text the first one inserted, so a turn
+containing `{{TURN}}` gets mangled; doing it in the other order has the mirror
+bug. Pick the placement mode first, then perform exactly one turn splice — the
+implementation reads as an `if`/`else` on which placeholder the template
+contains, and that shape is load-bearing rather than incidental. A template
+carrying both placeholders is an authoring error; it surfaces as an
+unsubstituted placeholder reaching GHC, which is loud.
+
 **Placement is the template's business, so the template declares it.** A bind
 turn whose text begins with `let ` is rewritten to the layout-safe explicit-brace
 form `let { … }` before being spliced into a `do` block (`push_braced_stmt`) —
