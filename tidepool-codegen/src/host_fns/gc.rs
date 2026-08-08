@@ -465,8 +465,7 @@ unsafe fn verify_tenured_graph(
     to_end: *const u8,
     retired: &[(*const u8, *const u8)],
 ) {
-    let in_arena =
-        |p: *const u8| arenas.iter().any(|&(start, end)| p >= start && p < end);
+    let in_arena = |p: *const u8| arenas.iter().any(|&(start, end)| p >= start && p < end);
     let readable = |p: *const u8| (p >= to_start && p < to_end) || in_arena(p);
 
     let fail = |owner: *const u8, target: *const u8, what: &str| -> ! {

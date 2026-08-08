@@ -23,8 +23,21 @@
 //! mutation check: with the barrier disabled, G1 must reproduce the SAME
 //! corruption signature.
 //!
-//! All run with `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on so a dangling
-//! read is deterministic (poison tag 0xDD) rather than sometimes-works.
+//! Two tests here make DIFFERENT claims about what is load-bearing, and their
+//! diagnostic settings differ accordingly:
+//!
+//! - `tenured_array_write_g1_reproduces_without_barrier` proves the BARRIER
+//!   is load-bearing — barrier off, heap-verify OFF, so the stranded element
+//!   is observed as poison at the dereference (the Phase 1 spike signature).
+//! - `heap_verify_catches_unrecorded_store_at_the_stranding_collection`
+//!   proves the VERIFIER is load-bearing and independent of the barrier —
+//!   barrier off, heap-verify ON, so `verify_tenured_graph` finds the
+//!   unrecorded store at the collection that strands it. It runs in a
+//!   subprocess because that detection aborts rather than unwinds.
+//!
+//! Every other test runs with `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on
+//! so a dangling read is deterministic (poison tag 0xDD) rather than
+//! sometimes-works.
 
 use serial_test::serial;
 use tidepool_codegen::emit::ExternalEnv;
@@ -583,6 +596,15 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
 /// G1 scenario. This MUST go red with the same predicted dangling-element
 /// corruption (`CaseTrap`, gc-poison tag 0xDD/221) captured in the Phase 1
 /// spike — if it stayed green, the test would prove nothing.
+///
+/// Heap-verify is deliberately OFF here, unlike every other test in this
+/// file. This test's claim is that the BARRIER is load-bearing: remove it and
+/// the stranded element is read back as poison at the dereference. With
+/// heap-verify on, `verify_tenured_graph` now detects the unrecorded store
+/// EARLIER — at the collection that strands it — and aborts the process
+/// before the read is ever reached, which would test the verifier rather than
+/// the barrier. `heap_verify_catches_unrecorded_store_at_the_stranding_collection`
+/// is the test for that second, separate claim.
 #[test]
 #[serial]
 fn tenured_array_write_g1_reproduces_without_barrier() {
@@ -590,7 +612,7 @@ fn tenured_array_write_g1_reproduces_without_barrier() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             reset_test_counters();
-            set_heap_verify(true);
+            set_heap_verify(false);
             set_gc_poison(true);
             tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(true);
             let table = table();
@@ -663,6 +685,132 @@ fn tenured_array_write_g1_reproduces_without_barrier() {
                 }
             }
 
+            drop(machine);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// The write barrier's own verifier gate: with the barrier force-disabled AND
+/// `TIDEPOOL_HEAP_VERIFY` on, the unrecorded old-to-young store is caught by
+/// `verify_tenured_graph` at the collection that strands the target — not
+/// later, at whatever next dereferences it.
+///
+/// This is the claim that matters about the verifier pass: it is INDEPENDENT
+/// of the barrier. A verifier that walked the barrier's remembered set could
+/// only ever inspect stores the barrier already caught, so it would be blind
+/// to precisely this failure. Walking the tenured object graph instead means
+/// a slot the barrier never recorded is still found.
+///
+/// Run in a SUBPROCESS because the detection aborts rather than unwinds:
+/// `gc_trigger` is `extern "C"`, so a panic raised inside a JIT-triggered
+/// collection hits `panic_cannot_unwind` and becomes SIGABRT. That is the
+/// pre-existing behavior of `verify_heap_post_gc` too — this pass is simply
+/// the first thing to exercise it through the JIT path — and it is acceptable
+/// for an opt-in diagnostic whose contract is to fail loudly, but it does
+/// mean the failure cannot be observed with `catch_unwind`.
+#[test]
+#[serial]
+fn heap_verify_catches_unrecorded_store_at_the_stranding_collection() {
+    const CHILD_ENV: &str = "TIDEPOOL_TEST_VERIFIER_ABORT_CHILD";
+    const CHILD_TEST: &str = "heap_verify_catches_unrecorded_store_at_the_stranding_collection";
+
+    if std::env::var(CHILD_ENV).is_ok() {
+        // ── child role: provoke the abort ────────────────────────────────
+        run_g1_scenario_with_barrier_disabled(true);
+        // Reaching here means no collection detected the stranded slot.
+        eprintln!("CHILD-REACHED-END-WITHOUT-DETECTION");
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn child test process");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stdout.contains("CHILD-REACHED-END-WITHOUT-DETECTION")
+            && !stderr.contains("CHILD-REACHED-END-WITHOUT-DETECTION"),
+        "the child ran the whole scenario without any collection detecting the \
+         unrecorded store — verify_tenured_graph did not fire.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[HEAP VERIFY] tenured-graph violation after GC"),
+        "expected the tenured-graph verifier to name the violation on stderr.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("dangling old-to-young reference"),
+        "expected the diagnostic to identify this as an unrecorded old-to-young \
+         store.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !out.status.success(),
+        "child must have died on the verifier abort, got {:?}",
+        out.status
+    );
+}
+
+/// The G1 scenario with the write barrier force-disabled: tenure a boxed
+/// array, have a later fragment write a freshly allocated nursery `Con` into
+/// its payload, then force collections. With `heap_verify` on, a collection
+/// is expected to detect the stranded slot and abort the process, so this
+/// returns only when nothing detected it.
+fn run_g1_scenario_with_barrier_disabled(heap_verify: bool) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            reset_test_counters();
+            set_heap_verify(heap_verify);
+            set_gc_poison(true);
+            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(true);
+            let table = table();
+
+            let dummy = build_value_fragment(0);
+            let mut machine =
+                JitEffectMachine::compile_session(&dummy, &table, 2048).expect("compile_session");
+
+            let mk_array = machine
+                .add_function(
+                    "mk_array",
+                    &build_mk_array(111),
+                    &table,
+                    &ExternalEnv::new(),
+                )
+                .expect("add_function mk_array");
+            let slot_arr = machine
+                .run_pure_and_bind(mk_array)
+                .expect("run_pure_and_bind mk_array");
+
+            let mut env = ExternalEnv::new();
+            env.insert(ARR_EXT, slot_arr.addr());
+            let write_fn = machine
+                .add_function("write_new", &build_write_new(777), &table, &env)
+                .expect("add_function write_new");
+            let _ = machine
+                .run_fragment_pure(write_fn)
+                .expect("run_fragment_pure write_new");
+
+            let filler = machine
+                .add_function(
+                    "filler",
+                    &build_gc_forcing_fragment(200),
+                    &table,
+                    &ExternalEnv::new(),
+                )
+                .expect("add_function filler");
+            let _ = machine.run_fragment_pure(filler);
+
+            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(false);
+            set_gc_poison(false);
+            set_heap_verify(false);
             drop(machine);
         })
         .unwrap()
