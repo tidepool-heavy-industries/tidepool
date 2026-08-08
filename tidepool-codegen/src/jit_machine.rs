@@ -192,6 +192,7 @@ pub struct ContinuationFrame {
 
 /// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
 /// [`ContinuationId`] a suspension parked under.
+#[derive(Debug)]
 pub enum ParkedOutcome {
     /// The turn ran to completion; `Value` is the bridged result.
     Completed(tidepool_eval::value::Value),
