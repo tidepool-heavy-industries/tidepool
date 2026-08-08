@@ -7,11 +7,17 @@ training data (Form fields, Fork/Finalize verbs, effect records, answer
 contract types) — the signature belongs in the prompt so no probe round
 trip is ever needed. `:t` is the fallback for the long tail, not the
 mechanism for the core. Landed for Form fields in d82cf099
-(`ANSWERER_FRAMING_SUFFIX`). Remaining mechanism idea: the hole-card
-already knows the answer type's `DataConTable` — it could render the
-full `data` declaration automatically (the `uiOf` machinery proves the
-table carries enough), instead of relying on harness authors to paste
-the type by hand as the wizard does.
+(`ANSWERER_FRAMING_SUFFIX`). Remaining mechanism: the hole-card can render
+a synopsis from the answer type's `DataConTable` — but an HONESTLY SHALLOW
+one: the table captures field LABELS, not field TYPES (`uiof.rs` module
+doc), so the near-term output is `Contribution { addedIdeas, draftDelta,
+advance }`, constructor + selector names only. Still kills most of the
+authored duplication. The full typed declaration arrives with the
+generic-surface wave's `GTypeDoc` interpreter (see
+`self-iterating-harness/15-generic-surface-wave.md`), which supersedes
+this; extending extract metadata with field types is the middle option
+only if that wave slips. Routed: shallow synopsis → harness-lifecycle
+wave-1.5.
 
 Inanna, 2026-08-08, during live dogfooding: "we _kinda_ want to encourage
 ghci-style usage of the tool — maybe we could support `:t`? and support up
