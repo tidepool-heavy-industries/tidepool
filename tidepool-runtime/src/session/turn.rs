@@ -208,7 +208,7 @@ pub struct TurnTemplate {
 /// wrapper the deleted `binders.rs`'s `wrap_decls` used to build per-call, now
 /// authored once and spliced via `{{TURN}}`. The pragma block is
 /// byte-identical to `wrap_decls`'s (moved verbatim, not retyped).
-pub(crate) const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes #-}\nmodule SessionDecls where\n{{TURN}}\n";
+pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes #-}\nmodule SessionDecls where\n{{TURN}}\n";
 
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
 /// need, the session context, the bind generation, and an optional

@@ -34,7 +34,7 @@ pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
 pub use turn::{
     classify_block, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
     SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier,
+    TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::path::{Path, PathBuf};
