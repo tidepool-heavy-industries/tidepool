@@ -1732,12 +1732,14 @@ pub fn compile_expr(
         }
     }
 
-    // Fragment-level structural stats: one pass over the (already-normalized)
-    // flat node vector. Correlates with jit_machine.rs's `add_function` log
-    // line by `name=`, but emitted separately here (rather than added to that
-    // line) because that file is off-limits while a sibling agent has
-    // uncommitted work in it.
-    {
+    // Fragment-level structural stats on the post-wrap tree actually handed to
+    // codegen: one pass over the (already-normalized) flat node vector.
+    // Correlates with jit_machine.rs's `add_function` log line by `name=`; kept
+    // as a separate line because it measures a different tree (post-wrap,
+    // here) than that line's pre-wrap `core_cons_prewrap`. Gated on the target
+    // being enabled: an unconditional walk + HashSet allocation on every
+    // compile would tax the hot path this instrument exists to measure.
+    if log::log_enabled!(target: "tidepool::codegen", log::Level::Debug) {
         let mut core_cons: FxHashSet<DataConId> = FxHashSet::default();
         let mut app_nodes = 0u64;
         let mut con_nodes = 0u64;

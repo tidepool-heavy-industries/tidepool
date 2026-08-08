@@ -1299,6 +1299,35 @@ impl JitEffectMachine {
         // shaping tracks table size. One `shape_ms` bucket cannot tell those
         // two apart.
         let normalize_ms = shape_start.elapsed();
+        // Pre-wrap reachable-constructor count: the fragment's own Core, before
+        // wrap_with_datacon_env mechanically adds a reference to every table
+        // constructor. This is the number the metadata-vs-reachable ratio needs;
+        // core_cons measured downstream of the wrap (tidepool-codegen/src/emit/expr.rs's
+        // fragment_stats line, a different tree) coincides with table_cons by
+        // construction and cannot answer that question. Gated on the target
+        // being enabled: an unconditional walk + HashSet allocation on every
+        // compile would tax the hot path this instrument exists to measure.
+        let core_cons_prewrap_count = if log::log_enabled!(target: "tidepool::codegen", log::Level::Debug)
+        {
+            let set: rustc_hash::FxHashSet<tidepool_repr::DataConId> = expr
+                .nodes
+                .iter()
+                .flat_map(|node| match node {
+                    tidepool_repr::CoreFrame::Con { tag, .. } => vec![*tag],
+                    tidepool_repr::CoreFrame::Case { alts, .. } => alts
+                        .iter()
+                        .filter_map(|alt| match alt.con {
+                            tidepool_repr::AltCon::DataAlt(id) => Some(id),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => vec![],
+                })
+                .collect();
+            set.len()
+        } else {
+            0
+        };
         let crate::datacon_env::WrappedExpr { expr, wraps } =
             crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
@@ -1324,6 +1353,7 @@ impl JitEffectMachine {
         let shape_ms = shape_start.elapsed();
 
         let functions_defined_before = self.pipeline.functions_defined();
+        let blocks_emitted_before = self.pipeline.blocks_emitted();
         let dce_before = self.pipeline.dce_scan;
 
         let emit_start = std::time::Instant::now();
@@ -1340,14 +1370,16 @@ impl JitEffectMachine {
         let finalize_ms = finalize_start.elapsed();
 
         let funcs = self.pipeline.functions_defined() - functions_defined_before;
+        let blocks = self.pipeline.blocks_emitted() - blocks_emitted_before;
         let dce_delta = self.pipeline.dce_scan.delta_since(&dce_before);
         log::debug!(
             target: "tidepool::codegen",
-            "add_function name={name} table_cons={table_cons} wrapped_cons={wrapped_cons} \
-             nodes={nodes} normalize_ms={normalize_ms:.3} shape_ms={shape_ms:.3} \
+            "add_function name={name} table_cons={table_cons} core_cons_prewrap={core_cons_prewrap} \
+             wrapped_cons={wrapped_cons} nodes={nodes} normalize_ms={normalize_ms:.3} shape_ms={shape_ms:.3} \
              emit_ms={emit_ms:.3} finalize_ms={finalize_ms:.3} \
-             funcs={funcs} dce_calls={dce_calls} dce_nodes={dce_nodes} dce_ms={dce_ms:.3}",
+             funcs={funcs} blocks={blocks} dce_calls={dce_calls} dce_nodes={dce_nodes} dce_ms={dce_ms:.3}",
             table_cons = table.iter().count(),
+            core_cons_prewrap = core_cons_prewrap_count,
             wrapped_cons = wraps.len(),
             normalize_ms = normalize_ms.as_secs_f64() * 1000.0,
             shape_ms = shape_ms.as_secs_f64() * 1000.0,
