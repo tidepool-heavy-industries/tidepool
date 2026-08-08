@@ -274,12 +274,58 @@ sibling — per root's optional-extra guidance, that means skip the quiet-box
 comparison run rather than wait for one; the scheduled clean re-run after
 this wave folds is where that comparison belongs.
 
-**stages tables**: as of this measurement, ZERO `timing::record_stage` call
-sites exist on the answerer turn path yet, and ZERO extract-side
-`TIDEPOOL_TIMING` forwarding exists (both are sibling branches that merge
-after this one) — empty `stages` arrays / all-zero stage stats here are
-EXPECTED, not a bug. The bench is correct-but-empty today; it fills in once
-those land, with no changes to this bench needed. That is also why the
-per-stage BREAKDOWN — not a precise wall-clock — is what this bench exists to
-produce once they merge; the wall-clock numbers above are a coarse baseline
-until then.
+**stages tables** were empty in the runs above: they were taken before the
+`timing::record_stage` call sites merged, so every `stages` array is empty and
+every `attributed_ms` is 0. Those runs are wall-clock baselines only. The
+section below supersedes them for anything stage-level.
+
+## Stage attribution (one run, debug, exclusive lock)
+
+Taken after all three instrumentation branches merged, via
+`scripts/ghc-slots.sh exclusive` (whole-box quiet, so no sibling GHC load),
+debug profile, `N=2 / size_n=1 / retry_n=1`. `TIDEPOOL_TIMING=1` was set but
+the extract on `TIDEPOOL_EXTRACT` predated the phase lines, so no `extract.*`
+rows appear — see the gap note below. Medians in ms:
+
+| stage | cold/warm | small/large | retry round-trip |
+|---|---|---|---|
+| `extract_spawn` | 6778 | 9425 | 12620 |
+| `jit_codegen` | 2704 | 4070 | 4361 |
+| `classify_extract` | 33 | 75 | 72 |
+| `cbor_deserialize` | 9 | 17 | 21 |
+| `run_exec` | 0 | 0 | 3 |
+| `template`, `cbor_read`, `asks_parse` | 0 | 0 | 0 |
+| `provider_call` | 0 | 0 | 0 (replayed, not a live model) |
+
+Per-turn residual (`wall_ms − attributed_ms`) is 32–76ms against 9–21s turns —
+under 0.4%, so the stage set accounts for essentially the whole turn and
+nothing material is hiding between stages.
+
+Three things this settles:
+
+- **`extract_spawn` and `jit_codegen` are the turn.** Roughly 70% and 28%.
+  Every other stage combined is under 1%.
+- **The double extract spawn is not the headline cost.** `classify_extract` —
+  the parse-only `--emit-stmt-binders` lane, the second of the two spawns per
+  round — costs 33–75ms, not seconds. Collapsing it would win milliseconds.
+  This was the pre-measurement suspicion and the numbers do not support it.
+- **`jit_codegen` at 2.7–4.4s is larger than anyone predicted**, and it is
+  Rust-side Cranelift work measured in an unoptimized build. Production
+  (`harness-dogfooding/run.sh`) launches `target/debug/tidepool-selfharness`,
+  so this cost is real as currently configured, but it is a build-profile
+  artifact as much as an algorithmic one — the release comparison above runs
+  ~1.3–1.5x faster overall, consistent with most of the debug penalty landing
+  here.
+
+**The open gap:** where the ~6.8s inside `extract_spawn` goes is NOT answered.
+A synthetic single-module extract run (captured while building the Haskell-side
+instrumentation) totals 194ms with `ghc_session` at 122ms and `typecheck` at
+~1ms — but a real templated turn's spawn is ~35x that, and the difference lives
+entirely in the preamble + `Tidepool.Prelude` + effect-stack decls compiled as
+home modules, which the synthetic module doesn't have. So the synthetic split
+cannot be extrapolated. Whether the real spawn is dominated by session/interface
+loading or by typechecking those extra home modules is still open, and the two
+answers point at different mechanisms. Re-running the bench with
+`TIDEPOOL_TIMING=1` against an extract built from this branch's `haskell/`
+answers it in one shot — that capture was queued and then deliberately
+abandoned when the measurement was shelved, not attempted and failed.
