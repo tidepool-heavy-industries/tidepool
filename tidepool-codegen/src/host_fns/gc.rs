@@ -312,22 +312,51 @@ fn max_heap_bytes() -> usize {
     })
 }
 
-/// Process-global test override for `heap_verify_enabled`. `env::set_var` is
-/// racy against the `OnceLock`-cached env read below (it latches the FIRST
-/// read) and unsafe on edition 2024; this atomic gives tests a reliable,
-/// safe way to force the verifier on without touching the environment.
-static HEAP_VERIFY_FORCE: AtomicBool = AtomicBool::new(false);
+/// Test override state for an env-gated diagnostic knob: 0 = unset (defer to
+/// the environment), 1 = force on, 2 = force off.
+///
+/// Tri-state rather than a bool because `env::set_var` is racy against the
+/// `OnceLock`-cached env reads below (they latch the FIRST read) and unsafe on
+/// edition 2024, AND because a test must be able to reach BOTH states. An
+/// OR-only override can add force-on but never retract the env var, which
+/// leaves a suite run under `TIDEPOOL_HEAP_VERIFY=1` unable to exercise any
+/// behavior that requires the verifier off — `gc_write_barrier.rs`'s
+/// barrier mutation check needs exactly that, since with the verifier on the
+/// tenured-graph pass detects the corruption first and aborts.
+const OVERRIDE_UNSET: u8 = 0;
+const OVERRIDE_ON: u8 = 1;
+const OVERRIDE_OFF: u8 = 2;
 
-/// Test-only: force the post-GC heap verifier on (or back off), independent
-/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API. Forwards to
-/// `tidepool-heap`'s `set_checked_scanning` so one knob enables both; note
-/// that knob is tri-state (unset/on/off) where this crate's own
-/// `HEAP_VERIFY_FORCE`/`GC_POISON_FORCE` are OR-only against the env var —
-/// see `tidepool_heap::gc::raw`'s doc comment for why.
+fn resolve_override(override_state: &AtomicU8, env_cached: bool) -> bool {
+    match override_state.load(Ordering::Relaxed) {
+        OVERRIDE_ON => true,
+        OVERRIDE_OFF => false,
+        _ => env_cached,
+    }
+}
+
+/// Process-global test override for `heap_verify_enabled`.
+static HEAP_VERIFY_FORCE: AtomicU8 = AtomicU8::new(OVERRIDE_UNSET);
+
+/// Test-only: force the post-GC heap verifier on or off, independent of
+/// `TIDEPOOL_HEAP_VERIFY` in EITHER direction. Not part of the public API.
+/// Forwards to `tidepool-heap`'s `set_checked_scanning` so one knob drives
+/// both crates' diagnostic scanning.
 #[doc(hidden)]
 pub fn set_heap_verify(on: bool) {
-    HEAP_VERIFY_FORCE.store(on, Ordering::Relaxed);
+    HEAP_VERIFY_FORCE.store(
+        if on { OVERRIDE_ON } else { OVERRIDE_OFF },
+        Ordering::Relaxed,
+    );
     tidepool_heap::gc::raw::set_checked_scanning(on);
+}
+
+/// Test-only: clear the heap-verify override and defer back to
+/// `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
+#[doc(hidden)]
+pub fn clear_heap_verify_override() {
+    HEAP_VERIFY_FORCE.store(OVERRIDE_UNSET, Ordering::Relaxed);
+    tidepool_heap::gc::raw::clear_checked_scanning_override();
 }
 
 /// Kill-switched fail-loud mode: `TIDEPOOL_HEAP_VERIFY=1` (or `set_heap_verify`)
@@ -336,19 +365,29 @@ pub fn set_heap_verify(on: bool) {
 fn heap_verify_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
-        || HEAP_VERIFY_FORCE.load(Ordering::Relaxed)
+    let env = *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"));
+    resolve_override(&HEAP_VERIFY_FORCE, env)
 }
 
-/// Process-global test override for `gc_poison_enabled` (same rationale as
-/// `HEAP_VERIFY_FORCE`: `env::set_var` is racy against the `OnceLock` cache).
-static GC_POISON_FORCE: AtomicBool = AtomicBool::new(false);
+/// Process-global test override for `gc_poison_enabled` (same tri-state
+/// rationale as `HEAP_VERIFY_FORCE`).
+static GC_POISON_FORCE: AtomicU8 = AtomicU8::new(OVERRIDE_UNSET);
 
-/// Test-only: force from-space poisoning on (or back off), independent of
-/// `TIDEPOOL_GC_POISON`. Not part of the public API.
+/// Test-only: force from-space poisoning on or off, independent of
+/// `TIDEPOOL_GC_POISON` in either direction. Not part of the public API.
 #[doc(hidden)]
 pub fn set_gc_poison(on: bool) {
-    GC_POISON_FORCE.store(on, Ordering::Relaxed);
+    GC_POISON_FORCE.store(
+        if on { OVERRIDE_ON } else { OVERRIDE_OFF },
+        Ordering::Relaxed,
+    );
+}
+
+/// Test-only: clear the gc-poison override and defer back to
+/// `TIDEPOOL_GC_POISON`. Not part of the public API.
+#[doc(hidden)]
+pub fn clear_gc_poison_override() {
+    GC_POISON_FORCE.store(OVERRIDE_UNSET, Ordering::Relaxed);
 }
 
 /// Kill-switched fail-loud mode: `TIDEPOOL_GC_POISON=1` (or `set_gc_poison`)
@@ -363,8 +402,8 @@ pub fn set_gc_poison(on: bool) {
 fn gc_poison_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("TIDEPOOL_GC_POISON").is_ok_and(|v| v == "1"))
-        || GC_POISON_FORCE.load(Ordering::Relaxed)
+    let env = *ON.get_or_init(|| std::env::var("TIDEPOOL_GC_POISON").is_ok_and(|v| v == "1"));
+    resolve_override(&GC_POISON_FORCE, env)
 }
 
 /// Count of completed `verify_heap_post_gc` runs, process-wide. Lets a test

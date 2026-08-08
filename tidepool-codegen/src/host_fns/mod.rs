@@ -61,11 +61,12 @@ pub use cancel::runtime_cancel_check;
 
 pub(crate) use gc::GcState;
 pub use gc::{
-    arm_gc_fault, arm_write_barrier, clear_rust_roots, gc_doubling_run_count, gc_trigger,
-    gc_trigger_call_count, gc_trigger_last_vmctx, heap_verify_run_count, persistent_roots_count,
-    register_old_space_arena, register_persistent_root, register_rust_root, remembered_slots_count,
-    reset_test_counters, rust_roots_mark, set_gc_poison, set_heap_verify,
-    set_write_barrier_disabled_for_test, truncate_rust_roots, write_barrier, GcFaultPoint,
+    arm_gc_fault, arm_write_barrier, clear_gc_poison_override, clear_heap_verify_override,
+    clear_rust_roots, gc_doubling_run_count, gc_trigger, gc_trigger_call_count,
+    gc_trigger_last_vmctx, heap_verify_run_count, persistent_roots_count, register_old_space_arena,
+    register_persistent_root, register_rust_root, remembered_slots_count, reset_test_counters,
+    rust_roots_mark, set_gc_poison, set_heap_verify, set_write_barrier_disabled_for_test,
+    truncate_rust_roots, write_barrier, GcFaultPoint,
 };
 
 use errors::unresolved_var_trap;
