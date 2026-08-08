@@ -410,13 +410,11 @@ fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Same as `try_compile_runllmturn`, but imports `Tidepool.Fork` so
-/// `forkMap`/`forkCata` are in scope. `Tidepool.Fork` now rides the `Fork`
-/// effect (not `RunLLMTurn`), so the compiled stack needs `fork_decl()`
-/// alongside the standard decls for its `Tidepool.Effects` import to
-/// resolve.
+/// `forkMap`/`forkCata` are in scope. `Tidepool.Fork` rides the `Fork`
+/// effect (not `RunLLMTurn`); `standard_decls()` declares it (roster tail,
+/// tag 11), so its `Tidepool.Effects` import resolves.
 fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
@@ -453,8 +451,7 @@ fn forkmap_accepts_monomorphic_answer_type() {
 /// exactly one forkAllSited dispatch.
 #[test]
 fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  ys <- forkMap @Verdict (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]\n  pure (toJSON (length (ys :: [Verdict])))\n";
@@ -521,20 +518,18 @@ fn forkmap_rejects_partial_application() {
 
 // ---------------------------------------------------------------------------
 // fork (Tidepool.Fork's singleton sibling of forkAll): same extract-level
-// recognition mechanism as forkAll, but routed to runLLMTurnForkSited
-// (mirroring runLLMTurnFork) so its sidecar type is recorded BARE (`T`, not
-// `[T]`) — see Tidepool.Translate's isForkVar arm and Tidepool.Fork's `fork`
-// haddock.
+// recognition mechanism as forkAll, but head-swapped to forkSited (the Fork
+// effect) so its sidecar type is recorded BARE (`T`, not `[T]`) — see
+// Tidepool.Translate's isForkVar arm and Tidepool.Fork's `fork` haddock.
 // ---------------------------------------------------------------------------
 
 /// A `fork @Verdict "brief"` call site's asks.json entry records the BARE
 /// answer type (`"Verdict"`), NOT the bracketed `"[Verdict]"` forkAll/forkMap
-/// use — because `fork` head-swaps to `runLLMTurnForkSited`, the same single-
-/// answer sibling `runLLMTurnFork` itself routes through.
+/// use — because `fork` head-swaps to `forkSited`, the single-answer
+/// sibling of `forkAllSited` on the `Fork` effect.
 #[test]
 fn fork_sidecar_entry_records_bare_answer_type() {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  y <- fork @Verdict \"brief\"\n  pure (toJSON (show (y :: Verdict)))\n";
@@ -565,8 +560,7 @@ fn fork_sidecar_entry_records_bare_answer_type() {
 /// left `forkAll`'s own recognition arm untouched.
 #[test]
 fn forkall_sidecar_entry_still_records_list_answer_type() {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code =

@@ -65,12 +65,11 @@ fn prelude_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("haskell/lib"))
 }
 
-/// A Fork-capable stack: the general eval decls plus the `Fork` effect, so
-/// `Tidepool.Fork`'s `forkMap`/`forkCata` (which lower to the `Fork` effect)
-/// resolve. `EngineConfig::standard` alone does not declare `Fork`.
+/// A Fork-capable stack: the general eval decls, whose roster tail declares
+/// the `Fork` effect (tag 11), so `Tidepool.Fork`'s `forkMap`/`forkCata`
+/// (which lower to `Fork`) resolve.
 fn fork_cfg() -> EngineConfig {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config")
 }
 
