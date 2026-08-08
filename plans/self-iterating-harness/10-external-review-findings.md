@@ -174,7 +174,7 @@ honesty now (fix the "recursive"/"does not reopen" claims), hold (b) as the
 principled follow-on. **Awaiting your call on (b).**
 
 ## Post-recovery ROBUSTNESS WAVE (parked, with Codex's acceptance criteria)
-- **F3 [LANDED — verification in flight]** lifecycle: unconditional `Idle` is
+- **F3 [RESOLVED]** lifecycle: unconditional `Idle` is
   the cosmetic half — needs `Failed`/`Poisoned` or an error guard that
   restores/discards every mutable resident component before publishing `Idle`.
   Landed `4a8c9b95`: `SelfHarnessState::Failed{reason}`/`Poisoned{reason}`; an
@@ -182,10 +182,17 @@ principled follow-on. **Awaiting your call on (b).**
   inference counter and `self.outer` (which may be parked mid-fragment on a
   hole) before publishing `Failed`, so the next cycle re-bootstraps from source;
   a bootstrap failure *while recovering* escalates to `Poisoned`, which
-  `run_one_cycle`/`run_loop`/`restore` refuse. `tests/selfharness_lifecycle.rs`
-  passes 2/2 — but a passing test is not yet evidence the guard is load-bearing;
-  a mutation check (revert the discard, confirm red) is outstanding before this
-  row is closed.
+  `run_one_cycle`/`run_loop`/`restore` refuse. Closed by mutation check
+  (`650b85a7`), not by a green run: removing `self.outer = None` from the
+  discard turns the recovery test RED with `session is suspended on
+  continuation scont_1` — the parked-mid-fragment session the discard exists to
+  drop; restoring the unconditional `Idle` turns it RED with `an errored cycle
+  must publish Failed`. Both reverts left the tree byte-identical. Verifying
+  also surfaced a gap the original landing missed: a FRESH driver's bootstrap
+  failure left `lifecycle()` at the cosmetic `Idle` (the escalation only fired
+  when recovering) — it now publishes `Failed`, covered by
+  `fresh_driver_bootstrap_failure_is_failed_not_idle`. 4/4 green across
+  `selfharness_lifecycle` + `selfharness_spine`.
 - **F4 [RESOLVED]** state+compaction = ONE generation-tagged checkpoint.
   Acceptance: after a crash at every write boundary, restart selects a state +
   summary from the SAME committed generation + harness source. Resolved
