@@ -25,10 +25,10 @@ Module map:
 - `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
   + `asks.json` sidecar) via `tidepool-extract`, independent of
   `tidepool-runtime`'s caching compile (turns are one-shot, no cache needed).
-- `log` — E4 event-log wire schema (header pins prelude+extract fingerprints).
-  `Event::TurnStart{source}` now carries the EXTRACTED executed Haskell block
-  (not a "model" tag — WS4); `Event::Effect{req,resp}` is written by the live
-  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`)
+- `log` — event-log wire schema (header pins prelude+extract fingerprints).
+  `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
+  a "model" tag; `Event::Effect{req,resp}` is written by the live
+  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`/`eval_in_binding`)
   whenever a turn dispatches a HANDLED effect — see Replay below for the
   substitution boundary and the scoped-stack caveat.
 - `provider` — `ModelProvider` trait (calling-model turns; not the Llm

@@ -1772,8 +1772,8 @@ impl Harness {
     /// was kept LIVE in the shared heap (never deep-forced). This runs `f arg`
     /// in place against that same suspended heap — the "code as a value"
     /// round-trip — and returns the (data) result `Value`. The node stays
-    /// suspended on its finalize hole afterward (the apply is a child run, like
-    /// [`Self::eval_in_binding`]); the caller terminates it via
+    /// suspended on its finalize hole afterward (the apply is a non-consuming
+    /// child run against the suspended machine); the caller terminates it via
     /// [`Self::take_finalized_value`] when done.
     pub async fn apply_finalized_closure(
         &self,
