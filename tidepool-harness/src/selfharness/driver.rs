@@ -770,6 +770,21 @@ impl SelfHarnessDriver {
     /// misbehaving harness from running away across loops. `auto` (the
     /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
     /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
+    ///
+    /// Defense in depth against a state-decode failure taking the whole
+    /// process down: whatever [`Self::restore`]'s fingerprint check misses (a
+    /// hash collision, a hand-edited checkpoint, a same-source edit that
+    /// changes the `State` type without changing the file's fingerprint), a
+    /// cycle that fails with [`DriverError::StateDecode`] while `state_json`
+    /// was `Some` (a restored or prior-cycle state, not the very first cycle)
+    /// is retried EXACTLY ONCE from fresh `initialState` rather than
+    /// propagated — logged loudly first. If the retry ALSO fails, that is an
+    /// ordinary cycle error and takes the existing F3 (`Failed`/`Poisoned`)
+    /// path, same as any other error; this is a single retry, not a new
+    /// ladder rung. A `StateDecode` when `state_json` is already `None` means
+    /// the harness source's own `initialState`/`FromJSON State` disagree —
+    /// a real bug in the harness, not a stale checkpoint — and propagates as
+    /// it does for every other cycle error.
     pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
         self.refuse_if_poisoned()?;
         let mut state_json: Option<Json> = self.restore(source)?;
@@ -779,7 +794,19 @@ impl SelfHarnessDriver {
                 self.between_loops_gate()?;
             }
             first = false;
-            let outcome = self.run_one_cycle(source, state_json.as_ref())?;
+            let outcome = match self.run_one_cycle(source, state_json.as_ref()) {
+                Ok(outcome) => outcome,
+                Err(DriverError::StateDecode(detail)) if state_json.is_some() => {
+                    tracing::warn!(
+                        detail = %detail,
+                        "cycle failed to decode its restored State — retrying once from \
+                         fresh initialState instead of taking the process down"
+                    );
+                    state_json = None;
+                    self.run_one_cycle(source, state_json.as_ref())?
+                }
+                Err(e) => return Err(e),
+            };
             state_json = Some(outcome.state_json);
         }
     }
@@ -793,11 +820,21 @@ impl SelfHarnessDriver {
     /// sequence rather than restarting it at 1.
     ///
     /// `source`'s fingerprint identifies the harness file THIS process just
-    /// loaded. A restored checkpoint whose fingerprint disagrees does not
-    /// block the restore — a harness file is expected to change across a
-    /// self-iteration run — but is reported via
-    /// [`Event::HarnessSourceChanged`] so a later
-    /// [`DriverError::StateDecode`] is diagnosable rather than mysterious.
+    /// loaded. A restored checkpoint whose fingerprint disagrees is DISCARDED
+    /// rather than restored: the checkpoint's `State` was produced by a
+    /// DIFFERENT harness source and is not safe to decode against the
+    /// current one (a mismatched `State` shape crashes the process on boot —
+    /// the whole reason this check exists). [`Event::HarnessSourceChanged`]
+    /// is still emitted, carrying both fingerprints, as the durable record of
+    /// what happened; the generation counter still adopts
+    /// `checkpoint.generation` so it stays monotonic across the restart, but
+    /// `self.last_compaction` is left `None` (a compaction summary describes
+    /// the discarded harness's loop, not this one) and the run starts fresh
+    /// from `initialState`, exactly the first-ever-run path. A harness file
+    /// that self-edits and restarts therefore loses its accumulated `State`
+    /// even when the `State` TYPE didn't change — a real cost, taken
+    /// deliberately: a lost `State` costs a run, a decoded-then-poisoned one
+    /// costs the process.
     ///
     /// Called by [`Self::run_loop`] at start; exposed so a restart-durability
     /// test can drive the same reload path without entering the
@@ -807,14 +844,22 @@ impl SelfHarnessDriver {
         let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
             return Ok(None);
         };
-        self.last_compaction = checkpoint.compaction;
         self.checkpoint_generation = checkpoint.generation;
         if checkpoint.harness_source != source.fingerprint {
+            tracing::info!(
+                restored_fingerprint = %checkpoint.harness_source,
+                current_fingerprint = %source.fingerprint,
+                "checkpoint harness_source disagrees with the current source fingerprint — \
+                 discarding the persisted state and starting fresh from initialState"
+            );
             self.emit(Event::HarnessSourceChanged {
                 restored_fingerprint: checkpoint.harness_source,
                 current_fingerprint: source.fingerprint.clone(),
             });
+            self.last_compaction = None;
+            return Ok(None);
         }
+        self.last_compaction = checkpoint.compaction;
         Ok(Some(checkpoint.state))
     }
 
