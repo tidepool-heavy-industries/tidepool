@@ -16,6 +16,8 @@
 module Tidepool.Binders
   ( ExportItem(..)
   , extractBinders
+  , extractBindersNamed
+  , exportItemName
   , renderBindersJson
   , emitBinders
     -- * Statement binders (session-eval bind-vs-expr classification)
@@ -23,6 +25,12 @@ module Tidepool.Binders
   , extractStmtBinders
   , renderStmtBindersJson
   , emitStmtBinders
+    -- * Turn-mode rich result (--turn)
+  , TurnOut(..)
+  , BoundBinder(..)
+  , renderTurnOutJson
+  , renderBoundBinderJson
+  , renderAskJson
   ) where
 
 import GHC
@@ -46,6 +54,11 @@ import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
 import Data.List (intercalate, foldl', nub)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Word (Word64)
+import Data.Char (ord)
+import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
 import Tidepool.Timing (timeSection, emitPhase, timePhase)
@@ -86,6 +99,45 @@ extractBinders path includes = do
         pm <- parseModule chosen
         let decls = hsmodDecls (unLoc (pm_parsed_source pm))
         pure (concatMap declItems decls)
+
+-- | Like 'extractBinders' but selects the module summary by an EXACT match on
+-- @expectedModuleName@ rather than falling back to @head summaries@ when no
+-- module named @SessionDecls@ is found. Used by @--turn@'s decl path: the
+-- caller controls the name of the scratch module it just spliced and wrote
+-- (via 'Main.extractModuleName' on the spliced source), so it can demand
+-- exactly that summary instead of guessing at one. A missing match is a
+-- caller wiring bug — the module just written is not the module GHC parsed —
+-- and fails loudly rather than silently returning a different module's
+-- binders.
+extractBindersNamed :: FilePath -> [FilePath] -> String -> IO [ExportItem]
+extractBindersNamed path includes expectedModuleName = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    _ <- setSessionDynFlags dflags { importPaths = importPaths dflags ++ includes }
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    _ <- depanal [] False
+    graph <- getModuleGraph
+    case filter isExpected (mgModSummaries graph) of
+      (chosen : _) -> do
+        pm <- parseModule chosen
+        let decls = hsmodDecls (unLoc (pm_parsed_source pm))
+        pure (concatMap declItems decls)
+      [] -> liftIO (ioError (userError
+              ("extractBindersNamed: no module named " ++ expectedModuleName
+                ++ " in the parsed module graph")))
+  where
+    isExpected ms = moduleNameString (moduleName (ms_mod ms)) == expectedModuleName
+
+-- | The head name an 'ExportItem' introduces — the binder for 'EValue', the
+-- type/class head for 'EType'\/'EClass'. Used to derive a @--turn@ decl
+-- verdict's binders from its harvested 'declItems' when the verdict itself
+-- carries none (see 'TDecl's doc).
+exportItemName :: ExportItem -> String
+exportItemName (EValue n)   = n
+exportItemName (EType n _)  = n
+exportItemName (EClass n _) = n
 
 -- | The binders one top-level declaration introduces.
 declItems :: LHsDecl GhcPs -> [ExportItem]
@@ -136,22 +188,29 @@ renderBindersJson items =
 
 renderItem :: ExportItem -> String
 renderItem (EValue n) =
-  "{\"kind\":\"value\",\"name\":" ++ jstr n ++ "}"
+  "{\"kind\":\"value\",\"name\":" ++ jsonString n ++ "}"
 renderItem (EType n cons) =
-  "{\"kind\":\"type\",\"name\":" ++ jstr n
-    ++ ",\"cons\":[" ++ intercalate "," (map jstr cons) ++ "]}"
+  "{\"kind\":\"type\",\"name\":" ++ jsonString n
+    ++ ",\"cons\":[" ++ intercalate "," (map jsonString cons) ++ "]}"
 renderItem (EClass n methods) =
-  "{\"kind\":\"class\",\"name\":" ++ jstr n
-    ++ ",\"methods\":[" ++ intercalate "," (map jstr methods) ++ "]}"
+  "{\"kind\":\"class\",\"name\":" ++ jsonString n
+    ++ ",\"methods\":[" ++ intercalate "," (map jsonString methods) ++ "]}"
 
--- | Minimal JSON string escaping (identifiers + operator symbols only need
--- quote/backslash escaping).
-jstr :: String -> String
-jstr s = '"' : concatMap esc s ++ "\""
+-- | JSON string escaping for arbitrary text — every caller in this module,
+-- including rendered types that wrap across lines and whole wrapped module
+-- sources, goes through this one escaper.
+jsonString :: String -> String
+jsonString s = '"' : concatMap esc s ++ "\""
   where
     esc '"'  = "\\\""
     esc '\\' = "\\\\"
-    esc c    = [c]
+    esc '\n' = "\\n"
+    esc '\r' = "\\r"
+    esc '\t' = "\\t"
+    esc c
+      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
+      | otherwise  = [c]
+    pad4 s' = replicate (4 - length s') '0' ++ s'
 
 getLibdir :: IO FilePath
 getLibdir = do
@@ -298,8 +357,8 @@ stmtExtensions =
 
 renderStmtBindersJson :: StmtBinders -> String
 renderStmtBindersJson (StmtBinders kind binders) =
-  "{\"kind\":" ++ jstr kind
-    ++ ",\"binders\":[" ++ intercalate "," (map jstr binders) ++ "]}"
+  "{\"kind\":" ++ jsonString kind
+    ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
 
 -- | Read the turn statement from @srcFile@, classify it, and write the JSON
 -- contract to @out@. Mirrors 'emitBinders'. @timing@ threads
@@ -310,3 +369,90 @@ emitStmtBinders timing srcFile out = do
   src <- readFile srcFile
   sb  <- extractStmtBinders timing src
   timePhase timing "write" (writeFile out (renderStmtBindersJson sb))
+
+--------------------------------------------------------------------------------
+-- Turn-mode rich result (--turn) — a tagged variant over the verdict
+--------------------------------------------------------------------------------
+
+-- | One bound-value record from a BIND turn: the mint'd 'stableVarId', the
+-- thin session iface module it was written under, its closure/data tier, and
+-- its rendered type. Shared by the legacy @--emit-bound-binders@ sidecar and
+-- the 'Bind' variant below — one record shape, two call sites.
+data BoundBinder = BoundBinder
+  { bbName        :: String
+  , bbVarId       :: Word64
+  , bbModule      :: String
+  , bbTier        :: String
+  , bbTypeDisplay :: String
+  } deriving (Eq, Show)
+
+-- | The rich result of a @--turn@ run: a tagged variant over the verdict
+-- (see @plans/one-spawn-turn-protocol.md@). 'TDecl' never compiles — its
+-- 'toDeclItems' come from a whole-module parse ('extractBinders' for a
+-- decl-batch caller, 'extractBindersNamed' for a single @--turn@ decl turn
+-- that spliced its own scratch module), not this module's statement parse,
+-- because a decl-batch caller (@--turn-verdict decl@ over N declarations
+-- joined into one module) has no single statement to parse. 'TBind'/'TExpr'
+-- carry what the selected template variant actually compiled to. The
+-- wire-visible tag ('renderTurnOutJson' \/ the CBOR encoder) is
+-- @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these constructor names.
+--
+-- 'TDecl's @toBinders@ is UNRELIABLE as a verbatim echo of the supplied
+-- verdict: a decl-batch verdict (@--turn-verdict decl@, no @:name,name…@
+-- suffix) carries an empty binder list, so 'runTurnMode' DERIVES
+-- @toBinders@ from 'toDeclItems'' head names ('exportItemName') whenever the
+-- verdict itself supplies none. @toBinders@ is therefore never a bare echo
+-- of the verdict on the decl path — a @--json-output@ consumer should read
+-- it as "the binders this turn introduces", not as "what the verdict said".
+data TurnOut
+  = TDecl
+      { toBinders   :: [Text]
+      , toDeclItems :: [ExportItem]
+      }
+  | TBind
+      { toBinders       :: [Text]
+      , toVariant       :: Int
+      , toBoundBinders  :: [BoundBinder]
+      , toAsks          :: [(Word64, Text)]
+      , toWrappedSource :: Text
+      }
+  | TExpr
+      { toVariant       :: Int
+      , toAsks          :: [(Word64, Text)]
+      , toWrappedSource :: Text
+      }
+  deriving (Eq, Show)
+
+renderTurnOutJson :: TurnOut -> String
+renderTurnOutJson (TDecl bs items) =
+  "{\"kind\":\"Decl\",\"binders\":[" ++ jsonStringList bs
+    ++ "],\"declItems\":[" ++ intercalate "," (map renderItem items) ++ "]}"
+renderTurnOutJson (TBind bs var bbs aks wrapped) =
+  "{\"kind\":\"Bind\",\"binders\":[" ++ jsonStringList bs
+    ++ "],\"variant\":" ++ show var
+    ++ ",\"boundBinders\":[" ++ intercalate "," (map renderBoundBinderJson bbs)
+    ++ "],\"asks\":[" ++ intercalate "," (map renderAskJson aks)
+    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
+renderTurnOutJson (TExpr var aks wrapped) =
+  "{\"kind\":\"Expr\",\"variant\":" ++ show var
+    ++ ",\"asks\":[" ++ intercalate "," (map renderAskJson aks)
+    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
+
+jsonStringList :: [Text] -> String
+jsonStringList = intercalate "," . map (jsonString . T.unpack)
+
+-- | One 'BoundBinder' as JSON. @varId@ is a DECIMAL STRING of the u64 (an f64
+-- would lose precision) — same shape the legacy @--emit-bound-binders@
+-- sidecar always used.
+renderBoundBinderJson :: BoundBinder -> String
+renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
+  "{\"name\":" ++ jsonString name
+    ++ ",\"varId\":" ++ jsonString (show varid)
+    ++ ",\"module\":" ++ jsonString modul
+    ++ ",\"tier\":" ++ jsonString tier
+    ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
+
+-- | One runLLMTurn/runLLMTurnFork @{site, type}@ pair as JSON — same shape the
+-- @asks.json@ sidecar always used.
+renderAskJson :: (Word64, Text) -> String
+renderAskJson (site, ty) = "{\"site\":" ++ show site ++ ",\"type\":" ++ jsonString (T.unpack ty) ++ "}"

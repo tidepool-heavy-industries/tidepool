@@ -7,11 +7,10 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isDigit, ord)
-import Numeric (showHex)
-import Data.List (isPrefixOf, stripPrefix, intercalate)
-import Data.Maybe (fromMaybe, mapMaybe, isJust)
-import Control.Monad (foldM, when, forM_)
+import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
+import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
+import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
+import Control.Monad (foldM, when, forM_, void)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
@@ -29,7 +28,11 @@ import Data.Word (Word64)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Tidepool.Binders (emitBinders, emitStmtBinders)
+import Tidepool.Binders
+  ( emitBinders, emitStmtBinders, extractBinders, extractBindersNamed
+  , extractStmtBinders, exportItemName
+  , StmtBinders(..), TurnOut(..), BoundBinder(..)
+  , renderTurnOutJson, renderBoundBinderJson, renderAskJson )
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
   , stripMonadHead, isClosureType, renderType, splitTupleType )
@@ -39,7 +42,7 @@ import Tidepool.Session
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
 import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
-import Tidepool.CborEncode (encodeTree, encodeMetadata)
+import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
 -- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
@@ -58,7 +61,7 @@ main = do
   timing <- readTimingEnabled
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
       -- Statement binder extraction (parse-only): bind-vs-expr + bound names
@@ -67,6 +70,10 @@ main = do
           timePhase timing "total" (runReportingDiags (emitStmtBinders timing file out))
       -- Lane A: parse-only declaration binder extraction for the FIRST file.
       | Just out <- argEmitBinders args     -> runReportingDiags (emitBinders file (argIncludes args) out)
+      -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
+      -- + rich-result emission, in one process. Checked before 'isSessionMode'
+      -- since a bind/expr turn also carries --session-root/--inject-val.
+      | argTurn args                        -> runTurnMode args file
       -- Session mode (Wave 3b): bind/reference turn with iface injection +
       -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
       -- file is processed (matching the two guards above) — one invocation,
@@ -112,11 +119,18 @@ data Args = Args
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
   , argEmitBoundBinders :: Maybe FilePath
+  -- --turn mode (one-spawn-per-turn protocol, plans/one-spawn-turn-protocol.md):
+  , argTurn :: Bool
+  , argTurnTemplates :: [String]
+  , argTurnOut :: Maybe FilePath
+  , argJsonOutput :: Maybe FilePath
+  , argTurnVerdict :: Maybe String
   }
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False Nothing [] []
-                     Nothing False [] Nothing Nothing [] Nothing)
+                     Nothing False [] Nothing Nothing [] Nothing
+                     False [] Nothing Nothing Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -131,6 +145,11 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--session-root" : dir : rest) = go a { argSessionRoot = Just dir } rest
     go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
     go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
+    go a ("--turn" : rest) = go a { argTurn = True } rest
+    go a ("--turn-template" : kv : rest) = go a { argTurnTemplates = argTurnTemplates a ++ [kv] } rest
+    go a ("--turn-out" : out : rest) = go a { argTurnOut = Just out } rest
+    go a ("--json-output" : out : rest) = go a { argJsonOutput = Just out } rest
+    go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
@@ -256,7 +275,7 @@ processFile timing args path = do
         -- (tidepool-harness/src/compile.rs passes --target, never
         -- --all-closed), so it's the one carrying translate/cbor_encode/write
         -- timing.
-        writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
+        void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior)
@@ -307,8 +326,11 @@ processFile timing args path = do
 -- 'processSessionFile'), while the general whole-module CLI path
 -- ('processFile') passes the same string for both, preserving its existing
 -- @--target foo@ → @foo.cbor@ contract. Shared by both so the runtime gets
--- identical JIT-able Core either way.
-writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO ()
+-- identical JIT-able Core either way. Returns the runLLMTurn/runLLMTurnFork
+-- @{site, type}@ pairs it wrote to @asks.json@, so a caller that also needs
+-- them (the turn mode's rich result) reads them off this one translation
+-- rather than re-running 'translateModuleClosed'.
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text)]
 writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   (closed, translateMs) <- timeSection (translateModuleClosed hscEnv binds targetName)
   emitPhase timing "translate" translateMs
@@ -364,6 +386,7 @@ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts t
     writeFile asksFile (renderAsksJson runLLMTurnSites)
     hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length runLLMTurnSites) ++ " sites)"
   emitPhase timing "write" writeMs
+  return runLLMTurnSites
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
@@ -404,7 +427,7 @@ processSessionFile args path = do
     -- The JIT-able Core for the target (same emission as whole-module mode).
     -- File base name is always "result" — every Rust session-turn caller
     -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
-    writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
+    void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
   case res of
@@ -422,20 +445,212 @@ processSessionFile args path = do
       exitFailure
     Right () -> putStrLn (renderDiagsJson [])
 
--- | The BIND-turn artifacts: the bound value's type @T@ (stripped from
+-- | Turn mode (@--turn@, plans/one-spawn-turn-protocol.md): classify the RAW
+-- turn text (or accept a caller-supplied @--turn-verdict@), splice the
+-- matching template, compile through the EXISTING session-compile path
+-- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
+-- 'TurnOut' result — CBOR always (@--turn-out@), JSON rendering too when
+-- @--json-output@ is given. A @decl@ verdict never compiles: its
+-- 'toDeclItems' come from a whole-module parse over the turn's OWN spliced
+-- scratch module ('extractBindersNamed', exact-name match — see
+-- @--turn-template decl=<file>@ below), never from the single-statement
+-- parse that serves the verdict — a decl-batch caller
+-- (@--turn-verdict decl@ over N declarations joined into one module) has no
+-- single statement to parse, only the module.
+--
+-- The template kind selected for a @bind@ verdict is either @bind@ (at least
+-- one bound name) or @binddiscard@ (a bind that binds no name, e.g.
+-- @_ <- e@) — mirroring the Rust @TemplateSelector@'s four-shape split. A
+-- @binddiscard@ turn compiles but is routed entirely around the
+-- session-bind artifacts (no @--bind-gen@\/@--session-root@ requirement, no
+-- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
+-- so it reaches 'TBind' with empty binders and an empty bound-binder list,
+-- same shape a caller already handles for any other zero-binder bind.
+runTurnMode :: Args -> FilePath -> IO ()
+runTurnMode args path = do
+  timing <- readTimingEnabled
+  hPutStrLn stderr $ "Processing (turn): " ++ path
+  res <- try $ do
+    turnSrc   <- readFile path
+    templates <- mapM parseTurnTemplate (argTurnTemplates args)
+    mVerdict  <- traverse parseTurnVerdictArg (argTurnVerdict args)
+    -- The classify substep emits no phases. 'extractStmtBinders' times itself
+    -- as a whole lane — its @startup@\/@ghc_session@\/@typecheck@ lines
+    -- describe a process that does nothing else — so inside this mode they
+    -- would land beside the compile's own phases from the same process: two
+    -- @ghc_session@ lines, and a @typecheck@ that no typecheck produced. A
+    -- phase's owner has to be whatever knows it is a whole lane.
+    sb        <- maybe (extractStmtBinders False turnSrc) return mVerdict
+    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (argOutDir args)
+        bindersStr = intercalate ", " (sbBinders sb)
+        -- Splice @tmplFile@ against the turn text, write the spliced module
+        -- to a scratch file under 'outDir', and return it alongside the
+        -- module name derived from its own @module X where@ header. The
+        -- scratch file's basename must match that header — 'runPipelineSession'
+        -- looks up the compiled module by @capitalize (takeBaseName path)@
+        -- (GhcPipeline.hs) exactly as 'tidepool_runtime::extract_module_name'
+        -- does today for the existing two-spawn wrap_* templates
+        -- (session.rs), which this mode's templates carry over unchanged.
+        spliceInto :: FilePath -> IO (String, String, FilePath)
+        spliceInto tmplFile = do
+          tmplSrc <- readFile tmplFile
+          let spliced = spliceTemplate tmplSrc turnSrc bindersStr
+              modName = fromMaybe "Input" (extractModuleName spliced)
+          createDirectoryIfMissing True outDir
+          let modulePath = outDir </> modName ++ ".hs"
+          writeFile modulePath spliced
+          return (spliced, modName, modulePath)
+    turnOut <- case sbKind sb of
+      "decl" -> do
+        tmplFile <- case lookup "decl" templates of
+          Just f  -> return f
+          Nothing -> error "--turn: no --turn-template for kind decl"
+        (_spliced, modName, modulePath) <- spliceInto tmplFile
+        items <- extractBindersNamed modulePath (argIncludes args) modName
+        let binders = if null (sbBinders sb)
+                        then map (T.pack . exportItemName) items
+                        else map T.pack (sbBinders sb)
+        return (TDecl binders items)
+      kind -> do
+        -- Four-shape selection (protocol note, "the verdict space has four
+        -- shapes, not three"): a bind that binds no name selects its own
+        -- template kind and skips the session-bind artifacts entirely,
+        -- mirroring Rust's 'TemplateSelector::for_verdict'.
+        let selector = if kind == "bind" && null (sbBinders sb) then "binddiscard" else kind
+        tmplFile <- case lookup selector templates of
+          Just f  -> return f
+          Nothing -> error ("--turn: no --turn-template for kind " ++ selector)
+        (spliced, _modName, modulePath) <- spliceInto tmplFile
+        let scope = SessionScope
+              { ssRoot      = fromMaybe "" (argSessionRoot args)
+              , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
+              }
+        result <- runPipelineSession (Just scope) modulePath (argIncludes args)
+        let binds       = prBinds result
+            tycons      = prTyCons result
+            hscEnv      = prHscEnv result
+            mCapturedTy = fmap T.pack (prCapturedType result)
+            warnTexts   = map T.pack (prWarnings result)
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts "__result" "result"
+        let wrapped = T.pack spliced
+        case selector of
+          "bind" -> do
+            g    <- requireArg "--bind-gen"     (argBindGen args)
+            root <- requireArg "--session-root" (argSessionRoot args)
+            bbs  <- mkBoundBinders (sbBinders sb) g root result
+            return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
+          "binddiscard" -> return (TBind [] 0 [] asksSites wrapped)
+          "expr" -> return (TExpr 0 asksSites wrapped)
+          other  -> error ("--turn: unexpected verdict kind: " ++ other)
+    outFile <- requireArg "--turn-out" (argTurnOut args)
+    let cbor = encodeTurnOut turnOut
+    BS.writeFile outFile cbor
+    hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
+    case argJsonOutput args of
+      Just jout -> do
+        writeFile jout (renderTurnOutJson turnOut)
+        hPutStrLn stderr $ "  Wrote: " ++ jout
+      Nothing -> return ()
+  case res of
+    Left (e :: SomeException) -> do
+      let diags = case fromException e of
+            Just (se :: SourceError) -> diagsFromSourceError se
+            Nothing                  -> [diagFromException e]
+      putStrLn (renderDiagsJson diags)
+      case fromException e of
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+      exitFailure
+    Right () -> putStrLn (renderDiagsJson [])
+
+-- | Parse one raw @--turn-template kind=file@ argument. Validated here (not in
+-- 'parseArgs', which stays total) so a malformed flag surfaces through
+-- 'runTurnMode''s @try@ as the same JSON diagnostics report every other
+-- failure does, not a bare crash.
+parseTurnTemplate :: String -> IO (String, FilePath)
+parseTurnTemplate kv = case break (== '=') kv of
+  (kind, '=' : file) | not (null kind), not (null file) -> return (kind, file)
+  _ -> error ("--turn: malformed --turn-template (expected kind=file): " ++ kv)
+
+-- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
+-- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of
+-- 'runTurnMode' never has to distinguish a supplied verdict from a parsed one.
+parseTurnVerdictArg :: String -> IO StmtBinders
+parseTurnVerdictArg s = case break (== ':') s of
+  (kind, "")      -> return (StmtBinders kind [])
+  (kind, ':' : ns) -> return (StmtBinders kind (splitComma ns))
+  _               -> error ("--turn: malformed --turn-verdict: " ++ s)
+
+splitComma :: String -> [String]
+splitComma s = case break (== ',') s of
+  (a, [])       -> [a]
+  (a, _ : rest) -> a : splitComma rest
+
+-- | Splice a turn template: literal replacement of @{{TURN}}@ (the raw turn
+-- text, verbatim), @{{TURN_STMT}}@ (the turn text placed as a @do@-block
+-- statement — see 'placeTurnStmt'), and @{{BINDERS}}@ (the harvested binder
+-- names, comma-joined) against the ORIGINAL template text only — a single
+-- left-to-right scan, never re-scanning already-spliced text, so a
+-- @{{TURN}}@\/@{{TURN_STMT}}@\/@{{BINDERS}}@ marker occurring verbatim inside
+-- the turn text itself is never mistaken for a second substitution point.
+-- @{{TURN}}@ is not a string prefix of @{{TURN_STMT}}@ (they diverge at the
+-- 7th character, @}@ vs @_@), so checking both at every position is
+-- unambiguous regardless of order.
+spliceTemplate :: String -> String -> String -> String
+spliceTemplate tmpl turnText bindersStr = go tmpl
+  where
+    go s
+      | "{{TURN_STMT}}" `isPrefixOf` s = placeTurnStmt turnText ++ go (drop 13 s)
+      | "{{TURN}}" `isPrefixOf` s      = turnText ++ go (drop 8 s)
+      | "{{BINDERS}}" `isPrefixOf` s   = bindersStr ++ go (drop 11 s)
+    go (c : cs) = c : go cs
+    go []       = []
+
+-- | Place @turnText@ as a @do@-block statement — the @{{TURN_STMT}}@
+-- placement mode. Mirrors Rust's @place_turn_stmt@
+-- (@tidepool-runtime/src/session/turn.rs@) and the repl's
+-- @push_braced_stmt@ (@tidepool-repl/src/session.rs@) byte for byte: a
+-- @let@ turn (at column 1, since a raw turn has no leading indentation)
+-- needs explicit decl braces there (a layout @let@ swallows the following
+-- @;@), so it is rewritten to @let { <rest> }@; anything else is placed
+-- verbatim. Both branches guarantee a trailing newline so a template's own
+-- following text always starts on a fresh line.
+placeTurnStmt :: String -> String
+placeTurnStmt turnText = case letRest of
+  Just rest | not ("{" `isPrefixOf` dropWhile isSpace rest) ->
+    "let {" ++ rest ++ (if "\n" `isSuffixOf` rest then "" else "\n") ++ " }\n"
+  _ ->
+    turnText ++ (if "\n" `isSuffixOf` turnText then "" else "\n")
+  where
+    trimmed = dropWhile isSpace turnText
+    letRest = case stripPrefix "let" trimmed of
+      Just rest@(c : _) | isSpace c -> Just rest
+      _                             -> Nothing
+
+-- | Extract the name from a source's @module X where@ (or @module X (@
+-- export-list) header — mirrors @tidepool_runtime::extract_module_name@
+-- exactly, so the scratch file this mode writes lands under the SAME name the
+-- existing session compile path already derives from a wrap_* template's
+-- header.
+extractModuleName :: String -> Maybe String
+extractModuleName src = listToMaybe
+  [ name
+  | line <- lines src
+  , Just rest <- [stripPrefix "module " (dropWhile (== ' ') line)]
+  , let name = takeWhile (\c -> isAlphaNum c || c == '.' || c == '_') (dropWhile (== ' ') rest)
+  , not (null name)
+  ]
+
+-- | The BIND-turn binder records: the bound value's type @T@ (stripped from
 -- @result :: Eff stack T@), the thin @Tidepool.Session.Val.G<g>@ iface carrying
--- all N binders, and the BoundBinder JSON the runtime consumes (N records, one
--- per binder). For a single name the type @T@ is used directly; for N>1 names
--- @T@ must be an N-tuple and is split into per-component types via
--- 'splitTupleType'. The iface + ids are computed the SAME way a later reference
--- turn recomputes them, so the value plane and type plane agree on one key.
-emitBindArtifacts :: Args -> PipelineResult -> IO ()
-emitBindArtifacts args result = do
-  bindNames <- case argBindNames args of
-    []  -> error "session-bind requires at least one --bind-name"
-    ns  -> return ns
-  g    <- requireArg "--bind-gen"    (argBindGen args)
-  root <- requireArg "--session-root" (argSessionRoot args)
+-- all N binders, and one 'BoundBinder' per bound name. For a single name the
+-- type @T@ is used directly; for N>1 names @T@ must be an N-tuple and is split
+-- into per-component types via 'splitTupleType'. The iface + ids are computed
+-- the SAME way a later reference turn recomputes them, so the value plane and
+-- type plane agree on one key. Shared by @--session-bind@ ('emitBindArtifacts')
+-- and @--turn@'s bind path — one computation, two callers.
+mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
+mkBoundBinders bindNames g root result = do
   effTy <- case prResultType result of
     Just t  -> return t
     Nothing -> error "session-bind: could not capture the type of `result` \
@@ -458,13 +673,26 @@ emitBindArtifacts args result = do
             modStr = sessionModuleString sm
             tier   = if isClosureType cty then "Tier1Closure" else "Tier0Data"
             tdisp  = renderType cty
-        in (name, varid, modStr, tier, tdisp, occ, cty)
-      binders = zipWith mkEntry bindNames componentTypes
-  iface <- mkThinSessionIface hsc sm [(occ, cty) | (_, _, _, _, _, occ, cty) <- binders]
+        in (BoundBinder name varid modStr tier tdisp, occ, cty)
+      built   = zipWith mkEntry bindNames componentTypes
+      binders = [ b | (b, _, _) <- built ]
+  iface <- mkThinSessionIface hsc sm [(occ, cty) | (_, occ, cty) <- built]
   writeSessionIface hsc root sm iface
-  forM_ binders $ \(name, varid, modStr, tier, tdisp, _, _) ->
+  forM_ binders $ \(BoundBinder name varid modStr tier tdisp) ->
     hPutStrLn stderr $ "  Wrote session iface: " ++ modStr ++ " (" ++ name
              ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
+  return binders
+
+-- | The @--session-bind@ artifacts: mint the 'BoundBinder' records via
+-- 'mkBoundBinders' and, when requested, write the standalone JSON sidecar.
+emitBindArtifacts :: Args -> PipelineResult -> IO ()
+emitBindArtifacts args result = do
+  bindNames <- case argBindNames args of
+    []  -> error "session-bind requires at least one --bind-name"
+    ns  -> return ns
+  g       <- requireArg "--bind-gen"    (argBindGen args)
+  root    <- requireArg "--session-root" (argSessionRoot args)
+  binders <- mkBoundBinders bindNames g root result
   case argEmitBoundBinders args of
     Just out -> do
       writeFile out (renderBoundBindersJson binders)
@@ -481,47 +709,23 @@ parseValModule s = case stripPrefix "Tidepool.Session.Val.G" s of
   _ -> Nothing
 
 requireArg :: String -> Maybe a -> IO a
-requireArg flag = maybe (error ("session-bind requires " ++ flag)) return
+requireArg flag = maybe (error ("required argument missing: " ++ flag)) return
 
--- | The BoundBinder JSON sidecar — one record per binder. @varId@ is a DECIMAL
--- STRING of the u64 (JSON f64 would lose 64-bit precision). Handles both single
--- and multi-binder turns (the runtime always reads a @binders@ array).
-renderBoundBindersJson :: [(String, Word64, String, String, String, a, b)] -> String
+-- | The BoundBinder JSON sidecar — one record per binder ('renderBoundBinderJson',
+-- shared with the 'TBind' rich-result rendering). Handles both single and
+-- multi-binder turns (the runtime always reads a @binders@ array).
+renderBoundBindersJson :: [BoundBinder] -> String
 renderBoundBindersJson binders =
-  "{\"binders\":[" ++ intercalate "," (map renderOne binders) ++ "]}"
-  where
-    renderOne (name, varid, modul, tier, tdisp, _, _) =
-      "{\"name\":" ++ jsonString name
-        ++ ",\"varId\":" ++ jsonString (show varid)
-        ++ ",\"module\":" ++ jsonString modul
-        ++ ",\"tier\":" ++ jsonString tier
-        ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
-
--- | Hand-rolled JSON string escaping, shared by every hand-rolled JSON sidecar
--- this file writes (@BoundBinder@, @asks.json@) — same fixed-shape rationale
--- as 'Tidepool.DiagJson': small, no aeson dependency needed.
-jsonString :: String -> String
-jsonString str = '"' : concatMap esc str ++ "\""
-  where
-    esc '"'  = "\\\""
-    esc '\\' = "\\\\"
-    esc '\n' = "\\n"
-    esc '\r' = "\\r"
-    esc '\t' = "\\t"
-    esc c
-      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
-      | otherwise  = [c]
-    pad4 s = replicate (4 - length s) '0' ++ s
+  "{\"binders\":[" ++ intercalate "," (map renderBoundBinderJson binders) ++ "]}"
 
 -- | runLLMTurn/runLLMTurnFork {site, type} pairs (#R0) as the asks.json
 -- sidecar: @[{"site": <u32>, "type": "<rendered>"}]@. @site@ is a bare JSON
 -- number (extract's own monotonic per-module counter, well inside u32 range).
+-- Per-entry rendering ('renderAskJson') is shared with the 'TBind'/'TExpr'
+-- rich-result rendering.
 renderAsksJson :: [(Word64, Text)] -> String
 renderAsksJson sites =
-  "[" ++ intercalate "," (map renderOne sites) ++ "]"
-  where
-    renderOne (site, ty) =
-      "{\"site\":" ++ show site ++ ",\"type\":" ++ jsonString (T.unpack ty) ++ "}"
+  "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 
 -- | Module name from file basename, mirroring GhcPipeline's convention.
 capitalizeMod :: String -> String
