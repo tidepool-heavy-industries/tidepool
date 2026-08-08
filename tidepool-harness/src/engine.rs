@@ -993,6 +993,184 @@ fn push_braced_stmt(out: &mut String, turn_text: &str) {
     }
 }
 
+/// Build the EXPR turn template a [`tidepool_runtime::session::TurnRequest`]
+/// carries: [`template_turn`] with a one-line `{{TURN}}` placeholder standing
+/// in for the real block (the verdict — and so which template applies — is
+/// not known until `run_turn` returns), with its `-- [user-lines] S:E`
+/// annotation repaired to the range the REAL block would occupy, and its
+/// compile target renamed to `__result` (see [`retarget_result_binder`]).
+///
+/// `template_haskell` computes the `[user-lines]` annotation's END line from
+/// the spliced code's own newline count, so a one-line placeholder yields a
+/// CORRECT start line (it depends only on content BEFORE the placeholder) but
+/// a WRONG end line for any block that isn't itself exactly one line. Left
+/// unrepaired, every GHC diagnostic the corrective-retry loop feeds back for a
+/// multi-line block would cite the wrong line range.
+///
+/// Byte-exactness is the contract these repairs buy: splicing `block` back in
+/// via [`tidepool_runtime::session::render_template`] must reproduce
+/// [`template_turn`] called directly on `block`, up to the deliberate binder
+/// rename — see `expr_turn_template_byte_identical_to_template_turn` for the
+/// pin.
+///
+/// Requires `block` not to end in `\n` — `{{TURN}}`'s splice is a dumb
+/// VERBATIM substitution (no newline normalization of its own), so this
+/// relies on `template_haskell`'s fixed one-newline-after-code padding
+/// (baked in once, at build time, from the one-line placeholder) being the
+/// SAME padding a trailing-newline-free `block` needs; a `block` that already
+/// ended in `\n` would double up. `run_block`'s only source of turn text,
+/// `extract_last_haskell_block`, always `trim_end()`s what it extracts, so
+/// this holds for every real caller.
+pub fn expr_turn_template(
+    cfg: &EngineConfig,
+    stack: &str,
+    block: &str,
+    imports: &str,
+    helpers: &str,
+) -> String {
+    let placeholder = template_turn(cfg, stack, "{{TURN}}", imports, helpers);
+    let repaired = repair_user_lines_end(&placeholder, content_line_count(block));
+    retarget_result_binder(&repaired)
+}
+
+/// Build a BIND/BINDDISCARD turn template: the same preamble/imports/helpers/
+/// `__result` scaffolding [`template_session_bind`] builds around a REAL
+/// statement, but with the bare `{{TURN_STMT}}` marker placed DIRECTLY —
+/// deliberately NOT through [`push_braced_stmt`].
+///
+/// `push_braced_stmt` (and `render_template`'s own `place_turn_stmt`, which
+/// mirrors it) ends its output in exactly one trailing newline, ADDING one
+/// when its input doesn't already have one — correct for a REAL statement,
+/// but the 13-character marker token `"{{TURN_STMT}}"` itself never ends in
+/// `\n`, so routing the MARKER through the same function bakes an extra
+/// trailing newline into the template. At splice time `render_template`
+/// substitutes the marker with `place_turn_stmt`'s OWN newline-terminated
+/// output, so that baked-in newline becomes a genuine duplicate — a blank
+/// line between the turn statement and `; pure …` that `template_session_bind`
+/// called directly on the same text never produces. Placing the marker bare
+/// leaves supplying the separator entirely to the splice's own normalization,
+/// which is what makes the two agree — see
+/// `bind_template_byte_identical_to_template_session_bind` for the pin.
+///
+/// `binder` is `"{{BINDERS}}"` for a real bind (its names are comma-joined
+/// and spliced in later) or the literal `"()"` for a discarding bind
+/// (`TemplateSelector::BindDiscard` — no `{{BINDERS}}` placeholder at all,
+/// "splicing no binder").
+pub fn session_bind_template(
+    cfg: &EngineConfig,
+    binder: &str,
+    imports: &str,
+    helpers: &str,
+) -> String {
+    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
+    let stack = cfg.effect_stack_type();
+
+    let mut out = String::new();
+    if imports.trim().is_empty() {
+        out.push_str(&preamble);
+    } else {
+        let insert = preamble.find("default (Int").unwrap_or(preamble.len());
+        out.push_str(&preamble[..insert]);
+        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str("import ");
+            out.push_str(imp);
+            out.push('\n');
+        }
+        out.push_str(&preamble[insert..]);
+    }
+    out.push_str("-- [user]\n");
+    if !helpers.trim().is_empty() {
+        out.push_str(helpers);
+        if !helpers.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("__result :: Eff {stack} _\n"));
+    out.push_str("__result = do {\n");
+    out.push_str("{{TURN_STMT}}");
+    out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    out
+}
+
+/// Rename the compiled EXPR module's top-level binder from `result`
+/// (`template_haskell`'s fixed name — shared with the stateless eval server,
+/// so that function can't change it) to `__result`, the name every OTHER
+/// template `run_turn` carries here already uses:
+/// [`template_session_bind`]'s fixed `__result`, and `run_turn`'s own default
+/// target when no `--target` is supplied. `--target` is ONE flag for the
+/// whole `--turn` spawn, shared across whichever verdict GHC actually picks
+/// — a caller supplying a `result`-targeted expr template alongside an
+/// `__result`-targeted bind template has no single `--target` value that
+/// works for both. Confirmed empirically against the built extract:
+/// `--target result` against a module that only declares `__result` fails
+/// with `translateModule: exported top-level binding 'result' not found`.
+/// So every compiling template here shares `__result`, and `run_turn` is
+/// called with no `--target` override at all.
+///
+/// Scoped to the text AFTER the `[user-lines]` marker (`template_haskell`'s
+/// own `result ::`/`result = do` lines always follow it) so a `result ::`/
+/// `result =` line inside caller-supplied `helpers`/`imports` (which precede
+/// the marker) is never touched.
+fn retarget_result_binder(src: &str) -> String {
+    const MARKER: &str = " -- [user-lines] ";
+    let Some(marker_pos) = src.find(MARKER) else {
+        return src.to_string();
+    };
+    let (head, tail) = src.split_at(marker_pos);
+    let tail = tail
+        .replacen("\nresult :: Eff ", "\n__result :: Eff ", 1)
+        .replacen("\nresult = do\n", "\n__result = do\n", 1);
+    format!("{head}{tail}")
+}
+
+/// The 1-based inclusive line count `code` occupies once embedded — mirrors
+/// `tidepool_mcp::eval_prep`'s `template_haskell_impl` end-line computation
+/// exactly (an empty block is 1 line; a trailing newline doesn't count as an
+/// extra line).
+fn content_line_count(code: &str) -> usize {
+    if code.is_empty() {
+        1
+    } else if code.ends_with('\n') {
+        code.matches('\n').count()
+    } else {
+        code.matches('\n').count() + 1
+    }
+}
+
+/// Rewrite a `-- [user-lines] S:E` annotation's END line to
+/// `start + content_lines - 1`, leaving the START line untouched. `src` is
+/// expected to contain exactly one such marker (as every [`template_turn`]
+/// output does); a src without one is returned unchanged rather than panicking
+/// — a caller error surfaces downstream as an unrepaired annotation, not here.
+fn repair_user_lines_end(src: &str, content_lines: usize) -> String {
+    const MARKER: &str = " -- [user-lines] ";
+    let Some(pos) = src.find(MARKER) else {
+        return src.to_string();
+    };
+    let after = &src[pos + MARKER.len()..];
+    let Some(colon) = after.find(':') else {
+        return src.to_string();
+    };
+    let start_str = &after[..colon];
+    let Ok(start) = start_str.parse::<usize>() else {
+        return src.to_string();
+    };
+    let rest = &after[colon + 1..];
+    let end_digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let real_end = start + content_lines - 1;
+
+    let mut out = String::with_capacity(src.len());
+    out.push_str(&src[..pos + MARKER.len()]);
+    out.push_str(start_str);
+    out.push(':');
+    out.push_str(&real_end.to_string());
+    out.push_str(&rest[end_digits..]);
+    out
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("engine setup failed: {0}")]
@@ -1141,5 +1319,117 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    // -- run_turn template byte-identity ------------------------------------
+    //
+    // `expr_turn_template`/`session_bind_template` are what `run_block` hands
+    // `run_turn` as its `--turn-template` sources. These pin that splicing
+    // `block`/`stmt` back into the built template (via
+    // `tidepool_runtime::session::render_template`, the same substitution
+    // `--turn` performs at runtime) reproduces exactly what calling the
+    // underlying builder directly on the real text would produce — the only
+    // thing standing between the `[user-lines]`/binder repairs and a silently
+    // wrong error-line mapping or a stray placeholder reaching GHC.
+    //
+    // Every fixture below deliberately does NOT end in `\n`: `run_block`'s
+    // only source of turn text, `extract_last_haskell_block`, always
+    // `trim_end()`s the fenced block it extracts, so a turn's raw text never
+    // carries a trailing newline in production. That invariant is load-bearing
+    // for `expr_turn_template` specifically — its `{{TURN}}` placement is a
+    // dumb VERBATIM splice with no newline normalization of its own, so it
+    // relies on `template_haskell`'s fixed one-newline-after-code padding
+    // (computed once, at template-build time, from the one-line placeholder)
+    // matching what a trailing-newline-free real block needs. A block that
+    // DID end in `\n` would double up — not exercised here because it can't
+    // reach this code from `run_block`.
+
+    use tidepool_runtime::session::render_template;
+
+    const STACK: &str = "'[]";
+
+    fn multiline_block() -> &'static str {
+        "let x = 1\n    y = 2\nin x + y"
+    }
+
+    fn quasiquote_block() -> &'static str {
+        "let s = [fmt|line one\nline two|]\nin s"
+    }
+
+    #[test]
+    fn expr_turn_template_byte_identical_to_template_turn() {
+        let cfg = EngineConfig::inert(vec![]);
+        for block in ["1 + 1", multiline_block(), quasiquote_block()] {
+            let tmpl = expr_turn_template(&cfg, STACK, block, "", "");
+            let spliced = render_template(&tmpl, block, &[]);
+            // `expr_turn_template` deliberately renames the compiled binder
+            // from `result` to `__result` (see `retarget_result_binder`) —
+            // apply the same rename to the direct-call reference so the pin
+            // still catches any OTHER divergence (imports, helpers,
+            // `[user-lines]` repair, splice placement).
+            let direct = retarget_result_binder(&template_turn(&cfg, STACK, block, "", ""));
+            assert_eq!(spliced, direct, "block: {block:?}");
+        }
+    }
+
+    #[test]
+    fn expr_turn_template_targets_underscore_result_not_result() {
+        let cfg = EngineConfig::inert(vec![]);
+        let tmpl = expr_turn_template(&cfg, STACK, "1 + 1", "", "");
+        assert!(tmpl.contains("\n__result :: Eff "));
+        assert!(tmpl.contains("\n__result = do\n"));
+        assert!(
+            !tmpl.contains("\nresult :: Eff ") && !tmpl.contains("\nresult = do\n"),
+            "the retargeted template must not also carry the original `result` binder:\n{tmpl}"
+        );
+    }
+
+    #[test]
+    fn bind_template_byte_identical_to_template_session_bind() {
+        let cfg = EngineConfig::inert(vec![]);
+        for (stmt, name) in [
+            ("x <- pure 1", "x"),
+            ("let y = 2", "y"),
+            (multiline_block(), "z"),
+        ] {
+            let tmpl = session_bind_template(&cfg, "{{BINDERS}}", "", "");
+            let spliced = render_template(&tmpl, stmt, &[name.to_string()]);
+            let direct = template_session_bind(&cfg, stmt, name, "", "");
+            assert_eq!(spliced, direct, "stmt: {stmt:?}");
+        }
+    }
+
+    /// The discarding-bind template is [`session_bind_template`] with the
+    /// literal binder `"()"` (no `{{BINDERS}}` placeholder at all — "splicing
+    /// no binder", per `plans/one-spawn-turn-protocol.md`'s four-shape note) —
+    /// pinned the same way as the bind template.
+    #[test]
+    fn binddiscard_template_byte_identical_to_template_session_bind_with_unit_binder() {
+        let cfg = EngineConfig::inert(vec![]);
+        let stmt = "_ <- pure ()";
+        let tmpl = session_bind_template(&cfg, "()", "", "");
+        assert!(
+            !tmpl.contains("{{BINDERS}}"),
+            "binddiscard template must splice no binder placeholder:\n{tmpl}"
+        );
+        let spliced = render_template(&tmpl, stmt, &[]);
+        let direct = template_session_bind(&cfg, stmt, "()", "", "");
+        assert_eq!(spliced, direct);
+    }
+
+    #[test]
+    fn repair_user_lines_end_fixes_only_the_end_line() {
+        let src = "head\n } in __b  -- [user-lines] 5:5\ntail";
+        let out = repair_user_lines_end(src, 3);
+        assert_eq!(out, "head\n } in __b  -- [user-lines] 5:7\ntail");
+    }
+
+    #[test]
+    fn content_line_count_matches_template_haskell_impl_convention() {
+        assert_eq!(content_line_count(""), 1);
+        assert_eq!(content_line_count("a"), 1);
+        assert_eq!(content_line_count("a\n"), 1);
+        assert_eq!(content_line_count("a\nb"), 2);
+        assert_eq!(content_line_count("a\nb\n"), 2);
     }
 }

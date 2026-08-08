@@ -11,24 +11,36 @@ one.
 
 1. **provider call** — `Harness::stream_turn`: the model writes a reply,
    possibly containing a fenced Haskell block. Network + inference.
-2. **classify** — `run_block` calls `tidepool_runtime::session::classify_turn`,
-   which spawns `tidepool-extract --emit-stmt-binders` (parse-only lane, no
-   Core pipeline — but still a full process start).
-3. **template** — `engine::template_turn` wraps the block in a module with the
-   effect row, pragmas, imports, and the node's `Lib.G<gen>` decl module.
-4. **extract** — `compile::compile_turn` spawns `tidepool-extract` again, this
-   time through the whole GHC pipeline, and it writes `<target>.cbor`,
-   `meta.cbor`, `asks.json` into a tempdir.
-5. **read + deserialize** — the three files are read and decoded into
-   `CoreExpr`, `DataConTable`, `AsksSidecar`.
-6. **jit codegen** — `ResidentSession::run` → `add_fragment_session`: Cranelift
+2. **template** — `run_block` builds every wrapper template the turn's
+   verdict might select (`engine::expr_turn_template`/`template_session_bind`,
+   the decl parse wrapper) — the effect row, pragmas, imports, the node's
+   `Lib.G<gen>` decl module, and its current `Val.G<gen>` modules — BEFORE the
+   verdict is known, since the one spawn below classifies and compiles
+   together.
+3. **turn compile** — `tidepool_runtime::session::run_turn` spawns
+   `tidepool-extract --turn` ONCE: the extract classifies the block itself
+   (bind/expr/decl — GHC-sourced, never a Rust-side guess), splices the
+   matching template, and — for a BIND or EXPR verdict — compiles it through
+   the whole GHC pipeline in the SAME process, writing `result.cbor`,
+   `meta.cbor`, `asks.json`, and the `TurnOut` sidecar into a tempdir. A DECL
+   verdict does not compile here: `run_block` separately calls
+   `session.define_scoped`, which performs its OWN decl-plane `run_turn`
+   spawn (see `plans/one-spawn-turn-protocol-phase-b.md`'s Decision 1 — this
+   is the one case Phase B's "one spawn per turn" claim does not cover, and
+   says so).
+4. **read + deserialize** — `result.cbor`/`meta.cbor` are read and decoded
+   into `CoreExpr`, `DataConTable`; `asks` arrives already decoded, off the
+   `TurnOut` wire payload.
+5. **jit codegen** — `ResidentSession::run` → `add_fragment_session`: Cranelift
    mints the fragment against the merged table.
-7. **run** — `Threadless::run_fragment` on the eval thread, to completion or to
+6. **run** — `Threadless::run_fragment` on the eval thread, to completion or to
    a suspension (`finalize`, `askUser`, `fork`).
 
-Steps 2 and 4 are two separate `tidepool-extract` process spawns per round.
-A compile error at step 4 costs a full round: the driver pushes the diagnostic
-back as a user turn and the loop restarts at step 1.
+Step 3 is the round's one `tidepool-extract` process spawn (down from the two
+separate spawns — a parse-only classify, then a full compile — a harness turn
+made before the one-spawn-per-turn migration). A compile error at step 3
+costs a full round: the driver pushes the diagnostic back as a user turn and
+the loop restarts at step 1.
 
 ## Stage vocabulary and event shape
 
@@ -291,11 +303,29 @@ rows appear — see the gap note below. Medians in ms:
 |---|---|---|---|
 | `extract_spawn` | 6778 | 9425 | 12620 |
 | `jit_codegen` | 2704 | 4070 | 4361 |
-| `classify_extract` | 33 | 75 | 72 |
+| `classify_extract` **RETIRED** (see tombstone below) | 33 | 75 | 72 |
 | `cbor_deserialize` | 9 | 17 | 21 |
 | `run_exec` | 0 | 0 | 3 |
 | `template`, `cbor_read`, `asks_parse` | 0 | 0 | 0 |
 | `provider_call` | 0 | 0 | 0 (replayed, not a live model) |
+
+> **`classify_extract` — RETIRED at `f320d21949feffe3d22ac64bee9dc0ffe0802d79`, successor
+> `extract.classify`.** Its semantics were a SEPARATE process spawn's wall
+> clock — the parse-only `--emit-stmt-binders` lane `run_block` called before
+> compiling. That spawn no longer exists: the one-spawn-per-turn migration
+> (`plans/one-spawn-turn-protocol-phase-b.md`) folded classification into the
+> single `--turn` process a harness turn now makes, which times its own
+> in-process classify substep as `extract.classify` (an `extract.*` phase
+> forwarded from INSIDE `extract_spawn`, not a sibling Rust-side stage — see
+> `timing.rs`'s module doc). A same-named stage carrying that different
+> meaning would silently poison any longitudinal comparison against the rows
+> above, so the constant is retired rather than repurposed — same fails-loud
+> principle as the one-format wire policy. The 33–75ms row above stays
+> exactly as measured: it is what reframed this whole workstream (a
+> parse-only spawn costing tens of milliseconds against a ~6.8s compile,
+> settled below), and remains the reproducible baseline `extract.classify`
+> should be compared against once it is next measured — read it as a
+> retired-but-interpretable historical figure, not a stale one.
 
 Per-turn residual (`wall_ms − attributed_ms`) is 32–76ms against 9–21s turns —
 under 0.4%, so the stage set accounts for essentially the whole turn and

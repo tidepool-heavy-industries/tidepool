@@ -43,8 +43,9 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, BoundBinder, ModuleEnv, ResidentError, ResidentOutcome,
-    ResidentSession, SessionBind, SessionLib, TurnKind,
+    run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentError, ResidentOutcome,
+    ResidentSession, SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
+    DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
@@ -1100,6 +1101,11 @@ impl Harness {
 
     /// Compile a `block` (with optional imports/helpers) and run it against
     /// `node`'s resident session as a TOP-LEVEL turn. Classifies a suspension.
+    ///
+    /// ONE `run_turn` spawn classifies and compiles together — the verdict
+    /// (decl/bind/expr) is not known until it returns, so every template it
+    /// might select is built up front, from the SAME session/contract context
+    /// a compile would have needed anyway.
     async fn run_block(
         &self,
         node: NodeId,
@@ -1107,146 +1113,193 @@ impl Harness {
         imports: &str,
         helpers: &str,
     ) -> Result<engine::TurnOutcome, HarnessError> {
-        let cfg_bin = self.cfg.extract_bin.clone();
-
-        // Classify the block OFF-REACTOR (it shells the extractor). A top-level
-        // DECLARATION accumulates on the node's decl plane (so a value declared
-        // this turn is a live binding next turn) instead of running as an
-        // expression; a classify failure falls through to the expression path,
-        // which re-reports any real error.
-        let block_owned = block.to_string();
-        let classify_started = std::time::Instant::now();
-        let classification = {
-            let b = block_owned.clone();
-            tokio::task::spawn_blocking(move || classify_turn(&b))
-                .await
-                .map_err(|e| HarnessError::Resident(format!("classify task join: {e}")))?
-                .ok()
-        };
-        timing::record_stage(
-            node.0,
-            timing::NO_ROUND,
-            timing::STAGE_CLASSIFY_EXTRACT,
-            classify_started.elapsed(),
-            0,
-        );
-        let kind = classification.as_ref().map(|c| c.kind);
-
-        if kind == Some(TurnKind::Decl) {
-            let mut session = self.take_session(node)?;
-            let (session, res) = tokio::task::spawn_blocking(move || {
-                let r = session.define_scoped(&[&block_owned]);
-                (session, r)
-            })
-            .await
-            .map_err(|e| HarnessError::Resident(format!("declare task join: {e}")))?;
-            self.put_session(node, session, None, AsksSidecar::default());
-            self.flush_effects(node)?;
-            return match res {
-                Ok(gen) => {
-                    let rendered = format!("declared (gen {})", gen.0);
-                    self.tree.node_done(node, rendered.clone())?;
-                    Ok(engine::TurnOutcome::Completed { rendered })
-                }
-                Err(e) => {
-                    let msg = format!("The declaration failed: {e}");
-                    self.push_user_turn(node, &msg)?;
-                    Err(HarnessError::Resident(e.to_string()))
-                }
-            };
-        }
-
-        // A value-plane BIND turn (`x <- e`) materializes its result into the
-        // node's value plane so a later turn can reference it. Single-binder only
-        // for now (multi-bind is a follow-up); a bind with no parsed binder name
-        // falls through to the expression path below.
-        if kind == Some(TurnKind::Bind) {
-            if let Some(name) = classification.and_then(|c| c.binders.into_iter().next()) {
-                return self
-                    .run_bind_turn(node, block, imports, helpers, &name)
-                    .await;
-            }
-        }
-
-        // Expression turn: make the compile session-aware — import the node's
-        // current `Lib.G<g>` decl module (if any) and add its directory to the
-        // search path, so a reference to a prior turn's declaration resolves. The
-        // decl context is peeked under the lock WITHOUT checking the session out,
-        // so a compile failure below never leaks it (the session is taken only
-        // once a compiled fragment is in hand — as the original path did).
+        // Session/contract context, peeked under the lock WITHOUT checking the
+        // session out, so a compile failure below never leaks it (the session
+        // is taken only once a compiled fragment is in hand).
         let (session_module, session_include) = self.session_decl_context(node);
-        // The node's answer contract (when it is driving toward a `finalize`)
-        // contributes both halves: its `imports` put the answer type in scope
-        // for the turn's own module, and its `ty` instantiates the ROW
+        let bind_ctx = self.session_bind_context(node);
+
+        // The EXPR template's imports + row: the node's answer contract (when
+        // driving toward a `finalize`) contributes both halves — its `imports`
+        // put the answer type in scope, and its `ty` instantiates the ROW
         // (`Finalize <ty>`) this turn compiles against — ONE computation
         // (`turn_target`) resolves both the include dir and the stack string
         // from the SAME row, so they cannot disagree.
         let contract = self.answer_contract(node);
-        let mut import_lines: Vec<String> = contract
+        let mut expr_import_lines: Vec<String> = contract
             .iter()
             .flat_map(|c| c.imports.iter().cloned())
             .collect();
         if !imports.is_empty() {
-            import_lines.push(imports.to_string());
+            expr_import_lines.push(imports.to_string());
         }
-        import_lines.extend(session_module);
-        let merged_imports = import_lines.join("\n");
-        // Resolved BEFORE the STAGE_TEMPLATE window: for a new answer type this
-        // materializes an effects module (a filesystem write), which is not
-        // templating cost and would inflate that stage's attribution.
+        expr_import_lines.extend(session_module.clone());
+        let expr_imports = expr_import_lines.join("\n");
         let target = self.cfg.turn_target(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
         )?;
+
+        // The BIND/BINDDISCARD templates' imports: user imports + the decl
+        // module + current Val modules (mirrors what `run_bind_turn` used to
+        // merge) — just the user imports when the node has no decl plane.
+        let bind_imports = match &bind_ctx {
+            Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
+                (_, true) => imports.to_string(),
+                (true, false) => session_imports.clone(),
+                (false, false) => format!("{imports}\n{session_imports}"),
+            },
+            None => imports.to_string(),
+        };
+
+        // Build every template `run_turn` might select — the verdict, and so
+        // which one applies, isn't known until it returns. Resolved BEFORE
+        // this window (contract/session context above): for a new answer type
+        // that materializes an effects module (a filesystem write), which is
+        // not templating cost and would inflate this stage's attribution.
         let template_started = std::time::Instant::now();
-        let src = engine::template_turn(&self.cfg, &target.stack, block, &merged_imports, helpers);
+        let expr_source =
+            engine::expr_turn_template(&self.cfg, &target.stack, block, &expr_imports, helpers);
+        let bind_source =
+            engine::session_bind_template(&self.cfg, "{{BINDERS}}", &bind_imports, helpers);
+        // BindDiscard: the same bind shape, yielding `pure ()` and splicing no
+        // binder (a literal `"()"`, not a `{{BINDERS}}` placeholder).
+        let binddiscard_source =
+            engine::session_bind_template(&self.cfg, "()", &bind_imports, helpers);
+        let templates = vec![
+            TurnTemplate {
+                kind: TemplateSelector::Decl,
+                source: DECL_TEMPLATE_SOURCE.to_string(),
+            },
+            TurnTemplate {
+                kind: TemplateSelector::Bind,
+                source: bind_source,
+            },
+            TurnTemplate {
+                kind: TemplateSelector::BindDiscard,
+                source: binddiscard_source,
+            },
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: expr_source,
+            },
+        ];
         timing::record_stage(
             node.0,
             timing::NO_ROUND,
             timing::STAGE_TEMPLATE,
             template_started.elapsed(),
-            src.len() as u64,
+            0,
         );
+
+        // include: the contract-aware target include, plus the decl-plane dir
+        // (if any) — the same path `bind_ctx`'s session root resolves to.
         let mut include = target.include;
         if let Some(dir) = session_include {
             include.push(dir);
         }
 
-        // Compile off-reactor (the session is still resident — no leak on a
-        // compile failure).
-        let node_id = node.0;
-        let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(
-                &cfg_bin,
-                &src,
-                "result",
-                &include,
-                node_id,
-                timing::NO_ROUND,
-            )
+        // session-root/inject/gen: from the bind context when the node has a
+        // decl plane; a scratch dir otherwise. `run_turn` carries these
+        // unconditionally (the decl/expr verdicts don't use them, but the wire
+        // is unconditional), so a node with no decl plane at all (a rare
+        // degrade — see `force`'s `node_decl_plane`) still needs SOME writable
+        // directory to hand the extract; a real Bind verdict on such a node is
+        // rejected below (PRESERVE step) regardless of what the extract did
+        // with this scratch root.
+        let scratch_root;
+        let (session_root, inject_modules, gen) = match &bind_ctx {
+            Some((_, inject, root, gen)) => (root.clone(), inject.clone(), gen.0),
+            None => {
+                scratch_root = tempfile::TempDir::new()
+                    .map_err(|e| HarnessError::Resident(format!("scratch session root: {e}")))?;
+                (scratch_root.path().to_path_buf(), Vec::new(), 0)
+            }
+        };
+
+        let block_owned = block.to_string();
+        let req_block = block_owned.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let include_refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
+            let req = TurnRequest {
+                turn_text: &req_block,
+                templates: &templates,
+                include: &include_refs,
+                session_root: &session_root,
+                inject_modules: &inject_modules,
+                gen,
+                verdict: None,
+                target: None,
+            };
+            run_turn(req)
         })
         .await
-        .map_err(|e| HarnessError::Resident(format!("compile task join: {e}")))?
+        .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
 
-        // Run the compiled fragment against the session (move it onto the
-        // blocking pool and back — the resident session is `Send`).
-        let mut session = self.take_session(node)?;
-        let expr = compiled.expr;
-        let table = compiled.table.clone();
-        let asks = compiled.asks;
+        match outcome {
+            TurnResult::Decl { .. } => {
+                let mut session = self.take_session(node)?;
+                let (session, res) = tokio::task::spawn_blocking(move || {
+                    let r = session.define_scoped(&[&block_owned]);
+                    (session, r)
+                })
+                .await
+                .map_err(|e| HarnessError::Resident(format!("declare task join: {e}")))?;
+                self.put_session(node, session, None, AsksSidecar::default());
+                self.flush_effects(node)?;
+                match res {
+                    Ok(gen) => {
+                        let rendered = format!("declared (gen {})", gen.0);
+                        self.tree.node_done(node, rendered.clone())?;
+                        Ok(engine::TurnOutcome::Completed { rendered })
+                    }
+                    Err(e) => {
+                        let msg = format!("The declaration failed: {e}");
+                        self.push_user_turn(node, &msg)?;
+                        Err(HarnessError::Resident(e.to_string()))
+                    }
+                }
+            }
+            // A value-plane BIND turn (`x <- e`) materializes its result into
+            // the node's value plane so a later turn can reference it.
+            // Single-binder only for now (multi-bind is a follow-up).
+            TurnResult::Bind {
+                binders,
+                bound,
+                compiled,
+                ..
+            } if !binders.is_empty() => {
+                let Some((.., gen)) = bind_ctx else {
+                    return Err(HarnessError::Resident(
+                        "value-plane bind requires a node decl plane".into(),
+                    ));
+                };
+                let binder = bound.into_iter().next().ok_or_else(|| {
+                    HarnessError::Resident("session-bind emitted no binder metadata".into())
+                })?;
+                self.run_bind_turn(node, binder, compiled, gen).await
+            }
+            // A discarding bind (`_ <- e`) or a bare expression: run for
+            // effect/value, no binding materializes on the value plane.
+            TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                let asks = AsksSidecar::from_pairs(compiled.asks);
+                let table = compiled.table;
+                let expr = compiled.expr;
 
-        let (session, outcome) = tokio::task::spawn_blocking(move || {
-            let out = session.run("turn", &expr, &table);
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("run task join: {e}")))?;
+                let mut session = self.take_session(node)?;
+                let run_table = table.clone();
+                let (session, run_outcome) = tokio::task::spawn_blocking(move || {
+                    let out = session.run("turn", &expr, &run_table);
+                    (session, out)
+                })
+                .await
+                .map_err(|e| HarnessError::Resident(format!("run task join: {e}")))?;
 
-        // Restore the session, flush effects, and classify the outcome — shared
-        // with the value-plane bind path (`None` = this turn is not a bind).
-        self.finish_run(node, session, outcome, compiled.table, asks, None)
+                self.finish_run(node, session, run_outcome, table, asks, None)
+            }
+        }
     }
 
     /// Shared turn epilogue: restore the session, flush effects, and turn a
@@ -1355,66 +1408,21 @@ impl Harness {
         ))
     }
 
-    /// Run a value-plane BIND turn (`x <- e`): compile it session-aware (the
-    /// extract's `--session-root`/`--inject-val`/`--session-bind` path via
-    /// `compile_session_turn`, so it resolves earlier value bindings and emits
-    /// binder metadata), then drive `run_bind`. A fork bind suspends here and its
-    /// value is materialized on resume (`finish_run` stashes the binder).
+    /// Materialize an ALREADY-COMPILED value-plane BIND turn (`x <- e`): run it
+    /// against the resident session (`session.run_bind`), then hand off to the
+    /// shared epilogue. Called from [`Self::run_block`] once `run_turn` has
+    /// returned a `TurnResult::Bind` with a non-empty binder list and
+    /// `session_bind_context` confirmed the node has a decl plane — `gen` is
+    /// the SAME generation that compile stamped into `binder.module`. A fork
+    /// bind suspends here and its value is materialized on resume
+    /// (`finish_run` stashes the binder).
     async fn run_bind_turn(
         &self,
         node: NodeId,
-        stmt: &str,
-        imports: &str,
-        helpers: &str,
-        binder_name: &str,
+        binder: BoundBinder,
+        compiled: CompiledTurn,
+        gen: Generation,
     ) -> Result<engine::TurnOutcome, HarnessError> {
-        let Some((session_imports, inject, session_root, gen)) = self.session_bind_context(node)
-        else {
-            return Err(HarnessError::Resident(
-                "value-plane bind requires a node decl plane".into(),
-            ));
-        };
-        // Decls + current value modules are IMPORTED (name visibility); values
-        // are ALSO injected (`--inject-val`) so they resolve at runtime via the
-        // session's ExternalEnv.
-        let merged_imports = match (imports.is_empty(), session_imports.is_empty()) {
-            (_, true) => imports.to_string(),
-            (true, false) => session_imports,
-            (false, false) => format!("{imports}\n{session_imports}"),
-        };
-        let src =
-            engine::template_session_bind(&self.cfg, stmt, binder_name, &merged_imports, helpers);
-        let mut include = self.cfg.include.clone();
-        include.push(session_root.clone());
-        let names = vec![binder_name.to_string()];
-        let g0 = gen.0;
-
-        // Compile off-reactor through the session-aware path.
-        let compiled = tokio::task::spawn_blocking(move || {
-            let include_refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
-            compile_session_turn(
-                &src,
-                &include_refs,
-                &session_root,
-                &inject,
-                Some(SessionBind {
-                    names: &names,
-                    gen: g0,
-                }),
-            )
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("bind compile join: {e}")))?
-        .map_err(|e| HarnessError::Compile(e.to_string()))?;
-
-        let binder = match compiled.binders.into_iter().next() {
-            Some(b) => b,
-            None => {
-                return Err(HarnessError::Resident(
-                    "session-bind emitted no binder metadata".into(),
-                ))
-            }
-        };
         let asks = AsksSidecar::from_pairs(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
