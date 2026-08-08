@@ -2005,9 +2005,13 @@ impl EmitContext {
                                 let rhs = *rhs;
                                 let body = *body;
                                 // Dead code elimination: skip RHS if binder is unused in body.
-                                let body_fvs = tidepool_repr::free_vars::free_vars(
-                                    &args.sess.tree.extract_subtree(body),
-                                );
+                                let dce_start = std::time::Instant::now();
+                                let body_subtree = args.sess.tree.extract_subtree(body);
+                                let body_fvs = tidepool_repr::free_vars::free_vars(&body_subtree);
+                                let dce_scan = &mut args.sess.pipeline.dce_scan;
+                                dce_scan.calls += 1;
+                                dce_scan.nodes_walked += body_subtree.nodes.len() as u64;
+                                dce_scan.elapsed += dce_start.elapsed();
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if is_trivial_field(rhs, args.sess.tree) {
                                         // Trivial RHS (already WHNF \u2014 Var/Lit/Lam/Con \u2014 or a
