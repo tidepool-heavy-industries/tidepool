@@ -16,6 +16,8 @@
 module Tidepool.Binders
   ( ExportItem(..)
   , extractBinders
+  , extractBindersNamed
+  , exportItemName
   , renderBindersJson
   , emitBinders
     -- * Statement binders (session-eval bind-vs-expr classification)
@@ -95,6 +97,45 @@ extractBinders path includes = do
         pm <- parseModule chosen
         let decls = hsmodDecls (unLoc (pm_parsed_source pm))
         pure (concatMap declItems decls)
+
+-- | Like 'extractBinders' but selects the module summary by an EXACT match on
+-- @expectedModuleName@ rather than falling back to @head summaries@ when no
+-- module named @SessionDecls@ is found. Used by @--turn@'s decl path: the
+-- caller controls the name of the scratch module it just spliced and wrote
+-- (via 'Main.extractModuleName' on the spliced source), so it can demand
+-- exactly that summary instead of guessing at one. A missing match is a
+-- caller wiring bug — the module just written is not the module GHC parsed —
+-- and fails loudly rather than silently returning a different module's
+-- binders.
+extractBindersNamed :: FilePath -> [FilePath] -> String -> IO [ExportItem]
+extractBindersNamed path includes expectedModuleName = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    _ <- setSessionDynFlags dflags { importPaths = importPaths dflags ++ includes }
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    _ <- depanal [] False
+    graph <- getModuleGraph
+    case filter isExpected (mgModSummaries graph) of
+      (chosen : _) -> do
+        pm <- parseModule chosen
+        let decls = hsmodDecls (unLoc (pm_parsed_source pm))
+        pure (concatMap declItems decls)
+      [] -> liftIO (ioError (userError
+              ("extractBindersNamed: no module named " ++ expectedModuleName
+                ++ " in the parsed module graph")))
+  where
+    isExpected ms = moduleNameString (moduleName (ms_mod ms)) == expectedModuleName
+
+-- | The head name an 'ExportItem' introduces — the binder for 'EValue', the
+-- type/class head for 'EType'\/'EClass'. Used to derive a @--turn@ decl
+-- verdict's binders from its harvested 'declItems' when the verdict itself
+-- carries none (see 'TDecl's doc).
+exportItemName :: ExportItem -> String
+exportItemName (EValue n)   = n
+exportItemName (EType n _)  = n
+exportItemName (EClass n _) = n
 
 -- | The binders one top-level declaration introduces.
 declItems :: LHsDecl GhcPs -> [ExportItem]
@@ -338,13 +379,22 @@ data BoundBinder = BoundBinder
 
 -- | The rich result of a @--turn@ run: a tagged variant over the verdict
 -- (see @plans/one-spawn-turn-protocol.md@). 'TDecl' never compiles — its
--- 'toDeclItems' come from the whole-module parse ('extractBinders'), not this
--- module's statement parse, because a decl-batch caller
--- (@--turn-verdict decl@ over N declarations joined into one module) has no
--- single statement to parse. 'TBind'/'TExpr' carry what the selected template
--- variant actually compiled to. The wire-visible tag ('renderTurnOutJson'
--- \/ the CBOR encoder) is @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these
--- constructor names.
+-- 'toDeclItems' come from a whole-module parse ('extractBinders' for a
+-- decl-batch caller, 'extractBindersNamed' for a single @--turn@ decl turn
+-- that spliced its own scratch module), not this module's statement parse,
+-- because a decl-batch caller (@--turn-verdict decl@ over N declarations
+-- joined into one module) has no single statement to parse. 'TBind'/'TExpr'
+-- carry what the selected template variant actually compiled to. The
+-- wire-visible tag ('renderTurnOutJson' \/ the CBOR encoder) is
+-- @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these constructor names.
+--
+-- 'TDecl's @toBinders@ is UNRELIABLE as a verbatim echo of the supplied
+-- verdict: a decl-batch verdict (@--turn-verdict decl@, no @:name,name…@
+-- suffix) carries an empty binder list, so 'runTurnMode' DERIVES
+-- @toBinders@ from 'toDeclItems'' head names ('exportItemName') whenever the
+-- verdict itself supplies none. @toBinders@ is therefore never a bare echo
+-- of the verdict on the decl path — a @--json-output@ consumer should read
+-- it as "the binders this turn introduces", not as "what the verdict said".
 data TurnOut
   = TDecl
       { toBinders   :: [Text]

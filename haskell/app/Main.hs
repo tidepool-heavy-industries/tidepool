@@ -7,8 +7,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isDigit, isAlphaNum)
-import Data.List (isPrefixOf, stripPrefix, intercalate)
+import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
+import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM_, void)
 import System.Exit (exitFailure)
@@ -29,7 +29,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Tidepool.Binders
-  ( emitBinders, emitStmtBinders, extractBinders, extractStmtBinders
+  ( emitBinders, emitStmtBinders, extractBinders, extractBindersNamed
+  , extractStmtBinders, exportItemName
   , StmtBinders(..), TurnOut(..), BoundBinder(..)
   , renderTurnOutJson, renderBoundBinderJson, renderAskJson )
 import Tidepool.GhcPipeline
@@ -450,10 +451,21 @@ processSessionFile args path = do
 -- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
 -- 'TurnOut' result — CBOR always (@--turn-out@), JSON rendering too when
 -- @--json-output@ is given. A @decl@ verdict never compiles: its
--- 'toDeclItems' come from the whole-module parse ('extractBinders') over
--- @path@ itself, never from the single-statement parse that serves the
--- verdict — a decl-batch caller (@--turn-verdict decl@ over N declarations
--- joined into one module) has no single statement to parse, only the module.
+-- 'toDeclItems' come from a whole-module parse over the turn's OWN spliced
+-- scratch module ('extractBindersNamed', exact-name match — see
+-- @--turn-template decl=<file>@ below), never from the single-statement
+-- parse that serves the verdict — a decl-batch caller
+-- (@--turn-verdict decl@ over N declarations joined into one module) has no
+-- single statement to parse, only the module.
+--
+-- The template kind selected for a @bind@ verdict is either @bind@ (at least
+-- one bound name) or @binddiscard@ (a bind that binds no name, e.g.
+-- @_ <- e@) — mirroring the Rust @TemplateSelector@'s four-shape split. A
+-- @binddiscard@ turn compiles but is routed entirely around the
+-- session-bind artifacts (no @--bind-gen@\/@--session-root@ requirement, no
+-- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
+-- so it reaches 'TBind' with empty binders and an empty bound-binder list,
+-- same shape a caller already handles for any other zero-binder bind.
 runTurnMode :: Args -> FilePath -> IO ()
 runTurnMode args path = do
   timing <- readTimingEnabled
@@ -469,27 +481,46 @@ runTurnMode args path = do
     -- @ghc_session@ lines, and a @typecheck@ that no typecheck produced. A
     -- phase's owner has to be whatever knows it is a whole lane.
     sb        <- maybe (extractStmtBinders False turnSrc) return mVerdict
+    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (argOutDir args)
+        bindersStr = intercalate ", " (sbBinders sb)
+        -- Splice @tmplFile@ against the turn text, write the spliced module
+        -- to a scratch file under 'outDir', and return it alongside the
+        -- module name derived from its own @module X where@ header. The
+        -- scratch file's basename must match that header — 'runPipelineSession'
+        -- looks up the compiled module by @capitalize (takeBaseName path)@
+        -- (GhcPipeline.hs) exactly as 'tidepool_runtime::extract_module_name'
+        -- does today for the existing two-spawn wrap_* templates
+        -- (session.rs), which this mode's templates carry over unchanged.
+        spliceInto :: FilePath -> IO (String, String, FilePath)
+        spliceInto tmplFile = do
+          tmplSrc <- readFile tmplFile
+          let spliced = spliceTemplate tmplSrc turnSrc bindersStr
+              modName = fromMaybe "Input" (extractModuleName spliced)
+          createDirectoryIfMissing True outDir
+          let modulePath = outDir </> modName ++ ".hs"
+          writeFile modulePath spliced
+          return (spliced, modName, modulePath)
     turnOut <- case sbKind sb of
       "decl" -> do
-        items <- extractBinders path (argIncludes args)
-        return (TDecl (map T.pack (sbBinders sb)) items)
-      kind -> do
-        tmplFile <- case lookup kind templates of
+        tmplFile <- case lookup "decl" templates of
           Just f  -> return f
-          Nothing -> error ("--turn: no --turn-template for kind " ++ kind)
-        tmplSrc <- readFile tmplFile
-        let bindersStr = intercalate ", " (sbBinders sb)
-            spliced     = spliceTemplate tmplSrc turnSrc bindersStr
-            outDir = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (argOutDir args)
-        createDirectoryIfMissing True outDir
-        -- The scratch file's basename must match the template's own
-        -- `module X where` header — 'runPipelineSession' looks up the
-        -- compiled module by @capitalize (takeBaseName path)@ (GhcPipeline.hs)
-        -- exactly as 'tidepool_runtime::extract_module_name' does today for
-        -- the existing two-spawn wrap_* templates (session.rs), which this
-        -- mode's templates carry over unchanged.
-        let modulePath = outDir </> (fromMaybe "Input" (extractModuleName spliced) ++ ".hs")
-        writeFile modulePath spliced
+          Nothing -> error "--turn: no --turn-template for kind decl"
+        (_spliced, modName, modulePath) <- spliceInto tmplFile
+        items <- extractBindersNamed modulePath (argIncludes args) modName
+        let binders = if null (sbBinders sb)
+                        then map (T.pack . exportItemName) items
+                        else map T.pack (sbBinders sb)
+        return (TDecl binders items)
+      kind -> do
+        -- Four-shape selection (protocol note, "the verdict space has four
+        -- shapes, not three"): a bind that binds no name selects its own
+        -- template kind and skips the session-bind artifacts entirely,
+        -- mirroring Rust's 'TemplateSelector::for_verdict'.
+        let selector = if kind == "bind" && null (sbBinders sb) then "binddiscard" else kind
+        tmplFile <- case lookup selector templates of
+          Just f  -> return f
+          Nothing -> error ("--turn: no --turn-template for kind " ++ selector)
+        (spliced, _modName, modulePath) <- spliceInto tmplFile
         let scope = SessionScope
               { ssRoot      = fromMaybe "" (argSessionRoot args)
               , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
@@ -502,12 +533,13 @@ runTurnMode args path = do
             warnTexts   = map T.pack (prWarnings result)
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts "__result" "result"
         let wrapped = T.pack spliced
-        case kind of
+        case selector of
           "bind" -> do
             g    <- requireArg "--bind-gen"     (argBindGen args)
             root <- requireArg "--session-root" (argSessionRoot args)
             bbs  <- mkBoundBinders (sbBinders sb) g root result
             return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
+          "binddiscard" -> return (TBind [] 0 [] asksSites wrapped)
           "expr" -> return (TExpr 0 asksSites wrapped)
           other  -> error ("--turn: unexpected verdict kind: " ++ other)
     outFile <- requireArg "--turn-out" (argTurnOut args)
@@ -555,19 +587,45 @@ splitComma s = case break (== ',') s of
   (a, _ : rest) -> a : splitComma rest
 
 -- | Splice a turn template: literal replacement of @{{TURN}}@ (the raw turn
--- text, verbatim) and @{{BINDERS}}@ (the harvested binder names, comma-joined)
--- against the ORIGINAL template text only — a single left-to-right scan, never
--- re-scanning already-spliced text, so a @{{TURN}}@\/@{{BINDERS}}@ marker
--- occurring verbatim inside the turn text itself is never mistaken for a
--- second substitution point.
+-- text, verbatim), @{{TURN_STMT}}@ (the turn text placed as a @do@-block
+-- statement — see 'placeTurnStmt'), and @{{BINDERS}}@ (the harvested binder
+-- names, comma-joined) against the ORIGINAL template text only — a single
+-- left-to-right scan, never re-scanning already-spliced text, so a
+-- @{{TURN}}@\/@{{TURN_STMT}}@\/@{{BINDERS}}@ marker occurring verbatim inside
+-- the turn text itself is never mistaken for a second substitution point.
+-- @{{TURN}}@ is not a string prefix of @{{TURN_STMT}}@ (they diverge at the
+-- 7th character, @}@ vs @_@), so checking both at every position is
+-- unambiguous regardless of order.
 spliceTemplate :: String -> String -> String -> String
 spliceTemplate tmpl turnText bindersStr = go tmpl
   where
     go s
-      | "{{TURN}}" `isPrefixOf` s    = turnText ++ go (drop 8 s)
-      | "{{BINDERS}}" `isPrefixOf` s = bindersStr ++ go (drop 11 s)
+      | "{{TURN_STMT}}" `isPrefixOf` s = placeTurnStmt turnText ++ go (drop 13 s)
+      | "{{TURN}}" `isPrefixOf` s      = turnText ++ go (drop 8 s)
+      | "{{BINDERS}}" `isPrefixOf` s   = bindersStr ++ go (drop 11 s)
     go (c : cs) = c : go cs
     go []       = []
+
+-- | Place @turnText@ as a @do@-block statement — the @{{TURN_STMT}}@
+-- placement mode. Mirrors Rust's @place_turn_stmt@
+-- (@tidepool-runtime/src/session/turn.rs@) and the repl's
+-- @push_braced_stmt@ (@tidepool-repl/src/session.rs@) byte for byte: a
+-- @let@ turn (at column 1, since a raw turn has no leading indentation)
+-- needs explicit decl braces there (a layout @let@ swallows the following
+-- @;@), so it is rewritten to @let { <rest> }@; anything else is placed
+-- verbatim. Both branches guarantee a trailing newline so a template's own
+-- following text always starts on a fresh line.
+placeTurnStmt :: String -> String
+placeTurnStmt turnText = case letRest of
+  Just rest | not ("{" `isPrefixOf` dropWhile isSpace rest) ->
+    "let {" ++ rest ++ (if "\n" `isSuffixOf` rest then "" else "\n") ++ " }\n"
+  _ ->
+    turnText ++ (if "\n" `isSuffixOf` turnText then "" else "\n")
+  where
+    trimmed = dropWhile isSpace turnText
+    letRest = case stripPrefix "let" trimmed of
+      Just rest@(c : _) | isSpace c -> Just rest
+      _                             -> Nothing
 
 -- | Extract the name from a source's @module X where@ (or @module X (@
 -- export-list) header — mirrors @tidepool_runtime::extract_module_name@
