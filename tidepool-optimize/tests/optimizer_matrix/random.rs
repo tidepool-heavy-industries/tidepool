@@ -149,6 +149,7 @@ fn optimization_preserves_semantics() {
         .spawn(|| {
             let mut runner = TestRunner::new(Config {
                 cases: 200,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             let compared = Cell::new(0u64);

@@ -132,8 +132,13 @@ pub fn run_matrix<S, F>(
         .stack_size(stack_bytes)
         .spawn(move || {
             let strategy = mk_strategy();
+            // Counterexample persistence resolves against a source file. Cells
+            // driven through this harness share this one, so their seeds land in
+            // a single sibling `proptest-regressions/support.txt`; without it
+            // proptest saves nothing and a red run's seed dies with the process.
             let mut runner = TestRunner::new(Config {
                 cases,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner.run(&strategy, f).unwrap();

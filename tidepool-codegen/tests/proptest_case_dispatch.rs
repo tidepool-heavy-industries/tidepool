@@ -762,6 +762,11 @@ fn build_partial(spec: &PartialSpec) -> CoreExpr {
 fn cfg() -> Config {
     let mut c = Config::with_cases(400);
     c.max_shrink_iters = 6000;
+    // Counterexample persistence resolves against the calling source file. The
+    // `proptest!` macro supplies it implicitly; a hand-built `Config` leaves it
+    // `None`, and proptest then neither replays the checked-in seeds nor saves
+    // a new one — a red run's seed would die with the process.
+    c.source_file = Some(file!());
     c
 }
 

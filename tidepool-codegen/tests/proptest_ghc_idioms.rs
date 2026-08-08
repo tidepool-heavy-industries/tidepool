@@ -998,6 +998,12 @@ fn fixup_root(tree: &mut CoreExpr, root: usize) -> CoreExpr {
 fn cfg() -> Config {
     let mut c = Config::with_cases(300);
     c.max_shrink_iters = 4000;
+    // Counterexample persistence resolves against the calling source file. The
+    // `proptest!` macro supplies it implicitly; a hand-built `Config` leaves it
+    // `None`, so the checked-in `proptest_ghc_idioms.proptest-regressions`
+    // seeds — including the shrunk jump-crosses-Lam case — would stop being
+    // replayed, and a new red run's seed would die with the process.
+    c.source_file = Some(file!());
     c
 }
 
