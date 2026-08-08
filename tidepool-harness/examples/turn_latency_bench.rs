@@ -6,11 +6,15 @@
 //!
 //! MEASUREMENT ONLY — see
 //! `plans/self-iterating-harness/11-turn-latency-contract.md` for the
-//! documented invocation and what the four scenarios below are for.
+//! documented invocation (both the DEBUG build, which matches production's
+//! `target/debug/tidepool-selfharness`, and the `--release` comparison) and
+//! what the four scenarios below are for.
 //!
-//! Run with: `cargo run --release --example turn_latency_bench -p tidepool-harness`
-//! (needs `TIDEPOOL_EXTRACT` + a with-packages GHC on `PATH`; see the
-//! contract doc for the exact env).
+//! Run with (needs `TIDEPOOL_EXTRACT` + a with-packages GHC on `PATH`, and
+//! `flock /tmp/tidepool-ghc.lock` around the run — see the contract doc for
+//! the exact env):
+//!   `cargo build --example turn_latency_bench -p tidepool-harness`
+//!   `flock /tmp/tidepool-ghc.lock ./target/debug/examples/turn_latency_bench`
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -27,7 +31,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::timing::RUST_STAGES;
+use tidepool_harness::timing::{RUST_STAGES, STAGE_JIT_CODEGEN, STAGE_RUN_EXEC};
 use tidepool_harness::{answerer_decls, Harness, NodeId, TurnOutcome};
 
 // ---------------------------------------------------------------------------
@@ -40,6 +44,12 @@ use tidepool_harness::{answerer_decls, Harness, NodeId, TurnOutcome};
 
 #[derive(Debug, Clone)]
 struct StageSample {
+    /// Kept for cross-checking, but NOT what attribution keys off (see
+    /// `Collector::current_turn`): `jit_codegen`/`run_exec` are emitted from
+    /// `tidepool-runtime` with no answerer node id at all (a `NO_NODE`
+    /// sentinel, `u64::MAX`), so keying attribution off `node` would silently
+    /// drop those two stages into every turn's residual.
+    #[allow(dead_code)]
     node: u64,
     #[allow(dead_code)]
     round: u64,
@@ -47,12 +57,24 @@ struct StageSample {
     ms: u64,
     #[allow(dead_code)]
     bytes: u64,
+    /// The in-flight turn marker active when this event fired, or `None` if
+    /// it fired between turns (shouldn't happen for real `record_stage`
+    /// events, but not assumed).
+    turn_marker: Option<u64>,
 }
 
 #[derive(Default)]
 struct Collector {
     /// The active scenario label, or `None` to drop events between windows.
     window: Mutex<Option<String>>,
+    /// The CURRENT in-flight turn's marker id, or `None` between turns.
+    /// Attribution keys off this, not the sample's `node` field — see
+    /// `StageSample::node`'s doc for why. Exact because every scenario
+    /// drives turns strictly sequentially: `begin_turn`/`end_turn` bracket
+    /// exactly the `drive_turn`/`run_to_hole_or_done` call that can emit
+    /// stages, never node setup/teardown around it.
+    current_turn: Mutex<Option<u64>>,
+    next_turn_id: Mutex<u64>,
     samples: Mutex<Vec<(String, StageSample)>>,
 }
 
@@ -63,6 +85,20 @@ impl Collector {
 
     fn stop_window(&self) {
         *self.window.lock().unwrap() = None;
+    }
+
+    /// Open a new turn's in-flight window and return its marker id. Pair
+    /// with `end_turn` bracketing exactly the turn-driving call.
+    fn begin_turn(&self) -> u64 {
+        let mut next = self.next_turn_id.lock().unwrap();
+        let id = *next;
+        *next += 1;
+        *self.current_turn.lock().unwrap() = Some(id);
+        id
+    }
+
+    fn end_turn(&self) {
+        *self.current_turn.lock().unwrap() = None;
     }
 
     fn samples_for(&self, label: &str) -> Vec<StageSample> {
@@ -137,6 +173,7 @@ impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
         let Some(label) = self.0.window.lock().unwrap().clone() else {
             return;
         };
+        let turn_marker = *self.0.current_turn.lock().unwrap();
         self.0.samples.lock().unwrap().push((
             label,
             StageSample {
@@ -145,6 +182,7 @@ impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
                 stage,
                 ms,
                 bytes: visitor.bytes.unwrap_or(0),
+                turn_marker,
             },
         ));
     }
@@ -200,6 +238,10 @@ struct ScenarioReport {
 struct Meta {
     percentile_definition: String,
     rust_stages: Vec<&'static str>,
+    /// Stages that carry no answerer node id (`tidepool-runtime`'s `NO_NODE`
+    /// sentinel, `u64::MAX`) — attribution for these is by in-flight turn
+    /// marker, not node; see `note`.
+    no_node_stages: Vec<&'static str>,
     note: String,
 }
 
@@ -312,7 +354,17 @@ fn good_block() -> String {
 // Scenario runners
 // ---------------------------------------------------------------------------
 
-type TurnRow = (usize, String, u64, Duration, String);
+struct TurnRow {
+    index: usize,
+    label: String,
+    node: u64,
+    /// The `Collector::begin_turn`/`end_turn` marker bracketing this turn's
+    /// drive call — what `build_report` attributes stages by (NOT `node`;
+    /// see `StageSample::node`'s doc).
+    turn_marker: u64,
+    wall: Duration,
+    outcome: String,
+}
 
 fn outcome_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
@@ -324,14 +376,18 @@ fn outcome_label(outcome: &TurnOutcome) -> &'static str {
 
 async fn drive_one(
     harness: &Harness,
+    collector: &Collector,
     scenario: &str,
     index: usize,
-) -> Result<(NodeId, Duration, TurnOutcome), Box<dyn Error>> {
+) -> Result<(NodeId, u64, Duration, TurnOutcome), Box<dyn Error>> {
     let node = harness.create_root(&format!("{scenario}-{index}"), "Begin.")?;
     harness.force(node, Actor::Operator)?;
+    let turn_marker = collector.begin_turn();
     let start = Instant::now();
     let outcome = harness.drive_turn(node).await?;
-    Ok((node, start.elapsed(), outcome))
+    let wall = start.elapsed();
+    collector.end_turn();
+    Ok((node, turn_marker, wall, outcome))
 }
 
 /// COLD (first turn in this freshly-booted `Harness`) vs WARM (every turn
@@ -349,14 +405,16 @@ async fn scenario_cold_warm(
     let mut turns: Vec<TurnRow> = Vec::new();
     for i in 0..n {
         let label = if i == 0 { "cold" } else { "warm" };
-        let (node, wall, outcome) = drive_one(&harness, scenario, i).await?;
-        turns.push((
-            i,
-            label.to_string(),
-            node.0,
+        let (node, turn_marker, wall, outcome) =
+            drive_one(&harness, collector, scenario, i).await?;
+        turns.push(TurnRow {
+            index: i,
+            label: label.to_string(),
+            node: node.0,
+            turn_marker,
             wall,
-            outcome_label(&outcome).to_string(),
-        ));
+            outcome: outcome_label(&outcome).to_string(),
+        });
     }
     collector.stop_window();
 
@@ -378,25 +436,29 @@ async fn scenario_small_vs_large(
     let mut turns: Vec<TurnRow> = Vec::new();
     let mut idx = 0;
     for _ in 0..n {
-        let (node, wall, outcome) = drive_one(&harness, scenario, idx).await?;
-        turns.push((
-            idx,
-            "small".to_string(),
-            node.0,
+        let (node, turn_marker, wall, outcome) =
+            drive_one(&harness, collector, scenario, idx).await?;
+        turns.push(TurnRow {
+            index: idx,
+            label: "small".to_string(),
+            node: node.0,
+            turn_marker,
             wall,
-            outcome_label(&outcome).to_string(),
-        ));
+            outcome: outcome_label(&outcome).to_string(),
+        });
         idx += 1;
     }
     for _ in 0..n {
-        let (node, wall, outcome) = drive_one(&harness, scenario, idx).await?;
-        turns.push((
-            idx,
-            "large".to_string(),
-            node.0,
+        let (node, turn_marker, wall, outcome) =
+            drive_one(&harness, collector, scenario, idx).await?;
+        turns.push(TurnRow {
+            index: idx,
+            label: "large".to_string(),
+            node: node.0,
+            turn_marker,
             wall,
-            outcome_label(&outcome).to_string(),
-        ));
+            outcome: outcome_label(&outcome).to_string(),
+        });
         idx += 1;
     }
     collector.stop_window();
@@ -406,10 +468,12 @@ async fn scenario_small_vs_large(
 
 /// A turn whose block does not typecheck, followed by a corrected turn —
 /// `Harness::run_to_hole_or_done`'s corrective-retry loop is the multiplier
-/// we care about, so a failed compile's cost must appear in the per-node
-/// stage sum (both attempts share ONE node, since the retry pushes the GHC
+/// we care about, so a failed compile's cost must appear in the round-trip's
+/// stage sum. `begin_turn`/`end_turn` bracket the WHOLE `run_to_hole_or_done`
+/// call, so both the bad attempt's and the corrected attempt's stages share
+/// ONE turn marker (they also share one node — the retry pushes the GHC
 /// diagnostic back as a user turn on the SAME node rather than starting a
-/// fresh one).
+/// fresh one — but marker, not node, is what attribution reads).
 async fn scenario_retry(
     collector: &Collector,
     repeats: usize,
@@ -427,16 +491,19 @@ async fn scenario_retry(
     for i in 0..repeats {
         let node = harness.create_root(&format!("{scenario}-{i}"), "Begin.")?;
         harness.force(node, Actor::Operator)?;
+        let turn_marker = collector.begin_turn();
         let start = Instant::now();
         let outcome = harness.run_to_hole_or_done(node).await?;
         let wall = start.elapsed();
-        turns.push((
-            i,
-            "retry_roundtrip".to_string(),
-            node.0,
+        collector.end_turn();
+        turns.push(TurnRow {
+            index: i,
+            label: "retry_roundtrip".to_string(),
+            node: node.0,
+            turn_marker,
             wall,
-            outcome_label(&outcome).to_string(),
-        ));
+            outcome: outcome_label(&outcome).to_string(),
+        });
     }
     collector.stop_window();
 
@@ -479,10 +546,12 @@ fn build_report(
     let samples = collector.samples_for(scenario);
 
     let mut by_stage: HashMap<String, Vec<u64>> = HashMap::new();
-    let mut by_node: HashMap<u64, u64> = HashMap::new();
+    let mut by_turn_marker: HashMap<u64, u64> = HashMap::new();
     for s in &samples {
         by_stage.entry(s.stage.clone()).or_default().push(s.ms);
-        *by_node.entry(s.node).or_default() += s.ms;
+        if let Some(marker) = s.turn_marker {
+            *by_turn_marker.entry(marker).or_default() += s.ms;
+        }
     }
 
     // Every known Rust-side stage first (fixed pipeline order), then any
@@ -506,14 +575,14 @@ fn build_report(
 
     let turn_records: Vec<TurnRecord> = turns
         .into_iter()
-        .map(|(index, label, node, wall, outcome)| {
-            let wall_ms = wall.as_millis() as u64;
-            let attributed_ms = *by_node.get(&node).unwrap_or(&0);
+        .map(|row| {
+            let wall_ms = row.wall.as_millis() as u64;
+            let attributed_ms = *by_turn_marker.get(&row.turn_marker).unwrap_or(&0);
             TurnRecord {
-                index,
-                label,
-                node,
-                outcome,
+                index: row.index,
+                label: row.label,
+                node: row.node,
+                outcome: row.outcome,
                 wall_ms,
                 attributed_ms,
                 unattributed_ms: wall_ms.saturating_sub(attributed_ms),
@@ -590,12 +659,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 as a worst-observed marker, not a precise 90th-percentile estimate."
                 .to_string(),
             rust_stages: RUST_STAGES.to_vec(),
+            no_node_stages: vec![STAGE_JIT_CODEGEN, STAGE_RUN_EXEC],
             note: "Stage samples come from tidepool_harness::timing::record_stage call sites. \
                 As of this bench's authoring, ZERO Rust-side call sites and ZERO extract-side \
                 TIDEPOOL_TIMING forwarding exist yet (two sibling branches land them, merging \
                 after this one) — an empty `stages` array, or all-zero stage stats, is EXPECTED \
                 here, not a bug. Each turn's `wall_ms` is measured independently by this bench \
-                (wraps `Harness::drive_turn`/`run_to_hole_or_done`) and is always populated."
+                (wraps `Harness::drive_turn`/`run_to_hole_or_done`) and is always populated. \
+                Per-turn `attributed_ms` is computed from an in-flight TURN MARKER on the \
+                collector (set right before, cleared right after, the drive call), NOT from the \
+                sample's `node` field: `no_node_stages` (jit_codegen/run_exec) are emitted from \
+                tidepool-runtime with no answerer node id — a NO_NODE sentinel (u64::MAX) that \
+                would never match any turn's node, which would otherwise silently inflate every \
+                turn's `unattributed_ms` by exactly the amount those two stages measured."
                 .to_string(),
         },
     };
