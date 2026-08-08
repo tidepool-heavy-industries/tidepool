@@ -1491,3 +1491,201 @@ fn works_filepath_extension_dotfile_fidelity() {
 // `Tidepool.Data.Time` and the Prelude/Fmt-runtime shadows: the names the
 // stdlib claims are JIT-safe, each pinned by a probe that calls it.
 // =========================================================================
+
+/// `formatISO8601` on a known instant and a PRE-EPOCH instant, plus both
+/// directions of `parseISO8601` and the full parse-then-format round trip.
+///
+/// `UTCTime 1700000000000` is the well-known Unix instant `1700000000`s ->
+/// 2023-11-14T22:13:20Z. `UTCTime (-1000)` is 1000ms BEFORE the epoch —
+/// exactly one second earlier, which floors into the END of the preceding
+/// day: 1969-12-31T23:59:59Z, not a negative time-of-day. `parseISO8601
+/// "2026-07-01T19:24:22-07:00"` normalizes the `-07:00` offset to UTC (add
+/// 7h): 19:24:22 on the 1st becomes 02:24:22 on the 2nd — the same fixture
+/// the module's own haddock uses — pinned as epoch-ms, and round-tripped
+/// back through `formatISO8601` to the reformatted UTC string.
+#[test]
+fn works_time_formatting_pinned() {
+    works(
+        "pure (object [\"known\" .= formatISO8601 (UTCTime 1700000000000), \
+         \"pre_epoch\" .= formatISO8601 (UTCTime (-1000)), \
+         \"roundtrip_tz\" .= (case parseISO8601 \"2026-07-01T19:24:22-07:00\" of { Right t -> formatISO8601 t; Left e -> e }), \
+         \"parse_tz_ms\" .= (case parseISO8601 \"2026-07-01T19:24:22-07:00\" of { Right t -> epochMillis t; Left _ -> (-1) }), \
+         \"parse_epoch\" .= (case parseISO8601 \"1970-01-01T00:00:00Z\" of { Right t -> epochMillis t; Left _ -> (-1) })])",
+        serde_json::json!({
+            "known": "2023-11-14T22:13:20Z",
+            "pre_epoch": "1969-12-31T23:59:59Z",
+            "roundtrip_tz": "2026-07-02T02:24:22Z",
+            "parse_tz_ms": 1782959062000_i64,
+            "parse_epoch": 0
+        }),
+    );
+}
+
+/// `daysFromCivil`/`diffUTCTime`/`addUTCTime`/`epochMillis` — the Int-only
+/// civil-date arithmetic the module header claims is fully JIT-safe.
+///
+/// `daysFromCivil 2024 2 29` = 19782, the same epoch-day `toGregorian`'s
+/// fixture (`UTCTime 1709164800000`) decomposes to (`19782 * 86400 * 1000 ==
+/// 1709164800000`) — `daysFromCivil` is `civilFromDays`'s pinned inverse.
+/// `daysFromCivil 1970 1 1` = 0 (the epoch). `daysFromCivil 1969 12 31` =
+/// -1: one day before the epoch is epoch-day -1, not an off-by-one wrap.
+///
+/// `diffUTCTime (UTCTime 1000) (UTCTime (-500))` crosses the epoch boundary
+/// (one operand pre-epoch, one post-epoch): (1000 - (-500)) / 1000 = 1.5s.
+/// `diffUTCTime (UTCTime 0) (UTCTime 5000)` is a negative delta: (0 - 5000)
+/// / 1000 = -5s (an integral Double renders as a bare JSON integer, see
+/// `works_moderate_double_literals`).
+///
+/// `addUTCTime (-1.5) (UTCTime 1000)` both crosses the epoch boundary and
+/// applies a negative delta: 1000 + round(-1.5 * 1000) = 1000 - 1500 = -500.
+/// `addUTCTime 0.0005 (UTCTime 0)` and `addUTCTime 0.0015 (UTCTime 0)` pin
+/// the millisecond-rounding boundary: `round` is banker's rounding (ties to
+/// even, see `works_round_bankers`), so 0.5ms ties DOWN to 0 (even) while
+/// 1.5ms ties UP to 2 (even) — not simple round-half-up.
+///
+/// `epochMillis (UTCTime (-500))` is the plain pre-epoch accessor: -500.
+#[test]
+fn works_time_arithmetic_pinned() {
+    works(
+        "pure (object [\"days_modern\" .= daysFromCivil 2024 2 29, \
+         \"days_epoch\" .= daysFromCivil 1970 1 1, \
+         \"days_pre_epoch\" .= daysFromCivil 1969 12 31, \
+         \"diff_cross_epoch\" .= diffUTCTime (UTCTime 1000) (UTCTime (-500)), \
+         \"diff_negative\" .= diffUTCTime (UTCTime 0) (UTCTime 5000), \
+         \"add_cross_epoch_neg\" .= epochMillis (addUTCTime (-1.5) (UTCTime 1000)), \
+         \"add_round_tie_down\" .= epochMillis (addUTCTime 0.0005 (UTCTime 0)), \
+         \"add_round_tie_up\" .= epochMillis (addUTCTime 0.0015 (UTCTime 0)), \
+         \"epoch_millis_pre_epoch\" .= epochMillis (UTCTime (-500))])",
+        serde_json::json!({
+            "days_modern": 19782,
+            "days_epoch": 0,
+            "days_pre_epoch": -1,
+            "diff_cross_epoch": 1.5,
+            "diff_negative": -5,
+            "add_cross_epoch_neg": -500,
+            "add_round_tie_down": 0,
+            "add_round_tie_up": 2,
+            "epoch_millis_pre_epoch": -500
+        }),
+    );
+}
+
+/// `replace`/`isSuffixOf`/`isInfixOf`/`takeWhileT`/`dropWhileT` — the
+/// `Tidepool.Prelude` Text shadows, called through the unqualified surface
+/// exactly as an eval user writes them.
+///
+/// `takeWhileT`/`dropWhileT` are pinned with an OPERATOR SECTION predicate
+/// (`(/= ',')`, `(< 'c')`), the shape a retired String-detour workaround
+/// existed for (a cross-module operator-section predicate reaching an
+/// external `Data.Text` unfolding once corrupted; `T` now points at the
+/// vendored home-module `Tidepool.Data.Text`) — plus partial application
+/// (`takeWhileT (/= ',')` passed to `map`) and use inside `filter`/`map`
+/// together, and empty-input/no-match cases for every one of the five.
+#[test]
+fn works_prelude_text_shadows_pinned() {
+    works(
+        "pure (object [\"replace_basic\" .= replace \"a\" \"o\" \"banana\", \
+         \"replace_no_match\" .= replace \"z\" \"o\" \"banana\", \
+         \"replace_empty_haystack\" .= replace \"a\" \"o\" \"\", \
+         \"is_suffix_true\" .= isSuffixOf \"ana\" \"banana\", \
+         \"is_suffix_false\" .= isSuffixOf \"xyz\" \"banana\", \
+         \"is_suffix_empty\" .= isSuffixOf \"\" \"banana\", \
+         \"is_infix_true\" .= isInfixOf \"nan\" \"banana\", \
+         \"is_infix_false\" .= isInfixOf \"xyz\" \"banana\", \
+         \"is_infix_empty\" .= isInfixOf \"\" \"banana\", \
+         \"take_while_section\" .= takeWhileT (/= ',') \"a,b,c\", \
+         \"take_while_no_match\" .= takeWhileT (== 'z') \"abc\", \
+         \"take_while_empty\" .= takeWhileT (/= ',') \"\", \
+         \"drop_while_section\" .= dropWhileT (< 'c') \"abcdef\", \
+         \"drop_while_no_match\" .= dropWhileT (== 'z') \"abc\", \
+         \"drop_while_empty\" .= dropWhileT (/= ',') \"\", \
+         \"take_while_partial_map\" .= map (takeWhileT (/= ',')) [\"a,b\", \"c,d\", \"nocomma\"], \
+         \"drop_while_filter_map\" .= map (dropWhileT (< 'c')) (filter (/= \"\") [\"abcdef\", \"\", \"cba\"])])",
+        serde_json::json!({
+            "replace_basic": "bonono",
+            "replace_no_match": "banana",
+            "replace_empty_haystack": "",
+            "is_suffix_true": true,
+            "is_suffix_false": false,
+            "is_suffix_empty": true,
+            "is_infix_true": true,
+            "is_infix_false": false,
+            "is_infix_empty": true,
+            "take_while_section": "a",
+            "take_while_no_match": "",
+            "take_while_empty": "",
+            "drop_while_section": "cdef",
+            "drop_while_no_match": "abc",
+            "drop_while_empty": "",
+            "take_while_partial_map": ["a", "c", "nocomma"],
+            "drop_while_filter_map": ["cdef", "cba"]
+        }),
+    );
+}
+
+/// `fmtInt`/`fmtFrac`/`fmtStr`/`fmtChar`/`fmtSigned`/`fmtPlain`
+/// (`Tidepool.QQ.Fmt.Runtime`) — called in the exact argument shape
+/// `[fmt|...|]` generates (`Tidepool.QQ.Fmt`'s `emitInt`/`emitFrac`/
+/// `emitStr`/`emitChar`/`emitDefault`: sign, then type-specific flags, then
+/// `grp`/width/fill/align, then the value last).
+///
+/// `fmtInt FMinus 10 .. 6 '0' FRight (-42)` = "000-42": `fpad` lays fill
+/// BEFORE the sign for right-alignment (not sign-aware zero-padding like
+/// printf's `%06d`) — pre="-", body="42", pad=6-3=3 chars of "0" first.
+/// `fmtInt FPlus 16 True True .. 0 ' ' FRight 255` = "+0XFF": explicit `+`
+/// sign, uppercase hex, `0x`/`0X` alt-form prefix. `fmtInt .. (Just ',') ..
+/// 1234567` groups every 3 digits: "1,234,567".
+///
+/// `fmtFrac` pins the millisecond-style rounding boundary at 2 decimal
+/// places: 0.125 * 100 = 12.5 exactly (0.125 is exactly representable in
+/// binary) ties DOWN to the even 12 -> "0.12"; 0.135 * 100 rounds to the
+/// even 14 -> "0.14"; at 0 decimal places, 2.5 ties to the even 2 -> "2"
+/// (same banker's-rounding `round` primop as `works_round_bankers`). A
+/// negative value through a width/zero-fill: `fmtFrac .. 2 8 '0' FRight
+/// (-3.14159)` = "000-3.14". Percent mode pre-multiplies by 100 and appends
+/// "%": `fmtFrac FMinus True 1 .. 0.4567` = "45.7%".
+///
+/// `fmtStr (Just 3) .. FLeft "hello"` truncates to "hel"; `fmtStr Nothing 6
+/// '.' FRight "hi"` pads to "....hi". `fmtChar 3 '*' FLeft 65` treats 65 as
+/// a code point ('A') and left-pads: "A**".
+///
+/// `fmtSigned` recovers the sign from a leading '-' in the ALREADY-RENDERED
+/// text: `fmtSigned FPlus 6 '0' FRight "-42"` = "000-42" (negative, sign
+/// from the text, not from `FPlus`); `fmtSigned FPlus 6 '0' FRight "42"` =
+/// "000+42" (non-negative, so `FPlus`'s explicit "+" is used).
+/// `fmtPlain 8 '-' FCenter "hi"` centers with no sign logic: "---hi---".
+#[test]
+fn works_fmt_runtime_helpers_pinned() {
+    works(
+        "pure (object [\"int_neg_zero_pad\" .= fmtInt FMinus 10 False False Nothing 6 '0' FRight (-42), \
+         \"int_hex_alt_plus\" .= fmtInt FPlus 16 True True Nothing 0 ' ' FRight 255, \
+         \"int_group_commas\" .= fmtInt FMinus 10 False False (Just ',') 0 ' ' FRight 1234567, \
+         \"frac_tie_even_down\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.125, \
+         \"frac_tie_even_up\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.135, \
+         \"frac_zero_prec_round\" .= fmtFrac FMinus False 0 0 ' ' FRight 2.5, \
+         \"frac_neg_padded\" .= fmtFrac FMinus False 2 8 '0' FRight (-3.14159), \
+         \"frac_percent\" .= fmtFrac FMinus True 1 0 ' ' FRight 0.4567, \
+         \"str_truncate\" .= fmtStr (Just 3) 0 ' ' FLeft \"hello\", \
+         \"str_pad_right\" .= fmtStr Nothing 6 '.' FRight \"hi\", \
+         \"char_left_pad\" .= fmtChar 3 '*' FLeft 65, \
+         \"signed_neg\" .= fmtSigned FPlus 6 '0' FRight \"-42\", \
+         \"signed_pos\" .= fmtSigned FPlus 6 '0' FRight \"42\", \
+         \"plain_center\" .= fmtPlain 8 '-' FCenter \"hi\"])",
+        serde_json::json!({
+            "int_neg_zero_pad": "000-42",
+            "int_hex_alt_plus": "+0XFF",
+            "int_group_commas": "1,234,567",
+            "frac_tie_even_down": "0.12",
+            "frac_tie_even_up": "0.14",
+            "frac_zero_prec_round": "2",
+            "frac_neg_padded": "000-3.14",
+            "frac_percent": "45.7%",
+            "str_truncate": "hel",
+            "str_pad_right": "....hi",
+            "char_left_pad": "A**",
+            "signed_neg": "000-42",
+            "signed_pos": "000+42",
+            "plain_center": "---hi---"
+        }),
+    );
+}
