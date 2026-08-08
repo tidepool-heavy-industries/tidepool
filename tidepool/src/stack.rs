@@ -14,8 +14,8 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 }
 
 /// The debug decl list: base effects (Console..Time, `base_effects!` order)
-/// with Meta appended, then the interposed effects (Ask, RunLLMTurn) appended
-/// last. This is the SAME order `build_debug_stack`'s handler HList wires
+/// with Meta appended, then the interposed effects (Ask, RunLLMTurn, Fork)
+/// appended last. This is the SAME order `build_debug_stack`'s handler HList wires
 /// (the interposed effects are appended separately by `TidepoolMcpServer::new`,
 /// which pushes `ask_decl()`/`runllmturn_decl()` onto whatever
 /// `H::collect_decls()` reports) — so a `TidepoolMcpServer` built on
@@ -111,6 +111,7 @@ mod tests {
         "Meta",
         "Ask",
         "RunLLMTurn",
+        "Fork",
     ];
 
     #[test]
@@ -161,8 +162,8 @@ mod tests {
         assert_eq!(collected_names, EXPECTED_ORDER);
         assert_eq!(
             ask_tag as usize,
-            EXPECTED_ORDER.len() - 2,
-            "Ask must land after Meta, followed only by RunLLMTurn"
+            EXPECTED_ORDER.len() - 3,
+            "Ask must land after Meta, followed only by RunLLMTurn and Fork"
         );
     }
 }
