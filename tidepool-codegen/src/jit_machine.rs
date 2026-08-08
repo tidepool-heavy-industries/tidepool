@@ -2802,10 +2802,30 @@ fn materialize_response_and_resume(
         ResponsePlan::Ready(p) => p,
         ResponsePlan::Park(stream) => {
             let id = crate::host_fns::park_stream(stream);
-            // SAFETY: vmctx is valid with installed GC state.
+            // SAFETY: vmctx is valid with installed GC state. One
+            // GC-and-retry via the shared `gc_retry` helper, matching the
+            // Eager arm below: `continuation` is already a registered
+            // rust_root (above), so the retry's collection evacuates it
+            // safely, and a transient nursery-full for this (small,
+            // fixed-size) tail-thunk allocation is recoverable rather than
+            // fatal.
+            //
+            // NESTED RETRY, not a second policy layer: `alloc_stream_tail_thunk`
+            // already retries internally via `host_alloc_gc` (also `gc_retry`-
+            // based), so on the failure path this can run alloc→gc→alloc→gc
+            // (inner) →alloc→gc→alloc (outer) — up to two collections, not
+            // `gc_retry`'s documented one. This outer wrap exists as
+            // defence-in-depth against that inner retry being removed or
+            // this allocation growing past what one collection can satisfy,
+            // not because one collection is insufficient today (it isn't —
+            // see the load test's module doc for the evidence).
             let p = unsafe {
                 crate::signal_safety::with_signal_protection(|| {
-                    crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0)
+                    heap_bridge::gc_retry(
+                        vmctx_ptr,
+                        |p: &*mut u8| p.is_null(),
+                        || crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0),
+                    )
                 })
             }
             .map_err(JitError::Signal)?;
@@ -2824,38 +2844,29 @@ fn materialize_response_and_resume(
                     limit: MAX_EFFECT_RESPONSE_NODES,
                 });
             }
-            // SAFETY: Converting a Value back to a heap object in
-            // the nursery.
+            // SAFETY: Converting a Value back to a heap object in the
+            // nursery, with one GC-and-retry via the shared `gc_retry`
+            // helper (matching every other value_to_heap call site:
+            // primops.rs eitherDecode/parseISO8601, streaming.rs
+            // build_cons_cells/stream_element): `continuation` is already a
+            // registered rust_root (above), so the retry's collection
+            // evacuates it safely, and a transient nursery-full at
+            // response-materialization time is recoverable rather than
+            // fatal.
             let conv = unsafe {
                 crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                    heap_bridge::gc_retry(
+                        vmctx_ptr,
+                        |r: &Result<*mut u8, heap_bridge::BridgeError>| {
+                            matches!(r, Err(heap_bridge::BridgeError::NurseryExhausted))
+                        },
+                        || heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()),
+                    )
                 })
             }
             .map_err(JitError::Signal)?;
             match conv {
                 Ok(p) => p,
-                Err(heap_bridge::BridgeError::NurseryExhausted) => {
-                    // One GC-and-retry, matching every other value_to_heap
-                    // call site (primops.rs eitherDecode/parseISO8601,
-                    // streaming.rs build_cons_cells): `continuation` is
-                    // already a registered rust_root (above), so the
-                    // retry's collection evacuates it safely, and a
-                    // transient nursery-full at response-materialization
-                    // time is recoverable rather than fatal.
-                    unsafe {
-                        crate::signal_safety::with_signal_protection(|| {
-                            crate::host_fns::gc_trigger(vmctx_ptr)
-                        })
-                    }
-                    .map_err(JitError::Signal)?;
-                    unsafe {
-                        crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
-                        })
-                    }
-                    .map_err(JitError::Signal)?
-                    .map_err(JitError::HeapBridge)?
-                }
                 Err(e) => return Err(JitError::HeapBridge(e)),
             }
         }
