@@ -73,6 +73,15 @@ fn prelude_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("haskell/lib"))
 }
 
+/// A Fork-capable stack: the general eval decls plus the `Fork` effect, so
+/// `Tidepool.Fork`'s `forkMap`/`forkCata` (which lower to the `Fork` effect)
+/// resolve. `EngineConfig::standard` alone does not declare `Fork`.
+fn fork_cfg() -> EngineConfig {
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
+    EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config")
+}
+
 fn header() -> LogHeader {
     LogHeader {
         prelude_hash: "acceptance-fork-combinators".into(),
@@ -120,7 +129,7 @@ async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("fork_combinators.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let cfg = fork_cfg();
 
     let replies = vec![
         // 1. Root turn: forkFilter over [1,2,3], keep the True verdicts.
@@ -245,7 +254,7 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("forkcata.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let cfg = fork_cfg();
 
     let replies = vec![
         // 1. Root turn: forkCata over a root with 3 leaf children, answer

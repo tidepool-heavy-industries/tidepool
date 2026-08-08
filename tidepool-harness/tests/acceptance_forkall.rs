@@ -1,13 +1,10 @@
 //! Acceptance coverage for `Tidepool.Fork.forkAll` — the `mapConcurrently`-shaped
-//! surface verb over the SAME `runLLMTurnFanout` machinery `forkFilter`
-//! already routes through (`Tidepool.Fork`'s haddock). Unlike `forkFilter`
-//! (fixed at `Bool`), `forkAll`'s answer type is CALLER-CHOSEN
-//! (`forkAll @T prompts`) — structurally identical to a bare
-//! `runLLMTurnFanout @T` call, so `Translate.hs`'s existing
-//! `isRunLLMTurnFanoutVar`-family recognizer (extended with `isForkAllVar`)
-//! head-swaps it straight to the EXISTING `runLLMTurnFanoutSited` sibling,
-//! no new `forkAllSited` needed. Record-replay, CI-shaped, zero live calls,
-//! same discipline as `acceptance_fork_combinators.rs`.
+//! surface verb over the `Fork` effect. `forkAll`'s answer type is CALLER-CHOSEN
+//! (`forkAll @T prompts`); `Translate.hs`'s `isForkAllVar` recognizer head-swaps
+//! it to the `Fork` effect's `forkAllSited` sibling, recording the site with the
+//! caller-chosen `[T]` answer type. Driven on a Fork-capable stack (`fork_cfg`),
+//! record-replay, CI-shaped, zero live calls — same discipline as
+//! `acceptance_fork_combinators.rs`.
 
 use std::sync::Arc;
 
@@ -32,6 +29,16 @@ fn prelude_dir() -> std::path::PathBuf {
         .parent()
         .map(|r| r.join("haskell/lib"))
         .unwrap_or_else(|| std::path::PathBuf::from("haskell/lib"))
+}
+
+/// A Fork-capable stack: the general eval decls plus the `Fork` effect, so
+/// `Tidepool.Fork`'s `forkAll` (which lowers to the `Fork` effect, not
+/// `RunLLMTurn`) resolves. `EngineConfig::standard` alone does not declare
+/// `Fork`.
+fn fork_cfg() -> EngineConfig {
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
+    EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config")
 }
 
 fn header() -> LogHeader {
@@ -83,7 +90,7 @@ async fn forkall_fans_out_and_gathers_typed_batch() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("forkall.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let cfg = fork_cfg();
 
     let replies = vec![
         reply(

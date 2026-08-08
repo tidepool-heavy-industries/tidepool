@@ -672,7 +672,12 @@ impl EngineConfig {
         // entry.
         let suspend_tag = decls
             .iter()
-            .position(|d| matches!(d.type_name, "Ask" | "AskUser" | "RunLLMTurn" | "Finalize"))
+            .position(|d| {
+                matches!(
+                    d.type_name,
+                    "Ask" | "AskUser" | "RunLLMTurn" | "Fork" | "Finalize"
+                )
+            })
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
