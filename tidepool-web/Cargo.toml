@@ -27,3 +27,8 @@ path = "src/bin/tidepool-selfharness.rs"
 [[bin]]
 name = "tidepool-selfharness-web"
 path = "src/bin/tidepool-selfharness-web.rs"
+
+[dev-dependencies]
+reqwest = { version = "0.13", features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
+futures-util = "0.3"

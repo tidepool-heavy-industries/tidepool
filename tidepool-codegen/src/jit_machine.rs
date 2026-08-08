@@ -2001,8 +2001,8 @@ impl JitEffectMachine {
         self.machine_state.stowed_roots_count()
     }
 
-    /// Read-only heap/GC snapshot (observatory heap pane) — EXISTING counters
-    /// only, no new instrumentation inside the collector. `nursery_bytes` is
+    /// Read-only heap/GC snapshot — EXISTING counters only, no new
+    /// instrumentation inside the collector. `nursery_bytes` is
     /// the nursery's total capacity; `live_bytes` is the session heap's bump
     /// high-water mark (`SessionState::cursor` — bytes allocated since the
     /// last GC, or since bootstrap if none has run yet); `gc_count` is
