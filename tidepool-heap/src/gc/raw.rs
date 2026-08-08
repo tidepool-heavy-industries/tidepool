@@ -1,7 +1,7 @@
 //! Cheney's semi-space copying GC for raw HeapObjects.
 
 use crate::layout::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 /// Result of a Cheney copying collection, containing statistics about the collection.
@@ -13,17 +13,32 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
 }
 
-/// Process-global test override for `checked_scanning_enabled`. `env::set_var`
-/// is racy against the `OnceLock`-cached env read below (it latches the FIRST
-/// read); this atomic gives tests a reliable, safe way to force checked
-/// scanning on/off without touching the environment.
-static CHECKED_SCANNING_FORCE: AtomicBool = AtomicBool::new(false);
+/// Process-global test override for `checked_scanning_enabled`: 0 = unset
+/// (defer to `TIDEPOOL_HEAP_VERIFY`), 1 = force on, 2 = force off.
+/// `env::set_var` is racy against the `OnceLock`-cached env read below (it
+/// latches the FIRST read); this atomic gives tests a reliable, safe way to
+/// force checked scanning on/off without touching the environment — in
+/// EITHER direction, unlike the OR-only `AtomicBool` shape this otherwise
+/// mirrors from `tidepool-codegen/src/host_fns/gc.rs`'s
+/// `heap_verify_enabled`/`gc_poison_enabled`: those can only add force-on on
+/// top of the env var, never retract it, which is fine for codegen's own
+/// gates but would leave a test with no way to reach normal mode once
+/// `TIDEPOOL_HEAP_VERIFY=1` is set in the environment — exactly the
+/// condition this crate's own test suite needs to exercise.
+static CHECKED_SCANNING_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
-/// Test-only: force diagnostic checked scanning on (or back off), independent
-/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
+/// Test-only: force diagnostic checked scanning on (`true`) or off (`false`),
+/// independent of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
 #[doc(hidden)]
 pub fn set_checked_scanning(on: bool) {
-    CHECKED_SCANNING_FORCE.store(on, Ordering::Relaxed);
+    CHECKED_SCANNING_OVERRIDE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Test-only: clear the override and defer back to `TIDEPOOL_HEAP_VERIFY`.
+/// Not part of the public API.
+#[doc(hidden)]
+pub fn clear_checked_scanning_override() {
+    CHECKED_SCANNING_OVERRIDE.store(0, Ordering::Relaxed);
 }
 
 /// Diagnostic mode: a size/count containment violation panics with full
@@ -33,9 +48,14 @@ pub fn set_checked_scanning(on: bool) {
 /// `tidepool-codegen/src/host_fns/gc.rs`; codegen's `set_heap_verify` forwards
 /// here so flipping one knob enables both.
 fn checked_scanning_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
-        || CHECKED_SCANNING_FORCE.load(Ordering::Relaxed)
+    match CHECKED_SCANNING_OVERRIDE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            static ON: OnceLock<bool> = OnceLock::new();
+            *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
+        }
+    }
 }
 
 /// Handle a size/count containment violation discovered before constructing

@@ -13,32 +13,25 @@
 //! rejected legitimate objects.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use tidepool_heap::gc::raw::{for_each_pointer_field, set_checked_scanning};
+use tidepool_heap::gc::raw::{
+    clear_checked_scanning_override, for_each_pointer_field, set_checked_scanning,
+};
 use tidepool_heap::layout::*;
 
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
 
-/// Resets `set_checked_scanning` to `false` on drop (including panic
-/// unwind), so a diagnostic-mode test can't leak its mode into whatever runs
-/// next in the same process.
+/// Clears the checked-scanning override on drop (including panic unwind),
+/// returning to the (tri-state) unset default so a test can't leak its mode
+/// into whatever runs next in the same process. Unlike `set_checked_scanning
+/// (false)`, clearing the override defers back to `TIDEPOOL_HEAP_VERIFY`
+/// rather than forcing normal mode — the correct reset for a guard, since
+/// "reset" should mean "no longer testing", not "force off, ignore the env".
 struct CheckedScanningGuard;
 impl Drop for CheckedScanningGuard {
     fn drop(&mut self) {
-        set_checked_scanning(false);
+        clear_checked_scanning_override();
     }
-}
-
-/// `set_checked_scanning` mirrors `TIDEPOOL_HEAP_VERIFY || force` (matching
-/// codegen's `heap_verify_enabled`, so the two stay one knob) — the env var
-/// is a fail-loud kill switch a test override can only ADD to, never
-/// retract. A "normal mode" test therefore has no way to reach normal mode
-/// when the env var is externally forced to "1"; skip rather than
-/// mis-assert. The diagnostic-mode sibling of each such case still runs
-/// (and would run regardless of this env var), so the violation itself
-/// stays covered.
-fn env_forces_diagnostic_mode() -> bool {
-    std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1")
 }
 
 unsafe fn write_con(buf: &mut [u8], con_tag: u64, declared_size: u32, num_fields: u16) -> *mut u8 {
@@ -76,6 +69,7 @@ unsafe fn write_smallarray_lit(buf: &mut [u8], payload: *mut u8) -> *mut u8 {
 
 #[test]
 fn well_formed_con_scans_every_field() {
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<256>([0u8; 256]);
     unsafe {
@@ -97,6 +91,7 @@ fn well_formed_con_scans_every_field() {
 
 #[test]
 fn well_formed_closure_scans_every_field() {
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<256>([0u8; 256]);
     unsafe {
@@ -118,6 +113,7 @@ fn well_formed_closure_scans_every_field() {
 
 #[test]
 fn well_formed_evaluated_thunk_scans_indirection() {
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -136,6 +132,7 @@ fn well_formed_evaluated_thunk_scans_indirection() {
 
 #[test]
 fn well_formed_boxed_array_scans_every_slot() {
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut payload_buf = AlignedBuf::<64>([0u8; 64]);
     let mut lit_buf = AlignedBuf::<64>([0u8; 64]);
@@ -174,10 +171,7 @@ fn size_below_header_minimum_panics_in_diagnostic_mode() {
 
 #[test]
 fn size_below_header_minimum_skips_in_normal_mode() {
-    if env_forces_diagnostic_mode() {
-        eprintln!("SKIPPED (TIDEPOOL_HEAP_VERIFY=1 forces diagnostic mode process-wide)");
-        return;
-    }
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -211,10 +205,7 @@ fn con_inflated_num_fields_panics_in_diagnostic_mode() {
 
 #[test]
 fn con_inflated_num_fields_skips_in_normal_mode() {
-    if env_forces_diagnostic_mode() {
-        eprintln!("SKIPPED (TIDEPOOL_HEAP_VERIFY=1 forces diagnostic mode process-wide)");
-        return;
-    }
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -250,10 +241,7 @@ fn closure_inflated_num_captured_panics_in_diagnostic_mode() {
 
 #[test]
 fn closure_inflated_num_captured_skips_in_normal_mode() {
-    if env_forces_diagnostic_mode() {
-        eprintln!("SKIPPED (TIDEPOOL_HEAP_VERIFY=1 forces diagnostic mode process-wide)");
-        return;
-    }
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -290,10 +278,7 @@ fn evaluated_thunk_truncated_panics_in_diagnostic_mode() {
 
 #[test]
 fn evaluated_thunk_truncated_skips_in_normal_mode() {
-    if env_forces_diagnostic_mode() {
-        eprintln!("SKIPPED (TIDEPOOL_HEAP_VERIFY=1 forces diagnostic mode process-wide)");
-        return;
-    }
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -330,10 +315,7 @@ fn boxed_array_len_overflow_panics_in_diagnostic_mode() {
 
 #[test]
 fn boxed_array_len_overflow_skips_in_normal_mode() {
-    if env_forces_diagnostic_mode() {
-        eprintln!("SKIPPED (TIDEPOOL_HEAP_VERIFY=1 forces diagnostic mode process-wide)");
-        return;
-    }
+    let _guard = CheckedScanningGuard;
     set_checked_scanning(false);
     let mut payload_buf = AlignedBuf::<64>([0u8; 64]);
     let mut lit_buf = AlignedBuf::<64>([0u8; 64]);

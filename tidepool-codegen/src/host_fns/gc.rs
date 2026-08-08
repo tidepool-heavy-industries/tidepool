@@ -319,7 +319,11 @@ fn max_heap_bytes() -> usize {
 static HEAP_VERIFY_FORCE: AtomicBool = AtomicBool::new(false);
 
 /// Test-only: force the post-GC heap verifier on (or back off), independent
-/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
+/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API. Forwards to
+/// `tidepool-heap`'s `set_checked_scanning` so one knob enables both; note
+/// that knob is tri-state (unset/on/off) where this crate's own
+/// `HEAP_VERIFY_FORCE`/`GC_POISON_FORCE` are OR-only against the env var —
+/// see `tidepool_heap::gc::raw`'s doc comment for why.
 #[doc(hidden)]
 pub fn set_heap_verify(on: bool) {
     HEAP_VERIFY_FORCE.store(on, Ordering::Relaxed);
