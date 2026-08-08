@@ -219,6 +219,10 @@ const KNOWN: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
+#[ignore = "expensive: replays the full real-Core corpus (a real GHC-compiled \
+            binding per fixture) through the JIT-vs-eval oracle; run with \
+            TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-codegen \
+            --run-ignored all -E 'test(corpus_report)'"]
 fn corpus_report() {
     if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
         eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");

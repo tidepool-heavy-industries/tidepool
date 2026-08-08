@@ -29,7 +29,62 @@ fn should_skip(name: &str) -> bool {
     false
 }
 
+/// Fixtures where BOTH engines legitimately error, with the one-line reason.
+/// Populated from a real run's `both_error_names` — never guessed. A
+/// both-error fixture not on this list fails the gate; a listed fixture that
+/// now compares cleanly is reported (not failed) so the stale entry can be
+/// pruned.
+const EXPECTED_BOTH_ERROR: &[(&str, &str)] = &[];
+
+/// Fixtures where eval and JIT legitimately land on different outcomes (eval
+/// errors, JIT produces a value), with the one-line reason. Same
+/// allow-or-fail contract as `EXPECTED_BOTH_ERROR`.
+const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
+    (
+        "thunk_blackhole",
+        "GHC Core `thunk_blackhole = let x = x in x` (the real-GHC shape #336's \
+         blackhole_differential.rs cites). eval correctly rejects the \
+         self-reference as a BlackHole (InfiniteLoop). This suite drives \
+         CodegenPipeline::compile_expr directly, not JitEffectMachine::run_pure \
+         (the path blackhole_differential.rs pins to the same contract for a \
+         synthetic LetRec{x=Var(x)} shape) — on the real top-level-lifted Core \
+         form the direct-compile path does not raise runtime_blackhole_trap and \
+         returns a value instead. A real JIT gap specific to this execution \
+         path, left unfixed here (production code is out of scope for this \
+         gate-hardening change).",
+    ),
+    (
+        "xs_u8286623314361937397",
+        "GHC-lifted local helper (`_u<digits>` uniquified where/let binder — \
+         see real_core_corpus.rs::is_lifted_local) bound to a self-referential, \
+         effectively-unbounded list; standalone execution forces it outside the \
+         call site that would bound it. eval's deep_force walks it fully and \
+         hits its own recursion-depth guard (DepthLimit); the JIT side goes \
+         through compare::heap_to_value, which silently truncates past \
+         MAX_HEAP_DEPTH (1000) instead of erroring — an asymmetry between the \
+         two forcing strategies on an out-of-context fixture, not a real engine \
+         divergence.",
+    ),
+    (
+        "xs'_u8286623314361937461",
+        "Same shape and cause as xs_u8286623314361937397 — lifted-local \
+         unbounded list, deep_force DepthLimit vs heap_to_value's silent \
+         MAX_HEAP_DEPTH truncation.",
+    ),
+];
+
+/// A nontrivial floor on how many fixtures must reach a clean comparison.
+/// Observed 312 on the 2026-08-08 baseline run (tested=349, closure_skip=34,
+/// mismatch=0, both_error=0, jit_only_error=0, eval_jit_diverge=3, skipped=1)
+/// — set a little below that so ordinary fixture churn doesn't flap the gate,
+/// while a real collapse in comparison reach still fails it.
+const COMPARED_FLOOR: usize = 300;
+
 #[test]
+#[ignore = "expensive: forks a full suite_cbor differential pass (eval + JIT \
+            per fixture); run with TIDEPOOL_EXPENSIVE_TESTS=1 \
+            cargo nextest run -p tidepool-codegen --run-ignored all \
+            -E 'test(haskell_suite_differential)'"]
 fn haskell_suite_differential() {
     if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
         eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
@@ -53,6 +108,10 @@ fn haskell_suite_differential() {
             let mut both_error = 0;
             let mut jit_only_error = 0;
             let mut eval_jit_diverge = 0;
+            let mut mismatch_names: Vec<String> = Vec::new();
+            let mut both_error_names: Vec<String> = Vec::new();
+            let mut jit_only_error_names: Vec<String> = Vec::new();
+            let mut eval_jit_diverge_names: Vec<String> = Vec::new();
 
             for entry in std::fs::read_dir(&cbor_dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -120,20 +179,27 @@ fn haskell_suite_differential() {
                                 compared += 1;
                             } else {
                                 mismatch += 1;
+                                mismatch_names.push(name.clone());
                                 eprintln!("MISMATCH {}: eval={} jit={}", name, eval_val, jit_val);
                             }
                         } else {
                             closure_skip += 1;
                         }
                     }
-                    (Err(_), Err(_)) | (Err(_), Ok(None)) => {
+                    (Err(eval_err), Err(_)) | (Err(eval_err), Ok(None)) => {
                         both_error += 1;
+                        both_error_names.push(name.clone());
+                        eprintln!("BOTH_ERROR {}: eval={:?}", name, eval_err);
                     }
                     (Ok(_), Err(_)) | (Ok(_), Ok(None)) => {
                         jit_only_error += 1;
+                        jit_only_error_names.push(name.clone());
+                        eprintln!("JIT_ONLY_ERROR {}", name);
                     }
-                    (Err(_), Ok(Some(_))) => {
+                    (Err(eval_err), Ok(Some(_))) => {
                         eval_jit_diverge += 1;
+                        eval_jit_diverge_names.push(name.clone());
+                        eprintln!("EVAL_JIT_DIVERGE {}: eval={:?}", name, eval_err);
                     }
                 }
             }
@@ -144,9 +210,68 @@ fn haskell_suite_differential() {
                  both_error={both_error}, jit_only_error={jit_only_error}, \
                  eval_jit_diverge={eval_jit_diverge}, skipped={skipped}"
             );
+            eprintln!("mismatch_names: {mismatch_names:?}");
+            eprintln!("both_error_names: {both_error_names:?}");
+            eprintln!("jit_only_error_names: {jit_only_error_names:?}");
+            eprintln!("eval_jit_diverge_names: {eval_jit_diverge_names:?}");
 
-            // At least some fixtures should have been tested
-            assert!(tested > 0, "No fixtures were tested!");
+            let mut violations: Vec<String> = Vec::new();
+
+            for n in &mismatch_names {
+                violations.push(format!("MISMATCH {n}: engines produced different values"));
+            }
+            for n in &jit_only_error_names {
+                violations.push(format!(
+                    "JIT_ONLY_ERROR {n}: eval succeeded, JIT errored — unexpected"
+                ));
+            }
+            for n in &both_error_names {
+                if !EXPECTED_BOTH_ERROR.iter().any(|(fx, _)| fx == n) {
+                    violations.push(format!(
+                        "BOTH_ERROR {n}: both engines errored, and {n} is not on \
+                         EXPECTED_BOTH_ERROR"
+                    ));
+                }
+            }
+            for n in &eval_jit_diverge_names {
+                if !EXPECTED_EVAL_JIT_DIVERGE.iter().any(|(fx, _)| fx == n) {
+                    violations.push(format!(
+                        "EVAL_JIT_DIVERGE {n}: eval errored but JIT produced a value, and \
+                         {n} is not on EXPECTED_EVAL_JIT_DIVERGE"
+                    ));
+                }
+            }
+            if compared < COMPARED_FLOOR {
+                violations.push(format!(
+                    "compared={compared} fell below COMPARED_FLOOR={COMPARED_FLOOR}"
+                ));
+            }
+
+            // A listed fixture that no longer reproduces is fine — report it so
+            // the stale entry can be pruned, never fail the gate over it.
+            for (fx, _) in EXPECTED_BOTH_ERROR {
+                if !both_error_names.iter().any(|n| n == fx) {
+                    eprintln!(
+                        "NOTE: EXPECTED_BOTH_ERROR entry {fx} did not both-error this run \
+                         — stale, consider pruning"
+                    );
+                }
+            }
+            for (fx, _) in EXPECTED_EVAL_JIT_DIVERGE {
+                if !eval_jit_diverge_names.iter().any(|n| n == fx) {
+                    eprintln!(
+                        "NOTE: EXPECTED_EVAL_JIT_DIVERGE entry {fx} did not diverge this run \
+                         — stale, consider pruning"
+                    );
+                }
+            }
+
+            assert!(
+                violations.is_empty(),
+                "{} unexpected outcome(s):\n{}",
+                violations.len(),
+                violations.join("\n")
+            );
         })
         .unwrap();
     handle.join().unwrap();

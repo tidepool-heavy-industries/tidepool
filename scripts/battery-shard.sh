@@ -18,6 +18,12 @@
 # stay skipped unless you export TIDEPOOL_EXPENSIVE_TESTS=1 yourself. Run
 # those deliberately, one at a time, with their own budget — they are NOT
 # what this script's ~380s-per-shard promise covers.
+# `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d, so
+# reaching them additionally needs `--run-ignored all` scoped with `-E` (a
+# bare `--run-ignored all` also un-ignores tidepool-codegen's deliberately-off
+# known-bug repros and heavy fuzz lanes — see scripts/battery.sh), e.g.:
+#   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh tidepool-codegen \
+#     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

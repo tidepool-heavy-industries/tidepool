@@ -18,6 +18,16 @@
 # effectful_lazy_ab_x8, corpus_report, haskell_suite_differential,
 # tidepool-testing::haskell_verified) are additionally gated behind
 # TIDEPOOL_EXPENSIVE_TESTS=1 and stay skipped even here unless you set it.
+# `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d (a
+# default nextest run must report them as ignored, not silently "passed" via
+# early return) — reaching them needs BOTH TIDEPOOL_EXPENSIVE_TESTS=1 AND
+# `--run-ignored all`. Do not pass `--run-ignored all` bare to this script:
+# tidepool-codegen also carries `#[ignore]`d known-bug repros and heavy fuzz
+# lanes (proptest_gc_recursion/host_arrays/ghc_idioms/jit_dispatch/
+# boundary_roundtrip) that are deliberately off by default and will FAIL or
+# run for ~68min if un-ignored. Scope with `-E`, e.g.:
+#   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery.sh -p tidepool-codegen \
+#     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
