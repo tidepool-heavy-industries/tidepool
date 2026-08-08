@@ -141,69 +141,25 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-/// The nested answerer Agent's SCOPED decl list (W1 effect-scoping). Mirrors
-/// [`outer_decls`] — a narrow, purpose-built stack rather than the full
-/// `EngineConfig::standard` Agent row: it DROPS all NINE base effects
-/// (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Meta`), so the
-/// answerer structurally CANNOT `run` a shell command, read files, or hit the
-/// network — its turn compiles against a `Tidepool.Effects` that never defines
-/// those verbs. The row is `[AskUser, RunLLMTurn, Finalize]`: `AskUser`
-/// (self-iterating-harness Wave 2) is answerer-only — a brand new effect
-/// alongside (not a replacement for) the general-Agent-stack `Ask`,
-/// deliberately absent from `standard_decls()` — presenting a typed form to a
-/// HUMAN OPERATOR (`askUser`/`askUserRaw`) and blocking until submit;
-/// `RunLLMTurn` is here for `fork`/`forkAll` (see the next section); `Finalize`
-/// (`finalize`) is the answer path.
+/// The nested answerer Agent's scoped decl row: `[AskUser, Fork, Finalize]`.
+/// It declares no base effects (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/
+/// `Time`/`Meta`) and no `RunLLMTurn`/`Ask`, so an answerer turn compiles
+/// against a `Tidepool.Effects` that never defines those verbs — the answerer
+/// structurally cannot run a shell command, read files, hit the network, or
+/// suspend an in-context `runLLMTurn`. Its whole surface: `askUser` (present a
+/// typed form to a human operator, riding `AskUser`), `fork`/`forkAll`
+/// (delegate to bounded parallel sub-answerers, riding `Fork` — the driver
+/// services the resulting suspension via [`Harness::answer_fanout`]/
+/// [`Harness::answer_fork`], and each child compiles against a fork-free leaf
+/// row so it cannot itself fork), and `finalize` (the answer path).
 ///
-/// # `RunLLMTurn` is back in the row — for `fork`/`forkAll`, the sanctioned recursive spawn
-///
-/// This USED to structurally exclude `RunLLMTurn` ("no recursive
-/// model-spawning" — see the branch history for the fuller account of why it
-/// was excluded and later became droppable once `examples/harness/
-/// HarnessTypes.hs` split its answer types out of the `loop`-defining
-/// module). It is deliberately back now: `fork`/`forkAll`
-/// (`Tidepool.Fork`, self-iterating-harness fork widen) are OPAQUE Haskell
-/// verbs that extract head-swaps to `runLLMTurnForkSited`/
-/// `runLLMTurnFanoutSited` — the SAME `RunLLMTurn` GADT/union-tag every other
-/// `runLLMTurn` call compiles to. So an answerer that wants to delegate to N
-/// parallel sub-answerers needs `RunLLMTurn` declared in its own row, or
-/// `forkAll`/`fork` fail to typecheck against its `Tidepool.Effects` (a
-/// stray-verb GHC "not in scope" error, same failure mode the OLD exclusion
-/// relied on for the opposite reason). This is controlled, bounded recursion
-/// — the driver services the resulting `Fork` suspension via
-/// [`Harness::answer_fanout`]/[`Harness::answer_fork`] (see
-/// [`SelfHarnessDriver::drive_answerer_to_finalize`]), not open-ended
-/// self-spawning — so it does not reopen the "no recursive model-spawning"
-/// concern the old doc guarded against. The bare `runLLMTurn`/`resume` verbs
-/// ride along as a side effect of the same decl (nothing hides them), but the
-/// answerer's advertised surface ([`ANSWERER_FRAMING_SUFFIX`]) frames
-/// `fork`/`forkAll` as the sanctioned primitive, not raw `runLLMTurn`.
-///
-/// The harness contract splits the `loop` dependency out of the way: `examples/
-/// harness/HarnessTypes.hs` holds `State`/`Mode`/`Decision`/`Confidence`/
-/// `initialState`/`render` with NO reference to `Tidepool.Harness`/
-/// `runLLMTurn`, and `examples/harness/Harness.hs` (which still defines `loop`)
-/// re-exports them. The answerer imports `HarnessTypes` directly, so its
-/// compile never pulls in `loop` — meaning `RunLLMTurn` in THIS row is there
-/// purely for the sanctioned `fork`/`forkAll` delegation above, never as an
-/// accidental door back into `loop`-style self-recursion. The
-/// Member-polymorphic verbs (siteid-plugin) make a per-compile decl list the
-/// only knob needed: `runLLMTurn`/`finalize` are not compiled against one
-/// hardcoded closed `M`, so the row's shape is exactly the decls passed here.
-/// This is the harness/agent structural split (see `Tidepool.Agent` in the
-/// stdlib for the answerer's own named boundary, mirroring `Tidepool.Harness`'s
-/// `HarnessEff`).
-///
-/// `AskUser` comes first: [`EngineConfig::from_decls`] takes the FIRST
-/// interposed effect (`Ask`|`AskUser`|`RunLLMTurn`|`Finalize`) as the suspend
-/// threshold — `RunLLMTurn`/`Finalize` both land at or past that threshold
-/// regardless of position, so keeping `RunLLMTurn` in the MIDDLE of this row
-/// (`AskUser`-then-`RunLLMTurn`-then-`Finalize`, mirroring the full Agent
-/// stack's own order) needs no further wiring.
+/// `AskUser` comes first because [`EngineConfig::from_decls`] takes the first
+/// interposed effect as the suspend threshold; `Fork`/`Finalize` land at or
+/// past it regardless of position.
 pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::askuser_decl(),
-        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::fork_decl(),
         tidepool_mcp::finalize_decl(),
     ]
 }
@@ -265,15 +221,12 @@ const ASKUSER_MAX_REPROMPTS: u32 = 8;
 const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 
 /// The narrow answerer instruction appended after `render`'s output to form
-/// the per-loop answerer session's system message (W1/C1). Deliberately
-/// scoped to the answerer's INTENDED surface — gui (`askUser`) plus
-/// `finalize` — NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
-/// advertises (`runLLMTurn`/`run`/git/http/…). This is now belt-and-braces
-/// rather than the enforcement mechanism: every verb `SYSTEM_FRAMING`
-/// advertises but this framing omits genuinely does NOT compile against the
-/// answerer's scoped stack ([`answerer_decls`]) — `RunLLMTurn` included, now
-/// that it's excluded from the row (see [`answerer_decls`]'s doc). This is
-/// the first real slice of the per-context-effect-set goal (§03).
+/// the per-loop answerer session's system message. Scoped to the answerer's
+/// surface — `askUser`, `fork`/`forkAll`, `finalize` — not the full eval
+/// surface [`crate::engine::SYSTEM_FRAMING`] advertises. This is
+/// belt-and-braces, not the enforcement mechanism: the scoped stack
+/// ([`answerer_decls`]) is what makes any verb this framing omits fail to
+/// compile.
 const ANSWERER_FRAMING_SUFFIX: &str = "\
 ---\n\
 You are the answering agent for a self-iterating harness loop. The system \
