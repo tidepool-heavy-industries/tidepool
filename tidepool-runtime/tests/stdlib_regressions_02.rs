@@ -189,17 +189,25 @@ fn works_splitat_negative_n_matches_base() {
 
 // =========================================================================
 // M5 — NOT covered here. The 2-result unboxed-tuple fallback landmine
-// (Translate.hs, the generic `case op ... of (# ... #)` arms) has no
-// reachable path from any exported stdlib function — every primop the
-// stdlib actually calls that returns a genuine multi-result unboxed tuple
-// (quotRem, addC/subC, decodeDouble_Int64#, ...) already has a dedicated
-// split in `splitMultiReturnPrimOp`/`splitUnaryMultiReturnPrimOp`, so no
-// JIT-level Haskell expression reaches the buggy fallback arm at all — that
-// unreachability is exactly the "landmine" M5 describes. The fix (a named,
-// loud `error` at extract time instead of silently aliasing both result
-// binders to one primop node) was verified directly against the extract
-// binary with hand-written `MagicHash`/`UnboxedTuples` source hitting the
-// two now-error'd arms:
+// (Translate.hs, the generic `case op ... of (# ... #)` arms). Most primops
+// the stdlib calls that return a genuine multi-result unboxed tuple
+// (quotRem, addC/subC, decodeDouble_Int64#, ...) have a dedicated split in
+// `splitMultiReturnPrimOp`/`splitUnaryMultiReturnPrimOp` and so never reach
+// the fallback arm.
+//
+// `decodeFloat_Int#` DOES NOT, and it is reachable from exported stdlib:
+// `eitherDecode "3.5" :: Either Text Float` routes through aeson's
+// `parseRealFloat` and aborts extraction with the named error below. An
+// earlier version of this comment claimed the fallback had no reachable path
+// from any exported stdlib function; `jit_surface::works_from_json_float`
+// disproves that and is red for exactly this reason. The fix shape is the
+// one the error text names — a dedicated split for `decodeFloat_Int#`
+// alongside the existing ones — not a change here.
+//
+// The fix that landed (a named, loud `error` at extract time instead of
+// silently aliasing both result binders to one primop node) was verified
+// directly against the extract binary with hand-written
+// `MagicHash`/`UnboxedTuples` source hitting the two now-error'd arms:
 //   - pure:     `case decodeFloat_Int# x of (# m, e #) -> ...`
 //     -> "Unsupported 2-result pure unboxed-tuple primop: decodeFloat_Int#"
 //   - stateful: `case casArray# arr# i old new s of (# s', flag, oldVal #) -> ...`
