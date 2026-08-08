@@ -43,6 +43,7 @@ use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{Event, Observer};
+use crate::selfharness::operator::{FormSpec, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::tree::NodeId;
@@ -133,9 +134,12 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// Agent row: it DROPS all NINE base effects (`Console`/`KV`/`Fs`/`Lsp`/
 /// `Http`/`Exec`/`Git`/`Time`/`Meta`), so the answerer structurally CANNOT
 /// `run` a shell command, read files, or hit the network — its turn compiles
-/// against a `Tidepool.Effects` that never defines those verbs. It keeps
-/// `Ask` (gui: `dialogForm`/`dialogAsk`) + `Finalize` (`finalize`), the answer
-/// path.
+/// against a `Tidepool.Effects` that never defines those verbs. The row is
+/// `[AskUser, Finalize]`: `AskUser` (self-iterating-harness Wave 2) is
+/// answerer-only — a brand new effect alongside (not a replacement for) the
+/// general-Agent-stack `Ask`, deliberately absent from `standard_decls()` —
+/// presenting a typed form to a HUMAN OPERATOR (`askUser`/`askUserRaw`) and
+/// blocking until submit; `Finalize` (`finalize`) is the answer path.
 ///
 /// # `RunLLMTurn` is STRUCTURALLY excluded — a compile error, not a prompt rule
 ///
@@ -169,12 +173,12 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// `Tidepool.Agent` in the stdlib for the answerer's own named boundary,
 /// mirroring `Tidepool.Harness`'s `HarnessEff`).
 ///
-/// `Ask` comes first: [`EngineConfig::from_decls`] takes the FIRST interposed
-/// effect (`Ask`|`RunLLMTurn`|`Finalize`) as the suspend threshold — with
-/// `RunLLMTurn` gone from this row, `Ask` is simply first among the two that
-/// remain.
+/// `AskUser` comes first: [`EngineConfig::from_decls`] takes the FIRST
+/// interposed effect (`Ask`|`AskUser`|`RunLLMTurn`|`Finalize`) as the suspend
+/// threshold — with `RunLLMTurn` gone from this row, `AskUser` is simply
+/// first among the two that remain.
 pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    vec![tidepool_mcp::ask_decl(), tidepool_mcp::finalize_decl()]
+    vec![tidepool_mcp::askuser_decl(), tidepool_mcp::finalize_decl()]
 }
 
 fn not_bootstrapped() -> DriverError {
@@ -209,6 +213,24 @@ const ANSWERER_NUDGE_ROUNDS: u32 = 16;
 /// runLLMTurn effect".
 const ANSWERER_MAX_ROUNDS: u32 = 32;
 
+/// Cap on CONSECUTIVE `askUser` re-presentations within the servicing of ONE
+/// hole (self-iterating-harness Wave 2 fold-in, post-review): `askUser`
+/// re-prompts by RECURSION on a decode failure — no `Either`, per spec — and
+/// the frozen headless `StdinGate::present_form` returns an EMPTY
+/// `Submission` on EOF rather than erroring, so a non-interactive gate with
+/// closed stdin composes into an unbounded hot loop that NEITHER
+/// `ANSWERER_MAX_ROUNDS` nor `LOOP_INFERENCE_CALL_CAP` catches (both only
+/// count `drive_turn` model rounds, and a form resume deliberately does not
+/// count as one). This counter is a SEPARATE, independent budget: it
+/// increments each time the answerer re-suspends on another `AskUser` hole
+/// without making progress, and resets the moment a resume yields anything
+/// else (a `Finalize` suspension, a plain completion, a compile error to
+/// correct). Past the cap, [`SelfHarnessDriver::drive_answerer_to_finalize`]
+/// hard-fails the hole with a [`DriverError::Session`] naming the cause,
+/// rather than spinning at full CPU. 8 leaves ample room for genuine operator
+/// typos while making a broken/closed gate terminate loudly and fast.
+const ASKUSER_MAX_REPROMPTS: u32 = 8;
+
 /// Per-LOOP hard cap on TOTAL model inference calls across every hole + round
 /// (W1 runaway cap 2; 08-wave1-correctness.md LOCKED: "Per-loop total
 /// inference-call cap = 1024 — hard-stop the loop"). Keeps a misbehaving
@@ -217,7 +239,7 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 
 /// The narrow answerer instruction appended after `render`'s output to form
 /// the per-loop answerer session's system message (W1/C1). Deliberately
-/// scoped to the answerer's INTENDED surface — gui (`dialogForm`/`Ask`) plus
+/// scoped to the answerer's INTENDED surface — gui (`askUser`) plus
 /// `finalize` — NOT the full eval surface [`crate::engine::SYSTEM_FRAMING`]
 /// advertises (`runLLMTurn`/`run`/git/http/…). This is now belt-and-braces
 /// rather than the enforcement mechanism: every verb `SYSTEM_FRAMING`
@@ -233,9 +255,10 @@ State each loop). Each request below asks you for ONE typed value.\n\
 \n\
 Your ONLY runnable output is a single fenced ```haskell block containing one \
 expression of type `M a`. To gather operator input across turns, evaluate a \
-typed form: `dialogForm form :: M (Either FormError a)` (build a `Form a` \
-applicatively from `textField`/`choiceField`/`boolField`/`intField`; `import \
-Tidepool.Form`) or a raw `dialogAsk ui` (`import Tidepool.Ui`). A value you \
+typed form: `askUser :: Form a -> M a` (`import Tidepool.Form`), built \
+applicatively from `enumField`/`intField`/`textField`/`boolField` — it BLOCKS \
+for a human operator and returns the decoded typed value directly (a bad \
+submission re-prompts internally; there is no `Either` to unwrap). A value you \
 bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
 on it.\n\
 \n\
@@ -337,6 +360,14 @@ pub struct SelfHarnessDriver {
     /// `None`. Default [`persistence::default_compaction_path`]; override via
     /// [`Self::set_compaction_path`] (mainly for tests).
     compaction_path: PathBuf,
+    /// The operator-input seam (self-iterating-harness Wave 2): the driver
+    /// blocks on this for `askUser` form presentation
+    /// ([`Self::drive_answerer_to_finalize`]) and the between-loops human
+    /// checkpoint ([`Self::between_loops_gate`]). Sync-blocking by design
+    /// (the frozen `OperatorGate` contract, `selfharness/operator.rs`).
+    /// Default [`StdinGate`] (headless behavior); override via
+    /// [`Self::set_gate`] (a web/GUI implementation, or a scripted test gate).
+    gate: Arc<dyn OperatorGate>,
 }
 
 impl SelfHarnessDriver {
@@ -362,12 +393,21 @@ impl SelfHarnessDriver {
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
             state_path: persistence::default_state_path(),
             compaction_path: persistence::default_compaction_path(),
+            gate: Arc::new(StdinGate),
         }
     }
 
     /// The driver's current lifecycle state.
     pub fn lifecycle(&self) -> &SelfHarnessState {
         &self.lifecycle
+    }
+
+    /// Override the operator-input gate (default [`StdinGate`]). A web/GUI
+    /// implementation of [`OperatorGate`] replaces the headless stdin
+    /// behavior; a test can inject a scripted gate instead of driving real
+    /// stdin.
+    pub fn set_gate(&mut self, gate: Arc<dyn OperatorGate>) {
+        self.gate = gate;
     }
 
     /// Override the emergency-compaction threshold (default
@@ -639,25 +679,13 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// The between-loops human checkpoint: prompt on stderr and block for a
-    /// line from stdin. Transitions to [`SelfHarnessState::Closing`] and
-    /// returns a [`DriverError`] on EOF (stdin closed — e.g. the operator hit
-    /// Ctrl-D), so the loop tears down rather than spinning.
+    /// The between-loops human checkpoint: block on [`OperatorGate::await_continue`]
+    /// — the human-clicks-continue gate (self-iterating-harness Wave 2) that
+    /// replaces the old stdin-Enter read. The default [`StdinGate`] keeps the
+    /// original headless behavior (block on a stdin line); a web/GUI gate
+    /// parks on a button click instead.
     fn between_loops_gate(&mut self) -> Result<(), DriverError> {
-        use std::io::{BufRead, Write};
-        eprint!("[self-harness] press Enter to run the next loop (Ctrl-D to stop)... ");
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        let n = std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| DriverError::Session(format!("between-loops gate stdin: {e}")))?;
-        if n == 0 {
-            self.lifecycle = SelfHarnessState::Closing;
-            return Err(DriverError::Session(
-                "between-loops gate: stdin closed (operator stopped the harness)".into(),
-            ));
-        }
+        self.gate.await_continue();
         Ok(())
     }
 
@@ -897,28 +925,52 @@ impl SelfHarnessDriver {
             });
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
-                    // A Finalize suspension is the answer; any other suspension
-                    // (the scoped answerer can only reach `Ask`/`Finalize`, so
-                    // this is an `Ask`/`dialogForm` mid-interaction) is handled
-                    // by the caller — return it and let `service_runllm_hole`
-                    // classify. Only `Finalize` ends the drive.
-                    if let TurnOutcome::Suspended { classified, .. } = &out {
-                        if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                            return Ok(out);
+                    // A Finalize suspension is the answer. An AskUser suspension
+                    // (the scoped answerer's gui path) is SERVICED here — present
+                    // the form via the operator gate, resume, and repeat while the
+                    // answerer keeps re-suspending on another AskUser (askUser's
+                    // Haskell-side decode-failure re-prompt) — see
+                    // `service_askuser_hole`. Any OTHER suspension is a hard error:
+                    // the scoped answerer stack (`[AskUser, Finalize]`) cannot
+                    // reach anything else.
+                    let TurnOutcome::Suspended { classified, .. } = &out else {
+                        unreachable!("matched TurnOutcome::Suspended above");
+                    };
+                    if matches!(classified.routing, HoleRouting::Finalize { .. }) {
+                        return Ok(out);
+                    }
+                    if let HoleRouting::AskUser { spec } = &classified.routing {
+                        match self.service_askuser_hole(node, spec)? {
+                            Some(finalize_outcome) => return Ok(finalize_outcome),
+                            None => {
+                                // The askUser chain resolved (the answerer's block
+                                // completed) WITHOUT finalize — same corrective
+                                // retry as a plain Completed turn below. A form
+                                // resume is NOT a model round (see
+                                // `service_askuser_hole`'s doc): `rounds` stays
+                                // untouched, only this outer loop repeats.
+                                self.agent.reopen_node(node)?;
+                                self.agent.push_user_turn(
+                                    node,
+                                    &format!(
+                                        "That did not resolve the request. Answer by \
+                                         evaluating `finalize @{ty_label} (value :: \
+                                         {ty_label})`."
+                                    ),
+                                )?;
+                                continue;
+                            }
                         }
                     }
-                    // A non-finalize suspension (an operator form): the answerer
-                    // is mid-interaction and has parked awaiting operator input,
-                    // which the self-harness driver has no operator to answer.
-                    // Treat it as a hard error rather than silently hanging.
+                    // A non-finalize, non-askUser suspension: the answerer is
+                    // mid-interaction and has parked awaiting input this driver
+                    // cannot service. Treat it as a hard error rather than
+                    // silently hanging.
                     return Err(DriverError::Session(format!(
-                        "runLLMTurn answerer suspended on a non-finalize hole \
-                         ({:?}) — the self-harness driver has no operator to answer it",
-                        match &out {
-                            TurnOutcome::Suspended { classified, .. } =>
-                                format!("{:?}", classified.routing),
-                            _ => "unknown".to_string(),
-                        }
+                        "runLLMTurn answerer suspended on a non-finalize, non-askUser \
+                         hole ({:?}) — the self-harness driver has no operator to \
+                         answer it",
+                        classified.routing
                     )));
                 }
                 // A plain value: the block ran to completion WITHOUT
@@ -961,6 +1013,80 @@ impl SelfHarnessDriver {
                 }
                 Err(e) => return Err(e.into()),
             }
+        }
+    }
+
+    /// Service a contiguous run of `askUser` suspensions on `node`, starting
+    /// from the just-classified `spec` (self-iterating-harness Wave 2): block
+    /// on the operator gate for a submission ([`OperatorGate::present_form`]),
+    /// resume the answerer with it via [`Harness::answer_dialog`] (the same
+    /// audited resume path a mechanical dialog answer uses — `answer_dialog`
+    /// accepts `AskUser` alongside `Dialog`/`Ask`), and repeat while the
+    /// resume keeps landing on ANOTHER `AskUser` suspension — `askUser`
+    /// re-prompts by RECURSION on a decode failure (no `Either`; the retry is
+    /// entirely Haskell-side), so a bad submission genuinely re-suspends on a
+    /// fresh `AskUserWith`, not an error this driver sees.
+    ///
+    /// Bounded by [`ASKUSER_MAX_REPROMPTS`] CONSECUTIVE re-presentations,
+    /// independent of the model-round caps (see that constant's doc): a form
+    /// resume never calls the model, so it must not touch `rounds`/
+    /// `loop_inference_calls` — but left totally uncapped, a non-interactive
+    /// gate at EOF (the default [`StdinGate`], closed stdin) composes with
+    /// `askUser`'s unbounded re-prompt recursion into a hot loop no existing
+    /// cap catches.
+    ///
+    /// Returns `Ok(Some(outcome))` when the chain resolves to a `Finalize`
+    /// suspension — built from [`Harness::pending_hole_full`] read right
+    /// after the resume, since `answer_dialog` itself returns no outcome —
+    /// the caller returns it as the hole's answer. Returns `Ok(None)` when a
+    /// resume completes the node with NO pending hole (the answerer's block
+    /// finished without ever calling `finalize`); the caller falls through to
+    /// its existing completed-without-finalize corrective retry. `Err` on a
+    /// resume failure or the reprompt cap being hit.
+    fn service_askuser_hole(
+        &mut self,
+        node: NodeId,
+        spec: &FormSpec,
+    ) -> Result<Option<TurnOutcome>, DriverError> {
+        let mut spec = spec.clone();
+        let mut reprompts: u32 = 0;
+        loop {
+            if reprompts >= ASKUSER_MAX_REPROMPTS {
+                return Err(DriverError::Session(format!(
+                    "operator form re-presented {reprompts} times without a decodable \
+                     submission (a non-interactive gate at EOF, or a form whose \
+                     submission never decodes) — hard-failing the hole"
+                )));
+            }
+            reprompts += 1;
+
+            let submission = self.gate.present_form(&spec);
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(self.agent.answer_dialog(node, Json::Object(submission)))
+            })?;
+
+            let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
+                // The resume completed the node with no further suspension.
+                return Ok(None);
+            };
+            if matches!(classified.routing, HoleRouting::Finalize { .. }) {
+                return Ok(Some(TurnOutcome::Suspended {
+                    hole: hole.0,
+                    classified,
+                    table,
+                }));
+            }
+            if let HoleRouting::AskUser { spec: next_spec } = classified.routing {
+                spec = next_spec;
+                continue;
+            }
+            return Err(DriverError::Session(
+                "runLLMTurn answerer suspended on a non-finalize, non-askUser hole \
+                 after an operator form resume — the self-harness driver has no \
+                 operator to answer it"
+                    .to_string(),
+            ));
         }
     }
 
@@ -1132,5 +1258,36 @@ impl SelfHarnessDriver {
     /// future GUI push directly (WS-H anti-pattern guard).
     fn emit(&self, event: Event) {
         self.observer.on_event(&event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answerer_decls;
+
+    /// The answerer's generated `Tidepool.Effects` module (self-iterating-
+    /// harness Wave 2) declares the NEW `AskUser` GADT + `askUserRaw` helper
+    /// — and does NOT declare `Ask`/`ask`/`dialogAsk` (a DIFFERENT effect,
+    /// deliberately absent from `answerer_decls()`, and `dialogAsk` is
+    /// deleted outright). Pure string-level check, no GHC needed.
+    #[test]
+    fn answerer_effects_module_declares_askuser_not_ask() {
+        let src = tidepool_mcp::effects_module_source(&answerer_decls());
+        assert!(
+            src.contains("data AskUser a where"),
+            "expected an AskUser GADT declaration, got:\n{src}"
+        );
+        assert!(
+            src.contains("askUserRaw"),
+            "expected the askUserRaw helper, got:\n{src}"
+        );
+        assert!(
+            !src.contains("data Ask a where"),
+            "the answerer stack must NOT declare the Ask GADT, got:\n{src}"
+        );
+        assert!(
+            !src.contains("dialogAsk"),
+            "dialogAsk is deleted and must not appear anywhere, got:\n{src}"
+        );
     }
 }

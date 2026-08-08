@@ -617,30 +617,55 @@ macro_rules! ask_effect_def {
                        "schemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]",
                        "schemaToValue (SOpt s) = schemaToValue s",
                        "schemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]"] },
-                // dialogAsk (harness Ui-elicitation surface, D2). Mechanically a
-                // hole with OPERATOR routing (not the runLLMTurn family): it
-                // sends AskWith carrying a `"ui"` payload field the harness
-                // recognizes and renders in the observatory form pane. The
-                // submission (widget values + always-present prose channel) comes
-                // back as the returned Value. TYPED as `Ui -> M Value`: the arg
-                // IS the `Tidepool.Ui` eDSL, not an untyped Value — so a wrong
-                // shape (e.g. a bare `toJSON "question"`) is a GHC error the
-                // model self-corrects from, not a payload that dead-ends in the
-                // renderer. Build it with the `Tidepool.Ui` smart constructors
-                // (`import Tidepool.Ui`), e.g. `dialogAsk (textIn "one rough
-                // spot?" True)` or `dialogAsk (card "Pick" [choice "verdict?"
-                // [("a","A")]])`. The generated Effects module imports `Ui` (see
-                // `eval_prep::effects_module_source`); the constructors ride the
-                // per-eval import list.
-                { raw ["-- | Elicit an operator answer via a RAW `Ui` form (rendered in the",
-                       "-- observatory form pane), returning the untyped {values, prose}",
-                       "-- submission `Value`. This is the escape hatch — for a TYPED result",
-                       "-- prefer `dialogForm` (`import Tidepool.Form`), which builds a form",
-                       "-- applicatively and decodes the submission into your type. Build `ui`",
-                       "-- with the `Tidepool.Ui` constructors (`import Tidepool.Ui`), e.g.",
-                       "-- `dialogAsk (textIn \"your note?\" True)`.",
-                       "dialogAsk :: Ui -> M Value",
-                       "dialogAsk ui = send (AskWith \"\" (object [\"ui\" .= ui]))"] },
+            ],
+        }
+    };
+}
+
+/// AskUser effect — single definition (self-iterating-harness Wave 2,
+/// `plans/self-iterating-harness/09-askuser-form-gui.md`).
+///
+/// A BRAND NEW effect, decl-side only, living ALONGSIDE `Ask` (NOT a rename —
+/// `ask_decl` stays load-bearing for `standard_decls()`/`llm_decl`, see this
+/// wave's escalated decision). Presents a typed form to a HUMAN OPERATOR and
+/// BLOCKS until they submit — distinct from `Ask`, which suspends to the
+/// CALLING LLM AGENT. Answerer-only: it rides in
+/// `tidepool-harness::selfharness::driver::answerer_decls` (`[AskUser,
+/// Finalize]`), not in `standard_decls()`. No `tidepool-handlers` handler —
+/// harness-serviced only (same convention as `ask_effect_def!`/
+/// `runllmturn_effect_def!`/`finalize_effect_def!`'s own doc comments); only
+/// [`effect_decl_projection!`] consumes this definition, so the
+/// `handler`/`req`/`method` slots name types that are never generated.
+///
+/// The typed surface a caller writes is `askUser :: Form a -> M a`
+/// (`Tidepool.Form`, built by a parallel Haskell workstream); `askUserRaw ::
+/// Value -> M Value` here is the raw escape hatch it is built on — the ONE
+/// frozen cross-agent contract name this definition exists to provide.
+#[macro_export]
+macro_rules! askuser_effect_def {
+    ($project:path) => {
+        $project! {
+            effect AskUser,
+            handler AskUserHandler,
+            req AskUserReq,
+            decl_fn askuser_decl,
+            description [
+                "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
+                "The typed surface is `askUser :: Form a -> M a` (`import Tidepool.Form`), ",
+                "built applicatively from `enumField`/`intField`/`textField`/`boolField` and ",
+                "decoding the submission into your type (re-prompting internally on a bad ",
+                "submission). `askUserRaw :: Value -> M Value` is the raw escape hatch it is ",
+                "built on, carrying the form spec as JSON directly.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor AskUserWith, method ask_user_with,
+                  args { spec: "Value" as tidepool_eval::value::Value },
+                  ret "Value" },
+            ],
+            helpers [
+                { raw ["askUserRaw :: Value -> M Value",
+                       "askUserRaw spec = send (AskUserWith spec)"] },
             ],
         }
     };

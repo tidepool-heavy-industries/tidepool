@@ -17,8 +17,9 @@
 //!   answer that `run_child`s against the parent and resumes it.
 //! - `{typedSite}` (no fork) → `runLLMTurn`: the SAME model answers in
 //!   context by evaluating `resume expr :: T`.
-//! - `{ui}` → `dialogAsk`: OPERATOR routing — the `Ui` renders in the form
-//!   pane; the operator's submission resumes the turn.
+//! - `AskUserWith spec` (own constructor, answerer-only) → `askUserRaw`:
+//!   OPERATOR routing — the typed `FormSpec` renders as a form; the
+//!   operator's submission resumes the turn.
 //!
 //! Answer validation is GHC end-to-end: an ill-typed `resume expr` fails to
 //! compile, and the compiler error is fed back verbatim as the retry prompt —
@@ -48,7 +49,11 @@ use crate::tree::FanBadge;
 /// How a suspended request routes — decoded from its constructor name +
 /// payload (self-iterating-harness WS-B: `Ask`, `RunLLMTurn`, and `Finalize`
 /// are each their own GADT/union-tag now, see [`classify_hole`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only (not `Eq`): [`HoleRouting::AskUser`] carries a
+/// [`crate::selfharness::operator::FormSpec`], which derives `PartialEq` but
+/// not `Eq` (the frozen `operator.rs` contract) — do not add `Eq` back there.
+#[derive(Debug, Clone, PartialEq)]
 pub enum HoleRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
     RunLLMTurn { site: u32, ty: Option<String> },
@@ -69,6 +74,13 @@ pub enum HoleRouting {
     /// `dialogAsk ui` — operator routing; the `Ui` value renders in the form
     /// pane.
     Dialog { ui: Json },
+    /// `askUserRaw spec` (self-iterating-harness Wave 2) — a typed form
+    /// suspends to a HUMAN OPERATOR, routed by CONSTRUCTOR NAME
+    /// (`AskUserWith`), not JSON-key probing. `spec` is the decoded
+    /// [`crate::selfharness::operator::FormSpec`] the operator gate renders.
+    AskUser {
+        spec: crate::selfharness::operator::FormSpec,
+    },
     /// `finalize @T x` (self-iterating-harness WS-B) — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
@@ -109,8 +121,16 @@ pub struct ClassifiedHole {
 ///   site the same way as `RunLLMTurn`. The raw value itself is recovered from
 ///   the original request `Value` by the caller (`Harness` retains it), not
 ///   through this JSON-shaped `ClassifiedHole`.
-/// - `AskWith` (prompt, payload) — `ui` → [`HoleRouting::Dialog`], else plain
-///   [`HoleRouting::Ask`] (a structured `ask schema prompt`).
+/// - `AskUserWith` (spec) — a real constructor arm, routed by CONSTRUCTOR
+///   NAME (no JSON-key probing): the request's sole field decodes as a
+///   [`crate::selfharness::operator::FormSpec`] → [`HoleRouting::AskUser`].
+///   A malformed spec (the decode fails) falls through to the plain-Ask
+///   fallback below instead of hanging, so a bad payload surfaces loudly at
+///   the driver.
+/// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
+///   `ask schema prompt`). The old `payload.get("ui")` → `Dialog` probe is
+///   gone (dead once `dialogAsk` was deleted) — a Dialog hole is no longer
+///   PRODUCED, though the variant and its consumers still exist.
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -129,16 +149,42 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 prompt: String::new(),
             }
         }
+        Some("AskUserWith") => match decode_askuser_spec(request, table) {
+            Some(spec) => ClassifiedHole {
+                routing: HoleRouting::AskUser { spec },
+                prompt: String::new(),
+            },
+            None => {
+                let (prompt, payload) = decode_askwith(request, table);
+                ClassifiedHole {
+                    routing: HoleRouting::Ask { payload },
+                    prompt,
+                }
+            }
+        },
         _ => {
             let (prompt, payload) = decode_askwith(request, table);
-            let routing = if let Some(ui) = payload.get("ui") {
-                HoleRouting::Dialog { ui: ui.clone() }
-            } else {
-                HoleRouting::Ask { payload }
-            };
-            ClassifiedHole { routing, prompt }
+            ClassifiedHole {
+                routing: HoleRouting::Ask { payload },
+                prompt,
+            }
         }
     }
+}
+
+/// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
+/// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
+/// mismatch — the caller falls back to the plain-Ask routing.
+fn decode_askuser_spec(
+    request: &Value,
+    table: &DataConTable,
+) -> Option<crate::selfharness::operator::FormSpec> {
+    let Value::Con(_, fields) = request else {
+        return None;
+    };
+    let field = fields.first()?;
+    let json = tidepool_runtime::value_to_json(field, table, 0);
+    serde_json::from_value(json).ok()
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
@@ -258,7 +304,7 @@ pub const SYSTEM_FRAMING: &str = "\
 You drive a resident Haskell (tidepool) session. Your ONLY output that runs is a \
 single fenced ```haskell code block containing ONE expression of type `M a` — the \
 same effect-monad surface as tidepool eval (verbs like `run`, `grepGlob`, `readGlob`, \
-`llm`, `runLLMTurn`, `runLLMTurnFork`, `dialogAsk`). The LAST such block in your \
+`llm`, `runLLMTurn`, `runLLMTurnFork`). The LAST such block in your \
 reply is compiled and run against the session; prose around it is ignored by the runtime.\n\
 \n\
 Verbs return typed DATA you unwrap — failures are `Either`, NOT exceptions. PREFER a typed \
@@ -281,19 +327,9 @@ use the typed verbs + optics.\n\
 To SUSPEND for a typed answer, evaluate `runLLMTurn @T \"prompt\"` (answered in your \
 own context) or `runLLMTurnFork @T \"prompt\"` (answered by a forked sub-agent).\n\
 \n\
-To elicit an operator form, PREFER a TYPED form (`import Tidepool.Form`): build a \
-`Form a` applicatively and answer with `dialogForm form :: M (Either FormError a)` — \
-e.g. `dialogForm ((,) <$> choiceField \"Lane\" [(\"a\", Alpha), (\"b\", Beta)] <*> textField \
-\"Notes\")` renders ONE multi-field form and returns the decoded typed value (a missing/ \
-ill-typed field is `Left FormError`). Field constructors: `textField`/`multilineField` \
-(→ `Text`), `choiceField label [(key, value)]` (a radio → the selected value), \
-`boolField` (→ `Bool`), `intField` (→ `Int`). For a raw untyped form, `dialogAsk ui` \
-(`import Tidepool.Ui`) returns the raw `Value` submission — pass the `Ui` directly (e.g. \
-`dialogAsk (textIn \"note?\" True)`), NOT `toJSON` of it.\n\
-\n\
 The session PERSISTS across turns like GHCi: a value you bind with `x <- …` this turn \
-— a `runLLMTurn`/`runLLMTurnFork` answer, or a `dialogForm`/`dialogAsk` submission \
-— is a LIVE binding in your NEXT turn, so you can BRANCH on it. A branching dialogue is \
+— a `runLLMTurn`/`runLLMTurnFork` answer — is a LIVE binding in your NEXT turn, so \
+you can BRANCH on it. A branching dialogue is \
 exactly that: bind a choice, then next turn pick the follow-up from it. E.g. turn 1 \
 `lane <- runLLMTurn @Text \"which lane — alpha or beta?\"`; turn 2 reads `lane` and \
 presents the form for that branch. Bind what you'll need later instead of re-asking.\n\
@@ -394,18 +430,16 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// Split a model-written block into (imports, expression). A model sometimes
 /// puts `import Foo` lines at the top of its ```haskell block; those are NOT
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
-/// and routed to `template_haskell`'s `imports` field. `Tidepool.Ui` is always
-/// added (harmless if unused) so `dialogAsk (card …)` resolves without the model
-/// having to remember the import (`Tidepool.Form`, for typed `dialogForm`, is
-/// likewise auto-imported by the turn preamble — see `preamble::pragmas_and_imports`).
-/// `prose`/`code` are HIDDEN from this import: `Tidepool.Form` (also always
-/// in scope) exports its own `prose`/`code` :: `Text -> Form ()` display
-/// combinators of the same bare name, and both being unqualified-imported
-/// would make either one an "Ambiguous occurrence" the instant a turn
-/// actually references it. `Tidepool.Ui.prose`/`.code` stay reachable
-/// qualified for a turn building a raw `dialogAsk` `Ui` tree by hand.
+/// and routed to `template_haskell`'s `imports` field.
+///
+/// No implicit import is added here anymore (the old always-on `Tidepool.Ui
+/// hiding (prose, code)` was for `dialogAsk`, now deleted): `Tidepool.Form`
+/// is already auto-imported by the turn preamble when `AskUser` is in the
+/// compiling stack (`preamble::pragmas_and_imports`), and an Agent-stack turn
+/// (which has no `AskUser`) must NOT get it force-imported — Tidepool.Form
+/// would fail to resolve there (it depends on `askUserRaw`).
 pub fn split_imports(block: &str) -> (String, String) {
-    let mut imports = vec!["Tidepool.Ui hiding (prose, code)".to_string()];
+    let mut imports: Vec<String> = Vec::new();
     let mut body = Vec::new();
     let mut in_body = false;
     for line in block.lines() {
@@ -533,14 +567,15 @@ impl EngineConfig {
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
         // `suspend_tag` is the suspend THRESHOLD: the index of the first
-        // interposed effect. For the full Agent stack that's `Ask`; for a
-        // narrower stack (e.g. RunLLMTurn-only) there is no `Ask` entry at
-        // all, so fall back to the first of the other interposed effects —
-        // found by name, not by position, since none of them is necessarily
-        // the list's last entry.
+        // interposed effect. For the full Agent stack that's `Ask`; for the
+        // answerer stack it's `AskUser`; for a narrower stack (e.g.
+        // RunLLMTurn-only) there is no `Ask`/`AskUser` entry at all, so fall
+        // back to the first of the other interposed effects — found by name,
+        // not by position, since none of them is necessarily the list's last
+        // entry.
         let suspend_tag = decls
             .iter()
-            .position(|d| matches!(d.type_name, "Ask" | "RunLLMTurn" | "Finalize"))
+            .position(|d| matches!(d.type_name, "Ask" | "AskUser" | "RunLLMTurn" | "Finalize"))
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls)

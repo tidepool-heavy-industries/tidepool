@@ -1,7 +1,7 @@
 //! Structural proof of the harness/agent effect-stack split: the OUTER
 //! self-iterating-harness session compiles against `Eff '[RunLLMTurn]`
 //! ([`tidepool_harness::selfharness::driver`]'s private `outer_decls`) and
-//! the nested ANSWERER turn compiles against `Eff '[Ask, Finalize]`
+//! the nested ANSWERER turn compiles against `Eff '[AskUser, Finalize]`
 //! ([`answerer_decls`]) — two DISJOINT decl lists, not a shared stack pinned
 //! by convention. `tidepool_mcp::effects_module_source` only emits an
 //! effect's GADT + Member-polymorphic helpers for decls actually passed into
@@ -113,26 +113,49 @@ fn finalize_compiles_in_the_answerer_stack() {
     );
 }
 
-/// The gui path — `dialogAsk` over `Ask` — also compiles against the
-/// answerer stack (`Ask` is in the row). Proves the answerer keeps its full
-/// intended surface (gather operator input, then finalize).
+/// The gui path — `askUserRaw` over `AskUser` — also compiles against the
+/// answerer stack (`AskUser` is in the row). Proves the answerer keeps its
+/// intended surface (present a typed form to a human operator, then
+/// finalize).
 #[test]
-fn dialog_ask_compiles_in_the_answerer_stack() {
+fn askuser_raw_compiles_in_the_answerer_stack() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
 
-    let result = compile_against(
-        answerer_decls(),
-        "dialogAsk (textIn \"one rough spot?\" True)",
-        "Tidepool.Ui",
-    );
+    let result = compile_against(answerer_decls(), "askUserRaw (toJSON (0 :: Int))", "");
     assert!(
         result.is_ok(),
-        "dialogAsk (an Ask verb) must compile against the answerer stack \
-         '[Ask, Finalize] (Ask is in the row), got:\n{:?}",
+        "askUserRaw (an AskUser verb) must compile against the answerer stack \
+         '[AskUser, Finalize] (AskUser is in the row), got:\n{:?}",
         result.err()
+    );
+}
+
+/// The OLD `Ask` effect's gui path — `ask`/`dialogAsk` — does NOT typecheck
+/// against the answerer's `Eff '[AskUser, Finalize]` stack: `Ask` is a
+/// DIFFERENT effect (still present on the general Agent stack, suspending to
+/// the calling LLM agent) and is not declared in this narrower compile at
+/// all.
+#[test]
+fn ask_is_a_compile_error_in_the_answerer_stack() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+
+    let result = compile_against(answerer_decls(), "(ask SStr \"x\" :: M Value)", "");
+    let err = match result {
+        Ok(_) => panic!(
+            "ask compiled against the answerer stack '[AskUser, Finalize] — the \
+             structural scoping is BROKEN (Ask must be undeclared there)"
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("ask") && err.contains("not in scope"),
+        "expected a GHC not-in-scope error naming ask, got:\n{err}"
     );
 }
 

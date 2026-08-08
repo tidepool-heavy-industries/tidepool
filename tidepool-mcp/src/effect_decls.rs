@@ -123,6 +123,10 @@ crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
+// AskUser effect (self-iterating-harness Wave 2, answerer-only): `askuser_decl()`
+// is generated from the single-source definition (`effect_defs.rs`).
+crate::askuser_effect_def!(crate::effect_defs::effect_decl_projection);
+
 // RunLLMTurn effect (self-iterating-harness WS-B, split out of Ask):
 // `runllmturn_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).

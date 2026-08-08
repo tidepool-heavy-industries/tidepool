@@ -19,7 +19,9 @@ Module map:
   (see Machine lifecycle below); drives the turn loop, hole classification,
   fork/fanout registration, elaborator proposal confirm/reject (B2).
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
-  the last fenced Haskell block, classify an `AskWith` suspension.
+  the last fenced Haskell block, classify a suspension (`AskWith`/
+  `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
+  name.
 - `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
   + `asks.json` sidecar) via `tidepool-extract`, independent of
   `tidepool-runtime`'s caching compile (turns are one-shot, no cache needed).
@@ -88,3 +90,48 @@ Forcing events are the only work-begins mechanism (consent integrity audits
 to literal zero — `NodeTree::force` is the only transition out of `Thunk`,
 and it logs `Event::Forced{actor}` before any session exists); teasers are
 harness-generated only (`forcing.rs::derive_teaser`).
+
+## Self-iterating harness — the answerer row + the `AskUser` operator gate
+
+The self-iterating harness's answerer Agent (`selfharness::driver::answerer_decls`)
+compiles against `Eff '[AskUser, Finalize]` — two decl-only effects, disjoint
+from the general Agent stack's `standard_decls()` (which keeps `Ask`,
+`RunLLMTurn`, and every base effect untouched; `AskUser` never appears
+there). `AskUser` (`tidepool_mcp::askuser_decl`) is a brand-new effect, not a
+rename of `Ask`: `Ask` suspends `ask schema prompt` to the CALLING LLM AGENT
+with a JSON Schema; `AskUser` suspends `askUserRaw :: Value -> M Value` (the
+raw wire escape; the typed surface authors write is `askUser :: Form a -> M
+a`, `Tidepool.Form`) to a HUMAN OPERATOR with a typed [`FormSpec`]
+(`selfharness::operator`), routed by CONSTRUCTOR NAME (`AskUserWith`) in
+[`engine::classify_hole`] — no JSON-key probing. `Tidepool.Form` is
+auto-imported into a turn's preamble whenever `AskUser` is in the compiling
+decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
+it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
+the general eval/Agent surface.
+
+`askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
+retry is entirely Haskell-side): a bad submission genuinely re-suspends on a
+fresh `AskUserWith`, not an error the driver observes. The driver services
+this in [`SelfHarnessDriver::service_askuser_hole`]: present the form via the
+operator gate, resume via [`Harness::answer_dialog`] (the same audited resume
+path a mechanical `Dialog`/`Ask` answer uses — `answer_dialog` accepts
+`AskUser` alongside them), and repeat while the resume keeps landing on
+another `AskUser` suspension, reading the fresh pending hole via
+[`Harness::pending_hole_full`] (the resume itself carries no outcome).
+Bounded by `ASKUSER_MAX_REPROMPTS` (8) CONSECUTIVE re-presentations,
+independent of and never counted against the model-round caps
+(`ANSWERER_MAX_ROUNDS`/`LOOP_INFERENCE_CALL_CAP`) — a form resume is not a
+model round, but left uncapped it composes with a non-interactive gate at EOF
+(the default `StdinGate` returns an empty submission on EOF, not an error)
+into an unbounded hot loop no round-based cap catches.
+
+**The operator-input seam is [`selfharness::operator::OperatorGate`]**
+(FROZEN — consume it, never redefine it there): `present_form(&FormSpec) ->
+Submission` and `await_continue()`, both SYNC-BLOCKING by design (the driver
+already runs its turn loop via `block_in_place`/`block_on`, not `async fn`).
+`SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`, defaulting to
+`StdinGate` (headless: reads one JSON line per form, one line per continue)
+and overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
+parks on a channel instead. `between_loops_gate` (the human-clicks-continue
+gate between loop iterations) is `gate.await_continue()` — no EOF-driven
+close of the loop; the caller decides how a continue signal arrives.

@@ -1195,6 +1195,25 @@ impl Harness {
             .map(|p| p.classified.clone())
     }
 
+    /// Like [`Self::pending_hole`], but also returns the hole id and the
+    /// compile table the pending suspension's constructor ids resolve
+    /// against — what a caller needs to build a
+    /// [`engine::TurnOutcome::Suspended`] out of a `pending_hole` read (the
+    /// self-iterating-harness driver's `AskUser` servicing loop, which reads
+    /// the pending hole again after a resume rather than threading the
+    /// original `drive_turn` outcome through). `None` if `node` isn't
+    /// suspended or has no compile table recorded.
+    pub(crate) fn pending_hole_full(
+        &self,
+        node: NodeId,
+    ) -> Option<(HoleId, ClassifiedHole, DataConTable)> {
+        let convos = self.convos.lock();
+        let convo = convos.get(&node)?;
+        let pending = convo.pending.as_ref()?;
+        let table = convo.suspend_table.clone()?;
+        Some((pending.hole.clone(), pending.classified.clone(), table))
+    }
+
     /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
     /// from the routing payload — what the observatory form pane renders. `None`
     /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
@@ -1806,7 +1825,7 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         match &pending.classified.routing {
-            HoleRouting::Dialog { .. } | HoleRouting::Ask { .. } => {}
+            HoleRouting::Dialog { .. } | HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } => {}
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,

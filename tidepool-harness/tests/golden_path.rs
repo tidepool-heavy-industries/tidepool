@@ -10,8 +10,8 @@
 //!   the checkpoint → ONE deliberate ill-typed attempt (`resume "nope"`)
 //!   exercises the GHC-verbatim retry (continuation NOT consumed) → a valid
 //!   `resume (42 :: Int)` runs via run_child against the suspended parent and
-//!   resumes it → the parent's next turn calls `dialogAsk` → an OPERATOR hole →
-//!   a mechanical option-key answer consumes it → the program completes.
+//!   resumes it → the parent's next turn calls `ask` → an OPERATOR hole →
+//!   a mechanical answer consumes it → the program completes.
 //!
 //! Then: fold the log to the terminal tree state, and re-seed a fresh
 //! `ReplayProvider` FROM the log to prove the recorded turns re-drive it.
@@ -19,13 +19,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::Harness;
-use serde_json::json;
 
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
@@ -73,13 +73,15 @@ fn golden_replies() -> Vec<RecordedReply> {
         //    the operator via a dialog, then completes. The block suspends first
         //    at the fork; when resumed it suspends again at the dialog; when THAT
         //    resumes it runs to completion — all one resident fragment.
-        r("I'll get a number from a sub-agent, confirm it, and finish.\n\n\
+        r(
+            "I'll get a number from a sub-agent, confirm it, and finish.\n\n\
            ```haskell\n\
            do\n\
            \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
-           \x20 _ <- dialogAsk (card \"Confirm\" [choice \"Proceed?\" [(\"yes\", \"Yes\"), (\"no\", \"No\")]])\n\
+           \x20 _ <- ask (SEnum [\"yes\", \"no\"]) \"Confirm: Proceed?\"\n\
            \x20 pure (toJSON n)\n\
-           ```"),
+           ```",
+        ),
         // 2. Fork answerer, DELIBERATELY ill-typed: a String where Int is wanted.
         r("```haskell\nresume \"forty-two\"\n```"),
         // 3. Fork answerer, corrected: a real Int.
@@ -90,7 +92,9 @@ fn golden_replies() -> Vec<RecordedReply> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn golden_path_record_replay() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -103,12 +107,17 @@ async fn golden_path_record_replay() {
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
     // 1. Operator creates the root (thunk) + forces it.
-    let root = harness.create_root("golden root", "Get a number, confirm it, finish.").unwrap();
+    let root = harness
+        .create_root("golden root", "Get a number, confirm it, finish.")
+        .unwrap();
     assert_eq!(harness.tree().state(root), Some(NodeState::Thunk));
     harness.force(root, Actor::Operator).unwrap();
 
     // 2. Drive the root turn loop → it suspends at the fork hole.
-    let outcome = harness.run_to_hole_or_done(root).await.expect("root drives to a hole");
+    let outcome = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to a hole");
     match outcome {
         tidepool_harness::TurnOutcome::Suspended { classified, .. } => {
             assert!(
@@ -120,7 +129,10 @@ async fn golden_path_record_replay() {
                 classified.routing
             );
         }
-        other => panic!("root should suspend at runLLMTurnFork, got a different outcome: {}", outcome_tag(&other)),
+        other => panic!(
+            "root should suspend at runLLMTurnFork, got a different outcome: {}",
+            outcome_tag(&other)
+        ),
     }
     assert!(matches!(
         harness.tree().state(root),
@@ -130,7 +142,7 @@ async fn golden_path_record_replay() {
     // 3. Answer the fork: forces a child answerer, drives it (ill-typed retry +
     //    valid answer), runs it via run_child, resumes the parent. The parent's
     //    ONE do-block continuation then advances to the NEXT suspension — the
-    //    dialogAsk — so after this call the parent is suspended on a DIALOG hole.
+    //    ask — so after this call the parent is suspended on an ASK hole.
     let child = harness
         .answer_fork(root, Actor::Operator)
         .await
@@ -138,11 +150,13 @@ async fn golden_path_record_replay() {
     // The child answerer node is done.
     assert_eq!(harness.tree().state(child), Some(NodeState::Done));
 
-    // 4. The parent re-suspended at the dialogAsk (same fragment, next hole).
-    let dialog = harness.pending_hole(root).expect("parent re-suspended at a hole");
+    // 4. The parent re-suspended at the ask (same fragment, next hole).
+    let dialog = harness
+        .pending_hole(root)
+        .expect("parent re-suspended at a hole");
     assert!(
-        matches!(dialog.routing, tidepool_harness::HoleRouting::Dialog { .. }),
-        "parent should re-suspend on a DIALOG hole after the fork resumes, got {:?}",
+        matches!(dialog.routing, tidepool_harness::HoleRouting::Ask { .. }),
+        "parent should re-suspend on an ASK hole after the fork resumes, got {:?}",
         dialog.routing
     );
     assert!(matches!(
@@ -150,11 +164,11 @@ async fn golden_path_record_replay() {
         Some(NodeState::Suspended { .. })
     ));
 
-    // 5. Operator answers the dialog MECHANICALLY (option key "yes"), no model
-    //    turn. The dialogAsk continuation then runs the block's `pure (toJSON n)`
-    //    tail to completion — the whole program is one resident fragment.
+    // 5. Operator answers the ask MECHANICALLY, no model turn. The
+    //    continuation then runs the block's `pure (toJSON n)` tail to
+    //    completion — the whole program is one resident fragment.
     harness
-        .answer_dialog(root, json!({ "values": { "yes": true }, "prose": "" }))
+        .answer_dialog(root, json!("yes"))
         .await
         .expect("mechanical dialog answer");
 
@@ -212,18 +226,29 @@ async fn fork_only_resumes_to_completion() {
     };
     let replies = vec![
         r("```haskell\ndo\n  n <- runLLMTurnFork @Int \"pick\"\n  pure (toJSON n)\n```"),
-        r("```haskell\nresume \"nope\"\n```"), // ill-typed
+        r("```haskell\nresume \"nope\"\n```"),   // ill-typed
         r("```haskell\nresume (7 :: Int)\n```"), // valid
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness"));
 
-    let root = harness.create_root("fork only", "fork for a number").unwrap();
+    let root = harness
+        .create_root("fork only", "fork for a number")
+        .unwrap();
     harness.force(root, Actor::Operator).unwrap();
-    let out = harness.run_to_hole_or_done(root).await.expect("drives to fork hole");
-    assert!(matches!(out, tidepool_harness::TurnOutcome::Suspended { .. }));
+    let out = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("drives to fork hole");
+    assert!(matches!(
+        out,
+        tidepool_harness::TurnOutcome::Suspended { .. }
+    ));
 
-    harness.answer_fork(root, Actor::Operator).await.expect("fork answered");
+    harness
+        .answer_fork(root, Actor::Operator)
+        .await
+        .expect("fork answered");
     assert_eq!(
         harness.tree().state(root),
         Some(NodeState::Done),
