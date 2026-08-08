@@ -34,3 +34,4 @@ path = "src/bin/tidepool-selfharness-web.rs"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
 futures-util = "0.3"
+tempfile = "3"
