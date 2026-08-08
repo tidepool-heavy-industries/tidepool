@@ -21,7 +21,7 @@
 # which is what a measurement wants.
 set -euo pipefail
 
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4)
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,
@@ -30,7 +30,7 @@ SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /t
 # here — so it drains rather than deadlocks. Override the floor with
 # TIDEPOOL_GHC_MEM_FLOOR_MB (0 disables). This is a soft guard; a cgroup
 # MemoryMax is the hard ceiling.
-MEM_FLOOR_MB="${TIDEPOOL_GHC_MEM_FLOOR_MB:-4096}"
+MEM_FLOOR_MB="${TIDEPOOL_GHC_MEM_FLOOR_MB:-6144}"
 mem_available_mb() { awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo; }
 await_memory() {
   [ "$MEM_FLOOR_MB" -gt 0 ] || return 0
