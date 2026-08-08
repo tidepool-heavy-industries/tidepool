@@ -151,7 +151,8 @@ fn node_free_vars(
             remove_binders(child(sets, *body), std::slice::from_ref(binder), empty)
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
-            let body_bound = remove_binders(child(sets, *body), std::slice::from_ref(binder), empty);
+            let body_bound =
+                remove_binders(child(sets, *body), std::slice::from_ref(binder), empty);
             union_children(&[child(sets, *rhs), &body_bound], empty)
         }
         CoreFrame::LetRec { bindings, body } => {
@@ -221,7 +222,7 @@ mod tests {
         let x = VarId(1);
         let y = VarId(2);
         let expr = tree(vec![
-            CoreFrame::Var(y),                    // 0
+            CoreFrame::Var(y),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1: free = {y}
         ]);
         let idx = FreeVarsIndex::compute(&expr);

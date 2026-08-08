@@ -1157,7 +1157,7 @@ fn topo_sort_deferred_simple(
     free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
 ) -> Vec<(VarId, usize)> {
     use petgraph::graph::{DiGraph, NodeIndex};
-    use petgraph::visit::Dfs;
+    use petgraph::visit::{Dfs, EdgeRef};
     use petgraph::Direction;
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -1336,15 +1336,14 @@ fn compute_captures_promised(
 }
 
 fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
-    let (body_tree, sorted_fvs) =
-        compute_captures(
-            args.ctx,
-            args.sess.tree,
-            &args.sess.free_vars_idx,
-            body_idx,
-            Some(binder),
-            "lam",
-        );
+    let (body_tree, sorted_fvs) = compute_captures(
+        args.ctx,
+        args.sess.tree,
+        &args.sess.free_vars_idx,
+        body_idx,
+        Some(binder),
+        "lam",
+    );
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
@@ -1570,16 +1569,15 @@ fn emit_thunk_promised(
     promised: Option<&FxHashSet<VarId>>,
 ) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
     // Extract the sub-expression and compute free variables
-    let (body_tree, sorted_fvs) =
-        compute_captures_promised(
-            args.ctx,
-            args.sess.tree,
-            &args.sess.free_vars_idx,
-            body_idx,
-            None,
-            "thunk",
-            promised,
-        );
+    let (body_tree, sorted_fvs) = compute_captures_promised(
+        args.ctx,
+        args.sess.tree,
+        &args.sess.free_vars_idx,
+        body_idx,
+        None,
+        "thunk",
+        promised,
+    );
 
     let captures: Vec<(VarId, Option<SsaVal>)> = sorted_fvs
         .iter()
@@ -3073,7 +3071,8 @@ impl EmitContext {
 
         // Bind deferred simple bindings in topological order (deps first) so each
         // thunk captures its already-bound siblings (see Phase 3c below).
-        let deferred_simple = topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
+        let deferred_simple =
+            topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
 
         // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
@@ -3795,7 +3794,10 @@ mod topo_sort_golden_tests {
         out
     }
 
-    fn names(sorted: &[(VarId, usize)], vars: &FxHashMap<&'static str, VarId>) -> Vec<&'static str> {
+    fn names(
+        sorted: &[(VarId, usize)],
+        vars: &FxHashMap<&'static str, VarId>,
+    ) -> Vec<&'static str> {
         let rev: FxHashMap<VarId, &'static str> = vars.iter().map(|(k, v)| (*v, *k)).collect();
         sorted.iter().map(|(v, _)| rev[v]).collect()
     }
@@ -3804,7 +3806,8 @@ mod topo_sort_golden_tests {
     fn independent_bindings_preserve_input_order() {
         // No dependencies among a/b/c: every binding is unblocked in the
         // first pass, so the output is exactly the input order.
-        let deps: &[(&'static str, &'static [&'static str])] = &[("c", &[]), ("a", &[]), ("b", &[])];
+        let deps: &[(&'static str, &'static [&'static str])] =
+            &[("c", &[]), ("a", &[]), ("b", &[])];
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
@@ -3820,7 +3823,8 @@ mod topo_sort_golden_tests {
         // binding with no unmet deps); round 2 resolves `b`; round 3
         // resolves `c`. Final order is the true dependency order regardless
         // of input order.
-        let deps: &[(&'static str, &'static [&'static str])] = &[("c", &["b"]), ("b", &["a"]), ("a", &[])];
+        let deps: &[(&'static str, &'static [&'static str])] =
+            &[("c", &["b"]), ("b", &["a"]), ("a", &[])];
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
@@ -3839,12 +3843,8 @@ mod topo_sort_golden_tests {
         // because of any dependency between them — then `d` (deps {b,c}
         // BOTH already pushed earlier in this same pass) all resolve in one
         // pass, in exactly the input order.
-        let deps: &[(&'static str, &'static [&'static str])] = &[
-            ("a", &[]),
-            ("c", &["a"]),
-            ("b", &["a"]),
-            ("d", &["b", "c"]),
-        ];
+        let deps: &[(&'static str, &'static [&'static str])] =
+            &[("a", &[]), ("c", &["a"]), ("b", &["a"]), ("d", &["b", "c"])];
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();

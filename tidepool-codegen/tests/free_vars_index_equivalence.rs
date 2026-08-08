@@ -98,7 +98,10 @@ fn equivalent_on_real_corpora() {
         corpora_scanned > 0,
         "no corpus directory was reachable — this run proved nothing; check the checkout"
     );
-    assert!(nodes_checked > 0, "no nodes were checked across any fixture");
+    assert!(
+        nodes_checked > 0,
+        "no nodes were checked across any fixture"
+    );
 }
 
 #[test]
@@ -124,7 +127,8 @@ fn equivalent_on_generated_trees() {
             });
             runner
                 .run(&arb_core_expr_depth(4), |tree| {
-                    nodes_checked.set(nodes_checked.get() + check_tree_exhaustively("generated", &tree));
+                    nodes_checked
+                        .set(nodes_checked.get() + check_tree_exhaustively("generated", &tree));
                     trees_checked.set(trees_checked.get() + 1);
                     Ok(())
                 })
@@ -155,7 +159,10 @@ fn equivalent_on_generated_trees() {
                  nodes_checked={nodes_checked}",
                 trees_checked.get()
             );
-            assert!(nodes_checked > 0, "no nodes were checked across any generated tree");
+            assert!(
+                nodes_checked > 0,
+                "no nodes were checked across any generated tree"
+            );
         })
         .unwrap()
         .join()
