@@ -12,11 +12,19 @@ self-iterating harness driver blocks on when it needs a human.
   (owned by a sibling workstream; see the frozen-seam note in that file).
 - `shell.rs` — the full HTML document: inline CSS + the vendored Datastar
   client JS, no CDN, no build step (also sibling-owned).
+- `lib.rs` — `spawn_operator_server(port)`: binds `127.0.0.1:<port>`, spawns
+  the axum server on a background task, and returns the `Arc<WebGate>` a
+  driver's `set_gate` takes. Both binaries below boot the server through it.
 - `bin/tidepool-selfharness-web.rs` — the server binary, plus a `--demo` mock
   driver for opening/reviewing the page with no harness running.
 - `bin/tidepool-selfharness.rs` — the actual self-iterating harness driver
   binary (not part of the web surface; lives here because it's this crate's
-  other binary target).
+  other binary target). Wires `WebGate` into `SelfHarnessDriver::set_gate`
+  before `run_loop` unless `--yes`/`--auto`/`--replay` is set (then the
+  driver's default headless `StdinGate` stays); also pushes the loaded
+  `--harness` source's directory onto the answerer's `EngineConfig::include`
+  and fans every driver `Event` out to both a stderr `LogObserver` and a
+  durable `JsonlObserver` (`transcript.jsonl`).
 - `tests/operator_gate.rs` — the HTTP-level integration test: boots the real
   router with `axum::serve` on an ephemeral port and drives it with a real
   client.
@@ -74,9 +82,16 @@ changes:
 - Every action element (submit button, continue button) points at a verb via
   `data-on-submit="@post('/submit')"` or `data-on-click="@post('/continue')"`.
   The vendored JS parses the URL out of that literal `@post('...')` string.
-- The client patches by same-`id` element replacement, and skips replacing an
-  element that currently has focus — so a live SSE tick never rips out what
-  the operator is mid-typing.
+- `panel()` stamps `data-rev="<n>"` on the `#panel` root, `<n>` being
+  `AppState`'s revision counter (bumped under the SAME lock as the pending
+  slot, on every `publish`/`take`). The client patches by same-`id` element
+  replacement, and skips replacing an element that currently has focus ONLY
+  when the incoming `data-rev` matches the currently-mounted element's — a
+  DIFFERENT revision (a new pending interaction was published) always
+  replaces `#panel` regardless of focus. This is what keeps a submit's
+  resulting SSE tick from being dropped just because the operator's focus is
+  still inside the panel — without the revision gate, that tick would be
+  silently skipped and the operator would see a stale, already-resolved form.
 
 Don't assert on class names, colors, or element nesting anywhere in this
 crate's tests — those are `render.rs`/`shell.rs`'s to change freely as long

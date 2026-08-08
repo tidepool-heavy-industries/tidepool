@@ -4,11 +4,24 @@
 //!
 //! The client ([`JS`]) speaks exactly the wire the renderer emits: it opens
 //! the `/sse` stream, applies `datastar-patch-elements` frames by replacing
-//! the same-`id` element in place (preserving a focused/typed-in field across
-//! ticks), and wires `data-on-submit`/`data-on-click="@post('/x')"` handlers.
-//! A `data-on-submit` form collects every `[data-bind]` input into a FLAT
-//! `{ <key>: <scalar> }` object (coerced by `data-kind`: int → number, bool →
-//! boolean, enum/text → string) and POSTs it.
+//! the same-`id` element in place, and wires `data-on-submit`/
+//! `data-on-click="@post('/x')"` handlers. A `data-on-submit` form collects
+//! every `[data-bind]` input into a FLAT `{ <key>: <scalar> }` object
+//! (coerced by `data-kind`: int → number, bool → boolean, enum/text →
+//! string) and POSTs it.
+//!
+//! ## Focus-preserving skip is gated on `data-rev` (F10)
+//! A focused/typed-in field is preserved across an SSE tick ONLY when the
+//! incoming fragment's `data-rev` (stamped by [`crate::render::panel`])
+//! matches the currently-mounted element's — i.e. the server re-rendered the
+//! SAME pending interaction (e.g. a periodic keep-alive tick). A DIFFERENT
+//! `data-rev` always replaces the element regardless of focus: it means the
+//! pending interaction itself changed (a submit resolved a form and the next
+//! interaction — `Idle`, another form, the continue gate — was published),
+//! and skipping that replace on stale-focus grounds is exactly the bug this
+//! gate fixes (a submit's resulting SSE tick used to get dropped while the
+//! panel still had focus, leaving the operator staring at an already-resolved
+//! form).
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
@@ -231,16 +244,21 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 pub const JS: &str = r#"
 (function () {
   // Apply one datastar-patch-elements payload: replace each same-id element in
-  // place. A focused/typed-in field is preserved (its element is left this tick)
-  // so a live SSE tick never rips out what the operator is doing.
+  // place. A focused/typed-in field is preserved (its element is left this
+  // tick) ONLY when the incoming data-rev matches the currently-mounted
+  // element's — the SAME pending interaction re-rendered. A DIFFERENT
+  // data-rev (a new pending interaction was published) always replaces the
+  // element regardless of focus, so a submit's resulting tick is never
+  // dropped just because the panel still has focus.
   function applyPatch(html) {
     const tpl = document.createElement('template');
     tpl.innerHTML = html.trim();
     tpl.content.querySelectorAll('[id]').forEach((next) => {
       const cur = document.getElementById(next.id);
       if (!cur) { document.body.appendChild(next); wire(next); return; }
+      const sameRev = cur.getAttribute('data-rev') === next.getAttribute('data-rev');
       const active = document.activeElement;
-      if (active && active !== document.body && cur.contains(active)) return;
+      if (sameRev && active && active !== document.body && cur.contains(active)) return;
       cur.replaceWith(next);
       wire(next);
     });
@@ -371,5 +389,34 @@ mod tests {
         assert!(JS.contains("new EventSource('/sse')"));
         assert!(JS.contains("data-bind"));
         assert!(JS.contains("datastar-patch-elements"));
+    }
+
+    /// F10: the focus-preserving skip must be GATED on a matching `data-rev`
+    /// — computed and checked before the unconditional replace, so a
+    /// differing revision (a new pending interaction) always reaches
+    /// `replaceWith` regardless of what currently has focus.
+    #[test]
+    fn js_focus_skip_gated_on_matching_data_rev() {
+        assert!(JS.contains("data-rev"));
+
+        let same_rev_idx = JS.find("const sameRev").expect("sameRev is computed");
+        let active_idx = JS
+            .find("const active = document.activeElement")
+            .expect("active is computed");
+        assert!(
+            same_rev_idx < active_idx,
+            "sameRev must be computed before the focus check reads document.activeElement"
+        );
+
+        let gate_idx = JS
+            .find("if (sameRev && active")
+            .expect("the skip is gated on sameRev");
+        let replace_idx = JS
+            .find("cur.replaceWith(next)")
+            .expect("the unconditional replace exists");
+        assert!(
+            gate_idx < replace_idx,
+            "the sameRev-gated early return must precede the unconditional replace"
+        );
     }
 }

@@ -3,7 +3,10 @@
 //! FROZEN SEAM (consumed by [`crate::server`]): the [`View`] enum and
 //! [`panel`] function. `panel` always yields the single `id="panel"` element
 //! the SSE stream patches in place — the page shell embeds it once, and every
-//! SSE frame replaces it wholesale.
+//! SSE frame replaces it wholesale. The `data-rev` attribute it stamps is
+//! part of that wire contract too — [`crate::shell`]'s client JS compares it
+//! against the currently-mounted `#panel` to decide whether a focus-preserving
+//! skip applies (see `shell.rs`'s `applyPatch`).
 //!
 //! ## Field wire contract (partner to `shell::JS`'s collector)
 //! Every input carries `data-bind="<key>"` and `data-kind="enum|int|text|bool"`.
@@ -26,9 +29,14 @@ pub enum View<'a> {
 
 /// The `id="panel"` fragment — the one element patched over SSE. Rendered both
 /// into the initial page ([`crate::shell::page`]) and into every SSE frame.
-pub fn panel(view: &View) -> Markup {
+/// `rev` is the server's monotonically-bumped revision counter
+/// ([`crate::server::AppState`]), stamped as `data-rev` so the client can
+/// tell a genuinely NEW pending interaction (always replace `#panel`) apart
+/// from a same-interaction re-render (skip while the operator has focus
+/// inside it).
+pub fn panel(view: &View, rev: u64) -> Markup {
     html! {
-        div id="panel" {
+        div id="panel" data-rev=(rev) {
             @match view {
                 View::Idle => (idle()),
                 View::Form(spec) => (form(spec)),
@@ -170,8 +178,8 @@ mod tests {
     #[test]
     fn panel_form_renders_every_field_kind_with_bind_and_kind() {
         let spec = sample();
-        let html = panel(&View::Form(&spec)).into_string();
-        assert!(html.starts_with("<div id=\"panel\">"));
+        let html = panel(&View::Form(&spec), 0).into_string();
+        assert!(html.starts_with("<div id=\"panel\""));
         // one data-bind per field key
         for key in ["mood", "count", "note", "ok"] {
             assert!(
@@ -194,14 +202,28 @@ mod tests {
 
     #[test]
     fn panel_continue_renders_button() {
-        let html = panel(&View::Continue).into_string();
+        let html = panel(&View::Continue, 0).into_string();
         assert!(html.contains("@post('/continue')"));
     }
 
     #[test]
     fn panel_idle_is_quiet() {
-        let html = panel(&View::Idle).into_string();
-        assert!(html.starts_with("<div id=\"panel\">"));
+        let html = panel(&View::Idle, 0).into_string();
+        assert!(html.starts_with("<div id=\"panel\""));
         assert!(!html.contains("@post"));
+    }
+
+    /// F10: `panel()` stamps the caller's revision as `data-rev` on the
+    /// `#panel` root, and a different revision produces a different
+    /// attribute value — the signal `shell.rs`'s client JS keys its
+    /// skip-on-focus rule off.
+    #[test]
+    fn panel_stamps_data_rev_from_the_argument() {
+        let a = panel(&View::Idle, 7).into_string();
+        assert!(a.contains("id=\"panel\" data-rev=\"7\""), "{a}");
+
+        let b = panel(&View::Idle, 8).into_string();
+        assert!(b.contains("id=\"panel\" data-rev=\"8\""), "{b}");
+        assert_ne!(a, b);
     }
 }

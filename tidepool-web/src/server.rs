@@ -62,10 +62,24 @@ impl Pending {
     }
 }
 
+/// The pending interaction plus a revision counter, both behind ONE lock
+/// (F10) — `rev` must never be read/bumped out of step with `pending`, or a
+/// client could observe a `data-rev` that doesn't actually correspond to the
+/// panel content it was stamped on.
+struct Slot {
+    pending: Pending,
+    /// Bumped on every [`AppState::publish`]/[`AppState::take`] — a NEW
+    /// pending interaction (or its resolution back to `Idle`) always gets a
+    /// fresh revision, so the client's focus-preserving skip rule (`shell.rs`)
+    /// never mistakes "the operator submitted, and a new form/gate replaced
+    /// it" for "the same form re-rendered".
+    rev: u64,
+}
+
 /// Shared server state: the pending operator interaction + the re-render tick.
 #[derive(Clone)]
 pub struct AppState {
-    pending: Arc<Mutex<Pending>>,
+    slot: Arc<Mutex<Slot>>,
     /// Broadcast of "the panel changed" — the gate pings this after publishing
     /// a pending interaction so every open SSE stream re-renders promptly.
     tick: broadcast::Sender<()>,
@@ -81,7 +95,10 @@ impl AppState {
     pub fn new() -> Self {
         let (tick, _) = broadcast::channel(16);
         AppState {
-            pending: Arc::new(Mutex::new(Pending::Idle)),
+            slot: Arc::new(Mutex::new(Slot {
+                pending: Pending::Idle,
+                rev: 0,
+            })),
             tick,
         }
     }
@@ -92,19 +109,27 @@ impl AppState {
 
     /// Render the current panel fragment.
     fn panel_html(&self) -> String {
-        let pending = self.pending.lock().unwrap();
-        panel(&pending.view()).into_string()
+        let slot = self.slot.lock().unwrap();
+        panel(&slot.pending.view(), slot.rev).into_string()
     }
 
-    /// Publish a pending interaction, replacing whatever was there, and ping.
+    /// Publish a pending interaction, replacing whatever was there, bump the
+    /// revision, and ping.
     fn publish(&self, next: Pending) {
-        *self.pending.lock().unwrap() = next;
+        let mut slot = self.slot.lock().unwrap();
+        slot.pending = next;
+        slot.rev += 1;
+        drop(slot);
         self.ping();
     }
 
-    /// Take the pending interaction, leaving `Idle`, and ping.
+    /// Take the pending interaction, leaving `Idle`, bump the revision, and
+    /// ping.
     fn take(&self) -> Pending {
-        let taken = std::mem::replace(&mut *self.pending.lock().unwrap(), Pending::Idle);
+        let mut slot = self.slot.lock().unwrap();
+        let taken = std::mem::replace(&mut slot.pending, Pending::Idle);
+        slot.rev += 1;
+        drop(slot);
         self.ping();
         taken
     }
@@ -154,8 +179,8 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn page(State(st): State<AppState>) -> Html<String> {
-    let pending = st.pending.lock().unwrap();
-    Html(shell::page(panel(&pending.view())).into_string())
+    let slot = st.slot.lock().unwrap();
+    Html(shell::page(panel(&slot.pending.view(), slot.rev)).into_string())
 }
 
 /// The SSE stream: one Datastar `patch-elements` frame per tick, each carrying
@@ -260,7 +285,7 @@ mod tests {
         let handle = std::thread::spawn(move || gate.present_form(&spec()));
 
         // Wait for the form to be published, then resolve it.
-        while !matches!(&*st.pending.lock().unwrap(), Pending::Form { .. }) {
+        while !matches!(st.slot.lock().unwrap().pending, Pending::Form { .. }) {
             std::thread::yield_now();
         }
         let mut body = Submission::new();
@@ -284,7 +309,7 @@ mod tests {
         let gate = WebGate::new(st.clone());
         let handle = std::thread::spawn(move || gate.await_continue());
 
-        while !matches!(&*st.pending.lock().unwrap(), Pending::Continue { .. }) {
+        while !matches!(st.slot.lock().unwrap().pending, Pending::Continue { .. }) {
             std::thread::yield_now();
         }
         match st.take() {
@@ -304,5 +329,33 @@ mod tests {
         assert_eq!(s, back);
         let keys: Vec<&str> = back.fields.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, vec!["mood", "count"]);
+    }
+
+    fn extract_rev(html: &str) -> &str {
+        let after = html
+            .split("data-rev=\"")
+            .nth(1)
+            .expect("panel html carries data-rev");
+        after.split('"').next().unwrap()
+    }
+
+    /// F10: every [`AppState::publish`]/[`AppState::take`] bumps the revision
+    /// stamped into the rendered panel — the signal the client uses to tell a
+    /// genuinely new pending interaction apart from a same-interaction
+    /// re-render.
+    #[test]
+    fn panel_html_data_rev_bumps_on_every_publish_and_take() {
+        let st = AppState::new();
+        let rev0 = extract_rev(&st.panel_html()).to_string();
+
+        st.publish(Pending::Continue {
+            resolve: oneshot::channel().0,
+        });
+        let rev1 = extract_rev(&st.panel_html()).to_string();
+        assert_ne!(rev0, rev1, "publish must bump the revision");
+
+        st.take();
+        let rev2 = extract_rev(&st.panel_html()).to_string();
+        assert_ne!(rev1, rev2, "take must bump the revision");
     }
 }

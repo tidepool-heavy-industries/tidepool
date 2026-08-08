@@ -10,6 +10,12 @@
 //! runtime required: `run_loop` services
 //! each `runLLMTurn` hole via `block_in_place` + `Handle::current().block_on`
 //! (see `driver.rs`'s module doc).
+//!
+//! Boots the operator GUI ([`tidepool_web::spawn_operator_server`]) and wires
+//! its [`tidepool_web::WebGate`] into the driver before `run_loop` — UNLESS
+//! `--yes`/`--auto`/`--replay` is set, in which case the driver keeps its
+//! default headless `StdinGate` (no browser needed for CI/replay/unattended
+//! runs).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +26,26 @@ use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
 use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider};
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
+use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    answerer_decls, load_harness_source, Event, Harness, JsonlObserver, LogObserver, Observer,
+    SelfHarnessDriver,
 };
+
+/// Dispatches every driver [`Event`] to each of several observers — lets the
+/// bin wire both stderr logging and the durable transcript without
+/// `SelfHarnessDriver` itself knowing about more than one [`Observer`].
+struct FanoutObserver {
+    observers: Vec<Arc<dyn Observer>>,
+}
+
+impl Observer for FanoutObserver {
+    fn on_event(&self, event: &Event) {
+        for o in &self.observers {
+            o.on_event(event);
+        }
+    }
+}
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,11 +60,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // press Enter against a recorded run).
     let auto = args.iter().any(|a| a == "--yes" || a == "--auto") || replay_log.is_some();
 
+    eprintln!(
+        "[boot] loading harness source from {}",
+        harness_source_path.display()
+    );
+    let source = load_harness_source(&harness_source_path)?;
+
     let prelude_dir = prelude_dir();
     let project_lib = project_lib_dir();
     // The nested answerer's SCOPED stack (gui + finalize, base effects dropped
     // — W1 effect-scoping), not the full Agent stack.
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?;
+    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?;
+    // So a sibling `HarnessTypes` module the harness source depends on
+    // resolves under the answerer's own compile too (mirrors the outer
+    // session's `outer_cfg.include.push(source.source_dir.clone())` in
+    // `driver.rs::bootstrap`).
+    cfg.include.push(source.source_dir.clone());
 
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
         (Some(log), _) => {
@@ -78,14 +112,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (WS-A + WS-B).
     let agent = Arc::new(Harness::new(writer, cfg, provider)?);
 
-    let observer = Arc::new(LogObserver);
+    let transcript_path = persistence::default_transcript_path();
+    let jsonl = JsonlObserver::create(&transcript_path)?;
+    eprintln!("[boot] transcript: {}", transcript_path.display());
+    let observer: Arc<dyn Observer> = Arc::new(FanoutObserver {
+        observers: vec![Arc::new(LogObserver), Arc::new(jsonl)],
+    });
     let mut driver = SelfHarnessDriver::new(agent, observer);
 
-    eprintln!(
-        "[boot] loading harness source from {}",
-        harness_source_path.display()
-    );
-    let source = load_harness_source(&harness_source_path)?;
+    if !auto {
+        let port: u16 = arg_str(&args, "--port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4600);
+        let gate = tidepool_web::spawn_operator_server(port).await?;
+        driver.set_gate(gate);
+    }
+
     driver.run_loop(&source, auto)?;
 
     Ok(())

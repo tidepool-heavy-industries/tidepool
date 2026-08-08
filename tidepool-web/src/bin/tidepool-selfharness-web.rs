@@ -10,15 +10,16 @@
 //! its aesthetic can be opened and reviewed on localhost with no harness, no
 //! model, and no API calls.
 //!
-//! Real-driver wiring is deliberately NOT here: root integrates the gate into
-//! `SelfHarnessDriver` after the effect/driver core merges.
+//! Real-driver wiring lives in the sibling `tidepool-selfharness` binary,
+//! which boots the same server via [`tidepool_web::spawn_operator_server`]
+//! and wires the returned gate into `SelfHarnessDriver`.
 
 use std::sync::Arc;
 
 use tidepool_harness::selfharness::operator::{
     EnumOption, Field, FieldKind, FormSpec, OperatorGate,
 };
-use tidepool_web::{router, AppState, WebGate};
+use tidepool_web::WebGate;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,19 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4601);
 
-    let state = AppState::new();
+    let gate = tidepool_web::spawn_operator_server(port).await?;
 
     if demo {
-        let gate = Arc::new(WebGate::new(state.clone()));
         std::thread::spawn(move || demo_loop(gate));
         eprintln!("[demo] mock driver running — the page presents a sample form");
     }
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("[boot] operator GUI on http://{addr}");
-    axum::serve(listener, router(state)).await?;
-    Ok(())
+    std::future::pending::<Result<(), Box<dyn std::error::Error>>>().await
 }
 
 /// The mock driver: present the sample form, report the submission, then park
