@@ -345,6 +345,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
@@ -377,7 +378,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     // still runs (it is called unconditionally after
     // `run_loop_fragment_inner`), so this already-forced answerer node must
     // still be retired terminally.
-    let cycle1 = driver.run_one_cycle(&harness_source, None);
+    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
     assert!(
         cycle1.is_err(),
         "the scripted first model call must fail this cycle"
@@ -400,6 +401,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     // finalize, same as `errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers`.
     driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("cycle 2 (after the recovered driver) must succeed");
     let (after_cycle2, _) = harness.tree().node_ids_after(None, usize::MAX);
     let new_in_cycle2: Vec<_> = after_cycle2
