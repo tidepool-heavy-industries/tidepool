@@ -49,6 +49,11 @@ impl Observer for FanoutObserver {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
 
     let replay_log = arg_value(&args, "--replay");
@@ -60,9 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // press Enter against a recorded run).
     let auto = args.iter().any(|a| a == "--yes" || a == "--auto") || replay_log.is_some();
 
-    eprintln!(
-        "[boot] loading harness source from {}",
-        harness_source_path.display()
+    tracing::info!(
+        target: "tidepool_web",
+        path = %harness_source_path.display(),
+        "loading harness source"
     );
     let source = load_harness_source(&harness_source_path)?;
 
@@ -79,13 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
         (Some(log), _) => {
-            eprintln!("[boot] replay mode over {}", log.display());
+            tracing::info!(target: "tidepool_web", path = %log.display(), "replay mode");
             Arc::new(ReplayProvider::from_log(log)?)
         }
         (None, Some(env_var)) => {
             let model =
                 std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-            eprintln!("[boot] API-key mode ({env_var}), model {model}");
+            tracing::info!(target: "tidepool_web", env_var, model, "API-key mode");
             Arc::new(ApiKeyProvider::new(ApiKeyConfig::new(
                 env_var.clone(),
                 model,
@@ -119,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         harness_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     let writer = LogWriter::create(&log_path, &header)?;
-    eprintln!("[boot] run log: {}", log_path.display());
+    tracing::info!(target: "tidepool_web", path = %log_path.display(), "run log");
 
     // The nested Harness: an ordinary node-tree orchestrator, used ONLY to
     // answer `runLLMTurn` holes by driving an Agent turn loop to `finalize`
@@ -128,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let transcript_path = persistence::default_transcript_path();
     let jsonl = JsonlObserver::create(&transcript_path)?;
-    eprintln!("[boot] transcript: {}", transcript_path.display());
+    tracing::info!(target: "tidepool_web", path = %transcript_path.display(), "transcript");
     let observer: Arc<dyn Observer> = Arc::new(FanoutObserver {
         observers: vec![Arc::new(LogObserver), Arc::new(jsonl)],
     });

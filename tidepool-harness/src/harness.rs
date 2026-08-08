@@ -799,6 +799,7 @@ impl Harness {
         // Emitted before the block runs, so it precedes this turn's Effect /
         // HolePublished events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
+        tracing::debug!(node = node.0, %block, "executed Haskell");
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -946,12 +947,18 @@ impl Harness {
 
         // Compile off-reactor (the session is still resident — no leak on a
         // compile failure).
+        let compile_started = std::time::Instant::now();
         let compiled = tokio::task::spawn_blocking(move || {
             compile::compile_turn(&cfg_bin, &src, "result", &include)
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile task join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
+        tracing::debug!(
+            node = node.0,
+            elapsed_ms = compile_started.elapsed().as_millis() as u64,
+            "answerer turn compile"
+        );
 
         // Run the compiled fragment against the session (move it onto the
         // blocking pool and back — the resident session is `Send`).

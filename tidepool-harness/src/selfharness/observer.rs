@@ -63,6 +63,6 @@ pub struct LogObserver;
 
 impl Observer for LogObserver {
     fn on_event(&self, event: &Event) {
-        eprintln!("[selfharness] {event:?}");
+        tracing::info!(?event, "selfharness event");
     }
 }
