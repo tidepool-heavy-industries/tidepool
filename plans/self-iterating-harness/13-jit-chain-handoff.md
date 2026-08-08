@@ -138,6 +138,16 @@ last-writer-wins. The third is sequenced after cluster C's work on the same
 file, since adding a guard changes semantics that cluster C is required to
 preserve.
 
+The `by_qualified_name` guard can be a **hard error**, not a warning or a
+deterministic tie-break. The precondition is positively proven, not merely
+unobserved: a real accumulated table carries 164 qualified names with zero
+duplicates. A collision therefore indicates the extractor's minting changed,
+which is exactly the condition that should stop the run rather than be
+silently absorbed.
+
+The `Result` frozen at `MissingConTags` (defect 1b) is deterministic and live
+today — it needs no precondition and is not masked by id stability.
+
 ## Gates this work added
 
 Permanent, and independent of how the tag investigation resolves:
@@ -161,6 +171,23 @@ These pin a property the extractor was relied upon to have but nothing stated:
 constructor id stability across invocations. Work that changes how the
 extractor mints ids will trip these rather than silently misclassifying a
 session's yields.
+
+**What `populated_session_second_fragment` does not prove.** It does not
+reproduce `selfharness_compaction`; it drives hand-built trees rather than real
+GHC-extracted Core; and it applies no GC pressure, so it is blind to the
+allocation-profile hypothesis. It gates one thing: that a second fragment
+compiled against an accumulated table and run through `run_child_fragment`
+classifies its result correctly. It also runs through the nested-child path
+whose `NurseryExhausted` guard is known-incomplete, so an intermittent failure
+there is ambient rather than a signal about the fragment path.
+
+The prior gate in this area, `datacon_never_used_as_value.rs`, was blind for a
+specific and instructive reason: it read each fixture tree raw off disk against
+that fixture's *own* table, using the same `free_vars` the prune used. Every
+axis it checked was self-consistent by construction — never a superset table,
+never the post-normalize tree, and never compiling or running anything. It was
+extended along both missing axes rather than given an extra case, since a case
+would have left the shape of the blindness intact.
 
 ## Test invocation notes
 
