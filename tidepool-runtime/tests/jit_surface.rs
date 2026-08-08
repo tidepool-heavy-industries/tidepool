@@ -1377,9 +1377,63 @@ fn works_pack_show_output_dialect_win() {
 
 // =========================================================================
 // Quasiquoter strictness — `[j|…|]` exact-number and control-character
-// handling, `[fmt|…|]` brace-escape discipline. Rejection paths are
-// compile-time failures, pinned with `fails_loudly`.
+// handling. (`[fmt|…|]` brace-escape discipline lands in a follow-up commit,
+// kept separate so the bare-`}` rejection stays independently revertible.)
+// Rejection paths are compile-time failures, pinned with `fails_loudly`.
 // =========================================================================
+
+/// `[j|…|]` integer literals beyond `Double`'s 53-bit mantissa parse EXACT:
+/// the literal-syntax number path is integer digit accumulation only, never
+/// `read :: Double`. Before the fix, `read "123456789012345678" :: Double`
+/// rounds to the nearest representable double and loses the low digits.
+#[test]
+fn qq_json_exact_large_integer_literal() {
+    works(
+        "pure [j|123456789012345678|]",
+        serde_json::json!(123456789012345678_i64),
+    );
+}
+
+/// A fractional literal with more significant digits than a `Double` mantissa
+/// can carry (19 digits) round-trips EXACTLY through `renderJson` — the
+/// coefficient/exponent are assembled arithmetically from the literal's
+/// digits, not recovered from a lossy `Double` parse.
+#[test]
+fn qq_json_exact_fraction_literal_beyond_double_precision() {
+    works(
+        "pure (renderJson [j|1.234567890123456789|])",
+        serde_json::json!("1.234567890123456789"),
+    );
+}
+
+/// The exact-number literal path also drives `[j|…|]` PATTERN matching
+/// (`buildMatch`'s `NNumber` arm): a beyond-`Double`-precision integer
+/// matches itself exactly.
+#[test]
+fn qq_json_pattern_matches_exact_large_integer() {
+    works(
+        "pure (case [j|123456789012345678|] of { [j|123456789012345678|] -> True; _ -> False })",
+        serde_json::json!(true),
+    );
+}
+
+/// A raw (unescaped) control character inside a `[j|…|]` string literal is a
+/// compile-time error naming the offending code point — the JSON grammar the
+/// quoter advertises never allowed a literal control byte inside a string.
+#[test]
+fn qq_json_string_rejects_unescaped_control_char() {
+    fails_loudly("pure [j|\"a\u{1}b\"|]", "control character");
+}
+
+/// A JSON escape sequence for the SAME code point still works — only the
+/// raw, unescaped byte is rejected.
+#[test]
+fn qq_json_string_allows_escaped_control_char() {
+    works(
+        "pure [j|\"a\\u0001b\"|]",
+        serde_json::json!("a\u{1}b"),
+    );
+}
 
 // =========================================================================
 // `Tidepool.FilePath` POSIX fidelity — the upstream `filepath` test vectors

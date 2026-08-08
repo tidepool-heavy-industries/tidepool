@@ -27,10 +27,7 @@
 -- standard JSON escapes @\\\" \\\\ \\\/ \\n \\t \\r \\b \\f \\uXXXX@,
 -- including surrogate pairs), numbers (integer/fraction/exponent, carried by
 -- 'Number' as an exact 'Scientific' — @coefficient * 10 ^ base10Exponent@),
--- @true@/@false@/@null@, and JSON whitespace. (Literal numbers in the
--- quasiquote source still parse through 'Double' before being decomposed into
--- Scientific digits, so a >2^53 literal in @[j| … |]@ text is lossy — see the
--- @NNumber@ note below; the antiquote/builder path is exact.)
+-- @true@/@false@/@null@, and JSON whitespace.
 --
 -- Antiquotes appear in /value position only/:
 --
@@ -64,8 +61,10 @@
 -- left-to-right in source order; duplicate binders are a compile error.
 module Tidepool.QQ.Json (j) where
 
-import Data.Char (chr, digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit)
+import Data.Char (chr, digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit, ord)
+import Data.List (foldl')
 import Data.Text (Text)
+import Numeric (showHex)
 import qualified Tidepool.Data.Text as T
 
 import Language.Haskell.TH
@@ -97,7 +96,7 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 
 import Tidepool.Aeson.Value
-  (Value (..), scientific, coefficient, base10Exponent, fromFloatDigits, fromText, toJSON)
+  (Value (..), scientific, fromText, toJSON)
 import qualified Tidepool.Aeson.KeyMap as KM
 
 -- | @[j| {"user": {"id": $uid}} |]@ — a JSON 'Value' literal with antiquotes
@@ -122,7 +121,7 @@ data Node
   = NObject [(Text, Node)]
   | NArray [Node] Bool        -- ^ elements and whether a trailing @...@ is present
   | NString Text
-  | NNumber Double
+  | NNumber Integer Int        -- ^ exact coefficient and base10 exponent
   | NBool Bool
   | NNull
   | NAntiVar String           -- ^ @$var@ in expression position
@@ -258,19 +257,21 @@ pInteger = do
   ds <- takeWhile1P isDigit "expected an integer"
   pure (read ds :: Integer)
 
--- | Lex a JSON number into a 'Double'.
-pNumber :: P Double
+-- | Lex a JSON number as an exact @(coefficient, base10Exponent)@ pair.
+-- Sign, integer digits, optional fraction digits and optional exponent are
+-- consumed and assembled arithmetically (integer digit accumulation) — the
+-- literal syntax never touches 'Double'.
+pNumber :: P (Integer, Int)
 pNumber = do
   neg  <- optChar '-'
   intD <- takeWhile1P isDigit "expected a digit"
   frac <- optFrac
   ex   <- optExp
-  let expStr = case ex of
-        Nothing       -> ""
-        Just (es, ed) -> "e" ++ (if es then "-" else "") ++ ed
-      norm = (if neg then "-" else "")
-           ++ intD ++ "." ++ maybe "0" id frac ++ expStr
-  pure (read norm :: Double)
+  let fracDigits = maybe "" id frac
+      coeff0     = accumDigits (intD ++ fracDigits)
+      coeff      = if neg then negate coeff0 else coeff0
+      e          = negate (length fracDigits) + maybe 0 id ex
+  pure (coeff, e)
   where
     optChar ch = do
       mc <- peekC
@@ -296,8 +297,17 @@ pNumber = do
                    Just '-' -> nextC >> pure True
                    _        -> pure False
           ds  <- takeWhile1P isDigit "expected a digit in the exponent"
-          pure (Just (es, ds))
+          let n = fromInteger (accumDigits ds) :: Int
+          pure (Just (if es then negate n else n))
         _ -> pure Nothing
+
+-- | Accumulate a run of decimal digit characters into a non-negative 'Integer'.
+accumDigits :: String -> Integer
+accumDigits = foldl' (\acc c -> acc * 10 + toInteger (digitToInt c)) 0
+
+-- | Render a code point as 4+ zero-padded hex digits (@U+XXXX@ style).
+padHex4 :: Int -> String
+padHex4 n = let h = showHex n "" in replicate (max 0 (4 - length h)) '0' ++ h
 
 -- | Lex a JSON string literal (the leading @\"@ must be next).
 pStringLit :: P Text
@@ -311,7 +321,11 @@ pStringLit = do
         Nothing   -> fail "unterminated string literal"
         Just '"'  -> pure (T.pack (reverse acc))
         Just '\\' -> do c <- pEscape; go (c : acc)
-        Just c    -> go (c : acc)
+        Just c
+          | ord c < 0x20 ->
+              fail ("unescaped control character U+" ++ padHex4 (ord c)
+                    ++ " in string literal; use an escape (\\n, \\t, \\r, \\uXXXX, ...)")
+          | otherwise -> go (c : acc)
     pEscape = do
       mc <- nextC
       case mc of
@@ -385,8 +399,8 @@ pExpValue = do
       'f' -> pKeyword "false" (NBool False)
       'n' -> pKeyword "null" NNull
       '$' -> NAntiVar <$> (expectC '$' >> pVarId)
-      '-' -> NNumber <$> pNumber
-      _ | isDigit c -> NNumber <$> pNumber
+      '-' -> uncurry NNumber <$> pNumber
+      _ | isDigit c -> uncurry NNumber <$> pNumber
         | otherwise -> fail ("unexpected character '" ++ [c] ++ "'; expected a JSON value")
 
 -- | Consume a bare keyword and reject a trailing identifier character.
@@ -485,8 +499,8 @@ pPatValue = do
       'n' -> pKeyword "null" NNull
       '$' -> NBind <$> (expectC '$' >> pVarId)
       '_' -> pPatWild
-      '-' -> NNumber <$> pNumber
-      _ | isDigit c -> NNumber <$> pNumber
+      '-' -> uncurry NNumber <$> pNumber
+      _ | isDigit c -> uncurry NNumber <$> pNumber
         | otherwise -> fail ("unexpected character '" ++ [c] ++ "'; expected a JSON pattern")
 
 -- | Parse a @_@ wildcard, rejecting bare identifiers.
@@ -558,14 +572,8 @@ expCodegen node = case node of
   NBool True   -> [| Bool True |]
   NBool False  -> [| Bool False |]
   NString t    -> [| String (T.pack $(litE (stringL (T.unpack t)))) |]
-  NNumber d ->
-    -- `Number` carries an exact 'Scientific'; decompose the parsed Double at
-    -- compile time into (coefficient, exponent) and splice the literals. (Parse
-    -- still rides Double, so >2^53 literals in [j|] source text remain lossy —
-    -- rare; the builder/antiquote path is the exact one.)
-    let s = fromFloatDigits d
-    in [| Number (scientific $(litE (integerL (coefficient s)))
-                             $(litE (integerL (toInteger (base10Exponent s))))) |]
+  NNumber c e ->
+    [| Number (scientific $(litE (integerL c)) $(litE (integerL (toInteger e)))) |]
   NArray es _  -> [| Array $(listE (map expCodegen es)) |]
   NObject kvs  -> [| Object (KM.fromList $(listE (map pairE kvs))) |]
   NAntiVar v   -> [| toJSON $(varE (mkName v)) |]
@@ -639,14 +647,13 @@ buildMatch ((scrut, node) : rest) binders =
             (normalB
                [| if $(varE x) == T.pack $(litE (stringL (T.unpack t)))
                     then $(cont) else Nothing |]) [] ]
-    NNumber d -> do
+    NNumber c e -> do
       x <- newName "n"
-      let s = fromFloatDigits d
       dispatch
         [ match (conP 'Number [varP x])
             (normalB
-               [| if $(varE x) == scientific $(litE (integerL (coefficient s)))
-                                             $(litE (integerL (toInteger (base10Exponent s))))
+               [| if $(varE x) == scientific $(litE (integerL c))
+                                             $(litE (integerL (toInteger e)))
                     then $(cont) else Nothing |]) [] ]
     NArray es ell -> do
       xs <- newName "xs"
