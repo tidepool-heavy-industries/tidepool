@@ -34,9 +34,12 @@ call, fits harness-lifecycle's scope).
 - **Intermittent garbage con_tag** (`selfharness_compaction`, open):
   `YieldError::UnexpectedConTag` with a raw-pointer-shaped tag + fast-abort
   (65.7s vs 193–201s band), one sighting under peak memory pressure, same
-  tree passed and failed. Sole live discriminator: harness-robustness's
-  bounded GC_POISON run (tiny-nursery + POISON + HEAP_VERIFY on a
-  cb1b131d-restored tree). NOTE: NurseryExhausted is EXPECTED noise in that
+  tree passed and failed. Sole live discriminator: the bounded GC_POISON
+  run — NOT YET RUN (stopped at the quiesce boundary); recipe committed in
+  `../self-iterating-harness/12-robustness-wave-receipt.md` (revert
+  9f2e18a5 to restore cb1b131d; GC_POISON + HEAP_VERIFY + MAX_HEAP=16MiB
+  on the one compaction test). ROOT runs it post-restart, one attempt,
+  before the dogfood go/no-go. NOTE: NurseryExhausted is EXPECTED noise in that
   run; only the garbage-tag signature counts. If it reproduces, the fix
   gates the dogfood.
 - **NurseryExhausted class, REOPENED**: cc1a86c0 fixed the Eager-response
