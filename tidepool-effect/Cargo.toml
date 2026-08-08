@@ -10,12 +10,12 @@ description = "Effect system and handlers for Tidepool Core"
 readme = "../README.md"
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-frunk = "0.4"
-thiserror = "1"
-parking_lot = "0.12"
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-bridge.workspace = true
+frunk.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true

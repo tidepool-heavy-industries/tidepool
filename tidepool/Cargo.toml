@@ -16,31 +16,31 @@ name = "tidepool"
 path = "src/main.rs"
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
-tidepool-optimize = { version = "0.1.0", path = "../tidepool-optimize" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
-tidepool-macro = { version = "0.1.0", path = "../tidepool-macro" }
-tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
-tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
-tidepool-handlers = { version = "0.1.0", path = "../tidepool-handlers" }
-frunk = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-heap.workspace = true
+tidepool-optimize.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-effect.workspace = true
+tidepool-codegen.workspace = true
+tidepool-macro.workspace = true
+tidepool-runtime.workspace = true
+tidepool-mcp.workspace = true
+tidepool-handlers.workspace = true
+frunk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-which = "7"
-clap = { version = "4", features = ["derive", "env"] }
-axum = "0.8"
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+which.workspace = true
+clap.workspace = true
+axum.workspace = true
+rmcp.workspace = true
 
 
 [dev-dependencies]
-tidepool-testing = { path = "../tidepool-testing" }
-tempfile = "3"
+tidepool-testing.workspace = true
+tempfile.workspace = true

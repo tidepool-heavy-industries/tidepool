@@ -18,30 +18,30 @@ name = "tidepool_repl"
 path = "src/lib.rs"
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
-tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
-tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
-tidepool-handlers = { version = "0.1.0", path = "../tidepool-handlers" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "signal", "time"] }
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-effect.workspace = true
+tidepool-codegen.workspace = true
+tidepool-runtime.workspace = true
+tidepool-mcp.workspace = true
+tidepool-handlers.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+rmcp.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-parking_lot = "0.12"
-frunk = "0.4"
-schemars = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+parking_lot.workspace = true
+frunk.workspace = true
+schemars.workspace = true
 dirs = "6"
-clap = { version = "4", features = ["derive", "env"] }
+clap.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-serial_test = "3"
-tidepool-testing = { path = "../tidepool-testing" }
+tempfile.workspace = true
+serial_test.workspace = true
+tidepool-testing.workspace = true

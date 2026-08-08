@@ -10,35 +10,35 @@ description = "Runtime support for Tidepool applications"
 readme = "../README.md"
 
 [dependencies]
-thiserror = "1"
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tempfile = "3"
-blake3 = "1"
-which = "7"
-log = "0.4"
-tracing = "0.1"
-parking_lot = "0.12"
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+thiserror.workspace = true
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-effect.workspace = true
+tidepool-codegen.workspace = true
+tidepool-bridge.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
+which.workspace = true
+log.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-proptest = "1"
-ciborium = "0.2"
-tidepool-testing = { path = "../tidepool-testing" }
+proptest.workspace = true
+ciborium.workspace = true
+tidepool-testing.workspace = true
 tidepool-optimize = { path = "../tidepool-optimize" }
-frunk = "0.4"
-tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
-tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+frunk.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-bridge-effects.workspace = true
+tidepool-bridge.workspace = true
+tidepool-effect.workspace = true
+tidepool-eval.workspace = true
 tidepool-mcp = { path = "../tidepool-mcp" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-serial_test = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+serial_test.workspace = true
 filetime = "0.2"
-glob = "0.3"
+glob.workspace = true

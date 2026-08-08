@@ -10,27 +10,27 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tidepool-repr = { path = "../tidepool-repr", version = "0.1.0" }
-tidepool-runtime = { path = "../tidepool-runtime", version = "0.1.0" }
-tidepool-mcp = { path = "../tidepool-mcp", version = "0.1.0" }
-tidepool-handlers = { path = "../tidepool-handlers", version = "0.1.0" }
-tidepool-eval = { path = "../tidepool-eval", version = "0.1.0" }
-tidepool-effect = { path = "../tidepool-effect", version = "0.1.0" }
-tidepool-bridge = { path = "../tidepool-bridge", version = "0.1.0" }
-tidepool-codegen = { path = "../tidepool-codegen", version = "0.1.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tidepool-repr.workspace = true
+tidepool-runtime.workspace = true
+tidepool-mcp.workspace = true
+tidepool-handlers.workspace = true
+tidepool-eval.workspace = true
+tidepool-effect.workspace = true
+tidepool-bridge.workspace = true
+tidepool-codegen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror = "2"
-genai = "0.5"
+genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
-reqwest = { version = "0.13", features = ["json", "form", "stream"] }
+reqwest = { workspace = true, features = ["form"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
-parking_lot = "0.12"
-tempfile = "3"
-tracing = "0.1"
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+parking_lot.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-tracing-subscriber = { version = "0.3", features = ["registry"] }
+tempfile.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry"] }

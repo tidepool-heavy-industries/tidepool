@@ -10,10 +10,10 @@ description = "Memory management and heap layout for Tidepool Core"
 readme = "../README.md"
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
 bumpalo = "3"
-thiserror = "1"
+thiserror.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
