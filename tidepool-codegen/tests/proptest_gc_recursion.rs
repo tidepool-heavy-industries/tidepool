@@ -735,7 +735,9 @@ fn cfg() -> Config {
 
 macro_rules! gc_property {
     ($name:ident, $label:literal, $strat:expr, $build:expr) => {
-        #[ignore = "heavy GC fuzz (~68min at 400 cases); on-demand: cargo test -p tidepool-codegen --test proptest_gc_recursion -- --ignored"]
+        #[ignore = "GC fuzz, ~154s wall for the whole lane at 400 cases (measured); kept out of the \
+                    inner loop, not out of reach: cargo nextest run -p tidepool-codegen -E \
+                    'binary(proptest_gc_recursion)' --run-ignored all"]
         #[test]
         #[serial]
         fn $name() {
@@ -806,7 +808,7 @@ gc_property!(
 // seed) so a regression that the random sweep happens to miss still trips.
 // ===========================================================================
 
-#[ignore = "heavy GC anchor (tiny-nursery sweep); on-demand: --ignored"]
+#[ignore = "GC anchor: 500-element spine under a 2 KiB nursery, ~0.5s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_long_spine_sum_tiny_nursery() {
@@ -851,7 +853,7 @@ fn anchor_long_spine_sum_tiny_nursery_body() {
     }
 }
 
-#[ignore = "heavy GC anchor (1500-iter loop, tiny nursery, >60s); on-demand: --ignored"]
+#[ignore = "GC anchor: 1500-iter loop under a 4 KiB nursery, ~0.1s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_accum_loop_tiny_nursery() {
