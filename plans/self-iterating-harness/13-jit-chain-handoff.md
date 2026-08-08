@@ -10,7 +10,7 @@ source.
 
 | cluster | scope | status |
 |---|---|---|
-| A | case-trap intern arena (D13), `Int64ToWord64` result tag, blackhole gap | see below |
+| A | case-trap intern arena (D13), `Int64ToWord64` result tag, blackhole gap | **landed** (blackhole open, see below) |
 | B | indexed free-vars analysis + petgraph topo sort (C4+C5) | **landed**, unmeasured |
 | C | `DataConTable` accumulation hygiene (D3) | **landed**, two items deferred |
 | D | `runtime_apply`/`runtime_tail_apply` + `FunctionImports` (D4+D5) | **not started** |
@@ -119,6 +119,38 @@ direct declaration. Conform it on resume.
 
 `petgraph` is mandatory for graph algorithms in this codebase — hand-rolled
 traversals are not an accepted alternative.
+
+## Cluster A — two fixes landed; the blackhole item is still open
+
+`int64ToWord64#` now tags its result `LIT_TAG_WORD`. It had shared a match arm
+with `Word64ToInt64`/`Int64ToInt` that unconditionally tagged `LIT_TAG_INT`,
+correct for those two and wrong for a `Word64#` result.
+`jitbug_int64_to_word64_result_tag` is un-ignored and now pins the invariant,
+and `Int64ToWord64` is back in `prop_int_unary`'s operator list.
+
+Case-trap diagnostic names are interned in a pipeline-owned arena rather than
+`Box::leak`ed. The arena hands out a raw pointer and length rather than a
+`&'static str`, because the strings live exactly as long as the pipeline, not
+forever — claiming `'static` would be a lifetime lie about a pointer that
+compiled code embeds. A `Box<str>`'s heap bytes are stable across `HashSet`
+rehash, so interning more names does not invalidate pointers already handed
+out.
+
+**The blackhole item remains open**, and what was found narrows it usefully.
+On a *synthetic* self-referential `LetRec`, both paths trap — they merely
+classify differently: `run_pure` gives a clean
+`Err(Yield(Runtime(BlackHole)))`, while calling `compile_expr` directly returns
+a poison-closure pointer whose `heap_to_value_forcing` fails as
+`Err(UnexpectedHeapTag(0))`. So the original one-line framing ("compile_expr
+does not raise `runtime_blackhole_trap`") does not hold in that form.
+
+That is *not* the same shape as the repo's already-documented divergence —
+`haskell_suite_differential.rs`'s `EXPECTED_EVAL_JIT_DIVERGE` entry
+`thunk_blackhole`, which concerns real GHC-lifted top-level Core returning a
+value with **no trap at all**. Anyone resuming this should start from that
+documented entry and the real lifted Core shape, not from a synthetic `LetRec`.
+The synthetic experiment was discarded; the expensive differential suite was
+not run to confirm firsthand.
 
 ## The chain, measured
 
