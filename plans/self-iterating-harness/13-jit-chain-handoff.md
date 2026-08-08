@@ -86,6 +86,33 @@ direct declaration. Conform it on resume.
 `petgraph` is mandatory for graph algorithms in this codebase — hand-rolled
 traversals are not an accepted alternative.
 
+## The chain, measured
+
+Metadata constructors versus constructors actually reachable from the
+fragment's own Core, read pre-wrap on a real GHC-extracted session:
+
+| turn | `table_cons` | reachable | ratio | Cranelift funcs | blocks |
+|---|---|---|---|---|---|
+| 1 | 164 | 24 | 6.8:1 | 232 | 13,348 |
+| 2 | 166 | 15 | 11.1:1 | 25 | 494 |
+
+Read it as *single-digit-to-low-teens percent reachable*, not as the earlier
+"hundreds versus dozens" framing — the table is 164-166, not hundreds. The
+proportional win is large and grows across turns (the table accumulates while
+fragments stay small), but anyone sizing the absolute win should use these
+figures.
+
+The count must be taken **pre-wrap**. `wrap_with_datacon_env` mechanically adds
+a reference to every table constructor, so any count downstream of it equals
+`table_cons` by construction — a measurement-point artifact, not a finding.
+
+Both diagnostic walks are gated on the `tidepool::codegen` target being
+enabled, and the pre-wrap walk is timed separately and subtracted out of
+`shape_ms`. It has to sit inside that window (it needs the pre-wrap tree, which
+the wrap then consumes), and without the subtraction the instrument inflates
+the very metric it reports — visible only when logging is on, which is the only
+time anyone reads it.
+
 ## Cluster C — landed; two items deferred with reasons
 
 `merge_table` filters out constructors already held with identical metadata,
