@@ -37,7 +37,7 @@ use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, ResumeInput, Suspe
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule};
+use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
 use super::engine::OutputSink;
 use super::{SessionError, SessionLib};
@@ -677,10 +677,14 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
 
     // -- value-plane bookkeeping (delegating over the two planes) ----------
 
-    /// Build the [`ExternalEnv`] a later fragment consults at a `Var`-miss: every
-    /// live binding's `SessionVarId → RootSlot`.
-    pub fn seed_external_env(&self) -> ExternalEnv {
-        self.bindings.seed_external_env()
+    /// Build the [`ExternalEnv`] a later fragment consults at a `Var`-miss:
+    /// the `SessionVarId → RootSlot` of every live binding `referenced`
+    /// names (D9) — typically `tidepool_repr::free_vars(&fragment)`. Not
+    /// every live binding: a binding absent from `referenced` still stays a
+    /// GC root (registered at bind time, independent of this call) but is
+    /// not seeded into this particular fragment's env.
+    pub fn seed_external_env(&self, referenced: &[VarId]) -> ExternalEnv {
+        self.bindings.seed_external_env(referenced)
     }
 
     /// Record a materialized value binding on the value plane.

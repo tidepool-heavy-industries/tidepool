@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use tidepool_repr::{BindingName, SessionModule, SessionVarId};
+use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
 use crate::emit::ExternalEnv;
 use crate::old_space::RootSlot;
@@ -172,16 +172,30 @@ impl BindingTable {
         self.live.values().map(|e| e.module)
     }
 
-    /// Build the `ExternalEnv` the JIT consults at a Var-miss: every live
-    /// binding's `SessionVarId → RootSlot` slot address. The Var-miss site emits
-    /// a per-fragment `load` through the slot to read the GC-current pointer, so
-    /// seeding the slot *address* (never a snapshot pointer) is what keeps the
-    /// read GC-safe.
+    /// Build the `ExternalEnv` the JIT consults at a Var-miss, seeded with
+    /// only the `SessionVarId → RootSlot` slot addresses the incoming
+    /// fragment actually references (D9) — `referenced` (typically
+    /// `tidepool_repr::free_vars(&fragment)`) intersected with `live`, not
+    /// every live binding. The Var-miss site emits a per-fragment `load`
+    /// through the slot to read the GC-current pointer, so seeding the slot
+    /// *address* (never a snapshot pointer) is what keeps the read GC-safe.
+    ///
+    /// This narrowing is about what gets SEEDED into the compiled fragment's
+    /// env, not what stays GC-reachable: a binding absent from `referenced`
+    /// is simply not looked up here — its `RootSlot` was already registered
+    /// as a persistent GC root at bind time (`OldSpace::tenure`, independent
+    /// of this table entirely) and keeps surviving collections regardless of
+    /// whether any later fragment ends up referencing it. See
+    /// `tests/session_seed_external_env_root_retention.rs`'s
+    /// `unreferenced_bindings_survive_a_real_gc_after_narrowed_seeding` for
+    /// the GC-poison proof.
     #[must_use]
-    pub fn seed_external_env(&self) -> ExternalEnv {
+    pub fn seed_external_env(&self, referenced: &[VarId]) -> ExternalEnv {
         let mut env = ExternalEnv::new();
-        for entry in self.live.values() {
-            env.insert(entry.id.var(), entry.value.root().addr());
+        for &var in referenced {
+            if let Some(entry) = self.live.get(&SessionVarId::from_var(var)) {
+                env.insert(entry.id.var(), entry.value.root().addr());
+            }
         }
         env
     }
@@ -242,18 +256,65 @@ mod tests {
         assert_eq!(t.iter_current().count(), 1);
     }
 
+    /// Narrowed contract, honestly restated (D9): the old
+    /// `seed_external_env_covers_every_live_binding` claim ("every live
+    /// binding, unconditionally") no longer holds by default — it only holds
+    /// as the special case where every live binding is also referenced.
     #[test]
-    fn seed_external_env_covers_every_live_binding() {
+    fn seed_external_env_seeds_every_referenced_binding_when_all_are_referenced() {
         let mut a: *mut u8 = std::ptr::null_mut();
         let mut b: *mut u8 = std::ptr::null_mut();
         let (sa, sb) = (fake_slot(&mut a), fake_slot(&mut b));
         let mut t = BindingTable::new();
-        t.bind(entry("x", 1, (0xFE << 56) | 1, sa));
-        t.bind(entry("y", 1, (0xFE << 56) | 3, sb));
+        let x_var = VarId((0xFE << 56) | 1);
+        let y_var = VarId((0xFE << 56) | 3);
+        t.bind(entry("x", 1, x_var.0, sa));
+        t.bind(entry("y", 1, y_var.0, sb));
 
-        let env = t.seed_external_env();
+        let env = t.seed_external_env(&[x_var, y_var]);
         assert_eq!(env.len(), 2);
-        assert!(env.get(VarId((0xFE << 56) | 1)).is_some());
-        assert!(env.get(VarId((0xFE << 56) | 3)).is_some());
+        assert!(env.get(x_var).is_some());
+        assert!(env.get(y_var).is_some());
+    }
+
+    /// D9: a live binding NOT in the referenced set must not be seeded — this
+    /// is the narrowing itself. (Whether it stays a GC root regardless is a
+    /// separate claim, proved by
+    /// `session_seed_external_env_root_retention.rs`'s GC-poison test, not by
+    /// this table in isolation.)
+    #[test]
+    fn seed_external_env_narrows_to_only_referenced_bindings() {
+        let mut a: *mut u8 = std::ptr::null_mut();
+        let mut b: *mut u8 = std::ptr::null_mut();
+        let (sa, sb) = (fake_slot(&mut a), fake_slot(&mut b));
+        let mut t = BindingTable::new();
+        let x_var = VarId((0xFE << 56) | 1);
+        let y_var = VarId((0xFE << 56) | 3);
+        t.bind(entry("x", 1, x_var.0, sa));
+        t.bind(entry("y", 1, y_var.0, sb));
+
+        let env = t.seed_external_env(&[x_var]);
+        assert_eq!(env.len(), 1);
+        assert!(env.get(x_var).is_some());
+        assert!(env.get(y_var).is_none());
+    }
+
+    /// D9: a referenced `VarId` that isn't a live session binding at all (an
+    /// ordinary local binder, or a stale id) is silently skipped rather than
+    /// erroring — the whole point is an intersection with `live`, not a
+    /// membership requirement on `referenced`.
+    #[test]
+    fn seed_external_env_ignores_a_referenced_var_not_in_the_table() {
+        let mut a: *mut u8 = std::ptr::null_mut();
+        let sa = fake_slot(&mut a);
+        let mut t = BindingTable::new();
+        let x_var = VarId((0xFE << 56) | 1);
+        let not_bound = VarId((0xFE << 56) | 99);
+        t.bind(entry("x", 1, x_var.0, sa));
+
+        let env = t.seed_external_env(&[x_var, not_bound]);
+        assert_eq!(env.len(), 1);
+        assert!(env.get(x_var).is_some());
+        assert!(env.get(not_bound).is_none());
     }
 }
