@@ -10,29 +10,29 @@ description = "Model Context Protocol (MCP) server for Tidepool"
 readme = "../README.md"
 
 [dependencies]
-tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
-tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "signal", "fs", "test-util"] }
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-parking_lot = "0.12"
+tidepool-codegen.workspace = true
+tidepool-runtime.workspace = true
+tidepool-eval.workspace = true
+tidepool-repr.workspace = true
+tidepool-effect.workspace = true
+rmcp.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "signal", "sync", "test-util"] }
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+parking_lot.workspace = true
 dyn-clone = "1.0"
-frunk = "0.4"
-schemars = "1.2"
-serde_json = { version = "1", features = ["arbitrary_precision"] }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+frunk.workspace = true
+schemars.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+tidepool-bridge.workspace = true
 
 [dev-dependencies]
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
-tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
-proptest = "1"
+proptest.workspace = true
 # Canonical extract_available()/prelude_path() guard for GHC-dependent tests.
-tidepool-testing = { path = "../tidepool-testing" }
+tidepool-testing.workspace = true

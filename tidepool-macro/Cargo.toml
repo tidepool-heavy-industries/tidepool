@@ -13,12 +13,12 @@ readme = "../README.md"
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
-serde_json = "1"
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-bridge.workspace = true

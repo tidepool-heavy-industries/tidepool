@@ -9,36 +9,36 @@ rust-version.workspace = true
 description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec/Lsp/Llm/Meta)"
 
 [dependencies]
-tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
-tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
-tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
-tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
-inventory = "0.3"
-frunk = "0.4"
+tidepool-mcp.workspace = true
+tidepool-effect.workspace = true
+tidepool-runtime.workspace = true
+tidepool-eval.workspace = true
+tidepool-repr.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-bridge-effects.workspace = true
+inventory.workspace = true
+frunk.workspace = true
 # Native deps moved from tidepool/Cargo.toml
-glob = "0.3"
+glob.workspace = true
 # Gitignore-aware exclusion for the glob/grep walk (#343) — ripgrep's own
 # gitignore matcher, so expand_glob's default exclusions match `rg`'s.
 ignore = "0.4"
 regex = "1"
-genai = "0.5"
-ureq = { version = "2", features = ["json"] }
-url = "2"
+genai.workspace = true
+ureq = { workspace = true, features = ["json"] }
+url.workspace = true
 # Direct deps for handler implementations
-serde_json = "1"
+serde_json.workspace = true
 # Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
 # matches the cache layer's blake3 choice (tidepool-runtime).
-blake3 = "1"
+blake3.workspace = true
 # flock(2) for the cross-process compare-and-swap file locks (Fs/KV CAS).
-libc = "0.2"
-tracing = "0.1"
+libc.workspace = true
+tracing.workspace = true
 # build_base_stack requires a tokio runtime (LlmHandler captures Handle::current())
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
-tidepool-testing = { path = "../tidepool-testing" }
-tempfile = "3"
+tidepool-testing.workspace = true
+tempfile.workspace = true

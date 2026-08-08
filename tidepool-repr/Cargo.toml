@@ -10,11 +10,11 @@ description = "Intermediate representation for the Tidepool compiler"
 readme = "../README.md"
 
 [dependencies]
-ciborium = "0.2"
-thiserror = "1"
-rustc-hash = "2.1.0"
+ciborium.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 serial_test = "3.4.0"
-tidepool-testing = { path = "../tidepool-testing" }
+tidepool-testing.workspace = true
