@@ -1,5 +1,11 @@
 # One extract spawn per turn — protocol
 
+> Phase B's implementation contract — the extract CLI and Rust API after the
+> swap, plus the four decisions this document left open — is
+> [`one-spawn-turn-protocol-phase-b.md`](one-spawn-turn-protocol-phase-b.md).
+> This document stays the design authority; that one is what the code is
+> written against.
+
 ## State of the branch (Phase A complete; Phase B not started)
 
 Phase A landed the protocol, the Rust seam, the extract mode, and the corpus. The
