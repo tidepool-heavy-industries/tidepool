@@ -232,16 +232,47 @@ lock with no timeout, so it cannot lose the non-FIFO race described above;
 runs debug then release back to back inside ONE acquisition so both numbers
 are taken under identical box conditions). Sample reduced to `N=2`,
 `size_n=1`, `retry_repeats=1` — small enough to be a good citizen on a
-contended lock and to keep total hold time short; per root's disposition,
-these are reported AS TAKEN (contended or quiet) rather than held for a
-clean box, since the bench command is documented and re-runnable and a
-dedicated clean re-run is already scheduled after the current wave folds.
+contended lock and to keep total hold time short.
 
-<!-- FILLED IN ONCE THE DETACHED RUNNER LANDS -->
+Runner timeline: queued 09:28:01Z, acquired the lock 10:10:32Z (a ~42.5
+minute wait — the swarm-wide non-FIFO-starvation and orphan-holder fixes
+above landed in the middle of that wait, from this same incident), ran debug
+then release back to back, released at 10:12:41Z. The lock was ITSELF
+contended when the runner queued and when it acquired — per root's
+disposition (measure now under contention with the caveat, rather than chase
+a quiet box; a dedicated clean re-run is separately scheduled after the
+current wave folds), these numbers are reported **AS TAKEN, under real
+sibling GHC load**, not a pristine box. Per root, that is arguably closer to
+lived dogfood experience than an idle-box number would be anyway.
 
-**Debug (primary, matches production):** `overall_wall_ms: <TBD>`.
+**Debug (primary, matches production):** `overall_wall_ms: 76947` (77.0s).
+Per-scenario wall: `cold_vs_warm` 15.8s (2 turns, 7900ms/7852ms),
+`small_vs_large_block` 15.8s (2 turns, 7831ms small / 7985ms large — again no
+appreciable small-vs-large gap), `compile_error_retry` 9.6s (1 round-trip).
+Every turn `Suspended` (finalize reached), including the retry round-trip.
 
-**Release (comparison):** `overall_wall_ms: <TBD>`.
+**Release (comparison):** `overall_wall_ms: 51628` (51.6s). Per-scenario
+wall: `cold_vs_warm` 11.8s (2 turns, 5847ms/5998ms), `small_vs_large_block`
+11.9s (2 turns, 5965ms/5888ms), `compile_error_retry` 7.6s (1 round-trip).
+
+**The debug/release gap under lock is ~1.3–1.5x, not the ~2.5x the unlocked
+pair suggested** (single non-retry turns: 7830–7985ms debug vs 5847–5998ms
+release, ≈1.33x; the retry round-trip: 9624ms vs 7600ms, ≈1.27x; the overall
+totals, 76947ms vs 51628ms, ≈1.49x — pulled up by `N` being too small for the
+three scenarios' fixed per-`Harness`-boot cost to average out evenly, not by
+a per-turn effect). Per root's framing: most of the pre-directive pair's 2.5x
+gap was contention, not a true debug-vs-release difference — the real,
+uncontended-in-relative-terms gap is real but smaller. Debug is still
+genuinely and consistently slower than release on every single-turn
+comparison, so **debug remains the number the report should quote** (it
+matches production), with this ~1.3–1.5x figure as the caveat on how much of
+the pre-directive 2.5x to trust.
+
+A cheap non-blocking probe (`flock -n /tmp/tidepool-ghc.lock true`) taken
+just before submitting this measurement found the lock still held by a
+sibling — per root's optional-extra guidance, that means skip the quiet-box
+comparison run rather than wait for one; the scheduled clean re-run after
+this wave folds is where that comparison belongs.
 
 **stages tables**: as of this measurement, ZERO `timing::record_stage` call
 sites exist on the answerer turn path yet, and ZERO extract-side
