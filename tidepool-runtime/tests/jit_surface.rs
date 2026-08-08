@@ -1420,6 +1420,18 @@ fn works_from_json_either() {
     );
 }
 
+/// `ToJSON [Char]` (`String`) resolves via the `OVERLAPPING`/`OVERLAPPABLE`
+/// pair already shipped in `Tidepool.Aeson.Value` — unexercised by any probe
+/// before this one, found while spiking the `FromJSON [Char]` mechanism above
+/// (same GHC overlapping-instance resolution, now pinned on both directions).
+#[test]
+fn works_to_json_string_overlapping() {
+    works(
+        r#"pure (object ["s" .= ("hi" :: String), "xs" .= toJSON ([1, 2, 3] :: [Int])])"#,
+        serde_json::json!({"s": "hi", "xs": [1, 2, 3]}),
+    );
+}
+
 /// As `eval_raw_with_imports`, but also splices `helpers` (extra top-level
 /// declarations — a local `data` type a probe needs) into the generated
 /// module.
