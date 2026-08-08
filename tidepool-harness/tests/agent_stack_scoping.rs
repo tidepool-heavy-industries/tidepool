@@ -1,13 +1,15 @@
 //! Structural proof of the harness/agent effect-stack split: the OUTER
 //! self-iterating-harness session compiles against `Eff '[RunLLMTurn]`
 //! ([`tidepool_harness::selfharness::driver`]'s private `outer_decls`) and
-//! the nested ANSWERER turn compiles against `Eff '[AskUser, Finalize]`
-//! ([`answerer_decls`]) — two DISJOINT decl lists, not a shared stack pinned
-//! by convention. `tidepool_mcp::effects_module_source` only emits an
-//! effect's GADT + Member-polymorphic helpers for decls actually passed into
-//! a given compile, so an effect absent from a compile's decl list is
-//! UNDECLARED there, not merely unreachable — calling it is a GHC "not in
-//! scope" error, a stronger wall than a solvable-elsewhere type mismatch.
+//! the nested ANSWERER turn compiles against `Eff '[AskUser, RunLLMTurn,
+//! Finalize]` ([`answerer_decls`]) — decl lists that share `RunLLMTurn` (the
+//! fork surface, see below) but are otherwise disjoint (`AskUser` is
+//! answerer-only, `Ask` is general-Agent-only), not a single shared stack
+//! pinned by convention. `tidepool_mcp::effects_module_source` only emits an
+//! effect's GADT + Member-polymorphic helpers for decls actually passed into a
+//! given compile, so an effect absent from a compile's decl list is UNDECLARED
+//! there, not merely unreachable — calling it is a GHC "not in scope" error, a
+//! stronger wall than a solvable-elsewhere type mismatch.
 //!
 //! This is the clean mechanism the harness/agent structural split needed:
 //! `runLLMTurn`/`finalize` (siteid-plugin) are `Member <Eff> effs =>`
@@ -18,6 +20,12 @@
 //! `RunLLMTurn`) resolvable: its answer types now live in a sibling
 //! `HarnessTypes` module the answerer imports instead (see that module's
 //! haddock).
+//!
+//! `RunLLMTurn` is back in the answerer's row (self-iterating-harness fork
+//! widen) because `fork`/`forkAll` (`Tidepool.Fork`) extract-head-swap to the
+//! same `RunLLMTurn` GADT every other `runLLMTurn` call compiles to — see
+//! [`answerer_decls`]'s doc for the full account of why this is controlled,
+//! bounded recursion rather than a reopening of unrestricted model-spawning.
 //!
 //! These tests compile a turn's Haskell straight through `tidepool-extract`
 //! (the same path a live turn takes) and assert on the compile OUTCOME.
@@ -63,40 +71,33 @@ fn compile_against(
     compile::compile_turn(&cfg.extract_bin, &source, "result", &cfg.include)
 }
 
-/// THE answerer-side structural guarantee: `runLLMTurn @T` does not
-/// typecheck against the answerer's `Eff '[Ask, Finalize]` stack, because
-/// `RunLLMTurn` is not declared in that compile at all — no recursive
-/// model-spawning is a property of what the compile is given to work with,
-/// not of the prompt/framing.
+/// THE answerer-side structural guarantee, UPDATED for the fork widen:
+/// `runLLMTurn @T` now DOES typecheck against the answerer's `Eff '[Ask,
+/// RunLLMTurn, Finalize]` stack — `RunLLMTurn` is declared there specifically
+/// so `fork`/`forkAll` (which head-swap to it) compile. This is no longer a
+/// "no recursive model-spawning" wall; that guarantee now lives at the
+/// DRIVER level (only a `Fork`-routed suspension is serviced, via
+/// `answer_fanout`/`answer_fork`; a bare in-context `runLLMTurn` resume is
+/// not something the answerer's framing ever prompts for, though it would
+/// compile).
 #[test]
-fn run_llm_turn_is_a_compile_error_in_the_answerer_stack() {
+fn run_llm_turn_compiles_in_the_answerer_stack() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
 
-    let result = compile_against(
-        answerer_decls(),
-        "(runLLMTurn @Int \"no recursion here\" :: M Int)",
-        "",
-    );
-
-    let err = match result {
-        Ok(_) => panic!(
-            "runLLMTurn compiled against the answerer stack '[Ask, Finalize] — the \
-             structural scoping is BROKEN (RunLLMTurn must be undeclared there)"
-        ),
-        Err(e) => e.to_string(),
-    };
+    let result = compile_against(answerer_decls(), "(runLLMTurn @Int \"go\" :: M Int)", "");
     assert!(
-        err.contains("runLLMTurn") && err.contains("not in scope"),
-        "expected a GHC not-in-scope error naming runLLMTurn, got:\n{err}"
+        result.is_ok(),
+        "runLLMTurn must compile against the answerer stack '[Ask, RunLLMTurn, \
+         Finalize] (RunLLMTurn is in the row, for fork/forkAll), got:\n{:?}",
+        result.err()
     );
 }
 
-/// The other half: `finalize @T x` — the answerer's terminal answer path —
-/// DOES compile against `Eff '[Ask, Finalize]`, so excluding `RunLLMTurn`
-/// did not collateral-damage the answer path.
+/// `finalize @T x` — the answerer's terminal answer path — still compiles
+/// against the answerer stack.
 #[test]
 fn finalize_compiles_in_the_answerer_stack() {
     if !extract_available() {
@@ -107,16 +108,16 @@ fn finalize_compiles_in_the_answerer_stack() {
     let result = compile_against(answerer_decls(), "(finalize @Int (41 + 1) :: M ())", "");
     assert!(
         result.is_ok(),
-        "finalize @Int must compile against the answerer stack '[Ask, Finalize] \
-         (Finalize is in the row), got:\n{:?}",
+        "finalize @Int must compile against the answerer stack '[Ask, RunLLMTurn, \
+         Finalize] (Finalize is in the row), got:\n{:?}",
         result.err()
     );
 }
 
 /// The gui path — `askUserRaw` over `AskUser` — also compiles against the
 /// answerer stack (`AskUser` is in the row). Proves the answerer keeps its
-/// intended surface (present a typed form to a human operator, then
-/// finalize).
+/// intended surface (present a typed form to a human operator, fork out to
+/// sub-answerers, then finalize).
 #[test]
 fn askuser_raw_compiles_in_the_answerer_stack() {
     if !extract_available() {
@@ -128,16 +129,42 @@ fn askuser_raw_compiles_in_the_answerer_stack() {
     assert!(
         result.is_ok(),
         "askUserRaw (an AskUser verb) must compile against the answerer stack \
-         '[AskUser, Finalize] (AskUser is in the row), got:\n{:?}",
+         '[AskUser, RunLLMTurn, Finalize] (AskUser is in the row), got:\n{:?}",
         result.err()
     );
 }
 
-/// The OLD `Ask` effect's gui path — `ask`/`dialogAsk` — does NOT typecheck
-/// against the answerer's `Eff '[AskUser, Finalize]` stack: `Ask` is a
+/// `forkAll @T` (`Tidepool.Fork`) also compiles against the answerer stack —
+/// the primitive the answerer's framing advertises for parallel
+/// sub-answerer delegation. It head-swaps to the `RunLLMTurn` GADT, so this is
+/// exactly what `RunLLMTurn` is in the row for. (The singular `fork` sibling
+/// rides the same arm and is exercised by `acceptance_fork`.)
+#[test]
+fn fork_all_compiles_in_the_answerer_stack() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+
+    let result = compile_against(
+        answerer_decls(),
+        "(forkAll @Int [\"pick a number\"] :: M [Int])",
+        "Tidepool.Fork (forkAll)",
+    );
+    assert!(
+        result.is_ok(),
+        "forkAll @Int must compile against the answerer stack '[AskUser, RunLLMTurn, \
+         Finalize] (RunLLMTurn is in the row), got:\n{:?}",
+        result.err()
+    );
+}
+
+/// The general Agent's `Ask` effect verb — `ask` — does NOT typecheck against
+/// the answerer's `Eff '[AskUser, RunLLMTurn, Finalize]` stack: `Ask` is a
 /// DIFFERENT effect (still present on the general Agent stack, suspending to
-/// the calling LLM agent) and is not declared in this narrower compile at
-/// all.
+/// the calling LLM agent) and is not declared in this narrower compile at all.
+/// A base effect (`Fs`/`Exec`/…) is rejected the same way — none are in the
+/// row — which is the capability boundary the scoped stack exists to enforce.
 #[test]
 fn ask_is_a_compile_error_in_the_answerer_stack() {
     if !extract_available() {
@@ -148,14 +175,43 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
     let result = compile_against(answerer_decls(), "(ask SStr \"x\" :: M Value)", "");
     let err = match result {
         Ok(_) => panic!(
-            "ask compiled against the answerer stack '[AskUser, Finalize] — the \
-             structural scoping is BROKEN (Ask must be undeclared there)"
+            "ask compiled against the answerer stack '[AskUser, RunLLMTurn, Finalize] \
+             — the structural scoping is BROKEN (Ask must be undeclared there)"
         ),
         Err(e) => e.to_string(),
     };
     assert!(
         err.contains("ask") && err.contains("not in scope"),
         "expected a GHC not-in-scope error naming ask, got:\n{err}"
+    );
+}
+
+/// The capability boundary proper: a BASE effect verb (`httpGet`, the `Http`
+/// effect — representative of the nine base effects the answerer row drops:
+/// `Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Meta`) does NOT
+/// typecheck against `Eff '[AskUser, RunLLMTurn, Finalize]`. This is the whole
+/// point of the scoped stack — the answerer structurally cannot hit the
+/// network, run a shell command, or read files, because those verbs are
+/// UNDECLARED in its compile, not merely unreachable.
+#[test]
+fn base_effect_is_a_compile_error_in_the_answerer_stack() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+
+    let result = compile_against(answerer_decls(), "(httpGet \"http://x\" :: M Value)", "");
+    let err = match result {
+        Ok(_) => panic!(
+            "httpGet (a base Http effect) compiled against the answerer stack \
+             '[AskUser, RunLLMTurn, Finalize] — the capability boundary is BROKEN \
+             (base effects must be undeclared there)"
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("httpGet") && err.contains("not in scope"),
+        "expected a GHC not-in-scope error naming httpGet, got:\n{err}"
     );
 }
 

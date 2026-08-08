@@ -50,7 +50,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::compile::{self, AsksSidecar};
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
-use crate::engine::{self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, RESUME_HELPER};
+use crate::engine::{
+    self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome, RESUME_HELPER,
+};
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
@@ -1226,6 +1228,23 @@ impl Harness {
         Some((pending.hole.clone(), pending.classified.clone(), table))
     }
 
+    /// Reconstruct a [`TurnOutcome::Suspended`] from `node`'s CURRENT pending
+    /// hole (self-iterating-harness fork widen: after [`Self::answer_fanout`]/
+    /// [`Self::answer_fork`] resumes a parent answerer, the driver needs the
+    /// parent's freshly re-published hole in the same shape
+    /// [`Self::drive_turn`] returns, without re-running a model turn).
+    /// `None` if `node` isn't currently suspended.
+    pub fn pending_turn_outcome(&self, node: NodeId) -> Option<TurnOutcome> {
+        let convos = self.convos.lock();
+        let convo = convos.get(&node)?;
+        let pending = convo.pending.as_ref()?;
+        Some(TurnOutcome::Suspended {
+            hole: pending.hole.0.clone(),
+            classified: pending.classified.clone(),
+            table: convo.suspend_table.clone().unwrap_or_default(),
+        })
+    }
+
     /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
     /// from the routing payload — what the observatory form pane renders. `None`
     /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
@@ -2086,6 +2105,29 @@ impl Harness {
                     return Ok(result.into_value());
                 }
                 Err(ResidentError::NotSuspended) => return Err(HarnessError::NotSuspended(target)),
+                // v1 limitation: a forked CHILD that itself suspends (nested
+                // `fork`/`forkAll`, or `dialogAsk`/`dialogForm`) is unsupported.
+                // The GUI/self-harness driver monitors ONE session (the
+                // parent's), so there is no operator to answer a hole opened
+                // two levels deep — and `run_child` itself only ever holds ONE
+                // stowed continuation (R0 sequential-isolated), so the child
+                // literally cannot park here. Cancel the child and hard-error
+                // rather than falling into the generic retry arm below (which
+                // would blind-retry forever: the child's own suspend is not a
+                // transient compile/runtime fault it can self-correct from).
+                Err(ResidentError::ChildSuspended) => {
+                    self.tree.node_cancelled(
+                        answerer,
+                        "nested fork/askUser in a fork child unsupported (v1)".to_string(),
+                    )?;
+                    self.drop_session(answerer);
+                    return Err(HarnessError::Aborted {
+                        node: answerer,
+                        reason: "a forked child answerer suspended on its own effect — nested \
+                                 fork or askUser inside a fork child is unsupported in v1"
+                            .to_string(),
+                    });
+                }
                 Err(e) => {
                     // A run-time fault in the answerer (e.g. `error "boom"`
                     // forced during its own eval, before the parent's

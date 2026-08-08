@@ -141,58 +141,71 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-/// The nested answerer Agent's SCOPED decl list (W1 effect-scoping;
-/// 08-wave1-correctness.md: "The Agent's effects = gui + finalize, NOT
-/// runLLMTurn — no recursive model-spawning"). Mirrors [`outer_decls`] — a
-/// narrow, purpose-built stack rather than the full `EngineConfig::standard`
-/// Agent row: it DROPS all NINE base effects (`Console`/`KV`/`Fs`/`Lsp`/
-/// `Http`/`Exec`/`Git`/`Time`/`Meta`), so the answerer structurally CANNOT
-/// `run` a shell command, read files, or hit the network — its turn compiles
-/// against a `Tidepool.Effects` that never defines those verbs. The row is
-/// `[AskUser, Finalize]`: `AskUser` (self-iterating-harness Wave 2) is
-/// answerer-only — a brand new effect alongside (not a replacement for) the
-/// general-Agent-stack `Ask`, deliberately absent from `standard_decls()` —
-/// presenting a typed form to a HUMAN OPERATOR (`askUser`/`askUserRaw`) and
-/// blocking until submit; `Finalize` (`finalize`) is the answer path.
+/// The nested answerer Agent's SCOPED decl list (W1 effect-scoping). Mirrors
+/// [`outer_decls`] — a narrow, purpose-built stack rather than the full
+/// `EngineConfig::standard` Agent row: it DROPS all NINE base effects
+/// (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Meta`), so the
+/// answerer structurally CANNOT `run` a shell command, read files, or hit the
+/// network — its turn compiles against a `Tidepool.Effects` that never defines
+/// those verbs. The row is `[AskUser, RunLLMTurn, Finalize]`: `AskUser`
+/// (self-iterating-harness Wave 2) is answerer-only — a brand new effect
+/// alongside (not a replacement for) the general-Agent-stack `Ask`,
+/// deliberately absent from `standard_decls()` — presenting a typed form to a
+/// HUMAN OPERATOR (`askUser`/`askUserRaw`) and blocking until submit;
+/// `RunLLMTurn` is here for `fork`/`forkAll` (see the next section); `Finalize`
+/// (`finalize`) is the answer path.
 ///
-/// # `RunLLMTurn` is STRUCTURALLY excluded — a compile error, not a prompt rule
+/// # `RunLLMTurn` is back in the row — for `fork`/`forkAll`, the sanctioned recursive spawn
 ///
-/// "No recursive model-spawning" used to be enforced only BEHAVIORALLY (the
-/// narrow answerer FRAMING, [`ANSWERER_FRAMING_SUFFIX`], simply never
-/// advertised `runLLMTurn`) because `RunLLMTurn` had to stay in this row for
-/// an unrelated reason: the frozen authored-harness contract
-/// (`examples/harness/Harness.hs`) used to define its answer types
-/// (`Decision`, …) in the SAME module as `loop` (which calls `runLLMTurn`) —
-/// so the answerer, which imports that module to construct a typed
-/// `finalize @Decision (...)` reply, would only compile if `runLLMTurn`
-/// typechecked there too, which needed `RunLLMTurn` in this decl list
-/// regardless of whether the verb was monomorphic or `Member`-polymorphic
-/// (GHC compiles a module as a whole, not just the names an importer uses).
+/// This USED to structurally exclude `RunLLMTurn` ("no recursive
+/// model-spawning" — see the branch history for the fuller account of why it
+/// was excluded and later became droppable once `examples/harness/
+/// HarnessTypes.hs` split its answer types out of the `loop`-defining
+/// module). It is deliberately back now: `fork`/`forkAll`
+/// (`Tidepool.Fork`, self-iterating-harness fork widen) are OPAQUE Haskell
+/// verbs that extract head-swaps to `runLLMTurnForkSited`/
+/// `runLLMTurnFanoutSited` — the SAME `RunLLMTurn` GADT/union-tag every other
+/// `runLLMTurn` call compiles to. So an answerer that wants to delegate to N
+/// parallel sub-answerers needs `RunLLMTurn` declared in its own row, or
+/// `forkAll`/`fork` fail to typecheck against its `Tidepool.Effects` (a
+/// stray-verb GHC "not in scope" error, same failure mode the OLD exclusion
+/// relied on for the opposite reason). This is controlled, bounded recursion
+/// — the driver services the resulting `Fork` suspension via
+/// [`Harness::answer_fanout`]/[`Harness::answer_fork`] (see
+/// [`SelfHarnessDriver::drive_answerer_to_finalize`]), not open-ended
+/// self-spawning — so it does not reopen the "no recursive model-spawning"
+/// concern the old doc guarded against. The bare `runLLMTurn`/`resume` verbs
+/// ride along as a side effect of the same decl (nothing hides them), but the
+/// answerer's advertised surface ([`ANSWERER_FRAMING_SUFFIX`]) frames
+/// `fork`/`forkAll` as the sanctioned primitive, not raw `runLLMTurn`.
 ///
-/// The harness contract now splits that dependency: `examples/harness/
-/// HarnessTypes.hs` holds `State`/`Mode`/`Decision`/`Confidence`/
+/// The harness contract splits the `loop` dependency out of the way: `examples/
+/// harness/HarnessTypes.hs` holds `State`/`Mode`/`Decision`/`Confidence`/
 /// `initialState`/`render` with NO reference to `Tidepool.Harness`/
-/// `runLLMTurn`, and `examples/harness/Harness.hs` (which still defines
-/// `loop`) re-exports them. The answerer imports `HarnessTypes` directly, so
-/// its compile never pulls in `loop` — `RunLLMTurn` can now be dropped from
-/// this row entirely. `RunLLMTurn`'s GADT/verbs are then simply UNDECLARED
-/// in the answerer's generated `Tidepool.Effects` (see
-/// `tidepool_mcp::effects_module_source`, which only emits an effect's GADT
-/// and helpers for decls actually passed in) — a stray `runLLMTurn` call in
-/// an answerer turn is a GHC "not in scope" error, the Member-polymorphic
-/// verbs (siteid-plugin) making that possible without extract/JIT changes:
-/// `runLLMTurn`/`finalize` no longer need to be compiled against one hardcoded
-/// closed `M`, so a narrower per-compile decl list is all that's needed to
-/// shrink the row. This is the harness/agent structural split (see
-/// `Tidepool.Agent` in the stdlib for the answerer's own named boundary,
-/// mirroring `Tidepool.Harness`'s `HarnessEff`).
+/// `runLLMTurn`, and `examples/harness/Harness.hs` (which still defines `loop`)
+/// re-exports them. The answerer imports `HarnessTypes` directly, so its
+/// compile never pulls in `loop` — meaning `RunLLMTurn` in THIS row is there
+/// purely for the sanctioned `fork`/`forkAll` delegation above, never as an
+/// accidental door back into `loop`-style self-recursion. The
+/// Member-polymorphic verbs (siteid-plugin) make a per-compile decl list the
+/// only knob needed: `runLLMTurn`/`finalize` are not compiled against one
+/// hardcoded closed `M`, so the row's shape is exactly the decls passed here.
+/// This is the harness/agent structural split (see `Tidepool.Agent` in the
+/// stdlib for the answerer's own named boundary, mirroring `Tidepool.Harness`'s
+/// `HarnessEff`).
 ///
 /// `AskUser` comes first: [`EngineConfig::from_decls`] takes the FIRST
 /// interposed effect (`Ask`|`AskUser`|`RunLLMTurn`|`Finalize`) as the suspend
-/// threshold — with `RunLLMTurn` gone from this row, `AskUser` is simply
-/// first among the two that remain.
+/// threshold — `RunLLMTurn`/`Finalize` both land at or past that threshold
+/// regardless of position, so keeping `RunLLMTurn` in the MIDDLE of this row
+/// (`AskUser`-then-`RunLLMTurn`-then-`Finalize`, mirroring the full Agent
+/// stack's own order) needs no further wiring.
 pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    vec![tidepool_mcp::askuser_decl(), tidepool_mcp::finalize_decl()]
+    vec![
+        tidepool_mcp::askuser_decl(),
+        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::finalize_decl(),
+    ]
 }
 
 fn not_bootstrapped() -> DriverError {
@@ -275,6 +288,12 @@ for a human operator and returns the decoded typed value directly (a bad \
 submission re-prompts internally; there is no `Either` to unwrap). A value you \
 bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
 on it.\n\
+\n\
+To answer by delegating to parallel sub-answerers, evaluate `forkAll @T \
+[brief1, brief2, ...] :: M [T]` (or `fork @T brief :: M T` for a single \
+delegate; `import Tidepool.Fork`). Each sub-answerer independently answers \
+one brief and cannot itself fork or gather operator input — it must resolve \
+its own brief directly. Combine the results and `finalize` as usual.\n\
 \n\
 When you have the answer, COMMIT it by evaluating `finalize @T (value :: T)` \
 — this ends your turn and hands the typed value back to the loop. `T` is the \
@@ -974,13 +993,14 @@ impl SelfHarnessDriver {
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
                     // A Finalize suspension is the answer. An AskUser suspension
-                    // (the scoped answerer's gui path) is SERVICED here — present
-                    // the form via the operator gate, resume, and repeat while the
-                    // answerer keeps re-suspending on another AskUser (askUser's
-                    // Haskell-side decode-failure re-prompt) — see
-                    // `service_askuser_hole`. Any OTHER suspension is a hard error:
-                    // the scoped answerer stack (`[AskUser, Finalize]`) cannot
-                    // reach anything else.
+                    // (operator gui) is SERVICED here via the operator gate
+                    // (`service_askuser_hole`, looping on askUser's Haskell-side
+                    // decode-failure re-prompt). A Fork suspension (`forkAll`/
+                    // `fork` delegation) is serviced via the EXISTING fanout/fork
+                    // machinery (`drain_answerer_fork`, REUSED not reimplemented).
+                    // Any OTHER suspension is a hard error: the scoped answerer
+                    // stack (`[AskUser, RunLLMTurn, Finalize]`) can reach nothing
+                    // else, and this driver has no operator for it.
                     let TurnOutcome::Suspended { classified, .. } = &out else {
                         unreachable!("matched TurnOutcome::Suspended above");
                     };
@@ -1010,14 +1030,26 @@ impl SelfHarnessDriver {
                             }
                         }
                     }
-                    // A non-finalize, non-askUser suspension: the answerer is
-                    // mid-interaction and has parked awaiting input this driver
-                    // cannot service. Treat it as a hard error rather than
-                    // silently hanging.
+                    // The answerer delegated to `forkAll`/`fork`: service it via
+                    // the existing fanout/fork machinery (REUSED, not
+                    // reimplemented) rather than handing it to an operator that
+                    // doesn't exist here.
+                    if matches!(classified.routing, HoleRouting::Fork { .. }) {
+                        if let Some(out) = self.drain_answerer_fork(node, ty_label)? {
+                            return Ok(out);
+                        }
+                        // The parent completed without ever finalizing —
+                        // `drain_answerer_fork` already reopened the node and
+                        // pushed a corrective nudge. Keep driving.
+                        continue;
+                    }
+                    // A non-finalize, non-askUser, non-fork suspension: the
+                    // answerer parked awaiting input this driver cannot service.
+                    // Hard error rather than silently hanging.
                     return Err(DriverError::Session(format!(
-                        "runLLMTurn answerer suspended on a non-finalize, non-askUser \
-                         hole ({:?}) — the self-harness driver has no operator to \
-                         answer it",
+                        "runLLMTurn answerer suspended on a non-finalize, non-askUser, \
+                         non-fork hole ({:?}) — the self-harness driver has no operator \
+                         to answer it",
                         classified.routing
                     )));
                 }
@@ -1224,6 +1256,88 @@ impl SelfHarnessDriver {
                 ResidentOutcome::Completed { .. } => return Ok(outcome),
             }
         }
+    }
+
+    /// Drain a `HoleRouting::Fork` suspension on the per-loop answerer
+    /// (self-iterating-harness fork widen, `forkAll`/`fork` via
+    /// `Tidepool.Fork`): resume it via the EXISTING
+    /// [`Harness::answer_fanout`]/[`Harness::answer_fork`] machinery — REUSED,
+    /// never reimplemented — looping in case the parent immediately hits
+    /// ANOTHER fork right after resuming (e.g. `forkAll` then `fork` in
+    /// sequence). `Ok(Some(out))` means the parent landed on `Finalize` — the
+    /// caller should `return Ok(out)` straight through, same as any other
+    /// finalize suspension. `Ok(None)` means the parent's block ran to
+    /// completion WITHOUT ever finalizing; this already reopened the node and
+    /// pushed the same corrective nudge [`Self::drive_answerer_to_finalize`]'s
+    /// `Completed` arm uses, so the caller should just let its round loop
+    /// keep driving. Any other resumed hole (an operator form) or a
+    /// mid-fanout child that itself suspended
+    /// ([`crate::harness::HarnessError::Aborted`], surfaced from
+    /// `answer_fanout`/`answer_fork` via `?`) is a hard error — the
+    /// self-harness driver has no operator inside a fork child (v1).
+    fn drain_answerer_fork(
+        &mut self,
+        node: NodeId,
+        ty_label: &str,
+    ) -> Result<Option<TurnOutcome>, DriverError> {
+        loop {
+            let routing = self
+                .agent
+                .pending_hole(node)
+                .map(|c| c.routing)
+                .ok_or_else(|| {
+                    DriverError::Session("fork resume: node has no pending hole to service".into())
+                })?;
+            match routing {
+                HoleRouting::Fork { fan: Some(_), .. } => {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(self.agent.answer_fanout(node, Actor::Operator))
+                    })?;
+                }
+                HoleRouting::Fork { fan: None, .. } => {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(self.agent.answer_fork(node, Actor::Operator))
+                    })?;
+                }
+                other => {
+                    return Err(DriverError::Session(format!(
+                        "drain_answerer_fork: expected a pending Fork hole, got {other:?}"
+                    )));
+                }
+            }
+
+            match self.agent.pending_hole(node).map(|c| c.routing) {
+                Some(HoleRouting::Finalize { .. }) => {
+                    return self
+                        .agent
+                        .pending_turn_outcome(node)
+                        .map(Some)
+                        .ok_or_else(|| {
+                            DriverError::Session("fork resume: finalize pending vanished".into())
+                        });
+                }
+                Some(HoleRouting::Fork { .. }) => continue,
+                Some(other) => {
+                    return Err(DriverError::Session(format!(
+                        "fork answerer resumed onto a non-finalize/non-fork hole \
+                         ({other:?}) — no operator to answer it"
+                    )));
+                }
+                None => break,
+            }
+        }
+
+        self.agent.reopen_node(node)?;
+        self.agent.push_user_turn(
+            node,
+            &format!(
+                "The fork results did not resolve the request. Answer by evaluating \
+                 `finalize @{ty_label} (value :: {ty_label})`."
+            ),
+        )?;
+        Ok(None)
     }
 
     /// Evaluate `render(state, lastCompaction)` against the outer session
