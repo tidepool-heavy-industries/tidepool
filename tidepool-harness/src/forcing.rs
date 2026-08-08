@@ -17,7 +17,8 @@
 //! calls [`NodeTree::force`] itself, regardless of the fan badge. A
 //! `Dynamic`-fan parent's materialized children are ordinary `Thunk` nodes
 //! like any other — each one still needs its own `Forced` event. There is
-//! no policy ladder to bypass.
+//! no policy ladder to bypass — an auto-force policy ladder is R2 scope,
+//! not built here.
 
 use std::collections::HashMap;
 

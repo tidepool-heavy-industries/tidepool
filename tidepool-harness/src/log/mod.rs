@@ -1,8 +1,8 @@
-//! Event-log schema (E4): append-only jsonl, one file per run, fsync per
+//! Event-log schema: append-only jsonl, one file per run, fsync per
 //! event. The header pins toolchain identity; replay is EFFECT-RESPONSE
 //! SUBSTITUTION (re-run logged sources with logged responses injected), so
 //! `Effect` events MUST record the response — a missing response breaks
-//! restoration. Segment 30 C1 implements the writer, C2 the replayer;
+//! restoration. Segment 30 implements the writer and the replayer;
 //! this module is the wire contract.
 //!
 //! Layout: [`LogHeader`] is the file's first line, unwrapped. Every
@@ -43,7 +43,7 @@ pub struct LogHeader {
 
 /// One jsonl line after the header: the writer-assigned monotonic
 /// per-file `seq` wrapped around an [`Event`]. This is the additive
-/// envelope C1 owns — `Event` itself is not reshaped.
+/// envelope the writer owns — `Event` itself is not reshaped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {
     pub seq: u64,
@@ -59,7 +59,7 @@ pub enum Event {
     NodeCreated {
         node: NodeId,
         parent: Option<NodeId>,
-        /// Harness-generated only (C7) — never program-authored.
+        /// Harness-generated only — never program-authored.
         teaser: String,
         effect_row: Vec<String>,
         fan: FanBadge,
@@ -112,8 +112,8 @@ pub enum Event {
         node: NodeId,
         reason: String,
     },
-    /// One conversation-turn delta (F2 turn-store draft — the transcript is
-    /// reconstructed by FOLDING these in `seq` order). A turn's `content` is
+    /// One conversation-turn delta — the transcript is
+    /// reconstructed by FOLDING these in `seq` order. A turn's `content` is
     /// the whole message (R0 stores messages inline, not as sub-deltas — the
     /// "delta" framing is the schema seam, kept so a later streaming turn can
     /// append partial content under the same `node`+`turn` without reshaping
@@ -136,7 +136,8 @@ pub enum Event {
     },
     /// A fork's transcript reference: the child `node` inherits the parent
     /// conversation up to and including the parent's turn at index
-    /// `parent_turn` (F2: "fork = ref to parent position"). Reconstruction
+    /// `parent_turn` — a fork is a reference to the parent's position, not a
+    /// copy. Reconstruction
     /// folds the parent's `TurnDelta`s with `turn <= parent_turn`, then the
     /// child's own.
     TurnForked {
@@ -144,7 +145,7 @@ pub enum Event {
         parent: NodeId,
         parent_turn: u64,
     },
-    /// F2's reserved `turn_spliced` kind, now built: an OPERATOR verb that
+    /// The `turn_spliced` kind: an OPERATOR verb that
     /// interjects a message into `node`'s OWN transcript (never a different
     /// node's — the operator addresses the conversation directly, unlike a
     /// fork's parent-position reference). Kept PARALLEL to [`Event::TurnDelta`]

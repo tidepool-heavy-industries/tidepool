@@ -2902,7 +2902,7 @@ impl Harness {
         Ok(())
     }
 
-    /// F2's `turn_spliced` verb, now built: interject `content` into `node`'s
+    /// The `turn_spliced` verb: interject `content` into `node`'s
     /// OWN transcript, landing at `node`'s CURRENT turn position. Appends
     /// straight to the LIVE `NodeConvo::transcript` (the same list
     /// `drive_turn`/`push_user_turn` read/append), so the very next prompt

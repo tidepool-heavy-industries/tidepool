@@ -1,4 +1,4 @@
-//! Server-derived operator forms (§6 D6, `uiOf`): map a typed hole's answer
+//! Server-derived operator forms (`uiOf`): map a typed hole's answer
 //! type to a mechanical [`Ui`] form purely from the compiled artifact's
 //! [`DataConTable`] — no Haskell Generic machinery, no fluency tax.
 //!

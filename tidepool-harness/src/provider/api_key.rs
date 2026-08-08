@@ -1,4 +1,4 @@
-//! API-key `ModelProvider` impl — co-equal (F4) with the OAuth impl in
+//! API-key `ModelProvider` impl — co-equal with the OAuth impl in
 //! [`super::oauth`]. Key resolution: env var first (an already-set var
 //! wins, matching `tidepool_runtime::paths::load_secrets`'s precedence),
 //! then the config-dir secrets file of the same name. The chat call itself

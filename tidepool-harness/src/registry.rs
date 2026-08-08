@@ -327,8 +327,8 @@ mod tests {
     use super::*;
 
     /// A trivial stand-in for the machine handle `M` — the registry is pure
-    /// lifecycle bookkeeping, so a counter proves the transitions without the
-    /// JIT.
+    /// lifecycle bookkeeping, so a counter is enough to exercise the
+    /// transitions without the JIT.
     #[derive(Debug, PartialEq, Eq)]
     struct FakeMachine {
         turns: u32,

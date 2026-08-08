@@ -1,4 +1,4 @@
-//! Record-replay provider + crash-replay (E4 / component 5 & 6).
+//! Record-replay provider + crash-replay.
 //!
 //! # Record-replay provider
 //!
@@ -6,14 +6,14 @@
 //! PRE-RECORDED log instead of calling a live model. In LIVE mode the harness
 //! logs each assistant turn (`TurnDelta` with `role = Assistant`); in REPLAY
 //! mode this provider hands those SAME assistant replies back in order, so a CI
-//! run re-drives the exact golden path with zero API calls. This is also E4's
-//! turn-replay: the turns ARE log events.
+//! run re-drives the exact golden path with zero API calls — the turns ARE log
+//! events.
 //!
 //! The provider is intentionally order-only (a queue of assistant replies): a
 //! deterministic single-thread golden path emits its turns in a fixed sequence,
 //! and replaying that sequence reproduces the run. A future multi-node
 //! interleaving would key replies by `(node, turn)` — the log already carries
-//! both, so the queue can become a map without a schema change (noted for F2).
+//! both, so the queue can become a map without a schema change.
 //!
 //! # Crash-replay
 //!

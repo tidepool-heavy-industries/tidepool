@@ -5,9 +5,10 @@
 //! the renderer. R0 is first-order (no monadic sequencing — that grows in
 //! R1 with the Dialog effect).
 //!
-//! LAW (B2, open sum): every `Choice` elicitation renders with an
-//! open-prose escape path IN ADDITION to its options — the renderer adds
-//! it unconditionally; it is not represented (and not omittable) here.
+//! Every `Choice` elicitation renders with an
+//! open-prose escape path IN ADDITION to its options (open sum) — the
+//! renderer adds it unconditionally; it is not represented (and not
+//! omittable) here.
 
 use serde::{Deserialize, Serialize};
 

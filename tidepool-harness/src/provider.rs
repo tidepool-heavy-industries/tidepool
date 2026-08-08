@@ -1,4 +1,4 @@
-//! Calling-model provider boundary (F4). The harness knows turns and
+//! Calling-model provider boundary. The harness knows turns and
 //! token counts, never providers — segment 60 supplies the two impls
 //! (ChatGPT-subscription OAuth, API-key) behind this one trait, passing
 //! one shared behavior suite. This is NOT the in-program `Llm` effect
