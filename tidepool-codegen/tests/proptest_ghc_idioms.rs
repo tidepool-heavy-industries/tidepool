@@ -13,12 +13,13 @@
 //! no division-by-variable, results are Int# / Con of Int#), so ~100% of cases
 //! reach value comparison rather than being skipped as eval-errors.
 //!
-//! Oracles:
-//!   1. `check_jit_vs_eval` at 64KB and 4KB nursery (B1 value-diff, B2 JIT-only
-//!      error, B4 nursery-knob divergence).
-//!   2. JIT determinism: compile+run twice, compare (B4).
-//!   3. B3 crash containment: fork-per-case; a child that dies by signal is a
-//!      shrinkable failure in the parent.
+//! Oracle: `tidepool_testing::differential` — one [`DiffConfig`] per property
+//! sweeping the 64KiB/4KiB nursery pair (B1 value-diff, B4 nursery-knob
+//! divergence) with `repeat_count(2)` (B4 determinism) and
+//! `CrashContainment::ForkProbe` (B3: a child killed by a signal is a
+//! reportable divergence the parent shrinks). Every property drives
+//! `TestRunner` directly so its `ReachCounter` lives and asserts in the SAME
+//! process as the cases it counts.
 //!
 //! The optimize-then-compare oracle (#3 in the spec) is SKIPPED: tidepool-codegen
 //! does not depend on tidepool-optimize and we may not edit Cargo.toml.
@@ -27,13 +28,14 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 use tidepool_repr::types::{Alt, AltCon, DataConId, JoinId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
-use tidepool_testing::proptest::{check_jit_vs_eval, values_equal};
+use tidepool_testing::differential::{check, CrashContainment, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::values_equal;
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 
@@ -47,15 +49,12 @@ const PAIR: DataConId = DataConId(4);
 const I_HASH: DataConId = DataConId(7); // I# single-field Int box wrapper
 
 // ---------------------------------------------------------------------------
-// Reach instrumentation.
-//
-// Counts how many generated cases actually reached a JIT-vs-eval value
-// comparison vs. were skipped. The DONE criteria require >= 90% reach.
+// Skeleton-frequency counters. Each property's local ReachCounter (see the
+// `#[test]` fns below) carries reach; these statics carry shape frequency and
+// are printed at the end of the property that bumps them — nextest gives
+// every test its own process, so a counter is only meaningful within the
+// test that both bumps and reads it.
 // ---------------------------------------------------------------------------
-static REACHED: AtomicU64 = AtomicU64::new(0);
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-
-// Skeleton-frequency + structural reach counters (reported in findings).
 static N_LETREC: AtomicU64 = AtomicU64::new(0);
 static N_CASEOFCASE: AtomicU64 = AtomicU64::new(0);
 static N_UNDER_LAMBDA: AtomicU64 = AtomicU64::new(0);
@@ -70,130 +69,18 @@ fn bump(c: &AtomicU64) {
 }
 
 // ---------------------------------------------------------------------------
-// B3 crash containment: fork-per-case.
-//
-// The JIT already installs signal handlers (`with_signal_protection`), but host
-// stack-overflow via recursive drops, or any handler-defeating fault, can still
-// kill the test process. We fork; the child compiles + runs the JIT and reports
-// a single success byte through a pipe before `_exit(0)`. The parent waitpid's:
-// a `WIFSIGNALED` child is a reportable B3 crash that proptest can shrink.
-//
-// Returns Ok(()) if the child exited normally (signalled-or-not handled by JIT
-// internally), Err(signal) if the child died by signal.
+// Differential config: the nursery pair, determinism repeats, and fork probe
+// that used to be reinvented per-lane now live in one DiffConfig. Nothing is
+// tolerated: an empty-policy run against all five properties (see the
+// migration commit message) came back 100% Compared, so despite this lane's
+// skeletons being more exotic than case-dispatch's, none of them actually
+// produces a legitimate JIT/eval error.
 // ---------------------------------------------------------------------------
-#[cfg(unix)]
-fn run_in_fork(expr: &CoreExpr, nursery: usize) -> Result<(), i32> {
-    use std::io::Read;
-
-    // Build the table on the parent side so the child only does compile+run.
-    let table = tidepool_testing::proptest::build_table_for_expr(expr);
-
-    let mut fds = [0i32; 2];
-    // SAFETY: pipe2 with a valid 2-int array.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        // Can't fork-guard; fall back to in-process (best effort).
-        let _ = JitEffectMachine::compile(expr, &table, nursery).map(|mut m| m.run_pure());
-        return Ok(());
-    }
-    let (read_fd, write_fd) = (fds[0], fds[1]);
-
-    // SAFETY: fork in a single-threaded test child; the child only touches
-    // its own JIT state and the write end of the pipe, then _exit.
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // Child: close read end, run JIT, write one byte, _exit(0).
-        unsafe {
-            libc::close(read_fd);
-        }
-        if let Ok(mut machine) = JitEffectMachine::compile(expr, &table, nursery) {
-            let _ = machine.run_pure();
-        }
-        let ok: u8 = 1;
-        unsafe {
-            libc::write(write_fd, &ok as *const u8 as *const libc::c_void, 1);
-            libc::close(write_fd);
-            libc::_exit(0);
-        }
-    }
-
-    // Parent.
-    unsafe {
-        libc::close(write_fd);
-    }
-    // Drain the pipe (we don't strictly need the byte, but reading avoids races).
-    let mut f = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(read_fd) };
-    let mut buf = [0u8; 1];
-    let _ = f.read(&mut buf);
-    drop(f); // closes read_fd
-
-    let mut status: libc::c_int = 0;
-    // SAFETY: waitpid on the child we just forked.
-    unsafe {
-        libc::waitpid(pid, &mut status as *mut libc::c_int, 0);
-    }
-    if libc::WIFSIGNALED(status) {
-        Err(libc::WTERMSIG(status))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(unix))]
-fn run_in_fork(_expr: &CoreExpr, _nursery: usize) -> Result<(), i32> {
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shared oracle wrapper: runs all three oracles for one expression.
-// ---------------------------------------------------------------------------
-fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-
-    // Oracle 3 (B3): crash containment at both nursery sizes, BEFORE running
-    // the in-process oracle (so a guaranteed-crash shape is caught even if the
-    // in-process signal handler would take the whole runner down).
-    for &n in &[64 * 1024usize, 4 * 1024usize] {
-        if let Err(sig) = run_in_fork(&expr, n) {
-            prop_assert!(
-                false,
-                "B3 fatal signal {} in forked JIT (nursery {}).\nExpr: {:#?}",
-                sig,
-                n,
-                expr
-            );
-        }
-    }
-
-    // Oracle 1 (B1/B2/B4): JIT vs eval at 64KB and 4KB nursery.
-    check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-    check_jit_vs_eval(expr.clone(), 4 * 1024)?;
-
-    // Oracle 2 (B4): JIT determinism — compile+run twice at 64KB, compare.
-    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
-    let r1 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    let r2 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    if let (Ok(v1), Ok(v2)) = (&r1, &r2) {
-        prop_assert!(
-            values_equal(v1, v2),
-            "B4 JIT non-determinism across two runs.\nRun1: {:?}\nRun2: {:?}\nExpr: {:#?}",
-            v1,
-            v2,
-            expr
-        );
-        // Both runs succeeded and agree -> this case reached value comparison.
-        bump(&REACHED);
-    } else if r1.is_ok() != r2.is_ok() {
-        prop_assert!(
-            false,
-            "B4 JIT determinism: one run errored, the other succeeded.\nRun1: {:?}\nRun2: {:?}\nExpr: {:#?}",
-            r1,
-            r2,
-            expr
-        );
-    }
-
-    Ok(())
+fn dcfg(label: &'static str) -> DiffConfig {
+    DiffConfig::new(label)
+        .nurseries(&[64 * 1024, 4 * 1024])
+        .repeat_count(2)
+        .crash_containment(CrashContainment::ForkProbe)
 }
 
 // ===========================================================================
@@ -1113,60 +1000,98 @@ fn cfg() -> Config {
     c
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_letrec_siblings(spec in arb_letrec()) {
-        let expr = build_letrec(&spec);
-        prop_assert!(expr.nodes.len() <= 400);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_letrec_siblings() {
+    let reach = ReachCounter::new("ghc-idioms/letrec_siblings");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_letrec(), |spec| {
+            let expr = build_letrec(&spec);
+            prop_assert!(expr.nodes.len() <= 400);
+            check(expr, &dcfg("ghc-idioms/letrec_siblings"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ letrec: n={} backref={}",
+        N_LETREC.load(Ordering::Relaxed),
+        N_BACKREF.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_case_of_case(spec in arb_case_of_case()) {
-        let expr = build_case_of_case(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_case_of_case() {
+    let reach = ReachCounter::new("ghc-idioms/case_of_case");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_case_of_case(), |spec| {
+            let expr = build_case_of_case(&spec);
+            check(expr, &dcfg("ghc-idioms/case_of_case"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ case_of_case: n={} under_lambda={}",
+        N_CASEOFCASE.load(Ordering::Relaxed),
+        N_UNDER_LAMBDA.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_joinrec(spec in arb_joinrec()) {
-        let expr = build_joinrec(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_joinrec() {
+    let reach = ReachCounter::new("ghc-idioms/joinrec");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_joinrec(), |spec| {
+            let expr = build_joinrec(&spec);
+            check(expr, &dcfg("ghc-idioms/joinrec"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ joinrec: n={}",
+        N_JOINREC.load(Ordering::Relaxed)
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_boxchain(spec in arb_boxchain()) {
-        let expr = build_boxchain(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_boxchain() {
+    let reach = ReachCounter::new("ghc-idioms/boxchain");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_boxchain(), |spec| {
+            let expr = build_boxchain(&spec);
+            check(expr, &dcfg("ghc-idioms/boxchain"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ boxchain: n={}",
+        N_BOXCHAIN.load(Ordering::Relaxed)
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_joincross(spec in arb_joincross()) {
-        let expr = build_joincross(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_joincross() {
+    let reach = ReachCounter::new("ghc-idioms/joincross");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_joincross(), |spec| {
+            let expr = build_joincross(&spec);
+            check(expr, &dcfg("ghc-idioms/joincross"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ joincross: n={} nested={}",
+        N_JOINCROSS.load(Ordering::Relaxed),
+        N_NESTED_CROSS.load(Ordering::Relaxed),
+    );
 }
 
 // ===========================================================================
@@ -1251,47 +1176,5 @@ fn bug1_join_crosses_lambda() {
             v
         ),
         Err(e) => panic!("BUG #1 regressed: eval={:?} but JIT={:?}", ev, e),
-    }
-}
-
-/// Reach floor: after the four properties run, at least 90% of attempted cases
-/// must have reached value comparison. Run this LAST (proptest test order within
-/// a file is alphabetical, so the `zzz_` prefix orders it after the others).
-#[test]
-#[serial]
-fn zzz_reach_floor() {
-    let total = TOTAL.load(Ordering::Relaxed);
-    let reached = REACHED.load(Ordering::Relaxed);
-    eprintln!(
-        "GHC-IDIOMS REACH: {}/{} cases reached value comparison ({:.1}%)",
-        reached,
-        total,
-        if total > 0 {
-            100.0 * reached as f64 / total as f64
-        } else {
-            0.0
-        }
-    );
-    eprintln!(
-        "SKELETON FREQ: letrec={} caseofcase={} (under_lambda={}) joinrec={} boxchain={} joincross={} (nested={}) backref={}",
-        N_LETREC.load(Ordering::Relaxed),
-        N_CASEOFCASE.load(Ordering::Relaxed),
-        N_UNDER_LAMBDA.load(Ordering::Relaxed),
-        N_JOINREC.load(Ordering::Relaxed),
-        N_BOXCHAIN.load(Ordering::Relaxed),
-        N_JOINCROSS.load(Ordering::Relaxed),
-        N_NESTED_CROSS.load(Ordering::Relaxed),
-        N_BACKREF.load(Ordering::Relaxed),
-    );
-    // Only enforce the floor if a meaningful number of cases ran (guards against
-    // running this test in isolation).
-    if total >= 100 {
-        let ratio = reached as f64 / total as f64;
-        assert!(
-            ratio >= 0.90,
-            "reach floor: only {:.1}% of {} cases reached value comparison (need >= 90%)",
-            100.0 * ratio,
-            total
-        );
     }
 }
