@@ -678,6 +678,28 @@ impl EngineConfig {
         Self::from_decls(agent_decls(), prelude_dir, project_lib)
     }
 
+    /// A config for unit tests that never compile a turn: no extract binary,
+    /// no includes, and an effects dir that is never read. `effect_names` is
+    /// the one field such a test does read — `Harness::flush_effects` maps an
+    /// effect's stack tag through it.
+    #[cfg(test)]
+    pub(crate) fn inert(effect_names: Vec<String>) -> Self {
+        EngineConfig {
+            extract_bin: "unused".to_string(),
+            include: Vec::new(),
+            effect_names,
+            decls: Vec::new(),
+            suspend_tag: 0,
+            prelude_dir: PathBuf::from("."),
+            project_lib: None,
+            effects_dir: PathBuf::from("."),
+            max_turns: 1,
+            max_child_turns: 1,
+            max_tokens: None,
+            context_window_tokens: None,
+        }
+    }
+
     /// Build a config for an EXPLICIT decls list — not necessarily the full
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
     /// driver (WS-A) uses this for its `Eff '[RunLLMTurn]`-only compile

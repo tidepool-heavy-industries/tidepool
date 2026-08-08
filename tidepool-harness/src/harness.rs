@@ -3092,19 +3092,7 @@ mod tests {
     }
 
     fn test_engine_cfg() -> EngineConfig {
-        EngineConfig {
-            extract_bin: "unused".to_string(),
-            include: Vec::new(),
-            effect_names: vec!["Console".to_string()],
-            decls: Vec::new(),
-            suspend_tag: 0,
-            prelude_dir: PathBuf::from("."),
-            project_lib: None,
-            max_turns: 1,
-            max_child_turns: 1,
-            max_tokens: None,
-            context_window_tokens: None,
-        }
+        EngineConfig::inert(vec!["Console".to_string()])
     }
 
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a
@@ -3125,6 +3113,7 @@ mod tests {
         .unwrap();
         let provider: Arc<dyn DynModelProvider> = Arc::new(UnusedProvider);
         Harness {
+            run_id: generate_run_id(),
             tree: NodeTree::new(writer),
             cfg: test_engine_cfg(),
             child_cfg: test_engine_cfg(),
