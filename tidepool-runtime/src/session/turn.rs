@@ -104,6 +104,44 @@ fn map_notfound(e: std::io::Error) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(e))
 }
 
+/// Scan `stderr` for `tidepool-timing phase=<name> ms=<int>` lines and re-emit
+/// each as an `extract.<phase>` stage. Mirrors `tidepool-harness/src/timing.rs`'s
+/// `ExtractTiming::parse` + `record_extract_phases` by hand: `tidepool-runtime`
+/// cannot depend on `tidepool-harness` (that crate depends on this one, so a
+/// back-dependency would be a cycle), and `classify_turn` has no answerer node
+/// id of its own — `node = 0`, `round = u64::MAX` unconditionally, same
+/// convention as `ResidentSession::run`'s mirror. Malformed lines are skipped
+/// (diagnostics only, never a failure path); absent timing lines forward zero
+/// phases.
+fn forward_extract_timing(stderr: &str) {
+    for line in stderr.lines() {
+        let Some(rest) = line.trim().strip_prefix("tidepool-timing ") else {
+            continue;
+        };
+        let mut phase = None;
+        let mut ms = None;
+        for field in rest.split_whitespace() {
+            if let Some(v) = field.strip_prefix("phase=") {
+                phase = Some(v.to_string());
+            } else if let Some(v) = field.strip_prefix("ms=") {
+                ms = v.parse::<u64>().ok();
+            }
+        }
+        if let (Some(phase), Some(ms)) = (phase, ms) {
+            let stage = format!("extract.{phase}");
+            tracing::debug!(
+                target: "tidepool_harness::timing",
+                node = 0u64,
+                round = u64::MAX,
+                stage = stage.as_str(),
+                ms,
+                bytes = 0u64,
+                "turn stage"
+            );
+        }
+    }
+}
+
 /// Classify a raw turn (`x <- e` / `let x = e` / a bare expression) via the
 /// extract's parse-only `--emit-stmt-binders`. The binder name(s) come from
 /// GHC's parser, never a Rust scanner (plan §5.0 / domain §6 R5).
@@ -119,6 +157,10 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
         .arg(&out)
         .output()
         .map_err(map_notfound)?;
+    // A failed classification still cost a real subprocess spawn — attribute
+    // its extract phases the same as a successful one, before the early return
+    // below.
+    forward_extract_timing(&String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
         // A parsed report is a real GHC rejection of the turn text; this lane
         // never has a live GHC session distinguishing multiple diagnostics, so

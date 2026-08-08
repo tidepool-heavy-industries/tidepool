@@ -335,15 +335,19 @@ where
         // Empty until the first bind materializes, so a value-plane-free session
         // behaves exactly as before.
         let env = self.core.seed_external_env();
+        let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
+        record_turn_stage("jit_codegen", jit_codegen_started.elapsed());
 
         let ask_tag = self.core.ask_tag();
+        let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             Threadless::run_fragment(machine, func_id, table, handlers, captured, ask_tag)
         })?;
+        record_turn_stage("run_exec", run_exec_started.elapsed());
         Ok(self.classify(outcome))
     }
 
@@ -369,20 +373,24 @@ where
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
         let env = self.core.seed_external_env();
+        let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
+        record_turn_stage("jit_codegen", jit_codegen_started.elapsed());
 
         let ask_tag = self.core.ask_tag();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
+        let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine.run_fragment_suspendable_binding(
                 func_id, table, handlers, captured, ask_tag, forced,
             )
         })?;
+        record_turn_stage("run_exec", run_exec_started.elapsed());
         // A completion (no suspension) tenured the result — bind it now. A
         // suspension defers the bind to `resume_bind`.
         if matches!(outcome, SuspendableOutcome::Completed(_)) {
@@ -793,6 +801,26 @@ where
             }
         }
     }
+}
+
+/// Mirrors `tidepool-harness/src/timing.rs`'s `record_stage` event shape
+/// (same target, message, and field names/order) by hand: `tidepool-runtime`
+/// cannot depend on `tidepool-harness` (that crate depends on this one, so a
+/// back-dependency would be a cycle), so the JIT-codegen/exec stages of a
+/// resident turn — which live here, not in the harness — reproduce the
+/// contract instead of importing it. A resident session has no answerer node
+/// id, so `node = 0` and `round = u64::MAX` (the harness's `NO_ROUND`
+/// sentinel) unconditionally.
+fn record_turn_stage(stage: &str, elapsed: std::time::Duration) {
+    tracing::debug!(
+        target: "tidepool_harness::timing",
+        node = 0u64,
+        round = u64::MAX,
+        stage,
+        ms = elapsed.as_millis() as u64,
+        bytes = 0u64,
+        "turn stage"
+    );
 }
 
 /// Map a caught panic payload (a Rust-level fault that unwound past the JIT's

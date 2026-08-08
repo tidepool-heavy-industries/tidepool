@@ -4020,6 +4020,7 @@ dependencies = [
  "tidepool-repr",
  "tidepool-testing",
  "tokio",
+ "tracing",
  "which",
 ]
 

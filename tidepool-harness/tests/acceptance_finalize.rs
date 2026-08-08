@@ -216,8 +216,14 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
         "",
         None,
     );
-    let result =
-        tidepool_harness::compile::compile_turn(&cfg.extract_bin, &src, "result", &cfg.include);
+    let result = tidepool_harness::compile::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &cfg.include,
+        0,
+        tidepool_harness::timing::NO_ROUND,
+    );
     assert!(
         result.is_ok(),
         "a function-typed finalize site must compile cleanly (the relaxed \

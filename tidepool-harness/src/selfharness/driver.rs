@@ -46,6 +46,7 @@ use crate::selfharness::observer::{Event, Observer};
 use crate::selfharness::operator::{FormSpec, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
+use crate::timing;
 use crate::tree::NodeId;
 
 #[derive(Debug, thiserror::Error)]
@@ -540,11 +541,16 @@ impl SelfHarnessDriver {
             "",
             None,
         );
+        // The outer session has no answerer node id (it is the single loop
+        // driver, not a tree node) — node 0 / NO_ROUND, same convention as
+        // `Harness::new`'s own boot compile.
         let boot = compile::compile_turn(
             &outer_cfg.extract_bin,
             &boot_src,
             "result",
             &outer_cfg.include,
+            0,
+            timing::NO_ROUND,
         )
         .map_err(|e| DriverError::Session(format!("outer bootstrap compile: {e}")))?;
 
@@ -601,8 +607,15 @@ impl SelfHarnessDriver {
         );
         let src =
             engine::template_turn_for(&outer_decls(), &outer.cfg, code, &imports, helpers, None);
-        compile::compile_turn(&outer.cfg.extract_bin, &src, "result", &outer.cfg.include)
-            .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))
+        compile::compile_turn(
+            &outer.cfg.extract_bin,
+            &src,
+            "result",
+            &outer.cfg.include,
+            0,
+            timing::NO_ROUND,
+        )
+        .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))
     }
 
     /// Run ONE `render` → `loop` → (service each `runLLMTurn` hole) →

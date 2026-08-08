@@ -18,10 +18,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use serde::Deserialize;
 use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
+
+use crate::timing;
 
 /// One `asks.json` entry: a yield-site id and its rendered answer type.
 #[derive(Debug, Clone, Deserialize)]
@@ -94,11 +97,17 @@ pub enum CompileError {
 /// `extract_bin` is the `tidepool-extract` binary path (normally from
 /// `TIDEPOOL_EXTRACT`); pass it explicitly so the harness resolves it once at
 /// construction rather than re-reading the env per turn.
+///
+/// `node`/`round` attribute this compile's [`timing`] stages — pass
+/// [`timing::NO_ROUND`] when the caller has no answerer-round context (only a
+/// node id).
 pub fn compile_turn(
     extract_bin: &str,
     source: &str,
     target: &str,
     include: &[PathBuf],
+    node: u64,
+    round: u64,
 ) -> Result<CompiledTurn, CompileError> {
     let temp_dir = tempfile::TempDir::new()?;
     // GHC derives the module name from the filename (capitalize(basename)); the
@@ -114,10 +123,22 @@ pub fn compile_turn(
     for path in include {
         cmd.arg("--include").arg(path);
     }
+    let spawn_start = Instant::now();
     let output = cmd.output().map_err(|source| CompileError::Spawn {
         bin: extract_bin.to_string(),
         source,
     })?;
+    timing::record_stage(
+        node,
+        round,
+        timing::STAGE_EXTRACT_SPAWN,
+        spawn_start.elapsed(),
+        0,
+    );
+    // A failed compile is still a real answerer round — attribute its extract
+    // phases the same as a successful one, before returning the error below.
+    let extract_timing = timing::ExtractTiming::parse(&String::from_utf8_lossy(&output.stderr));
+    timing::record_extract_phases(node, round, &extract_timing);
     if !output.status.success() {
         return Err(CompileError::Extract(format!(
             "stdout:\n{}\nstderr:\n{}",
@@ -137,28 +158,65 @@ pub fn compile_turn(
         return Err(CompileError::MissingOutput(meta_path));
     }
 
+    let cbor_read_start = Instant::now();
     let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
+    let asks_bytes = read_asks_bytes(&asks_path)?;
+    let cbor_read_bytes =
+        (expr_bytes.len() + meta_bytes.len() + asks_bytes.as_ref().map_or(0, Vec::len)) as u64;
+    timing::record_stage(
+        node,
+        round,
+        timing::STAGE_CBOR_READ,
+        cbor_read_start.elapsed(),
+        cbor_read_bytes,
+    );
+
+    let deserialize_start = Instant::now();
     let expr = read_cbor(&expr_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
     let (table, warnings) =
         read_metadata(&meta_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
+    timing::record_stage(
+        node,
+        round,
+        timing::STAGE_CBOR_DESERIALIZE,
+        deserialize_start.elapsed(),
+        0,
+    );
     // Register varId → name pairs so runtime unresolved-variable errors can name
     // the symbol (mirrors compile_haskell).
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
-    let asks = load_asks(&asks_path)?;
+    let asks_start = Instant::now();
+    let asks = parse_asks(asks_bytes)?;
+    timing::record_stage(
+        node,
+        round,
+        timing::STAGE_ASKS_PARSE,
+        asks_start.elapsed(),
+        0,
+    );
 
     Ok(CompiledTurn { expr, table, asks })
 }
 
-/// Read + parse the `asks.json` sidecar. A missing file yields an empty
-/// sidecar (older extract without the pass) rather than an error; a present but
-/// malformed file is a hard error (a real regression to surface).
-fn load_asks(path: &Path) -> Result<AsksSidecar, CompileError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AsksSidecar::default()),
-        Err(e) => return Err(CompileError::Io(e)),
+/// Read the `asks.json` sidecar's raw bytes. A missing file yields `None`
+/// (older extract without the pass) rather than an error; any other read
+/// failure is a hard error.
+fn read_asks_bytes(path: &Path) -> Result<Option<Vec<u8>>, CompileError> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(CompileError::Io(e)),
+    }
+}
+
+/// Parse the `asks.json` sidecar's bytes (if the extract wrote one) into a
+/// sidecar. `None` (file absent) yields an empty sidecar; present-but-malformed
+/// bytes are a hard error (a real regression to surface).
+fn parse_asks(bytes: Option<Vec<u8>>) -> Result<AsksSidecar, CompileError> {
+    let Some(bytes) = bytes else {
+        return Ok(AsksSidecar::default());
     };
     let sites: Vec<AskSite> =
         serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
@@ -178,4 +236,38 @@ fn extract_module_name(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Forwarding path proof: a canned extract stderr (as `compile_turn` would
+    /// see it with `TIDEPOOL_TIMING=1` set) parses into the phases
+    /// `record_extract_phases` re-emits as `extract.*` stages — without ever
+    /// shelling a real extract (the bench covers that).
+    #[test]
+    fn extract_stderr_timing_lines_forward_via_parse_and_record() {
+        let stderr = "\
+some ghc warning\n\
+tidepool-timing phase=startup ms=12\n\
+tidepool-timing phase=ghc_session ms=980\n\
+tidepool-timing phase=typecheck ms=340\n\
+tidepool-timing phase=total ms=1500\n";
+        let parsed = timing::ExtractTiming::parse(stderr);
+        assert_eq!(
+            parsed.phases,
+            vec![
+                (timing::PHASE_STARTUP.to_string(), 12),
+                (timing::PHASE_GHC_SESSION.to_string(), 980),
+                (timing::PHASE_TYPECHECK.to_string(), 340),
+                (timing::PHASE_TOTAL.to_string(), 1500),
+            ]
+        );
+        // Never an error path: an empty/absent-timing stderr forwards zero phases.
+        assert!(timing::ExtractTiming::parse("plain ghc noise\n").is_empty());
+        // The re-emit call site `compile_turn` uses on both the success and
+        // failure paths — proves it accepts the parsed result without panicking.
+        timing::record_extract_phases(0, timing::NO_ROUND, &parsed);
+    }
 }

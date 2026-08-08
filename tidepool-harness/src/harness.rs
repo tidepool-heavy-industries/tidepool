@@ -56,6 +56,7 @@ use crate::engine::{
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
+use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
@@ -355,8 +356,17 @@ impl Harness {
     ) -> Result<Self, HarnessError> {
         // A trivial effectful seed carrying the full effect-stack ConTags.
         let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "", None);
-        let boot = compile::compile_turn(&cfg.extract_bin, &boot_src, "result", &cfg.include)
-            .map_err(|e| HarnessError::Compile(e.to_string()))?;
+        // No real answerer node exists yet (this is the one-time boot compile) —
+        // node 0 / NO_ROUND, mirroring the resident-session "no node id" convention.
+        let boot = compile::compile_turn(
+            &cfg.extract_bin,
+            &boot_src,
+            "result",
+            &cfg.include,
+            0,
+            timing::NO_ROUND,
+        )
+        .map_err(|e| HarnessError::Compile(e.to_string()))?;
         // The fork-child compile config: this node's row minus the
         // fork-spawning effects, so a child cannot fork (see `child_cfg`).
         let child_cfg = EngineConfig::from_decls(
@@ -779,9 +789,17 @@ impl Harness {
         // Stream the provider call into `node`'s live-turn buffer (rendered
         // token-by-token), then log the completed turn with its thinking and
         // swap the buffer for the durable turn in one frame.
+        let provider_started = std::time::Instant::now();
         let driven = self
             .stream_turn(node, &transcript, framing.as_deref())
             .await?;
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_PROVIDER_CALL,
+            provider_started.elapsed(),
+            0,
+        );
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -911,6 +929,7 @@ impl Harness {
         // expression; a classify failure falls through to the expression path,
         // which re-reports any real error.
         let block_owned = block.to_string();
+        let classify_started = std::time::Instant::now();
         let classification = {
             let b = block_owned.clone();
             tokio::task::spawn_blocking(move || classify_turn(&b))
@@ -918,6 +937,13 @@ impl Harness {
                 .map_err(|e| HarnessError::Resident(format!("classify task join: {e}")))?
                 .ok()
         };
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_CLASSIFY_EXTRACT,
+            classify_started.elapsed(),
+            0,
+        );
         let kind = classification.as_ref().map(|c| c.kind);
 
         if kind == Some(TurnKind::Decl) {
@@ -976,12 +1002,20 @@ impl Harness {
         }
         import_lines.extend(session_module);
         let merged_imports = import_lines.join("\n");
+        let template_started = std::time::Instant::now();
         let src = engine::template_turn(
             &self.cfg,
             block,
             &merged_imports,
             helpers,
             contract.as_ref().map(|c| c.ty.as_str()),
+        );
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_TEMPLATE,
+            template_started.elapsed(),
+            src.len() as u64,
         );
         let mut include = self.cfg.include.clone();
         if let Some(dir) = session_include {
@@ -990,18 +1024,20 @@ impl Harness {
 
         // Compile off-reactor (the session is still resident — no leak on a
         // compile failure).
-        let compile_started = std::time::Instant::now();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile task join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
-        tracing::debug!(
-            node = node.0,
-            elapsed_ms = compile_started.elapsed().as_millis() as u64,
-            "answerer turn compile"
-        );
 
         // Run the compiled fragment against the session (move it onto the
         // blocking pool and back — the resident session is `Send`).
@@ -1980,8 +2016,16 @@ impl Harness {
             engine::template_answer_turn(&self.cfg, &format!("resume {expr}"), &imports, &helpers);
         let cfg_bin = self.cfg.extract_bin.clone();
         let include = self.cfg.include.clone();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
@@ -2073,8 +2117,16 @@ impl Harness {
         let src = engine::template_answer_turn(&self.cfg, &body, &imports, "");
         let cfg_bin = self.cfg.extract_bin.clone();
         let include = self.cfg.include.clone();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
@@ -2217,8 +2269,16 @@ impl Harness {
             let src = engine::template_answer_turn(compile_cfg, &body, &imports, &helpers);
             let cfg_bin = compile_cfg.extract_bin.clone();
             let include = compile_cfg.include.clone();
+            let answerer_id = answerer.0;
             let compiled = tokio::task::spawn_blocking(move || {
-                compile::compile_turn(&cfg_bin, &src, "result", &include)
+                compile::compile_turn(
+                    &cfg_bin,
+                    &src,
+                    "result",
+                    &include,
+                    answerer_id,
+                    timing::NO_ROUND,
+                )
             })
             .await
             .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?;
