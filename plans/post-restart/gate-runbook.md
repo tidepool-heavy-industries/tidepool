@@ -17,7 +17,15 @@ ONCE here, not per-fold (test-economy policy). Run detached under
   (NurseryExhausted class reopened, load-correlated). Anything else red is
   NEW.
 - **Contention produces watchdog timeouts, not wrong values** — a timeout
-  under load re-run in isolation is diagnosis, not noise-tolerance.
+  under load re-run in isolation is diagnosis, not noise-tolerance. The
+  converse: a SUB-100ms assertion failure is never contention — do not
+  classify fast failures as flake-by-load.
+- **Capture full output to a file; extract after.** Piping test output
+  through `tail`/`head` at capture time destroys the panic text you will
+  need — two independent diagnoses were delayed by exactly this in one day.
+- **A flaky test never folds.** 1-in-N flakes get fixed (or their claim
+  narrowed to a documented non-property) BEFORE the branch lands; repetition
+  gate for the fix: 15+ consecutive passes, since one green proves nothing.
 - For `tidepool-macro`: compiling tests IS running the extractor
   (proc-macro expansion). Safe forms only: `cargo check -p tidepool-macro`
   (no `--all-targets`) if checking; the full nextest run below is
