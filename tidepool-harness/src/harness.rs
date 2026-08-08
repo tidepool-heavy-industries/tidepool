@@ -156,26 +156,25 @@ struct NodeConvo {
     /// `resume_parent` drives `resume_bind` (not `resume`) while this is `Some`,
     /// and clears it when the bind finally lands (a completion, not a re-suspend).
     pending_bind: Option<(BoundBinder, Generation)>,
-    /// Running sum of every assistant turn's [`Usage`] on this node
-    /// (self-iterating-harness WS-E: the driver's emergency-compaction
-    /// trigger, [`Harness::node_usage`], sums this across every `runLLMTurn`
-    /// answerer / compaction node it drives per loop).
+    /// Running sum of every assistant turn's [`Usage`] on this node — the
+    /// self-iterating-harness driver's emergency-compaction trigger,
+    /// [`Harness::node_usage`], sums this across every `runLLMTurn`
+    /// answerer / compaction node it drives per loop.
     usage: Usage,
     /// The MOST RECENT turn's `input_tokens` (overwritten every turn, not
     /// summed) — the provider's per-round input token count already includes
     /// the whole re-sent transcript, so the latest value IS the node's real
     /// current context size (a high-water mark). The self-iterating-harness
-    /// driver's compaction threshold reads THIS (review C-1) rather than the
+    /// driver's compaction threshold reads THIS rather than the
     /// running [`Self::usage`] sum, which super-linearly over-counts across a
     /// multi-round hole (each round's input re-counts every prior round's
     /// transcript). `0` before the node's first turn.
     last_input_tokens: u64,
     /// This node's OWN system message, overriding the default
-    /// [`engine::SYSTEM_FRAMING`] when set (self-iterating-harness W1/C1: the
-    /// per-loop answerer session's framing is `render`'s output — the
-    /// distilled conditional the whole thesis rests on, wired to the model
-    /// here rather than left observational). `None` for an ordinary Agent
-    /// node (the default full-surface framing).
+    /// [`engine::SYSTEM_FRAMING`] when set — the self-iterating harness's
+    /// per-loop answerer session's framing is `render`'s output, wired to
+    /// the model here rather than left observational. `None` for an
+    /// ordinary Agent node (the default full-surface framing).
     framing: Option<String>,
     /// Set while a turn-owning operation (`drive_turn`/`summarize_turn`/an
     /// `answer_*` method) holds this node's [`TurnLease`] — guards the
@@ -616,7 +615,7 @@ impl Harness {
     }
 
     /// This harness's engine config — the self-iterating harness driver
-    /// (WS-A) reads `prelude_dir`/`project_lib` off it to build the OUTER
+    /// reads `prelude_dir`/`project_lib` off it to build the OUTER
     /// session's own (narrower) `EngineConfig`, so the outer `Eff
     /// '[RunLLMTurn]` compile and this nested Agent's compile resolve
     /// author-defined types (e.g. a harness's own `Decision`) from the SAME
@@ -632,8 +631,8 @@ impl Harness {
     ///
     /// Unpaginated — reads the whole tree via [`NodeTree::node_ids_after`]
     /// with no limit. Fine at R0 scale; [`Self::tree_snapshot_page`] is the
-    /// cursor-paged alternative for the protocol endpoint (D1: "usable at
-    /// 10³–10⁴ nodes").
+    /// cursor-paged alternative for the protocol endpoint, usable at
+    /// 10³–10⁴ nodes.
     pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
         let (all_ids, _) = self.tree.node_ids_after(None, usize::MAX);
         let mut stack: Vec<NodeId> = all_ids
@@ -658,8 +657,8 @@ impl Harness {
             .collect()
     }
 
-    /// Cursor-paged tree snapshot (widen C4: "snapshot endpoints paginate, no
-    /// small-tree assumption") — flat id order (not the DFS parent/child order
+    /// Cursor-paged tree snapshot — no small-tree assumption; flat id order
+    /// (not the DFS parent/child order
     /// `tree_snapshot` uses; a page is a slice of the id space, not a subtree).
     /// Returns up to `limit` rows after `cursor`, plus the next cursor to page
     /// with (`None` once exhausted). Built on [`NodeTree::node_ids_after`], the
@@ -723,7 +722,7 @@ impl Harness {
     /// `framing` (overriding the default [`engine::SYSTEM_FRAMING`] once the
     /// node is forced). `title` seeds the teaser + first user turn.
     /// The self-iterating harness's per-loop answerer session uses this to
-    /// install `render`'s output as the answerer's system prompt (W1/C1).
+    /// install `render`'s output as the answerer's system prompt.
     pub fn create_root_framed(
         &self,
         title: &str,
@@ -1003,7 +1002,7 @@ impl Harness {
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
             convo.usage.output_tokens += driven.usage.output_tokens;
-            // C-1: the latest turn's input_tokens IS the node's real context
+            // The latest turn's input_tokens IS the node's real context
             // size (the provider re-sends the whole transcript each round, so
             // its input count already includes every prior turn). Overwrite,
             // don't accumulate — this is the high-water the compaction
@@ -1012,7 +1011,7 @@ impl Harness {
         }
 
         let Some(block) = driven.block else {
-            // WS4 (self-iterating-harness): a prose-only turn ran no Haskell, but
+            // A prose-only turn ran no Haskell, but
             // still record a `TurnStart` whose `source` is the reply text — so a
             // node's durable log always shows one `TurnStart` per model turn
             // (`tail`ing it never has a silent gap), and consent integrity's
@@ -1023,12 +1022,11 @@ impl Harness {
             });
         };
 
-        // WS4 (self-iterating-harness): record the EXTRACTED executed Haskell as
-        // this turn's `TurnStart.source` — so `tail -f <log>` shows the exact
-        // block the turn ran, not a coarse "model" provenance tag (external-review
-        // finding 2: "tail the logs to see executed Haskell" must actually work).
-        // Emitted before the block runs, so it precedes this turn's Effect /
-        // HolePublished events in the durable log.
+        // Record the EXTRACTED executed Haskell as this turn's
+        // `TurnStart.source` — so `tail -f <log>` shows the exact block the
+        // turn ran, not a coarse "model" provenance tag. Emitted before the
+        // block runs, so it precedes this turn's Effect / HolePublished
+        // events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
         tracing::debug!(node = node.0, %block, "executed Haskell");
 
@@ -1044,8 +1042,8 @@ impl Harness {
     /// prose, not executed; the node's session is untouched (still idle), so it
     /// can keep driving afterward.
     ///
-    /// This is the self-iterating harness's simplified compaction primitive
-    /// (review C-2/H-1/J-1): compaction is ONE ordinary turn on the answerer
+    /// This is the self-iterating harness's simplified compaction primitive:
+    /// compaction is ONE ordinary turn on the answerer
     /// session that ALREADY holds the full context — "summarize everything
     /// above" — no second node, no `finalize`, no serializing the transcript
     /// into a prompt (the model has it in context). The caller then resets the
@@ -1577,7 +1575,7 @@ impl Harness {
         }
     }
 
-    /// The SERVER-DERIVED `Ui` form (§6 D6, `uiof::ui_of`) for a
+    /// The SERVER-DERIVED `Ui` form (`uiof::ui_of`) for a
     /// `runLLMTurn`/`runLLMTurnFork` hole on `node`, when the answer
     /// type maps mechanically — what the hole card renders IN ADDITION TO
     /// the raw Code+eval card, when `Some`. `None` when the node isn't
@@ -1597,9 +1595,9 @@ impl Harness {
         crate::uiof::ui_of(&table, &ty)
     }
 
-    /// The harness-level primitive `service_runllm_hole` (self-iterating-
-    /// harness WS-A, `selfharness/driver.rs`) calls once a nested Agent node
-    /// suspends on `finalize @T x` (self-iterating-harness WS-B): read the
+    /// The harness-level primitive `service_runllm_hole`
+    /// (`selfharness/driver.rs`) calls once a nested Agent node
+    /// suspends on `finalize @T x`: read the
     /// finalized value straight out of the suspended request `Value` (NEVER
     /// through JSON — it may carry a closure or other non-serializable
     /// value, per `finalize`'s relaxed function-arrow rule) and terminate
@@ -1656,7 +1654,7 @@ impl Harness {
             .get(1)
             .cloned()
             .ok_or_else(|| HarnessError::Resident("FinalizeWith missing its value field".into()))?;
-        // C5: a finalize suspension without its compile table is an
+        // A finalize suspension without its compile table is an
         // inconsistency — fail LOUD rather than defaulting to an empty
         // table, which would silently misrender the finalized value's
         // constructor ids.
@@ -1674,7 +1672,7 @@ impl Harness {
     /// Like [`Self::take_finalized_value`], but also returns the
     /// [`DataConTable`] the finalized value's constructor ids resolve
     /// against — needed by a caller that renders the raw value itself
-    /// (self-iterating-harness WS-E's forced compaction turn finalizes a
+    /// (the self-iterating harness's forced compaction turn finalizes a
     /// `Text`, then reads it out via [`tidepool_runtime::value_to_json`],
     /// which needs the SAME table the value was compiled with) rather than
     /// just feeding it opaquely into another suspended continuation. TERMINATES
@@ -1690,7 +1688,7 @@ impl Harness {
 
     /// Like [`Self::take_finalized_value`], but keeps the node + its resident
     /// session LIVE and reusable instead of cancelling — the self-iterating
-    /// harness's per-loop answerer (W1/C2) reuses ONE node across the loop's
+    /// harness's per-loop answerer reuses ONE node across the loop's
     /// holes so the model's transcript (the accumulating context window)
     /// persists, and hole #2 sees hole #1's exchange.
     ///
@@ -1740,8 +1738,8 @@ impl Harness {
         Ok(value)
     }
 
-    /// Whether `node`'s pending finalize hole carries a CLOSURE value
-    /// (self-iterating-harness W4): the tolerant suspend bridge substituted a
+    /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
+    /// tolerant suspend bridge substituted a
     /// `CLOSURE_SENTINEL` placeholder for field 1, so the finalized value is a
     /// live closure kept in-heap (applied by reference), not data. `false` for a
     /// plain-data finalize, or when `node` isn't suspended on a finalize hole.
@@ -1767,7 +1765,7 @@ impl Harness {
         )
     }
 
-    /// Apply a `finalize`d CLOSURE by reference (self-iterating-harness W4):
+    /// Apply a `finalize`d CLOSURE by reference:
     /// `node` must be suspended on a `finalize @(Int -> Int) f` hole whose value
     /// was kept LIVE in the shared heap (never deep-forced). This runs `f arg`
     /// in place against that same suspended heap — the "code as a value"
@@ -1817,7 +1815,7 @@ impl Harness {
     }
 
     /// Reopen a `Done` answerer node (`Done` → `Running`) for another turn —
-    /// the self-iterating harness's bounded answerer drive (W1) reuses ONE
+    /// the self-iterating harness's bounded answerer drive reuses ONE
     /// per-loop node, and a `Completed` (non-finalize) turn leaves it `Done`,
     /// so a corrective re-prompt must reopen it first. Mirrors
     /// [`Self::follow_up`]'s reopen step. No-op-safe only from `Done`
@@ -1828,9 +1826,9 @@ impl Harness {
     }
 
     /// The running sum of every assistant turn's [`Usage`] logged on `node`
-    /// so far (self-iterating-harness WS-E: what the driver's emergency
+    /// so far — what the self-iterating harness driver's emergency
     /// compaction trigger accumulates across the `runLLMTurn` answerer nodes
-    /// it drives per loop). `None` if `node` has no live session.
+    /// it drives per loop. `None` if `node` has no live session.
     pub fn node_usage(&self, node: NodeId) -> Option<Usage> {
         self.convos.lock().get(&node).map(|c| c.usage)
     }
@@ -1839,7 +1837,7 @@ impl Harness {
     /// current context size (the provider re-sends the whole transcript each
     /// round, so its per-round input count already includes every prior turn).
     /// This is a HIGH-WATER mark, not a running sum: the self-iterating
-    /// harness's compaction threshold reads THIS (review C-1), never
+    /// harness's compaction threshold reads THIS, never
     /// [`Self::node_usage`]'s summed `input_tokens`, which super-linearly
     /// over-counts across a multi-round hole. `Some(0)` before the node's
     /// first turn; `None` if `node` has no live session.
@@ -2153,9 +2151,9 @@ impl Harness {
         Ok(())
     }
 
-    /// Answer a `runLLMTurn`/`runLLMTurnFork` hole MECHANICALLY (§6 D6)
+    /// Answer a `runLLMTurn`/`runLLMTurnFork` hole MECHANICALLY
     /// from its server-derived form ([`Self::pending_derived_ui`]): ZERO model
-    /// turns. `submission` is F1's `{values, prose}` answer encoding; a
+    /// turns. `submission` is a `{values, prose}` answer encoding; a
     /// non-empty `prose` is NOT mechanical (that's the elaboration path's
     /// job, unbuilt) — rejected here rather than guessed at. On the
     /// mechanical path, `values` must map via
@@ -2992,7 +2990,7 @@ impl Harness {
 
     /// Drop `node`'s live convo (transcript + session). The self-iterating
     /// harness driver calls this at loop end to retire the per-loop answerer
-    /// session, so the next loop gets a fresh render-seeded one (W1/C2).
+    /// session, so the next loop gets a fresh render-seeded one.
     pub(crate) fn drop_session(&self, node: NodeId) {
         let mut convos = self.convos.lock();
         convos.remove(&node);
@@ -3008,7 +3006,7 @@ impl Harness {
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
-    /// in-place compaction relief (W2 / 02-runtime.md LOCKED: "replace its
+    /// in-place compaction relief (02-runtime.md LOCKED: "replace its
     /// context with the summary so the loop CONTINUES", NO loop-abort). The
     /// accumulated exchange is collapsed to one User-role message carrying
     /// `summary` as prior-window context; the node's running [`Usage`] is reset
@@ -3037,7 +3035,7 @@ impl Harness {
         // Reset the running context-size meter: the live context is now just
         // this summary, so the driver's budget check must see the small
         // compacted window, not the pre-compaction cumulative total. Both the
-        // summed `usage` and the high-water `last_input_tokens` (review C-1)
+        // summed `usage` and the high-water `last_input_tokens`
         // reset — the next turn's input_tokens re-establishes the real size.
         convo.usage = Usage::default();
         convo.last_input_tokens = 0;
@@ -3050,7 +3048,7 @@ impl Harness {
     /// Append a User-role message to `node`'s transcript (and log it), without
     /// driving a turn. The self-iterating harness driver pushes each
     /// `runLLMTurn` hole card onto the SAME per-loop answerer node this way, so
-    /// hole #2 sees hole #1's exchange (W1/C2: the accumulating context
+    /// hole #2 sees hole #1's exchange (the accumulating context
     /// window). Also the corrective-retry mechanism inside
     /// [`Self::run_to_hole_or_done`].
     pub(crate) fn push_user_turn(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
