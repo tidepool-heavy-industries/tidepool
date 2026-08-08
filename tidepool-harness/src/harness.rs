@@ -220,6 +220,27 @@ enum CapDecision {
     Abort { reason: String },
 }
 
+/// A fork/fanout child's inherited context, staged between
+/// `register_fork_child` and `force`: the cloned parent transcript prefix
+/// (through the fork checkpoint) plus the hole card, and the parent's framing
+/// (its system message), so the child's request prefix is byte-identical to
+/// the parent's through the checkpoint.
+type ForkedContext = (Vec<Message>, Option<String>);
+
+/// A fork child's compile row: the parent row minus the fork-spawning effects
+/// (`Fork`/`RunLLMTurn`). A child keeps everything else it needs to compute its
+/// answer (base effects, `AskUser`, `Finalize`) but literally cannot name
+/// `fork`/`forkAll`/`runLLMTurn` — depth-one is structural, not a runtime
+/// guard. For the answerer (`[AskUser, Fork, Finalize]`) this yields the leaf
+/// `[AskUser, Finalize]`.
+fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
+    parent
+        .iter()
+        .filter(|d| !matches!(d.type_name, "Fork" | "RunLLMTurn"))
+        .copied()
+        .collect()
+}
+
 /// Cap a (possibly huge) GHC/extract compile error before feeding it back to
 /// the model as a corrective turn — the head carries the structured diagnostics
 /// and first errors, which is what the model needs to fix its Haskell. UTF-8
@@ -249,6 +270,15 @@ pub struct LiveTurn {
 pub struct Harness {
     tree: NodeTree<()>,
     cfg: EngineConfig,
+    /// The row a FORK CHILD's answer block compiles against: the node's own
+    /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
+    /// structurally cannot fork — a `forkAll` in a child block is a GHC
+    /// "not in scope" error, not a runtime `ChildSuspended`. For the answerer
+    /// (`[AskUser, Fork, Finalize]`) this is the leaf `[AskUser, Finalize]`.
+    /// The child's answer still runs via `run_child` against the PARENT's
+    /// session (a pure `resume expr` value crossing), so the leaf row only
+    /// scopes what the child can NAME, not where its value lands.
+    child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
     /// Per-node streaming turn buffer (see [`LiveTurn`]). Present only while a
@@ -269,10 +299,10 @@ pub struct Harness {
     /// live `NodeConvo` to hold either yet). Removed once consumed at force
     /// time.
     seeds: Mutex<HashMap<NodeId, (String, Option<String>)>>,
-    /// A just-registered fork/fanout child's inherited transcript (parent
-    /// prefix + hole card), staged between `register_fork_child` and `force`
-    /// for the same reason as `seeds`. Removed once consumed at force time.
-    forked_transcripts: Mutex<HashMap<NodeId, Vec<Message>>>,
+    /// A just-registered fork/fanout child's inherited [`ForkedContext`],
+    /// staged between `register_fork_child` and `force` (same lifetime as
+    /// `seeds`). Removed once consumed at force time.
+    forked_transcripts: Mutex<HashMap<NodeId, ForkedContext>>,
     /// Rung-2 escalation state (operator popup), keyed by the answerer node
     /// that is parked awaiting a decision. Set by
     /// [`Self::escalate_to_operator`] just before the await, read by the web
@@ -299,9 +329,18 @@ impl Harness {
         let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "");
         let boot = compile::compile_turn(&cfg.extract_bin, &boot_src, "result", &cfg.include)
             .map_err(|e| HarnessError::Compile(e.to_string()))?;
+        // The fork-child compile config: this node's row minus the
+        // fork-spawning effects, so a child cannot fork (see `child_cfg`).
+        let child_cfg = EngineConfig::from_decls(
+            fork_child_decls(&cfg.decls),
+            cfg.prelude_dir.clone(),
+            cfg.project_lib.clone(),
+        )
+        .map_err(|e| HarnessError::Compile(format!("fork-child engine config: {e}")))?;
         Ok(Harness {
             tree: NodeTree::new(writer),
             cfg,
+            child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
             live_turns: Mutex::new(HashMap::new()),
@@ -607,10 +646,11 @@ impl Harness {
         let mut convos = self.convos.lock();
         let inherited = self.forked_transcripts.lock().remove(&node);
         let (transcript, framing) = match inherited {
-            // A fork/fanout answerer inherits its parent's transcript, whose
-            // turns are already in the log — nothing to re-log. Fork answerers
-            // are not render-seeded, so they keep the default framing.
-            Some(t) => (t, None),
+            // A fork/fanout answerer inherits its parent's transcript (turns
+            // already in the log — nothing to re-log) AND the parent's framing,
+            // so the child's request prefix is byte-identical to the parent's
+            // through the fork checkpoint (exact-context fork).
+            Some((t, framing)) => (t, framing),
             // A plain root: log its opening prompt as a User turn so the
             // transcript shows what was asked, not just the model's reply
             // (symmetric with the assistant `turn_delta` in `drive_turn`).
@@ -1597,10 +1637,10 @@ impl Harness {
         self.drop_session(child);
     }
 
-    /// Force + drive a FORK answerer for `node`'s pending fork hole (a plain
-    /// `runLLMTurnFork`, `fan: None` — a `runLLMTurnFanout` hole
-    /// routes to [`Self::answer_fanout`] instead). Registers a child node
-    /// (transcript forked at the parent's current turn), forces it, drives
+    /// Force + drive a FORK answerer for `node`'s pending single-fork hole
+    /// (`fork @T` / `runLLMTurnFork @T`, `fan: None` — a fanout hole routes to
+    /// [`Self::answer_fanout`] instead). Registers a child node (transcript
+    /// forked at the checkpoint, framing inherited), forces it, drives
     /// its turn loop until it produces an answering block, runs that block
     /// via `run_child` against the parent, and resumes the parent with the
     /// resulting typed Value. The ONE deliberate ill-typed attempt in the golden
@@ -1640,7 +1680,13 @@ impl Harness {
         // (provider/join/log fault, or cap-exhaustion abort) clean up the child
         // before propagating — no orphaned Running+resident node.
         let answer_value = match self
-            .drive_answerer_to_value(child, node, site_ty.as_deref(), self.cfg.max_turns)
+            .drive_answerer_to_value(
+                child,
+                node,
+                site_ty.as_deref(),
+                self.cfg.max_turns,
+                &self.child_cfg,
+            )
             .await
         {
             Ok(v) => v,
@@ -1662,18 +1708,17 @@ impl Harness {
     }
 
     /// Force + drive a FANOUT answerer set for `node`'s pending fanout hole
-    /// (`runLLMTurnFanout @T`, `HoleRouting::Fork` with `fan: Some(_)`).
-    /// One park, N thunk children — each registered under `node` (transcript
-    /// forked at the checkpoint, same discipline as [`Self::answer_fork`]),
-    /// forced, and driven to an answering value IN DECLARATION ORDER: children
-    /// serialize against the parked parent's single heap (F3's
-    /// sequential-isolated rule — `run_child` only ever touches one machine at
-    /// a time), so this needs no new `Slot` state beyond what a plain fork
-    /// already uses. Each child gets its own turn-cap budget
-    /// (`cfg.max_child_turns`) rather than the whole-node cap. The N raw
-    /// per-child `T` values are assembled into a genuine `[T]` `Value` (F3's
-    /// RAW-value rule, same discipline a single fork's `unsafeCoerce` relies
-    /// on) and resume the parent exactly once.
+    /// (`forkAll @T` / `runLLMTurnFanout @T`, `HoleRouting::Fork` with
+    /// `fan: Some(_)`). One park, N thunk children — each registered under
+    /// `node` (transcript forked at the checkpoint, same discipline as
+    /// [`Self::answer_fork`]), forced, and driven to an answering value IN
+    /// DECLARATION ORDER: children serialize against the parked parent's single
+    /// heap (`run_child` only ever touches one machine at a time), so this needs
+    /// no new `Slot` state beyond what a plain fork already uses. Each child gets
+    /// its own turn-cap budget (`cfg.max_child_turns`) rather than the whole-node
+    /// cap. The N raw per-child `T` values are assembled into a genuine `[T]`
+    /// `Value` (the same raw-representation discipline a single fork's
+    /// `unsafeCoerce` relies on) and resume the parent exactly once.
     ///
     /// A child that exhausts its `max_child_turns` budget does NOT hard-fail
     /// straight out of this loop anymore: [`Self::drive_answerer_to_value`]
@@ -1751,7 +1796,13 @@ impl Harness {
                 return Err(e);
             }
             let value = match self
-                .drive_answerer_to_value(child, node, element_ty, self.cfg.max_child_turns)
+                .drive_answerer_to_value(
+                    child,
+                    node,
+                    element_ty,
+                    self.cfg.max_child_turns,
+                    &self.child_cfg,
+                )
                 .await
             {
                 Ok(v) => v,
@@ -1804,7 +1855,7 @@ impl Harness {
             &engine::hole_card(&pending.classified.prompt, ty.as_deref()),
         )?;
         let value = self
-            .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns)
+            .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns, &self.cfg)
             .await?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
@@ -2018,12 +2069,18 @@ impl Harness {
     /// an unrelated resident/routing error) unwinds out of this loop; on
     /// abort, `answerer` is cancelled here (never left dangling) and
     /// [`HarnessError::Aborted`] is returned, naming `answerer` and why.
+    /// `compile_cfg` is the row the answerer's block compiles against: the
+    /// parent's own [`Self::cfg`] for an in-context answer (same node answers
+    /// itself), or the fork-child [`Self::child_cfg`] for a forked child — so a
+    /// child cannot name `fork`/`forkAll`. The answer VALUE always crosses via
+    /// `run_child` against `target`'s session regardless (a pure `resume expr`).
     async fn drive_answerer_to_value(
         &self,
         answerer: NodeId,
         target: NodeId,
         ty: Option<&str>,
         max_turns: u32,
+        compile_cfg: &EngineConfig,
     ) -> Result<Value, HarnessError> {
         let mut attempts = 0;
         let mut turn_budget = max_turns;
@@ -2107,9 +2164,9 @@ impl Harness {
                 None => RESUME_HELPER.to_string(),
             };
             let (imports, body) = engine::split_imports(&block);
-            let src = engine::template_answer_turn(&self.cfg, &body, &imports, &helpers);
-            let cfg_bin = self.cfg.extract_bin.clone();
-            let include = self.cfg.include.clone();
+            let src = engine::template_answer_turn(compile_cfg, &body, &imports, &helpers);
+            let cfg_bin = compile_cfg.extract_bin.clone();
+            let include = compile_cfg.include.clone();
             let compiled = tokio::task::spawn_blocking(move || {
                 compile::compile_turn(&cfg_bin, &src, "result", &include)
             })
@@ -2460,11 +2517,16 @@ impl Harness {
     }
 
     /// Register a fork/fanout child under `parent`, inheriting the parent's
-    /// transcript up to its current turn plus the hole card. Emits
-    /// `TurnForked` referencing the parent position. The child is a THUNK —
-    /// the caller forces it. `title` distinguishes a plain fork's single
-    /// child ("fork answerer") from one of a fanout's N children ("fanout
-    /// answerer <i>").
+    /// transcript prefix through the fork checkpoint plus the hole card, and
+    /// the parent's framing (its system message). Emits `TurnForked`
+    /// referencing the checkpoint. The child is a THUNK — the caller forces it.
+    /// `title` distinguishes a plain fork's single child ("fork answerer") from
+    /// one of a fanout's N children ("fanout answerer <i>").
+    ///
+    /// The checkpoint is the parent transcript's PREFIX LENGTH at fork time (a
+    /// durable transcript position), not the assistant-only `turn_seq` counter
+    /// — the child clones exactly that prefix, so the two agree by
+    /// construction.
     fn register_fork_child(
         &self,
         parent: NodeId,
@@ -2472,11 +2534,12 @@ impl Harness {
         prompt: &str,
         ty: Option<&str>,
     ) -> Result<NodeId, HarnessError> {
-        let (parent_transcript, parent_turn) = {
+        let (parent_transcript, parent_framing) = {
             let convos = self.convos.lock();
             let convo = convos.get(&parent).ok_or(HarnessError::NoSession(parent))?;
-            (convo.transcript.clone(), convo.turn_seq.saturating_sub(1))
+            (convo.transcript.clone(), convo.framing.clone())
         };
+        let checkpoint = parent_transcript.len() as u64;
         let child = self.tree.create_node(
             Some(parent),
             title,
@@ -2484,17 +2547,19 @@ impl Harness {
             ForkShape::Exact(0),
             false,
         )?;
-        self.tree.turn_forked(child, parent, parent_turn)?;
+        self.tree.turn_forked(child, parent, checkpoint)?;
 
         // The child's transcript = parent prefix + the hole card as a fresh user
-        // task. The fork IS the calling agent (inherits scope), so the parent
-        // conversation is genuine context.
+        // task. The fork IS the calling agent (inherits scope + framing), so the
+        // parent conversation is genuine context.
         let mut transcript = parent_transcript;
         transcript.push(Message {
             role: Role::User,
             content: engine::hole_card(prompt, ty),
         });
-        self.forked_transcripts.lock().insert(child, transcript);
+        self.forked_transcripts
+            .lock()
+            .insert(child, (transcript, parent_framing));
         Ok(child)
     }
 

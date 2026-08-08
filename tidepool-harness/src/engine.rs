@@ -57,14 +57,15 @@ use crate::tree::FanBadge;
 pub enum HoleRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
     RunLLMTurn { site: u32, ty: Option<String> },
-    /// `runLLMTurnFork @T` (`fan: None`) — park; a forked child answerer
-    /// produces the typed value. `runLLMTurnFanout @T` (B1 widen,
-    /// `fan: Some(_)`) — same payload-classification scheme (F3: "fan"
-    /// joins additively), park; N thunk children each answer the element
-    /// type. `ty` is the RENDERED answer type: the element type `T` for a
-    /// plain fork, the LIST type `[T]` for a fanout (`engine::strip_list_type`
-    /// recovers `T` from it). `prompts` carries the per-child prompt text,
-    /// one per fanout child, in declaration order (empty for a plain fork).
+    /// Park a suspension into a bounded fan-out with a join. Produced by two
+    /// sources that share this routing: the `Fork` effect (`ForkWith` →
+    /// `fan: None`, one child; `ForkAllWith` → `fan: Some(_)`, N children —
+    /// `Tidepool.Fork`'s `fork`/`forkAll`), and the general Agent stack's
+    /// `runLLMTurn` fork payload (`runLLMTurnFork`/`runLLMTurnFanout`). `ty` is
+    /// the RENDERED answer type: the element type `T` for a plain fork, the
+    /// LIST type `[T]` for a fanout (`engine::strip_list_type` recovers `T`).
+    /// `prompts` carries the per-child prompt text, one per fanout child, in
+    /// declaration order (empty for a plain fork).
     Fork {
         site: u32,
         ty: Option<String>,
@@ -110,11 +111,16 @@ pub struct ClassifiedHole {
 /// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
 /// constructor's own wire shape):
 ///
-/// - `RunLLMTurnWith` (prompt, payload) — the SAME `typedSite`/`fork`/`fan`/
-///   `prompts` payload shape `AskWith` used to carry for this family, now on
-///   its own constructor: `fork` → [`HoleRouting::Fork`], else
-///   [`HoleRouting::RunLLMTurn`]. `asks` resolves `typedSite` to its rendered
-///   answer type.
+/// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`fan`/
+///   `prompts` payload shape carried on the `RunLLMTurn` constructor: `fork` →
+///   [`HoleRouting::Fork`] (the general Agent stack's `runLLMTurnFork`/
+///   `runLLMTurnFanout`), else [`HoleRouting::RunLLMTurn`]. `asks` resolves
+///   `typedSite` to its rendered answer type.
+/// - `ForkWith` (site, brief) / `ForkAllWith` (site, prompts) — the `Fork`
+///   effect (`Tidepool.Fork`'s `fork`/`forkAll`), routed by CONSTRUCTOR NAME
+///   to [`HoleRouting::Fork`] (`fan: None` for one child, `fan: Some(_)` for a
+///   batch). The site id is a constructor field, not a payload key; `asks`
+///   resolves it to the rendered answer type the same way.
 /// - `FinalizeWith` (site, value) — [`HoleRouting::Finalize`]. The VALUE field
 ///   is never JSON-decoded here (it crosses in-heap, may be non-serializable —
 ///   e.g. a closure); only the leading `Int` site id is. `asks` resolves the
@@ -147,6 +153,32 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             ClassifiedHole {
                 routing: HoleRouting::Finalize { site, ty },
                 prompt: String::new(),
+            }
+        }
+        Some("ForkWith") => {
+            let (site, brief) = decode_fork_one(request, table);
+            ClassifiedHole {
+                routing: HoleRouting::Fork {
+                    site,
+                    ty: asks.type_of(site).map(str::to_string),
+                    fan: None,
+                    prompts: Vec::new(),
+                },
+                prompt: brief,
+            }
+        }
+        Some("ForkAllWith") => {
+            let (site, prompts) = decode_fork_all(request, table);
+            ClassifiedHole {
+                prompt: prompts.join("\n"),
+                routing: HoleRouting::Fork {
+                    site,
+                    ty: asks.type_of(site).map(str::to_string),
+                    fan: Some(FanBadge::Exact {
+                        n: prompts.len() as u32,
+                    }),
+                    prompts,
+                },
             }
         }
         Some("AskUserWith") => match decode_askuser_spec(request, table) {
@@ -280,6 +312,53 @@ fn decode_finalize_site(
         .unwrap_or(0) as u32;
     let ty = asks.type_of(site).map(str::to_string);
     (site, ty)
+}
+
+/// Pull `(site, brief)` out of a `ForkWith`-shaped request (`Con(_, [site ::
+/// Int, brief :: Text])`) — a single `fork @T brief` suspension. The site id
+/// selects the recorded answer type; the brief is the child's task text.
+fn decode_fork_one(request: &Value, table: &DataConTable) -> (u32, String) {
+    let Value::Con(_, fields) = request else {
+        return (0, String::new());
+    };
+    let site = fields
+        .first()
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_u64())
+        .unwrap_or(0) as u32;
+    let brief = fields
+        .get(1)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_str().map(str::to_string))
+        .unwrap_or_default();
+    (site, brief)
+}
+
+/// Pull `(site, prompts)` out of a `ForkAllWith`-shaped request (`Con(_, [site
+/// :: Int, prompts :: [Text]])`) — a `forkAll @T briefs` suspension. `prompts`
+/// is the per-child brief list in declaration order; a non-`Text` element is
+/// silently dropped, so a shorter result than the `fan` count is a cardinality
+/// error the caller catches (`Harness::answer_fanout`).
+fn decode_fork_all(request: &Value, table: &DataConTable) -> (u32, Vec<String>) {
+    let Value::Con(_, fields) = request else {
+        return (0, Vec::new());
+    };
+    let site = fields
+        .first()
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_u64())
+        .unwrap_or(0) as u32;
+    let prompts = fields
+        .get(1)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_array().cloned())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (site, prompts)
 }
 
 /// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
@@ -593,7 +672,12 @@ impl EngineConfig {
         // entry.
         let suspend_tag = decls
             .iter()
-            .position(|d| matches!(d.type_name, "Ask" | "AskUser" | "RunLLMTurn" | "Finalize"))
+            .position(|d| {
+                matches!(
+                    d.type_name,
+                    "Ask" | "AskUser" | "RunLLMTurn" | "Fork" | "Finalize"
+                )
+            })
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls)

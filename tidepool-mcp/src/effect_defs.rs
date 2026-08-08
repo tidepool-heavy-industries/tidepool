@@ -869,6 +869,73 @@ macro_rules! finalize_effect_def {
     };
 }
 
+/// Fork effect — single definition (answerer parallel-delegation surface).
+///
+/// The context-window fork as its own effect, distinct from `RunLLMTurn`:
+/// `runLLMTurn` is suspend-and-resume (an open turn the answerer holds); a
+/// fork is spawn-and-gather (a bounded fan-out with a join). Two constructors,
+/// each carrying its extract-substituted site id and the child brief(s):
+/// `ForkWith site brief` (one child, one typed answer) and `ForkAllWith site
+/// prompts` (N children, one per prompt, answered as a typed batch). The Rust
+/// layer routes a suspension by CONSTRUCTOR NAME (`engine::classify_hole`), so
+/// a fork never rides a `runLLMTurn` payload key.
+///
+/// Decl-side only (harness-serviced, no `tidepool-handlers` handler — same
+/// convention as `runllmturn_effect_def!`/`finalize_effect_def!`/
+/// `askuser_effect_def!`); only [`effect_decl_projection!`] consumes this
+/// definition, so the `handler`/`req`/`method` slots name types that are never
+/// generated.
+///
+/// `forkSited`/`forkAllSited` are the executing helpers — the `send`-wrappers
+/// `Tidepool.Fork`'s OPAQUE `fork`/`forkAll`/`forkMap`/`forkCata` stubs
+/// head-swap to (extract resolves them by name in `Translate.hs`). They are
+/// `Member Fork effs`-polymorphic so extract can re-apply a dictionary
+/// argument verbatim at the swapped call site, exactly like the `runLLMTurn`
+/// family. The site id extract substitutes selects the recorded answer type;
+/// the `0` literal in the stub bodies is a placeholder that never runs.
+#[macro_export]
+macro_rules! fork_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Fork,
+            handler ForkHandler,
+            req ForkReq,
+            decl_fn fork_decl,
+            description [
+                "Spawn parallel sub-answerers and gather their typed answers. ",
+                "`fork \\@T brief` forks ONE child that answers a single `T`; ",
+                "`forkAll \\@T briefs` forks one child per brief, answered together ",
+                "as `[T]` in order (`import Tidepool.Fork`). A forked child answers ",
+                "its own brief directly and cannot itself fork — depth-one.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor ForkWith, method fork_with,
+                  args { site: "Int" as i64, brief: "Text" as String },
+                  ret "Value" },
+                { ctor ForkAllWith, method fork_all_with,
+                  args { site: "Int" as i64, prompts: "[Text]" as Vec<String> },
+                  ret "Value" },
+            ],
+            helpers [
+                // The Int arg is the site id extract substitutes at the call
+                // site (the literal `0` in Tidepool.Fork's stubs is a
+                // placeholder). `unsafeCoerce` relabels the same runtime bytes
+                // back to the caller's answer type — safe because extract has
+                // checked (Translate.hs's checkRunLLMTurnType) the site's
+                // answer type is monomorphic and function-free, so the harness
+                // resumes with a value the caller validated against that type.
+                { raw ["{-# OPAQUE forkSited #-}",
+                       "forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a",
+                       "forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)"] },
+                { raw ["{-# OPAQUE forkAllSited #-}",
+                       "forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]",
+                       "forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)"] },
+            ],
+        }
+    };
+}
+
 /// Llm effect — single definition.
 // See `http_effect_def!` on why `crate::` (not `$crate`) is correct here.
 #[allow(clippy::crate_in_macro_def)]
@@ -1461,6 +1528,27 @@ mod tests {
             .contains(&"LspDef :: LspNode -> Lsp (Maybe LspNode)"));
         assert!(d
             .type_defs.contains(&"data LspError = LspDaemonDown Text deriving (Show, Eq)\ninstance ToJSON LspError where\n  toJSON e = case e of\n    LspDaemonDown detail -> object [\"tag\" .= (\"LspDaemonDown\" :: Text), \"detail\" .= detail]\n"));
+    }
+
+    /// The Fork effect's generated decl: two constructors (`ForkWith`/
+    /// `ForkAllWith`) carrying a site id, and the `forkSited`/`forkAllSited`
+    /// executing helpers `Tidepool.Fork`'s stubs head-swap to.
+    #[test]
+    fn generated_fork_decl_shape() {
+        let d = crate::fork_decl();
+        assert_eq!(d.type_name, "Fork");
+        assert_eq!(
+            d.constructors,
+            &[
+                "ForkWith :: Int -> Text -> Fork Value",
+                "ForkAllWith :: Int -> [Text] -> Fork Value",
+            ]
+        );
+        assert!(d.type_defs.is_empty());
+        assert!(d.helpers[0].contains("forkSited :: forall a effs. Member Fork effs"));
+        assert!(d.helpers[0].contains("send (ForkWith sid brief)"));
+        assert!(d.helpers[1].contains("forkAllSited :: forall a effs. Member Fork effs"));
+        assert!(d.helpers[1].contains("send (ForkAllWith sid prompts)"));
     }
 
     #[test]
