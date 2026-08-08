@@ -33,8 +33,9 @@ pub use engine::{
 pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
 
 pub use turn::{
-    classify_turn, compile_session_turn, BoundBinder, SessionBind, SessionTurnResult,
-    TurnClassification, TurnKind, ValueTier,
+    classify_turn, compile_session_turn, run_turn, BoundBinder, CompiledTurn, SessionBind,
+    SessionTurnResult, TurnClassification, TurnKind, TurnRequest, TurnResult, TurnTemplate,
+    ValueTier,
 };
 
 use std::path::{Path, PathBuf};

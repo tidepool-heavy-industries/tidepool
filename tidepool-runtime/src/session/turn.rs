@@ -21,6 +21,10 @@ use tidepool_repr::{CoreExpr, DataConTable};
 
 use crate::{extract_module_name, CompileError};
 
+use super::binders::extract_binders;
+use super::render::ExportItem;
+use super::SessionError;
+
 /// Strict-force tier of a bound value (mirrors the extract's `BoundBinder.tier`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueTier {
@@ -94,6 +98,218 @@ pub struct SessionBind<'a> {
     pub names: &'a [String],
     /// The generation of the `Val.G<g>` module to mint (shared by all N names).
     pub gen: u64,
+}
+
+/// A wrapper-module source for one [`TurnKind`], with two substitution
+/// points: `{{TURN}}` (the raw turn text, spliced verbatim) and `{{BINDERS}}`
+/// (the verdict's binder names, comma-joined). Byte-exactness is the
+/// contract: for a given verdict, the module [`run_turn`] compiles must be
+/// byte-identical to the module a caller wraps by hand today.
+///
+/// Several [`TurnTemplate`]s may share a `kind`, forming an ordered variant
+/// list (the extract mode's retry: try each in order, first that typechecks
+/// wins). [`run_turn`] only ever attempts variant 0 — the list is carried now
+/// so the later swap to the extract's own retry needs no signature change.
+#[derive(Clone, Debug)]
+pub struct TurnTemplate {
+    pub kind: TurnKind,
+    pub source: String,
+}
+
+/// One `run_turn` request: the raw turn text, the wrapper templates it may
+/// need, the session context [`compile_session_turn`] already takes, the bind
+/// generation, and an optional caller-supplied verdict.
+///
+/// When `verdict` is `Some`, [`run_turn`] uses it verbatim and does not spawn
+/// the classify — this is the batch-classify case, where a caller already
+/// holds a GHC-sourced verdict for the whole block.
+pub struct TurnRequest<'a> {
+    /// The raw turn text (`x <- e` / `let x = e` / a bare expression / a
+    /// declaration), spliced verbatim into `{{TURN}}`.
+    pub turn_text: &'a str,
+    /// Wrapper templates, keyed by [`TurnKind`]. Selection is a lookup by the
+    /// verdict's kind, never a guess.
+    pub templates: &'a [TurnTemplate],
+    /// Extra `--include` dirs, forwarded to [`compile_session_turn`] (BIND/EXPR)
+    /// or [`extract_binders`] (DECL).
+    pub include: &'a [&'a Path],
+    /// Where the `Val` ifaces are written/read (BIND/EXPR only).
+    pub session_root: &'a Path,
+    /// Live `Tidepool.Session.Val.G<g'>` modules to inject (BIND/EXPR only).
+    pub inject_modules: &'a [String],
+    /// The generation of the `Val.G<g>` module a BIND turn mints.
+    pub gen: u64,
+    /// A verdict the caller already holds from a batch classify. Skips the
+    /// classify spawn when present; GHC-sourced either way.
+    pub verdict: Option<TurnClassification>,
+}
+
+/// What a compiled (BIND or EXPR) turn yields. Grouped separately from
+/// [`TurnResult`] so the `Decl` variant, which compiles nothing, carries none
+/// of it.
+#[derive(Debug)]
+pub struct CompiledTurn {
+    /// JIT-able Core for the turn's `result` binding.
+    pub expr: CoreExpr,
+    /// This turn's DataCon metadata.
+    pub table: DataConTable,
+    /// Compile warnings (e.g. `has_io`).
+    pub warnings: MetaWarnings,
+    /// Typed-yield sites from the `asks.json` sidecar.
+    pub asks: Vec<(u32, String)>,
+}
+
+/// The result of [`run_turn`] — one variant per verdict, each carrying only
+/// its own kind's payload. A caller cannot read a field its verdict does not
+/// have.
+#[derive(Debug)]
+pub enum TurnResult {
+    /// A top-level declaration. Does not compile: `items` is the decl's
+    /// export items ([`extract_binders`]'s payload).
+    Decl {
+        /// The declared names (GHC-sourced).
+        binders: Vec<String>,
+        items: Vec<ExportItem>,
+    },
+    /// A bind (`x <- e` / `let x = e`).
+    Bind {
+        /// The verdict's bound/declared names.
+        binders: Vec<String>,
+        /// The compiled bound-binder records ([`compile_session_turn`]'s
+        /// `binders` sidecar payload).
+        bound: Vec<BoundBinder>,
+        /// Which template variant of the `Bind` kind compiled (always `0` in
+        /// this interim body).
+        variant: usize,
+        compiled: CompiledTurn,
+        /// The full wrapped module actually compiled — the byte-identity
+        /// anchor.
+        wrapped_source: String,
+    },
+    /// A bare expression.
+    Expr {
+        /// Which template variant of the `Expr` kind compiled (always `0` in
+        /// this interim body).
+        variant: usize,
+        compiled: CompiledTurn,
+        /// The full wrapped module actually compiled — the byte-identity
+        /// anchor.
+        wrapped_source: String,
+    },
+}
+
+/// Splice `turn_text` and `binders` into a template `source`. `{{BINDERS}}`
+/// is substituted first, `{{TURN}}` last, so turn text containing literal
+/// `{{BINDERS}}`/`{{TURN}}` text is never re-scanned — the turn splice is
+/// byte-exact regardless of its content.
+fn render_template(source: &str, turn_text: &str, binders: &[String]) -> String {
+    source
+        .replace("{{BINDERS}}", &binders.join(", "))
+        .replace("{{TURN}}", turn_text)
+}
+
+/// Look up the variant-0 template for `kind` — the first template in
+/// declaration order whose `kind` matches. Later same-kind entries are the
+/// ordered retry list [`TurnTemplate`] documents; this shim only ever
+/// attempts the first.
+fn select_template(templates: &[TurnTemplate], kind: TurnKind) -> Option<&TurnTemplate> {
+    templates.iter().find(|t| t.kind == kind)
+}
+
+/// A missing template for a verdict is a caller wiring bug, not a GHC
+/// rejection — reported the same way the turn/binder lanes report every other
+/// synthetic shape violation (`CompileError::ExtractFailed`, never a panic).
+fn missing_template_error(kind: TurnKind) -> CompileError {
+    CompileError::ExtractFailed(format!("run_turn: no template supplied for {kind:?}"))
+}
+
+/// [`SessionError`] → [`CompileError`], preserving the `Io`/`MalformedDiagnostics`
+/// split intact (an environment problem stays `Io`, a stale/skewed extractor
+/// stays `MalformedDiagnostics`); only the two user-Haskell-shaped variants
+/// (`BinderExtraction`, `ValidationFailed`) collapse into `ExtractFailed`,
+/// mirroring how this module already reports every other turn-lane synthetic
+/// shape violation.
+fn session_error_to_compile_error(e: SessionError) -> CompileError {
+    match e {
+        SessionError::Io(io) => CompileError::Io(io),
+        SessionError::MalformedDiagnostics(msg) => CompileError::MalformedDiagnostics(msg),
+        SessionError::BinderExtraction(msg) | SessionError::ValidationFailed(msg) => {
+            CompileError::ExtractFailed(msg)
+        }
+    }
+}
+
+/// The one entry point for a session-eval turn: classify (unless the caller
+/// already supplies a verdict), pick the wrapper template the verdict needs,
+/// and compile. For now the body performs today's two (or three, on a DECL
+/// turn) spawns — [`classify_turn`], template selection, then
+/// [`compile_session_turn`] or [`extract_binders`]. This is scaffolding with
+/// a deletion date: when the extract's own `--turn` mode lands, this body
+/// becomes a single call and the interim spawns are deleted outright. There
+/// is exactly one code path through this function — no flag, no fallback.
+pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
+    let TurnClassification { kind, binders } = match req.verdict {
+        Some(v) => v,
+        None => classify_turn(req.turn_text)?,
+    };
+
+    match kind {
+        TurnKind::Decl => {
+            let items = extract_binders(req.turn_text, req.include)
+                .map_err(session_error_to_compile_error)?;
+            Ok(TurnResult::Decl { binders, items })
+        }
+        TurnKind::Bind => {
+            let template = select_template(req.templates, TurnKind::Bind)
+                .ok_or_else(|| missing_template_error(TurnKind::Bind))?;
+            let wrapped_source = render_template(&template.source, req.turn_text, &binders);
+            let bind = SessionBind {
+                names: &binders,
+                gen: req.gen,
+            };
+            let result = compile_session_turn(
+                &wrapped_source,
+                req.include,
+                req.session_root,
+                req.inject_modules,
+                Some(bind),
+            )?;
+            Ok(TurnResult::Bind {
+                binders,
+                bound: result.binders,
+                variant: 0,
+                compiled: CompiledTurn {
+                    expr: result.expr,
+                    table: result.table,
+                    warnings: result.warnings,
+                    asks: result.asks,
+                },
+                wrapped_source,
+            })
+        }
+        TurnKind::Expr => {
+            let template = select_template(req.templates, TurnKind::Expr)
+                .ok_or_else(|| missing_template_error(TurnKind::Expr))?;
+            let wrapped_source = render_template(&template.source, req.turn_text, &binders);
+            let result = compile_session_turn(
+                &wrapped_source,
+                req.include,
+                req.session_root,
+                req.inject_modules,
+                None,
+            )?;
+            Ok(TurnResult::Expr {
+                variant: 0,
+                compiled: CompiledTurn {
+                    expr: result.expr,
+                    table: result.table,
+                    warnings: result.warnings,
+                    asks: result.asks,
+                },
+                wrapped_source,
+            })
+        }
+    }
 }
 
 fn extract_bin() -> String {
@@ -449,5 +665,145 @@ mod tests {
         let json = r#"{"binders":[{"name":"f","varId":"42","module":"Tidepool.Session.Val.G1","tier":"Tier1Closure","typeDisplay":"Int -> Int"}]}"#;
         let bs = parse_bound_binders(json).unwrap();
         assert_eq!(bs[0].tier, ValueTier::Tier1Closure);
+    }
+
+    #[test]
+    fn render_template_byte_exact_turn_and_multi_binder_join() {
+        let source = "module M where\nresult = do { {{TURN}}\n ; pure ({{BINDERS}}) }\n";
+        let turn = "x <- pure {1, 2}\nlet y = {\"k\":1}";
+        let out = render_template(source, turn, &["a".to_string(), "b".to_string()]);
+        assert!(
+            out.contains(turn),
+            "turn text with braces/newlines was not spliced byte-exact:\n{out}"
+        );
+        assert!(
+            out.contains("pure (a, b)"),
+            "binders not comma-joined:\n{out}"
+        );
+        assert!(!out.contains("{{TURN}}"));
+        assert!(!out.contains("{{BINDERS}}"));
+    }
+
+    #[test]
+    fn render_template_single_binder_has_no_trailing_comma() {
+        let out = render_template("{{BINDERS}}", "ignored", &["x".to_string()]);
+        assert_eq!(out, "x");
+    }
+
+    /// `{{BINDERS}}` is substituted first and `{{TURN}}` last, so a turn text
+    /// that happens to contain literal placeholder syntax is never re-scanned
+    /// — the turn splice stays byte-exact regardless of its content.
+    #[test]
+    fn render_template_turn_text_placeholder_syntax_is_not_resubstituted() {
+        let out = render_template(
+            "A={{BINDERS}} T={{TURN}}",
+            "contains {{BINDERS}} literally",
+            &["z".to_string()],
+        );
+        assert_eq!(out, "A=z T=contains {{BINDERS}} literally");
+    }
+
+    #[test]
+    fn select_template_picks_first_matching_kind_variant_zero() {
+        let templates = vec![
+            TurnTemplate {
+                kind: TurnKind::Bind,
+                source: "bind-a".to_string(),
+            },
+            TurnTemplate {
+                kind: TurnKind::Expr,
+                source: "expr-a".to_string(),
+            },
+            TurnTemplate {
+                kind: TurnKind::Bind,
+                source: "bind-b".to_string(),
+            },
+        ];
+        assert_eq!(
+            select_template(&templates, TurnKind::Bind).unwrap().source,
+            "bind-a"
+        );
+        assert_eq!(
+            select_template(&templates, TurnKind::Expr).unwrap().source,
+            "expr-a"
+        );
+        assert!(select_template(&templates, TurnKind::Decl).is_none());
+    }
+
+    /// A verdict for a kind with no matching template is a clean error, not a
+    /// panic — and it must not spawn the extractor at all (the lookup fails
+    /// before any process is invoked).
+    #[test]
+    fn run_turn_missing_template_is_clean_error_not_panic() {
+        std::env::set_var("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
+        let req = TurnRequest {
+            turn_text: "1 + 1",
+            templates: &[],
+            include: &[],
+            session_root: Path::new("/nonexistent-session-root"),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+            }),
+        };
+        let err = run_turn(req).unwrap_err();
+        assert!(
+            matches!(err, CompileError::ExtractFailed(_)),
+            "expected a clean ExtractFailed, got {err:?}"
+        );
+    }
+
+    /// A caller-supplied verdict must skip the classify spawn entirely: the
+    /// only extractor invocation observed is the compile call, never
+    /// `--emit-stmt-binders`. The fake extractor logs its argv and exits
+    /// non-zero (the compile is allowed to fail; only the spawn count and
+    /// arguments matter here). Env mutation is safe: nextest runs each test
+    /// in its own process.
+    #[test]
+    fn run_turn_supplied_verdict_skips_classify_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("calls.log");
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", log_path.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let session_root = dir.path().join("session");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let templates = vec![TurnTemplate {
+            kind: TurnKind::Expr,
+            source: "module M where\nresult = {{TURN}}\n".to_string(),
+        }];
+        let req = TurnRequest {
+            turn_text: "1 + 1",
+            templates: &templates,
+            include: &[],
+            session_root: &session_root,
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+            }),
+        };
+        let _ = run_turn(req);
+
+        let calls = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert_eq!(
+            calls.lines().count(),
+            1,
+            "expected exactly one extract spawn (compile only), got:\n{calls}"
+        );
+        assert!(
+            !calls.contains("--emit-stmt-binders"),
+            "classify spawn ran despite a supplied verdict:\n{calls}"
+        );
     }
 }
