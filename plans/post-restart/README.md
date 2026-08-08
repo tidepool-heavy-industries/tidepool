@@ -110,6 +110,18 @@ call, fits harness-lifecycle's scope).
   skipped the cheap check. Also: the dead node stays alive/busy in the
   exo tree even after pane teardown — there is NO operator lever to
   tombstone a node whose pane is gone (third confirmed liveness gap).
+  WATCHDOG VERDICT (end-to-end, timed): agent killed ~21:00 → ledger
+  alive/busy, watchdog SILENT for 30 min (the human caught it by
+  looking); pane killed ~21:30 (deliberate reclaim) → watchdog fired
+  immediately. It detects PANE death, not AGENT death — and misses
+  exactly the shape a `kill <claude-pid>` produces, i.e. every CAUSED
+  death. ListAgents dropped the node within a minute of the real kill:
+  the signal exists, the watchdog reads the wrong source (should read
+  peer-list membership, or both). Second: a deliberate hand-teardown is
+  indistinguishable from a death — the correct reclaim generated a
+  false alarm; needs an "expected teardown" marker. The earlier
+  "silent child death is covered by the watchdog now" claim is
+  OPTIMISTIC — covered only when the pane dies with the agent.
   The earlier "cross-written status.children" residue is discounted
   (single agent's own status file); the transient ListAgents/tree
   disagreement stands, with the trust direction INVERTED from the
