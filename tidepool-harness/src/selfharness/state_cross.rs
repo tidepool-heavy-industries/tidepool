@@ -1,4 +1,4 @@
-//! WS-C seam: `State` crossing at a loop boundary — the SERIALIZED channel
+//! `State` crossing at a loop boundary — the SERIALIZED channel
 //! (02-runtime.md "Two monads over one resident heap"), distinct from the
 //! in-heap `run_child` channel `service_runllm_hole` uses within a loop.
 //! `State` is any author-defined `(ToJSON s, FromJSON s) => s` (LOCKED,
@@ -45,8 +45,8 @@ use tidepool_repr::DataConTable;
 pub(crate) const LOADED_QUALIFIER: &str = "Loaded";
 
 /// The stable sentinel prefix the [`state_in`] decode splice raises when the
-/// prior loop's `State` JSON fails the author's `FromJSON State` instance
-/// (J1). The driver matches a fragment run-error carrying this prefix and
+/// prior loop's `State` JSON fails the author's `FromJSON State` instance.
+/// The driver matches a fragment run-error carrying this prefix and
 /// surfaces it as a typed [`crate::selfharness::driver::DriverError::StateDecode`]
 /// rather than an opaque "loop run failed" — a decode failure means the
 /// author's `ToJSON`/`FromJSON` are not inverse, which is a distinct,
@@ -81,7 +81,7 @@ pub fn state_in(state_json: Option<&Json>) -> String {
         ),
         Some(json) => {
             let literal = haskell_string_literal(&json.to_string());
-            // J1: on decode failure raise with a stable sentinel prefix the
+            // On decode failure raise with a stable sentinel prefix the
             // driver recognizes and turns into a typed `DriverError::StateDecode`
             // — a decode failure means the author's `ToJSON`/`FromJSON State`
             // are not inverse, a distinct actionable failure, not a generic run
@@ -100,7 +100,7 @@ pub fn state_in(state_json: Option<&Json>) -> String {
 /// Render `s` as a double-quoted Haskell `Text` literal (via
 /// `OverloadedStrings`, always on in a harness turn's default pragma set).
 /// Shared by [`state_in`] and `driver::render_framing`'s compaction splice.
-/// J2: reuses the input-lane escaper
+/// Reuses the input-lane escaper
 /// ([`tidepool_mcp::escape_haskell_string`]) for the body rather than
 /// hand-rolling the same escape table, so every generated Haskell string
 /// literal (eval `input`, `State`, compaction) escapes control chars

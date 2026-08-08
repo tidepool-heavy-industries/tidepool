@@ -24,12 +24,10 @@ pub enum SelfHarnessState {
     /// by driving a nested Agent session to a `finalize`
     /// ([`crate::selfharness::driver::SelfHarnessDriver::service_runllm_hole`]).
     SuspendedOnHole,
-    /// The runtime-owned emergency compaction turn (~80% threshold, WS-E) is
+    /// The runtime-owned emergency compaction turn (~80% threshold) is
     /// running. Distinct from `RunningLoop` — the loop itself never enters
     /// this state; only the driver's forced trigger does.
     Compacting,
-    /// Teardown in progress — the driver accepts no further loop ticks.
-    Closing,
     /// A cycle's fallible body (`loop`, hole servicing, state serialization,
     /// or the post-loop render) raised an error. The driver has discarded
     /// every mutable resident component the failed cycle could have left
@@ -47,22 +45,3 @@ pub enum SelfHarnessState {
     Poisoned { reason: String },
 }
 
-impl SelfHarnessState {
-    pub fn is_idle(&self) -> bool {
-        matches!(self, SelfHarnessState::Idle)
-    }
-
-    /// Short label for diagnostics/logging, mirroring
-    /// `tidepool_repl::state::SessionState::busy_label`'s role.
-    pub fn label(&self) -> &'static str {
-        match self {
-            SelfHarnessState::Idle => "idle",
-            SelfHarnessState::RunningLoop => "running loop",
-            SelfHarnessState::SuspendedOnHole => "suspended on a runLLMTurn hole",
-            SelfHarnessState::Compacting => "compacting",
-            SelfHarnessState::Closing => "closing",
-            SelfHarnessState::Failed { .. } => "failed",
-            SelfHarnessState::Poisoned { .. } => "poisoned",
-        }
-    }
-}

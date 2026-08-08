@@ -88,7 +88,7 @@ pub fn default_transcript_path() -> PathBuf {
         .join("transcript.jsonl")
 }
 
-/// Default DURABLE per-node event-log path (WS4):
+/// Default DURABLE per-node event-log path:
 /// `<cache_dir>/selfharness/log.jsonl`. This is the [`crate::log`] append-only
 /// jsonl the answerer [`Harness`](crate::harness::Harness)'s [`LogWriter`](crate::log::LogWriter)
 /// writes — `Event::TurnStart { source, .. }` (the executed Haskell of every
@@ -157,7 +157,7 @@ pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), Persi
 /// A transcript [`Observer`]: appends every driver [`Event`] to a jsonl
 /// file, one line per event, opened in append mode so a restarted process
 /// resumes the same file rather than truncating prior history. Reuses the
-/// existing WS-H observer seam ([`crate::selfharness::driver::SelfHarnessDriver`]
+/// existing observer seam ([`crate::selfharness::driver::SelfHarnessDriver`]
 /// emits to whatever [`Observer`] it was constructed with) rather than
 /// adding a second event-emission path.
 pub struct JsonlObserver {

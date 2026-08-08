@@ -1,4 +1,4 @@
-//! WS-D seam: bootstrap-load for the authored harness source — `render`,
+//! Bootstrap-load for the authored harness source — `render`,
 //! `loop`, and the concrete `State` declaration (`examples/harness/Harness.hs`
 //! is the reference contract this loads). Loaded ONCE at driver bootstrap,
 //! NEVER per-turn (02-runtime.md: "Runtime-invoked at loop boundaries
@@ -100,7 +100,7 @@ pub enum HarnessSourceError {
 
 /// Resolve a harness source file (e.g. `examples/harness/Harness.hs`) at
 /// bootstrap into its module name + include-path root, verifying it
-/// exists. WS-D.
+/// exists.
 pub fn load_harness_source(path: &Path) -> Result<HarnessSource, HarnessSourceError> {
     if !path.is_file() {
         return Err(HarnessSourceError::NotFound {

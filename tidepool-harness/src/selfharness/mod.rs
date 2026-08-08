@@ -8,19 +8,18 @@
 //!
 //! # Modules
 //!
-//! - [`driver`] (WS-A) — the outer lifecycle + the render/loop alternation,
+//! - [`driver`] — the outer lifecycle + the render/loop alternation,
 //!   the `runLLMTurn`-hole servicer, and the `askUser` operator-form servicer
-//!   (self-iterating-harness Wave 2, both the answerer and the outer-loop
-//!   form paths).
-//! - [`lifecycle`] (WS-A) — the driver's outer state machine, modeled on
+//!   (both the answerer and the outer-loop form paths).
+//! - [`lifecycle`] — the driver's outer state machine, modeled on
 //!   `tidepool_repl::state::SessionState`.
-//! - [`state_cross`] (WS-C) — `State` JSON crossing at a loop boundary.
-//! - [`harness_source`] (WS-D) — bootstrap-load of the authored
+//! - [`state_cross`] — `State` JSON crossing at a loop boundary.
+//! - [`harness_source`] — bootstrap-load of the authored
 //!   `render`/`loop`/`State` source.
-//! - [`observer`] (WS-H) — the pluggable event-observer extension point
+//! - [`observer`] — the pluggable event-observer extension point
 //!   `driver` emits to; ships a `LogObserver`, stubs a future GUI subscriber
 //!   + reactive hooks.
-//! - [`operator`] (Wave 2) — the frozen [`operator::OperatorGate`] seam the
+//! - [`operator`] — the frozen [`operator::OperatorGate`] seam the
 //!   driver blocks on for operator input + the `FormSpec`/`Submission` wire
 //!   types; ships a headless [`operator::StdinGate`].
 //! - [`persistence`] — local-file checkpoint (state + compaction + harness-
@@ -28,7 +27,7 @@
 //!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
 //!
 //! `crate::engine::HoleRouting::Finalize` is the other half of the S3 freeze
-//! (routing for the `finalize` effect WS-B adds); it lives in `engine.rs`
+//! (routing for the `finalize` effect); it lives in `engine.rs`
 //! alongside the rest of `HoleRouting`, not here.
 
 pub mod driver;

@@ -1,15 +1,14 @@
-//! FROZEN CONTRACT (wave-2 `09-askuser-form-gui.md`): the operator-input seam
-//! shared by the `AskUser` effect decode (WS1), the driver's form servicer
-//! (WS2), and the web GUI (WS3). Single source for the form-spec / submission
-//! wire types and the [`OperatorGate`] the driver blocks on.
+//! The operator-input seam (`09-askuser-form-gui.md`), consumed as-is by the
+//! `AskUser` effect decode, the driver's form servicer, and the web GUI —
+//! never redefined at those call sites. Single source for the form-spec /
+//! submission wire types and the [`OperatorGate`] the driver blocks on.
 //!
 //! The gate is **sync-blocking**, mirroring the existing between-loops stdin
 //! gate ([`super::driver::SelfHarnessDriver::between_loops_gate`]) and the
 //! driver's `block_in_place`/`block_on` turn-driving: `present_form` blocks the
 //! driver thread until the operator submits; `await_continue` blocks until the
-//! operator advances the loop. A web implementation (WS3) parks a channel; the
+//! operator advances the loop. A web implementation parks a channel; the
 //! headless [`StdinGate`] reads a line.
-#![allow(dead_code)] // scaffold: consumers (WS1/WS2/WS3) wire these as they land.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +53,7 @@ pub struct EnumOption {
 pub type Submission = serde_json::Map<String, serde_json::Value>;
 
 /// The seam the driver blocks on for operator input. Sync-blocking by design
-/// (see module docs). A web GUI (WS3) implements this by parking a channel
+/// (see module docs). A web GUI implements this by parking a channel
 /// resolved from an HTTP handler; [`StdinGate`] keeps headless runs working.
 pub trait OperatorGate: Send + Sync {
     /// Present `spec` to the operator and BLOCK until they submit. The returned
@@ -69,8 +68,8 @@ pub trait OperatorGate: Send + Sync {
 
 /// Headless default: `await_continue` reads a line from stdin (the current
 /// between-loops behavior); `present_form` reads one JSON line as the flat
-/// submission, so non-web/CLI drives and tests still work. WS2 wires this as
-/// the default when no web gate is configured.
+/// submission, so non-web/CLI drives and tests still work. Used as the
+/// default when no web gate is configured.
 #[derive(Debug, Default)]
 pub struct StdinGate;
 

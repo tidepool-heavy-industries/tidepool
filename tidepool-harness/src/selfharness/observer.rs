@@ -9,10 +9,10 @@ use serde::Serialize;
 use crate::tree::NodeId;
 
 /// One lifecycle event the driver emits, at the granularity of the outer
-/// render/loop hylo (§01/02) — NOT a duplicate of `crate::forcing::Event`
+/// render/loop hylo — NOT a duplicate of `crate::forcing::Event`
 /// (which logs one Agent node's turn/effect/hole history durably); this is
 /// the loop-boundary + hole-servicing story layered above it.
-/// `Serialize` (W3): [`crate::selfharness::persistence::JsonlObserver`]
+/// `Serialize`: [`crate::selfharness::persistence::JsonlObserver`]
 /// appends each event as one transcript jsonl line.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
@@ -29,14 +29,13 @@ pub enum Event {
     /// service it (`site`/`ty` mirror
     /// `crate::engine::HoleRouting::RunLLMTurn`).
     RunLLMTurnHole { site: u32, ty: Option<String> },
-    /// An Agent turn resolved the pending hole via `finalize` (WS-B),
+    /// An Agent turn resolved the pending hole via `finalize`,
     /// resuming the parent `loop`.
     Finalize { node: NodeId },
     /// The runtime-owned ~80% emergency compaction fired on `node` (the
-    /// per-loop answerer). Carries WHAT compaction produced (review C-4: the
-    /// event was payload-free, so the jsonl transcript — the distillation
-    /// substrate — recorded only THAT it fired, never the summary): the
-    /// `summary` text, and the answerer's context size (last-turn
+    /// per-loop answerer). Carries WHAT compaction produced — so the jsonl
+    /// transcript records not just that it fired but the summary itself:
+    /// the `summary` text, and the answerer's context size (last-turn
     /// `input_tokens`) `pre_input_tokens` (which crossed threshold) and
     /// `post_input_tokens` (the summarizing turn's own input, for the record).
     CompactionTrigger {
@@ -66,9 +65,9 @@ pub trait Observer: Send + Sync {
     fn on_event(&self, event: &Event);
 }
 
-/// v1 subscriber: logs each event. The default (and, for the scaffold
-/// phase, only wired) [`Observer`] — WS-A's driver emits to one of these by
-/// default when no other subscriber is configured.
+/// Logs each event via `tracing`. The default [`Observer`] the driver emits
+/// to when no other subscriber is configured; the production binary fans
+/// out to this AND a durable [`crate::selfharness::persistence::JsonlObserver`].
 #[derive(Debug, Default)]
 pub struct LogObserver;
 
