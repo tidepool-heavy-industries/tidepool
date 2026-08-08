@@ -224,9 +224,10 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 }
 "#;
 
-/// The vendored Datastar client. Lifted from the observatory's patch-apply +
-/// form-collection JS, trimmed to the two-verb form surface and a FLAT,
-/// type-coerced submission.
+/// The vendored Datastar client: opens `/sse`, applies patch-elements frames
+/// by same-`id` replacement, and collects a `data-on-submit` form into a FLAT,
+/// `data-kind`-coerced submission for the two-verb (`/submit`, `/continue`)
+/// surface.
 pub const JS: &str = r#"
 (function () {
   // Apply one datastar-patch-elements payload: replace each same-id element in
