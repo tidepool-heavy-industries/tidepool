@@ -111,11 +111,14 @@ as applied at the deferred-constructor-fields site.
 
 ### petgraph dependency line
 
-`petgraph` 0.6 is declared directly in `tidepool-codegen/Cargo.toml`. The
-manifests work centralizes common external dependencies through a generator
-(`gen-workspace-deps.py`); on the post-batch base this line likely wants to be
-`petgraph.workspace = true`, and the generator's equivalence check may flag the
-direct declaration. Conform it on resume.
+`petgraph` 0.6 is declared **directly** in `tidepool-codegen/Cargo.toml`, and
+that is correct rather than an oversight. `scripts/gen-workspace-deps.py`
+centralizes an external dependency only when two or more crates declare it with
+an identical version requirement; `petgraph` has one user, so it stays local.
+Verified with `--check`, not inferred — the intuition that a workspace-wide
+convention means *every* dep goes in `[workspace.dependencies]` is wrong here,
+and the `[workspace.dependencies]` block is generated and must not be
+hand-edited.
 
 `petgraph` is mandatory for graph algorithms in this codebase — hand-rolled
 traversals are not an accepted alternative.
@@ -383,9 +386,13 @@ In wave order, with what each needs:
 
 ## Gates run on the composed branch
 
+All of these were re-run **after** rebasing onto the parent's advanced tip (110
+commits), because gate results measured against a different base are not
+evidence about the branch that actually merges.
+
 | gate | result |
 |---|---|
-| quick tier (`--no-fail-fast`) | 1775 run, **1775 passed**, 9 skipped |
+| quick tier (`--no-fail-fast`) | 1782 run, **1782 passed**, 9 skipped |
 | differential (`--run-ignored all`, `TIDEPOOL_EXPENSIVE_TESTS=1`) | 1 run, 1 passed |
 | GHC accumulation (`session_table_qualified_identity` + `resident_session`) | 5 run, 4 passed, 1 known-open |
 | `cargo check --workspace --all-targets`, `fmt --check` | clean |
