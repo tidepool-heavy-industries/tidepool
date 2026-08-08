@@ -11,7 +11,7 @@ source.
 | cluster | scope | status |
 |---|---|---|
 | A | case-trap intern arena (D13), `Int64ToWord64` result tag, blackhole gap | see below |
-| B | indexed free-vars analysis + petgraph topo sort (C4+C5) | **held, WIP branch** |
+| B | indexed free-vars analysis + petgraph topo sort (C4+C5) | **landed**, unmeasured |
 | C | `DataConTable` accumulation hygiene (D3) | **landed**, two items deferred |
 | D | `runtime_apply`/`runtime_tail_apply` + `FunctionImports` (D4+D5) | **not started** |
 | E | lambda registry, stack-map lookup, `seed_external_env` (D7/D8/D9) | **not started** |
@@ -21,13 +21,44 @@ D, E and F were never started. E's fence (a sibling holding uncommitted
 `jit_machine.rs` work) was lifted before the quiesce, so E is unblocked on
 entry. B must own `emit/expr.rs` alone; D follows B on the same file.
 
-## Cluster B — resume from the WIP branch, do not restart
+## A failure class this lane hit twice in one day
 
-Branch `root.jit-chain.cluster-b`, commit `2bbc583f`. Not folded: it carries an
-edit that was never compiled, and an unverified edit must not reach a submitted
-branch. The branch is durable independently of its worktree.
+**A test that asserts in a domain wider than production's types can inhabit.**
+Both instances passed review and both were caught only by adversarial checking,
+never by the suite itself.
 
-**Verified green before the checkpoint.** `emit/free_vars_index.rs` —
+1. The second-fragment gate claimed an emission axis it could not constrain.
+   Caught by mutation: inducing the named error left it green. Claim narrowed.
+2. `multiturn_merge_matches_flattened_sequential_property` asserted equivalence
+   over turns modelled as `Vec<DataCon>`. Production passes a `DataConTable`,
+   whose `iter()` is `by_id.values()` — at most one entry per id. The property
+   is false for a turn holding two entries for one id, which production cannot
+   produce. Caught by repetition: it failed roughly 1 run in 8, because
+   proptest draws 2000 fresh cases per run with no persisted seed.
+
+The guard, both directions: when a property test takes a wider, more convenient
+input shape than production's, either constrain the generator to the production
+invariant or assert only what holds in the wider domain. Taking the freedom
+*and* asserting the narrow property is the bug.
+
+Two corollaries earned the hard way. A single green run cannot clear an
+intermittent test — repetition is the gate, and the rate sets the count. And
+diagnostics must be captured whole to a file and extracted afterward: two
+separate runs here were piped through `tail` at capture time, destroying the
+panic text and the shrunk counterexample on exactly the runs that needed
+forensics.
+
+## Cluster B — landed, but unmeasured and unmutated
+
+Folded from `root.jit-chain.cluster-b`. It reached its bar — compiles clean
+post-rebase, 5/5 topological-sort goldens green, 11/11 `emit::` unit tests
+green — but a quiesce cut its verification short. **Not done, and worth doing
+before trusting the perf claim:** the before/after `emit_ms` measurement,
+mutation checks on either half, and the GHC-heavy `resident_session`
+confirmation. The correctness evidence is strong; the performance claim is
+currently unevidenced.
+
+**Verified green.** `emit/free_vars_index.rs` —
 `FreeVarsIndex::compute`, a single forward pass over the flat node vector
 (children precede parents, so no explicit stack walk is needed), with
 `Rc<FxHashSet<VarId>>` shared for pass-through nodes and a canonical empty set.
@@ -38,14 +69,17 @@ real-corpus nodes (138 fixtures) and 14,686 generated-tree nodes.
 (`compile_expr`, `emit_lam`, `emit_thunk_promised`, LetRec phase 3a). All seven
 conversion sites were converted and green.
 
-**Not verified.** The petgraph topological sort: Kahn's algorithm over a
+The petgraph topological sort replaces the bespoke one: Kahn's algorithm over a
 `DiGraph`, tie-broken by a min-heap on `NodeIndex` so ordering follows original
-binding order, with `Dfs` for reachability. Written in full and hand-traced
-against all five golden shapes, but the final edit was never compiled. The
-golden tests (independent, chain, diamond, cycle, self-reference) are written
-and were green against the *old* algorithm, which is what makes them a
-behaviour-identity check rather than a restatement of the new one. Budget ~10
-minutes to compile-check and rerun them before anything else.
+binding order, with `Dfs` for reachability. Determinism is a requirement, not a
+nicety — a nondeterministic emission order would make compilation
+irreproducible.
+
+Its golden tests (independent, chain, diamond, cycle, self-reference) were
+written and made green against the **old** algorithm before the replacement
+landed. That ordering is what makes them a behaviour-identity check rather than
+a restatement of the new implementation, and it is the only reason replacing an
+emission-ordering algorithm was safe to do at all.
 
 ### Seven sites, not eight
 
