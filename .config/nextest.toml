@@ -57,8 +57,8 @@
 slow-timeout = { period = "60s", terminate-after = 30 }
 
 # Default tier: bare `cargo nextest run` skips the GHC-extract-heavy crates.
-# Every test in tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight
-# GHC `extract` compile (seconds each) — they are "run sometimes", not on every
+# Every test in tidepool-runtime/repl/mcp/handlers forks a heavyweight GHC
+# `extract` compile (seconds each) — they are "run sometimes", not on every
 # quick inner-loop check. The pure-Rust crates (codegen/eval/repr/effect/bridge/
 # optimize/bignum) still run by default and stay fast.
 #
@@ -68,42 +68,46 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # tests, likewise pass `--ignore-default-filter -p <crate>` (a bare `-p
 # tidepool-runtime` reports "0 running, N skipped" — the default-filter is
 # ANDed with `-p`, not overridden by it).
+# tidepool-testing is a MIXED crate like tidepool-harness below: its lib unit
+# tests (including the differential-runner's own self-tests,
+# `differential::tests::*`) are pure Rust, but its integration binaries
+# (`haskell_verified`, `proptest_deep_differential`) reach GHC through
+# `eval_harness`. Split by `kind(test)` rather than excluded wholesale, so the
+# lib tests — including the test that proves the runner's own gate logic is
+# sound — run on every quick inner-loop check instead of only under
+# `--ignore-default-filter`.
 # tidepool-harness is a MIXED crate: its lib/unit tests are pure-Rust (quick
-# tier), but the `golden_path` integration binary drives real GHC extracts
-# (the S1 record-replay golden path) — that one binary is GHC-tier, excluded
-# here and capped via the ghc-heavy group below. (Its in-test skip-gate alone
-# is not enough: a stale `tidepool-extract` on PATH satisfies the gate and then
-# fails the compile, so the filter is the real tier boundary.)
-# `acceptance_run_llm_turn` (A3, PRD §11) is the same shape as
-# `golden_path`: record-replay through the real Harness, real GHC extracts.
-# `uiof_mechanical` (A1, uiOf server-derived forms) is the same shape again: a
-# real GHC extract of a user `Verdict` module, driven through the real Harness.
-# `acceptance_fanout` (B1, runLLMTurnFanout) is the same shape again: a fan
-# of 3 real GHC extracts (root + 3 children) through the real Harness.
-# `acceptance_fork_combinators` (Wave C, Tidepool.Fork) is the same shape
-# again: a `forkFilter` fan of 3 real GHC extracts through the real Harness,
-# plus (combinator-sites widen) a `forkCata` 2-level tree — a leaf-batch
-# fanout followed by the root's own singleton fanout on the same node.
-# `turn_splice` (Wave C leftovers, F2's `turn_spliced` verb) is the same
-# shape again: a real GHC extract of a root + fork-answerer child through the
-# real Harness, this time with a `Harness::splice` call injected mid-answer to
-# prove the spliced content reaches the child's next scripted prompt.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice)) | (package(tidepool-harness) & binary(acceptance_askuser)))'
+# tier), but its tests/ integration binaries drive real GHC extracts through
+# the Harness (record-replay golden paths, fanout/fork/splice scenarios, uiOf
+# forms, etc). Classified WHOLESALE by `kind(test)` (every integration test
+# binary is GHC-heavy) rather than a per-binary denylist — a denylist rots
+# silently as binaries are added (this one lagged 16 of 24 integration
+# binaries before the wholesale rewrite) and a rename/move can't desync it
+# from the ghc-heavy override below, since both now share one predicate.
+# `provider_behavior` is the sole quick-tier exception (pure-Rust, no
+# extract/Harness use) — adding a second exception here requires showing the
+# new binary does no extract, the same bar `provider_behavior` cleared.
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)))'
 
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
-# tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
-# compile through the EvalHarness pipeline; at full-core parallelism these
+# tidepool-runtime/repl/mcp/handlers (and tidepool-testing/tidepool-harness's
+# integration binaries) forks a heavyweight GHC `extract` compile through the
+# EvalHarness pipeline; at full-core parallelism these
 # oversubscribe CPU+memory and THRASH — compiles that take ~13s quiet crawl to
 # minutes, which pushed tidepool-repl::lifecycle_state::
 # timed_out_runaway_self_heals_to_idle (a 20s-budget runaway that self-heals in
 # ~35s in isolation) past the 1800s ceiling on a full-workspace run. Capping the
 # GHC group prevents the thrash while the pure-Rust crates (codegen/eval/repr/
 # effect/bridge — zero extract calls) keep running at full parallelism, so the
-# codegen ~2.15x win is untouched. 4 is conservative for a 16-core box shared
-# with sibling agents; raise it on a dedicated machine if the battery is slow.
+# codegen ~2.15x win is untouched. This is a PROCESS-LOCAL cap sitting UNDER
+# the host semaphore (scripts/ghc-slots.sh, 3 slots shared across every
+# worktree on the box) — it bounds nextest's own concurrency within a single
+# run, it is not itself the host guarantee, and taking a slot is still
+# required before launching GHC-heavy work. Matched to the 3-slot host cap;
+# raise it only alongside a matching ghc-slots.sh SLOTS change.
 [test-groups.ghc-heavy]
-max-threads = 4
+max-threads = 3
 
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing) | (package(tidepool-harness) & binary(golden_path)) | (package(tidepool-harness) & binary(acceptance_run_llm_turn)) | (package(tidepool-harness) & binary(acceptance_consent_integrity)) | (package(tidepool-harness) & binary(acceptance_fanout)) | (package(tidepool-harness) & binary(acceptance_fork_combinators)) | (package(tidepool-harness) & binary(uiof_mechanical)) | (package(tidepool-harness) & binary(turn_splice)) | (package(tidepool-harness) & binary(acceptance_askuser))'
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior))'
 test-group = 'ghc-heavy'

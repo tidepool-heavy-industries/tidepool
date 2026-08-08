@@ -69,4 +69,26 @@ fi
 echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=${TIDEPOOL_EXPENSIVE_TESTS:-unset})"
 
-exec cargo nextest run --ignore-default-filter -p "$crate" "$@"
+# `exec` here would replace this shell before any check could run — so a run
+# that SELECTS ZERO TESTS (a typo'd -E filter, a crate/filter combination with
+# nothing left after --ignore-default-filter) would inherit nextest's exit
+# code and nothing else, and read as a pass whenever that code is 0. Capture
+# the run instead: report a genuine test failure AND an empty selection if
+# both occur (never let one mask the other), and propagate the real exit
+# status. stderr is where nextest writes everything (PASS/FAIL/Summary lines
+# included; stdout is otherwise unused) — tee it through unchanged via a
+# process substitution so a caller piping/redirecting stderr still sees the
+# identical live stream this exec used to produce.
+tmp_log="$(mktemp)"
+trap 'rm -f "$tmp_log"' EXIT
+set +e
+cargo nextest run --ignore-default-filter -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
+run_status=$?
+set -e
+
+if grep -qE '\b0 tests run:' "$tmp_log"; then
+  echo "error: shard selected/ran ZERO tests for -p ${crate} — a silent no-op, not a pass" >&2
+  [ "$run_status" -eq 0 ] && run_status=1
+fi
+
+exit "$run_status"

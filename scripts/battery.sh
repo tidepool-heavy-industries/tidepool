@@ -80,4 +80,20 @@ echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 # GHC-extract-heavy ones that .config/nextest.toml's default-filter skips for
 # quick inner-loop `cargo nextest run`. Same profile, so slow-timeout + the
 # ghc-heavy thread cap still apply.
-exec cargo nextest run --workspace --ignore-default-filter "$@"
+#
+# `exec` here would replace this shell before any check could run — same
+# zero-tests-as-a-pass trap scripts/battery-shard.sh closes; see that script's
+# comment for the reasoning. Capture the run instead of masking it behind exec.
+tmp_log="$(mktemp)"
+trap 'rm -f "$tmp_log"' EXIT
+set +e
+cargo nextest run --workspace --ignore-default-filter "$@" 2> >(tee "$tmp_log" >&2)
+run_status=$?
+set -e
+
+if grep -qE '\b0 tests run:' "$tmp_log"; then
+  echo "error: battery selected/ran ZERO tests — a silent no-op, not a pass" >&2
+  [ "$run_status" -eq 0 ] && run_status=1
+fi
+
+exit "$run_status"
