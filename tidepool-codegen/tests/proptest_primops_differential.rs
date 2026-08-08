@@ -497,14 +497,6 @@ fn prop_int_unary() {
     let mut runner = TestRunner::new(cfg_int());
     runner
         .run(&arb_edge_i64(), |a| {
-            // Int64ToWord64 is deliberately NOT in this list — see
-            // `jitbug_int64_to_word64_result_tag` below: correcting its
-            // operand kind (int64ToWord64# :: Int64# -> Word64# takes an
-            // Int#, so it belongs here, not in prop_word_unary) unmasks a
-            // SEPARATE, confirmed JIT bug in the result's lit-tag, which the
-            // runner's `ValueMismatch` verdict has no tolerance escape hatch
-            // for (by design) and which production code is out of scope to
-            // fix here.
             for op in [
                 PrimOpKind::IntNegate,
                 PrimOpKind::IntNot,
@@ -516,6 +508,7 @@ fn prop_int_unary() {
                 PrimOpKind::Int2Float,
                 PrimOpKind::IntToInt64,
                 PrimOpKind::Int64ToInt,
+                PrimOpKind::Int64ToWord64,
             ] {
                 check(prog_unary_int(op, a), &dcfg(), &reach)?;
             }
@@ -1147,30 +1140,13 @@ fn evalbug4_word64_shrl_shift_64() {
     assert_eq!(eval, "Ok(Lit(LitWord(1)))");
 }
 
-/// CONFIRMED BUG, OPEN (JIT result mis-tag, out of scope to fix here — the
-/// migration boundary forbids production-code edits): `int64ToWord64# ::
-/// Int64# -> Word64#` must tag its result Word, but
-/// `tidepool-codegen/src/emit/primop.rs:1102-1106` folds `Word64ToInt64 |
-/// Int64ToInt | Int64ToWord64` into ONE match arm that unconditionally tags
-/// `LIT_TAG_INT` — correct for the first two (whose output really is Int),
-/// wrong for `Int64ToWord64`. Both engines compute the SAME bit pattern; only
-/// the JIT's output lit-tag is wrong, so this is a `Verdict::ValueMismatch`
-/// (`LitWord` vs `LitInt` are different `Value`s) that the runner's
-/// `ExpectedErrorPolicy` has no tolerance for BY DESIGN (there is no
-/// `ValueMismatch` escape hatch) — it can only be pinned as a captured, open
-/// bug, not silently accepted. This was unreachable before the operand-kind
-/// generator fix above (`prop_int_unary`): with the old `prog_unary_word`
-/// (`LitWord`) operand, eval's strict Int64 unbox rejected the case as
-/// ill-typed Core before either side ever reached a value to compare.
+/// INVARIANT: `int64ToWord64# :: Int64# -> Word64#` tags its result Word.
+/// Both engines compute the same bit pattern for `i64::MIN`; this pins that
+/// the JIT's result carries `LIT_TAG_WORD`, not `LIT_TAG_INT`.
 #[test]
-#[ignore = "confirmed open JIT bug (result lit-tag), out of scope: primop.rs is production code"]
 fn jitbug_int64_to_word64_result_tag() {
     let (eval, jit) = run_one(PrimOpKind::Int64ToWord64, vec![Literal::LitInt(i64::MIN)]);
     assert_eq!(eval, "Ok(Lit(LitWord(9223372036854775808)))");
-    // BUG: observed today is `Ok(Lit(LitInt(-9223372036854775808)))` — same
-    // bits, wrong tag. This assertion documents the desired (currently
-    // unmet) contract; it is expected to FAIL until primop.rs's shared match
-    // arm is split to give Int64ToWord64 its own `LIT_TAG_WORD` result.
     assert_eq!(jit, "Ok(Lit(LitWord(9223372036854775808)))");
 }
 

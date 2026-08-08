@@ -1099,10 +1099,18 @@ pub fn emit_primop(
         }
 
         // Conversions between sized int/word types (no-ops on 64-bit)
-        PrimOpKind::Word64ToInt64 | PrimOpKind::Int64ToInt | PrimOpKind::Int64ToWord64 => {
+        PrimOpKind::Word64ToInt64 | PrimOpKind::Int64ToInt => {
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(v, LIT_TAG_INT))
+        }
+        PrimOpKind::Int64ToWord64 => {
+            // int64ToWord64# :: Int64# -> Word64# — same bit pattern as the
+            // arm above, but the result type is Word64#, so it must carry
+            // LIT_TAG_WORD, not LIT_TAG_INT.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(v, LIT_TAG_WORD))
         }
         PrimOpKind::Word64ToWord | PrimOpKind::WordToWord64 => {
             // Identity on 64-bit; Word64# and Word# share the machine representation.
