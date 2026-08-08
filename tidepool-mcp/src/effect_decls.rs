@@ -136,6 +136,10 @@ crate::runllmturn_effect_def!(crate::effect_defs::effect_decl_projection);
 // generated from the single-source definition (`effect_defs.rs`).
 crate::finalize_effect_def!(crate::effect_defs::effect_decl_projection);
 
+// Fork effect (answerer parallel-delegation surface): `fork_decl()` is
+// generated from the single-source definition (`effect_defs.rs`).
+crate::fork_effect_def!(crate::effect_defs::effect_decl_projection);
+
 // Llm effect: `llm_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
