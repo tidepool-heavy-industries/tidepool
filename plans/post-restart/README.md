@@ -87,3 +87,12 @@ call, fits harness-lifecycle's scope).
   edits in one file before containment (WIP-commit + freeze + root killed
   the stray by verified PID). Spawn should be idempotent per worktree, and
   a pane whose registration failed should die loudly, not run the spec.
+  Corroborating residue (same incident): (a) the dev node's
+  `status.children` blob was cross-written by the twin — it listed three
+  TOP-LEVEL lanes as children of a leaf dev (ledger tree structure itself
+  stayed correct); harmless today but load-bearing if anything ever walks
+  `status.children` for teardown/traversal — status files must be
+  single-writer or last-write-detected. (b) Post-kill, `ListAgents`
+  dropped the (live) ledger child for a window while `tree` showed it
+  alive — peer list and ledger can disagree transiently, so the watchdog
+  must not read either alone as death evidence.
