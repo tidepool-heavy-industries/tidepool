@@ -1549,13 +1549,19 @@ fn dispatch_primop(
                     got: args.len(),
                 });
             }
-            // `seq a b`: force `a` to WHNF (propagating any error/BlackHole it
-            // raises), discard the result, and return `b`. Not currently
-            // reachable from the Haskell extract (GHC desugars surface `seq`
-            // to a `case`; `mapPrimOp` in Translate.hs has no `SeqOp` arm and
-            // errors if one is ever handed unsaturated Core) — this arm exists
-            // for directly-constructed IR and keeps the oracle's semantics
-            // correct against a future emitter.
+            // `seq a b`: force `a` to WHNF (propagating any error or
+            // `InfiniteLoop` it raises), discard the result, return `b`.
+            // Arguments arriving through `eval` are already WHNF — the
+            // `Frame::PrimOpArg` resume forces every one — so this force is
+            // a no-op on that path; it is what makes the arm's semantics
+            // self-contained rather than dependent on the caller.
+            //
+            // The Haskell extract does not emit this primop: GHC desugars
+            // surface `seq` to a `case`, and `mapPrimOp` (Translate.hs) has
+            // no `SeqOp` arm, so unsaturated `seq#` Core hard-errors at
+            // extraction instead. The JIT correspondingly rejects `SeqOp`
+            // (tidepool-codegen/src/emit/primop.rs). This arm serves
+            // directly-constructed IR.
             force(args[0].clone(), heap)?;
             Ok(args[1].clone())
         }
@@ -3670,12 +3676,37 @@ mod tests {
     }
 
     #[test]
-    fn test_seq_forces_failing_unforced_arg() {
-        // Just ((\y -> z) 0) where `z` is unbound — the field is a non-trivial
-        // (App) Con field, so `con_step` thunks it rather than evaluating it
-        // eagerly (same mechanism as `test_con_field_nontrivial_primop_is_lazy`).
-        // `case` binds that still-unforced field to `x`; `seq x 999` must force
-        // it and propagate the failure, not skip straight to the literal.
+    fn test_seq_arm_forces_unforced_first_arg() {
+        // The SeqOp arm at its own boundary: every argument reaching
+        // `dispatch_primop` through `eval` has already been forced by the
+        // `Frame::PrimOpArg` resume, so an unforced first argument is
+        // reachable only by calling the arm directly, as here. `seq` forces
+        // the thunk to WHNF and propagates its failure instead of returning
+        // the second argument.
+        let mut heap = crate::heap::VecHeap::new();
+        let bottom = CoreExpr {
+            nodes: vec![CoreFrame::Var(VarId(99))], // unbound — errors when forced
+        };
+        let tid = heap.alloc(Env::new(), bottom);
+        let res = dispatch_primop(
+            PrimOpKind::SeqOp,
+            vec![Value::ThunkRef(tid), Value::Lit(Literal::LitInt(999))],
+            &mut heap,
+        );
+        assert!(
+            matches!(res, Err(EvalError::UnboundVar(VarId(99)))),
+            "seq must force its first argument and propagate the failure, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn test_seq_bottom_propagates_through_eval() {
+        // End-to-end `seq bottom 999`: Just ((\y -> z) 0) with `z` unbound —
+        // the field is a non-trivial (App) Con field, so `con_step` thunks it
+        // (same mechanism as `test_con_field_nontrivial_primop_is_lazy`), and
+        // `case` binds that thunk to `x`. Evaluating `seq x 999` forces the
+        // thunk and surfaces the failure rather than yielding the literal.
         let nodes = vec![
             CoreFrame::Var(VarId(99)), // 0: z (unbound — errors if forced)
             CoreFrame::Lam {
@@ -3717,9 +3748,10 @@ mod tests {
     #[test]
     fn test_seq_forces_succeeding_arg_and_returns_second() {
         use crate::value::ThunkId;
-        // let x = 1 + 1 in seq x 999 — `x` is a non-trivial LetNonRec rhs, so it
-        // reaches SeqOp as an unforced ThunkRef. The fix must both return the
-        // second argument AND have actually forced the first.
+        // let x = 1 + 1 in seq x 999 — `x` is a non-trivial LetNonRec rhs, so
+        // it is bound as a thunk. `seq` returns the second argument, and `x`'s
+        // thunk is Evaluated afterwards: the first argument was forced, not
+        // merely passed over.
         let nodes = vec![
             CoreFrame::Lit(Literal::LitInt(1)), // 0
             CoreFrame::PrimOp {
