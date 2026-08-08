@@ -220,6 +220,24 @@ principled follow-on. **Awaiting your call on (b).**
   path. Known gap: `eval_in_binding` is `pub`, has no callers or tests in the
   workspace, and takes no lease — routed to the quality sweep as a
   delete-or-lease call rather than leased speculatively.
+- **Crash recovery [RESOLVED]** — the durability claim is now tested end to end
+  through the production path (`87c1de8f`, `tidepool-web/tests/crash_recovery.rs`).
+  Spawns the real `tidepool-selfharness` via `CARGO_BIN_EXE`, waits on a durable
+  `TurnStart` marker until the process is genuinely mid-turn (that marker is
+  logged before the block's GHC compile, so the kill lands inside a real
+  compile window), SIGKILLs it by its own spawned PID, restarts the identical
+  binary against the same `XDG_CACHE_HOME`, and asserts via
+  `persistence::load_checkpoint(driver.checkpoint_path())` — no hard-coded
+  filename or JSON shape — that `generation` went 1 → 3. Generation 2 alone
+  would mean the restart began from `initialState`, so the assertion
+  discriminates resumption from a fresh start. `.tmp` absence is checked
+  immediately after the SIGKILL, covering the torn-write case at the crash
+  boundary. A `Drop`-based `ChildGuard` reaps both children on every exit path.
+  The two internal waits are a progress-stall watchdog (fail on no new durable
+  event for 500s; 600s/800s absolute ceilings), not flat deadlines — a flat
+  deadline flaked under contention that ran GHC 4-6x slower than baseline, and
+  a stall window discriminates "slow under load" from "actually broken" in a
+  way wall-clock cannot.
 - **F9** unknown/malformed suspension constructor → a classification ERROR
   naming the constructor, not a silent `Ask` wildcard (still open for general
   callers + the malformed-`AskUserWith` case).
