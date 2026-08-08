@@ -101,6 +101,15 @@ call, fits harness-lifecycle's scope).
   "duplicate", VERIFY THE PREMISE — enumerate panes/processes and count;
   discriminate by pane_pid parentage, never by spec identity (both twins
   and the real child carry the identical generated spec by construction).
+  SHARPENED post-recovery: the same agent ALSO reported "two mechanisms
+  coexisting in eval_prep.rs" — only one ever existed. Two confident
+  misperceptions from one agent in one window. The general rule: **an
+  agent's report about its own environment is not evidence** — not about
+  processes, not about its own tree's contents; both are independently
+  checkable (ps parentage, grep) and all three parties (dev, TL, root)
+  skipped the cheap check. Also: the dead node stays alive/busy in the
+  exo tree even after pane teardown — there is NO operator lever to
+  tombstone a node whose pane is gone (third confirmed liveness gap).
   The earlier "cross-written status.children" residue is discounted
   (single agent's own status file); the transient ListAgents/tree
   disagreement stands, with the trust direction INVERTED from the
