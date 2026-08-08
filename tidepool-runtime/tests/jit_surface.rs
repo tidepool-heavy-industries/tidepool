@@ -119,6 +119,43 @@ fn fails_loudly(code: &str, marker: &str) {
     }
 }
 
+/// As `fails_loudly`, but injects extra `import` lines first (mirrors
+/// `works_with_imports` alongside `eval_raw_with_imports`, including running
+/// on the same stack-sized, signal-safe thread) — for probes that need a
+/// quoter import (e.g. `"Tidepool.QQ (fmt, j)"`, no `import` keyword) to even
+/// parse.
+fn fails_loudly_with_imports(imports: &str, code: &str, marker: &str) {
+    let imports = imports.to_string();
+    let code = code.to_string();
+    let imports_t = imports.clone();
+    let code_t = code.clone();
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_imports(&imports_t, &code_t)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| {
+            "thread panicked (HARD crash / uncaught signal / possible STILL-SILENT footgun)"
+                .to_string()
+        })
+        .and_then(|r| r);
+    match got {
+        Ok(v) => panic!(
+            "\nLOUD-FAIL probe unexpectedly SUCCEEDED:\n  code: {code}\n  got:  {v}\n  \
+             (the footgun changed — verify it still fails, then re-pin this probe)"
+        ),
+        Err(e) => assert!(
+            e.contains(marker),
+            "\nLOUD-FAIL probe failed but WITHOUT the expected clean marker:\n  code: {code}\n  \
+             want marker: {marker:?}\n  error: {e}\n  \
+             (if this is a silent SIGILL/SIGSEGV or wrong shape, it's a BUG-FIND — report it)"
+        ),
+    }
+}
+
 // =========================================================================
 // CLASS 1 — WORKS: "stale fears, verified gone". Assert the correct value.
 // A failure here is a regression in a feature the docs already call fixed.
@@ -1378,8 +1415,19 @@ fn works_pack_show_output_dialect_win() {
 // =========================================================================
 // Quasiquoter strictness — `[j|…|]` exact-number and control-character
 // handling, `[fmt|…|]` brace-escape discipline. Rejection paths are
-// compile-time failures, pinned with `fails_loudly`.
+// compile-time failures, pinned with `fails_loudly_with_imports` (defined
+// near `fails_loudly`, top of file — shared plumbing, not local to this
+// section).
+//
+// `[j|…|]`/`[fmt|…|]` are NOT auto-imported on this raw `template_haskell`
+// path (that injection is the live MCP server request handler's job, which
+// this harness bypasses) — every probe below needs an explicit
+// `Tidepool.QQ (fmt, j)` import, same as `works_form_qq` and
+// `render/fmt_spec_reject.rs`/`render/fmt_nonfinite.rs` elsewhere in this
+// suite.
 // =========================================================================
+
+const QQ_IMPORTS: &str = "Tidepool.QQ (fmt, j)";
 
 /// `[j|…|]` integer literals beyond `Double`'s 53-bit mantissa parse EXACT:
 /// the literal-syntax number path is integer digit accumulation only, never
@@ -1387,7 +1435,8 @@ fn works_pack_show_output_dialect_win() {
 /// rounds to the nearest representable double and loses the low digits.
 #[test]
 fn qq_json_exact_large_integer_literal() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure [j|123456789012345678|]",
         serde_json::json!(123456789012345678_i64),
     );
@@ -1399,7 +1448,8 @@ fn qq_json_exact_large_integer_literal() {
 /// digits, not recovered from a lossy `Double` parse.
 #[test]
 fn qq_json_exact_fraction_literal_beyond_double_precision() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure (renderJson [j|1.234567890123456789|])",
         serde_json::json!("1.234567890123456789"),
     );
@@ -1410,7 +1460,8 @@ fn qq_json_exact_fraction_literal_beyond_double_precision() {
 /// matches itself exactly.
 #[test]
 fn qq_json_pattern_matches_exact_large_integer() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure (case [j|123456789012345678|] of { [j|123456789012345678|] -> True; _ -> False })",
         serde_json::json!(true),
     );
@@ -1421,14 +1472,15 @@ fn qq_json_pattern_matches_exact_large_integer() {
 /// quoter advertises never allowed a literal control byte inside a string.
 #[test]
 fn qq_json_string_rejects_unescaped_control_char() {
-    fails_loudly("pure [j|\"a\u{1}b\"|]", "control character");
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [j|\"a\u{1}b\"|]", "control character");
 }
 
 /// A JSON escape sequence for the SAME code point still works — only the
 /// raw, unescaped byte is rejected.
 #[test]
 fn qq_json_string_allows_escaped_control_char() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure [j|\"a\\u0001b\"|]",
         serde_json::json!("a\u{1}b"),
     );
@@ -1439,7 +1491,7 @@ fn qq_json_string_allows_escaped_control_char() {
 /// (a lone `}` is not allowed; `}}` is the literal-`}` escape).
 #[test]
 fn qq_fmt_rejects_bare_unmatched_brace() {
-    fails_loudly("pure [fmt|value } here|]", "unmatched '}'");
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [fmt|value } here|]", "unmatched '}'");
 }
 
 /// MUST-NOT-BREAK: a `}` INSIDE a hole's expression, inside a string literal
@@ -1449,7 +1501,8 @@ fn qq_fmt_rejects_bare_unmatched_brace() {
 /// inside the string, because it never leaves `scanLiteral`'s string-body scan.
 #[test]
 fn qq_fmt_brace_inside_hole_string_literal_still_works() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         r#"pure [fmt|{T.pack "a}b"}|]"#,
         serde_json::json!("a}b"),
     );
@@ -1462,7 +1515,8 @@ fn qq_fmt_brace_inside_hole_string_literal_still_works() {
 /// nested `{ y = 1 }`'s `}` decrements depth instead of ending the hole.
 #[test]
 fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure [fmt|{let { y = 1 :: Int } in y}|]",
         serde_json::json!("1"),
     );
@@ -1472,7 +1526,8 @@ fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
 /// rejection lands (regression guard: only the UNDOUBLED case is rejected).
 #[test]
 fn qq_fmt_doubled_brace_still_literal() {
-    works(
+    works_with_imports(
+        QQ_IMPORTS,
         "pure [fmt|literal }} brace|]",
         serde_json::json!("literal } brace"),
     );
@@ -1482,7 +1537,7 @@ fn qq_fmt_doubled_brace_still_literal() {
 /// ran out of input — previously this lexer error carried no position.
 #[test]
 fn qq_fmt_unclosed_brace_carries_offset() {
-    fails_loudly("pure [fmt|hello {name|]", "at offset");
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [fmt|hello {name|]", "at offset");
 }
 
 // =========================================================================
