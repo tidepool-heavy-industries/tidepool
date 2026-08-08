@@ -20,10 +20,12 @@
 //! runs out, not the reply content.
 //!
 //! Assertions read the persisted checkpoint only through
-//! `SelfHarnessDriver::restore`'s public `Option<Json>` contract (the exact
-//! author `State` shape `examples/harness` already documents) — never a
-//! checkpoint filename or its on-disk JSON wrapping, which a sibling change
-//! in this same wave is replacing.
+//! `SelfHarnessDriver::checkpoint_path`'s public accessor (never a
+//! hard-coded filename) plus `persistence::load_checkpoint`'s public
+//! `Checkpoint` record — `generation`, incremented once per committed
+//! cycle, is the direct claim: the restarted process's checkpoint
+//! generation continuing past the crashed process's is what "resumed from
+//! the checkpoint rather than `initialState`" means, mechanically.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,6 +36,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Event as LogEvent, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Role, Usage};
 use tidepool_harness::replay::ReplayProvider;
+use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{answerer_decls, Harness, LogObserver, NodeId, SelfHarnessDriver};
 
 fn extract_available() -> bool {
@@ -201,13 +204,9 @@ fn assert_no_tmp_files(dir: &Path, when: &str) {
 }
 
 /// A driver over an inert answerer `Harness` (never run — its own
-/// `ReplayProvider` is empty), built only to call
-/// `SelfHarnessDriver::restore` against the default checkpoint location
-/// under the CURRENT `XDG_CACHE_HOME`. This is the public surface the spec
-/// calls out for reading back a persisted checkpoint without naming its
-/// file or JSON shape — `restore`'s signature (`Result<Option<Json>,
-/// DriverError>`) is stable across the sibling F4 change landing in this
-/// same wave.
+/// `ReplayProvider` is empty), built only for its `checkpoint_path()`
+/// accessor under the CURRENT `XDG_CACHE_HOME` — the public way to
+/// discover where the checkpoint lives without naming its file.
 fn checker_driver() -> SelfHarnessDriver {
     let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
         .expect("answerer engine config");
@@ -322,21 +321,27 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
 
     assert_no_tmp_files(&selfharness_dir, "immediately after the SIGKILL");
 
-    // The persisted checkpoint must reflect cycle 1's COMMITTED state, not
-    // cycle 2's in-flight (never-committed) work — proving the crash landed
-    // between commits, not mid-write.
-    let mut checker = checker_driver();
-    let restored_after_crash = checker
-        .restore()
+    // The persisted checkpoint must reflect cycle 1's COMMITTED generation,
+    // not cycle 2's in-flight (never-committed) work — proving the crash
+    // landed between commits, not mid-write.
+    let checker = checker_driver();
+    let checkpoint_after_crash = persistence::load_checkpoint(checker.checkpoint_path())
         .expect("checkpoint parses cleanly right after the crash")
-        .expect("cycle 1 persisted a checkpoint before the crash");
+        .expect("cycle 1 committed a checkpoint before the crash");
     assert_eq!(
-        restored_after_crash
+        checkpoint_after_crash.generation, 1,
+        "checkpoint after the crash must be generation 1 (cycle 1's commit), not \
+         generation 0 (no commit yet) or 2 (cycle 2 also committed); got \
+         {checkpoint_after_crash:?}"
+    );
+    assert_eq!(
+        checkpoint_after_crash
+            .state
             .get("loopCount")
             .and_then(|v| v.as_i64()),
         Some(1),
-        "checkpoint after the crash must be cycle 1's committed loopCount (1), not \
-         cycle 2's in-flight work or the pre-cycle-1 initialState (0); got {restored_after_crash:?}"
+        "generation 1's state must carry cycle 1's committed loopCount (1); got \
+         {checkpoint_after_crash:?}"
     );
 
     // --- process 2: same binary, same args, same cache dir — the
@@ -374,25 +379,38 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
 
     assert_no_tmp_files(&selfharness_dir, "after the restarted process exits");
 
-    let restored_after_restart = checker
-        .restore()
+    let checkpoint_after_restart = persistence::load_checkpoint(checker.checkpoint_path())
         .expect("checkpoint parses cleanly after the restarted process exits")
         .expect("a checkpoint still exists after the restart run");
+    // The direct durability claim: the restarted process committed
+    // generation 2 then 3, continuing from the generation 1 the killed
+    // process left — generation 2 alone would mean it restarted from
+    // generation 0 (initialState) instead of the persisted checkpoint.
     assert_eq!(
-        restored_after_restart
-            .get("loopCount")
-            .and_then(|v| v.as_i64()),
-        Some(3),
-        "the restarted process must continue from cycle 1's persisted loopCount (1) \
-         through 2 more committed cycles to reach 3 — loopCount 2 would mean it \
-         restarted from initialState instead of the checkpoint; got \
-         {restored_after_restart:?}\nstderr:\n{}",
+        checkpoint_after_restart.generation,
+        3,
+        "the restarted process must continue from generation 1 through 2 more \
+         committed cycles to reach generation 3; got {checkpoint_after_restart:?}\n\
+         stderr:\n{}",
         tail(&stderr2_path)
     );
     assert_eq!(
-        restored_after_restart.get("mode").and_then(|v| v.as_str()),
+        checkpoint_after_restart
+            .state
+            .get("loopCount")
+            .and_then(|v| v.as_i64()),
+        Some(3),
+        "generation 3's state must carry loopCount 3, continuing from cycle 1's \
+         persisted loopCount (1) through 2 more committed cycles; got \
+         {checkpoint_after_restart:?}"
+    );
+    assert_eq!(
+        checkpoint_after_restart
+            .state
+            .get("mode")
+            .and_then(|v| v.as_str()),
         Some("Observing"),
         "Deciding -> Acting -> Observing across the 2 post-restart cycles, continuing \
-         the mode chain from cycle 1's persisted Deciding; got {restored_after_restart:?}"
+         the mode chain from cycle 1's persisted Deciding; got {checkpoint_after_restart:?}"
     );
 }
