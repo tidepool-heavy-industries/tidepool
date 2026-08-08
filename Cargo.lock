@@ -3874,6 +3874,7 @@ dependencies = [
  "tidepool-runtime",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
