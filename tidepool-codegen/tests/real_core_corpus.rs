@@ -24,18 +24,7 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/test/corpus_cbor")
 }
 
-/// GHC lifts `where`/`let` helpers to uniquified top-level binders
-/// (`go_u6341068275337658369`). Those are inlined into the bindings that use
-/// them; running them standalone tests nothing. Skip them.
-fn is_lifted_local(name: &str) -> bool {
-    match name.rfind("_u") {
-        Some(i) => {
-            let tail = &name[i + 2..];
-            tail.len() >= 6 && tail.chars().all(|c| c.is_ascii_digit())
-        }
-        None => false,
-    }
-}
+use tidepool_testing::haskell_suite::is_lifted_local;
 
 fn short(v: &Value) -> String {
     let s = format!("{v:?}");

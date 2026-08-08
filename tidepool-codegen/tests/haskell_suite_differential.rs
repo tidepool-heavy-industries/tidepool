@@ -26,6 +26,11 @@ fn should_skip(name: &str) -> bool {
     if name == "meta" {
         return true;
     }
+    // Lifted locals (`_u<digits>`) are NOT skipped here, unlike the real-Core
+    // corpus harness. This suite's fixtures are the test suite's own bindings,
+    // and 75 of its lifted locals compare cleanly — excluding the class to
+    // silence two pathological ones costs an order of magnitude more coverage
+    // than it buys. The two are named in EXPECTED_EVAL_JIT_DIVERGE instead.
     false
 }
 
@@ -55,15 +60,15 @@ const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
     ),
     (
         "xs_u8286623314361937397",
-        "GHC-lifted local helper (`_u<digits>` uniquified where/let binder — \
-         see real_core_corpus.rs::is_lifted_local) bound to a self-referential, \
-         effectively-unbounded list; standalone execution forces it outside the \
-         call site that would bound it. eval's deep_force walks it fully and \
-         hits its own recursion-depth guard (DepthLimit); the JIT side goes \
-         through compare::heap_to_value, which silently truncates past \
-         MAX_HEAP_DEPTH (1000) instead of erroring — an asymmetry between the \
-         two forcing strategies on an out-of-context fixture, not a real engine \
-         divergence.",
+        "GHC-lifted local helper bound to a self-referential, effectively \
+         unbounded list; standalone execution forces it outside the call site \
+         that would bound it. eval's deep_force walks it fully and hits its own \
+         recursion-depth guard (DepthLimit); the JIT side goes through \
+         compare::heap_to_value, which silently truncates past MAX_HEAP_DEPTH \
+         (1000) instead of erroring — an asymmetry between the two forcing \
+         strategies on an out-of-context fixture, not a real engine divergence. \
+         Named individually rather than excluded as a class: this suite's other \
+         lifted locals compare cleanly and are real coverage.",
     ),
     (
         "xs'_u8286623314361937461",
