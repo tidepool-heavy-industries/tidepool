@@ -743,8 +743,11 @@ pub fn arm_gc_fault(point: GcFaultPoint) {
 /// `libc::raise` is delivered synchronously to the calling thread before
 /// `raise` returns and involves no UB, unlike an inline trap instruction
 /// whose undefined behavior the optimizer is free to exploit.
+///
+/// The disarmed case costs one relaxed load — every collection runs this, so
+/// the locked read-modify-write stays behind the armed check.
 fn maybe_raise_gc_fault(point: GcFaultPoint) {
-    if point == GcFaultPoint::None {
+    if point == GcFaultPoint::None || GC_FAULT_POINT.load(Ordering::Relaxed) == 0 {
         return;
     }
     let armed = GC_FAULT_POINT.compare_exchange(
