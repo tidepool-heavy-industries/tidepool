@@ -893,12 +893,12 @@ impl SelfHarnessDriver {
         result
     }
 
-    /// Drop the current loop's answerer session, so the next loop
-    /// starts from a fresh render-seeded one. Idempotent — a no-op if no
-    /// answerer is live.
+    /// Retire the current loop's answerer node (terminalize it and drop its
+    /// session), so the next loop starts from a fresh render-seeded one.
+    /// Idempotent — a no-op if no answerer is live.
     fn retire_answerer(&mut self) {
         if let Some(node) = self.answerer.take() {
-            self.agent.drop_session(node);
+            let _ = self.agent.terminate_node(node, "loop answerer retired");
         }
     }
 

@@ -216,3 +216,79 @@ async fn a_failed_turn_releases_its_lease() {
         .expect("the lease must have been released after the failed first turn");
     assert!(matches!(second, TurnOutcome::Completed { .. }));
 }
+
+/// The registry-level "panic mid-turn recovers-or-Busy" mutation check,
+/// driven through the REAL `Harness`/registry (not a synthetic `FakeMachine`):
+/// with the node's registry slot manually held `Running` (simulating a turn
+/// that panicked mid-flight, or is genuinely still in flight), a second call
+/// on that node must fail BUSY (`HarnessError::TurnInFlight`, the
+/// `CheckoutError::Running -> HarnessError::TurnInFlight` mapping) — never
+/// `NoSession`, and never a permanent wedge. Once the held checkout is
+/// dropped without an explicit restore (the panic-safety net, step 5's
+/// `Drop` impl), a following call on the SAME node must succeed — recovered,
+/// not wedged `Running` forever.
+///
+/// Mutation: remove `impl Drop for Checkout` — the node must go RED (the
+/// second `drive_turn` after dropping the manual checkout keeps returning
+/// `TurnInFlight` forever instead of recovering).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panic_mid_turn_recovers_via_drop_or_reports_busy_never_no_session() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let writer =
+        LogWriter::create(dir.path().join("turn-lease-panic-recover.jsonl"), &header()).unwrap();
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let provider = Arc::new(FailFirstProvider {
+        calls: AtomicU32::new(0),
+    });
+    // FailFirstProvider only fails the FIRST call; every real call here
+    // succeeds — the failure under test is a registry-level checkout
+    // conflict, not a provider error.
+    provider.calls.store(1, Ordering::SeqCst);
+    let provider_dyn: Arc<dyn DynModelProvider> = provider;
+    let harness = Arc::new(Harness::new(writer, cfg, provider_dyn).expect("harness boots"));
+
+    let root = harness.create_root("panic-recover root", "Begin.").unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    let sid = harness
+        .tree()
+        .session_of(root)
+        .expect("a forced node has a session");
+
+    // Simulate an in-flight (or crashed-without-cleanup) turn: check the
+    // machine out directly against the registry, bypassing the harness's own
+    // turn-lease/checkout wrappers, and DO NOT restore it.
+    let held = harness.tree().registry().checkout_run(sid).unwrap();
+
+    let busy = harness.drive_turn(root).await;
+    let busy_msg = match &busy {
+        Ok(_) => "Ok(_)".to_string(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        matches!(busy, Err(HarnessError::TurnInFlight(n)) if n == root),
+        "a node whose registry slot is checked out elsewhere must report TurnInFlight, \
+         never NoSession or any other error, got: {busy_msg}"
+    );
+
+    // Drop the held checkout WITHOUT an explicit restore — the panic-safety
+    // net (`impl Drop for Checkout`) must recover the slot to Idle.
+    drop(held);
+
+    let recovered = harness.drive_turn(root).await;
+    let recovered_msg = match &recovered {
+        Ok(_) => "Ok(_)".to_string(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        matches!(recovered, Ok(TurnOutcome::Completed { .. })),
+        "the node must recover once the stale checkout is dropped, not stay wedged, got: \
+         {recovered_msg}"
+    );
+}
