@@ -47,8 +47,11 @@ focused, award-grade minimal frontend** and lift only the clean transport.
 - DO NOT add a second event-emission path in the driver — the `Observer` seam
   (`selfharness/observer.rs`) is the extension point; the GUI push is an
   `Observer` (finish `GuiObserver`), not a hardwired call.
-- DO NOT block the driver's async runtime with a naive sync wait — the
-  operator gate must be an `async` await on a channel/notify, not a spin.
+- The `OperatorGate` is SYNC-BLOCKING (it mirrors the existing stdin
+  `between_loops_gate` and the driver's `block_in_place`/`block_on` turn
+  driving — no async-trait). DO NOT spin-wait; block on a channel/oneshot. DO
+  call it from a blocking-safe context (`block_in_place`), never on a bare
+  async worker, so a park doesn't stall the tokio runtime.
 - DO NOT return `Either FormError` from `askUser` — it absorbs failure and
   re-prompts. `Either` stays internal to the decode step.
 - DO NOT touch the `Harness`/engine core when deleting the web binary (WS5) —
@@ -90,9 +93,12 @@ commits before forking, so TLs build against a stable boundary.
      coercion, no keyed/unkeyed duality.
 2. **`OperatorGate` trait** (new, `selfharness/`), the WS2↔WS3 boundary:
    ```rust
-   #[async_trait] pub trait OperatorGate: Send + Sync {
-       async fn present_form(&self, spec: FormSpec) -> Submission; // resolves on submit
-       async fn await_continue(&self);                            // resolves on button
+   // SYNC-BLOCKING (no async-trait): mirrors the existing stdin gate; the
+   // driver calls these from a block_in_place context so a park doesn't stall
+   // a tokio worker. A web impl blocks on a channel resolved by an HTTP handler.
+   pub trait OperatorGate: Send + Sync {
+       fn present_form(&self, spec: &FormSpec) -> Submission; // blocks until submit
+       fn await_continue(&self);                              // blocks until the button
    }
    ```
    The driver holds `Arc<dyn OperatorGate>`; the web server (WS3) implements it;
@@ -120,11 +126,12 @@ commits before forking, so TLs build against a stable boundary.
 
 ### WS2 — Operator servicer (fill the `driver.rs:910` dead-end)
 - Add `Arc<dyn OperatorGate>` to the driver. Replace the hard-error: an
-  `AskUser` suspension → `gate.present_form(spec).await` → decode via the
-  turn's table → resume the answerer with the typed `Value` (mirror
-  `resume_parent`; the decode-retry is Haskell-side, so a decode failure
-  re-suspends the same form).
-- Replace `between_loops_gate`'s stdin read with `gate.await_continue().await`.
+  `AskUser` suspension → `gate.present_form(&spec)` (blocking, from a
+  `block_in_place` context) → decode via the turn's table → resume the answerer
+  with the typed `Value` (mirror `resume_parent`; the decode-retry is
+  Haskell-side, so a decode failure re-suspends the same form).
+- Replace `between_loops_gate`'s stdin read with `gate.await_continue()`
+  (blocking, `block_in_place`).
 - Provide `StdinGate` (headless default) so existing tests/CLI keep working.
 
 ### WS3 — Fresh minimal operator GUI (`bin/tidepool-selfharness-web.rs`)
