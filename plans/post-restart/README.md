@@ -78,21 +78,30 @@ call, fits harness-lifecycle's scope).
   occurred TWICE (a TL, then a leaf) — detection is priority 1; merge
   teardown half-fails on already-pruned worktrees (1.1G orphan dir cleaned
   by hand); stale orphaned panes from the first TL death still need reaping.
-- exo wishlist NEW (2026-08-08, post-restart): **duplicate spawn / silent
-  child birth** — spawn_dev produced TWO panes running the identical
-  generated spec in the SAME worktree with ONE ledger entry; the stray was
-  invisible to ListAgents and the peer list (its messages arrived
-  from-mode=bypass), and was caught only because the ledger dev noticed
-  edits it hadn't made. Two concurrent writers interleaved uncommitted
-  edits in one file before containment (WIP-commit + freeze + root killed
-  the stray by verified PID). Spawn should be idempotent per worktree, and
-  a pane whose registration failed should die loudly, not run the spec.
-  Corroborating residue (same incident): (a) the dev node's
-  `status.children` blob was cross-written by the twin — it listed three
-  TOP-LEVEL lanes as children of a leaf dev (ledger tree structure itself
-  stayed correct); harmless today but load-bearing if anything ever walks
-  `status.children` for teardown/traversal — status files must be
-  single-writer or last-write-detected. (b) Post-kill, `ListAgents`
-  dropped the (live) ledger child for a window while `tree` showed it
-  alive — peer list and ledger can disagree transiently, so the watchdog
-  must not read either alone as death evidence.
+- exo wishlist NEW (2026-08-08, CORRECTED same day): the "duplicate
+  spawn / silent child birth" report was a MISDIAGNOSIS that cost a live
+  agent — the dev saw its own command line in `ps`, reported itself as a
+  twin, and root killed the ledger child on provenance evidence
+  (byte-identical spec, exo tmux ancestry, spawn window) that was
+  consistent with BOTH hypotheses and discriminated nothing. Exactly one
+  pane ever existed; `%241`'s pane_pid was the killed claude's parent.
+  Recovery: WIP snapshot 6b2f5e9d + replacement dev; nothing lost but
+  the hour. The TWO CONFIRMED defects, both sharper than the misdiagnosis:
+  1. **No agent self-identity token** — a dev cannot distinguish itself
+     from a hypothetical duplicate (`ps` shows its own cmdline; nothing
+     in env/prompt names its own PID or pane). Give spawned agents a
+     self-id (pane id + PID in env) so "is this me?" is answerable.
+  2. **`pane_alive` tracks the PANE, not the AGENT** — `tree` reported
+     the node alive/busy with fresh timestamps an HOUR after its claude
+     died, because the pane's zsh survives. A watchdog reading the
+     ledger alone will never see this death class; `ListAgents` (which
+     dropped the node) was the correct source. Liveness must track the
+     agent process, not the pane shell.
+  Root-side kill-protocol lesson (recorded in memory): before killing a
+  "duplicate", VERIFY THE PREMISE — enumerate panes/processes and count;
+  discriminate by pane_pid parentage, never by spec identity (both twins
+  and the real child carry the identical generated spec by construction).
+  The earlier "cross-written status.children" residue is discounted
+  (single agent's own status file); the transient ListAgents/tree
+  disagreement stands, with the trust direction INVERTED from the
+  original note: ListAgents was right, the ledger was wrong.
