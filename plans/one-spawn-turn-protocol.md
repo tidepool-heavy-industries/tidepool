@@ -31,7 +31,7 @@ branches on a verdict it derived itself.
 ```
 tidepool-extract-bin <turn.txt> --turn \
   --turn-template <kind>=<file> [--turn-template <kind>=<file> …] \
-  --turn-out <turn.json> \
+  --turn-out <turn.cbor> [--json-output <turn.json>] \
   --output-dir <dir> [--include <dir> …] \
   [--session-root <dir>] [--inject-val <mod> …] [--bind-gen <g>] \
   [--turn-verdict <kind>[:<name>,<name>…]]
@@ -51,42 +51,66 @@ tidepool-extract-bin <turn.txt> --turn \
   infers the bind path from its own verdict. `--bind-gen` stays an input —
   generation numbering is the caller's session state, not something GHC knows.
 
-### Output — `turn.json`
+### Output — the rich result, a tagged variant
 
-Beside the unchanged `result.cbor` / `meta.cbor` / `asks.json`. The tree wire
-format is untouched (no `TPLR` version bump): classification and binders ride
-*beside* the tree bytes, never inside them.
+The result is a **sum type over the verdict**, not a record with fields that are
+meaningful for some kinds and dead for others. Which variant came back is what
+the caller branches on; a variant carries exactly the payload its kind has.
 
-```json
-{
-  "kind": "decl" | "bind" | "expr",
-  "binders": ["x"],
-  "declItems": [{"kind":"value","name":"slug"}],
-  "variant": 0,
-  "compiled": true,
-  "boundBinders": [{"name":"x","varId":"…","module":"Tidepool.Session.Val.G3",
-                    "tier":"Tier0Data","typeDisplay":"Int"}],
-  "wrappedSource": "…"
-}
+```
+TurnOut
+  = Decl { binders :: [Text], declItems :: [ExportItem] }
+  | Bind { binders :: [Text], variant :: Int, boundBinders :: [BoundBinder]
+         , asks :: [(Word32, Text)], wrappedSource :: Text }
+  | Expr { variant :: Int, asks :: [(Word32, Text)], wrappedSource :: Text }
 ```
 
-- `kind` / `binders` — verbatim the `--emit-stmt-binders` contract, so the
-  existing verdict semantics (`Tidepool.Binders.classifyTurn`: bind-marker
-  first, then signature, then name-declaring `ValD`, then bare expression,
-  then remaining decls, else expression) carry over unchanged.
-- `declItems` — the `--emit-binders` payload, harvested from the same parse.
-  Present on a `decl` verdict only; a decl turn does **not** compile in this
-  mode (the decl plane's module render is the caller's, a different pipeline).
+- `binders` — verbatim the `--emit-stmt-binders` contract, so the existing
+  verdict semantics (`Tidepool.Binders.classifyTurn`: bind-marker first, then
+  signature, then name-declaring `ValD`, then bare expression, then remaining
+  decls, else expression) carry over unchanged.
+- `declItems` — the `--emit-binders` payload, harvested from the same parse. A
+  decl turn does **not** compile in this mode: the decl plane's module render is
+  the caller's, a different pipeline.
 - `variant` — which template of the chosen kind's list compiled.
-- `boundBinders` — the `--emit-bound-binders` payload, inlined. On a `bind`
-  verdict only.
+- `boundBinders` — the `--emit-bound-binders` payload, inlined. `varId` stays a
+  decimal string wherever it is rendered as JSON (an f64 would lose the u64).
 - `wrappedSource` — what was actually compiled. Diagnostic, and the anchor for
   the byte-identity contract test.
+
+**CBOR is the machine path.** The variant is written as a CBOR sidecar beside
+the unchanged `result.cbor` / `meta.cbor` / `asks.json`. The tree wire format is
+untouched (no `TPLR` version bump): classification and binders ride *beside* the
+tree bytes, never inside them.
+
+`--json-output` renders the same variant as JSON for scripting and debugging.
+It is a *rendering*, not a second format: variant names and payload shape stay
+identical between the two, so a script reading the JSON is reading the same
+structure the runtime reads. Nothing consumes the JSON in the product path.
 
 Failures keep the existing convention: exactly one JSON diagnostics report on
 stdout, non-zero exit. A caller distinguishes a real GHC rejection
 (`ExtractFailed` / `Diagnostics`) from an unparseable report
 (`MalformedDiagnostics` → version skew) exactly as it does today.
+
+### `--emit-stmt-binders` is deleted, not deprecated
+
+When this mode lands, the `--emit-stmt-binders` flag is removed from the extract
+CLI and every use of it across the tree goes with it (`session/turn.rs`,
+`session/binders.rs`, the repl path that shares them, any script or test
+referencing it). Its parse-only mode **is** the second spawn being deleted;
+keeping it would preserve exactly the seam this work removes. Afterwards
+statement binders have one source: the rich result variant. No parallel channel,
+no deprecation shim.
+
+Consequence, deliberate: the new Rust side is incompatible with an older
+deployed extract binary. That is correct under the one-format wire policy — a
+stale extract fails loud, and `scripts/redeploy.sh` ships both sides together.
+Any merge of this work carries a redeploy requirement.
+
+`--emit-binders` (declaration export items) is a separate flag whose payload the
+`Decl` variant subsumes. Removing it follows the same no-parallel-channel logic
+but has not been directed; treat it as an open question, not a decision.
 
 ### Variant retry
 
@@ -122,19 +146,28 @@ callers consume:
 ```rust
 pub struct TurnTemplate { pub kind: TurnKind, pub source: String }
 pub struct TurnRequest<'a> { /* raw text, templates, session ctx, gen, verdict */ }
-pub struct TurnResult { /* kind, binders, decl_items, expr, table, warnings,
-                          bound_binders, asks, variant, wrapped_source */ }
+pub enum TurnResult {
+    Decl { binders: Vec<String>, items: Vec<ExportItem> },
+    Bind { binders: Vec<String>, bound: Vec<BoundBinder>, variant: usize,
+           compiled: CompiledTurn, wrapped_source: String },
+    Expr { variant: usize, compiled: CompiledTurn, wrapped_source: String },
+}
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError>;
 ```
+
+`TurnResult` mirrors the extract's variant: an enum, so a caller cannot read a
+field that its verdict does not have. `CompiledTurn` groups what a compiled turn
+yields (`expr`, `table`, `warnings`, `asks`) — the `Decl` variant compiles
+nothing and carries none of it.
 
 `run_turn` is the only entry point callers see. Its body is replaced, not
 wrapped: while the extract mode is being built it performs the two spawns
 (`classify_turn`, then Rust-side template selection, then
 `compile_session_turn`), and when the mode lands that body becomes the single
-`--turn` call and `classify_turn` / `extract_binders`' spawn and the
-bind-turn binder spawn are deleted. There is no configuration switch between
-the two and no surviving two-spawn path — the interim body is scaffolding with
-a deletion date, not a fallback seam.
+`--turn` call. `classify_turn` and its `--emit-stmt-binders` spawn are then
+deleted outright, along with the bind-turn binder spawn. There is no
+configuration switch between the two and no surviving two-spawn path — the
+interim body is scaffolding with a deletion date, not a fallback seam.
 
 Non-negotiable invariants:
 
