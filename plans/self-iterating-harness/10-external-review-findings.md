@@ -91,9 +91,13 @@ scope; a post-recovery **robustness/consolidation wave**):
   reopen unlogged (`forcing.rs:487`) so a crash mid-follow-up folds as `Done`.
 - **MED** durable writer fsyncs all tree activity under one mutex (`forcing`) —
   unrelated nodes contend on disk latency.
-- **[DESIGN] MED** default OAuth provider ignores `EngineConfig.max_tokens`
-  (`provider/oauth.rs:578`); API-key route honors it. Matters for the indefinite
-  loop's runaway/cost semantics. (Behavioral parity — confirm intended.)
+- **[VERIFIED — non-issue]** default OAuth provider omits `max_tokens`
+  (`provider/oauth.rs:578`) — DELIBERATE + documented: the ChatGPT Codex endpoint
+  rejects `max_output_tokens` (`400 Unsupported parameter`); the real Codex CLI
+  never sends it. Not a bug. The runaway-cost concern for the indefinite loop is
+  real but already bounded by `LOOP_INFERENCE_CALL_CAP` (1024); a per-token cap
+  on the OAuth route would need a client-side counter, not the rejected param.
+  (Checked directly, provider/ is disjoint from all recovery TLs.)
 - **MED-LOW** declaration compile/type errors bypass the self-correction loop
   (`harness.rs:839` returns `Resident`, not model-correctable `Compile`).
 - **MED-LOW** cross-turn decl persistence silently degrades to `None` on setup
