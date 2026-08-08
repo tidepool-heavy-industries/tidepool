@@ -83,3 +83,4 @@ viz/index.html
 # extract test harness scratch (synthetic fixture modules + their .hi/.o)
 haskell/test-session/work/
 haskell/test-fidelity/work/
+examples/guess/haskell/Game_cbor/
