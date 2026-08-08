@@ -1,11 +1,14 @@
 # tidepool-web
 
-Protocol server (HTTP+SSE, E1) + the Datastar "observatory" over
-`tidepool-harness`. Every capability the observatory's panes use is a
-documented, curl-able verb first — the browser UI is just one client. See
-`CLAUDE.md` in this crate for the stack (axum + maud + vendored Datastar) and
-the F1/F2/F3 freeze this protocol builds against
-(`plans/harness-r0/FREEZES.md`).
+The minimal operator GUI for the self-iterating harness: one form page served
+over HTTP + Datastar SSE. The harness driver has exactly two moments where it
+needs a human — filling in a typed form (`askUser`) and clicking "continue"
+between loop iterations — and this crate is the web side of both.
+
+Stack: axum + maud, the official Datastar Rust SDK for SSE-pushed fragments.
+No JS build step; the Datastar client is one small vendored file inlined into
+the page (see `shell.rs`). See `CLAUDE.md` in this crate for the wire
+contract, the four verbs, and why the gate is sync-blocking.
 
 Loopback bind only (`127.0.0.1`) — reachability is the authorization
 boundary. There is no auth token check on the HTTP surface itself; if you're
@@ -13,221 +16,68 @@ not on the box, you get in via SSH port-forward / tailnet, not a password.
 
 ## Boot
 
-The binary is `tidepool-harness` (in this crate: `src/bin/tidepool-harness.rs`).
+The server binary is `tidepool-selfharness-web`:
 
 ```bash
-cargo run --bin tidepool-harness -- --port 4600
+cargo run --bin tidepool-selfharness-web -- --port 4601
 ```
 
-- `--port <n>` — defaults to `4600`.
-- `--replay <log.jsonl>` — crash-replay / record-replay mode (below);
-  omit for a fresh live run.
-- `TIDEPOOL_EXTRACT` — path to the `tidepool-extract-bin` binary (required for
-  a live run; see the workspace `CLAUDE.md` for how to build it).
-- `TIDEPOOL_PRELUDE_DIR` — override the stdlib include dir (defaults to the
-  in-repo `haskell/lib`).
-- `TIDEPOOL_LLM_MODEL` — the calling-model id for a fresh OAuth session
-  (defaults to `gpt-5`).
+- `--port <n>` — defaults to `4601`.
 
-Each run writes a fresh, timestamped event log under
-`$XDG_STATE_HOME/tidepool/logs` (or `~/.local/state/tidepool/logs`) — a run
-never appends to an old log.
-
-## Signing in (ssh -L auth flow)
-
-A fresh (non-`--replay`) run needs a signed-in ChatGPT-subscription OAuth
-session before any node can be forced. If the harness runs on a remote box:
+By itself this only serves the page and the `WebGate` — nothing drives it
+without a real harness wired to a `WebGate::new(state)` (see
+`tidepool-selfharness.rs`, the harness driver binary, for how the pieces
+compose). To see the page working with no harness, no model, and no API
+calls:
 
 ```bash
-ssh -L 1455:localhost:1455 <harness-box>
+cargo run --bin tidepool-selfharness-web -- --demo --port 4601
 ```
 
-(or the tailscale equivalent — port `1455` is the OAuth callback port). Then:
+`--demo` runs a background mock driver: it presents a sample `FormSpec` (one
+field of each v1 kind — enum/int/text/bool), prints the flat submission it
+receives to stderr, parks on the continue gate, then loops. Open
+`http://127.0.0.1:4601` and drive it by hand.
+
+## The verbs
+
+Everything the page does is one of four HTTP verbs — curl-able, no private
+API:
 
 ```bash
-curl -sX POST http://127.0.0.1:4600/auth/start
-# => {"authorization_url": "https://...", "port_forward_hint": "..."}
-```
+# The page shell + whatever's currently pending (a form, the continue
+# button, or an idle placeholder).
+curl -s http://127.0.0.1:4601/
 
-Open `authorization_url` in a browser, sign in — the callback lands on
-`localhost:1455` via the tunnel above. Poll status:
+# Live patch stream: one datastar-patch-elements frame per state change,
+# each replacing #panel in place.
+curl -s http://127.0.0.1:4601/sse
 
-```bash
-curl -s http://127.0.0.1:4600/auth/status
-# => {"signed_in": true}
-```
-
-The observatory page (`GET /`) shows a "sign in" banner button that drives the
-same `/auth/start` verb.
-
-## The observatory panes
-
-`GET /` serves the page shell; `GET /sse` is the live patch stream (Datastar
-`datastar-patch-elements` frames). Six panes, each independently scrollable:
-
-- **tree** (`#tree`) — the cognition tree: node id, lifecycle state, fork
-  badge, pending-hole prompt teaser, and an "awaiting operator" badge for a
-  node parked on the escalation ladder's rung 2 (below). Force/fork buttons
-  post the verbs below.
-- **inspector** (`#inspector`) — priority order: a node parked awaiting an
-  escalation decision (the stuck-node popup, below) first, then the first
-  node suspended on an operator (`dialogAsk`/`ask`) hole, rendered as a `Ui`
-  form.
-- **meters** (`#meters`) — per-node + rollup token usage, folded from
-  `TurnDelta` events' `usage` field (assistant turns only).
-- **trace** (`#trace`) — per-node effect request/response tail (last 20 per
-  node), one collapsed `<details>` per node.
-- **heap** (`#heap`) — per-node LIVE heap/GC snapshot, straight off the
-  resident `JitEffectMachine` (not folded from the log, unlike meters/trace):
-  nursery capacity in bytes, the session heap's bump high-water mark in
-  bytes, and the GC-generation count. A node with no live session (thunk,
-  done, or cancelled) is simply absent from the table.
-- **log** (`#log`) — the last 200 raw log lines (initial render only; not
-  SSE-live in R0).
-
-`tree`, `inspector`, `meters`, `trace`, and `heap` all re-render and patch
-live over SSE on every logged event (or an internal "tick" nudge right after
-a verb mutates the harness).
-
-## Driving via curl
-
-Everything the panes do is one of these verbs. Examples assume `--port 4600`.
-
-**Create + force a root node:**
-
-```bash
-curl -sX POST http://127.0.0.1:4600/create \
+# Resolve a pending form. Body is a flat { key: scalar } object matching
+# the form's fields (enum -> chosen tag string, int -> number, text ->
+# string, bool -> bool).
+curl -sX POST http://127.0.0.1:4601/submit \
   -H 'content-type: application/json' \
-  -d '{"title": "demo", "prompt": "List the files in the repo root."}'
-# => {"ok": true, "node": 0}
+  -d '{"direction": "continue", "iterations": 3, "note": "", "verbose": false}'
 
-curl -sX POST http://127.0.0.1:4600/force/0
-# => {"ok": true, "forced": 0}
+# Resolve the between-loops gate. No body.
+curl -sX POST http://127.0.0.1:4601/continue
 ```
 
-Forcing drives the node's turn loop (in the background) until it completes,
-suspends at a hole, or hits the turn cap.
+A verb that doesn't match what's currently pending (e.g. `/continue` while a
+form is pending) returns `{"ok": false, "error": "..."}` with a 400 — and
+leaves the pending interaction untouched, so the right verb still works
+afterward.
 
-**Answer a suspended hole:**
+## Testing
 
 ```bash
-# Mechanical option-key answer (D6): the operator picked a Choice option.
-curl -sX POST http://127.0.0.1:4600/answer/0/approve
-
-# Free-text / prose answer (routes to the elaboration path):
-curl -sX POST http://127.0.0.1:4600/answer/0 \
-  -H 'content-type: application/json' \
-  -d '{"prose": "Approve, but note the risk in the summary."}'
+cargo nextest run -p tidepool-web
 ```
 
-**Drive a fork answerer for a fork hole:**
-
-```bash
-curl -sX POST http://127.0.0.1:4600/fork/1
-# => {"ok": true, "forking": 1}
-```
-
-**Resolve a stuck-node escalation (the fanout escalation ladder):**
-
-A fanout (or plain fork/return-control) answerer that exhausts its turn
-budget does not hard-fail the fan anymore. It first tries ONE auto
-corrective-retry (rung 1, no operator involved — a nudge plus a small extra
-turn budget). If it's still stuck after that, it parks awaiting an operator
-decision (rung 2) — the tree pane badges the node "awaiting operator" and the
-inspector shows the stuck-node popup: the node's own recent transcript, an
-"allocate more turns" control (with an optional steering message injected as
-the answerer's next turn), and an "abort fan" control.
-
-```bash
-# Grant 5 more turns, optionally steering the answerer:
-curl -sX POST http://127.0.0.1:4600/steer/2 \
-  -H 'content-type: application/json' \
-  -d '{"turns": 5, "steer": "Remember: resume must be a single Int, not a String."}'
-# => {"ok": true, "turns": 5}
-
-# Abort the fan instead: cancels the stuck answerer (never left "running"),
-# a typed error surfaces to the fan, and the PARENT stays suspended on its
-# original hole, re-answerable.
-curl -sX POST http://127.0.0.1:4600/steer/2/abort
-# => {"ok": true}
-```
-
-Both are in-process-only: the operator decision is delivered through an
-in-memory oneshot channel the parked turn loop is awaiting on its own async
-stack, not a durable/across-restart suspension. A process restart mid-wait
-loses the in-flight fan; the operator re-triggers by re-forcing, same as any
-other in-flight turn.
-
-**Cancel a node:**
-
-```bash
-curl -sX POST http://127.0.0.1:4600/cancel/0
-```
-
-**Splice an operator message into a node's transcript (F2 `turn_spliced`):**
-
-Interjects `content` into `node`'s OWN transcript, landing at its current
-turn position — visible in `node`'s NEXT prompt assembly (the next `force`,
-`fork` answerer turn, etc. reads the live transcript this appends to). Logged
-as a distinct `turn_spliced` event, not a `turn_delta` — an audit trail can
-tell an operator interjection apart from a modeled or harness-generated
-turn. Requires `node` to be `running` or `suspended` (same as any other
-transcript-mutating verb); a `thunk`/`done`/`cancelled` node has no live
-transcript to splice into.
-
-```bash
-curl -sX POST http://127.0.0.1:4600/splice/1 \
-  -H 'content-type: application/json' \
-  -d '{"content": "Operator note: focus on the auth path, ignore the rest."}'
-# => {"ok": true}
-```
-
-**`eval_in_binding` — a non-consuming heap-browser peek (D4):**
-
-Evaluate a plain `M a` expression against a *suspended* node's live session
-heap, without touching its pending hole, the tree state, or the event log —
-useful for inspecting in-scope bindings mid-suspension. `name` only labels the
-compiled fragment (for diagnostics); it is not a persisted binding — each call
-is independent.
-
-```bash
-curl -sX POST http://127.0.0.1:4600/eval_in_binding/0 \
-  -H 'content-type: application/json' \
-  -d '{"name": "peek", "expr": "pure (1 + 1 :: Int)"}'
-# => {"ok": true, "name": "peek", "rendered": "2"}
-```
-
-Errors (not suspended, compile failure, runtime fault) come back as
-`{"ok": false, "error": "..."}` with a 400 status; a compile error is the raw
-GHC message, same as everywhere else in the harness.
-
-**Cursor-paged snapshot — for trees too big to fetch in one shot (D1):**
-
-```bash
-curl -s 'http://127.0.0.1:4600/snapshot?limit=2'
-# => {"ok": true, "nodes": [...], "next_cursor": 1}
-
-curl -s 'http://127.0.0.1:4600/snapshot?cursor=1&limit=2'
-# => {"ok": true, "nodes": [...], "next_cursor": null}   # exhausted
-```
-
-`cursor` and `limit` are both optional (`limit` defaults to 50, clamped to
-500); `next_cursor: null` means the snapshot is exhausted. Each node in
-`nodes` is `{node, parent, state, hole, is_fork_hole, hole_prompt}` (`hole` is
-the pending hole id when `state` is `"suspended"`, or the reason when
-`"cancelled"`; `null` otherwise).
-
-## `--replay` mode
-
-Record-replay / crash-recovery, zero live model calls — the golden-path CI
-shape, also usable by hand:
-
-```bash
-cargo run --bin tidepool-harness -- --replay ~/.local/state/tidepool/logs/harness-run-171....jsonl
-```
-
-This folds the given log to report the terminal tree state (printed to
-stderr at boot), then serves a **new** run whose provider replays the prior
-run's recorded assistant turns in order (`ReplayProvider`) instead of calling
-a live model — force/answer/fork verbs work exactly as in a live run, driving
-the replayed turns through the same protocol surface.
+`tests/operator_gate.rs` boots the real router with `axum::serve` on an
+ephemeral port and drives it with a real HTTP client (`reqwest`) — the
+`present_form`/`await_continue` round trip, both error paths, and the first
+`/sse` frame. It asserts only on the wire contract (the `id="panel"` root,
+`data-bind`/`data-kind`, `@post` targets, JSON bodies), never on markup —
+see `CLAUDE.md`'s "Wire contract" section.
