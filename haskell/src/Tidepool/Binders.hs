@@ -42,10 +42,13 @@ import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (unLoc)
+import Control.Exception (evaluate)
+import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
 import Data.List (intercalate, foldl', nub)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
+import Tidepool.Timing (timeSection, emitPhase, timePhase)
 
 -- | A binder a declaration introduces.
 --
@@ -190,11 +193,21 @@ data StmtBinders = StmtBinders
 --     names ('collectLStmtBinders'); @BodyStmt@ (a bare expression) → @"expr"@.
 --   * else (both fail) → @"expr"@ (the runtime recompiles through the
 --     bare-expression path, where GHC re-parses and reports the real error).
-extractStmtBinders :: String -> IO StmtBinders
-extractStmtBinders src = do
-  libdir <- getLibdir
+--
+-- @timing@ gates the 'tidepool-timing' stderr lines (see 'Tidepool.Timing');
+-- this lane runs no GHC typecheck at all (parse-only), so its @ghc_session@
+-- line isolates pure GHC-API/session boot cost, and what it labels
+-- @typecheck@ is really just forcing the parse (see @PHASE_TYPECHECK@'s own
+-- "Parse + rename + typecheck" doc in timing.rs) — no rename or typecheck
+-- ever runs here, and that absence is itself the signal this lane exists to
+-- surface.
+extractStmtBinders :: Bool -> String -> IO StmtBinders
+extractStmtBinders timing src = do
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
-    dflags0 <- getSessionDynFlags
+    (dflags0, sessionMs) <- timeSection getSessionDynFlags
+    liftIO (emitPhase timing "ghc_session" sessionMs)
     let dflags = foldl' xopt_set dflags0 stmtExtensions
         popts  = initParserOpts dflags
         loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
@@ -203,7 +216,9 @@ extractStmtBinders src = do
         -- is safe to reuse; the mutable lexer state is not).
         declRes = unP parseDeclaration (initParserState popts buf loc)
         stmtRes = unP parseStatement   (initParserState popts buf loc)
-    pure (classifyTurn declRes stmtRes)
+    (sb, parseMs) <- timeSection (liftIO (evaluate (classifyTurn declRes stmtRes)))
+    liftIO (emitPhase timing "typecheck" parseMs)
+    pure sb
 
 -- | Combine the declaration- and statement-context parses into one verdict.
 -- Neither context alone is sufficient: a bare @sq 7@ parses (spuriously) as a
@@ -287,9 +302,11 @@ renderStmtBindersJson (StmtBinders kind binders) =
     ++ ",\"binders\":[" ++ intercalate "," (map jstr binders) ++ "]}"
 
 -- | Read the turn statement from @srcFile@, classify it, and write the JSON
--- contract to @out@. Mirrors 'emitBinders'.
-emitStmtBinders :: FilePath -> FilePath -> IO ()
-emitStmtBinders srcFile out = do
+-- contract to @out@. Mirrors 'emitBinders'. @timing@ threads
+-- 'Tidepool.Timing.readTimingEnabled' down from the caller (read once at
+-- process entry).
+emitStmtBinders :: Bool -> FilePath -> FilePath -> IO ()
+emitStmtBinders timing srcFile out = do
   src <- readFile srcFile
-  sb  <- extractStmtBinders src
-  writeFile out (renderStmtBindersJson sb)
+  sb  <- extractStmtBinders timing src
+  timePhase timing "write" (writeFile out (renderStmtBindersJson sb))

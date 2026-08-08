@@ -40,6 +40,7 @@ import Tidepool.Session
   , mkThinSessionIface, writeSessionIface )
 import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
 -- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
 -- stdout before exiting (see 'Tidepool.DiagJson') — empty @diagnostics@ on
@@ -51,6 +52,10 @@ main = do
   hSetEncoding stdout utf8
   rawArgs <- getArgs
   let args = parseArgs rawArgs
+  -- Read once at process entry (see Tidepool.Timing) and thread down;
+  -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
+  -- files — see the module doc there and tidepool-harness/src/timing.rs.
+  timing <- readTimingEnabled
   case argFiles args of
     [] -> do
       hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] <file.hs> ..."
@@ -58,7 +63,8 @@ main = do
     (file : _)
       -- Statement binder extraction (parse-only): bind-vs-expr + bound names
       -- for one session-eval turn. Fast path, no Core pipeline.
-      | Just out <- argEmitStmtBinders args -> runReportingDiags (emitStmtBinders file out)
+      | Just out <- argEmitStmtBinders args ->
+          timePhase timing "total" (runReportingDiags (emitStmtBinders timing file out))
       -- Lane A: parse-only declaration binder extraction for the FIRST file.
       | Just out <- argEmitBinders args     -> runReportingDiags (emitBinders file (argIncludes args) out)
       -- Session mode (Wave 3b): bind/reference turn with iface injection +
@@ -67,7 +73,7 @@ main = do
       -- one stdout report, per the module doc.
       | isSessionMode args                  -> processSessionFile args file
       -- Normal one-shot extraction (byte-identical to historical behaviour).
-      | otherwise                           -> processFile args file
+      | otherwise                           -> timePhase timing "total" (processFile timing args file)
 
 -- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
 -- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
@@ -129,8 +135,8 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 
-processFile :: Args -> FilePath -> IO ()
-processFile args path = do
+processFile :: Bool -> Args -> FilePath -> IO ()
+processFile timing args path = do
   let mOutDir = argOutDir args
       mTarget = argTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -245,8 +251,12 @@ processFile args path = do
         -- Whole-module mode: serialize all bindings as nested lets around the
         -- target (shared with the session path; see 'writeWholeModuleClosed').
         -- File base name matches the lookup name here (the general CLI
-        -- contract: --target foo produces foo.cbor).
-        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
+        -- contract: --target foo produces foo.cbor). This is the branch the
+        -- self-iterating harness's full-compile lane actually exercises
+        -- (tidepool-harness/src/compile.rs passes --target, never
+        -- --all-closed), so it's the one carrying translate/cbor_encode/write
+        -- timing.
+        writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior)
@@ -298,22 +308,20 @@ processFile args path = do
 -- ('processFile') passes the same string for both, preserving its existing
 -- @--target foo@ → @foo.cbor@ contract. Shared by both so the runtime gets
 -- identical JIT-able Core either way.
-writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO ()
-writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
-  ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
-               , cmReachBinds = reachBinds, cmVarNames = varNames
-               , cmRunLLMTurnSites = runLLMTurnSites
-               } <- translateModuleClosed hscEnv binds targetName
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO ()
+writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
+  (closed, translateMs) <- timeSection (translateModuleClosed hscEnv binds targetName)
+  emitPhase timing "translate" translateMs
+  let ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
+                    , cmReachBinds = reachBinds, cmVarNames = varNames
+                    , cmRunLLMTurnSites = runLLMTurnSites
+                    } = closed
   if not (null unresolved) then do
     let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
     error $ "Unresolved external(s): " ++ unwords names
       ++ "\nThese functions don't expose their implementation to the GHC API."
       ++ "\nDefine them in your source or use equivalent inline definitions."
   else return ()
-  let cbor = encodeTree nodes
-  let outFile = outDir </> outFileBase ++ ".cbor"
-  BS.writeFile outFile cbor
-  hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
 
   -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
   let tyconMeta = collectDataCons tycons
@@ -327,18 +335,35 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
       allMeta = mergeMetaPreserving
                   [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
       hasIO = targetBindingHasIO binds targetName
-  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy varNames warnTexts
-  let metaFile = outDir </> "meta.cbor"
-  BS.writeFile metaFile metaCbor
-  hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
-  -- runLLMTurn (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
-  -- written (empty list when the module has no runLLMTurn/runLLMTurnFork
-  -- sites) — loud absence beats a silently-missing file for the Rust-side
-  -- consumer (segment 30) to distinguish "no sites" from "extract too old".
-  let asksFile = outDir </> "asks.json"
-  writeFile asksFile (renderAsksJson runLLMTurnSites)
-  hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length runLLMTurnSites) ++ " sites)"
+  -- 'cbor_encode' forces both ByteStrings here (rather than leaving them as
+  -- thunks BS.writeFile forces below) purely so the wire-format-inert timing
+  -- can attribute encode vs. write honestly — mirrors the existing
+  -- 'evaluate (BS.length cbor)' force in processFile's --all-closed branch,
+  -- which forces for the same reason (surfacing lazy-thunk errors early).
+  ((cbor, metaCbor), cborMs) <- timeSection $ do
+    c <- evaluate (encodeTree nodes)
+    m <- evaluate (encodeMetadata allMeta hasIO mCapturedTy varNames warnTexts)
+    pure (c, m)
+  emitPhase timing "cbor_encode" cborMs
+
+  ((), writeMs) <- timeSection $ do
+    let outFile = outDir </> outFileBase ++ ".cbor"
+    BS.writeFile outFile cbor
+    hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+
+    let metaFile = outDir </> "meta.cbor"
+    BS.writeFile metaFile metaCbor
+    hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+    -- runLLMTurn (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
+    -- written (empty list when the module has no runLLMTurn/runLLMTurnFork
+    -- sites) — loud absence beats a silently-missing file for the Rust-side
+    -- consumer (segment 30) to distinguish "no sites" from "extract too old".
+    let asksFile = outDir </> "asks.json"
+    writeFile asksFile (renderAsksJson runLLMTurnSites)
+    hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length runLLMTurnSites) ++ " sites)"
+  emitPhase timing "write" writeMs
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
@@ -347,6 +372,11 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetNa
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
 processSessionFile :: Args -> FilePath -> IO ()
 processSessionFile args path = do
+  -- The self-iterating harness's full-compile lane never reaches this
+  -- session-mode path (compile.rs passes only --target, never
+  -- --session-root) — this read is here purely so 'writeWholeModuleClosed'
+  -- (shared with 'processFile') behaves identically regardless of caller.
+  timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (session): " ++ path
   let scope = SessionScope
         { ssRoot      = fromMaybe "" (argSessionRoot args)
@@ -374,7 +404,7 @@ processSessionFile args path = do
     -- The JIT-able Core for the target (same emission as whole-module mode).
     -- File base name is always "result" — every Rust session-turn caller
     -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
-    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
+    writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
   case res of

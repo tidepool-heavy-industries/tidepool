@@ -11,6 +11,7 @@ executable tidepool-extract-bin
     Tidepool.DiagJson
     Tidepool.GhcPipeline
     Tidepool.Session
+    Tidepool.Timing
     Tidepool.Translate
     Tidepool.Resolve
     Tidepool.FatIface

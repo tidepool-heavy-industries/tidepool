@@ -52,6 +52,7 @@ import Control.Monad (forM, when)
 import Data.Char (toUpper)
 import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule )
+import Tidepool.Timing (readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs)
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -109,8 +110,11 @@ runPipelineSession mscope path includes
 
 runNormalPipeline :: FilePath -> [FilePath] -> IO PipelineResult
 runNormalPipeline path includes = do
-  libdir <- getLibdir
+  timing <- readTimingEnabled
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
+    sessionT0 <- monotonicTime
     dflags <- getSessionDynFlags
     -- Force x86_64-linux target platform regardless of host architecture.
     -- The Cranelift JIT has a single backend; we need deterministic Core IR
@@ -173,13 +177,23 @@ runNormalPipeline path includes = do
     let summaries = mgModSummaries modGraph
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
+    sessionT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_session" (elapsedMs sessionT0 sessionT1))
     -- Process all modules: parse, typecheck, desugar, optimize each.
     -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
     -- the load phase may have downgraded them for TH/QQ bytecode provisioning.
+    -- 'typecheck'/'core' are summed ACROSS this loop (one line each, emitted
+    -- after) rather than timed per-module: the wire grammar is one line per
+    -- phase per process, and a turn module always compiles alongside its
+    -- preamble/stdlib dep modules in the same loop.
+    tcMsRef <- liftIO (newIORef (0 :: Integer))
+    coreMsRef <- liftIO (newIORef (0 :: Integer))
     results <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
-      parsed <- parseModule modSum
-      typechecked <- typecheckModule parsed
+      (typechecked, tcMs) <- timeSection $ do
+        parsed <- parseModule modSum
+        typecheckModule parsed
+      liftIO (modifyIORef' tcMsRef (+ tcMs))
       hscEnv0 <- getSession
       let hscEnv = hscUpdateFlags canonicalizeDFlags hscEnv0
       let tcGblEnv = fst (tm_internals_ typechecked)
@@ -195,9 +209,15 @@ runNormalPipeline path includes = do
           -- scaffold-reserved name; see 'processSessionFile'). Try both.
           mResultTy   = capturedBindingType "result" tcGblEnv
                           <|> capturedBindingType "__result" tcGblEnv
-      desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-      simplified <- liftIO $ core2core hscEnv desugared
+      (simplified, coreMs) <- timeSection $ do
+        desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+        liftIO $ core2core hscEnv desugared
+      liftIO (modifyIORef' coreMsRef (+ coreMs))
       return (externalizeInternalTops simplified, mCapturedTy, mResultTy)
+    totalTcMs <- liftIO (readIORef tcMsRef)
+    totalCoreMs <- liftIO (readIORef coreMsRef)
+    liftIO (emitPhase timing "typecheck" totalTcMs)
+    liftIO (emitPhase timing "core" totalCoreMs)
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
