@@ -516,14 +516,18 @@ translateModule allBinds targetName unresolvedIds =
         (b:_) -> Just (varId b)
         []    -> Nothing
       where
-        expectedModule = lookup name auxVerbModules
+        -- A name absent from auxVerbModules is a wiring mistake, not a
+        -- non-match: answering Nothing would silently retire the head-swap
+        -- that lookup feeds.
+        expectedModule = case lookup name auxVerbModules of
+          Just m  -> m
+          Nothing -> error $ "findAuxVarId: no defining module registered for '"
+                             ++ name ++ "' — add it to auxVerbModules"
         isMatch b =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
-          && case expectedModule of
-               Just m  -> maybe False ((== m) . moduleNameString . moduleName)
-                                (nameModule_maybe (idName b))
-               Nothing -> False
+          && maybe False ((== expectedModule) . moduleNameString . moduleName)
+                   (nameModule_maybe (idName b))
 
     bindersOf (NonRec b _) = [b]
     bindersOf (Rec pairs)  = map fst pairs
@@ -2824,6 +2828,13 @@ isShowDoubleVar v =
 -- or a stdlib import still qualifies here; a user's own function that
 -- merely shares one of these occurrence names, defined anywhere else, does
 -- not.
+--
+-- Every verb listed here carries @{-\# OPAQUE \#-}@ at its definition, and
+-- must: @NOINLINE@ alone leaves -O2 free to worker\/wrapper a verb whose
+-- argument is unused into a fresh @$w\<verb\>_u...@ at the call site, whose
+-- occurrence name matches nothing below. OPAQUE blocks that as well as
+-- inlining, keeping the name — and the call site's type application —
+-- intact for these recognizers.
 intrinsicVerbModules :: [(String, String)]
 intrinsicVerbModules =
   [ ("eitherDecodeValue", "Tidepool.Aeson.Value")
@@ -2843,13 +2854,28 @@ intrinsicVerbModules =
 -- from @v@'s ORIGINAL defining module ('nameModule_maybe') — not merely
 -- occurrence-name-alike. Distinguishes the real stdlib/generated verb from
 -- a user's own, differently-moduled, same-named function.
+--
+-- A @name@ absent from 'intrinsicVerbModules' is a wiring mistake, not a
+-- non-match: answering 'False' would silently retire whichever recognizer
+-- passed it. Raised only once the occurrence name matches, so the lookup
+-- stays off the common path.
 isIntrinsicVerb :: String -> Id -> Bool
 isIntrinsicVerb name v =
   occNameString (nameOccName (idName v)) == name
-  && case lookup name intrinsicVerbModules of
-       Just m  -> maybe False ((== m) . moduleNameString . moduleName)
-                        (nameModule_maybe (idName v))
-       Nothing -> False
+  && definedIn (intrinsicVerbModule name) v
+
+intrinsicVerbModule :: String -> String
+intrinsicVerbModule name = case lookup name intrinsicVerbModules of
+  Just m  -> m
+  Nothing -> error $ "isIntrinsicVerb: no defining module registered for '"
+                     ++ name ++ "' — add it to intrinsicVerbModules"
+
+-- | Is @v@'s ORIGINAL defining module exactly @modStr@? Wired-in and other
+-- module-less names are never a match.
+definedIn :: String -> Id -> Bool
+definedIn modStr v =
+  maybe False ((== modStr) . moduleNameString . moduleName)
+        (nameModule_maybe (idName v))
 
 -- | Recognize @eitherDecodeValue@ (the stdlib stub in Tidepool.Aeson.Value). Its
 -- calls are lowered to the pure @JsonDecode@ primop; the OPAQUE stub body
