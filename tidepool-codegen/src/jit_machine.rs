@@ -1371,7 +1371,7 @@ impl JitEffectMachine {
         //   Ok -> Err: do NOT clobber. Overwriting an established `Ok` with a
         //     fresh `Err` would break a session whose later turn happens to
         //     carry a sparser table than a prior turn did.
-        if let Ok(refreshed) = ConTags::from_table(table).map_err(|kind| kind.name()) {
+        if let Ok(refreshed) = ConTags::from_table(table) {
             self.tags = Ok(refreshed);
         }
         let nodes = expr.nodes.len();
