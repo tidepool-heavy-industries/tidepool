@@ -2267,6 +2267,20 @@ pub fn emit_primop(
             let byte_offset = builder.ins().imul_imm(idx, 8);
             let effective = builder.ins().iadd(base, byte_offset);
             builder.ins().store(MemFlags::new(), val, effective, 0);
+            // Write barrier: `effective` is the array's payload slot address
+            // just stored through. If the array wrapper has been tenured,
+            // this is the ONLY way GC learns about a nursery pointer now
+            // living in old/external-to-nursery memory — see
+            // `old_space.rs`'s module doc. Cheap no-op when unarmed (no
+            // old-space exists yet).
+            emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "write_barrier",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[],
+                &[sess.vmctx, effective],
+            )?;
             builder.ins().jump(cont_block, &[]);
 
             builder.switch_to_block(oob_block);
@@ -2310,6 +2324,12 @@ pub fn emit_primop(
             let dest = unbox_bytearray(sess.pipeline, builder, args[2]);
             let dest_off = unbox_int(sess.pipeline, builder, sess.vmctx, args[3]);
             let len = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
+            // vmctx is threaded through so `runtime_copy_boxed_array` can
+            // route its dest-range writes through the SAME `write_barrier`
+            // (host_fns/gc.rs) other array writes use — not a parallel
+            // mechanism. The dest slot range is only known post-bounds-
+            // validation inside the host fn, unlike WriteSmallArray's single
+            // slot (computed in emitted IR before the store).
             let _ = emit_runtime_call(
                 sess.pipeline,
                 builder,
@@ -2320,9 +2340,10 @@ pub fn emit_primop(
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
                 ],
                 &[],
-                &[src, src_off, dest, dest_off, len],
+                &[sess.vmctx, src, src_off, dest, dest_off, len],
             )?;
             Ok(SsaVal::Raw(
                 builder.ins().iconst(types::I64, 0),
@@ -2409,6 +2430,10 @@ pub fn emit_primop(
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let expected = args[2].value();
             let new_val = args[3].value();
+            // vmctx is threaded through so `runtime_cas_boxed_array` can route
+            // its (conditional) slot write through `write_barrier` — the slot
+            // address is only known post-bounds-validation inside the host
+            // fn, same reasoning as the copy family above.
             let old = emit_runtime_call(
                 sess.pipeline,
                 builder,
@@ -2418,9 +2443,10 @@ pub fn emit_primop(
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
                 ],
                 &[AbiParam::new(types::I64)],
-                &[arr, idx, expected, new_val],
+                &[sess.vmctx, arr, idx, expected, new_val],
             )?;
             // CAS returns the old value as a heap pointer
             builder.declare_value_needs_stack_map(old);

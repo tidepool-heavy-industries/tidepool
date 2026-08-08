@@ -10,7 +10,7 @@ use super::errors::{
     runtime_oom, RuntimeError, MIN_VALID_ADDR,
 };
 use super::force::heap_force;
-use super::gc::gc_trigger;
+use super::gc::{gc_trigger, write_barrier};
 
 // ---------------------------------------------------------------------------
 // ByteArray runtime functions
@@ -367,8 +367,13 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
     ptr as i64
 }
 
-/// Copy `len` pointer slots from src[src_off..] to dest[dest_off..].
+/// Copy `len` pointer slots from src[src_off..] to dest[dest_off..]. `vmctx`
+/// routes every dest slot through `write_barrier` (the dest range is only
+/// known post-bounds-validation, unlike `WriteSmallArray`'s single
+/// emit-time-computed slot) — the SAME barrier API every other old-to-young
+/// array store uses, not a parallel mechanism.
 pub extern "C" fn runtime_copy_boxed_array(
+    vmctx: *mut VMContext,
     src: i64,
     src_off: i64,
     dest: i64,
@@ -398,6 +403,11 @@ pub extern "C" fn runtime_copy_boxed_array(
     unsafe {
         std::ptr::copy(src_ptr, dest_ptr, 8 * len);
     }
+    for i in 0..len {
+        // SAFETY: dest_ptr..+8*len was just validated in-bounds and written above.
+        let slot = unsafe { (dest_ptr as *mut *mut u8).add(i) };
+        write_barrier(vmctx, slot);
+    }
 }
 
 /// Shrink a boxed array (just update the length field).
@@ -417,8 +427,16 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
 }
 
 /// CAS on a boxed array slot: compare-and-swap `arr[idx]`.
-/// Returns the old value. If old == expected, writes new.
-pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
+/// Returns the old value. If old == expected, writes new. `vmctx` routes a
+/// successful write through `write_barrier` — the slot address is only known
+/// post-bounds-validation, same reasoning as `runtime_copy_boxed_array`.
+pub extern "C" fn runtime_cas_boxed_array(
+    vmctx: *mut VMContext,
+    arr: i64,
+    idx: i64,
+    expected: i64,
+    new: i64,
+) -> i64 {
     if (arr as u64) < MIN_VALID_ADDR || idx < 0 {
         return error_poison_ptr() as i64;
     }
@@ -432,6 +450,7 @@ pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new
     let old = unsafe { *slot };
     if old == expected {
         unsafe { *slot = new };
+        write_barrier(vmctx, slot as *mut *mut u8);
     }
     old
 }

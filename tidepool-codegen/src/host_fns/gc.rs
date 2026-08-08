@@ -105,6 +105,103 @@ pub unsafe fn persistent_roots_count(vmctx: *mut VMContext) -> usize {
         .unwrap_or(0)
 }
 
+/// Arm the write barrier on the machine `vmctx` belongs to. Idempotent;
+/// `OldSpace::tenure` calls this unconditionally on every tenure. No-op when
+/// `vmctx`/`vmctx.machine_state` is null (see the module doc).
+///
+/// # Safety
+/// If `vmctx` is non-null, it must point to a live `VMContext`.
+pub unsafe fn arm_write_barrier(vmctx: *mut VMContext) {
+    if let Some(ms) = machine_state_opt(vmctx) {
+        ms.arm_write_barrier();
+    }
+}
+
+/// Register a newly-allocated old-space arena's byte range on the machine
+/// `vmctx` belongs to (diagnostic reach — see the field doc on
+/// `MachineState::old_space_arenas`). No-op when `vmctx`/`vmctx.machine_state`
+/// is null.
+///
+/// # Safety
+/// If `vmctx` is non-null, it must point to a live `VMContext`; `start`/`end`
+/// must bound a live allocation that outlives every future
+/// `retire_old_space_arena` call for the same range.
+pub unsafe fn register_old_space_arena(vmctx: *mut VMContext, start: *const u8, end: *const u8) {
+    if let Some(ms) = machine_state_opt(vmctx) {
+        ms.register_old_space_arena(start, end);
+    }
+}
+
+/// Number of remembered write-barrier slots on the machine `vmctx` belongs to
+/// (test/diagnostic accessor). Returns 0 when there is no machine to read.
+///
+/// # Safety
+/// If `vmctx` is non-null, it must point to a live `VMContext`.
+pub unsafe fn remembered_slots_count(vmctx: *mut VMContext) -> usize {
+    machine_state_opt(vmctx)
+        .map(|ms| ms.remembered_slots_count())
+        .unwrap_or(0)
+}
+
+/// Process-global test override: forces `write_barrier` to no-op (as if
+/// unarmed) regardless of the machine's actual armed state. Default off. This
+/// is the mutation-check kill switch (#[doc(hidden)], test-only) — flipping
+/// it on and re-running a barrier-dependent test must reproduce the SAME
+/// pre-fix corruption signature, or the test proves nothing.
+static WRITE_BARRIER_DISABLED_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+/// Test-only: disable (or re-enable) the write barrier process-wide,
+/// independent of any machine's armed state. Not part of the public API.
+#[doc(hidden)]
+pub fn set_write_barrier_disabled_for_test(on: bool) {
+    WRITE_BARRIER_DISABLED_FOR_TEST.store(on, Ordering::Relaxed);
+}
+
+fn write_barrier_disabled_for_test() -> bool {
+    WRITE_BARRIER_DISABLED_FOR_TEST.load(Ordering::Relaxed)
+}
+
+/// THE write barrier (see `old_space.rs`'s module doc for the invariant):
+/// every store of a possibly-young pointer into an already-tenured or
+/// external-to-nursery location routes through this ONE function —
+/// `OldSpace::tenure`'s thunk-indirection cells, `WriteSmallArray`/
+/// `WriteArray`, `casSmallArray#`, and the boxed-array copy family's
+/// destination range. `slot` is the ADDRESS of the pointer-sized location
+/// that was just written (or, for tenure, a thunk's indirection cell) — NOT
+/// the value stored there. Records `slot` in the machine's remembered set so
+/// `perform_gc` traces and rewrites it on every collection, exactly like a
+/// stack or persistent root.
+///
+/// Cheap when unarmed: a relaxed load and return, before any hashing or
+/// `RefCell` borrow — same shape as `maybe_raise_gc_fault`'s disarmed check.
+/// Sound to skip while unarmed: before the first `OldSpace::tenure` call
+/// there is no old-space, so no old-to-young store is possible yet.
+///
+/// `extern "C"` so the JIT can call it directly from emitted
+/// `WriteSmallArray`/`WriteArray` IR (no Rust host-fn wrapper in between);
+/// Rust call sites (`OldSpace::tenure`, the CAS/copy host fns) call the exact
+/// same function. No-op when `vmctx`/`vmctx.machine_state` is null (see the
+/// module doc) — same null-vmctx invariant as `register_persistent_root`.
+///
+/// # Safety
+/// `slot` must be non-null and point to a valid, dereferenceable
+/// `*mut u8`-sized location that stays valid until the memory holding it dies
+/// (arena teardown / machine drop forgets it — see `forget_remembered_range`).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn write_barrier(vmctx: *mut VMContext, slot: *mut *mut u8) {
+    if write_barrier_disabled_for_test() {
+        return;
+    }
+    // SAFETY: vmctx is valid; machine_state was installed before entering
+    // JIT code (same contract as every other vmctx-reached GC-cluster fn).
+    if let Some(ms) = unsafe { machine_state_opt(vmctx) } {
+        if !ms.write_barrier_armed() {
+            return;
+        }
+        ms.register_remembered_slot(slot);
+    }
+}
+
 /// Per-machine state for the copying garbage collector.
 pub(crate) struct GcState {
     pub active_start: *mut u8,
@@ -635,6 +732,15 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
             // place. Empty in the non-nested case — a plain run/resume never
             // registers one, so this is a no-op there.
             ms.extend_stowed_roots(&mut root_slots);
+
+            // Append write-barrier remembered slots: every recorded
+            // old/external-to-young store (`write_barrier`), most notably a
+            // tenured array's payload slot mutated by a later
+            // `writeSmallArray#`/`WriteArray`/`casSmallArray#`/copy. Folded in
+            // here so BOTH the first Cheney pass below and the doubling
+            // re-evacuate (which reuses this same `root_slots` vector) trace
+            // and rewrite them.
+            ms.extend_remembered_slots(&mut root_slots);
 
             // Defense-in-depth: trace VMContext tail_callee/tail_arg
             // SAFETY: vmctx is valid and these fields are heap pointers.

@@ -46,7 +46,7 @@
 //! as production instead of a test-only backdoor.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -98,6 +98,28 @@ pub struct MachineState {
     /// (`free_session_heap`). NOT touched by `clear_run_scratch` — a child
     /// turn's per-run teardown must not strand the parent's continuation.
     stowed_roots: RefCell<Vec<*mut *mut u8>>,
+    /// Write-barrier armed flag: false until `OldSpace::tenure` first runs.
+    /// Before the first tenure there is no old-space, so no old-to-young
+    /// store is possible — see `old_space.rs`'s module doc for the invariant.
+    /// `host_fns::write_barrier` checks this FIRST and returns before any
+    /// hashing/borrow when unarmed.
+    write_barrier_armed: Cell<bool>,
+    /// The write barrier's remembered set: slot addresses of every recorded
+    /// old/external-to-young store (`host_fns::write_barrier`). A `HashSet`,
+    /// not a `Vec` — the same slot can be re-targeted by repeated writes
+    /// (e.g. a loop over `writeSmallArray#` on one index), and an unbounded
+    /// `Vec` would grow without limit. `perform_gc` folds this into
+    /// `root_slots` on every collection (both the initial Cheney pass and the
+    /// doubling re-evacuate, since both reuse the same `root_slots` vector),
+    /// so a remembered slot's target is evacuated and the slot rewritten in
+    /// place exactly like any other root.
+    remembered_slots: RefCell<HashSet<*mut *mut u8>>,
+    /// Byte ranges of every currently-live old-space arena. `OldSpace` owns
+    /// its arenas but hangs off `JitEffectMachine`/`SessionState`, not
+    /// reachable from `perform_gc` (vmctx -> `MachineState` only) — recording
+    /// each arena's range here as it is allocated gives a diagnostic pass
+    /// old-space bounds without threading `OldSpace` itself through vmctx.
+    old_space_arenas: RefCell<Vec<(*const u8, *const u8)>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -122,6 +144,9 @@ impl MachineState {
             rust_roots: RefCell::new(Vec::new()),
             persistent_roots: RefCell::new(Vec::new()),
             stowed_roots: RefCell::new(Vec::new()),
+            write_barrier_armed: Cell::new(false),
+            remembered_slots: RefCell::new(HashSet::new()),
+            old_space_arenas: RefCell::new(Vec::new()),
         }
     }
 
@@ -405,6 +430,12 @@ impl MachineState {
         // Defensive: a machine dropped mid-nested-child (a child panicked and
         // its guard unwound) must not leave a dangling stowed slot registered.
         self.clear_stowed_roots();
+        // Per-arena `retire_old_space_arena` calls (JitEffectMachine::drop,
+        // before this runs) already forget slots pointing into old-space; this
+        // is the blanket net for anything left (e.g. a boxed-array payload
+        // slot, which lives in an external malloc'd buffer outside every
+        // arena range).
+        self.clear_remembered_slots();
         self.gc_state.borrow_mut().take();
     }
 
@@ -507,6 +538,85 @@ impl MachineState {
     /// `extend_persistent_roots`, used by `perform_gc`.
     pub(crate) fn extend_stowed_roots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.stowed_roots.borrow().iter().copied());
+    }
+
+    // --- write barrier / remembered set (generational write barrier) ------
+
+    /// Arm the barrier. Idempotent; `OldSpace::tenure` calls this unconditionally
+    /// on every tenure (cheap even when already armed).
+    pub(crate) fn arm_write_barrier(&self) {
+        self.write_barrier_armed.set(true);
+    }
+
+    /// Whether the barrier is armed — the cheap disarmed-check
+    /// `host_fns::write_barrier` reads before any hashing or borrow.
+    pub(crate) fn write_barrier_armed(&self) -> bool {
+        self.write_barrier_armed.get()
+    }
+
+    /// Record `slot` in the remembered set.
+    pub(crate) fn register_remembered_slot(&self, slot: *mut *mut u8) {
+        self.remembered_slots.borrow_mut().insert(slot);
+    }
+
+    /// Number of remembered slots (test/diagnostic accessor).
+    pub(crate) fn remembered_slots_count(&self) -> usize {
+        self.remembered_slots.borrow().len()
+    }
+
+    /// Clear all remembered slots (machine-teardown path, alongside
+    /// `clear_persistent_roots`).
+    pub(crate) fn clear_remembered_slots(&self) {
+        self.remembered_slots.borrow_mut().clear();
+    }
+
+    /// Append this machine's remembered slots to `out` — the remembered-set
+    /// sibling of `extend_stowed_roots`, used by `perform_gc`.
+    pub(crate) fn extend_remembered_slots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.remembered_slots.borrow().iter().copied());
+    }
+
+    /// Snapshot of every currently-remembered slot. Read-only; does not
+    /// affect GC. Reserved for a defense-in-depth diagnostic pass over the
+    /// barrier's own tracing — no in-tree caller yet.
+    #[allow(dead_code)]
+    pub(crate) fn remembered_slots_snapshot(&self) -> Vec<*mut *mut u8> {
+        self.remembered_slots.borrow().iter().copied().collect()
+    }
+
+    /// Remove every remembered slot whose address falls in `[start, end)`.
+    /// Invariant: no remembered slot outlives the memory it points into.
+    pub(crate) fn forget_remembered_range(&self, start: *const u8, end: *const u8) {
+        let (s, e) = (start as usize, end as usize);
+        self.remembered_slots.borrow_mut().retain(|&slot| {
+            let a = slot as usize;
+            a < s || a >= e
+        });
+    }
+
+    // --- old-space arena ranges (diagnostic reach) -------------------------
+
+    /// Register a newly-allocated old-space arena's byte range.
+    pub(crate) fn register_old_space_arena(&self, start: *const u8, end: *const u8) {
+        self.old_space_arenas.borrow_mut().push((start, end));
+    }
+
+    /// Retire an old-space arena: forget any remembered slot pointing into
+    /// `[start, end)` and deregister the range itself. Call exactly once per
+    /// arena, at the point its backing memory is about to be freed, so a
+    /// stale range is never read as live old-space.
+    pub(crate) fn retire_old_space_arena(&self, start: *const u8, end: *const u8) {
+        self.forget_remembered_range(start, end);
+        self.old_space_arenas
+            .borrow_mut()
+            .retain(|&(s, e)| !(s == start && e == end));
+    }
+
+    /// Snapshot of every currently-live old-space arena's byte range, for a
+    /// diagnostic verifier pass that needs old-space bounds and can only
+    /// reach `MachineState` (via vmctx), not `OldSpace` itself.
+    pub(crate) fn old_space_arena_ranges(&self) -> Vec<(*const u8, *const u8)> {
+        self.old_space_arenas.borrow().iter().copied().collect()
     }
 }
 

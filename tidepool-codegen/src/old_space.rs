@@ -1,38 +1,37 @@
-//! Old-space (gen-1) tenuring for the value plane (Wave 1.A, component E).
+//! Old-space (gen-1) tenuring for the value plane.
 //!
 //! The session heap is split into two generations:
 //!
 //! - **gen-0 (nursery):** the bump-allocated region the JIT allocates into;
 //!   collected by the minor (Cheney) GC on every `gc_trigger`.
 //! - **gen-1 (`OldSpace`):** an append-only, growable buffer holding *tenured*
-//!   bindings — strict-forced, immutable, first-order values promoted out of the
-//!   nursery once at bind time so a later run can resolve them through a stable
-//!   [`RootSlot`].
+//!   bindings — strict-forced, immutable Tier0 data and unforced Tier1
+//!   closures, promoted out of the nursery once at bind time so a later run
+//!   can resolve them through a stable [`RootSlot`].
 //!
-//! ## The write barrier (static remembered set)
+//! ## The write barrier
 //!
-//! A generational collector normally needs a write barrier to catch gen-1 →
-//! gen-0 pointers (old objects mutated to point at young ones). Tier0 data
-//! needs none: it is **strict-forced to normal form** (Wave 1.B component K)
-//! and **immutable**, and [`OldSpace::tenure`] copies the value's *entire*
-//! transitive closure into old-space at once — so its tenured graph holds NO
-//! pointers back into the nursery. But Tier1 closures tenure UNFORCED, so
-//! live (unevaluated/blackhole) thunks reach old-space, and forcing one later
-//! MUTATES it: the update writes an indirection to a result allocated in the
-//! nursery. Those indirection cells are the ONLY post-tenure-writable slots
-//! in old-space, and all of them are enumerable at tenure time — so `tenure`
-//! registers each as a persistent GC root. That registration IS the write
-//! barrier: every minor GC traces the cell, evacuates its (post-force)
-//! nursery target, and rewrites the cell in place. (Field bug 2026-07-10:
-//! before this, a forced tenured thunk's result was collected out from under
-//! it — a timing-dependent SIGSEGV.)
+//! Every store of a nursery pointer into already-tenured or external-to-
+//! nursery memory routes through ONE function, [`crate::host_fns::write_barrier`]:
+//! [`OldSpace::tenure`]'s thunk-indirection cells (a Tier1 closure tenures
+//! UNFORCED, and forcing it later mutates its indirection cell to point at a
+//! nursery result), `WriteSmallArray`/`WriteArray`, `casSmallArray#`, and the
+//! boxed-array copy family's destination range. `write_barrier` records the
+//! store's destination slot in the machine's remembered set; `perform_gc`
+//! traces and rewrites every remembered slot on every collection (including
+//! the doubling re-evacuate, which reuses the same root-slot list), exactly
+//! like a stack or persistent root. The barrier is armed on the first
+//! `OldSpace::tenure` call — before that there is no old-space, so no
+//! old-to-young store is possible.
 //!
 //! The minor GC's from-range is the nursery ONLY (`raw::cheney_copy`'s
 //! `is_in_range` excludes old-space addresses), so tenured objects are never
-//! scanned, moved, or evacuated by a minor collection. Their addresses are
-//! therefore stable for the session's life. Any OTHER future mutation path
-//! into old-space (e.g. `writeSmallArray#` on a tenured array) breaks this
-//! model and must add its own remembered-set entry; document it here.
+//! scanned, moved, or evacuated by a minor collection, and their addresses
+//! are stable for the session's life. `TIDEPOOL_HEAP_VERIFY` does not cover
+//! this class of corruption: the post-GC verifier walks only the packed
+//! to-space a collection just produced, never a boxed array's external
+//! malloc'd payload buffer — the write barrier is the only thing keeping a
+//! store into that buffer visible to GC.
 //!
 //! Old-space is compacted only on an explicit *major* pass (when a binding
 //! generation dies) — never during a minor GC.
@@ -151,12 +150,17 @@ impl OldSpace {
 
     /// Tenure the value graph rooted at `ptr` from the nursery into old-space.
     ///
-    /// Evacuates `ptr`'s *entire* transitive closure (so no tenured pointer
-    /// points back into the nursery — the no-write-barrier invariant), returns
-    /// a [`RootSlot`] holding the tenured root pointer, and registers that slot
-    /// as a persistent GC root
-    /// ([`crate::host_fns::register_persistent_root`]) so minor GCs keep it live
-    /// and never strand it.
+    /// Evacuates `ptr`'s *entire* transitive closure at tenure time, returns a
+    /// [`RootSlot`] holding the tenured root pointer, and registers that slot
+    /// as a persistent GC root ([`crate::host_fns::register_persistent_root`])
+    /// so minor GCs keep it live and never strand it. Any thunk in the copied
+    /// closure that is still unevaluated or mid-force has its indirection cell
+    /// routed through the write barrier ([`crate::host_fns::write_barrier`],
+    /// see the module doc) instead — a later force of that thunk mutates the
+    /// cell to point at a nursery result, and the barrier is what keeps that
+    /// store visible to GC. Also arms the write barrier (idempotent) and
+    /// registers every arena this call grows into with `MachineState`, for a
+    /// diagnostic pass that needs old-space bounds reachable from vmctx alone.
     ///
     /// `nursery_from` is the nursery range to evacuate out of (typically
     /// `MachineState::gc_active_range`); objects outside it are already
@@ -168,16 +172,22 @@ impl OldSpace {
     /// # Safety
     /// `ptr` must be a valid heap object; `nursery_from` must bound the live
     /// nursery; `vmctx` must be the live `VMContext` for the run this tenure
-    /// happens during (its `machine_state` is where the persistent root gets
-    /// registered — see `host_fns::register_persistent_root`); the returned
-    /// slot is registered as a persistent root and must outlive every
-    /// fragment compiled against it (machine lifetime).
+    /// happens during (its `machine_state` is where the persistent root and
+    /// write-barrier registrations land — see `host_fns::register_persistent_root`
+    /// / `host_fns::write_barrier`); the returned slot is registered as a
+    /// persistent root and must outlive every fragment compiled against it
+    /// (machine lifetime).
     pub unsafe fn tenure(
         &mut self,
         vmctx: *mut VMContext,
         ptr: *mut u8,
         nursery_from: (*const u8, *const u8),
     ) -> RootSlot {
+        // Before the first tenure there is no old-space, so no old-to-young
+        // store is possible yet; arm unconditionally (idempotent, cheap even
+        // when already armed) so every barrier call site after this point is live.
+        crate::host_fns::arm_write_barrier(vmctx);
+
         let (from_start, from_end) = nursery_from;
 
         let needed = measure_closure_bytes(ptr, from_start, from_end);
@@ -209,6 +219,10 @@ impl OldSpace {
             if free < needed {
                 self.arenas.push(vec![0u8; DEFAULT_ARENA.max(needed)]);
                 self.cursor = 0;
+                let new_arena = self.arenas.last().unwrap();
+                let arena_start = new_arena.as_ptr();
+                let arena_end = arena_start.add(new_arena.len());
+                crate::host_fns::register_old_space_arena(vmctx, arena_start, arena_end);
             }
 
             // Copy the closure into the current arena via Cheney's algorithm.
@@ -225,9 +239,11 @@ impl OldSpace {
             );
 
             // The write barrier (see the module doc): any live thunk in the
-            // graph just copied gets its indirection cell registered as a
-            // persistent root, here — the only point where every such cell
-            // in this tenure is enumerable at once.
+            // graph just copied gets its indirection cell routed through
+            // `write_barrier`, here — the only point where every such cell in
+            // this tenure is enumerable at once. A later force of the thunk
+            // mutates the cell to point at a nursery result; the barrier is
+            // what keeps that store visible to GC.
             let base = to_slice.as_mut_ptr();
             let mut off = 0usize;
             while off < res.bytes_copied {
@@ -238,7 +254,7 @@ impl OldSpace {
                     if state == tidepool_heap::layout::THUNK_UNEVALUATED
                         || state == tidepool_heap::layout::THUNK_BLACKHOLE
                     {
-                        crate::host_fns::register_persistent_root(
+                        crate::host_fns::write_barrier(
                             vmctx,
                             obj.add(tidepool_heap::layout::THUNK_INDIRECTION_OFFSET)
                                 as *mut *mut u8,
