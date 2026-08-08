@@ -314,6 +314,33 @@ fn truncate_ghc_error(msg: &str) -> String {
     }
 }
 
+/// Render a turn-compile failure as text a MODEL can act on.
+///
+/// `CompileError::Diagnostics`' own `Display` reports only how many
+/// diagnostics there were, not what they said — fine for a log line, useless
+/// as the corrective user turn [`Harness::run_to_hole_or_done`] feeds back,
+/// which is the whole mechanism by which a model fixes its own Haskell. So the
+/// diagnostics are rendered here: severity, span, and message per entry, in
+/// the order GHC reported them. Every other variant's `Display` already
+/// carries its detail.
+fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
+    let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
+        return e.to_string();
+    };
+    let mut out = format!("GHC error ({} diagnostic(s)):", diags.len());
+    for d in diags {
+        out.push('\n');
+        match &d.span {
+            Some(s) => out.push_str(&format!(
+                "{}:{}:{}: {}: {}",
+                s.file, s.start_line, s.start_col, d.severity, d.message
+            )),
+            None => out.push_str(&format!("{}: {}", d.severity, d.message)),
+        }
+    }
+    out
+}
+
 /// A node's in-progress turn as it streams — the answer text and reasoning
 /// ("thinking") accumulated so far, before the turn completes and is logged.
 /// The observatory renders this so tokens appear live; it's cleared when the
@@ -1236,7 +1263,7 @@ impl Harness {
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
-        .map_err(|e| HarnessError::Compile(e.to_string()))?;
+        .map_err(|e| HarnessError::Compile(render_compile_error(&e)))?;
 
         match outcome {
             TurnResult::Decl { .. } => {

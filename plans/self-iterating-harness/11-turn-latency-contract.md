@@ -359,3 +359,91 @@ answers point at different mechanisms. Re-running the bench with
 `TIDEPOOL_TIMING=1` against an extract built from this branch's `haskell/`
 answers it in one shot — that capture was queued and then deliberately
 abandoned when the measurement was shelved, not attempted and failed.
+
+> **Closed.** That capture was taken after the one-spawn swap — see *The open
+> gap above is now CLOSED* at the end of this document. The answer is neither
+> candidate named here: it is `core`.
+
+## Post-swap stage attribution (one run, debug, one-spawn path)
+
+Taken after the one-spawn-per-turn swap landed
+(`plans/one-spawn-turn-protocol-phase-b.md`), debug profile,
+`N=2 / size_n=1 / retry_n=1`, `TIDEPOOL_TIMING=1`, against an extract built
+from this branch's `haskell/`.
+
+**Read this as a SHAPE check, not a latency comparison.** It ran under
+`scripts/ghc-slots.sh run` (a shared slot) while a sibling lane was executing
+a full repl suite, so the absolute numbers are inflated by contention —
+`extract_spawn` medians of 6.4–16.1s here against 6.8–12.6s in the quiet-box
+run above. Nothing should be concluded about whether the swap made a turn
+faster or slower from these; the swap removes a 33–75ms parse-only spawn, and
+that is below this run's noise floor by two orders of magnitude. What the run
+DOES establish is that the phase table survives the new entry point intact.
+
+Medians in ms, by scenario (cold/warm, small/large, retry round-trip):
+
+| stage | cold/warm | small/large | retry |
+|---|---|---|---|
+| `extract_spawn` | 16058 | 13137 | 6449 |
+| `extract.total` | 15915 | 12962 | 6379 |
+| `extract.core` | 9913 | 8563 | 3829 |
+| `extract.ghc_session` | 4790 | 3290 | 2083 |
+| `extract.typecheck` | 632 | 425 | 359 |
+| `extract.translate` | 400 | 528 | 152 |
+| `extract.classify` | 156 | 56 | 34 |
+| `extract.startup` | 76 | 49 | 38 |
+| `extract.cbor_encode` | 32 | 49 | 13 |
+| `extract.write` | 2 | 1 | 0 |
+| `jit_codegen` | 1433 | 1104 | 626 |
+| `cbor_deserialize` | 5 | 4 | 3 |
+| `template`, `cbor_read`, `run_exec`, `provider_call` | ~0 | ~0 | ~0 |
+
+Three things this settles:
+
+- **`classify_extract`'s successor reads the same.** `extract.classify` costs
+  34–156ms, against the retired stage's 33–75ms — the same band, now measured
+  INSIDE the compile process rather than as a separate spawn. The measurement
+  that reframed this workstream is reproducible after the swap, which is the
+  whole reason the phase was added rather than the classify step left silent.
+- **`classify_extract` is gone from the Rust timeline**, as intended: no
+  scenario's stage list carries it. One stage left the Rust timeline as
+  another joined the extract timeline, and both halves are visible here.
+- **Every turn reached `Suspended`** (the `Finalize` hole), including the
+  compile-error retry round-trip — so the corrective loop still recovers from
+  an injected error through the one-spawn path.
+
+`attributed_ms` exceeds `wall_ms` in this run and the residual clamps to 0,
+because the summary sums `extract_spawn` AND the `extract.*` phases it
+contains. That is the documented double-count a collector must avoid (see the
+flat-stages rule above): pick one granularity. It is a property of the
+summary, not of the instrumentation.
+
+### The open gap above is now CLOSED: it is `core`, not session boot
+
+The question the previous section left open — whether the seconds inside
+`extract_spawn` are session/interface loading or typechecking the preamble +
+`Tidepool.Prelude` + effect-stack home modules — has an answer, and it is
+neither:
+
+- `extract.core` (desugar to Core + the simplifier passes GHC runs before the
+  binds are read) is **60–66% of the whole spawn** in every scenario.
+- `extract.ghc_session` is 26–32%.
+- `extract.typecheck` is **under 6%** — so "typechecking the extra home
+  modules" was the wrong suspicion.
+
+That relocates the only large remaining turn cost to GHC's Core pipeline over
+the home-module set, which is a different mechanism from anything this
+workstream touched, and a different one from what the synthetic single-module
+run (194ms total, `ghc_session` 122ms, `typecheck` ~1ms) suggested. Whoever
+picks up turn latency next should start there rather than at spawn count.
+
+### The bench needed a fix to run at all
+
+`turn_latency_bench` was written before `Finalize` became type-indexed and
+instantiated in the row. Every block it replays is `finalize @Int …`, but it
+set no answer contract, so its turns compiled against `Finalize NoAnswer` —
+an uninhabited type admitting no answer — and failed at the first compile with
+`'Finalize Int' is not a member of '[AskUser, Fork, Finalize NoAnswer]'`. It
+now pins the contract to `Int` per node before driving. The break predates the
+one-spawn swap by two commits and was never a regression of it; it simply had
+not been re-run since.
