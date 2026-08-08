@@ -21,6 +21,9 @@ module Tidepool.Translate
   , varId
   , stableVarId
   , fieldParentDisamb
+  , normalizeMod
+  , binderQualName
+  , checkedKeyToIdx
   ) where
 
 import GHC
@@ -550,10 +553,11 @@ translateModule allBinds targetName unresolvedIds =
           pairInfo = map (\p@(b, rhs) ->
             (p, varId b, exprFreeVarKeys rhs)) allPairs
 
-          -- Map from binder key -> index into pairInfo
+          -- Map from binder key -> index into pairInfo, guarded against a
+          -- silent varId collision between two distinct bindings.
           keyToIdx :: Map.Map Word64 Int
-          keyToIdx = Map.fromList
-            [(k, i) | (i, (_, k, _)) <- zip [0..] pairInfo]
+          keyToIdx = checkedKeyToIdx
+            [ (k, binderQualName b) | ((b, _), k, _) <- pairInfo ]
 
           pairInfoLen = length pairInfo
           pairInfoAt idx = case drop idx pairInfo of
@@ -2147,13 +2151,32 @@ localVarId v =
       Fingerprint h1 _ = fingerprintString combined
   in h1 .&. 0x00FFFFFFFFFFFFFF
 
--- | Normalize a module name by stripping ".Internal" / "Internal." segments.
+-- | Alias an exact module name to its canonical spelling, so the same
+-- entity reached through two module paths gets ONE 'stableVarId'. Every
+-- module name NOT in this table passes through unchanged — no prefix or
+-- infix matching.
+--
+-- 'Data.Text.Internal' -> 'Data.Text': the @text@ package defines 'Text'
+-- and its primitives in @Data.Text.Internal@ and re-exports them from
+-- @Data.Text@; 'isDataTextEmptyVar' already special-cases both spellings
+-- for @empty@, direct evidence both are observed as the defining module
+-- for the same binding.
+--
+-- 'GHC.Internal.Maybe' -> 'GHC.Maybe': GHC's base-library split
+-- (GHC >= 9.10) moved 'Maybe'\'s definition into the @ghc-internal@
+-- package's @GHC.Internal.Maybe@, re-exported from @base@'s @GHC.Maybe@;
+-- both are real, separately-exposed modules in this toolchain
+-- (@ghc-pkg field ghc-internal\/base exposed-modules@). This alias was
+-- introduced alongside the Maybe-unboxing fix in 805099c3.
+moduleAliasTable :: [(String, String)]
+moduleAliasTable =
+  [ ("Data.Text.Internal", "Data.Text")
+  , ("GHC.Internal.Maybe", "GHC.Maybe")
+  ]
+
+-- | Normalize a module name via 'moduleAliasTable', an exact-match lookup.
 normalizeMod :: String -> String
-normalizeMod s =
-  let t = T.pack s
-      t1 = T.replace ".Internal" "" t
-      t2 = T.replace "Internal." "" t1
-  in T.unpack t2
+normalizeMod s = Data.Maybe.fromMaybe s (lookup s moduleAliasTable)
 
 -- | Module-qualified name for a DataCon (e.g. "Data.Map.Bin").
 -- Falls back to just the OccName for wired-in names without a module.
@@ -2161,6 +2184,32 @@ qualifiedName :: Name -> Text
 qualifiedName name = case nameModule_maybe name of
   Just m  -> T.pack (normalizeMod (moduleNameString (moduleName m)) ++ "." ++ occNameString (nameOccName name))
   Nothing -> T.pack (occNameString (nameOccName name))
+
+-- | Diagnostic label for a binder, mirroring 'varId'\'s own case split so the
+-- label always names the identity 'varId' actually hashed. A local binder
+-- has no stable module-qualified name, so it falls back to its occurrence
+-- name tagged @(local)@ — still actionable in a collision error.
+binderQualName :: Id -> Text
+binderQualName v = case isDataConId_maybe v of
+  Just dc -> qualifiedName (varName (dataConWorkId dc))
+  Nothing
+    | isExternalName (varName v) -> qualifiedName (varName v)
+    | otherwise -> T.pack (occNameString (nameOccName (varName v)) ++ " (local)")
+
+-- | Build a varId -> list-position map from ordered (varId, qualified-name)
+-- pairs. Errors loudly when two entries share a varId but carry DIFFERENT
+-- qualified names — a genuine 'stableVarId' collision, which would
+-- otherwise silently drop one binding from a reachability DFS keyed on this
+-- map. Repeated entries for the SAME qualified name (the same entity
+-- reached more than once) are not a collision.
+checkedKeyToIdx :: [(Word64, Text)] -> Map.Map Word64 Int
+checkedKeyToIdx pairs = Map.map fst (foldl' step Map.empty (zip [0 :: Int ..] pairs))
+  where
+    step acc (i, (k, qn)) = case Map.lookup k acc of
+      Just (_, qn') | qn' /= qn ->
+        error $ "varId collision: 0x" ++ Numeric.showHex k ""
+          ++ " maps to both " ++ T.unpack qn' ++ " and " ++ T.unpack qn
+      _ -> Map.insert k (i, qn) acc
 
 stableVarId :: Name -> Word64
 stableVarId name = stableVarIdWith (fieldParentDisamb name) name
