@@ -3004,6 +3004,7 @@ impl Harness {
         });
         convo.turn_seq += 1;
         drop(convos);
+        tracing::info!(node = node.0, "user turn to model:\n{content}");
         self.tree
             .turn_delta(node, turn, Role::User, content.to_string(), None)?;
         Ok(())

@@ -1051,6 +1051,9 @@ pub async fn drive_model_turn(
         reasoning,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
+    if let Some(r) = reasoning.as_deref().filter(|r| !r.is_empty()) {
+        tracing::info!("model reasoning:\n{r}");
+    }
     Ok(DrivenTurn {
         reply: text,
         usage,
