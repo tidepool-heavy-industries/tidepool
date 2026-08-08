@@ -1025,6 +1025,45 @@ mod tests {
             kind: TurnKind::Decl,
             binders: &[],
         },
+        // -- decl (rule 3), extension-gated syntax --
+        //
+        // `run_turn`'s decl branch (today: `extract_binders`, which wraps the
+        // turn text in `wrap_decls`'s 17-extension pragma block before
+        // compiling) must accept a canonical declaration whose syntax only
+        // parses with one of those extensions enabled — dropping the wrapper
+        // is a compile-boundary narrowing (a valid declaration stops
+        // compiling), which is exactly the strict-superset violation the
+        // dialect rule forbids. These three are confirmed (by direct probe of
+        // `--emit-binders`, wrapped vs. unwrapped) to actually regress
+        // without the wrapper: their legality check lives in GHC's
+        // lexer/parser, not the renamer, so it fires even under a parse-only
+        // extraction. `RecordWildCards`/`GADTs`/`TypeApplications` were also
+        // considered — their extension-legality check is deferred to the
+        // renamer, a phase `extract_binders`'s parse-only extraction never
+        // reaches, so a declaration using them compiles identically wrapped
+        // or raw and would NOT catch the wrapper being dropped from this
+        // particular decl path; not included here for that reason.
+        Case {
+            name: "lambda_case_decl",
+            text: "f = \\case { 0 -> 1 ; _ -> 2 }",
+            kind: TurnKind::Decl,
+            binders: &["f"],
+        },
+        // #321-class regression, decl side (see `quasiquote_bind` below for
+        // the bind side): a quasiquote in a *declaration* body must still
+        // classify and compile as a decl.
+        Case {
+            name: "quasiquote_decl",
+            text: "greet = [fmt|hello|]",
+            kind: TurnKind::Decl,
+            binders: &["greet"],
+        },
+        Case {
+            name: "multi_way_if_decl",
+            text: "f x = if | x > 0 -> 1 | otherwise -> 2",
+            kind: TurnKind::Decl,
+            binders: &["f"],
+        },
         // -- bind (rule 1) --
         Case {
             name: "monadic_bind",
