@@ -1212,6 +1212,169 @@ fn works_fork_map() {
 // canonical names must carry canonical semantics (`splitOn`, `digitToInt`).
 // =========================================================================
 
+/// `FromJSON Int` decodes an exact integer within `Int` range.
+#[test]
+fn works_from_json_int_exact() {
+    works(
+        r#"pure (case (eitherDecode "42" :: Either Text Int) of { Right i -> i; Left _ -> -999 })"#,
+        serde_json::json!(42),
+    );
+}
+
+/// `FromJSON Int` REJECTS a fractional `Scientific` rather than truncating it,
+/// mirroring aeson's bounded-integral parse (aeson `FromJSON` source,
+/// `parseBoundedIntegralFromScientific` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_int_rejects_fraction() {
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "-3.7" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "3.7" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+}
+
+/// `FromJSON Int` REJECTS an exact integer outside `Int` range rather than
+/// silently wrapping (same `toBoundedInteger` grounding as above).
+#[test]
+fn works_from_json_int_rejects_out_of_range() {
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "99999999999999999999999999" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+}
+
+/// `_Int` truncates toward zero, matching upstream `Data.Aeson.Lens._Int`'s
+/// integral conversion (NOT floor) —
+/// https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
+#[test]
+fn works_lens_int_truncates_toward_zero() {
+    works(
+        r#"pure (fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(-3),
+    );
+    works(
+        r#"pure (fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(10),
+    );
+}
+
+/// `_Int` stays `Nothing` — never a silent wraparound — for an exact integer
+/// outside `Int` range.
+#[test]
+fn works_lens_int_out_of_range_is_nothing() {
+    works(
+        r#"pure (isJust ((decode "99999999999999999999999999" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(false),
+    );
+}
+
+/// `_Integer` truncates toward zero for a fractional number (same upstream
+/// lens-aeson grounding as `_Int`); unlike `_Int`, `Integer` is unbounded, so
+/// an exact integer far beyond `Int` range still decodes —
+/// https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
+#[test]
+fn works_lens_integer_truncates_and_is_unbounded() {
+    works(
+        r#"pure (fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer)))"#,
+        serde_json::json!(-3),
+    );
+    works(
+        r#"pure (fromMaybe "MISSING" (show <$> ((decode "123456789012345678901234567890" :: Maybe Value) >>= (^? _Integer))))"#,
+        serde_json::json!("123456789012345678901234567890"),
+    );
+}
+
+/// `Prelude.splitOn` with an empty separator raises the canonical
+/// `Data.Text.splitOn` exception instead of returning data — text-2.1.2
+/// continues to document an empty delimiter as invalid input.
+/// https://hackage.haskell.org/package/text-2.1.2/docs/Data-Text.html
+#[test]
+fn split_on_empty_needle_fails_loudly() {
+    fails_loudly(r#"pure (length (splitOn "" "abc"))"#, "splitOn");
+}
+
+/// `digitToInt` decodes a hex digit exactly, matching `Data.Char.digitToInt`.
+#[test]
+fn works_digit_to_int_hex() {
+    works(
+        r#"pure (object ["a" .= digitToInt 'a', "nine" .= digitToInt '9', "big" .= digitToInt 'F'])"#,
+        serde_json::json!({"a": 10, "nine": 9, "big": 15}),
+    );
+}
+
+/// `digitToInt` THROWS on a non-hex-digit character, mirroring
+/// `Data.Char.digitToInt` —
+/// https://hackage.haskell.org/package/base/docs/Data-Char.html#v:digitToInt
+#[test]
+fn digit_to_int_non_hex_fails_loudly() {
+    fails_loudly(r#"pure (digitToInt 'z')"#, "not a digit");
+}
+
+/// `digitToIntMay` is the total form of `digitToInt`: `Nothing` for a
+/// non-hex-digit character instead of throwing.
+#[test]
+fn works_digit_to_int_may() {
+    works(
+        r#"pure (object ["hit" .= digitToIntMay 'a', "miss" .= digitToIntMay 'z'])"#,
+        serde_json::json!({"hit": 10, "miss": null}),
+    );
+}
+
+/// `Tidepool.Data.Text`'s polymorphic `Pack` dialect, pinned against the
+/// standing criterion for every dialect choice in this repo: some
+/// canonical-INVALID case may now work (the win the dialect exists for), but
+/// NO canonical-VALID case may change or fail. `T.pack (s :: String)` is
+/// VALID-CANONICAL — `Data.Text.pack :: String -> Text` accepts exactly this;
+/// it must keep meaning "pack the String".
+#[test]
+fn works_pack_valid_canonical_string() {
+    works(
+        r#"pure (T.pack ("abc" :: String))"#,
+        serde_json::json!("abc"),
+    );
+}
+
+/// VALID-CANONICAL: `T.pack (t :: Text)` — not canonical `Data.Text.pack`
+/// (which only accepts `String`), but canonical under `Pack`'s own contract
+/// (identity on `Text`); pinned since the dialect's exported behavior for a
+/// `Text` argument must stay identity.
+#[test]
+fn works_pack_identity_on_text() {
+    works(
+        r#"pure (T.pack ("already text" :: Text))"#,
+        serde_json::json!("already text"),
+    );
+}
+
+/// AT-RISK VALID-CANONICAL: `T.pack "lit"` — a bare string literal is the
+/// case `Tidepool.Data.Text`'s own module comment flags as now ambiguous
+/// between the `Pack String` and `Pack Text` instances. `ExtendedDefaultRules`
+/// plus the preamble's `default (Int, Double, Text)` must resolve it (to
+/// `Text`, an identity pack) so it still means the obvious `Text "lit"` —
+/// if this probe fails to compile, the dialect criterion is violated.
+#[test]
+fn works_pack_string_literal_defaults() {
+    works(r#"pure (T.pack "lit")"#, serde_json::json!("lit"));
+}
+
+/// INVALID-CANONICAL, NOW WORKS: `T.pack (show x)` — canonically a type
+/// error (`Data.Text.pack :: String -> Text` cannot accept `show x :: Text`,
+/// since this stdlib's `show` returns `Text`, not `String`). This is the win
+/// the `Pack` dialect exists for: `T.pack (show x)` is identity instead of a
+/// trap. (`works_fork` already exercises this shape in production; this pins
+/// it directly.)
+#[test]
+fn works_pack_show_output_dialect_win() {
+    works(
+        r#"pure (T.pack (show (42 :: Int)))"#,
+        serde_json::json!("42"),
+    );
+}
+
 // =========================================================================
 // Quasiquoter strictness — `[j|…|]` exact-number and control-character
 // handling, `[fmt|…|]` brace-escape discipline. Rejection paths are

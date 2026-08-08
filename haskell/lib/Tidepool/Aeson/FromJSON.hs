@@ -40,7 +40,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
-import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific, toBoundedInteger)
+import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific)
 import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
@@ -230,17 +230,20 @@ instance FromJSON Double where
   parseJSON (Number s) = Success (toRealFloat s)
   parseJSON v          = mismatch "number" v
 
--- Integral values decode exactly (bounds-checked via 'toBoundedInteger' — an
--- out-of-'Int'-range integer is an 'Error', not a silent wraparound);
--- non-integral ones still truncate toward zero (unaffected by the bounds
--- check, which only applies to exact integers).
+-- Every 'Number' goes through 'toBoundedInteger': an exact integer within
+-- 'Int' range succeeds, and everything else — a fractional 'Scientific' or an
+-- exact integer outside 'Int' range — is an 'Error', mirroring aeson's
+-- bounded-integral parse, which fails a value that is "either floating or
+-- will cause over or underflow" (aeson `FromJSON` source,
+-- `parseBoundedIntegralFromScientific` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
 instance FromJSON Int where
-  parseJSON (Number s)
-    | s == fromInteger (truncateScientific s) =
-        case toBoundedInteger s of
-          Just i  -> Success i
-          Nothing -> Error ("Int out of range: " ++ show s)
-    | otherwise = Success (fromInteger (truncateScientific s))
+  parseJSON (Number s) = case toBoundedInteger s of
+    Just i  -> Success i
+    Nothing
+      | s == fromInteger (truncateScientific s) ->
+          Error ("Int out of range: " ++ show s)
+      | otherwise -> Error ("Int: not an integral value: " ++ show s)
   parseJSON v = mismatch "number" v
 
 instance FromJSON a => FromJSON [a] where
