@@ -61,6 +61,10 @@ case "$mode" in
         exec {fd}>"$f"
         if flock -n "$fd"; then
           await_memory
+          # Marker for scripts that self-slot (scripts/battery.sh,
+          # scripts/battery-shard.sh): held here, so they must not acquire a
+          # second one. Set only after the slot is actually taken.
+          export TIDEPOOL_GHC_SLOT="$f"
           exec "$@"
         fi
         exec {fd}>&-
@@ -78,6 +82,7 @@ case "$mode" in
       exec {fd}>"$f"
       flock "$fd"
     done
+    export TIDEPOOL_GHC_SLOT="all"
     exec "$@"
     ;;
   *)

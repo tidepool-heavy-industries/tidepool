@@ -108,8 +108,9 @@ process — never two tests sharing one — which structurally de-races the JIT'
 process-global-ish state (signal handlers, GC, fork-safety harnesses) that the
 old blanket `-- --test-threads=1` discipline used to serialize against by
 brute force. See `.config/nextest.toml` for the hazard-audit note (which
-historical hazards existed, why process-per-test resolves them, and why no
-`test-group` overrides are needed today) and `scripts/battery.sh` for the
+historical hazards existed, why process-per-test resolves them, and why the
+only `test-group` override needed is the GHC fan-out cap) and
+`scripts/battery.sh` for the
 canonical full-suite invocation. Plain `cargo test --workspace -- --test-threads=1`
 still works as a fallback (e.g. no `cargo-nextest` available) but is
 noticeably slower — see the branch history for a measured comparison.
@@ -128,9 +129,16 @@ export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
 
 This environment hard-kills background processes at ~380s, and a full-workspace
 GHC battery is HOURS (every GHC-heavy test forks a real `tidepool-extract`
-compile, capped at 4 concurrent, and a handful of suites alone run ~900s).
+compile, capped at 3 concurrent, and a handful of suites alone run ~900s).
 Bare `scripts/battery.sh` WILL get killed mid-run. Four tiers, from fastest to
 most exhaustive:
+
+Both battery scripts take a host GHC slot for you (`scripts/ghc-slots.sh run`,
+3 slots shared box-wide) and re-exec themselves under it — you do not wrap
+them, and an outer wrapper is respected rather than double-acquired. Inside a
+run, `.config/nextest.toml`'s `ghc-heavy` test group caps concurrent extract
+compiles at 3; membership is default-deny, so a new crate or test binary is
+capped without an edit there.
 
 1. **Fast default** — `cargo nextest run`. Pure-Rust crates only
    (`.config/nextest.toml`'s `default-filter` skips every GHC-extract-heavy

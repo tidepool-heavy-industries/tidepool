@@ -31,6 +31,16 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Take a host GHC slot for the whole run, including the cabal build below.
+# Everything past this point forks real `tidepool-extract` compiles, and the
+# box is shared by every agent worktree — a run launched without a slot is how
+# the 2026-08-09 load-159 incident started. Self-slotting means forgetting is
+# not a failure mode; `scripts/ghc-slots.sh run` exports TIDEPOOL_GHC_SLOT, so
+# an outer wrapper is respected rather than double-acquired.
+if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
+  exec "$PWD/scripts/ghc-slots.sh" run -- "$PWD/scripts/battery.sh" "$@"
+fi
+
 if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev/null 2>&1; then
   echo "error: cargo-nextest not found. Install with: cargo install cargo-nextest --locked" >&2
   exit 1

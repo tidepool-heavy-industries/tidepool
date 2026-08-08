@@ -89,7 +89,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # new binary does no extract, the same bar `provider_behavior` cleared.
 default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)))'
 
-# GHC-compile-heavy crates run capped, not at full core count. Every test in
+# GHC-compile-heavy tests run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers (and tidepool-testing/tidepool-harness's
 # integration binaries) forks a heavyweight GHC `extract` compile through the
 # EvalHarness pipeline; at full-core parallelism these
@@ -103,11 +103,32 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # the host semaphore (scripts/ghc-slots.sh, 3 slots shared across every
 # worktree on the box) — it bounds nextest's own concurrency within a single
 # run, it is not itself the host guarantee, and taking a slot is still
-# required before launching GHC-heavy work. Matched to the 3-slot host cap;
-# raise it only alongside a matching ghc-slots.sh SLOTS change.
+# required before launching GHC-heavy work (scripts/battery.sh and
+# scripts/battery-shard.sh now take one for you). Matched to the 3-slot host
+# cap; raise it only alongside a matching ghc-slots.sh SLOTS change.
 [test-groups.ghc-heavy]
 max-threads = 3
 
+# The cap is DEFAULT-DENY: everything is GHC-heavy unless it appears in the
+# exemption list below. That direction is the whole point. The 2026-08-09
+# load-159 incident (memory PSI 58% full-stall, 22 concurrent tidepool-extract
+# compiles under a single ghc-slots slot) happened because this override was
+# an allowlist of GHC-heavy binaries — tidepool-harness integration binaries
+# were named one by one, the list lagged 16 of 24 as binaries were added, and
+# the unnamed ones ran uncapped at full core count. An allowlist fails OPEN:
+# whatever it forgets thrashes the box. Default-deny fails CLOSED: whatever
+# this exemption list forgets merely runs at 3-way parallelism instead of 16.
+#
+# So: add a crate, add a test binary, rename a package — it lands in the
+# capped group with no edit here. An entry is only removed from the cap after
+# showing the tests do no `extract` work (spawn no tidepool-extract, drive no
+# EvalHarness/Harness turn, expand no haskell_eval!/haskell_inline!), the same
+# bar every name below clears today.
+#
+# Deliberately NOT exempt, though their test counts are small: tidepool-macro
+# (haskell_eval!/haskell_inline! fork extract during expansion), tidepool (the
+# facade resolves and runs extract in setup), and the two examples (same
+# macros). Capping them costs nothing and keeps the rule uniform.
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior))'
+filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-lsp) | package(tidepool-web) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior))))'
 test-group = 'ghc-heavy'
