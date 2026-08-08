@@ -431,6 +431,35 @@ One smaller thing, worth fixing while in there: with `--turn-verdict decl` the
 the real names, so `binders` is unreliable on the batch path. Derive `Decl`'s
 binders from the harvested items' head names when the verdict supplies none.
 
+## JSON escaping in the extract
+
+Every hand-rolled JSON string in the extract goes through a **full** escaper:
+quote, backslash, `\n`, `\r`, `\t`, and `\u00XX` for the remaining control
+characters. This is not optional politeness. Three of the fields rendered here
+carry arbitrary text rather than identifiers — a binder's `typeDisplay` (a
+rendered type, which wraps across lines for a wide signature), an ask's rendered
+answer type, and `wrappedSource` (an entire Haskell module, so newlines are
+guaranteed). A minimal quote-and-backslash escaper produces invalid JSON for all
+three, and the repl's `t_on_wide_multiline_signature_does_not_crash` is the test
+that catches it.
+
+Two properties worth keeping deliberately:
+
+- **One escaper per module, correct for arbitrary input.** A minimal variant
+  living beside a full one means each caller has to know which its field
+  deserves, and that judgement is exactly what fails silently during a refactor.
+  There is no performance case for the cheap version: these sidecars are written
+  once per turn.
+- **Verify with a strict parser.** A raw newline inside a JSON string renders as
+  a line break, so invalid output looks correct printed to a terminal. Strict
+  `json.loads` (never `strict=False`) over every sidecar is the check; eyeballing
+  `--json-output` proves nothing.
+
+Note for anyone tidying: `Tidepool.DiagJson` has its own `jstr` with a
+byte-identical body. Both escapers are correct — the duplication is real but
+harmless, and consolidating them needs a shared module, hence a cabal change,
+which is owned elsewhere. Do not "simplify" either one toward the minimal form.
+
 ## Rust side
 
 `tidepool-runtime/src/session/turn.rs` grows the request/result pair the
