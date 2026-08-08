@@ -57,6 +57,8 @@ import Data.List (intercalate, foldl', nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
+import Data.Char (ord)
+import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
 import Tidepool.Timing (timeSection, emitPhase, timePhase)
@@ -186,22 +188,29 @@ renderBindersJson items =
 
 renderItem :: ExportItem -> String
 renderItem (EValue n) =
-  "{\"kind\":\"value\",\"name\":" ++ jstr n ++ "}"
+  "{\"kind\":\"value\",\"name\":" ++ jsonString n ++ "}"
 renderItem (EType n cons) =
-  "{\"kind\":\"type\",\"name\":" ++ jstr n
-    ++ ",\"cons\":[" ++ intercalate "," (map jstr cons) ++ "]}"
+  "{\"kind\":\"type\",\"name\":" ++ jsonString n
+    ++ ",\"cons\":[" ++ intercalate "," (map jsonString cons) ++ "]}"
 renderItem (EClass n methods) =
-  "{\"kind\":\"class\",\"name\":" ++ jstr n
-    ++ ",\"methods\":[" ++ intercalate "," (map jstr methods) ++ "]}"
+  "{\"kind\":\"class\",\"name\":" ++ jsonString n
+    ++ ",\"methods\":[" ++ intercalate "," (map jsonString methods) ++ "]}"
 
--- | Minimal JSON string escaping (identifiers + operator symbols only need
--- quote/backslash escaping).
-jstr :: String -> String
-jstr s = '"' : concatMap esc s ++ "\""
+-- | JSON string escaping for arbitrary text — every caller in this module,
+-- including rendered types that wrap across lines and whole wrapped module
+-- sources, goes through this one escaper.
+jsonString :: String -> String
+jsonString s = '"' : concatMap esc s ++ "\""
   where
     esc '"'  = "\\\""
     esc '\\' = "\\\\"
-    esc c    = [c]
+    esc '\n' = "\\n"
+    esc '\r' = "\\r"
+    esc '\t' = "\\t"
+    esc c
+      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
+      | otherwise  = [c]
+    pad4 s' = replicate (4 - length s') '0' ++ s'
 
 getLibdir :: IO FilePath
 getLibdir = do
@@ -348,8 +357,8 @@ stmtExtensions =
 
 renderStmtBindersJson :: StmtBinders -> String
 renderStmtBindersJson (StmtBinders kind binders) =
-  "{\"kind\":" ++ jstr kind
-    ++ ",\"binders\":[" ++ intercalate "," (map jstr binders) ++ "]}"
+  "{\"kind\":" ++ jsonString kind
+    ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
 
 -- | Read the turn statement from @srcFile@, classify it, and write the JSON
 -- contract to @out@. Mirrors 'emitBinders'. @timing@ threads
@@ -416,34 +425,34 @@ data TurnOut
 
 renderTurnOutJson :: TurnOut -> String
 renderTurnOutJson (TDecl bs items) =
-  "{\"kind\":\"Decl\",\"binders\":[" ++ jstrList bs
+  "{\"kind\":\"Decl\",\"binders\":[" ++ jsonStringList bs
     ++ "],\"declItems\":[" ++ intercalate "," (map renderItem items) ++ "]}"
 renderTurnOutJson (TBind bs var bbs aks wrapped) =
-  "{\"kind\":\"Bind\",\"binders\":[" ++ jstrList bs
+  "{\"kind\":\"Bind\",\"binders\":[" ++ jsonStringList bs
     ++ "],\"variant\":" ++ show var
     ++ ",\"boundBinders\":[" ++ intercalate "," (map renderBoundBinderJson bbs)
     ++ "],\"asks\":[" ++ intercalate "," (map renderAskJson aks)
-    ++ "],\"wrappedSource\":" ++ jstr (T.unpack wrapped) ++ "}"
+    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
 renderTurnOutJson (TExpr var aks wrapped) =
   "{\"kind\":\"Expr\",\"variant\":" ++ show var
     ++ ",\"asks\":[" ++ intercalate "," (map renderAskJson aks)
-    ++ "],\"wrappedSource\":" ++ jstr (T.unpack wrapped) ++ "}"
+    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
 
-jstrList :: [Text] -> String
-jstrList = intercalate "," . map (jstr . T.unpack)
+jsonStringList :: [Text] -> String
+jsonStringList = intercalate "," . map (jsonString . T.unpack)
 
 -- | One 'BoundBinder' as JSON. @varId@ is a DECIMAL STRING of the u64 (an f64
 -- would lose precision) — same shape the legacy @--emit-bound-binders@
 -- sidecar always used.
 renderBoundBinderJson :: BoundBinder -> String
 renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
-  "{\"name\":" ++ jstr name
-    ++ ",\"varId\":" ++ jstr (show varid)
-    ++ ",\"module\":" ++ jstr modul
-    ++ ",\"tier\":" ++ jstr tier
-    ++ ",\"typeDisplay\":" ++ jstr tdisp ++ "}"
+  "{\"name\":" ++ jsonString name
+    ++ ",\"varId\":" ++ jsonString (show varid)
+    ++ ",\"module\":" ++ jsonString modul
+    ++ ",\"tier\":" ++ jsonString tier
+    ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
 
 -- | One runLLMTurn/runLLMTurnFork @{site, type}@ pair as JSON — same shape the
 -- @asks.json@ sidecar always used.
 renderAskJson :: (Word64, Text) -> String
-renderAskJson (site, ty) = "{\"site\":" ++ show site ++ ",\"type\":" ++ jstr (T.unpack ty) ++ "}"
+renderAskJson (site, ty) = "{\"site\":" ++ show site ++ ",\"type\":" ++ jsonString (T.unpack ty) ++ "}"
