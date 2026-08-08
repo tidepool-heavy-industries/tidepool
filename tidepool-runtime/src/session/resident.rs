@@ -292,9 +292,9 @@ where
         &self.effect_names
     }
 
-    /// Read-only heap/GC snapshot of this session's live machine (observatory
-    /// heap pane) — `None` only during the transient window a turn is running
-    /// on its own eval thread (the machine moved out; see [`Self::on_eval_thread`]).
+    /// Read-only heap/GC snapshot of this session's live machine — `None`
+    /// only during the transient window a turn is running on its own eval
+    /// thread (the machine moved out; see [`Self::on_eval_thread`]).
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.machine().map(|m| m.heap_stats())
     }

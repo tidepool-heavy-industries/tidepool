@@ -3,12 +3,11 @@
 //! over a nested [`tidepool_harness::Harness`], per
 //! `plans/self-iterating-harness/07-impl-orchestration.md`.
 //!
-//! Modeled on `tidepool-harness.rs` (this crate's other binary)'s boot
-//! sequence — provider select (OAuth default, `--replay <log>` for
-//! deterministic replay, `--api-key <ENV_VAR>` for a non-interactive
-//! API-key provider), engine config, a fresh run log — but drives
-//! [`tidepool_harness::SelfHarnessDriver::run_loop`] instead of serving the
-//! observatory. Multi-thread tokio runtime required: `run_loop` services
+//! Provider select (OAuth default, `--replay <log>` for deterministic
+//! replay, `--api-key <ENV_VAR>` for a non-interactive API-key provider),
+//! engine config, a fresh run log, then drives
+//! [`tidepool_harness::SelfHarnessDriver::run_loop`]. Multi-thread tokio
+//! runtime required: `run_loop` services
 //! each `runLLMTurn` hole via `block_in_place` + `Handle::current().block_on`
 //! (see `driver.rs`'s module doc).
 
