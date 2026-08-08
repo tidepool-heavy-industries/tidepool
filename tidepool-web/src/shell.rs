@@ -135,7 +135,14 @@ body {
   outline: none; border-bottom: 2px solid var(--ink);
   padding-bottom: calc(1 * var(--unit) - 1px);
 }
-input.input[data-kind="int"] { text-align: right; font-variant-numeric: tabular-nums; }
+input.input[data-kind="int"] {
+  text-align: right; font-variant-numeric: tabular-nums;
+  appearance: textfield; -moz-appearance: textfield;
+}
+input.input[data-kind="int"]::-webkit-outer-spin-button,
+input.input[data-kind="int"]::-webkit-inner-spin-button {
+  appearance: none; -webkit-appearance: none; margin: 0;
+}
 
 .enum { display: flex; flex-direction: column; gap: calc(2 * var(--unit)); width: 100%; }
 .enum-opt, .bool {
@@ -143,17 +150,21 @@ input.input[data-kind="int"] { text-align: right; font-variant-numeric: tabular-
   cursor: pointer; font-size: var(--text-body);
 }
 
-/* square, flat check controls — no native chrome, no border-radius anywhere */
+/* square, flat check controls — no native chrome, no border-radius anywhere.
+   The two kinds carry different marks on purpose: an exclusive choice
+   (radio) reads as a solid fill; an independent toggle (checkbox) reads as
+   a drawn mark inside an unfilled box — two meanings, two marks. */
 input[type="radio"], input[type="checkbox"] {
   appearance: none; -webkit-appearance: none; margin: 0; flex: none;
   width: calc(2 * var(--unit)); height: calc(2 * var(--unit));
   border: var(--hair); border-radius: 0; background: var(--paper);
   cursor: pointer; position: relative;
 }
-input[type="radio"]:checked, input[type="checkbox"]:checked { background: var(--ink); }
-input[type="radio"]:checked::after, input[type="checkbox"]:checked::after {
-  content: ""; position: absolute; inset: calc(0.5 * var(--unit));
-  background: var(--paper);
+input[type="radio"]:checked { background: var(--ink); }
+input[type="checkbox"]:checked::after {
+  content: ""; position: absolute; inset: calc(0.25 * var(--unit));
+  background: var(--ink);
+  clip-path: polygon(14% 44%, 0% 63%, 38% 100%, 100% 16%, 78% 0%, 35% 62%);
 }
 input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 .input:focus-visible, .btn:focus-visible {
@@ -179,7 +190,7 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
   display: flex; flex-direction: column; align-items: center; gap: calc(4 * var(--unit));
   text-align: center;
   padding: calc(10 * var(--unit)) 0;
-  border-top: var(--hair); border-bottom: var(--hair);
+  border-bottom: var(--hair);
 }
 .continue .eyebrow { color: var(--muted); }
 .continue .btn-primary { padding: calc(2.5 * var(--unit)) calc(6 * var(--unit)); }
@@ -189,7 +200,7 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
   display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--unit));
   text-align: center;
   padding: calc(11 * var(--unit)) 0;
-  border-top: var(--hair); border-bottom: var(--hair);
+  border-bottom: var(--hair);
 }
 .idle .eyebrow { color: var(--muted); }
 .idle-glyph {
