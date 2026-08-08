@@ -1377,9 +1377,8 @@ fn works_pack_show_output_dialect_win() {
 
 // =========================================================================
 // Quasiquoter strictness — `[j|…|]` exact-number and control-character
-// handling. (`[fmt|…|]` brace-escape discipline lands in a follow-up commit,
-// kept separate so the bare-`}` rejection stays independently revertible.)
-// Rejection paths are compile-time failures, pinned with `fails_loudly`.
+// handling, `[fmt|…|]` brace-escape discipline. Rejection paths are
+// compile-time failures, pinned with `fails_loudly`.
 // =========================================================================
 
 /// `[j|…|]` integer literals beyond `Double`'s 53-bit mantissa parse EXACT:
@@ -1433,6 +1432,57 @@ fn qq_json_string_allows_escaped_control_char() {
         "pure [j|\"a\\u0001b\"|]",
         serde_json::json!("a\u{1}b"),
     );
+}
+
+/// A bare, unmatched `}` outside a hole is a compile-time error in
+/// `[fmt|…|]` — matching the Python f-string grammar the module advertises
+/// (a lone `}` is not allowed; `}}` is the literal-`}` escape).
+#[test]
+fn qq_fmt_rejects_bare_unmatched_brace() {
+    fails_loudly("pure [fmt|value } here|]", "unmatched '}'");
+}
+
+/// MUST-NOT-BREAK: a `}` INSIDE a hole's expression, inside a string literal
+/// (`T.pack "a}b"`), is legal and must stay legal — only a `}` OUTSIDE a hole
+/// is rejected. `scanHole`/`scanLiteral` (bracket-depth + literal-aware) reach
+/// the real closing `}` without the new bare-`}` rule ever seeing the one
+/// inside the string, because it never leaves `scanLiteral`'s string-body scan.
+#[test]
+fn qq_fmt_brace_inside_hole_string_literal_still_works() {
+    works(
+        r#"pure [fmt|{T.pack "a}b"}|]"#,
+        serde_json::json!("a}b"),
+    );
+}
+
+/// MUST-NOT-BREAK companion: a `}` INSIDE a hole's expression that is NOT in
+/// a string — an explicit-brace `let { … }` block (the same construct the
+/// module haddock cites for bracket-depth tracking) — also stays legal. The
+/// hole's own closing `}` is only recognized at bracket depth 0, so the
+/// nested `{ y = 1 }`'s `}` decrements depth instead of ending the hole.
+#[test]
+fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
+    works(
+        "pure [fmt|{let { y = 1 :: Int } in y}|]",
+        serde_json::json!("1"),
+    );
+}
+
+/// The doubled-brace `}}` literal-`}` escape still works after the bare-`}`
+/// rejection lands (regression guard: only the UNDOUBLED case is rejected).
+#[test]
+fn qq_fmt_doubled_brace_still_literal() {
+    works(
+        "pure [fmt|literal }} brace|]",
+        serde_json::json!("literal } brace"),
+    );
+}
+
+/// An unclosed `{` in `[fmt|…|]` now names the offset at which the quote body
+/// ran out of input — previously this lexer error carried no position.
+#[test]
+fn qq_fmt_unclosed_brace_carries_offset() {
+    fails_loudly("pure [fmt|hello {name|]", "at offset");
 }
 
 // =========================================================================
