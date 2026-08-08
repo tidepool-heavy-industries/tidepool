@@ -119,7 +119,7 @@ async fn second_hole_sees_first_holes_exchange() {
     let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
         .expect("answerer engine config");
     let writer = tidepool_harness::log::LogWriter::create(
-        &std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "selfharness-context-window-{}.jsonl",
             std::process::id()
         )),

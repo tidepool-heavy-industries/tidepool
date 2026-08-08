@@ -122,7 +122,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     )
     .expect("answerer engine config");
     let writer = tidepool_harness::log::LogWriter::create(
-        &std::env::temp_dir().join(format!("selfharness-budget-{}.jsonl", std::process::id())),
+        std::env::temp_dir().join(format!("selfharness-budget-{}.jsonl", std::process::id())),
         &header(),
     )
     .expect("log writer");

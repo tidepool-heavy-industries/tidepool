@@ -103,7 +103,7 @@ async fn render_output_is_the_answerer_system_message() {
     )
     .expect("answerer engine config");
     let writer = tidepool_harness::log::LogWriter::create(
-        &std::env::temp_dir().join(format!("selfharness-framing-{}.jsonl", std::process::id())),
+        std::env::temp_dir().join(format!("selfharness-framing-{}.jsonl", std::process::id())),
         &header(),
     )
     .expect("log writer");

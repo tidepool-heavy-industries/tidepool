@@ -188,7 +188,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
-        tidepool_harness::log::LogWriter::create(&scratch("inplace").join("log.jsonl"), &header())
+        tidepool_harness::log::LogWriter::create(scratch("inplace").join("log.jsonl"), &header())
             .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
@@ -365,7 +365,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
-        tidepool_harness::log::LogWriter::create(&scratch("c1").join("log.jsonl"), &header())
+        tidepool_harness::log::LogWriter::create(scratch("c1").join("log.jsonl"), &header())
             .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 

@@ -105,7 +105,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let writer = tidepool_harness::log::LogWriter::create(
-        &std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "acceptance-selfharness-{}.jsonl",
             std::process::id()
         )),

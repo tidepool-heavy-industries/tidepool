@@ -176,7 +176,7 @@ fn make_driver(
         log_id
     ));
     std::fs::create_dir_all(&log_dir).expect("log dir");
-    let writer = tidepool_harness::log::LogWriter::create(&log_dir.join("log.jsonl"), &header())
+    let writer = tidepool_harness::log::LogWriter::create(log_dir.join("log.jsonl"), &header())
         .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     let mut driver = SelfHarnessDriver::new(agent, observer);
