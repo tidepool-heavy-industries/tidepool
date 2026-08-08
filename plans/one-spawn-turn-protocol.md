@@ -329,11 +329,16 @@ an empty name list through to a bind compile does not work — the extract rejec
 it (`session-bind requires at least one --bind-name`) — so the discarding bind
 needs its own template kind, selected by the extract from its own verdict.
 
-Doing it that way is also more correct than the status quo, incidentally: the
-extract splices the right-hand side from the parsed statement, whereas
-`split_discard_bind` finds the first `<-` in the raw text. The lexical split
-happens to hold for the shapes seen so far, but it is a text scan standing in for
-a parse.
+The implementation turned out simpler than this section first claimed, in a way
+worth correcting rather than leaving. There is no right-hand side to extract at
+all: `_ <- e` is a perfectly good `do`-block statement, so the discarding template
+splices the whole statement verbatim and compiles. Nothing needs stripping.
+
+`split_discard_bind` exists only because the repl compiles a bind turn as a bare
+*expression*, where `_ <- e` is a parse error — the stripping is a workaround for
+the wrapper, not for the syntax. Once the turn is placed inside a `do` block the
+workaround has nothing left to do, so Phase B **deletes** `split_discard_bind`
+rather than porting it or reimplementing it against the parse.
 
 ## The extract lags the Rust side — three gaps to close before any caller is wired
 
