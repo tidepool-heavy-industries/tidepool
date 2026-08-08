@@ -600,10 +600,10 @@ translateModule allBinds targetName unresolvedIds =
     exprFreeVarKeys :: CoreExpr -> Set.Set Word64
     exprFreeVarKeys = go Set.empty
       where
-        bindV b bound | isTyVar b || isCoVar b = bound
+        bindV b bound | isErasedBinder b = bound
                       | otherwise = Set.insert (varId b) bound
         go bound expr = case expr of
-          Var v | isTyVar v || isCoVar v -> Set.empty
+          Var v | isErasedBinder v -> Set.empty
                 | varId v `Set.member` bound -> Set.empty
                 | otherwise -> Set.singleton (varId v)
           Lit{} -> Set.empty
@@ -627,7 +627,7 @@ translateModule allBinds targetName unresolvedIds =
     wrapAllBinds :: [CoreBind] -> Id -> TransM Int
     wrapAllBinds [] target = emitNode (NVar (varId target))
     wrapAllBinds (NonRec b rhs : rest) target
-      | isTyVar b = wrapAllBinds rest target  -- skip type bindings
+      | isErasedBinder b = wrapAllBinds rest target  -- skip erased (type/coercion) bindings
       | isShowDoubleSpecVar b = do
           -- Replace body with safe lambda wrapper instead of compiling the
           -- original body which pulls in floatToDigits/Integer arithmetic.
@@ -641,7 +641,7 @@ translateModule allBinds targetName unresolvedIds =
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
     wrapAllBinds (Rec pairs : rest) target = do
-      let valPairs = filter (\(b, _) -> not (isTyVar b)) pairs
+      let valPairs = filter (\(b, _) -> not (isErasedBinder b)) pairs
       if null valPairs
         then wrapAllBinds rest target
         else do
@@ -717,7 +717,7 @@ translateModuleClosed hscEnv allBinds targetName = do
   auditEnv <- System.Environment.lookupEnv "TIDEPOOL_VARID_AUDIT"
   case auditEnv of
     Just _ -> do
-      let sites = filter (not . isTyVar . fst) (concatMap bindingSites closedBinds)
+      let sites = filter (not . isErasedBinder . fst) (concatMap bindingSites closedBinds)
           grouped = Map.fromListWith (++)
             [ (varId b, [(b, top)]) | (b, top) <- sites ]
           collisions = Map.filter (\xs -> length xs > 1) grouped
@@ -900,7 +900,7 @@ uniquifyDuplicateBinders binds = do
     -- Visit a binder: rename iff its unique key was already seen.
     goB :: VarEnv Var -> Var -> State (UniqSupply, Set.Set Word64) (VarEnv Var, Var)
     goB env b
-      | isTyVar b || isCoVar b = return (env, b)
+      | isErasedBinder b = return (env, b)
       | otherwise = do
           (us, seen) <- get
           let k = getKey (varUnique b)
@@ -1863,7 +1863,7 @@ translateHead = \case
           else emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
-    | isTyVar b -> translate body
+    | isErasedBinder b -> translate body
     | otherwise -> do
         bodyIdx <- translate body
         emitNode $ NLam (varId b) bodyIdx
@@ -1924,7 +1924,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitMultiReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -1944,7 +1944,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitWord2DivPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b, c] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -1962,7 +1962,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitUnaryMultiReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [r1Binder, r2Binder] <- vBinders -> do
         aIdx <- translate a
         v1Idx <- emitOp op1Name [aIdx]
@@ -1978,7 +1978,7 @@ translateHead = \case
     , Just (op1Name, op2Name, op3Name) <- splitTripleReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [b1, b2, b3] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -2004,7 +2004,7 @@ translateHead = \case
     -- Only drop the last value arg if the first result binder has State# type
     -- (stateful primops like readSmallArray#). For pure primops returning unboxed
     -- tuples (like indexSmallArray# :: SmallArray# a -> Int# -> (# a #)), keep all args.
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , let hasStateBinder = case vBinders of
             (b:_) -> case splitTyConApp_maybe (idType b) of
                        Just (tc, _) -> tc == statePrimTyCon
@@ -2074,7 +2074,7 @@ translateHead = \case
   Case scrut b _alts_ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc -> do
         scrutIdx <- translate scrut
-        let vBinders = filter (not . isTyVar) binders
+        let vBinders = filter (not . isErasedBinder) binders
         bodyIdx <- translate body
         case vBinders of
           [valBinder] -> do
@@ -2123,7 +2123,7 @@ translateAlt (Alt con binders body) = do
   -- AND coercion args / `valueRepArity = dataConRepArity - |eqSpec|`), so an
   -- unfiltered alt reads past the stored fields: eval ArityMismatch, JIT SIGSEGV.
   -- Exclude coercion binders too, matching the build's value-field count.
-  let vBinders = filter (\b -> not (isTyVar b) && not (isCoVar b)) binders
+  let vBinders = filter (not . isErasedBinder) binders
   altCon <- mapAltCon con
   bodyIdx <- translate body
   return $ FlatAlt altCon (map varId vBinders) bodyIdx
@@ -2272,7 +2272,7 @@ stripTicksAndCasts e          = e
 collectValueBinders :: Int -> CoreExpr -> ([Var], CoreExpr)
 collectValueBinders 0 e = ([], e)
 collectValueBinders n (Lam b e)
-  | isTyVar b = collectValueBinders (n-1) e  -- type args count toward join arity
+  | isErasedBinder b = collectValueBinders (n-1) e  -- type/coercion args count toward join arity
   | otherwise = let (bs, body) = collectValueBinders (n-1) e in (b:bs, body)
 -- GHC may eta-reduce join point RHSes; return what we found.
 collectValueBinders _ e = ([], e)
@@ -2281,6 +2281,13 @@ isValueArg :: CoreExpr -> Bool
 isValueArg (Type _) = False
 isValueArg (Coercion _) = False
 isValueArg _ = True
+
+-- | A binder carrying no runtime value: type evidence ('TyVar') or coercion
+-- evidence ('CoVar'). Both are erased on the Haskell side, so such a binder
+-- emits no runtime lambda and occupies no parameter/argument slot — matching
+-- 'isValueArg', which drops both 'Type' and 'Coercion' at call sites.
+isErasedBinder :: Var -> Bool
+isErasedBinder b = isTyVar b || isCoVar b
 
 -- | Split a typed-yield call site's (already 'isValueArg'-filtered) value-arg
 -- list into "0+ leading extra args" and "the trailing @n@ args the verb's own
@@ -3212,7 +3219,7 @@ jumpCrossesLam vid = go False
     go underLam (Var v)   = underLam && varId v == vid
     go underLam (App f a) = go underLam f || go underLam a
     go _        (Lam b e)
-      | isTyVar b         = go False e  -- type lambdas don't create new functions
+      | isErasedBinder b   = go False e  -- erased (type/coercion) lambdas don't create new functions
       | otherwise          = go True e
     go underLam (Let (NonRec b rhs) e)
       | isJoinId b =
