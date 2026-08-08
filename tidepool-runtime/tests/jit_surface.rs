@@ -1211,3 +1211,25 @@ fn works_fork_map() {
     .unwrap_or_else(|e| panic!("forkMap probe failed: {e}"));
     assert_eq!(got, serde_json::json!([10, 20, 30, 40]));
 }
+
+// =========================================================================
+// Aeson numeric fidelity — `FromJSON Int` bounded-integral decoding and the
+// `_Int`/`_Integer` prisms, plus the `Data.Text`/`Data.Char` shadows whose
+// canonical names must carry canonical semantics (`splitOn`, `digitToInt`).
+// =========================================================================
+
+// =========================================================================
+// Quasiquoter strictness — `[j|…|]` exact-number and control-character
+// handling, `[fmt|…|]` brace-escape discipline. Rejection paths are
+// compile-time failures, pinned with `fails_loudly`.
+// =========================================================================
+
+// =========================================================================
+// `Tidepool.FilePath` POSIX fidelity — the upstream `filepath` test vectors
+// for `normalise` and the sibling path functions.
+// =========================================================================
+
+// =========================================================================
+// `Tidepool.Data.Time` and the Prelude/Fmt-runtime shadows: the names the
+// stdlib claims are JIT-safe, each pinned by a probe that calls it.
+// =========================================================================
