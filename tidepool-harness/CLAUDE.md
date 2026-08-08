@@ -118,6 +118,42 @@ decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
 it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
 the general eval/Agent surface.
 
+### The answer contract — `finalize` is pinned to the hole's type
+
+An answerer turn does not compile against the polymorphic `finalize`. While a
+node is answering a typed hole it carries an `AnswerContract` (set per hole by
+the driver via `Harness::set_answer_contract`, since the per-loop answerer node
+is reused across holes whose types differ), and its turns compile with:
+
+- **`finalize` pinned to the hole's type** — `engine::finalize_shim` emits
+  `finalize :: forall v a effs. (v ~ T, Member Finalize effs) => v -> Eff effs
+  a` as a top-level binding, with `finalize` hidden from the unqualified
+  `Tidepool.Effects` import and the module also imported `qualified as
+  TidepoolEffects` so the shim reaches the original
+  (`tidepool_mcp::build_preamble_shadowing_effects`). `Tidepool.Effects`' own
+  `finalize` leaves `v` unconstrained, which let a wrong-typed value compile and
+  then cross in-heap into a `T`-typed continuation and case-trap there. The
+  tyvar shape is preserved, not collapsed to `T -> M a`: `v` first (so
+  `finalize @T x` still binds it), `a` free (so the template's `toJSON _r`
+  defaults it rather than demanding `ToJSON T`), `Member` a real constraint (so
+  the dictionary rides as the leading value arg `Translate.hs` re-applies when
+  head-swapping to `finalizeSited`).
+- **The author modules that define the type** — `HarnessSource::answerer_imports`,
+  derived structurally as the sibling modules the harness file itself imports.
+  Not a naming convention: a module the harness does not import is never pulled
+  in (so unrelated harnesses can share a directory — the fixtures do), and the
+  harness module itself never is (it defines `loop`, whose `runLLMTurn` is
+  absent from the answerer's row, and GHC compiles an imported module whole).
+  Resolving the type through the one shared module also fixes WHICH type it is,
+  so constructor ids agree at the crossing.
+
+Both halves are load-bearing: without the pin a wrong-typed answer traps, and
+without the imports the model cannot name the type it is being asked for and
+substitutes one that compiles. A harness that inlines its author types alongside
+`loop` fails the second half — `SelfHarnessDriver::types_in_scope_hint` says so
+in the retry rather than looping to the round cap. A node with no contract
+compiles exactly as before. Pinned by `tests/finalize_type_pinning.rs`.
+
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a
 fresh `AskUserWith`, not an error the driver observes. The driver services
