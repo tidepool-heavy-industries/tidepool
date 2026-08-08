@@ -83,9 +83,12 @@ enum CellKind {
     /// The test exists and is runnable on demand, but is `#[ignore]`d because it
     /// surfaces an open divergence it cannot itself resolve. Distinct from
     /// [`CellKind::NotCovered`]: the coverage is written, not absent, and the
-    /// named finding is what gates its return to the live suite.
+    /// named finding is what gates its return to the live suite. `withheld`
+    /// carries the claim the cell still makes when run, so the claim keeps being
+    /// validated rather than becoming unreachable while quarantined.
     Quarantined {
         test_fn: &'static str,
+        withheld: &'static CellKind,
         finding: &'static str,
     },
     /// Deliberately absent: no test exercises this (pass, generator) pair.
@@ -329,6 +332,10 @@ const MATRIX: &[Cell] = &[
         generator: GeneratorId::Shadowing,
         kind: CellKind::Quarantined {
             test_fn: "shadowing::jit_agrees_with_eval_with_shadowing",
+            withheld: &CellKind::JitDifferential {
+                cases: 800,
+                reach_floor: 0.5,
+            },
             finding: "one-directional oracle divergence under shadowed binders: the JIT returns a \
                       value where eval reports InfiniteLoop (Verdict::EvalOnlyFailure), on roughly \
                       1 run in 8 at 800 cases. JitEffectMachine::compile runs normalize, which \
@@ -382,8 +389,11 @@ fn matrix_is_well_formed() {
         }
     }
 
-    for cell in MATRIX {
-        match cell.kind {
+    /// A quarantined cell's `withheld` claim is validated by the same rules as a
+    /// live one, so it cannot rot into an ill-formed row while the `#[ignore]` is
+    /// on.
+    fn check_claim(cell: &Cell, kind: &CellKind) {
+        match *kind {
             CellKind::PreservesEval { cases }
             | CellKind::Idempotent { cases }
             | CellKind::NonIncreasingSize { cases } => {
@@ -402,7 +412,11 @@ fn matrix_is_well_formed() {
                     "{cell:?}: a shaped cell names its test fn"
                 );
             }
-            CellKind::Quarantined { test_fn, finding } => {
+            CellKind::Quarantined {
+                test_fn,
+                withheld,
+                finding,
+            } => {
                 assert!(
                     !test_fn.is_empty(),
                     "{cell:?}: a quarantined cell names the #[ignore]d test fn to run"
@@ -411,6 +425,15 @@ fn matrix_is_well_formed() {
                     !finding.is_empty(),
                     "{cell:?}: a quarantined cell names the open finding that gates its return"
                 );
+                assert!(
+                    !matches!(
+                        withheld,
+                        CellKind::NotCovered { .. } | CellKind::Quarantined { .. }
+                    ),
+                    "{cell:?}: a quarantined cell withholds a real claim, not another \
+                     absence or quarantine"
+                );
+                check_claim(cell, withheld);
             }
             CellKind::NotCovered { reason } => {
                 assert!(
@@ -419,5 +442,9 @@ fn matrix_is_well_formed() {
                 );
             }
         }
+    }
+
+    for cell in MATRIX {
+        check_claim(cell, &cell.kind);
     }
 }
