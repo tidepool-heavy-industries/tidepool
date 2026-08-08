@@ -56,7 +56,7 @@ use crate::engine::{
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
-use crate::tree::{HoleId, NodeId};
+use crate::tree::{FanBadge, HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
 /// web server over it) is not generic. `build_base_stack` returns an opaque
@@ -1578,6 +1578,25 @@ impl Harness {
         })
     }
 
+    /// Cancel + drop a fork/fanout CHILD that failed mid-drive, so no error
+    /// path leaves it `Running` with a live resident session (the leak external
+    /// review flagged: only the success path used to `node_done` + `drop_session`
+    /// the child; a provider/join/log fault inside `drive_answerer_to_value`, or
+    /// a `resume_parent` failure after, propagated via `?` and orphaned the
+    /// child). Scoped to the fork/fanout callers deliberately — NOT baked into
+    /// `drive_answerer_to_value` itself, which is also called in-context with
+    /// `answerer == the main node`, where cancelling "the child" would kill the
+    /// live agent. Idempotent w.r.t. the internal abort paths that already
+    /// cancelled the child (cap-exhaustion / `ChildSuspended`): the tree
+    /// transition is best-effort (`let _`), the session drop is the load-bearing
+    /// half and is safe to repeat.
+    fn cleanup_failed_child(&self, child: NodeId) {
+        let _ = self
+            .tree
+            .node_cancelled(child, "fork child failed".to_string());
+        self.drop_session(child);
+    }
+
     /// Force + drive a FORK answerer for `node`'s pending fork hole (a plain
     /// `runLLMTurnFork`, `fan: None` — a `runLLMTurnFanout` hole
     /// routes to [`Self::answer_fanout`] instead). Registers a child node
@@ -1610,18 +1629,32 @@ impl Harness {
         // Register the fork child: inherit the parent transcript up to the
         // parent's current turn, append the hole card.
         let child = self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
-        self.force(child, actor)?;
+        if let Err(e) = self.force(child, actor) {
+            self.cleanup_failed_child(child);
+            return Err(e);
+        }
 
         // Drive the child's turn loop until it emits an answering block, then run
         // that block via run_child against the SUSPENDED PARENT (not the child's
-        // own session) to produce a Value in the parent's heap.
-        let answer_value = self
+        // own session) to produce a Value in the parent's heap. On ANY failure
+        // (provider/join/log fault, or cap-exhaustion abort) clean up the child
+        // before propagating — no orphaned Running+resident node.
+        let answer_value = match self
             .drive_answerer_to_value(child, node, site_ty.as_deref(), self.cfg.max_turns)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.cleanup_failed_child(child);
+                return Err(e);
+            }
+        };
 
         // Resume the parent with the child's typed answer.
-        self.resume_parent(node, &pending.hole, answer_value)
-            .await?;
+        if let Err(e) = self.resume_parent(node, &pending.hole, answer_value).await {
+            self.cleanup_failed_child(child);
+            return Err(e);
+        }
         // The child answerer node is done once it has produced the answer.
         let _ = self.tree.node_done(child, "answer delivered".to_string());
         self.drop_session(child);
@@ -1663,13 +1696,13 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (list_ty, prompts) = match &pending.classified.routing {
+        let (list_ty, fan, prompts) = match &pending.classified.routing {
             HoleRouting::Fork {
                 ty,
-                fan: Some(_),
+                fan: Some(fan),
                 prompts,
                 ..
-            } => (ty.clone(), prompts.clone()),
+            } => (ty.clone(), *fan, prompts.clone()),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -1680,6 +1713,27 @@ impl Harness {
         };
         let element_ty = list_ty.as_deref().and_then(engine::strip_list_type);
 
+        // Cardinality integrity: the Haskell side's `fan` is the ONE
+        // authoritative child count (it is `length prompts` at the
+        // `runLLMTurnFanoutSited` call, before serialization). Every prompt
+        // element must have decoded to a `Text` brief — `classify_hole`'s
+        // `filter_map(as_str)` SILENTLY DROPS a non-string element, so a
+        // shorter `prompts` than `fan` means one was lost. Answering anyway
+        // would resume the parent with a `[T]` shorter than its `forkAll`
+        // promised (a length the type system already committed to). Fail loud
+        // instead of under-answering. (An empty `fan == prompts == 0` is
+        // legitimate — `forkAll [] :: M [T]` resumes with `[]` — so it passes.)
+        if let FanBadge::Exact { n } = fan {
+            if n as usize != prompts.len() {
+                return Err(HarnessError::Resident(format!(
+                    "fanout cardinality mismatch on {node:?}: fan={n} but {} prompt(s) \
+                     decoded — a non-Text prompt element was dropped, or the fan/prompts \
+                     wire fields disagree",
+                    prompts.len()
+                )));
+            }
+        }
+
         let mut children = Vec::with_capacity(prompts.len());
         let mut answers = Vec::with_capacity(prompts.len());
         for (idx, prompt) in prompts.iter().enumerate() {
@@ -1689,10 +1743,23 @@ impl Harness {
                 prompt,
                 element_ty,
             )?;
-            self.force(child, actor)?;
-            let value = self
+            // Guard every child exit: a force/drive fault must not orphan this
+            // child (earlier children are already Done+dropped; later ones are
+            // never created — only the in-flight one can leak).
+            if let Err(e) = self.force(child, actor) {
+                self.cleanup_failed_child(child);
+                return Err(e);
+            }
+            let value = match self
                 .drive_answerer_to_value(child, node, element_ty, self.cfg.max_child_turns)
-                .await?;
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    self.cleanup_failed_child(child);
+                    return Err(e);
+                }
+            };
             let _ = self.tree.node_done(child, "answer delivered".to_string());
             self.drop_session(child);
             children.push(child);
