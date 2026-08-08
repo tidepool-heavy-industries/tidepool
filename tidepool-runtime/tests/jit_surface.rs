@@ -1325,6 +1325,178 @@ fn works_lens_integer_truncates_and_is_unbounded() {
     );
 }
 
+/// GO/NO-GO spike: `FromJSON [Char]` resolves via an `OVERLAPPING` instance
+/// over the general `FromJSON a => FromJSON [a]` instance at a single call
+/// site that also exercises the `OVERLAPPABLE` array-decoding branch, mirroring
+/// upstream aeson's `String` instance
+/// (https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_string_overlapping_spike() {
+    works(
+        r#"pure (object ["s" .= (either (const "ERR") id (eitherDecode "\"hi\"" :: Either Text String)), "xs" .= (either (const []) id (eitherDecode "[1,2,3]" :: Either Text [Int]))])"#,
+        serde_json::json!({"s": "hi", "xs": [1, 2, 3]}),
+    );
+}
+
+/// `FromJSON Char` decodes a JSON string of EXACTLY one character; a longer
+/// or empty string is an `Error` (aeson `FromJSON Char`'s `parseChar` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_char() {
+    works(
+        r#"pure (object ["ok" .= either (const '?') id (eitherDecode "\"a\"" :: Either Text Char), "tooLong" .= either (const True) (const False) (eitherDecode "\"ab\"" :: Either Text Char), "empty" .= either (const True) (const False) (eitherDecode "\"\"" :: Either Text Char)])"#,
+        serde_json::json!({"ok": "a", "tooLong": true, "empty": true}),
+    );
+}
+
+/// `FromJSON Integer` is unbounded: an exact integral `Scientific` of any
+/// magnitude decodes; a fractional value is an `Error` (aeson `FromJSON
+/// Integer` routes through `parseIntegral` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_integer() {
+    works(
+        r#"pure (object ["ok" .= show (either (const (-1 :: Integer)) id (eitherDecode "99999999999999999999999999" :: Either Text Integer)), "fraction" .= either (const True) (const False) (eitherDecode "3.7" :: Either Text Integer)])"#,
+        serde_json::json!({"ok": "99999999999999999999999999", "fraction": true}),
+    );
+}
+
+/// `FromJSON Word` is bounded non-negative integral: negative, fractional, or
+/// out-of-range is an `Error` (aeson `FromJSON Word` routes through
+/// `parseBoundedIntegral` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_word() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Word)) id (eitherDecode "42" :: Either Text Word), "negative" .= either (const True) (const False) (eitherDecode "-1" :: Either Text Word), "fraction" .= either (const True) (const False) (eitherDecode "3.7" :: Either Text Word)])"#,
+        serde_json::json!({"ok": 42, "negative": true, "fraction": true}),
+    );
+}
+
+/// `FromJSON Float`, same shape as the already-pinned `FromJSON Double`
+/// (aeson `FromJSON Float` routes through `parseRealFloat` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_float() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Float)) id (eitherDecode "3.5" :: Either Text Float), "notNumber" .= either (const True) (const False) (eitherDecode "\"x\"" :: Either Text Float)])"#,
+        serde_json::json!({"ok": 3.5, "notNumber": true}),
+    );
+}
+
+/// `FromJSON ()` decodes an EMPTY array, and nothing else — pinning aeson
+/// 1.5.x's shape (aeson 2.x relaxed `()` to accept any value; this instance
+/// deliberately mirrors the older, stricter shape) —
+/// https://hackage.haskell.org/package/aeson-1.5.6.0/docs/src/Data.Aeson.Types.FromJSON.html.
+#[test]
+fn works_from_json_unit() {
+    works(
+        r#"pure (object ["ok" .= either (const False) (const True) (eitherDecode "[]" :: Either Text ()), "nonEmpty" .= either (const True) (const False) (eitherDecode "[1]" :: Either Text ()), "notArray" .= either (const True) (const False) (eitherDecode "{}" :: Either Text ())])"#,
+        serde_json::json!({"ok": true, "nonEmpty": true, "notArray": true}),
+    );
+}
+
+/// Tuple `FromJSON` instances decode a JSON ARRAY with an EXACT arity check —
+/// a 2-tuple rejects a 3-element array — covering 2- through 5-tuples (aeson
+/// `FromJSON2 (,)` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_tuples() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Int, 0 :: Int)) id (eitherDecode "[1,2]" :: Either Text (Int, Int)), "wrongArity" .= either (const True) (const False) (eitherDecode "[1,2,3]" :: Either Text (Int, Int)), "fiveOk" .= either (const [0,0,0,0,0::Int]) (\(a,b,c,d,e) -> [a,b,c,d,e]) (eitherDecode "[1,2,3,4,5]" :: Either Text (Int, Int, Int, Int, Int))])"#,
+        serde_json::json!({"ok": [1, 2], "wrongArity": true, "fiveOk": [1, 2, 3, 4, 5]}),
+    );
+}
+
+/// `FromJSON (Either a b)` decodes upstream's object form: `{"Left": x}` to
+/// `Left x`, `{"Right": y}` to `Right y`; any other shape is an `Error`
+/// (aeson `FromJSON2 Either` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_either() {
+    works(
+        r#"pure (object ["left" .= (case (eitherDecode "{\"Left\":1}" :: Either Text (Either Int Text)) of { Right (Left i) -> show i; _ -> "ERR" }), "right" .= (case (eitherDecode "{\"Right\":\"hi\"}" :: Either Text (Either Int Text)) of { Right (Right t) -> t; _ -> "ERR" }), "badShape" .= either (const True) (const False) (eitherDecode "{\"Wrong\":1}" :: Either Text (Either Int Text))])"#,
+        serde_json::json!({"left": "1", "right": "hi", "badShape": true}),
+    );
+}
+
+/// As `eval_raw_with_imports`, but also splices `helpers` (extra top-level
+/// declarations — a local `data` type a probe needs) into the generated
+/// module.
+fn eval_raw_with_helpers(
+    imports: &str,
+    helpers: &str,
+    code: &str,
+) -> Result<serde_json::Value, String> {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, helpers, None, None);
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hs = root.join("haskell/lib");
+    let lib = root.join(".tidepool/lib");
+    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
+    let mut d = NullDispatcher;
+    match compile_and_run(&src, "result", &include, &mut d, &()) {
+        Ok(v) => Ok(v.to_json()),
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
+    }
+}
+
+fn works_with_helpers(helpers: &str, code: &str, expected: serde_json::Value) {
+    let helpers = helpers.to_string();
+    let code = code.to_string();
+    let helpers_t = helpers.clone();
+    let code_t = code.clone();
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_helpers("", &helpers_t, &code_t)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())
+        .and_then(|r| r);
+    match got {
+        Ok(got) => assert_eq!(
+            got, expected,
+            "\nWORKS probe returned the wrong value:\n  code: {code}\n  want: {expected}\n  got:  {got}"
+        ),
+        Err(e) => panic!("\nWORKS probe REGRESSED (was supposed to succeed):\n  code: {code}\n  error: {e}"),
+    }
+}
+
+/// Regression: an ALL-nullary sum still decodes from its bare constructor-name
+/// string (aeson's `allNullaryToStringTag = True` default), unperturbed by
+/// adding the mixed-sum `TaggedObject` branch below. Mirrors this module's own
+/// doc-comment example type.
+#[test]
+fn works_generic_nullary_sum_still_bare_string() {
+    works_with_helpers(
+        "data Mode = Observing | Deciding | Acting deriving (Generic, Show, FromJSON)",
+        r#"pure (case (eitherDecode "\"Deciding\"" :: Either Text Mode) of { Right Deciding -> True; _ -> False })"#,
+        serde_json::json!(true),
+    );
+}
+
+/// A sum with a non-nullary (record) constructor decodes via aeson's default
+/// `TaggedObject` shape: a `"tag"` field naming the constructor; a nullary
+/// constructor needs nothing else, a record constructor's fields are read
+/// from the SAME object alongside `"tag"` (aeson `parseNonAllNullarySum` /
+/// `FromTaggedObject'`'s record instance —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+/// An unrecognized tag, and a missing `"tag"` field, are both `Error`s.
+#[test]
+fn works_generic_tagged_sum() {
+    works_with_helpers(
+        "data Shape = Circle { radius :: Double } | Square { side :: Double } | Origin deriving (Generic, Show, FromJSON)",
+        r#"pure (object ["nullary" .= (case (eitherDecode "{\"tag\":\"Origin\"}" :: Either Text Shape) of { Right Origin -> True; _ -> False }), "record" .= (case (eitherDecode "{\"tag\":\"Circle\",\"radius\":2.5}" :: Either Text Shape) of { Right (Circle r) -> r; _ -> -1 }), "unknownTag" .= either (const True) (const False) (eitherDecode "{\"tag\":\"Triangle\"}" :: Either Text Shape), "missingTag" .= either (const True) (const False) (eitherDecode "{\"radius\":2.5}" :: Either Text Shape)])"#,
+        serde_json::json!({"nullary": true, "record": 2.5, "unknownTag": true, "missingTag": true}),
+    );
+}
+
 /// `Prelude.splitOn` with an empty separator raises the canonical
 /// `Data.Text.splitOn` exception instead of returning data — text-2.1.2
 /// continues to document an empty delimiter as invalid input.
