@@ -140,7 +140,7 @@ pub struct ClassifiedHole {
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
-    match con_name(request, table) {
+    let hole = match con_name(request, table) {
         Some("RunLLMTurnWith") => {
             let (prompt, payload) = decode_prompt_payload(request, table);
             ClassifiedHole {
@@ -201,7 +201,9 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 prompt,
             }
         }
-    }
+    };
+    tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
+    hole
 }
 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
@@ -1049,6 +1051,10 @@ pub async fn drive_model_turn(
         reasoning,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
+    match &block {
+        Some(b) => tracing::info!("model haskell block:\n{b}"),
+        None => tracing::info!("model turn had no haskell block (prose-only)"),
+    }
     Ok(DrivenTurn {
         reply: text,
         usage,

@@ -140,6 +140,11 @@ pub fn compile_turn(
     let extract_timing = timing::ExtractTiming::parse(&String::from_utf8_lossy(&output.stderr));
     timing::record_extract_phases(node, round, &extract_timing);
     if !output.status.success() {
+        tracing::warn!(
+            target = %target,
+            "extract failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return Err(CompileError::Extract(format!(
             "stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -195,6 +200,16 @@ pub fn compile_turn(
         timing::STAGE_ASKS_PARSE,
         asks_start.elapsed(),
         0,
+    );
+
+    let mut sites: Vec<_> = asks.by_site.iter().collect();
+    sites.sort_by_key(|(site, _)| **site);
+    tracing::info!(
+        target = %target,
+        module = %module,
+        expr_bytes = expr_bytes.len(),
+        sites = ?sites,
+        "compiled turn"
     );
 
     Ok(CompiledTurn { expr, table, asks })
