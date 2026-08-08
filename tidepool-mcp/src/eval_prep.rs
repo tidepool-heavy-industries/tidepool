@@ -57,7 +57,7 @@ macro_rules! base_effects {
 }
 
 /// All standard effects in canonical order (the base stack + the interposed
-/// `Ask`/`RunLLMTurn` effects appended last, in that order). Derived from the
+/// `Ask`/`RunLLMTurn`/`Fork` effects appended last, in that order). Derived from the
 /// single-source [`base_effects!`] list — do not hand-maintain a parallel
 /// order here.
 ///
@@ -66,16 +66,19 @@ macro_rules! base_effects {
 /// eval/repl sessions keep the exact `runLLMTurn`/`runLLMTurnFork`/
 /// `runLLMTurnFanout`/`forkAll`/`forkMap`/`forkCata` availability they had
 /// when those verbs lived inside `Ask`'s helpers — only the wire constructor
-/// (`RunLLMTurnWith` instead of `AskWith`) changed. Both are UNHANDLED
+/// (`RunLLMTurnWith` instead of `AskWith`) changed. `Fork` backs
+/// `Tidepool.Fork`'s `forkSited`/`forkAllSited` (the retarget off
+/// `RunLLMTurn`'s helpers) and must stay in the roster or the generated
+/// `Tidepool.Effects` cannot export those names. All three are UNHANDLED
 /// (interposed) tags: no `tidepool-handlers` entry, serviced by each server's
 /// own suspend machinery (see `tidepool-codegen::jit_machine::drive_effect_loop`'s
 /// `suspend_tag` threshold — every tag from the first interposed effect
-/// onward suspends, so appending a second interposed effect here needs no
+/// onward suspends, so appending further interposed effects here needs no
 /// Rust-side dispatch change).
 pub fn standard_decls() -> Vec<EffectDecl> {
     macro_rules! std_decls_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
-            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl() ]
+            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl(), $crate::fork_decl() ]
         };
     }
     crate::base_effects!(std_decls_rows)
@@ -652,12 +655,13 @@ mod tests {
         assert_eq!(a, b);
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
-        // Ask and RunLLMTurn are both interposed (self-iterating-harness
-        // WS-B split runLLMTurn out of Ask into its own effect), appended in
-        // that order after the base stack — RunLLMTurn is last now, not Ask.
+        // Ask, RunLLMTurn, and Fork are all interposed (WS-B split runLLMTurn
+        // out of Ask; the fork retarget moved Tidepool.Fork's backing onto
+        // Fork), appended in that order after the base stack.
         assert_eq!(a[9], "Ask");
-        assert_eq!(a.last(), Some(&"RunLLMTurn"));
-        assert_eq!(a.len(), 11);
+        assert_eq!(a[10], "RunLLMTurn");
+        assert_eq!(a.last(), Some(&"Fork"));
+        assert_eq!(a.len(), 12);
         // SG was cut (friction #37); the stack must NOT contain it.
         assert!(
             !a.contains(&"SG"),
