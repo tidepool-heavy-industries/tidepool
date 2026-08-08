@@ -34,6 +34,41 @@
 # `cargo test` too — a pre-existing bug from the MachineState migration,
 # unrelated to nextest; see branch report).
 #
+# COMPILING A PROC-MACRO TEST *IS* EXTRACTION (stdlib-fidelity's find).
+# `haskell_eval!`/`haskell_inline!` run tidepool-extract during macro
+# EXPANSION, so the GHC work happens at BUILD time, in rustc, not in a test
+# process. Three consequences, none of which any setting in this file can fix:
+#   - `default-filter` below is a RUN-time filter. `cargo nextest run` still
+#     BUILDS tidepool-macro's integration binaries; it only declines to run
+#     them.
+#   - `cargo check --workspace --all-targets` — everyone's standard gate —
+#     does the same.
+#   - the `ghc-heavy` test group cannot see any of it. A group caps concurrent
+#     test PROCESSES; this is rustc.
+# So neither command is unconditionally GHC-free, and neither takes a
+# ghc-slots slot. What bounds it is the macro's own content-addressed cache
+# (`<crate>/target/tidepool-cbor/<basename>-<key>`, keyed on source bytes +
+# target binding + transitive .hs deps): 14 macro invocations across the four
+# expanding targets (tidepool-macro/tests/{basic,hs_eval}.rs,
+# examples/{guess,tide}) collapse to 5 distinct keys — measured, 3 + 1 + 1
+# cache dirs. That cache is gitignored and lives under each CRATE's own
+# `target/`, not the workspace target dir, so `cargo clean` does not touch it.
+# The cost is ~5 un-slotted extract spawns ONCE per worktree. Three things
+# re-pay it: a fresh worktree, an edit to a .hs source, and a Rust toolchain
+# bump (the key is a DefaultHasher digest, which is toolchain-local by
+# construction — see content_key in tidepool-macro/src/expand.rs). All three
+# describe a batch like this one landing, so expect every agent to pay it on
+# their first build after the rebase.
+# NOT gated behind a feature, deliberately: gating tidepool-macro's test pair
+# would leave examples/guess and examples/tide expanding the same macros from
+# their bins, so the "quick tier is GHC-free by construction" claim still
+# would not hold — and gating the examples costs the demos their build
+# coverage. A partial gate buys churn and leaves the false claim standing.
+# If that ~5 ever stops being the bound, the fix is a slot at the spawn point
+# in tidepool-macro/src/expand.rs, not a filter here; note that tidepool-macro
+# is published, so the semaphore path would have to arrive by env, not be
+# hard-coded.
+#
 # Net result: no nextest `test-group` overrides are needed for correctness.
 # The `#[serial]`/`serial_test` annotations left in test sources are now
 # vestigial (serial_test's default lock is in-process only — this workspace
@@ -60,7 +95,9 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # Every test in tidepool-runtime/repl/mcp/handlers forks a heavyweight GHC
 # `extract` compile (seconds each) — they are "run sometimes", not on every
 # quick inner-loop check. The pure-Rust crates (codegen/eval/repr/effect/bridge/
-# optimize/bignum) still run by default and stay fast.
+# optimize/bignum) still run by default and stay fast. This filter governs what
+# RUNS; it says nothing about what gets BUILT — see the proc-macro note above
+# before calling this tier GHC-free.
 #
 # To run EVERYTHING (the full battery), add `--ignore-default-filter` — this is
 # what `scripts/battery.sh` does, so it keeps the slow-timeout + ghc-heavy cap
@@ -93,7 +130,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # HTTP/SSE test that belongs in the quick tier.
 default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-web) & binary(crash_recovery)))'
 
-# GHC-compile-heavy crates run capped, not at full core count. Every test in
+# GHC-compile-heavy tests run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers (and tidepool-testing/tidepool-harness's
 # integration binaries) forks a heavyweight GHC `extract` compile through the
 # EvalHarness pipeline; at full-core parallelism these
@@ -107,11 +144,41 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # the host semaphore (scripts/ghc-slots.sh, 3 slots shared across every
 # worktree on the box) — it bounds nextest's own concurrency within a single
 # run, it is not itself the host guarantee, and taking a slot is still
-# required before launching GHC-heavy work. Matched to the 3-slot host cap;
-# raise it only alongside a matching ghc-slots.sh SLOTS change.
+# required before launching GHC-heavy work (scripts/battery.sh and
+# scripts/battery-shard.sh now take one for you).
+#
+# 3 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
+# moves with box capacity — it has been 3, 5, and 4 within a day; do not
+# copy whatever it says today into here). The two numbers answer different
+# questions:
+# slots bound how many GHC-heavy RUNS proceed at once, this bounds how many
+# extract compiles ONE run fans out to. Worst case is their product, so
+# raising this multiplies against every slot — the incident budget is "one
+# run under one slot stays at ~4 or below", which 3 satisfies with room. Raise
+# it only with a measurement, not to track a slot-count change.
 [test-groups.ghc-heavy]
 max-threads = 3
 
+# The cap is DEFAULT-DENY: everything is GHC-heavy unless it appears in the
+# exemption list below. That direction is the whole point. The 2026-08-09
+# load-159 incident (memory PSI 58% full-stall, 22 concurrent tidepool-extract
+# compiles under a single ghc-slots slot) happened because this override was
+# an allowlist of GHC-heavy binaries — tidepool-harness integration binaries
+# were named one by one, the list lagged 16 of 24 as binaries were added, and
+# the unnamed ones ran uncapped at full core count. An allowlist fails OPEN:
+# whatever it forgets thrashes the box. Default-deny fails CLOSED: whatever
+# this exemption list forgets merely runs at 3-way parallelism instead of 16.
+#
+# So: add a crate, add a test binary, rename a package — it lands in the
+# capped group with no edit here. An entry is only removed from the cap after
+# showing the tests do no `extract` work (spawn no tidepool-extract, drive no
+# EvalHarness/Harness turn, expand no haskell_eval!/haskell_inline!), the same
+# bar every name below clears today.
+#
+# Deliberately NOT exempt, though their test counts are small: tidepool-macro
+# (haskell_eval!/haskell_inline! fork extract during expansion), tidepool (the
+# facade resolves and runs extract in setup), and the two examples (same
+# macros). Capping them costs nothing and keeps the rule uniform.
 [[profile.default.overrides]]
-filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-web) & binary(crash_recovery))'
+filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-lsp) | (package(tidepool-web) & !binary(crash_recovery)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior))))'
 test-group = 'ghc-heavy'

@@ -83,9 +83,10 @@
 
         overlays = [ (import rust-overlay) ghcInternalOverlay ];
         pkgs = import nixpkgs { inherit system overlays; };
-        rust = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
-        };
+        # rust-toolchain.toml is the single source of truth for the Rust
+        # version + components; the flake reads it rather than pinning
+        # `stable.latest` (which drifts silently on every flake.lock update).
+        rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       in {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = [
@@ -97,12 +98,25 @@
             pkgs.cabal-install
             pkgs.openssl
             pkgs.jq
+            # No sccache here, deliberately. It IS active for every build on
+            # this box, but via `build.rustc-wrapper` in ~/.cargo/config.toml
+            # (host-global, outside this flake), naming an absolute store path
+            # — which is already an exact pin, tighter than a version string.
+            # This shell used to add `pkgs.sccache` alongside it; under the
+            # current flake.lock that resolves to 0.14.0 while the live wrapper
+            # is 0.16.0, so it put a DIFFERENT sccache client on PATH than the
+            # one doing the caching. Every agent worktree on this box shares
+            # one sccache server; a second client version reaching it is at
+            # best redundant. `checks.sccache-pin` below is the tripwire that
+            # catches the two drifting further apart.
+            pkgs.cargo-nextest
           ];
 
           shellHook = ''
             echo "tidepool dev shell"
             echo "  Rust: $(rustc --version)"
             echo "  GHC:  $(ghc --version)"
+            echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')"
           '';
         };
 
@@ -147,6 +161,128 @@
         '';
 
         packages.default = self.packages.${system}.tidepool-extract;
+
+        formatter = pkgs.nixfmt;
+
+        checks = {
+          # Fail-loud replacement for the ghcInternalOverlay postPatch's silent
+          # `if [ -d "$dir" ]` / `if [ -d "$lib" ]` guards (flake.nix, above):
+          # if GHC ever renames/moves one of these boot-library directories,
+          # the patch would otherwise skip injecting the fat-interface flags
+          # for it with no error. This check lives OUTSIDE the patchedGhc
+          # derivation on purpose — it builds over the plain GHC *source*
+          # tarball (cheap fetch, no compile), so it can assert loudly without
+          # touching postPatch/mkDerivation and changing their derivation
+          # hashes (that would trigger a from-source GHC rebuild).
+          #
+          # The directory list is duplicated rather than shared with
+          # postPatch's `for dir in ...` / `for lib in ...` lines: sharing it
+          # would mean editing that string, which is exactly the hash-changing
+          # edit this check exists to avoid. Keep both lists in sync by hand;
+          # each side comments at the other.
+          #
+          # `knownMissing`: the patch's second loop names `libraries/Cabal-syntax`,
+          # but in the GHC 9.12.2 tree that directory lives at
+          # `libraries/Cabal/Cabal-syntax` (nested under Cabal, not a sibling
+          # under libraries/), so the postPatch `-d` guard silently skips it —
+          # Cabal-syntax never gets the fat-interface OPTIONS_GHC. Correcting
+          # the path in postPatch changes the patched-GHC derivation hash, so
+          # it isn't done here; it rides the next deliberate lock bump (which
+          # rebuilds GHC anyway) instead of costing a from-source rebuild today.
+          # One-line fix for that future bump:
+          #   for lib in ... libraries/Cabal libraries/Cabal/Cabal-syntax libraries/text
+          # (replace the bare `libraries/Cabal-syntax` entry with the nested path).
+          #
+          # The assertion below is self-retiring: it fails if Cabal-syntax ever
+          # starts existing at the top-level name the patch actually uses — that
+          # would mean the patch entry has gone live again and this exception
+          # (and the one-line fix above) should be deleted.
+          ghc-boot-library-dirs = pkgs.runCommand "ghc-boot-library-dirs-check" { } ''
+            src=${pkgs.haskell.compiler.ghc912.src}
+
+            # Mirrors the two `for` loops in ghcInternalOverlay's postPatch above,
+            # minus the one entry tracked in knownMissing below.
+            expected="libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim \
+                  libraries/containers libraries/bytestring libraries/array \
+                  libraries/deepseq libraries/directory libraries/filepath \
+                  libraries/process libraries/unix libraries/parsec \
+                  libraries/mtl libraries/transformers libraries/stm \
+                  libraries/template-haskell libraries/binary \
+                  libraries/exceptions libraries/time libraries/hpc \
+                  libraries/Cabal libraries/text"
+
+            missing=""
+            for d in $expected; do
+              if [ ! -d "$src/$d" ]; then
+                missing="$missing $d"
+              fi
+            done
+
+            if [ -n "$missing" ]; then
+              echo "ghcInternalOverlay's postPatch loops over these boot-library" >&2
+              echo "directories, but they no longer exist in $src:" >&2
+              echo "$missing" >&2
+              exit 1
+            fi
+
+            # knownMissing: libraries/Cabal-syntax (patch's path) -> real path
+            # libraries/Cabal/Cabal-syntax. Assert the real path still exists
+            # (the gap is real, not stale) and the patch's path still does NOT
+            # exist (if it now does, the exception above is out of date).
+            if [ ! -d "$src/libraries/Cabal/Cabal-syntax" ]; then
+              echo "knownMissing entry libraries/Cabal-syntax (real path" >&2
+              echo "libraries/Cabal/Cabal-syntax) is stale: the real path no" >&2
+              echo "longer exists either. Update the known-gap entry." >&2
+              exit 1
+            fi
+            if [ -d "$src/libraries/Cabal-syntax" ]; then
+              echo "libraries/Cabal-syntax now exists at the top level -" >&2
+              echo "the postPatch loop's entry for it is live again. Delete" >&2
+              echo "the knownMissing exception for it in this check." >&2
+              exit 1
+            fi
+
+            touch $out
+          '';
+
+          # sccache is the fleet's compile cache: one ~30 GiB store on this box,
+          # shared by every agent worktree, and the reason a fresh worktree's
+          # `cargo check --workspace` costs a minute rather than ten. Cache keys
+          # are sccache's own hashing scheme, so a version change re-fills the
+          # whole store from cold — on a machine already at its size limit.
+          #
+          # The live pin is `build.rustc-wrapper` in ~/.cargo/config.toml: an
+          # absolute /nix/store path, exact by construction. This check records
+          # what this FLAKE would supply, and asserts it against that live
+          # version. They disagree today (nixpkgs 0.14.0 vs live 0.16.0), which
+          # is why the dev shell no longer ships one — see the devShell comment.
+          # The check is the tripwire for the decision that closes the gap:
+          # either the lock moves to 0.16.0 (then the shell can own sccache
+          # again and rustc-wrapper can go back to a bare "sccache"), or the
+          # host wrapper moves, and whichever happens this fails until the two
+          # numbers here are reconciled deliberately.
+          sccache-pin = pkgs.runCommand "sccache-pin-check" { } ''
+            nixpkgs_version="${pkgs.sccache.version}"
+            known_nixpkgs="0.14.0"
+            live_wrapper="0.16.0"
+
+            if [ "$nixpkgs_version" != "$known_nixpkgs" ]; then
+              echo "nixpkgs' sccache moved: $known_nixpkgs -> $nixpkgs_version." >&2
+              if [ "$nixpkgs_version" = "$live_wrapper" ]; then
+                echo "It now MATCHES the live rustc-wrapper ($live_wrapper) — the dev shell" >&2
+                echo "can take pkgs.sccache back and this check can collapse to one number." >&2
+              else
+                echo "Still != the live rustc-wrapper ($live_wrapper). Update both numbers" >&2
+                echo "here in the same commit as the lock, and expect a cold cache." >&2
+              fi
+              exit 1
+            fi
+            touch $out
+          '';
+
+          # Covers extractor construction as part of `nix flake check`.
+          tidepool-extract = self.packages.${system}.tidepool-extract;
+        };
       }
     );
 }

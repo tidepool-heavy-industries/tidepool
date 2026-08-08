@@ -34,14 +34,14 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// RunLLMTurn's position in the standard effect stack (see
-/// `run_llm_turn_sidecar.rs`'s `RUN_LLM_TURN_TAG` doc: 9 base effects at
-/// tags 0..8, `Ask` interposed at tag 9, `RunLLMTurn` right after it at tag
-/// 10). `forkFilter`/`forkMap` route through `runLLMTurnFanoutSited`
-/// (self-iterating-harness WS-B split `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout` out of `Ask` into their own effect/tag), so their
-/// fanout dispatch now arrives at THIS tag, not `Ask`'s.
-const RUN_LLM_TURN_TAG: u64 = 10;
+/// `Fork`'s position in the standard effect stack: 9 base effects at tags
+/// 0..8, then the interposed `Ask` (9), `RunLLMTurn` (10), and `Fork` (11) —
+/// the roster order in `tidepool-mcp`'s `standard_decls()`.
+///
+/// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
+/// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
+/// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
+const FORK_TAG: u64 = 11;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
@@ -106,6 +106,43 @@ fn works(code: &str, expected: serde_json::Value) {
 /// the clean, named one we promise (possible silent-crash bug-find).
 fn fails_loudly(code: &str, marker: &str) {
     match run_probe(code) {
+        Ok(v) => panic!(
+            "\nLOUD-FAIL probe unexpectedly SUCCEEDED:\n  code: {code}\n  got:  {v}\n  \
+             (the footgun changed — verify it still fails, then re-pin this probe)"
+        ),
+        Err(e) => assert!(
+            e.contains(marker),
+            "\nLOUD-FAIL probe failed but WITHOUT the expected clean marker:\n  code: {code}\n  \
+             want marker: {marker:?}\n  error: {e}\n  \
+             (if this is a silent SIGILL/SIGSEGV or wrong shape, it's a BUG-FIND — report it)"
+        ),
+    }
+}
+
+/// As `fails_loudly`, but injects extra `import` lines first (mirrors
+/// `works_with_imports` alongside `eval_raw_with_imports`, including running
+/// on the same stack-sized, signal-safe thread) — for probes that need a
+/// quoter import (e.g. `"Tidepool.QQ (fmt, j)"`, no `import` keyword) to even
+/// parse.
+fn fails_loudly_with_imports(imports: &str, code: &str, marker: &str) {
+    let imports = imports.to_string();
+    let code = code.to_string();
+    let imports_t = imports.clone();
+    let code_t = code.clone();
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_imports(&imports_t, &code_t)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| {
+            "thread panicked (HARD crash / uncaught signal / possible STILL-SILENT footgun)"
+                .to_string()
+        })
+        .and_then(|r| r);
+    match got {
         Ok(v) => panic!(
             "\nLOUD-FAIL probe unexpectedly SUCCEEDED:\n  code: {code}\n  got:  {v}\n  \
              (the footgun changed — verify it still fails, then re-pin this probe)"
@@ -1145,10 +1182,7 @@ impl DispatchEffect<()> for BoolListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, RUN_LLM_TURN_TAG,
-            "expected the fanout's RunLLMTurn dispatch"
-        );
+        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }
@@ -1183,10 +1217,7 @@ impl DispatchEffect<()> for IntListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, RUN_LLM_TURN_TAG,
-            "expected the fanout's RunLLMTurn dispatch"
-        );
+        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }
@@ -1210,4 +1241,870 @@ fn works_fork_map() {
     )
     .unwrap_or_else(|e| panic!("forkMap probe failed: {e}"));
     assert_eq!(got, serde_json::json!([10, 20, 30, 40]));
+}
+
+// =========================================================================
+// Aeson numeric fidelity — `FromJSON Int` bounded-integral decoding and the
+// `_Int`/`_Integer` prisms, plus the `Data.Text`/`Data.Char` shadows whose
+// canonical names must carry canonical semantics (`splitOn`, `digitToInt`).
+// =========================================================================
+
+/// `FromJSON Int` decodes an exact integer within `Int` range.
+#[test]
+fn works_from_json_int_exact() {
+    works(
+        r#"pure (case (eitherDecode "42" :: Either Text Int) of { Right i -> i; Left _ -> -999 })"#,
+        serde_json::json!(42),
+    );
+}
+
+/// `FromJSON Int` REJECTS a fractional `Scientific` rather than truncating it,
+/// mirroring aeson's bounded-integral parse (aeson `FromJSON` source,
+/// `parseBoundedIntegralFromScientific` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_int_rejects_fraction() {
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "-3.7" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "3.7" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+}
+
+/// `FromJSON Int` REJECTS an exact integer outside `Int` range rather than
+/// silently wrapping (same `toBoundedInteger` grounding as above).
+#[test]
+fn works_from_json_int_rejects_out_of_range() {
+    works(
+        r#"pure (either (const True) (const False) (eitherDecode "99999999999999999999999999" :: Either Text Int))"#,
+        serde_json::json!(true),
+    );
+}
+
+/// `_Int` truncates toward zero, matching upstream `Data.Aeson.Lens._Int`'s
+/// integral conversion (NOT floor) —
+/// https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
+#[test]
+fn works_lens_int_truncates_toward_zero() {
+    works(
+        r#"pure (fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(-3),
+    );
+    works(
+        r#"pure (fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(10),
+    );
+}
+
+/// `_Int` stays `Nothing` — never a silent wraparound — for an exact integer
+/// outside `Int` range.
+#[test]
+fn works_lens_int_out_of_range_is_nothing() {
+    works(
+        r#"pure (isJust ((decode "99999999999999999999999999" :: Maybe Value) >>= (^? _Int)))"#,
+        serde_json::json!(false),
+    );
+}
+
+/// `_Integer` truncates toward zero for a fractional number (same upstream
+/// lens-aeson grounding as `_Int`); unlike `_Int`, `Integer` is unbounded, so
+/// an exact integer far beyond `Int` range still decodes —
+/// https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
+#[test]
+fn works_lens_integer_truncates_and_is_unbounded() {
+    works(
+        r#"pure (fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer)))"#,
+        serde_json::json!(-3),
+    );
+    works(
+        r#"pure (fromMaybe "MISSING" (show <$> ((decode "123456789012345678901234567890" :: Maybe Value) >>= (^? _Integer))))"#,
+        serde_json::json!("123456789012345678901234567890"),
+    );
+}
+
+/// GO/NO-GO spike: `FromJSON [Char]` resolves via an `OVERLAPPING` instance
+/// over the general `FromJSON a => FromJSON [a]` instance at a single call
+/// site that also exercises the `OVERLAPPABLE` array-decoding branch, mirroring
+/// upstream aeson's `String` instance
+/// (https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_string_overlapping_spike() {
+    works(
+        r#"pure (object ["s" .= (either (const "ERR") id (eitherDecode "\"hi\"" :: Either Text String)), "xs" .= (either (const []) id (eitherDecode "[1,2,3]" :: Either Text [Int]))])"#,
+        serde_json::json!({"s": "hi", "xs": [1, 2, 3]}),
+    );
+}
+
+/// `FromJSON Char` decodes a JSON string of EXACTLY one character; a longer
+/// or empty string is an `Error` (aeson `FromJSON Char`'s `parseChar` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_char() {
+    works(
+        r#"pure (object ["ok" .= either (const '?') id (eitherDecode "\"a\"" :: Either Text Char), "tooLong" .= either (const True) (const False) (eitherDecode "\"ab\"" :: Either Text Char), "empty" .= either (const True) (const False) (eitherDecode "\"\"" :: Either Text Char)])"#,
+        serde_json::json!({"ok": "a", "tooLong": true, "empty": true}),
+    );
+}
+
+/// `FromJSON Integer` is unbounded: an exact integral `Scientific` of any
+/// magnitude decodes; a fractional value is an `Error` (aeson `FromJSON
+/// Integer` routes through `parseIntegral` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_integer() {
+    works(
+        r#"pure (object ["ok" .= show (either (const (-1 :: Integer)) id (eitherDecode "99999999999999999999999999" :: Either Text Integer)), "fraction" .= either (const True) (const False) (eitherDecode "3.7" :: Either Text Integer)])"#,
+        serde_json::json!({"ok": "99999999999999999999999999", "fraction": true}),
+    );
+}
+
+/// `FromJSON Word` is bounded non-negative integral: negative, fractional, or
+/// out-of-range is an `Error` (aeson `FromJSON Word` routes through
+/// `parseBoundedIntegral` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_word() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Word)) id (eitherDecode "42" :: Either Text Word), "negative" .= either (const True) (const False) (eitherDecode "-1" :: Either Text Word), "fraction" .= either (const True) (const False) (eitherDecode "3.7" :: Either Text Word)])"#,
+        serde_json::json!({"ok": 42, "negative": true, "fraction": true}),
+    );
+}
+
+/// `FromJSON Float`, same shape as the already-pinned `FromJSON Double`
+/// (aeson `FromJSON Float` routes through `parseRealFloat` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_float() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Float)) id (eitherDecode "3.5" :: Either Text Float), "notNumber" .= either (const True) (const False) (eitherDecode "\"x\"" :: Either Text Float)])"#,
+        serde_json::json!({"ok": 3.5, "notNumber": true}),
+    );
+}
+
+/// `FromJSON ()` decodes an EMPTY array, and nothing else — pinning aeson
+/// 1.5.x's shape (aeson 2.x relaxed `()` to accept any value; this instance
+/// deliberately mirrors the older, stricter shape) —
+/// https://hackage.haskell.org/package/aeson-1.5.6.0/docs/src/Data.Aeson.Types.FromJSON.html.
+#[test]
+fn works_from_json_unit() {
+    works(
+        r#"pure (object ["ok" .= either (const False) (const True) (eitherDecode "[]" :: Either Text ()), "nonEmpty" .= either (const True) (const False) (eitherDecode "[1]" :: Either Text ()), "notArray" .= either (const True) (const False) (eitherDecode "{}" :: Either Text ())])"#,
+        serde_json::json!({"ok": true, "nonEmpty": true, "notArray": true}),
+    );
+}
+
+/// Tuple `FromJSON` instances decode a JSON ARRAY with an EXACT arity check —
+/// a 2-tuple rejects a 3-element array — covering 2- through 5-tuples (aeson
+/// `FromJSON2 (,)` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_tuples() {
+    works(
+        r#"pure (object ["ok" .= either (const (0 :: Int, 0 :: Int)) id (eitherDecode "[1,2]" :: Either Text (Int, Int)), "wrongArity" .= either (const True) (const False) (eitherDecode "[1,2,3]" :: Either Text (Int, Int)), "fiveOk" .= either (const [0,0,0,0,0::Int]) (\(a,b,c,d,e) -> [a,b,c,d,e]) (eitherDecode "[1,2,3,4,5]" :: Either Text (Int, Int, Int, Int, Int))])"#,
+        serde_json::json!({"ok": [1, 2], "wrongArity": true, "fiveOk": [1, 2, 3, 4, 5]}),
+    );
+}
+
+/// `FromJSON (Either a b)` decodes upstream's object form: `{"Left": x}` to
+/// `Left x`, `{"Right": y}` to `Right y`; any other shape is an `Error`
+/// (aeson `FromJSON2 Either` —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+#[test]
+fn works_from_json_either() {
+    works(
+        r#"pure (object ["left" .= (case (eitherDecode "{\"Left\":1}" :: Either Text (Either Int Text)) of { Right (Left i) -> show i; _ -> "ERR" }), "right" .= (case (eitherDecode "{\"Right\":\"hi\"}" :: Either Text (Either Int Text)) of { Right (Right t) -> t; _ -> "ERR" }), "badShape" .= either (const True) (const False) (eitherDecode "{\"Wrong\":1}" :: Either Text (Either Int Text))])"#,
+        serde_json::json!({"left": "1", "right": "hi", "badShape": true}),
+    );
+}
+
+/// `ToJSON [Char]` (`String`) resolves via the `OVERLAPPING`/`OVERLAPPABLE`
+/// pair already shipped in `Tidepool.Aeson.Value` — unexercised by any probe
+/// before this one, found while spiking the `FromJSON [Char]` mechanism above
+/// (same GHC overlapping-instance resolution, now pinned on both directions).
+#[test]
+fn works_to_json_string_overlapping() {
+    works(
+        r#"pure (object ["s" .= ("hi" :: String), "xs" .= toJSON ([1, 2, 3] :: [Int])])"#,
+        serde_json::json!({"s": "hi", "xs": [1, 2, 3]}),
+    );
+}
+
+/// As `eval_raw_with_imports`, but also splices `helpers` (extra top-level
+/// declarations — a local `data` type a probe needs) into the generated
+/// module.
+fn eval_raw_with_helpers(
+    imports: &str,
+    helpers: &str,
+    code: &str,
+) -> Result<serde_json::Value, String> {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, helpers, None, None);
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hs = root.join("haskell/lib");
+    let lib = root.join(".tidepool/lib");
+    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
+    let mut d = NullDispatcher;
+    match compile_and_run(&src, "result", &include, &mut d, &()) {
+        Ok(v) => Ok(v.to_json()),
+        Err(e) => Err(tidepool_runtime::classify(&e).message),
+    }
+}
+
+fn works_with_helpers(helpers: &str, code: &str, expected: serde_json::Value) {
+    let helpers = helpers.to_string();
+    let code = code.to_string();
+    let helpers_t = helpers.clone();
+    let code_t = code.clone();
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_helpers("", &helpers_t, &code_t)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())
+        .and_then(|r| r);
+    match got {
+        Ok(got) => assert_eq!(
+            got, expected,
+            "\nWORKS probe returned the wrong value:\n  code: {code}\n  want: {expected}\n  got:  {got}"
+        ),
+        Err(e) => panic!("\nWORKS probe REGRESSED (was supposed to succeed):\n  code: {code}\n  error: {e}"),
+    }
+}
+
+/// Regression: an ALL-nullary sum still decodes from its bare constructor-name
+/// string (aeson's `allNullaryToStringTag = True` default), unperturbed by
+/// adding the mixed-sum `TaggedObject` branch below. Mirrors this module's own
+/// doc-comment example type.
+#[test]
+fn works_generic_nullary_sum_still_bare_string() {
+    works_with_helpers(
+        "data Mode = Observing | Deciding | Acting deriving (Generic, Show, FromJSON)",
+        r#"pure (case (eitherDecode "\"Deciding\"" :: Either Text Mode) of { Right Deciding -> True; _ -> False })"#,
+        serde_json::json!(true),
+    );
+}
+
+/// A sum with a non-nullary (record) constructor decodes via aeson's default
+/// `TaggedObject` shape: a `"tag"` field naming the constructor; a nullary
+/// constructor needs nothing else, a record constructor's fields are read
+/// from the SAME object alongside `"tag"` (aeson `parseNonAllNullarySum` /
+/// `FromTaggedObject'`'s record instance —
+/// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+/// An unrecognized tag, and a missing `"tag"` field, are both `Error`s.
+#[test]
+fn works_generic_tagged_sum() {
+    works_with_helpers(
+        "data Shape = Circle { radius :: Double } | Square { side :: Double } | Origin deriving (Generic, Show, FromJSON)",
+        r#"pure (object ["nullary" .= (case (eitherDecode "{\"tag\":\"Origin\"}" :: Either Text Shape) of { Right Origin -> True; _ -> False }), "record" .= (case (eitherDecode "{\"tag\":\"Circle\",\"radius\":2.5}" :: Either Text Shape) of { Right (Circle r) -> r; _ -> -1 }), "unknownTag" .= either (const True) (const False) (eitherDecode "{\"tag\":\"Triangle\"}" :: Either Text Shape), "missingTag" .= either (const True) (const False) (eitherDecode "{\"radius\":2.5}" :: Either Text Shape)])"#,
+        serde_json::json!({"nullary": true, "record": 2.5, "unknownTag": true, "missingTag": true}),
+    );
+}
+
+/// `Prelude.splitOn` with an empty separator raises the canonical
+/// `Data.Text.splitOn` exception instead of returning data — text-2.1.2
+/// continues to document an empty delimiter as invalid input.
+/// https://hackage.haskell.org/package/text-2.1.2/docs/Data-Text.html
+#[test]
+fn split_on_empty_needle_fails_loudly() {
+    fails_loudly(r#"pure (length (splitOn "" "abc"))"#, "splitOn");
+}
+
+/// `digitToInt` decodes a hex digit exactly, matching `Data.Char.digitToInt`.
+#[test]
+fn works_digit_to_int_hex() {
+    works(
+        r#"pure (object ["a" .= digitToInt 'a', "nine" .= digitToInt '9', "big" .= digitToInt 'F'])"#,
+        serde_json::json!({"a": 10, "nine": 9, "big": 15}),
+    );
+}
+
+/// `digitToInt` THROWS on a non-hex-digit character, mirroring
+/// `Data.Char.digitToInt` —
+/// https://hackage.haskell.org/package/base/docs/Data-Char.html#v:digitToInt
+#[test]
+fn digit_to_int_non_hex_fails_loudly() {
+    fails_loudly(r#"pure (digitToInt 'z')"#, "not a digit");
+}
+
+/// `digitToIntMay` is the total form of `digitToInt`: `Nothing` for a
+/// non-hex-digit character instead of throwing.
+#[test]
+fn works_digit_to_int_may() {
+    works(
+        r#"pure (object ["hit" .= digitToIntMay 'a', "miss" .= digitToIntMay 'z'])"#,
+        serde_json::json!({"hit": 10, "miss": null}),
+    );
+}
+
+/// `Tidepool.Data.Text`'s polymorphic `Pack` dialect, pinned against the
+/// standing criterion for every dialect choice in this repo: some
+/// canonical-INVALID case may now work (the win the dialect exists for), but
+/// NO canonical-VALID case may change or fail. `T.pack (s :: String)` is
+/// VALID-CANONICAL — `Data.Text.pack :: String -> Text` accepts exactly this;
+/// it must keep meaning "pack the String".
+#[test]
+fn works_pack_valid_canonical_string() {
+    works(
+        r#"pure (T.pack ("abc" :: String))"#,
+        serde_json::json!("abc"),
+    );
+}
+
+/// VALID-CANONICAL: `T.pack (t :: Text)` — not canonical `Data.Text.pack`
+/// (which only accepts `String`), but canonical under `Pack`'s own contract
+/// (identity on `Text`); pinned since the dialect's exported behavior for a
+/// `Text` argument must stay identity.
+#[test]
+fn works_pack_identity_on_text() {
+    works(
+        r#"pure (T.pack ("already text" :: Text))"#,
+        serde_json::json!("already text"),
+    );
+}
+
+/// AT-RISK VALID-CANONICAL: `T.pack "lit"` — a bare string literal is the
+/// case `Tidepool.Data.Text`'s own module comment flags as now ambiguous
+/// between the `Pack String` and `Pack Text` instances. `ExtendedDefaultRules`
+/// plus the preamble's `default (Int, Double, Text)` must resolve it (to
+/// `Text`, an identity pack) so it still means the obvious `Text "lit"` —
+/// if this probe fails to compile, the dialect criterion is violated.
+#[test]
+fn works_pack_string_literal_defaults() {
+    works(r#"pure (T.pack "lit")"#, serde_json::json!("lit"));
+}
+
+/// INVALID-CANONICAL, NOW WORKS: `T.pack (show x)` — canonically a type
+/// error (`Data.Text.pack :: String -> Text` cannot accept `show x :: Text`,
+/// since this stdlib's `show` returns `Text`, not `String`). This is the win
+/// the `Pack` dialect exists for: `T.pack (show x)` is identity instead of a
+/// trap. (`works_fork` already exercises this shape in production; this pins
+/// it directly.)
+#[test]
+fn works_pack_show_output_dialect_win() {
+    works(
+        r#"pure (T.pack (show (42 :: Int)))"#,
+        serde_json::json!("42"),
+    );
+}
+
+// =========================================================================
+// Quasiquoter strictness — `[j|…|]` exact-number and control-character
+// handling, `[fmt|…|]` brace-escape discipline. Rejection paths are
+// compile-time failures, pinned with `fails_loudly_with_imports` (defined
+// near `fails_loudly`, top of file — shared plumbing, not local to this
+// section).
+//
+// `[j|…|]`/`[fmt|…|]` are NOT auto-imported on this raw `template_haskell`
+// path (that injection is the live MCP server request handler's job, which
+// this harness bypasses) — every probe below needs an explicit
+// `Tidepool.QQ (fmt, j)` import, same as `works_form_qq` and
+// `render/fmt_spec_reject.rs`/`render/fmt_nonfinite.rs` elsewhere in this
+// suite.
+// =========================================================================
+
+const QQ_IMPORTS: &str = "Tidepool.QQ (fmt, j)";
+
+/// `[j|…|]` integer literals beyond `Double`'s 53-bit mantissa parse EXACT:
+/// the literal-syntax number path is integer digit accumulation only, never
+/// `read :: Double`. Before the fix, `read "123456789012345678" :: Double`
+/// rounds to the nearest representable double and loses the low digits.
+#[test]
+fn qq_json_exact_large_integer_literal() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [j|123456789012345678|]",
+        serde_json::json!(123456789012345678_i64),
+    );
+}
+
+/// A fractional literal with more significant digits than a `Double` mantissa
+/// can carry (19 digits) round-trips EXACTLY through `renderJson` — the
+/// coefficient/exponent are assembled arithmetically from the literal's
+/// digits, not recovered from a lossy `Double` parse.
+#[test]
+fn qq_json_exact_fraction_literal_beyond_double_precision() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure (renderJson [j|1.234567890123456789|])",
+        serde_json::json!("1.234567890123456789"),
+    );
+}
+
+/// The exact-number literal path also drives `[j|…|]` PATTERN matching
+/// (`buildMatch`'s `NNumber` arm): a beyond-`Double`-precision integer
+/// matches itself exactly.
+#[test]
+fn qq_json_pattern_matches_exact_large_integer() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure (case [j|123456789012345678|] of { [j|123456789012345678|] -> True; _ -> False })",
+        serde_json::json!(true),
+    );
+}
+
+/// JSON permits an arbitrarily large exponent, but `pNumber` narrows the
+/// exponent digits to `Int` (`fromInteger :: Integer -> Int`) before
+/// splicing — unguarded, a pathological exponent like this one would
+/// silently WRAP the Int rather than erroring, producing a wrong-but-quiet
+/// `Scientific`. `maxExponentDigits` (Json.hs) rejects it instead. NOTE:
+/// per the TL's fold-before-verify instruction, this probe has not executed
+/// — the marker is derived by hand from the error string `pNumber`
+/// constructs (`"exponent has too many digits (" ++ show (length ds) ++
+/// ") ..."`), not confirmed by a run.
+#[test]
+fn qq_json_exponent_overflow_rejected_not_wrapped() {
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [j|1e9999999|]", "too many digits");
+}
+
+/// MUST-NOT-BREAK companion to the probe above: `maxExponentDigits` counts
+/// SIGNIFICANT digits (leading zeros stripped first), so a cosmetically
+/// zero-padded exponent — 10 digit characters, magnitude 1 — is valid JSON
+/// (upstream aeson parses it without complaint) and must still PARSE, not
+/// get caught by the same guard that rejects genuine magnitude. `1e0000000001`
+/// denotes `1 * 10^1 = 10`. NOTE: per the TL's fold-before-verify
+/// instruction, this probe has not executed — the expected value is
+/// hand-derived (coefficient 1, exponent 1, canonical decimal render "10"),
+/// not confirmed by a run.
+#[test]
+fn qq_json_exponent_leading_zeros_still_parses() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure (renderJson [j|1e0000000001|])",
+        serde_json::json!("10"),
+    );
+}
+
+/// A raw (unescaped) control character inside a `[j|…|]` string literal is a
+/// compile-time error naming the offending code point — the JSON grammar the
+/// quoter advertises never allowed a literal control byte inside a string.
+#[test]
+fn qq_json_string_rejects_unescaped_control_char() {
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [j|\"a\u{1}b\"|]", "control character");
+}
+
+/// A JSON escape sequence for the SAME code point still works — only the
+/// raw, unescaped byte is rejected.
+#[test]
+fn qq_json_string_allows_escaped_control_char() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [j|\"a\\u0001b\"|]",
+        serde_json::json!("a\u{1}b"),
+    );
+}
+
+/// A bare, unmatched `}` outside a hole is a compile-time error in
+/// `[fmt|…|]` — matching the Python f-string grammar the module advertises
+/// (a lone `}` is not allowed; `}}` is the literal-`}` escape).
+#[test]
+fn qq_fmt_rejects_bare_unmatched_brace() {
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [fmt|value } here|]", "unmatched '}'");
+}
+
+/// MUST-NOT-BREAK: a `}` INSIDE a hole's expression, inside a string literal
+/// (`T.pack "a}b"`), is legal and must stay legal — only a `}` OUTSIDE a hole
+/// is rejected. `scanHole`/`scanLiteral` (bracket-depth + literal-aware) reach
+/// the real closing `}` without the new bare-`}` rule ever seeing the one
+/// inside the string, because it never leaves `scanLiteral`'s string-body scan.
+#[test]
+fn qq_fmt_brace_inside_hole_string_literal_still_works() {
+    works_with_imports(
+        QQ_IMPORTS,
+        r#"pure [fmt|{T.pack "a}b"}|]"#,
+        serde_json::json!("a}b"),
+    );
+}
+
+/// MUST-NOT-BREAK companion: a `}` INSIDE a hole's expression that is NOT in
+/// a string — an explicit-brace `let { … }` block (the same construct the
+/// module haddock cites for bracket-depth tracking) — also stays legal. The
+/// hole's own closing `}` is only recognized at bracket depth 0, so the
+/// nested `{ y = 1 }`'s `}` decrements depth instead of ending the hole.
+#[test]
+fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [fmt|{let { y = 1 :: Int } in y}|]",
+        serde_json::json!("1"),
+    );
+}
+
+/// The doubled-brace `}}` literal-`}` escape still works after the bare-`}`
+/// rejection lands (regression guard: only the UNDOUBLED case is rejected).
+#[test]
+fn qq_fmt_doubled_brace_still_literal() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [fmt|literal }} brace|]",
+        serde_json::json!("literal } brace"),
+    );
+}
+
+/// An unclosed `{` in `[fmt|…|]` now names the offset at which the quote body
+/// ran out of input — previously this lexer error carried no position.
+#[test]
+fn qq_fmt_unclosed_brace_carries_offset() {
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [fmt|hello {name|]", "at offset");
+}
+
+// =========================================================================
+// `Tidepool.FilePath` POSIX fidelity — the upstream `filepath` test vectors
+// for `normalise` and the sibling path functions.
+// =========================================================================
+
+/// `normalise` ported from `System.FilePath.Posix.normalise`
+/// (filepath-1.5.2.0, BSD-3-Clause) — trailing-separator and leading-`/`
+/// vectors, the ones the HIGH finding was about (the old splitOn-based
+/// shadow dropped a meaningful trailing separator and collapsed `"./"`).
+/// Vectors are upstream's own doctests, plus the finding's own repro shapes.
+/// <https://hackage.haskell.org/package/filepath-1.5.2.0/docs/System-FilePath-Posix.html>
+#[test]
+fn works_filepath_normalise_trailing_and_leading_separators() {
+    works(
+        r#"pure (object
+            [ "a_slash" .= normalise "a/"
+            , "test_many_slash" .= normalise "/test////"
+            , "dot_slash" .= normalise "./"
+            , "file_test_many_slash" .= normalise "/file/test////"
+            , "dotdot_bob_fred_slash" .= normalise "../bob/fred/"
+            , "bob_fred_dot" .= normalise "bob/fred/."
+            , "dot_bob_fred_slash" .= normalise "./bob/fred/"
+            , "empty" .= normalise ""
+            , "double_leading_slash_home" .= normalise "//home"
+            , "backslash_literal" .= normalise "/file/\\test////"
+            ])"#,
+        serde_json::json!({
+            "a_slash": "a/",
+            "test_many_slash": "/test/",
+            "dot_slash": "./",
+            "file_test_many_slash": "/file/test/",
+            "dotdot_bob_fred_slash": "../bob/fred/",
+            "bob_fred_dot": "bob/fred/",
+            "dot_bob_fred_slash": "bob/fred/",
+            "empty": ".",
+            "double_leading_slash_home": "/home",
+            "backslash_literal": "/file/\\test/",
+        }),
+    );
+}
+
+/// `normalise` — vectors upstream documents as UNCHANGED by normalisation
+/// (interior `.` collapsed, `..` left alone, no trailing separator to add).
+/// Confirms the port doesn't touch what the old shadow already got right.
+/// Same upstream URL as `works_filepath_normalise_trailing_and_leading_separators`.
+#[test]
+fn works_filepath_normalise_interior_dots_and_clean_paths() {
+    works(
+        r#"pure (object
+            [ "a_dot_b_dotdot_c" .= normalise "a/./b/../c"
+            , "test_dot_file" .= normalise "/test/./file"
+            , "file_dot_test" .= normalise "/file/./test"
+            , "test_file_dotdot_bob_fred_slash" .= normalise "/test/file/../bob/fred/"
+            , "a_dotdot_c" .= normalise "/a/../c"
+            , "dot" .= normalise "."
+            , "dot_dot" .= normalise "./."
+            , "slash_dot_slash" .= normalise "/./"
+            , "root" .= normalise "/"
+            ])"#,
+        serde_json::json!({
+            "a_dot_b_dotdot_c": "a/b/../c",
+            "test_dot_file": "/test/file",
+            "file_dot_test": "/file/test",
+            "test_file_dotdot_bob_fred_slash": "/test/file/../bob/fred/",
+            "a_dotdot_c": "/a/../c",
+            "dot": ".",
+            "dot_dot": "./",
+            "slash_dot_slash": "/",
+            "root": "/",
+        }),
+    );
+}
+
+/// Sibling-diff fix: `splitExtension`/`takeExtension`/`takeBaseName`/
+/// `hasExtension` no longer special-case a leading `.` (a hidden file like
+/// `.bashrc`) as "no extension" — upstream's `System.FilePath.Posix.splitExtension`
+/// (filepath-1.5.2.0) finds the extension from the LAST `.` in the whole
+/// path with no hidden-file exception, so a name that begins with `.` and
+/// has no other `.` splits as an EMPTY base name and an ALL-extension. The
+/// old Tidepool shadow silently gave the opposite (canonical-name,
+/// non-canonical semantics) answer for every dotfile.
+/// <https://hackage.haskell.org/package/filepath-1.5.2.0/docs/System-FilePath-Posix.html>
+#[test]
+fn works_filepath_extension_dotfile_fidelity() {
+    works(
+        r#"pure (object
+            [ "take_extension_bashrc" .= takeExtension ".bashrc"
+            , "take_extension_dot" .= takeExtension "."
+            , "split_extension_bashrc" .= (let (b, e) = splitExtension ".bashrc" in object ["base" .= b, "ext" .= e])
+            , "take_base_name_bashrc" .= takeBaseName ".bashrc"
+            , "has_extension_bashrc" .= hasExtension ".bashrc"
+            , "split_extension_crossing_slash" .= (let (b, e) = splitExtension "file.txt/boris" in object ["base" .= b, "ext" .= e])
+            , "take_extension_regular" .= takeExtension "file.txt"
+            ])"#,
+        serde_json::json!({
+            "take_extension_bashrc": ".bashrc",
+            "take_extension_dot": ".",
+            "split_extension_bashrc": {"base": "", "ext": ".bashrc"},
+            "take_base_name_bashrc": "",
+            "has_extension_bashrc": true,
+            "split_extension_crossing_slash": {"base": "file.txt/boris", "ext": ""},
+            "take_extension_regular": ".txt",
+        }),
+    );
+}
+
+// =========================================================================
+// `Tidepool.Data.Time` and the Prelude/Fmt-runtime shadows: the names the
+// stdlib claims are JIT-safe, each pinned by a probe that calls it.
+// =========================================================================
+
+/// `formatISO8601` on a known instant and a PRE-EPOCH instant, plus both
+/// directions of `parseISO8601` and the full parse-then-format round trip.
+///
+/// `UTCTime 1700000000000` is the well-known Unix instant `1700000000`s ->
+/// 2023-11-14T22:13:20Z. `UTCTime (-1000)` is 1000ms BEFORE the epoch —
+/// exactly one second earlier, which floors into the END of the preceding
+/// day: 1969-12-31T23:59:59Z, not a negative time-of-day. `parseISO8601
+/// "2026-07-01T19:24:22-07:00"` normalizes the `-07:00` offset to UTC (add
+/// 7h): 19:24:22 on the 1st becomes 02:24:22 on the 2nd — the same fixture
+/// the module's own haddock uses — pinned as epoch-ms, and round-tripped
+/// back through `formatISO8601` to the reformatted UTC string.
+#[test]
+fn works_time_formatting_pinned() {
+    works(
+        "pure (object [\"known\" .= formatISO8601 (UTCTime 1700000000000), \
+         \"pre_epoch\" .= formatISO8601 (UTCTime (-1000)), \
+         \"roundtrip_tz\" .= (case parseISO8601 \"2026-07-01T19:24:22-07:00\" of { Right t -> formatISO8601 t; Left e -> e }), \
+         \"parse_tz_ms\" .= (case parseISO8601 \"2026-07-01T19:24:22-07:00\" of { Right t -> epochMillis t; Left _ -> (-1) }), \
+         \"parse_epoch\" .= (case parseISO8601 \"1970-01-01T00:00:00Z\" of { Right t -> epochMillis t; Left _ -> (-1) })])",
+        serde_json::json!({
+            "known": "2023-11-14T22:13:20Z",
+            "pre_epoch": "1969-12-31T23:59:59Z",
+            "roundtrip_tz": "2026-07-02T02:24:22Z",
+            "parse_tz_ms": 1782959062000_i64,
+            "parse_epoch": 0
+        }),
+    );
+}
+
+/// `daysFromCivil`/`diffUTCTime`/`addUTCTime`/`epochMillis` — the Int-only
+/// civil-date arithmetic the module header claims is fully JIT-safe.
+///
+/// `daysFromCivil 2024 2 29` = 19782, the same epoch-day `toGregorian`'s
+/// fixture (`UTCTime 1709164800000`) decomposes to (`19782 * 86400 * 1000 ==
+/// 1709164800000`) — `daysFromCivil` is `civilFromDays`'s pinned inverse.
+/// `daysFromCivil 1970 1 1` = 0 (the epoch). `daysFromCivil 1969 12 31` =
+/// -1: one day before the epoch is epoch-day -1, not an off-by-one wrap.
+///
+/// `diffUTCTime (UTCTime 1000) (UTCTime (-500))` crosses the epoch boundary
+/// (one operand pre-epoch, one post-epoch): (1000 - (-500)) / 1000 = 1.5s.
+/// `diffUTCTime (UTCTime 0) (UTCTime 5000)` is a negative delta: (0 - 5000)
+/// / 1000 = -5s (an integral Double renders as a bare JSON integer, see
+/// `works_moderate_double_literals`).
+///
+/// `addUTCTime (-1.5) (UTCTime 1000)` both crosses the epoch boundary and
+/// applies a negative delta: 1000 + round(-1.5 * 1000) = 1000 - 1500 = -500.
+/// `addUTCTime 0.0625 (UTCTime 0)` and `addUTCTime 0.1875 (UTCTime 0)` pin
+/// the millisecond-rounding boundary at an EXACT tie: 1/16 and 3/16 are
+/// exactly representable in binary64, and so are their *1000 products (62.5
+/// and 187.5) — no floating-point rounding noise before `round` ever sees
+/// them, unlike a decimal literal such as 0.0005 whose stored double isn't
+/// provably exactly 0.0005. `round` is banker's rounding (ties to even, see
+/// `works_round_bankers`): 62.5 ties DOWN to 62 (even), 187.5 ties UP to 188
+/// (even) — not simple round-half-up.
+///
+/// `epochMillis (UTCTime (-500))` is the plain pre-epoch accessor: -500.
+#[test]
+fn works_time_arithmetic_pinned() {
+    works(
+        "pure (object [\"days_modern\" .= daysFromCivil 2024 2 29, \
+         \"days_epoch\" .= daysFromCivil 1970 1 1, \
+         \"days_pre_epoch\" .= daysFromCivil 1969 12 31, \
+         \"diff_cross_epoch\" .= diffUTCTime (UTCTime 1000) (UTCTime (-500)), \
+         \"diff_negative\" .= diffUTCTime (UTCTime 0) (UTCTime 5000), \
+         \"add_cross_epoch_neg\" .= epochMillis (addUTCTime (-1.5) (UTCTime 1000)), \
+         \"add_round_tie_down\" .= epochMillis (addUTCTime 0.0625 (UTCTime 0)), \
+         \"add_round_tie_up\" .= epochMillis (addUTCTime 0.1875 (UTCTime 0)), \
+         \"epoch_millis_pre_epoch\" .= epochMillis (UTCTime (-500))])",
+        serde_json::json!({
+            "days_modern": 19782,
+            "days_epoch": 0,
+            "days_pre_epoch": -1,
+            "diff_cross_epoch": 1.5,
+            "diff_negative": -5,
+            "add_cross_epoch_neg": -500,
+            "add_round_tie_down": 62,
+            "add_round_tie_up": 188,
+            "epoch_millis_pre_epoch": -500
+        }),
+    );
+}
+
+/// `replace`/`isSuffixOf`/`isInfixOf`/`takeWhileT`/`dropWhileT` — the
+/// `Tidepool.Prelude` Text shadows, called through the unqualified surface
+/// exactly as an eval user writes them.
+///
+/// `takeWhileT`/`dropWhileT` are pinned with an OPERATOR SECTION predicate
+/// (`(/= ',')`, `(< 'c')`), the shape a retired String-detour workaround
+/// existed for (a cross-module operator-section predicate reaching an
+/// external `Data.Text` unfolding once corrupted; `T` now points at the
+/// vendored home-module `Tidepool.Data.Text`) — plus partial application
+/// (`takeWhileT (/= ',')` passed to `map`) and use inside `filter`/`map`
+/// together, and empty-input/no-match cases for every one of the five.
+#[test]
+fn works_prelude_text_shadows_pinned() {
+    works(
+        "pure (object [\"replace_basic\" .= replace \"a\" \"o\" \"banana\", \
+         \"replace_no_match\" .= replace \"z\" \"o\" \"banana\", \
+         \"replace_empty_haystack\" .= replace \"a\" \"o\" \"\", \
+         \"is_suffix_true\" .= isSuffixOf \"ana\" \"banana\", \
+         \"is_suffix_false\" .= isSuffixOf \"xyz\" \"banana\", \
+         \"is_suffix_empty\" .= isSuffixOf \"\" \"banana\", \
+         \"is_infix_true\" .= isInfixOf \"nan\" \"banana\", \
+         \"is_infix_false\" .= isInfixOf \"xyz\" \"banana\", \
+         \"is_infix_empty\" .= isInfixOf \"\" \"banana\", \
+         \"take_while_section\" .= takeWhileT (/= ',') \"a,b,c\", \
+         \"take_while_no_match\" .= takeWhileT (== 'z') \"abc\", \
+         \"take_while_empty\" .= takeWhileT (/= ',') \"\", \
+         \"drop_while_section\" .= dropWhileT (< 'c') \"abcdef\", \
+         \"drop_while_no_match\" .= dropWhileT (== 'z') \"abc\", \
+         \"drop_while_empty\" .= dropWhileT (/= ',') \"\", \
+         \"take_while_partial_map\" .= map (takeWhileT (/= ',')) [\"a,b\", \"c,d\", \"nocomma\"], \
+         \"drop_while_filter_map\" .= map (dropWhileT (< 'c')) (filter (/= \"\") [\"abcdef\", \"\", \"cba\"])])",
+        serde_json::json!({
+            "replace_basic": "bonono",
+            "replace_no_match": "banana",
+            "replace_empty_haystack": "",
+            "is_suffix_true": true,
+            "is_suffix_false": false,
+            "is_suffix_empty": true,
+            "is_infix_true": true,
+            "is_infix_false": false,
+            "is_infix_empty": true,
+            "take_while_section": "a",
+            "take_while_no_match": "",
+            "take_while_empty": "",
+            "drop_while_section": "cdef",
+            "drop_while_no_match": "abc",
+            "drop_while_empty": "",
+            "take_while_partial_map": ["a", "c", "nocomma"],
+            "drop_while_filter_map": ["cdef", "cba"]
+        }),
+    );
+}
+
+/// `fmtInt`/`fmtFrac`/`fmtStr`/`fmtChar`/`fmtSigned`/`fmtPlain`
+/// (`Tidepool.QQ.Fmt.Runtime`) — called in the exact argument shape
+/// `[fmt|...|]` generates (`Tidepool.QQ.Fmt`'s `emitInt`/`emitFrac`/
+/// `emitStr`/`emitChar`/`emitDefault`: sign, then type-specific flags, then
+/// `grp`/width/fill/align, then the value last).
+///
+/// `fmtInt FMinus 10 .. 6 '0' FRight (-42)` = "000-42": `fpad` lays fill
+/// BEFORE the sign for right-alignment (not sign-aware zero-padding like
+/// printf's `%06d`) — pre="-", body="42", pad=6-3=3 chars of "0" first.
+/// `fmtInt FPlus 16 True True .. 0 ' ' FRight 255` = "+0XFF": explicit `+`
+/// sign, uppercase hex, `0x`/`0X` alt-form prefix. `fmtInt .. (Just ',') ..
+/// 1234567` groups every 3 digits: "1,234,567".
+///
+/// `fmtFrac` pins the rounding-tie boundary at 2 decimal places with EXACT
+/// dyadic-fraction ties, so no floating-point rounding noise reaches `round`:
+/// 0.125 (1/8) * 100 = 12.5 exactly, ties DOWN to the even 12 -> "0.12";
+/// 0.375 (3/8) * 100 = 37.5 exactly, ties UP to the even 38 -> "0.38"; at 0
+/// decimal places, 2.5 ties to the even 2 -> "2" (same banker's-rounding
+/// `round` primop as `works_round_bankers`). A
+/// negative value through a width/zero-fill: `fmtFrac .. 2 8 '0' FRight
+/// (-3.14159)` = "000-3.14". Percent mode pre-multiplies by 100 and appends
+/// "%": `fmtFrac FMinus True 1 .. 0.4567` = "45.7%".
+///
+/// `fmtStr (Just 3) .. FLeft "hello"` truncates to "hel"; `fmtStr Nothing 6
+/// '.' FRight "hi"` pads to "....hi". `fmtChar 3 '*' FLeft 65` treats 65 as
+/// a code point ('A') and left-pads: "A**".
+///
+/// `fmtSigned` recovers the sign from a leading '-' in the ALREADY-RENDERED
+/// text: `fmtSigned FPlus 6 '0' FRight "-42"` = "000-42" (negative, sign
+/// from the text, not from `FPlus`); `fmtSigned FPlus 6 '0' FRight "42"` =
+/// "000+42" (non-negative, so `FPlus`'s explicit "+" is used).
+/// `fmtPlain 8 '-' FCenter "hi"` centers with no sign logic: "---hi---".
+#[test]
+fn works_fmt_runtime_helpers_pinned() {
+    works(
+        "pure (object [\"int_neg_zero_pad\" .= fmtInt FMinus 10 False False Nothing 6 '0' FRight (-42), \
+         \"int_hex_alt_plus\" .= fmtInt FPlus 16 True True Nothing 0 ' ' FRight 255, \
+         \"int_group_commas\" .= fmtInt FMinus 10 False False (Just ',') 0 ' ' FRight 1234567, \
+         \"frac_tie_even_down\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.125, \
+         \"frac_tie_even_up\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.375, \
+         \"frac_zero_prec_round\" .= fmtFrac FMinus False 0 0 ' ' FRight 2.5, \
+         \"frac_neg_padded\" .= fmtFrac FMinus False 2 8 '0' FRight (-3.14159), \
+         \"frac_percent\" .= fmtFrac FMinus True 1 0 ' ' FRight 0.4567, \
+         \"str_truncate\" .= fmtStr (Just 3) 0 ' ' FLeft \"hello\", \
+         \"str_pad_right\" .= fmtStr Nothing 6 '.' FRight \"hi\", \
+         \"char_left_pad\" .= fmtChar 3 '*' FLeft 65, \
+         \"signed_neg\" .= fmtSigned FPlus 6 '0' FRight \"-42\", \
+         \"signed_pos\" .= fmtSigned FPlus 6 '0' FRight \"42\", \
+         \"plain_center\" .= fmtPlain 8 '-' FCenter \"hi\"])",
+        serde_json::json!({
+            "int_neg_zero_pad": "000-42",
+            "int_hex_alt_plus": "+0XFF",
+            "int_group_commas": "1,234,567",
+            "frac_tie_even_down": "0.12",
+            "frac_tie_even_up": "0.38",
+            "frac_zero_prec_round": "2",
+            "frac_neg_padded": "000-3.14",
+            "frac_percent": "45.7%",
+            "str_truncate": "hel",
+            "str_pad_right": "....hi",
+            "char_left_pad": "A**",
+            "signed_neg": "000-42",
+            "signed_pos": "000+42",
+            "plain_center": "---hi---"
+        }),
+    );
+}
+
+/// The `0`-flag's SIGN-AWARE zero-padding, pinned end to end through the
+/// real `[fmt|...|]` quasiquoter — not the runtime helpers called directly
+/// (contrast `works_fmt_runtime_helpers_pinned`, which calls `fmtInt` with
+/// an EXPLICIT `FRight`, a different and also-correct path).
+///
+/// Python's format-spec grammar: preceding the width field by a `0` enables
+/// sign-aware zero-padding for numeric types — equivalent to a fill
+/// character of `0` with an alignment type of `=`. `Tidepool.QQ.PyF.Spec`'s
+/// `overrideAlignmentIfZero` implements exactly this rule (a bare `0` flag
+/// with no explicit alignment maps to fill `'0'` plus `AlignInside`), and
+/// `Tidepool.QQ.Fmt.Runtime`'s `fpad FInside = pre ++ pad need ++ body`
+/// places the sign BEFORE the padding, between it and the digits.
+///
+/// The only existing zero-pad coverage (`haskell/test/Suite.hs`'s
+/// `qq_fmt_spec_zero_pad`, `[fmt|{n:04d}|]` on `n = 42`) runs on a POSITIVE
+/// number, which has no sign to place — `AlignInside` and plain `AlignRight`
+/// produce IDENTICAL output for a positive value, so that probe cannot tell
+/// the two apart. If the zero-flag override, `extractPad`, `alignE`, or
+/// `fpad`'s `FInside` case silently fell back to `AlignRight`, nothing
+/// already pinned would catch it. `[fmt|{n:06d}|]` on a NEGATIVE `n` is the
+/// shape that can: Python's `f"{-42:06d}"` is `"-00042"`, never `"000-42"`.
+///
+/// `[fmt|{d:08.2f}|]` on a negative `Double` pins the same wiring for the
+/// fractional presentation type: `-3.14159` rounds (non-tie) to `3.14` at 2
+/// decimal places, and sign-aware zero-padding to width 8 gives `"-0003.14"`
+/// — sign, three zero-fill digits, then the 4-character body `3.14`.
+#[test]
+fn works_fmt_qq_sign_aware_zero_pad() {
+    works_with_imports(
+        "Tidepool.QQ.Fmt (fmt)",
+        "pure (object [\"int_neg\" .= [fmt|{n:06d}|], \"frac_neg\" .= [fmt|{d:08.2f}|]]) \
+         where { n = (-42) :: Int; d = (-3.14159) :: Double }",
+        serde_json::json!({
+            "int_neg": "-00042",
+            "frac_neg": "-0003.14"
+        }),
+    );
 }

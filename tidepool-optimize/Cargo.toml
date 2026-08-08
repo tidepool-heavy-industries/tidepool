@@ -10,12 +10,12 @@ description = "Optimization passes for Tidepool Core"
 readme = "../README.md"
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
-rustc-hash = "2.1.0"
-thiserror = "1"
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-tidepool-testing = { path = "../tidepool-testing" }
-proptest = "1"
+tidepool-testing.workspace = true
+proptest.workspace = true
 serial_test = "3.4.0"

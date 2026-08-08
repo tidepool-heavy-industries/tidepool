@@ -2,18 +2,19 @@
 name = "tidepool-guess"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Guessing game example for Tidepool (JIT)"
 publish = false
 
 [dependencies]
-tidepool-repr = { version = "0.1.0", path = "../../tidepool-repr" }
-tidepool-eval = { version = "0.1.0", path = "../../tidepool-eval" }
-tidepool-effect = { version = "0.1.0", path = "../../tidepool-effect" }
-tidepool-bridge = { version = "0.1.0", path = "../../tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "../../tidepool-bridge-derive" }
-tidepool-macro = { version = "0.1.0", path = "../../tidepool-macro" }
-tidepool-codegen = { version = "0.1.0", path = "../../tidepool-codegen" }
-frunk = "0.4"
+tidepool-repr.workspace = true
+tidepool-eval.workspace = true
+tidepool-effect.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-macro.workspace = true
+tidepool-codegen.workspace = true
+frunk.workspace = true
 rand = "0.8"
 
 [package.metadata.tidepool]

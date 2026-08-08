@@ -1,14 +1,16 @@
-module Tidepool.CborEncode (encodeTree, encodeMetadata) where
+module Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Word
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.Translate (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..), DCMeta(..))
+import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 2.0 (bumped from 1.1 for
 -- the breaking metadata-entry shape change: 7 -> 8 elements, parent-type-name
@@ -150,3 +152,64 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
   <> encodeListLen (fromIntegral (length dcmFieldLabels))
   <> foldMap encodeString dcmFieldLabels
   <> encodeString dcmTypeName
+
+--------------------------------------------------------------------------------
+-- Turn-mode rich result (--turn) — independent of the frozen tree format
+-- above: no TPLR header, no version coupling. A 2-element list, a string tag
+-- ("Decl"/"Bind"/"Expr") plus the variant's payload, mirroring 'encodeNode's
+-- tagged-list convention. The JSON rendering ('Tidepool.Binders.renderTurnOutJson')
+-- uses the same tag strings and payload shape.
+--------------------------------------------------------------------------------
+
+encodeTurnOut :: TurnOut -> ByteString
+encodeTurnOut turnOut = toStrictByteString $ case turnOut of
+  TDecl bs items ->
+    encodeListLen 2 <> encodeString "Decl"
+    <> (encodeListLen 2 <> encodeTextList bs <> encodeExportItems items)
+  TBind bs var bbs aks wrapped ->
+    encodeListLen 2 <> encodeString "Bind"
+    <> (encodeListLen 5
+        <> encodeTextList bs
+        <> encodeInt var
+        <> encodeBoundBinders bbs
+        <> encodeAsks aks
+        <> encodeString wrapped)
+  TExpr var aks wrapped ->
+    encodeListLen 2 <> encodeString "Expr"
+    <> (encodeListLen 3
+        <> encodeInt var
+        <> encodeAsks aks
+        <> encodeString wrapped)
+
+encodeTextList :: [Text] -> Encoding
+encodeTextList xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeString xs
+
+encodeStringList :: [String] -> Encoding
+encodeStringList xs = encodeListLen (fromIntegral (length xs)) <> foldMap (encodeString . T.pack) xs
+
+encodeExportItems :: [ExportItem] -> Encoding
+encodeExportItems items = encodeListLen (fromIntegral (length items)) <> foldMap encodeExportItem items
+
+encodeExportItem :: ExportItem -> Encoding
+encodeExportItem item = case item of
+  EValue n     -> encodeListLen 2 <> encodeString "EValue" <> encodeString (T.pack n)
+  EType n cons -> encodeListLen 3 <> encodeString "EType" <> encodeString (T.pack n) <> encodeStringList cons
+  EClass n ms  -> encodeListLen 3 <> encodeString "EClass" <> encodeString (T.pack n) <> encodeStringList ms
+
+encodeBoundBinders :: [BoundBinder] -> Encoding
+encodeBoundBinders bs = encodeListLen (fromIntegral (length bs)) <> foldMap encodeBoundBinder bs
+
+encodeBoundBinder :: BoundBinder -> Encoding
+encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
+  encodeListLen 5
+  <> encodeString (T.pack name)
+  <> encodeWord64 varid
+  <> encodeString (T.pack modul)
+  <> encodeString (T.pack tier)
+  <> encodeString (T.pack tdisp)
+
+encodeAsks :: [(Word64, Text)] -> Encoding
+encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
+
+encodeAsk :: (Word64, Text) -> Encoding
+encodeAsk (site, ty) = encodeListLen 2 <> encodeWord64 site <> encodeString ty

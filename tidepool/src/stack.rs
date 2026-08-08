@@ -14,8 +14,8 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 }
 
 /// The debug decl list: base effects (Console..Time, `base_effects!` order)
-/// with Meta appended, then the interposed effects (Ask, RunLLMTurn) appended
-/// last. This is the SAME order `build_debug_stack`'s handler HList wires
+/// with Meta appended, then the interposed effects (Ask, RunLLMTurn, Fork)
+/// appended last. This is the SAME order `build_debug_stack`'s handler HList wires
 /// (the interposed effects are appended separately by `TidepoolMcpServer::new`,
 /// which pushes `ask_decl()`/`runllmturn_decl()`/`fork_decl()` onto whatever
 /// `H::collect_decls()` reports) — so a `TidepoolMcpServer` built on

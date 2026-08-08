@@ -21,7 +21,7 @@
 # which is what a measurement wants.
 set -euo pipefail
 
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4)
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,
@@ -30,7 +30,7 @@ SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /t
 # here — so it drains rather than deadlocks. Override the floor with
 # TIDEPOOL_GHC_MEM_FLOOR_MB (0 disables). This is a soft guard; a cgroup
 # MemoryMax is the hard ceiling.
-MEM_FLOOR_MB="${TIDEPOOL_GHC_MEM_FLOOR_MB:-4096}"
+MEM_FLOOR_MB="${TIDEPOOL_GHC_MEM_FLOOR_MB:-6144}"
 mem_available_mb() { awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo; }
 await_memory() {
   [ "$MEM_FLOOR_MB" -gt 0 ] || return 0
@@ -61,6 +61,10 @@ case "$mode" in
         exec {fd}>"$f"
         if flock -n "$fd"; then
           await_memory
+          # Marker for scripts that self-slot (scripts/battery.sh,
+          # scripts/battery-shard.sh): held here, so they must not acquire a
+          # second one. Set only after the slot is actually taken.
+          export TIDEPOOL_GHC_SLOT="$f"
           exec "$@"
         fi
         exec {fd}>&-
@@ -78,6 +82,7 @@ case "$mode" in
       exec {fd}>"$f"
       flock "$fd"
     done
+    export TIDEPOOL_GHC_SLOT="all"
     exec "$@"
     ;;
   *)

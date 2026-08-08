@@ -1,0 +1,78 @@
+# Spec: extract-side latency wave TL (respawn AFTER Phase B lands)
+
+Owns the extract-side half of the latency program: the metadata
+over-collection chain's root plus the declaration-path cluster. MUST wait
+for the one-spawn-turn Phase B TL to land (single owner of
+writeWholeModuleClosed at every point in time).
+
+## The measured motivation (jit-chain's experiment, 2026-08-09, pre-wrap on
+## real session Core — size all absolute wins from THESE figures)
+
+- turn 1: table=164 constructors, fragment-reachable=24 → 6.8:1 (~15%)
+- turn 2: table=166, reachable=15 → 11.1:1 (~9%) — worsens as the table grows
+- downstream: turn 1 emits 232 Cranelift funcs / 13,348 blocks for a
+  24-constructor fragment
+- CAVEAT (carry with the number): "single-digit-to-low-teens percent
+  reachable" — the table is 164–166, NOT "hundreds vs dozens".
+
+## Items (D/C/E numbering from the campaign; all green-lit on merit —
+## correctness gates required, benchmarks optional)
+
+- **D1** Reachable Core is translated TWICE: writeWholeModuleClosed's
+  scanMeta = collectUsedDataCons re-runs the FULL translator per reachable
+  RHS just to rediscover tsUsedDCs (Main.hs ~329, Translate.hs ~1027),
+  discarding the IR. Fix: translateModule is the one authoritative producer
+  (IR + used DCs + types + effect sites); defense-in-depth = cheap Core
+  visitor asserting subset, never a second translation.
+- **D2** Metadata = every constructor of every home-module TyCon, no
+  reachability (mg_tcs → collectDataCons, Translate.hs ~2718). Fix:
+  RuntimeTypeClosure from runtime-observable roots (built/matched cons in
+  reachable Core; sibling sets where rendering needs them; target/result +
+  boundary + session-bound types). THE chain root — shrinks the table,
+  wrapper chain, and CBOR for free.
+- **C1** GHC compiles every home module twice per extract (load'
+  LoadAllTargets + unconditional second parse/typecheck/core2core loop —
+  GhcPipeline.hs ~165/~184; session path ~366/~387). Leading suspect for
+  the 6.8s extract_spawn. First: bracket load' SEPARATELY from the second
+  loop under TIDEPOOL_TIMING (the capture that was queued and abandoned).
+- **C2** resolveExternals expands the full external closure BEFORE target
+  reachability (Resolve.hs ~75 → Translate.hs ~651 prune); the
+  isNeverResolve fences are the tell. Fix: demand-driven worklist. ALSO E5:
+  the queue is list-prepend + visited-later — a real worklist with
+  scheduled-or-visited membership.
+- **E1** Declaration turns pay multiple disposable GHC boots. Phase B kills
+  the --emit-* spawns; the remainder = ONE parse/typecheck transaction
+  returning binders+diagnostics+interfaces+Core, committed atomically.
+- **E2** Lib.Gn → Lib.G(n-1) linear home-module chain ⇒ O(n²)
+  declaration-heavy sessions (SESSION-COMPOUNDING; dogfood-critical). Fixes:
+  retained home-package state / compile-each-generation-once / periodic
+  compact checkpoints. Rendering-only fixes miss the issue.
+- **E3** cumulative_exports_before walks all prior turns per render →
+  incremental persistent maps. Cleanup-sized.
+- **E4** FatIface fallback decodes a whole module's mi_extra_decls for one
+  unfolding; per-process cache dies with each disposable extractor.
+- **E6** canonicalizeDFlags forces -O2 on every module summary → tiered
+  (validation parse/typecheck-only; optimized Core only for
+  target+reachable). SEMANTICS-SENSITIVE: exposed unfoldings affect
+  extraction — differential + corpus + extract-fidelity suites mandatory.
+
+**The pivotal decision: persistent extractor.** E1/E2/E4 all point at it;
+C1's measurement decides between precompiled interfaces vs persistent
+server. Measure first (Codex ranking: binder-vs-validation spawn breakdown;
+compile time vs #generations; modules typechecked per generation;
+fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
+
+## Constraints
+
+- The `classify` phase vocabulary decision is binding (see
+  plans/one-spawn-turn-protocol.md): extract phase `classify` after
+  ghc_session; classify_extract retired with a doc tombstone.
+- Extractor id-stability is now a PINNED invariant (three permanent tests
+  from the ConTags incident — session_table_qualified_identity + two
+  quick-tier assertions). Changing id-minting fires them; that's the
+  design conversation happening, not a test to silence.
+- One-format wire policy: extract changes that move the wire ship both
+  sides via redeploy, fail loud on skew.
+- Correctness gates: hardened differential (floors), corpus_report,
+  extract-fidelity-test 26/26, harness acceptance. E6 additionally needs
+  the full set with zero tolerance.

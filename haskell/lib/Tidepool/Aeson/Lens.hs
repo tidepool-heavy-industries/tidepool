@@ -32,7 +32,7 @@ import Control.Lens (Traversal', Prism', prism')
 import Tidepool.Aeson.Value (Value(..), KeyMap, fromText)
 import Tidepool.Aeson.Scientific
   ( Scientific, scientific, toRealFloat, fromFloatDigits
-  , floorScientific, floorBoundedInteger )
+  , truncateScientific, truncateBoundedInteger )
 
 -- | Access a value at a given key in a JSON object.
 key :: Text -> Traversal' Value Value
@@ -90,22 +90,24 @@ _Object = prism' Object $ \v -> case v of
   _        -> Nothing
 
 -- | Prism that extracts an Int from a Number value: exact for integral
--- numbers, FLOORED for fractional ones (@\"-3.7\"@ -> @-4@), matching
--- upstream lens-aeson; @Nothing@ if the (floored) value is out of 'Int'
--- range rather than silently wrapping.
+-- numbers, TRUNCATED toward zero for fractional ones (@\"-3.7\"@ -> @-3@,
+-- @\"10.5\"@ -> @10@), matching upstream @Data.Aeson.Lens._Int@'s integral
+-- conversion; @Nothing@ if the (truncated) value is out of 'Int' range rather
+-- than silently wrapping. https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
 _Int :: Prism' Value Int
 _Int = prism' (\i -> Number (scientific (fromIntegral i) 0)) $ \v -> case v of
-  Number s -> floorBoundedInteger s
+  Number s -> truncateBoundedInteger s
   _        -> Nothing
 
 -- | Prism that extracts an Integer from a Number value. Mirrors
 -- @Data.Aeson.Lens._Integer@: an integral 'Scientific' yields its exact
--- 'Integer' coefficient (any magnitude); a fractional number FLOORS (matching
--- upstream lens-aeson, e.g. @\"-3.7\"@ -> @-4@). 'Integer' is unbounded, so
--- there is no out-of-range case here (unlike '_Int').
+-- 'Integer' coefficient (any magnitude); a fractional number TRUNCATES toward
+-- zero (@\"-3.7\"@ -> @-3@), matching upstream lens-aeson's integral
+-- conversion. 'Integer' is unbounded, so there is no out-of-range case here
+-- (unlike '_Int'). https://hackage.haskell.org/package/lens-aeson/docs/Data-Aeson-Lens.html
 _Integer :: Prism' Value Integer
 _Integer = prism' (\i -> Number (scientific i 0)) $ \v -> case v of
-  Number s -> Just (floorScientific s)
+  Number s -> Just (truncateScientific s)
   _        -> Nothing
 
 -- | Prism that extracts a Double from a Number value.

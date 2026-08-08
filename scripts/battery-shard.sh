@@ -31,6 +31,13 @@ if [ $# -lt 1 ]; then
   echo "usage: $0 <crate> [extra nextest args...]" >&2
   exit 1
 fi
+
+# Take a host GHC slot for the whole shard — see scripts/battery.sh for why
+# this is self-slotted rather than left to the caller. After the usage check,
+# so a misinvocation fails immediately instead of after a slot wait.
+if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
+  exec "$PWD/scripts/ghc-slots.sh" run -- "$PWD/scripts/battery-shard.sh" "$@"
+fi
 crate="$1"
 shift
 

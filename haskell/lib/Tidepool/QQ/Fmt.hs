@@ -43,7 +43,8 @@
 --
 -- * @\\\{@ → literal @{@, @\\\\@ → literal @\\@, @\\c@ → @\\c@ unchanged.
 -- * @{{@ → literal @{@, @}}@ → literal @}@ (PyF\/Python doubling).
--- * A bare @}@ outside a hole is a literal @}@.
+-- * A bare @}@ outside a hole is a compile-time error — write @}}@ for a
+--   literal @}@ (matching Python\/PyF: a lone @}@ is not allowed).
 -- * An unclosed @{@ → compile-time error.
 --
 -- == Limitation
@@ -90,7 +91,7 @@ data Item
 ------------------------------------------------------------------------
 
 fmtExp :: String -> Q Exp
-fmtExp src = lexItems src >>= buildExp
+fmtExp src = lexItems src src >>= buildExp
 
 buildExp :: [Item] -> Q Exp
 buildExp items = do
@@ -120,19 +121,22 @@ mergeAdjacentLits []                        = []
 -- Hole lexer (bracket-depth + literal aware)
 ------------------------------------------------------------------------
 
-lexItems :: String -> Q [Item]
-lexItems []                     = return []
-lexItems ('{' : '{' : r)        = consLit "{"      (lexItems r)   -- {{ → {
-lexItems ('}' : '}' : r)        = consLit "}"      (lexItems r)   -- }} → }
-lexItems ('\\' : '{' : r)       = consLit "{"      (lexItems r)   -- \{ → {
-lexItems ('\\' : '\\' : r)      = consLit "\\"     (lexItems r)   -- \\ → \
-lexItems ('\\' : c : r)         = consLit ['\\', c] (lexItems r)  -- \c → \c
-lexItems ('{' : r)              = do
-    (body, rest) <- scanHole 0 False r
+-- | @lexItems full remaining@ — @full@ is the whole quote body (fixed, for
+-- offset reporting); @remaining@ shrinks as input is consumed.
+lexItems :: String -> String -> Q [Item]
+lexItems _    []                     = return []
+lexItems full ('{' : '{' : r)        = consLit "{"      (lexItems full r)   -- {{ → {
+lexItems full ('}' : '}' : r)        = consLit "}"      (lexItems full r)   -- }} → }
+lexItems full ('\\' : '{' : r)       = consLit "{"      (lexItems full r)   -- \{ → {
+lexItems full ('\\' : '\\' : r)      = consLit "\\"     (lexItems full r)   -- \\ → \
+lexItems full ('\\' : c : r)         = consLit ['\\', c] (lexItems full r)  -- \c → \c
+lexItems full ('{' : r)              = do
+    (body, rest) <- scanHole full 0 False r
     let (e, msp) = splitExprSpec body
-    fmap (IHole (trim e) (fmap trim msp) :) (lexItems rest)
-lexItems ('}' : r)              = consLit "}" (lexItems r)        -- bare } literal
-lexItems (c : r)                = consLit [c] (lexItems r)
+    fmap (IHole (trim e) (fmap trim msp) :) (lexItems full rest)
+lexItems full s@('}' : _)            =
+    fail (errAt full s "unmatched '}' — a literal '}' must be written as '}}'")
+lexItems full (c : r)                = consLit [c] (lexItems full r)
 
 consLit :: String -> Q [Item] -> Q [Item]
 consLit s = fmap (ILit s :)
@@ -141,29 +145,34 @@ consLit s = fmap (ILit s :)
 -- skipping string and char literals.  @pIdent@ tracks whether the previous
 -- char was an identifier char, so a @'@ following one (a prime, e.g. @x'@) is
 -- not mistaken for a char-literal opener.
-scanHole :: Int -> Bool -> String -> Q (String, String)
-scanHole _ _ [] = fail "fmt: unclosed '{' — no matching '}' before end of quote"
-scanHole d pIdent (c : cs)
+scanHole :: String -> Int -> Bool -> String -> Q (String, String)
+scanHole full _ _ [] = fail (errAt full "" "unclosed '{' — no matching '}' before end of quote")
+scanHole full d pIdent (c : cs)
   | c == '}' && d == 0 = return ([], cs)
-  | c == '"'           = do (lit, cs') <- scanLiteral '"' cs
-                            prependBody ('"' : lit) (scanHole d False cs')
+  | c == '"'           = do (lit, cs') <- scanLiteral full '"' cs
+                            prependBody ('"' : lit) (scanHole full d False cs')
   | c == '\'' && not pIdent
-                       = do (lit, cs') <- scanLiteral '\'' cs
-                            prependBody ('\'' : lit) (scanHole d False cs')
-  | otherwise          = prependBody [c] (scanHole (bump c d) (isIdentChar c) cs)
+                       = do (lit, cs') <- scanLiteral full '\'' cs
+                            prependBody ('\'' : lit) (scanHole full d False cs')
+  | otherwise          = prependBody [c] (scanHole full (bump c d) (isIdentChar c) cs)
   where
     prependBody pre m = do { (b, r) <- m; return (pre ++ b, r) }
 
 -- | Consume a string\/char literal body (after the opening delimiter) up to
 -- and including the closing delimiter, honouring backslash escapes.
-scanLiteral :: Char -> String -> Q (String, String)
-scanLiteral delim = go
+scanLiteral :: String -> Char -> String -> Q (String, String)
+scanLiteral full delim = go
   where
-    go []               = fail "fmt: unterminated literal inside a {hole}"
+    go []               = fail (errAt full "" "unterminated literal inside a {hole}")
     go ('\\' : x : xs)  = do { (a, r) <- go xs; return ('\\' : x : a, r) }
     go (x : xs)
       | x == delim      = return ([delim], xs)
       | otherwise       = do { (a, r) <- go xs; return (x : a, r) }
+
+-- | A lexer error message naming @msg@, with the offset into @full@ at which
+-- @at@ (a physical suffix of @full@) begins.
+errAt :: String -> String -> String -> String
+errAt full at msg = "fmt: " ++ msg ++ " (at offset " ++ show (length full - length at) ++ ")"
 
 bump :: Char -> Int -> Int
 bump c d

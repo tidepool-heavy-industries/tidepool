@@ -2,28 +2,29 @@
 name = "tidepool-tide"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Tidepool interactive shell and compiler"
 publish = false
 
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"
-tidepool-repr = { version = "0.1.0", path = "../../tidepool-repr" }
-tidepool-bridge = { version = "0.1.0", path = "../../tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "../../tidepool-bridge-derive" }
-tidepool-eval = { version = "0.1.0", path = "../../tidepool-eval" }
-tidepool-effect = { version = "0.1.0", path = "../../tidepool-effect" }
-tidepool-macro = { version = "0.1.0", path = "../../tidepool-macro" }
-tidepool-codegen = { version = "0.1.0", path = "../../tidepool-codegen" }
-frunk = "0.4"
-ureq = "2"
-url = "2"
+tidepool-repr.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-eval.workspace = true
+tidepool-effect.workspace = true
+tidepool-macro.workspace = true
+tidepool-codegen.workspace = true
+frunk.workspace = true
+ureq.workspace = true
+url.workspace = true
 rustyline = "15"
 anyhow = "1.0"
 thiserror = "2"
 clap = { version = "4.4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 miette = { version = "7", features = ["fancy"] }
 
 [package.metadata.tidepool]

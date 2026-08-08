@@ -3,45 +3,26 @@ name:          tidepool-extract
 version:       0.1.0.0
 build-type:    Simple
 
-executable tidepool-extract-bin
-  main-is:          Main.hs
-  hs-source-dirs:   app, src, lib
-  other-modules:
+-- Internal (unexposed) sub-library: the genuinely shared extractor
+-- implementation, compiled ONCE per configuration instead of once per
+-- component. Chosen over a plain top-level `library` stanza because this
+-- package has no public API of its own (it's an app, not a library people
+-- depend on) — an internal library says "shared build unit" without implying
+-- a package-level export surface. tidepool-extract-bin and the three
+-- src/-dependent test-suites below all depend on it; formqq-parser-test does
+-- not (it only needs lib/Tidepool/FormQQ/Parse.hs, never src/).
+library tidepool-extract-internal
+  hs-source-dirs:   src
+  exposed-modules:
     Tidepool.Binders
+    Tidepool.CborEncode
     Tidepool.DiagJson
+    Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.Resolve
     Tidepool.Session
     Tidepool.Timing
     Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
-    Tidepool.CborEncode
-    Tidepool.Prelude
-    Tidepool.FilePath
-    Tidepool.Render
-    Tidepool.Data.Text
-    Tidepool.Data.Time
-    Tidepool.Records
-    Tidepool.TextFormat
-    Tidepool.Table
-    Tidepool.Internal.DataTextProbe
-    Tidepool.Aeson
-    Tidepool.Aeson.Scientific
-    Tidepool.Aeson.Value
-    Tidepool.Aeson.KeyMap
-    Tidepool.Aeson.Lens
-    Tidepool.Aeson.FromJSON
-    Tidepool.QQ
-    Tidepool.QQ.Fmt
-    Tidepool.QQ.Fmt.Runtime
-    Tidepool.QQ.PyF.Spec
-    Tidepool.QQ.Json
-    Tidepool.QQ.Validate
-    Tidepool.Patch
-    Tidepool.QQ.Patch
-    Tidepool.QQ.HsMeta.Parse
-    Tidepool.QQ.HsMeta.Settings
-    Tidepool.QQ.HsMeta.Translate
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
@@ -63,19 +44,39 @@ executable tidepool-extract-bin
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
-executable spike-extract
+-- The only default-built executable. `app/Main.hs`'s own import closure pulls
+-- in no lib/Tidepool/** module (the eval stdlib is a runtime GHC include
+-- path, not a host-compiled dependency — see haskell/CLAUDE.md), so
+-- hs-source-dirs is just `app` and everything else comes from the internal
+-- library.
+executable tidepool-extract-bin
+  main-is:          Main.hs
+  hs-source-dirs:   app
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc  >= 9.12 && < 9.13,
+    tidepool-extract-internal,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    text
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
+-- Not built by default: `cabal build` only builds tidepool-extract-bin.
+-- Run: cabal test spike-extract  (needs the nix with-packages GHC on PATH;
+-- `cabal build --enable-tests` builds it without running).
+test-suite spike-extract
+  type:             exitcode-stdio-1.0
   main-is:          Spike.hs
-  hs-source-dirs:   spike-extract, src
-  other-modules:
-    Tidepool.GhcPipeline
-    Tidepool.Session
-    Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
+  hs-source-dirs:   spike-extract
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
+    tidepool-extract-internal,
     bytestring,
     containers,
     filepath,
@@ -89,20 +90,16 @@ executable spike-extract
 -- Wave-3a acceptance test: drives the PRODUCTION Option-C surface
 -- (Tidepool.Session + runPipelineSession + translateModuleClosed) and asserts
 -- a session-binder reference reaches Core as external NVar(stableVarId).
--- Run: cabal run session-c-test  (needs the nix with-packages GHC on PATH).
-executable session-c-test
+-- Run: cabal test session-c-test  (needs the nix with-packages GHC on PATH).
+test-suite session-c-test
+  type:             exitcode-stdio-1.0
   main-is:          SessionCTest.hs
-  hs-source-dirs:   test-session, src
-  other-modules:
-    Tidepool.GhcPipeline
-    Tidepool.Session
-    Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
+  hs-source-dirs:   test-session
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
+    tidepool-extract-internal,
     bytestring,
     containers,
     filepath,
@@ -117,20 +114,16 @@ executable session-c-test
 -- shared field label under different parent types => distinct disambiguators;
 -- non-field Name => empty disambiguator. Pins the mechanism directly (the
 -- gotcha_registry canary passes pre-fix, so it does not).
--- Run: cabal run varid-mechanism-test  (needs the nix with-packages GHC on PATH).
-executable varid-mechanism-test
+-- Run: cabal test varid-mechanism-test  (needs the nix with-packages GHC on PATH).
+test-suite varid-mechanism-test
+  type:             exitcode-stdio-1.0
   main-is:          VarIdMechanismTest.hs
-  hs-source-dirs:   test-varid, src
-  other-modules:
-    Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
-    Tidepool.GhcPipeline
-    Tidepool.Session
+  hs-source-dirs:   test-varid
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
+    tidepool-extract-internal,
     bytestring,
     containers,
     filepath,
@@ -145,8 +138,12 @@ executable varid-mechanism-test
 -- evaluation — see FormQQParserTest.hs). The compile-time-fail path is
 -- exercised live through the JIT eval pipeline by `works_form_qq` in
 -- tidepool-runtime/tests/jit_surface.rs.
--- Run: cabal run formqq-parser-test
-executable formqq-parser-test
+-- Run: cabal test formqq-parser-test
+-- Needs `lib` on hs-source-dirs (not the internal library): it exercises
+-- Tidepool.FormQQ.Parse, an eval-stdlib asset module, not extractor
+-- implementation.
+test-suite formqq-parser-test
+  type:             exitcode-stdio-1.0
   main-is:          FormQQParserTest.hs
   hs-source-dirs:   test-formqq, lib
   other-modules:
@@ -159,21 +156,25 @@ executable formqq-parser-test
 -- recognizer module qualification, unboxed-tuple result-arity fail-loud.
 -- Drives the real runPipeline + translateModuleClosed path on synthetic
 -- fixture modules written under test-fidelity/work/.
--- Run: cabal run extract-fidelity-test  (needs the nix with-packages GHC on PATH).
-executable extract-fidelity-test
+-- Run: cabal test extract-fidelity-test  (needs the nix with-packages GHC on PATH).
+-- A test-suite, not an executable: `cabal build` builds only the production
+-- exe, and every non-production component here is a test-suite so it stays
+-- that way. `Main.hs` already exits non-zero unless every check passes, which
+-- is exactly the exitcode-stdio-1.0 contract.
+-- Reaches the extractor through `tidepool-extract-internal` rather than
+-- re-listing src/ modules on its own hs-source-dirs — the whole point of the
+-- internal library is that the extractor compiles ONCE per configuration.
+test-suite extract-fidelity-test
+  type:             exitcode-stdio-1.0
   main-is:          Main.hs
-  hs-source-dirs:   test-fidelity, src
+  hs-source-dirs:   test-fidelity
   other-modules:
     Fidelity.Harness
     Fidelity.Erasure
     Fidelity.Recognizers
     Fidelity.PrimopArity
-    Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
-    Tidepool.GhcPipeline
-    Tidepool.Session
   build-depends:
+    tidepool-extract-internal,
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,

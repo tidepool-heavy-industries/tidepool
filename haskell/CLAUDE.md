@@ -8,6 +8,26 @@ The GHC→Core extractor (`tidepool-extract`) and the eval stdlib
 
 After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.).
 
+**Package layout.** `cabal build` (no target) builds only `tidepool-extract-bin`,
+the production executable. Its `Main.hs` depends on the internal library
+`tidepool-extract-internal` (`hs-source-dirs: src`), which holds the extractor
+implementation (`Tidepool.Binders`, `.GhcPipeline`, `.Session`, `.Translate`,
+`.Resolve`, `.FatIface`, `.CborEncode`, `.DiagJson`, `.Timing`) — compiled ONCE
+and shared by the production binary and the four `src`-dependent test-suites
+below, instead of once per component. Five non-production components exist as
+`test-suite` stanzas, so `cabal build` skips them by default:
+
+| Component | Purpose | Run |
+|---|---|---|
+| `spike-extract` | scratch pipeline spike | `cabal test spike-extract` |
+| `session-c-test` | Wave-3a session-binder acceptance pin | `cabal test session-c-test` |
+| `varid-mechanism-test` | `stableVarId`/`fieldParentDisamb` contract pin | `cabal test varid-mechanism-test` |
+| `formqq-parser-test` | `[form\|...\|]` DSL line-parser unit tests | `cabal test formqq-parser-test` |
+| `extract-fidelity-test` | erasure symmetry, recognizer qualification, unboxed-tuple arity — through the real pipeline | `cabal test extract-fidelity-test` |
+
+`cabal build --enable-tests` builds all five without running them. Each
+`.cabal` stanza carries its own `Run:` comment; this table just indexes them.
+
 **How the extract binary is resolved.** `tidepool-extract` is the GHC→Core
 extractor. The Rust runtime invokes it via the `TIDEPOOL_EXTRACT` env var if set,
 else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs`, `cache.rs`).
@@ -17,6 +37,18 @@ and `exec`s the `tidepool-extract-bin` binary **in the nix store**. Deploying a 
 extract means updating that nix profile entry (see below) — copying a binary
 under `~/.local/bin` or `~/.cargo/bin` does nothing, as the nix-profile entry is
 earlier on PATH.
+
+**The cross-worktree Haskell cache is nix, not `dist-newstyle`.** Patched GHC
+and every dependency derivation (`base`, `lens`, `cborg`, …) are
+content-addressed in the nix store and shared through Cachix — that's what
+makes a from-scratch `cabal build` fast on a box with many active worktrees:
+the compiler and every boot/Hackage package it needs are already built and
+shared, only this package's own modules compile. `dist-newstyle` is mutable
+per-worktree build state (object files, the local plan) and must NEVER be
+shared between active worktrees — two `cabal` processes writing the same
+`dist-newstyle` race each other's build lock and cache files. Each worktree
+gets its own `dist-newstyle` (gitignored) for free by virtue of being a
+separate checkout; don't "optimize" this into a shared directory.
 
 **Local iteration — test against a worktree build (no deploy):**
 
@@ -115,10 +147,16 @@ surface here — it drifts. Module map:
   end-to-end — see `works_form_qq` in `tidepool-runtime/tests/jit_surface.rs`.
   A new stdlib module needs no build-time registration to be eval-importable
   (the extract binary resolves `haskell/lib` as a GHC include path at
-  runtime); `tidepool-extract.cabal`'s `other-modules` list is unrelated to
-  this and can safely lag behind (confirmed empirically: `Tidepool.Ui`,
-  `Tidepool.Cargo`, `Tidepool.Git`, `Tidepool.Records.Bridged` all work
-  eval-side despite not being listed there).
+  runtime). `tidepool-extract-bin`'s derived import closure contains ZERO
+  `lib/Tidepool/**` modules — `app/Main.hs` only ever reaches
+  `tidepool-extract-internal` (the `src/` implementation), never `lib/`, so
+  `lib/` is a pure runtime asset tree as far as the production component's
+  build is concerned; nothing there is host-compiled or needs listing. The
+  one exception is `formqq-parser-test`, which unit-tests
+  `Tidepool.FormQQ.Parse` directly host-side and so lists it under
+  `other-modules` with `lib` on its own `hs-source-dirs` — that dependency is
+  real and expected to stay in sync, unlike the old blanket list this passage
+  used to describe.
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 
