@@ -92,12 +92,16 @@ fn test_fault_mid_closure_never_double_drops_the_capture() {
 
     assert!(result.is_err(), "expected SignalError, got Ok");
     let drops = COUNT.load(Ordering::SeqCst);
-    // A fault mid-closure abandons the trampoline's stack frame via
-    // siglongjmp, which skips Rust destructors: the capture leaks (0
-    // drops). What must never happen is 2 — that was the double-free.
-    assert!(
-        drops <= 1,
-        "capture dropped {} times, expected at most 1 (leak-on-fault, never double-drop)",
+    // The trampoline moves the closure out of the caller's payload onto its
+    // own stack frame before invoking it; a fault mid-call abandons that
+    // frame via siglongjmp, which skips Rust destructors, so the capture
+    // leaks — exactly 0 drops. The caller's payload no longer owns the
+    // closure by this point, so it has nothing left to drop either. Any
+    // observed drop would mean something still (wrongly) owns and drops a
+    // value the trampoline already owns.
+    assert_eq!(
+        drops, 0,
+        "capture dropped {} times, expected exactly 0 (leak-on-fault, never dropped)",
         drops
     );
 }
