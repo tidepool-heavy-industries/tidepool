@@ -76,3 +76,28 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - Correctness gates: hardened differential (floors), corpus_report,
   extract-fidelity-test 26/26, harness acceptance. E6 additionally needs
   the full set with zero tolerance.
+
+## D7 (measured live, 2026-08-08 dogfood): boot pays FOUR extract compiles
+## (~96s) before the first model call
+
+Clean-cache wizard launch decomposition (release, box under moderate load;
+extract_spawn 14-33s each):
+
+1. ~15s — outer session boot seed (`driver.rs` bootstrap): full-template
+   compile of `pure (toJSON (0 :: Int))` purely to seed the
+   RunLLMTurn-only stack's ConTags.
+2. ~15s — the answerer `Harness::new`'s own boot seed: the SAME trivial
+   compile for the answerer stack.
+3. ~30s — `compile_outer` of the render framing (`Loaded.render …`).
+4. ~30s — `compile_outer` of the loop body (`Loaded.loop …`,
+   sites=[(0,"Contribution")]) — only after this does the first model
+   turn fire.
+
+The two boot seeds are CONSTANT per (decl-list, stack) — identical source
+every launch. `compile_turn` is deliberately cache-free ("turns are
+one-shot"), which is right for turns and wrong for boot seeds: a
+content-addressed disk cache of the two seeds' (CBOR, table) — or
+precomputed ConTags shipped without GHC at all — removes ~30s of every
+launch. Render/loop compiles (3)+(4) are per-cycle and belong to the
+existing D1/D2/E1 work. Sequencing unchanged (after Phase B); this entry
+just pins the measured boot shape so the win is sized honestly.
