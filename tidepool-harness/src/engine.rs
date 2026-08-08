@@ -495,7 +495,8 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         Answer by evaluating `finalize @{ty} (value :: {ty})` in a single \
+         Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
+         WHOLE expression with `:: M {ty}` — in a single \
          ```haskell block — this ends your turn and hands the value back to the \
          loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
          bind its result, then `finalize`.)"
