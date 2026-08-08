@@ -25,9 +25,12 @@ Module map:
 - `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
   + `asks.json` sidecar) via `tidepool-extract`, independent of
   `tidepool-runtime`'s caching compile (turns are one-shot, no cache needed).
-- `log` — E4 event-log wire schema (header pins prelude+extract fingerprints);
-  `Event::Effect` (req+resp) is a reserved wire slot — see Replay below for
-  what's actually written today.
+- `log` — E4 event-log wire schema (header pins prelude+extract fingerprints).
+  `Event::TurnStart{source}` now carries the EXTRACTED executed Haskell block
+  (not a "model" tag — WS4); `Event::Effect{req,resp}` is written by the live
+  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`)
+  whenever a turn dispatches a HANDLED effect — see Replay below for the
+  substitution boundary and the scoped-stack caveat.
 - `provider` — `ModelProvider` trait (calling-model turns; not the Llm
   effect) + `provider/{api_key,http,oauth,paths}` impls.
 - `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
@@ -70,19 +73,25 @@ Two independent pieces, both in `replay.rs`:
   terminal per-node `NodeState` + tree structure, so a `kill -9`'d process
   restores a browsable history tree from the durable log alone.
 
-**`Event::Effect` is a reserved wire slot, not currently written or
-substituted.** The req+resp shape and its writer (`NodeTree::effect`,
-`forcing.rs`) exist and are exercised by a `forcing.rs` unit test, but
-nothing in the live turn loop (`harness`/`engine`) calls that writer — no
-`Event::Effect` records are produced during real operation today (so
-`tidepool-web`'s trace pane, which folds `Event::Effect` out of the log, has
-nothing to show against a live-run log). Nor is there a reader that
-substitutes recorded responses back into a resumed session on restart — were
-effects being logged, a node that suspended after running them, then
-restarted and resumed, would RE-EXECUTE those effects live rather than
-replay their recorded responses. Effect-response-substitution replay is
-explicitly OUT OF R0 SCOPE; the wire slot and writer are frozen and reserved
-for that future work, not deprecated.
+**`Event::Effect` IS written by the live turn loop; effect-response
+SUBSTITUTION on replay is what remains out of scope.** The writer
+(`NodeTree::effect` ← `Harness::flush_effects`, which drains the node's
+`effect_trace` after each `run_block`/`answer_*`/`eval_in_binding`) is wired
+into the live path: every turn that dispatches a HANDLED (non-suspending)
+effect produces one `Event::Effect{req,resp}` per effect. A SUSPENDING effect
+(`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never reaches a handler, so it logs
+as `HolePublished`/`HoleConsumed`, not `Effect`. **Scoped-stack caveat:** the
+self-iterating harness's answerer (`[AskUser, Finalize]`) and outer loop
+(`[RunLLMTurn, AskUser]`) declare ONLY suspending effects — no base
+`Console`/`Fs`/`Http`/… — so `flush_effects` runs but drains an empty trace:
+those nodes produce NO `Event::Effect` BY CONSTRUCTION (that absence IS the
+capability boundary — the answerer structurally cannot run a shell/file/net
+effect). A general Agent node (full base-effect row) does produce them. What
+is still OUT OF R0 SCOPE is a READER that substitutes recorded effect
+responses back into a resumed session on restart — a node that suspended
+after running handled effects, then restarted and resumed, would RE-EXECUTE
+them live rather than replay recorded responses. The record side is live; the
+replay side is reserved.
 
 ## Rules inherited from the plan
 
@@ -134,4 +143,39 @@ already runs its turn loop via `block_in_place`/`block_on`, not `async fn`).
 and overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
 parks on a channel instead. `between_loops_gate` (the human-clicks-continue
 gate between loop iterations) is `gate.await_continue()` — no EOF-driven
-close of the loop; the caller decides how a continue signal arrives.
+close of the loop; the caller decides how a continue signal arrives. Every
+gate call (`present_form`/`await_continue`) runs under `tokio::task::block_in_place`
+so a web gate's channel park yields the tokio worker instead of stalling it.
+
+The OUTER loop can present a form too: `outer_decls()` is `[RunLLMTurn,
+AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
+`askUser` suspends on `AskUserWith`, serviced by
+`SelfHarnessDriver::service_outer_askuser_hole` (the same gate, the same
+`ASKUSER_MAX_REPROMPTS` bound, resuming the OUTER session via
+`engine::json_answer_to_value`). This does NOT add `AskUser` to
+`Tidepool.Harness`/`HarnessEff` (whose row stays `'[RunLLMTurn]`,
+stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
+unifies against the wider generated row.
+
+## WS4 — tailing the durable log
+
+Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
+`selfharness::persistence`):
+
+- **`transcript.jsonl`** (`default_transcript_path`, written by `JsonlObserver`
+  over the WS-H `Observer` seam) — the LOOP-level story: `LoopBoundary`,
+  `RunLLMTurnHole`, `TurnStart`/`TurnEnd`/`Finalize` (node ids only),
+  `CompactionTrigger{summary,…}`. One line per driver `Event`.
+- **`log.jsonl`** (`default_log_path`, the durable per-NODE `crate::log`
+  written by the answerer `Harness`'s `LogWriter`) — the fine-grained story:
+  `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell — WS4/finding
+  2, so `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
+  the exact blocks the answerer ran), `TurnDelta` (the full model reply),
+  `HolePublished`/`HoleConsumed` (each `askUser`/`finalize` suspension +
+  answer), `NodeDone`. `Event::Effect` appears here only for a node whose stack
+  has base effects — the scoped answerer/outer stacks have none, so effect
+  activity shows as `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
+
+A caller boots the answerer `Harness` with `LogWriter::create(&default_log_path(),
+&header)` to land `log.jsonl` on this path; the driver writes `transcript.jsonl`
+via a `JsonlObserver` at `default_transcript_path()`. `tail -f` either.

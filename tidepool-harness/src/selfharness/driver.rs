@@ -120,11 +120,25 @@ struct OuterSession {
     module_name: String,
 }
 
-/// The outer Harness-monad's OWN decl list — `Eff '[RunLLMTurn]`
-/// (02-runtime.md LOCKED: no base effects for v1), distinct from the nested
-/// Agent's full stack (`crate::engine`'s private `agent_decls`).
+/// The outer Harness-monad's OWN decl list — `Eff '[RunLLMTurn, AskUser]`,
+/// distinct from the nested Agent's full stack (`crate::engine`'s private
+/// `agent_decls`). `RunLLMTurn` is the loop's model-spawning verb (02-runtime.md
+/// LOCKED: no BASE effects for v1); `AskUser` (self-iterating-harness Wave 2) is
+/// added so an AUTHORED `loop` can present a typed operator form directly —
+/// `Tidepool.Form`'s `askUser` is auto-imported into every outer compile
+/// whenever `AskUser` is in this decl list (see
+/// `tidepool_mcp::pragmas_and_imports`), and the driver services the resulting
+/// suspension via [`SelfHarnessDriver::service_outer_askuser_hole`]. This does
+/// NOT add `AskUser` to `Tidepool.Harness`/`HarnessEff` (whose row stays
+/// `'[RunLLMTurn]`, now stale-but-unused): the reference `loop :: State ->
+/// Harness State` uses only `runLLMTurn`, and a loop that wants a form imports
+/// `Tidepool.Form` and relies on `askUser`'s `Member AskUser` constraint
+/// unifying against this wider row.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    vec![tidepool_mcp::runllmturn_decl()]
+    vec![
+        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::askuser_decl(),
+    ]
 }
 
 /// The nested answerer Agent's SCOPED decl list (W1 effect-scoping;
@@ -608,29 +622,38 @@ impl SelfHarnessDriver {
         self.answerer_framing = Some(format!("{prompt_before}\n\n{ANSWERER_FRAMING_SUFFIX}"));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
-        let (value, table) = self.run_loop_fragment(prior_state)?;
-        let state_json = state_cross::state_out(&value, &table);
+        // F4 (external-review finding 4): the driver must return to `Idle` on ANY
+        // exit from the loop body — an error mid-loop (a runaway-cap hard-fail, a
+        // failed resume, a compaction error) must not strand the lifecycle in
+        // `RunningLoop`/`Compacting`. Run the fallible body, then reset the
+        // lifecycle unconditionally before propagating success or error.
+        let result = (|| {
+            let (value, table) = self.run_loop_fragment(prior_state)?;
+            let state_json = state_cross::state_out(&value, &table);
 
-        // W2: any MID-LOOP compaction that fired during this loop has already
-        // set `self.cycle_compaction` (and `self.last_compaction`) IN PLACE —
-        // the loop CONTINUED under the summary rather than aborting. `None` if
-        // the context window never crossed threshold this loop.
-        let compaction = self.cycle_compaction.take();
-        // `self.last_compaction` carries the LATEST compaction summary forward
-        // to the next render regardless of which cycle produced it: this
-        // cycle's if one fired, else the prior cycle's (unchanged). Render
-        // `prompt_after` against it so the summary reaches the very next render
-        // (02-runtime.md: `render`'s `Maybe Text`).
-        let next_compaction = self.last_compaction.clone();
-        let prompt_after = self.render_framing(Some(&state_json), next_compaction.as_deref())?;
+            // W2: any MID-LOOP compaction that fired during this loop has already
+            // set `self.cycle_compaction` (and `self.last_compaction`) IN PLACE —
+            // the loop CONTINUED under the summary rather than aborting. `None` if
+            // the context window never crossed threshold this loop.
+            let compaction = self.cycle_compaction.take();
+            // `self.last_compaction` carries the LATEST compaction summary forward
+            // to the next render regardless of which cycle produced it: this
+            // cycle's if one fired, else the prior cycle's (unchanged). Render
+            // `prompt_after` against it so the summary reaches the very next render
+            // (02-runtime.md: `render`'s `Maybe Text`).
+            let next_compaction = self.last_compaction.clone();
+            let prompt_after =
+                self.render_framing(Some(&state_json), next_compaction.as_deref())?;
+
+            Ok(CycleOutcome {
+                prompt_before,
+                state_json,
+                prompt_after,
+                compaction,
+            })
+        })();
         self.lifecycle = SelfHarnessState::Idle;
-
-        Ok(CycleOutcome {
-            prompt_before,
-            state_json,
-            prompt_after,
-            compaction,
-        })
+        result
     }
 
     /// Bootstrap the outer session over `source`, restore the last
@@ -685,7 +708,11 @@ impl SelfHarnessDriver {
     /// original headless behavior (block on a stdin line); a web/GUI gate
     /// parks on a button click instead.
     fn between_loops_gate(&mut self) -> Result<(), DriverError> {
-        self.gate.await_continue();
+        // The gate is SYNC-blocking (frozen contract); run the park under
+        // `block_in_place` so a web gate's channel-wait yields the tokio worker
+        // to other tasks instead of stalling it.
+        let gate = Arc::clone(&self.gate);
+        tokio::task::block_in_place(move || gate.await_continue());
         Ok(())
     }
 
@@ -768,35 +795,54 @@ impl SelfHarnessDriver {
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
                         engine::classify_hole(&request, &compiled.table, &compiled.asks);
-                    let (site, ty) = match &classified.routing {
-                        HoleRouting::RunLLMTurn { site, ty } => (*site, ty.clone()),
+                    match &classified.routing {
+                        HoleRouting::RunLLMTurn { site, ty } => {
+                            let answer =
+                                self.service_runllm_hole(*site, ty.as_deref(), &classified.prompt)?;
+                            // W2: between holes — if the answerer's accumulated
+                            // context has crossed threshold, compact + replace its
+                            // context IN PLACE now, so the NEXT hole drives under
+                            // the smaller window.
+                            //
+                            // D-2: this runs only AFTER `service_runllm_hole` has
+                            // already finalized THIS hole's answer
+                            // (`take_finalized_value_keep_open` consumed the finalize
+                            // continuation and returned the session to idle —
+                            // harness.rs `take_finalized_value_keep_open`). So the
+                            // summarize turn `maybe_compact_answerer` drives sees the
+                            // last answer already IN the transcript and cannot drop
+                            // it: a future refactor that moves this call BEFORE the
+                            // answer is taken would compact a mid-finalize session —
+                            // do not.
+                            self.maybe_compact_answerer()?;
+                            let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+                            outcome = outer.session.resume(&hole, answer).map_err(|e| {
+                                DriverError::Session(format!("loop resume failed: {e}"))
+                            })?;
+                        }
+                        // The AUTHORED loop itself evaluated `askUser` (`Tidepool.Form`,
+                        // auto-imported because `AskUser` is in `outer_decls`) — a form
+                        // presented DIRECTLY by the loop, distinct from an answerer's
+                        // form (`service_askuser_hole`). Present it via the same
+                        // operator gate and resume the OUTER session; the helper loops
+                        // over `askUser`'s Haskell-side decode-retry (a bad submission
+                        // re-suspends on a fresh `AskUserWith`) and returns the first
+                        // outcome that ISN'T another operator form — a `runLLMTurn`
+                        // suspension the main loop then services, or a completion.
+                        HoleRouting::AskUser { spec } => {
+                            outcome = self.service_outer_askuser_hole(
+                                hole.clone(),
+                                spec.clone(),
+                                &compiled,
+                            )?;
+                        }
                         other => {
                             return Err(DriverError::Session(format!(
-                                "outer loop suspended on a non-RunLLMTurn hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn only"
+                                "outer loop suspended on an unserviceable hole ({other:?}) — \
+                                 the Harness monad exposes runLLMTurn and askUser only"
                             )))
                         }
-                    };
-                    let answer =
-                        self.service_runllm_hole(site, ty.as_deref(), &classified.prompt)?;
-                    // W2: between holes — if the answerer's accumulated context
-                    // has crossed threshold, compact + replace its context IN
-                    // PLACE now, so the NEXT hole drives under the smaller window.
-                    //
-                    // D-2: this runs only AFTER `service_runllm_hole` has already
-                    // finalized THIS hole's answer (`take_finalized_value_keep_open`
-                    // consumed the finalize continuation and returned the session
-                    // to idle — harness.rs `take_finalized_value_keep_open`). So
-                    // the summarize turn `maybe_compact_answerer` drives sees the
-                    // last answer already IN the transcript and cannot drop it: a
-                    // future refactor that moves this call BEFORE the answer is
-                    // taken would compact a mid-finalize session — do not.
-                    self.maybe_compact_answerer()?;
-                    let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-                    outcome = outer
-                        .session
-                        .resume(&hole, answer)
-                        .map_err(|e| DriverError::Session(format!("loop resume failed: {e}")))?;
+                    }
                 }
             }
         }
@@ -838,8 +884,10 @@ impl SelfHarnessDriver {
         })?;
 
         // Push the hole card onto the EXISTING answerer node, accumulating
-        // context rather than spawning a fresh one.
-        let child_prompt = engine::hole_card(prompt, ty);
+        // context rather than spawning a fresh one. The SCOPED answerer card
+        // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
+        // `resume expr` (which does not compile against this stack — finding 1).
+        let child_prompt = engine::answerer_hole_card(prompt, ty);
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
@@ -1060,7 +1108,12 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
-            let submission = self.gate.present_form(&spec);
+            // The gate is SYNC-blocking (frozen contract): park it under
+            // `block_in_place` so a web gate's channel-wait yields the tokio
+            // worker rather than stalling it.
+            let gate = Arc::clone(&self.gate);
+            let form = spec.clone();
+            let submission = tokio::task::block_in_place(move || gate.present_form(&form));
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
                     .block_on(self.agent.answer_dialog(node, Json::Object(submission)))
@@ -1087,6 +1140,89 @@ impl SelfHarnessDriver {
                  operator to answer it"
                     .to_string(),
             ));
+        }
+    }
+
+    /// Service a run of `askUser` suspensions the AUTHORED OUTER loop itself
+    /// raised (self-iterating-harness Wave 2, outer-form path — distinct from
+    /// [`Self::service_askuser_hole`], which handles a nested ANSWERER's form).
+    /// Present `spec` via the operator gate ([`OperatorGate::present_form`]),
+    /// convert the flat submission into the `Value` `askUserRaw :: Value -> M
+    /// Value` returns ([`engine::json_answer_to_value`] against the outer
+    /// compile's `table`), and resume the OUTER session — repeating while the
+    /// resume lands on ANOTHER `AskUser` suspension, since `askUser` re-prompts
+    /// by RECURSION on a decode failure (no `Either`; the retry is entirely
+    /// Haskell-side, so a bad submission genuinely re-suspends on a fresh
+    /// `AskUserWith`, not an error this driver sees).
+    ///
+    /// Returns the FIRST [`ResidentOutcome`] that is NOT another operator form
+    /// — a `runLLMTurn` suspension (which [`Self::run_loop_fragment_inner`]'s
+    /// main loop then services) or a completion — so the outer loop can
+    /// interleave author-driven forms and model-answered holes freely.
+    ///
+    /// Bounded by [`ASKUSER_MAX_REPROMPTS`] CONSECUTIVE re-presentations, for
+    /// the same reason [`Self::service_askuser_hole`] is: the default headless
+    /// [`StdinGate`] returns an EMPTY submission on EOF rather than erroring, so
+    /// a non-interactive gate composes with `askUser`'s unbounded Haskell-side
+    /// re-prompt into a hot loop no model-round cap catches (a form resume is
+    /// not a model round). The between-loops human gate bounds loop ITERATIONS,
+    /// not re-prompts WITHIN one loop's `askUser` — this counter does.
+    fn service_outer_askuser_hole(
+        &mut self,
+        hole: String,
+        spec: FormSpec,
+        compiled: &CompiledTurn,
+    ) -> Result<ResidentOutcome, DriverError> {
+        let mut hole = hole;
+        let mut spec = spec;
+        let mut reprompts: u32 = 0;
+        loop {
+            if reprompts >= ASKUSER_MAX_REPROMPTS {
+                return Err(DriverError::Session(format!(
+                    "outer-loop operator form re-presented {reprompts} times without a \
+                     decodable submission (a non-interactive gate at EOF, or a form \
+                     whose submission never decodes) — hard-failing the loop"
+                )));
+            }
+            reprompts += 1;
+
+            // Sync-blocking gate under `block_in_place` (see the frozen contract):
+            // a web gate parks a channel here; yield the worker while it waits.
+            let gate = Arc::clone(&self.gate);
+            let form = spec.clone();
+            let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+            let answer = engine::json_answer_to_value(&Json::Object(submission), &compiled.table)
+                .map_err(|e| {
+                DriverError::Session(format!("outer askUser submission decode: {e}"))
+            })?;
+            let outcome = {
+                let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+                outer.session.resume(&hole, answer).map_err(|e| {
+                    DriverError::Session(format!("outer askUser resume failed: {e}"))
+                })?
+            };
+
+            match &outcome {
+                ResidentOutcome::Suspended {
+                    hole: next_hole,
+                    request,
+                    ..
+                } => {
+                    let classified =
+                        engine::classify_hole(request, &compiled.table, &compiled.asks);
+                    if let HoleRouting::AskUser { spec: next_spec } = classified.routing {
+                        // askUser's Haskell-side decode-retry re-suspended on a
+                        // fresh form: re-present it (does NOT count as progress).
+                        hole = next_hole.clone();
+                        spec = next_spec;
+                        continue;
+                    }
+                    // A runLLMTurn suspension (or anything else) — hand it back
+                    // to the main loop, which classifies and services it.
+                    return Ok(outcome);
+                }
+                ResidentOutcome::Completed { .. } => return Ok(outcome),
+            }
         }
     }
 

@@ -6,14 +6,12 @@
 //! same `run_to_hole_or_done` turn loop the fork/return-control path already
 //! uses.
 //!
-//! # Scaffold phase (07-impl-orchestration.md S1/S3/S4)
-//!
-//! Every seam here is a FROZEN CONTRACT, not a working implementation —
-//! `unimplemented!()` bodies with coherent signatures for the fork wave
-//! (WS-A/C/D/E/G) to build against:
+//! # Modules
 //!
 //! - [`driver`] (WS-A) — the outer lifecycle + the render/loop alternation,
-//!   plus the `runLLMTurn`-hole-servicing seam.
+//!   the `runLLMTurn`-hole servicer, and the `askUser` operator-form servicer
+//!   (self-iterating-harness Wave 2, both the answerer and the outer-loop
+//!   form paths).
 //! - [`lifecycle`] (WS-A) — the driver's outer state machine, modeled on
 //!   `tidepool_repl::state::SessionState`.
 //! - [`state_cross`] (WS-C) — `State` JSON crossing at a loop boundary.
@@ -22,9 +20,12 @@
 //! - [`observer`] (WS-H) — the pluggable event-observer extension point
 //!   `driver` emits to; ships a `LogObserver`, stubs a future GUI subscriber
 //!   + reactive hooks.
+//! - [`operator`] (Wave 2) — the frozen [`operator::OperatorGate`] seam the
+//!   driver blocks on for operator input + the `FormSpec`/`Submission` wire
+//!   types; ships a headless [`operator::StdinGate`].
 //! - [`persistence`] (W3) — local-file `State` json persist/restore +
 //!   transcript-jsonl [`Observer`] impl (D5: "State-to-disk +
-//!   restart-reload").
+//!   restart-reload") + the durable-log path helpers (WS4).
 //!
 //! `crate::engine::HoleRouting::Finalize` is the other half of the S3 freeze
 //! (routing for the `finalize` effect WS-B adds); it lives in `engine.rs`

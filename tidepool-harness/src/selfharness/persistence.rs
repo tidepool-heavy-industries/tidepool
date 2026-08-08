@@ -61,6 +61,23 @@ pub fn default_transcript_path() -> PathBuf {
         .join("transcript.jsonl")
 }
 
+/// Default DURABLE per-node event-log path (WS4):
+/// `<cache_dir>/selfharness/log.jsonl`. This is the [`crate::log`] append-only
+/// jsonl the answerer [`Harness`](crate::harness::Harness)'s [`LogWriter`](crate::log::LogWriter)
+/// writes — `Event::TurnStart { source, .. }` (the executed Haskell of every
+/// answerer turn) and `Event::Effect { req, resp, .. }` (drained per turn by
+/// `Harness::flush_effects`) for the self-iterating answerer nodes — as opposed
+/// to [`default_transcript_path`], which is the loop-level driver-[`Event`]
+/// stream. A caller booting the answerer `Harness` points its `LogWriter` here
+/// (`LogWriter::create(&default_log_path(), &header)`) so `tail -f` on this one
+/// path shows the executed source + effect req/resp interleaved. Sits alongside
+/// `state.json`/`transcript.jsonl`/`compaction.txt` under the same dir.
+pub fn default_log_path() -> PathBuf {
+    tidepool_runtime::paths::cache_dir()
+        .join("selfharness")
+        .join("log.jsonl")
+}
+
 /// Default compaction-summary path: `<cache_dir>/selfharness/compaction.txt`
 /// (review C-3). The driver's `last_compaction` is otherwise in-memory only,
 /// so a crash after a mid-loop compaction would lose the summary the next

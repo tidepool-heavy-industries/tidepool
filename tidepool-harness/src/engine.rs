@@ -388,6 +388,24 @@ pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
     }
 }
 
+/// The hole card for a SELF-ITERATING-HARNESS answerer (scoped `[AskUser,
+/// Finalize]` stack), which can ONLY resolve a hole via `finalize @T` — it has
+/// no `resume` (the generic [`hole_card`] tells the model to write `resume
+/// expr`, which does not compile against this scoped stack and costs a needless
+/// compile-error/retry round; external-review finding 1). This card names
+/// `finalize @T` directly.
+pub fn answerer_hole_card(prompt: &str, ty: Option<&str>) -> String {
+    let ty = ty.unwrap_or("A");
+    format!(
+        "The loop needs a typed answer of type `{ty}`.\n\n\
+         {prompt}\n\n\
+         Answer by evaluating `finalize @{ty} (value :: {ty})` in a single \
+         ```haskell block — this ends your turn and hands the value back to the \
+         loop. (To gather operator input first, evaluate a `askUser` form; bind \
+         its result, then `finalize`.)"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Eval-block extraction
 // ---------------------------------------------------------------------------

@@ -705,8 +705,6 @@ impl Harness {
             )
         };
 
-        self.tree.turn_start(node, "model".to_string(), None)?;
-
         // Stream the provider call into `node`'s live-turn buffer (rendered
         // token-by-token), then log the completed turn with its thinking and
         // swap the buffer for the durable turn in one frame.
@@ -741,10 +739,24 @@ impl Harness {
         }
 
         let Some(block) = driven.block else {
+            // WS4 (self-iterating-harness): a prose-only turn ran no Haskell, but
+            // still record a `TurnStart` whose `source` is the reply text — so a
+            // node's durable log always shows one `TurnStart` per model turn
+            // (`tail`ing it never has a silent gap), and consent integrity's
+            // "no Turn/Effect before Forced" holds (this is well after Forced).
+            self.tree.turn_start(node, driven.reply.clone(), None)?;
             return Ok(engine::TurnOutcome::NoBlock {
                 reply: driven.reply,
             });
         };
+
+        // WS4 (self-iterating-harness): record the EXTRACTED executed Haskell as
+        // this turn's `TurnStart.source` — so `tail -f <log>` shows the exact
+        // block the turn ran, not a coarse "model" provenance tag (external-review
+        // finding 2: "tail the logs to see executed Haskell" must actually work).
+        // Emitted before the block runs, so it precedes this turn's Effect /
+        // HolePublished events in the durable log.
+        self.tree.turn_start(node, block.clone(), None)?;
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
