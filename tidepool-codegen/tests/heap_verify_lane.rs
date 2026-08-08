@@ -19,7 +19,7 @@
 //! violation surfaces as a panic, which is a hard test failure — that's the
 //! whole point.
 
-use tidepool_codegen::host_fns::{heap_verify_run_count, set_heap_verify};
+use tidepool_codegen::host_fns::{gc_doubling_run_count, heap_verify_run_count, set_heap_verify};
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::value::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
@@ -435,4 +435,28 @@ fn heap_verify_fires_on_big_con() {
 fn heap_verify_fires_on_accum_loop() {
     let (expr, expected) = build_accum_loop(600);
     run_verified(expr, 4 * 1024, expected, "accum_loop");
+}
+
+/// Forces the heap-DOUBLING path specifically (not just any GC): a 512-byte
+/// nursery against `build_big_con(4)`'s live tree makes the first collection's
+/// live set exceed 75% of the nursery, so `perform_gc` immediately
+/// re-evacuates into a doubled space. Proven, not assumed —
+/// `gc_doubling_run_count()` must advance — so this test would fail loud if a
+/// future change to the doubling threshold or this tree's size stopped
+/// exercising the path it exists to cover. `run_verified` already proves
+/// `verify_heap_post_gc` ran; `gc_doubling_run_count` on top of that proves it
+/// ran ON THE DOUBLING PATH, which is the coverage `verify_heap_post_gc` used
+/// to have a known gap on (the intermediate to-space was an untracked
+/// from-space).
+#[test]
+fn heap_verify_fires_on_doubling_path() {
+    let (expr, expected) = build_big_con(4);
+    let before = gc_doubling_run_count();
+    run_verified(expr, 512, expected, "doubling_path");
+    let after = gc_doubling_run_count();
+    assert!(
+        after > before,
+        "gc_doubling_run_count did not increase ({before} -> {after}) — \
+         this test forces the doubling path, so it should have"
+    );
 }

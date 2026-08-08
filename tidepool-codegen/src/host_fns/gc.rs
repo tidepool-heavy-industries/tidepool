@@ -275,6 +275,57 @@ pub fn heap_verify_run_count() -> usize {
     HEAP_VERIFY_RUNS.load(Ordering::Relaxed)
 }
 
+/// Count of completed heap-doubling passes (`perform_gc`'s doubling branch),
+/// process-wide. Lets a test prove a collection actually took the doubling
+/// path rather than assuming a nursery size forces it.
+static GC_DOUBLING_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only: how many times the heap-doubling branch has run in this process.
+#[doc(hidden)]
+pub fn gc_doubling_run_count() -> usize {
+    GC_DOUBLING_RUNS.load(Ordering::Relaxed)
+}
+
+/// Verdict for a pointer value read from a live-heap slot, post-GC.
+enum FieldPtrVerdict {
+    /// Null (legal mid-LetRec construction), inside to-space and 8-aligned,
+    /// or outside every space this collection touched (a poison object, a
+    /// malloc'd byte array, or any other address this walk has no opinion
+    /// on).
+    Ok,
+    /// Lands inside a `retired` range: a dangling evacuation.
+    DanglingIntoRetired,
+    /// Lands inside to-space but is not 8-aligned.
+    MisalignedToSpace,
+}
+
+/// The single owner for "is this pointer target acceptable post-GC" — every
+/// slot classification in [`verify_heap_post_gc`] goes through this, so a
+/// future pass over a different slot population (e.g. old-space's external
+/// array payloads) can call the same predicate instead of reimplementing the
+/// to-space/retired-range comparison.
+fn classify_field_ptr(
+    p: *const u8,
+    to_start: *const u8,
+    to_end: *const u8,
+    retired: &[(*const u8, *const u8)],
+) -> FieldPtrVerdict {
+    if p.is_null() {
+        return FieldPtrVerdict::Ok;
+    }
+    if p >= to_start && p < to_end {
+        return if (p as usize).is_multiple_of(8) {
+            FieldPtrVerdict::Ok
+        } else {
+            FieldPtrVerdict::MisalignedToSpace
+        };
+    }
+    if retired.iter().any(|&(start, end)| p >= start && p < end) {
+        return FieldPtrVerdict::DanglingIntoRetired;
+    }
+    FieldPtrVerdict::Ok
+}
+
 /// Post-GC heap invariant walk (see `heap_verify_enabled`).
 ///
 /// Walks the packed live set `to_start..+live_bytes` exactly like the Cheney
@@ -284,32 +335,39 @@ pub fn heap_verify_run_count() -> usize {
 ///   EXACTLY — catches the u16 size-wrap class, S3-C1/C2);
 /// - Lit tags within the known set (catches constant drift, S3-C3);
 /// - thunk state bytes valid;
-/// - every pointer field is null (legal mid-LetRec-construction), inside
-///   to-space (then 8-aligned), or outside BOTH spaces (poison / malloc'd
-///   byte arrays) — a pointer into FROM-SPACE is a dangling evacuation and
-///   fails loudly here instead of as a SIGSEGV collections later. BLACKHOLE
-///   capture slots are checked too, as defense-in-depth alongside the
-///   general field walk: `for_each_pointer_field` traces
+/// - every pointer field classifies as [`FieldPtrVerdict::Ok`] via
+///   [`classify_field_ptr`] — a pointer into a `retired` range is a dangling
+///   evacuation and fails loudly here instead of as a SIGSEGV collections
+///   later. BLACKHOLE capture slots are checked too, as defense-in-depth
+///   alongside the general field walk: `for_each_pointer_field` traces
 ///   `THUNK_UNEVALUATED`/`THUNK_BLACKHOLE` captures identically (the S3-C6
 ///   skip was fixed in `raw.rs`, 2026-06-11), so a from-space capture here
 ///   would now be caught by the main Cheney scan too — this check just
 ///   guards the invariant a second way rather than covering a live gap.
 ///
-/// From-space addresses are COMPARED, never dereferenced (the buffer may
-/// already be freed). Known v1 gap: in the heap-doubling path the
-/// intermediate to-space is a second (untracked) from-space; pointers
-/// dangling into it land in the "outside both" class and pass.
+/// `retired` covers every space THIS collection evacuated OUT of: the
+/// original nursery, and, on the heap-doubling path, the intermediate
+/// to-space as well (doubling runs a second Cheney pass over what was, for
+/// that pass, itself a from-space — a pointer dangling into it is exactly as
+/// much a dangling evacuation as one into the original nursery). Addresses in
+/// `retired` are COMPARED, never dereferenced — the buffer may already be
+/// freed by the time this runs. That's sound because nothing allocates
+/// between a range's free and this call, and every `retired` range was
+/// allocated while still live and is disjoint from `to_start..+live_bytes`
+/// and from every other `retired` range (each doubling pass allocates a
+/// fresh, larger buffer before the prior one is dropped).
+///
+/// Scope: this walk covers only the packed to-space `perform_gc` just
+/// produced. It does not follow old-space's external malloc'd array payload
+/// buffers — a pointer stranded in one of those is not yet checked here.
 unsafe fn verify_heap_post_gc(
     to_start: *const u8,
     live_bytes: usize,
-    from_start: *const u8,
-    from_end: *const u8,
+    retired: &[(*const u8, *const u8)],
 ) {
     HEAP_VERIFY_RUNS.fetch_add(1, Ordering::Relaxed);
     use crate::layout as l;
     let to_end = to_start.add(live_bytes);
-    let in_to = |p: *const u8| p >= to_start && p < to_end;
-    let in_from = |p: *const u8| p >= from_start && p < from_end;
 
     let fail = |off: usize, idx: usize, what: &str, obj: *const u8| -> ! {
         let dump_len = 32.min(live_bytes - off);
@@ -317,34 +375,29 @@ unsafe fn verify_heap_post_gc(
         panic!(
             "[HEAP VERIFY] violation after GC: {what}\n  object #{idx} at to-space offset {off:#x} \
              (live_bytes={live_bytes:#x})\n  first {dump_len} bytes: {bytes:02x?}\n  \
-             from-space was {from_start:p}..{from_end:p}, to-space {to_start:p}..{to_end:p}"
+             retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}"
         )
     };
 
     let check_field = |off: usize, idx: usize, obj: *const u8, slot: usize, label: &str| {
         let p = *(obj.add(slot) as *const *const u8);
-        if p.is_null() {
-            return; // legal: deferred Con field mid-LetRec construction
-        }
-        if in_from(p) {
-            fail(
+        match classify_field_ptr(p, to_start, to_end, retired) {
+            FieldPtrVerdict::Ok => {}
+            FieldPtrVerdict::DanglingIntoRetired => fail(
                 off,
                 idx,
                 &format!(
                     "{label} slot +{slot} holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
                 ),
                 obj,
-            );
-        }
-        if in_to(p) && !(p as usize).is_multiple_of(8) {
-            fail(
+            ),
+            FieldPtrVerdict::MisalignedToSpace => fail(
                 off,
                 idx,
                 &format!("{label} slot +{slot} holds a misaligned to-space pointer {p:p}"),
                 obj,
-            );
+            ),
         }
-        // Outside both spaces: poison object or malloc'd byte array — allowed.
     };
 
     let mut off = 0usize;
@@ -416,28 +469,24 @@ unsafe fn verify_heap_post_gc(
                         for i in 0..len {
                             let slot_addr = payload.add(8 + i * 8);
                             let p = *(slot_addr as *const *const u8);
-                            if p.is_null() {
-                                continue;
-                            }
-                            if in_from(p) {
-                                fail(
+                            match classify_field_ptr(p, to_start, to_end, retired) {
+                                FieldPtrVerdict::Ok => {}
+                                FieldPtrVerdict::DanglingIntoRetired => fail(
                                     off,
                                     idx,
                                     &format!(
                                         "array elem[{i}] holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
                                     ),
                                     obj,
-                                );
-                            }
-                            if in_to(p) && !(p as usize).is_multiple_of(8) {
-                                fail(
+                                ),
+                                FieldPtrVerdict::MisalignedToSpace => fail(
                                     off,
                                     idx,
                                     &format!(
                                         "array elem[{i}] holds a misaligned to-space pointer {p:p}"
                                     ),
                                     obj,
-                                );
+                                ),
                             }
                         }
                     }
@@ -528,9 +577,19 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
     if let Some(registry_ptr) = registry_ptr {
         // SAFETY: registry_ptr was set by set_stack_map_registry and outlives JIT execution.
         let registry = unsafe { &*registry_ptr };
+        // `stack_low` is a local in THIS frame. perform_gc is always called
+        // beneath the JIT call chain (gc_trigger → perform_gc, never the
+        // reverse), and the stack grows down, so this address is a sound
+        // LOW bound: every JIT frame `walk_frames` is about to walk sits at
+        // a strictly higher address than this one.
+        let stack_low: u8 = 0;
+        let bounds = frame_walker::StackBounds::capture(&stack_low as *const u8 as usize);
         // SAFETY: fp is a valid frame pointer read from gc_trigger's caller.
         // registry contains stack maps for all JIT functions in the call chain.
-        let roots = unsafe { frame_walker::walk_frames(fp, registry) };
+        // A violation of that contract is now a controlled failure, not UB —
+        // see `walk_frames`'s doc.
+        let roots =
+            unsafe { frame_walker::walk_frames(fp, registry, bounds, heap_verify_enabled()) };
 
         // ── Cheney copying GC ──────────────────────────────
         // SAFETY: vmctx is valid; machine_state was installed before entering
@@ -619,6 +678,12 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
             let mut active = tospace;
             let mut live_bytes = result.bytes_copied;
             let mut new_size = from_size;
+            // Every range this collection evacuates OUT of, for the post-GC
+            // verifier: the original nursery, plus (if the doubling branch
+            // below runs) the intermediate to-space it evacuates a second
+            // time.
+            let mut retired_ranges: Vec<(*const u8, *const u8)> =
+                vec![(from_start as *const u8, from_end as *const u8)];
             if live_bytes * 4 > from_size * 3 && from_size < max_heap {
                 new_size = (from_size * 2).min(max_heap);
                 let mut bigger = alloc_aligned_zeroed(new_size);
@@ -634,8 +699,21 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                     )
                 };
                 live_bytes = second.bytes_copied;
+                GC_DOUBLING_RUNS.fetch_add(1, Ordering::Relaxed);
+                // Capture the intermediate to-space's full allocated range
+                // BEFORE `active = bigger` drops it below: for this second
+                // Cheney pass it was itself a from-space, so a pointer left
+                // dangling into it is exactly as much a dangling evacuation
+                // as one into the original nursery, and the verifier needs
+                // both ranges to catch it.
+                let intermediate_start = active.as_ptr() as *const u8;
+                // SAFETY: `active` is a `Vec<u64>` of `active.len()` words;
+                // the byte range it backs is valid for reads for its full
+                // length.
+                let intermediate_end = unsafe { intermediate_start.add(active.len() * 8) };
+                retired_ranges.push((intermediate_start, intermediate_end));
                 if gc_poison_enabled() {
-                    // The intermediate to-space is a second (untracked)
+                    // The intermediate to-space is a second (now-retired)
                     // from-space; poison it so anything left dangling into
                     // it fails loudly (see `gc_poison_enabled`).
                     active.iter_mut().for_each(|w| *w = 0xDDDD_DDDD_DDDD_DDDD);
@@ -673,22 +751,19 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
             }
 
             // Fail-loud heap invariant walk (TIDEPOOL_HEAP_VERIFY=1).
-            // Runs while from-space is still distinguishable, so a
-            // surviving from-space pointer — a dangling evacuation —
-            // is detected HERE, not three collections later as a
-            // SIGSEGV. (plans/future-plans.md item D)
+            // Runs while every retired range is still distinguishable, so a
+            // surviving from-space pointer — a dangling evacuation, into
+            // the original nursery OR (on the doubling path) the
+            // intermediate to-space — is detected HERE, not three
+            // collections later as a SIGSEGV.
             if heap_verify_enabled() {
                 // SAFETY: to_start..+live_bytes is the packed live set
-                // cheney_copy just produced; from range was the
-                // pre-collection nursery (old buffer still alive in
-                // state.active_buffer's predecessor scope).
+                // cheney_copy just produced; retired_ranges covers every
+                // space this collection evacuated out of (addresses are
+                // only compared, never dereferenced — see
+                // `verify_heap_post_gc`'s doc).
                 unsafe {
-                    verify_heap_post_gc(
-                        to_start,
-                        live_bytes,
-                        from_start as *const u8,
-                        from_end as *const u8,
-                    );
+                    verify_heap_post_gc(to_start, live_bytes, &retired_ranges);
                 }
             }
         }
@@ -820,13 +895,12 @@ mod tests {
             // from-space: an unrelated range that contains nothing we point at.
             let fake_from = 0x1000 as *const u8;
             let fake_from_end = 0x2000 as *const u8;
-            verify_heap_post_gc(base, 56, fake_from, fake_from_end); // silent
+            let retired = [(fake_from, fake_from_end)];
+            verify_heap_post_gc(base, 56, &retired); // silent
 
             // Corruption 1 (S3-C2 shape): num_fields says 4 but size says 32.
             *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 4;
-            let r = std::panic::catch_unwind(|| {
-                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
-            });
+            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
             assert!(
                 r.is_err(),
                 "verifier must fire on Con size/num_fields mismatch"
@@ -835,17 +909,13 @@ mod tests {
 
             // Corruption 2: dangling evacuation — field points into from-space.
             *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = 0x1800 as *mut u8;
-            let r = std::panic::catch_unwind(|| {
-                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
-            });
+            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
             assert!(r.is_err(), "verifier must fire on from-space pointer");
             *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;
 
             // Corruption 3: unknown lit tag (constant-drift class).
             *base.add(layout::LIT_TAG_OFFSET as usize) = 99;
-            let r = std::panic::catch_unwind(|| {
-                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
-            });
+            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
             assert!(r.is_err(), "verifier must fire on unknown lit tag");
         }
     }
