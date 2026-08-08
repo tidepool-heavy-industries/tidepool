@@ -394,6 +394,81 @@ fn merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns() {
     );
 }
 
+/// When a property test wants Vec-shaped freedom for generation convenience,
+/// either constrain the generator to the production invariant, or assert
+/// only what holds in the wider domain — asserting a narrower-domain property
+/// over Vec-shaped freedom is how a generator outruns what production can
+/// actually feed it. Here: production's `merge_table` takes a
+/// `&DataConTable`, whose `iter()` is `by_id.values()`, so a real turn holds
+/// AT MOST ONE entry per id. `Vec<DataCon>` has no such constraint, so a
+/// generator drawing turns as plain `Vec<DataCon>` can produce two entries
+/// for the same id within one turn — a shape `merge_one_turn`'s
+/// skip-identical filter (which decides per-entry against the table as it
+/// stood BEFORE the turn) was never required to agree with the flattened
+/// sequential fold on, and doesn't
+/// (`duplicate_ids_within_one_turn_diverge_but_cannot_occur_in_production`
+/// pins the divergence explicitly). Restore the invariant here rather than
+/// widen the property.
+fn dedup_turn_by_id_keep_last(turn: Vec<DataCon>) -> Vec<DataCon> {
+    let mut last_index_for_id: std::collections::HashMap<DataConId, usize> =
+        std::collections::HashMap::new();
+    for (i, dc) in turn.iter().enumerate() {
+        last_index_for_id.insert(dc.id, i);
+    }
+    turn.into_iter()
+        .enumerate()
+        .filter(|(i, dc)| last_index_for_id.get(&dc.id) == Some(i))
+        .map(|(_, dc)| dc)
+        .collect()
+}
+
+#[test]
+fn duplicate_ids_within_one_turn_diverge_but_cannot_occur_in_production() {
+    // Documents a known NON-property, matching the pattern in
+    // `merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns`
+    // above: unreachable in production, so pinned explicitly rather than
+    // fixed. Production's `merge_table` takes a `&DataConTable`, whose
+    // `iter()` is `by_id.values()` (`tidepool-repr/src/datacon_table.rs`) —
+    // a real turn holds AT MOST ONE entry per id. This test feeds
+    // `merge_all_turns`/`flatten_and_fold_sequential` a turn with TWO
+    // entries for the same id, a shape only reachable through this test
+    // file's `Vec<DataCon>`-typed turn representation, never through
+    // production's `DataConTable`-typed one. Do not read the `assert_ne!`
+    // below as a lurking bug in the skip-identical filter and do not "fix"
+    // it there — see `dedup_turn_by_id_keep_last`, which excludes this shape
+    // from the property fuzzer for exactly this reason.
+    let turns = vec![
+        vec![dc(4, "Bar", 1, 2, Some("Mod.4"), "TyA")],
+        vec![
+            dc(4, "Foo", 1, 2, Some("Mod.4"), "TyA"),
+            dc(4, "Bar", 1, 2, Some("Mod.4"), "TyA"),
+        ],
+    ];
+    let (merged_table, merged_result) = merge_all_turns(&turns);
+    let (sequential_table, sequential_result) = flatten_and_fold_sequential(&turns);
+    assert!(merged_result.is_ok());
+    assert!(sequential_result.is_ok());
+    // Sequential (flatten + fold insert_checked one at a time) applies "Foo"
+    // then "Bar" in order — "Bar" is last and wins.
+    assert_eq!(
+        sequential_table.get(DataConId(4)).map(|d| d.name.as_str()),
+        Some("Bar")
+    );
+    // merge_all_turns's skip-identical filter compares each of turn 2's
+    // entries against the table as it stood BEFORE turn 2 independently:
+    // "Bar" matches what's already accumulated (from turn 1) and is
+    // filtered out; only "Foo" survives to be applied. That inverts the
+    // within-turn order.
+    assert_eq!(
+        merged_table.get(DataConId(4)).map(|d| d.name.as_str()),
+        Some("Foo")
+    );
+    assert_ne!(
+        merged_table, sequential_table,
+        "documents the divergence; see comment above for why it's unreachable in production"
+    );
+}
+
 /// Turns drawn from the same small overlapping pool as `arb_datacon`, so
 /// consecutive turns mostly re-present what's already accumulated (subset,
 /// the documented steady state) with occasional new-or-changed entries.
@@ -401,9 +476,14 @@ fn merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns() {
 /// fuzzer stays within the domain real sessions actually exercise — the
 /// pre-existing qualified-name collision hole is covered by dedicated
 /// explicit tests above instead, per the standing instruction not to widen
-/// or "fix" that axis in this pass.
+/// or "fix" that axis in this pass. Each generated turn is deduped by id
+/// (see `dedup_turn_by_id_keep_last`) to keep it within the one-entry-per-id
+/// domain production can actually produce.
 fn arb_turns() -> impl Strategy<Value = Vec<Vec<DataCon>>> {
-    prop::collection::vec(prop::collection::vec(arb_datacon(), 0..6), 2..8)
+    prop::collection::vec(
+        prop::collection::vec(arb_datacon(), 0..6).prop_map(dedup_turn_by_id_keep_last),
+        2..8,
+    )
 }
 
 #[test]
