@@ -1,6 +1,35 @@
-use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder, VarId};
+use tidepool_repr::{CoreExpr, CoreFrame, DataConId, DataConTable, TreeBuilder, VarId};
 
-/// Wrap a CoreExpr with let-bindings for all data constructors from the table.
+/// One constructor binding minted by [`wrap_with_datacon_env`].
+///
+/// The wrapper RHSs are CLOSED terms — an arity-0 `Con` with no fields, or a
+/// curried lambda chain over freshly-minted binders — so they capture nothing
+/// from the fragment and are identical for a given constructor on every turn.
+/// That closedness is what lets a caller compile a wrapper's closure once per
+/// session and reuse it (see `CodegenPipeline`'s constructor-closure cache).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataConWrap {
+    /// Index of the `LetNonRec` node this binding occupies in the wrapped tree.
+    /// Valid only against the tree returned alongside it, and only while that
+    /// tree's indices are untouched — a later pass that rebuilds the tree
+    /// (e.g. `lower::lower_jump_crosses_lam`) invalidates the manifest.
+    pub let_idx: usize,
+    /// The constructor bound at `VarId(tag.0)`.
+    pub tag: DataConId,
+    /// `rep_arity`: 0 binds a saturated `Con`, N binds an N-deep lambda chain.
+    pub arity: usize,
+}
+
+/// [`wrap_with_datacon_env`]'s result: the wrapped tree plus a manifest of the
+/// bindings it minted, innermost (lowest `DataConId`) first.
+pub struct WrappedExpr {
+    /// The fragment with its constructor environment prepended.
+    pub expr: CoreExpr,
+    /// One entry per minted binding, in construction order.
+    pub wraps: Vec<DataConWrap>,
+}
+
+/// Wrap a CoreExpr with let-bindings for data constructors from the table.
 ///
 /// For each DataCon with arity N:
 /// - arity 0: `let dc_var = Con(id, []) in ...`
@@ -10,9 +39,12 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder, VarId};
 ///
 /// The binding VarId matches `VarId(dc.id.0)`, which is what the GHC Core translator
 /// uses to reference data constructors as function values.
-pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreExpr {
+pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> WrappedExpr {
     if expr.nodes.is_empty() {
-        return expr;
+        return WrappedExpr {
+            expr,
+            wraps: Vec::new(),
+        };
     }
     let mut b = TreeBuilder::new();
 
@@ -25,6 +57,7 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreEx
     datacons.sort_by_key(|dc| dc.id.0);
 
     let mut body = root;
+    let mut wraps = Vec::with_capacity(datacons.len());
 
     for dc in &datacons {
         let binder = VarId(dc.id.0);
@@ -40,6 +73,11 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreEx
                 binder,
                 rhs: con,
                 body,
+            });
+            wraps.push(DataConWrap {
+                let_idx: body,
+                tag: dc.id,
+                arity,
             });
         } else {
             // Build curried lambda chain: \v0 -> \v1 -> ... -> Con(id, [v0, v1, ...])
@@ -76,8 +114,16 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreEx
                 rhs: inner,
                 body,
             });
+            wraps.push(DataConWrap {
+                let_idx: body,
+                tag: dc.id,
+                arity,
+            });
         }
     }
 
-    b.build()
+    WrappedExpr {
+        expr: b.build(),
+        wraps,
+    }
 }

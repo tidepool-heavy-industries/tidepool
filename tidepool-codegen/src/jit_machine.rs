@@ -414,7 +414,12 @@ impl JitEffectMachine {
             tidepool_repr::check_toplevel_varids(expr)?;
         }
         let expr = tidepool_repr::normalize(expr, table);
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        // The wrapper manifest is dropped here: `lower_jump_crosses_lam` below
+        // rebuilds the tree, so its node indices would not survive. The manifest
+        // exists for the session re-entry path (`add_function`), which has prior
+        // fragments to share constructor closures with; a one-shot compile has
+        // none.
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table).expr;
         // Defensive precondition restore: the real Haskell pipeline never emits
         // a Jump crossing a Lam boundary (Translate.hs's `jumpCrossesLam` rewrites
         // it first), but hand-built/synthetic CoreExpr producers can. Re-check
@@ -1288,7 +1293,8 @@ impl JitEffectMachine {
         // like the original entry; only the JITModule destination differs (it is
         // already finalized — we add a fresh round).
         let expr = tidepool_repr::normalize(expr, table);
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        let crate::datacon_env::WrappedExpr { expr, wraps: _ } =
+            crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
