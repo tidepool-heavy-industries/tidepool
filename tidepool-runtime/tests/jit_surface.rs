@@ -34,14 +34,14 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// RunLLMTurn's position in the standard effect stack (see
-/// `run_llm_turn_sidecar.rs`'s `RUN_LLM_TURN_TAG` doc: 9 base effects at
-/// tags 0..8, `Ask` interposed at tag 9, `RunLLMTurn` right after it at tag
-/// 10). `forkFilter`/`forkMap` route through `runLLMTurnFanoutSited`
-/// (self-iterating-harness WS-B split `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout` out of `Ask` into their own effect/tag), so their
-/// fanout dispatch now arrives at THIS tag, not `Ask`'s.
-const RUN_LLM_TURN_TAG: u64 = 10;
+/// `Fork`'s position in the standard effect stack: 9 base effects at tags
+/// 0..8, then the interposed `Ask` (9), `RunLLMTurn` (10), and `Fork` (11) —
+/// the roster order in `tidepool-mcp`'s `standard_decls()`.
+///
+/// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
+/// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
+/// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
+const FORK_TAG: u64 = 11;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
@@ -1145,10 +1145,7 @@ impl DispatchEffect<()> for BoolListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, RUN_LLM_TURN_TAG,
-            "expected the fanout's RunLLMTurn dispatch"
-        );
+        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }
@@ -1183,10 +1180,7 @@ impl DispatchEffect<()> for IntListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, RUN_LLM_TURN_TAG,
-            "expected the fanout's RunLLMTurn dispatch"
-        );
+        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }
