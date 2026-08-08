@@ -608,7 +608,6 @@ mod tests {
     /// transitions without the JIT.
     #[derive(Debug, PartialEq, Eq)]
     struct FakeMachine {
-        #[allow(dead_code)]
         id: u32,
     }
 
