@@ -802,10 +802,14 @@ mod tests {
             meta_entry(42, "DynFlags", "GHC.Driver.Session.DynFlags"),
         ]);
         match read_metadata(&bytes).expect_err("colliding meta must be rejected") {
-            ReadError::DataConCollision(c) => {
-                assert_eq!(c.id, crate::types::DataConId(42));
-                assert_eq!(c.first, "Data.OpenUnion.Internal.Union");
-                assert_eq!(c.second, "GHC.Driver.Session.DynFlags");
+            ReadError::DataConCollision(crate::datacon_table::DataConCollision::Id {
+                id,
+                first,
+                second,
+            }) => {
+                assert_eq!(id, crate::types::DataConId(42));
+                assert_eq!(first, "Data.OpenUnion.Internal.Union");
+                assert_eq!(second, "GHC.Driver.Session.DynFlags");
             }
             other => panic!("expected DataConCollision, got {other:?}"),
         }

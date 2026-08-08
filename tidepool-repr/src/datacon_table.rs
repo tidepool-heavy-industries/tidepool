@@ -11,30 +11,64 @@ fn dc_identity(dc: &DataCon) -> &str {
     dc.qualified_name.as_deref().unwrap_or(&dc.name)
 }
 
-/// Two DISTINCT constructors (different module-qualified identity) sharing one
-/// [`DataConId`] — i.e. a 56-bit `stableVarId` hash collision.
+/// A collision `insert_checked`/`extend_checked` refuses to silently absorb.
 ///
-/// This is the silent-eviction class that took out freer-simple's `Union`: a
-/// dcid-keyed map would overwrite one constructor's entry with the other, and
-/// the lost constructor then resolves to `None` (or to the wrong metadata) at
-/// effect-machine setup / case dispatch. [`DataConTable::insert_checked`]
-/// surfaces it loudly instead of overwriting.
+/// Two independent axes, both loud rather than last-writer-wins:
+///
+/// - [`Self::Id`]: two DISTINCT constructors (different module-qualified
+///   identity) sharing one [`DataConId`] — i.e. a 56-bit `stableVarId` hash
+///   collision. This is the silent-eviction class that took out freer-simple's
+///   `Union`: a dcid-keyed map would overwrite one constructor's entry with
+///   the other, and the lost constructor then resolves to `None` (or to the
+///   wrong metadata) at effect-machine setup / case dispatch.
+/// - [`Self::QualifiedName`]: two DISTINCT [`DataConId`]s claiming one
+///   module-qualified name. `by_qualified_name` (and `freer_names::resolve`,
+///   which consults it first) can only remember one id per name, so the
+///   other would silently drop out of qualified-name resolution — the mirror
+///   image of the `Id` case. A real accumulated session table carries zero
+///   such duplicates (library constructor ids are stable across extract
+///   invocations), so this indicates the extractor's id minting changed, not
+///   a shape to tie-break.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "DataConId {:#018x} collision: two distinct constructors hash to the same \
-     varId — '{first}' and '{second}'. One would silently shadow the other in \
-     the DataConTable (the freer-simple Union eviction class). This is a \
-     Haskell-side stableVarId hash collision; rename one constructor or widen \
-     the hash. (Set TIDEPOOL_VARID_AUDIT=1 on the extract for the forensic dump.)",
-    .id.0
-)]
-pub struct DataConCollision {
-    /// The colliding identifier.
-    pub id: DataConId,
-    /// Module-qualified identity of the constructor already in the table.
-    pub first: String,
-    /// Module-qualified identity of the constructor that collided with it.
-    pub second: String,
+pub enum DataConCollision {
+    #[error(
+        "DataConId {:#018x} collision: two distinct constructors hash to the same \
+         varId — '{first}' and '{second}'. One would silently shadow the other in \
+         the DataConTable (the freer-simple Union eviction class). This is a \
+         Haskell-side stableVarId hash collision; rename one constructor or widen \
+         the hash. (Set TIDEPOOL_VARID_AUDIT=1 on the extract for the forensic dump.)",
+        .id.0
+    )]
+    Id {
+        /// The colliding identifier.
+        id: DataConId,
+        /// Module-qualified identity of the constructor already in the table.
+        first: String,
+        /// Module-qualified identity of the constructor that collided with it.
+        second: String,
+    },
+    #[error(
+        "qualified name {qualified_name:?} collision: two distinct DataConIds claim \
+         it — {:#018x} ('{first}') and {:#018x} ('{second}'). `by_qualified_name` \
+         (and `freer_names::resolve`, which consults it first) can only remember \
+         one id per name, so the other would silently drop out of qualified-name \
+         resolution. A real accumulated session table carries zero such \
+         duplicates, so this indicates the extractor's id minting changed; it is \
+         not something to tie-break.",
+        .first_id.0, .second_id.0
+    )]
+    QualifiedName {
+        /// The qualified name both ids claim.
+        qualified_name: String,
+        /// The id already holding the qualified-name mapping.
+        first_id: DataConId,
+        /// Identity of the constructor already holding the mapping.
+        first: String,
+        /// The id that tried to claim the same qualified name.
+        second_id: DataConId,
+        /// Identity of the constructor that collided with it.
+        second: String,
+    },
 }
 
 /// Lookup table for data constructor metadata.
@@ -84,17 +118,37 @@ impl DataConTable {
     /// This is the always-on table-integrity guard; it covers every producer,
     /// including future non-extract ones. (The Haskell extractor additionally
     /// stops coalescing colliding entries so they actually reach this check.)
+    ///
+    /// Also guards the `by_qualified_name` axis: two DISTINCT ids claiming one
+    /// qualified name is a hard error too, for the same reason — see
+    /// [`Self::check_collision`], which this and [`Self::extend_checked`] both
+    /// route through so neither route can drift out of sync with the other.
     pub fn insert_checked(&mut self, dc: DataCon) -> Result<(), DataConCollision> {
+        self.check_collision(&dc)?;
+        self.insert(dc);
+        Ok(())
+    }
+
+    /// Check `dc` against both collision axes without mutating the table —
+    /// the by-id axis (a `stableVarId` hash collision between two distinct
+    /// constructors) and the `by_qualified_name` axis (two distinct
+    /// [`DataConId`]s claiming one qualified name). A re-encounter of the SAME
+    /// id or the SAME id already owning a qualified name is not a collision.
+    ///
+    /// Shared by [`Self::insert_checked`] and [`Self::extend_checked`] so both
+    /// ingestion routes see byte-identical guard logic rather than two
+    /// hand-maintained copies that could drift.
+    fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
         if let Some(existing) = self.by_id.get(&dc.id) {
-            if dc_identity(existing) != dc_identity(&dc) {
-                return Err(DataConCollision {
+            if dc_identity(existing) != dc_identity(dc) {
+                return Err(DataConCollision::Id {
                     id: dc.id,
                     first: dc_identity(existing).to_string(),
-                    second: dc_identity(&dc).to_string(),
+                    second: dc_identity(dc).to_string(),
                 });
             }
             if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
-                return Err(DataConCollision {
+                return Err(DataConCollision::Id {
                     id: dc.id,
                     first: format!(
                         "{} (tag={}, rep_arity={})",
@@ -104,14 +158,31 @@ impl DataConTable {
                     ),
                     second: format!(
                         "{} (tag={}, rep_arity={})",
-                        dc_identity(&dc),
+                        dc_identity(dc),
                         dc.tag,
                         dc.rep_arity
                     ),
                 });
             }
         }
-        self.insert(dc);
+        if let Some(qn) = &dc.qualified_name {
+            if let Some(&existing_id) = self.by_qualified_name.get(qn) {
+                if existing_id != dc.id {
+                    let existing_identity = self
+                        .by_id
+                        .get(&existing_id)
+                        .map(|d| dc_identity(d).to_string())
+                        .unwrap_or_else(|| qn.clone());
+                    return Err(DataConCollision::QualifiedName {
+                        qualified_name: qn.clone(),
+                        first_id: existing_id,
+                        first: existing_identity,
+                        second_id: dc.id,
+                        second: dc_identity(dc).to_string(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -219,6 +290,11 @@ impl DataConTable {
     /// before returning — so the table left behind by an error is byte-for-
     /// byte the same table `for dc in dcs { insert_checked(dc)? }` would have
     /// left at the same point, not a batch-deferred half state.
+    ///
+    /// Routes through [`Self::check_collision`] — the same guard
+    /// `insert_checked` uses, including the `by_qualified_name` axis — so a
+    /// collision on either axis stops the batch exactly where the sequential
+    /// fold would.
     pub fn extend_checked<I>(&mut self, dcs: I) -> Result<(), DataConCollision>
     where
         I: IntoIterator<Item = DataCon>,
@@ -226,33 +302,9 @@ impl DataConTable {
         let mut affected: HashSet<String> = HashSet::new();
         let mut result = Ok(());
         for dc in dcs {
-            if let Some(existing) = self.by_id.get(&dc.id) {
-                if dc_identity(existing) != dc_identity(&dc) {
-                    result = Err(DataConCollision {
-                        id: dc.id,
-                        first: dc_identity(existing).to_string(),
-                        second: dc_identity(&dc).to_string(),
-                    });
-                    break;
-                }
-                if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
-                    result = Err(DataConCollision {
-                        id: dc.id,
-                        first: format!(
-                            "{} (tag={}, rep_arity={})",
-                            dc_identity(existing),
-                            existing.tag,
-                            existing.rep_arity
-                        ),
-                        second: format!(
-                            "{} (tag={}, rep_arity={})",
-                            dc_identity(&dc),
-                            dc.tag,
-                            dc.rep_arity
-                        ),
-                    });
-                    break;
-                }
+            if let Err(e) = self.check_collision(&dc) {
+                result = Err(e);
+                break;
             }
             let type_name = self.upsert_no_sort(dc);
             affected.insert(type_name);
@@ -714,9 +766,14 @@ mod tests {
                 "GHC.Driver.Session.DynFlags",
             ))
             .expect_err("distinct constructor at same id must collide");
-        assert_eq!(err.id, DataConId(42));
-        assert_eq!(err.first, "Data.OpenUnion.Internal.Union");
-        assert_eq!(err.second, "GHC.Driver.Session.DynFlags");
+        match &err {
+            DataConCollision::Id { id, first, second } => {
+                assert_eq!(*id, DataConId(42));
+                assert_eq!(first, "Data.OpenUnion.Internal.Union");
+                assert_eq!(second, "GHC.Driver.Session.DynFlags");
+            }
+            other => panic!("expected DataConCollision::Id, got {other:?}"),
+        }
         // The survivor is unchanged — the collision did not overwrite it.
         assert_eq!(
             table.get_by_qualified_name("Data.OpenUnion.Internal.Union"),
@@ -765,11 +822,16 @@ mod tests {
         let err = table
             .insert_checked(make_datacon_qualified(5, "Foo", 2, 3, "Mod.Foo"))
             .expect_err("agreeing identity but disagreeing tag/arity must collide");
-        assert_eq!(err.id, DataConId(5));
-        assert!(err.first.contains("tag=1"), "first: {}", err.first);
-        assert!(err.first.contains("rep_arity=2"), "first: {}", err.first);
-        assert!(err.second.contains("tag=2"), "second: {}", err.second);
-        assert!(err.second.contains("rep_arity=3"), "second: {}", err.second);
+        match &err {
+            DataConCollision::Id { id, first, second } => {
+                assert_eq!(*id, DataConId(5));
+                assert!(first.contains("tag=1"), "first: {first}");
+                assert!(first.contains("rep_arity=2"), "first: {first}");
+                assert!(second.contains("tag=2"), "second: {second}");
+                assert!(second.contains("rep_arity=3"), "second: {second}");
+            }
+            other => panic!("expected DataConCollision::Id, got {other:?}"),
+        }
         // The survivor (first insert) is unchanged.
         assert_eq!(table.get(DataConId(5)).unwrap().tag, 1);
         assert_eq!(table.get(DataConId(5)).unwrap().rep_arity, 2);
@@ -787,8 +849,110 @@ mod tests {
         let err = table
             .insert_checked(make_datacon(9, "Different", 1, 0))
             .expect_err("different unqualified name at same id collides");
-        assert_eq!(err.first, "Same");
-        assert_eq!(err.second, "Different");
+        match &err {
+            DataConCollision::Id { first, second, .. } => {
+                assert_eq!(first, "Same");
+                assert_eq!(second, "Different");
+            }
+            other => panic!("expected DataConCollision::Id, got {other:?}"),
+        }
+    }
+
+    // ---- insert_checked / extend_checked: by_qualified_name collision guard ----
+
+    /// Two DISTINCT ids claiming one qualified name must be rejected loudly,
+    /// naming both ids — the mirror-image of the by-id guard above, and the
+    /// fix for finding 2 in
+    /// `plans/self-iterating-harness/12-contags-staleness-findings.md`.
+    #[test]
+    fn insert_checked_rejects_distinct_ids_sharing_a_qualified_name() {
+        let mut table = DataConTable::new();
+        table
+            .insert_checked(make_datacon_qualified(
+                10,
+                "Val",
+                1,
+                1,
+                "Control.Monad.Freer.Val",
+            ))
+            .expect("first insert is clean");
+        let err = table
+            .insert_checked(make_datacon_qualified(
+                910,
+                "Val",
+                1,
+                1,
+                "Control.Monad.Freer.Val",
+            ))
+            .expect_err("a second, distinct id claiming the same qualified name must collide");
+        match &err {
+            DataConCollision::QualifiedName {
+                qualified_name,
+                first_id,
+                second_id,
+                ..
+            } => {
+                assert_eq!(qualified_name, "Control.Monad.Freer.Val");
+                assert_eq!(*first_id, DataConId(10));
+                assert_eq!(*second_id, DataConId(910));
+            }
+            other => panic!("expected DataConCollision::QualifiedName, got {other:?}"),
+        }
+        // The survivor is unchanged — the collision did not overwrite it.
+        assert_eq!(
+            table.get_by_qualified_name("Control.Monad.Freer.Val"),
+            Some(DataConId(10))
+        );
+        assert_eq!(table.get(DataConId(910)), None);
+        // The error message names both colliding ids.
+        let msg = err.to_string();
+        assert!(msg.contains("0x000000000000000a"), "msg: {msg}");
+        assert!(msg.contains("0x000000000000038e"), "msg: {msg}");
+        assert!(msg.contains("Control.Monad.Freer.Val"), "msg: {msg}");
+    }
+
+    /// The SAME id re-presenting the qualified name it already owns is not a
+    /// collision — the guard only fires when a DIFFERENT id claims it.
+    #[test]
+    fn insert_checked_allows_same_id_reclaiming_its_own_qualified_name() {
+        let mut table = DataConTable::new();
+        let dc = make_datacon_qualified(7, "Just", 2, 1, "GHC.Maybe.Just");
+        table.insert_checked(dc.clone()).expect("first insert");
+        table
+            .insert_checked(dc)
+            .expect("the same id re-claiming its own qualified name is not a collision");
+        assert_eq!(table.len(), 1);
+    }
+
+    /// `extend_checked` must route through the SAME qualified-name guard as
+    /// `insert_checked` — not a separately hand-maintained copy that could
+    /// drift. Two distinct ids sharing a qualified name, fed through the
+    /// batch API, must collide identically.
+    #[test]
+    fn extend_checked_rejects_distinct_ids_sharing_a_qualified_name() {
+        let mut table = DataConTable::new();
+        let first = make_datacon_qualified(1, "A", 1, 0, "Shared.Qualified.Name");
+        let second = make_datacon_qualified(2, "B", 1, 0, "Shared.Qualified.Name");
+        let err = table
+            .extend_checked([first, second])
+            .expect_err("extend_checked must reject the same qualified-name collision");
+        match &err {
+            DataConCollision::QualifiedName {
+                first_id,
+                second_id,
+                ..
+            } => {
+                assert_eq!(*first_id, DataConId(1));
+                assert_eq!(*second_id, DataConId(2));
+            }
+            other => panic!("expected DataConCollision::QualifiedName, got {other:?}"),
+        }
+        // Only the first (clean) entry landed.
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.get_by_qualified_name("Shared.Qualified.Name"),
+            Some(DataConId(1))
+        );
     }
 
     #[test]

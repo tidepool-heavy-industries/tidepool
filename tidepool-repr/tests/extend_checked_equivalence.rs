@@ -8,19 +8,20 @@
 //! sequential path: same final table on success, same error (and same
 //! partially-applied table) on a genuine collision.
 //!
-//! One axis is NOT well-defined against production behavior: `insert_checked`
-//! guards collisions on the `id` axis only, so two DISTINCT ids that happen to
-//! share one `qualified_name` are never rejected, and `by_qualified_name` is a
-//! bare last-write-wins map — whichever id is processed LAST wins the
-//! mapping. In production that "last" is decided by a per-process-random
-//! `HashMap` iteration order (`DataConTable::iter`), so there is no single
-//! canonical outcome to pin against. Every comparison in this file therefore
-//! drives `extend_checked` and the `insert_checked` fold from the SAME
-//! explicit, already-ordered `Vec`/`Vec<Vec<_>>` — never from `.iter()` on a
-//! table — so both paths see identical input order and the comparison is
-//! well-defined. `distinct_ids_sharing_a_qualified_name_last_writer_wins_matches_input_order`
-//! pins that shared behavior explicitly (documented, not fixed — the
-//! collision hole is a known pre-existing defect, out of scope here).
+//! `insert_checked`/`extend_checked` also guard the `by_qualified_name` axis:
+//! two DISTINCT ids claiming one qualified_name is a hard error, not a
+//! last-write-wins race (`DataConTable::check_collision`, the guard both
+//! routes share). Every comparison in this file still drives `extend_checked`
+//! and the `insert_checked` fold from the SAME explicit, already-ordered
+//! `Vec`/`Vec<Vec<_>>` — never from `.iter()` on a table — so both paths see
+//! identical input order; that discipline now buys agreement on WHETHER and
+//! WHERE a collision fires, not just on a winner (there is no winner to pin
+//! anymore, on either axis).
+//! `distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order`
+//! and `merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns`
+//! pin the qualified-name axis explicitly — both used to document an
+//! undefined last-writer-wins/divergence outcome and now assert the
+//! collision error instead.
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -299,99 +300,96 @@ fn same_logical_constructor_across_generations_preserves_tiebreak_order() {
 }
 
 #[test]
-fn distinct_ids_sharing_a_qualified_name_last_writer_wins_matches_input_order() {
-    // KNOWN DEFECT, preserved not fixed: insert_checked's collision guard is
-    // keyed on `id` only. Two DISTINCT ids that share one qualified_name both
-    // insert cleanly, and `by_qualified_name` (a bare HashMap) silently
-    // records whichever was processed LAST. This test does not close that
-    // hole — it pins that extend_checked reproduces the identical
-    // last-writer-wins outcome as folding insert_checked, for the SAME
-    // explicit input order, in BOTH directions — proving the outcome tracks
-    // input order (not some canonical resolution) and that batching never
-    // perturbs it.
+fn distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order() {
+    // FORMERLY a known-undefined last-writer-wins race (whichever id was
+    // processed last silently won `by_qualified_name`, tracking process-random
+    // HashMap iteration order in production). The `by_qualified_name` collision
+    // guard (finding 2, `plans/self-iterating-harness/12-contags-staleness-
+    // findings.md`) closes that hole: two DISTINCT ids sharing one
+    // qualified_name is now a hard error, in both `insert_checked` and its
+    // batched sibling `extend_checked`, regardless of which order they arrive
+    // in — there is no winner to pin, only a collision to reject.
     let first = dc(40, "A", 1, 0, Some("Shared.Qualified.Name"), "T1");
     let second = dc(41, "B", 1, 0, Some("Shared.Qualified.Name"), "T2");
 
     let fwd = [first.clone(), second.clone()];
     let (table_fwd, result_fwd) = via_extend_checked(&fwd);
-    assert!(result_fwd.is_ok());
-    assert_eq!(
-        table_fwd.get_by_qualified_name("Shared.Qualified.Name"),
-        Some(DataConId(41)),
-        "second-processed id must win the qualified_name mapping"
+    assert!(
+        result_fwd.is_err(),
+        "distinct ids sharing a qualified name must collide"
     );
+    match result_fwd.as_ref().unwrap_err() {
+        DataConCollision::QualifiedName {
+            first_id,
+            second_id,
+            ..
+        } => {
+            assert_eq!(*first_id, DataConId(40));
+            assert_eq!(*second_id, DataConId(41));
+        }
+        other => panic!("expected QualifiedName collision, got {other:?}"),
+    }
     assert_eq!(fold_sequential(&fwd), (table_fwd, result_fwd));
 
     let rev = [second, first];
     let (table_rev, result_rev) = via_extend_checked(&rev);
-    assert!(result_rev.is_ok());
-    assert_eq!(
-        table_rev.get_by_qualified_name("Shared.Qualified.Name"),
-        Some(DataConId(40)),
-        "reversing input order must flip the winner — it tracks order, not identity"
+    assert!(
+        result_rev.is_err(),
+        "the collision fires regardless of processing order"
     );
+    match result_rev.as_ref().unwrap_err() {
+        DataConCollision::QualifiedName {
+            first_id,
+            second_id,
+            ..
+        } => {
+            assert_eq!(*first_id, DataConId(41));
+            assert_eq!(*second_id, DataConId(40));
+        }
+        other => panic!("expected QualifiedName collision, got {other:?}"),
+    }
     assert_eq!(fold_sequential(&rev), (table_rev, result_rev));
 }
 
 #[test]
 fn merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns() {
-    // A SEPARATE, more specific finding than the single-call last-writer-wins
-    // pin above: `merge_table`'s skip-identical pre-filter (STEP 1) decides
-    // whether to skip an unchanged entry using a filter pass that does not
-    // see intra-batch effects. When two distinct ids share a qualified_name
-    // (the pre-existing hole — confirmed absent from real extracted sessions
-    // as of this writing, so currently unexercised in production) and a
-    // LATER turn re-presents an unchanged id whose job is to reclaim that
-    // qualified_name from a different id introduced earlier in the SAME
-    // turn, the skip filter omits it — because at filter time it still
-    // "owned" the mapping — and never learns that a same-turn predecessor
-    // just took it over. Sequential per-item reprocessing (today's
-    // production code, and this crate's `insert_checked` fold) always
-    // reclaims it, because it never skips.
+    // FORMERLY pinned an undefined divergence: `merge_table`'s skip-identical
+    // pre-filter (STEP 1) decides whether to skip an unchanged entry using a
+    // filter pass that does not see intra-batch effects, so a later turn
+    // re-presenting an id that had *already* lost a qualified-name race to a
+    // same-turn predecessor could reclaim it on the sequential path while the
+    // batched path did not. That divergence was undefined precisely because
+    // there was no canonical winner to begin with.
     //
-    // This is NOT the qualified-name collision hole itself (this file must
-    // not touch that) — it is a documented consequence of the skip-identical
-    // optimization interacting with that pre-existing hole. Pinned here so
-    // it is visible and intentional rather than a surprise; not fixed, per
-    // explicit direction to leave the qualified-name axis alone this pass.
+    // The `by_qualified_name` collision guard (finding 2) closes the hole
+    // this divergence lived in: two distinct ids sharing one qualified_name
+    // is now a hard error, so both the `merge_table`-style skip-filtered path
+    // and the flattened sequential fold must reject this shape outright
+    // rather than disagree about a winner. Turn 1 introduces id 50 under
+    // "Shared.Turn.Name"; turn 2 introduces the DISTINCT id 51 under the same
+    // qualified name before re-presenting id 50 unchanged — the skip filter
+    // only elides entries that are byte-identical to what's already
+    // accumulated, and id 51 is never such an entry, so it cannot dodge the
+    // guard by being filtered out.
     let id1 = dc(50, "A", 1, 0, Some("Shared.Turn.Name"), "T1");
     let id2 = dc(51, "B", 1, 0, Some("Shared.Turn.Name"), "T2");
     let turns = vec![vec![id1.clone()], vec![id2, id1]];
 
-    let (merged_table, merged_result) = merge_all_turns(&turns);
-    let (sequential_table, sequential_result) = flatten_and_fold_sequential(&turns);
-    assert!(merged_result.is_ok());
-    assert!(sequential_result.is_ok());
+    let (_, merged_result) = merge_all_turns(&turns);
+    let (_, sequential_result) = flatten_and_fold_sequential(&turns);
 
-    // Sequential (today's per-turn `for dc in table.iter() { insert_checked
-    // }`, folded across turns) ALWAYS reclaims — id 1's redundant reprocess
-    // is never skipped, so its unconditional qualified_name write wins last.
-    assert_eq!(
-        sequential_table.get_by_qualified_name("Shared.Turn.Name"),
-        Some(DataConId(50)),
-        "sequential reprocessing always reclaims the qualified_name"
-    );
-    // The batched skip-filter path (`merge_table`'s actual, unmodified
-    // behavior) DOES NOT reclaim it here: turn 2's filter pass decides id 1
-    // is skippable using the table state as of the START of turn 2 (where id
-    // 1 still owned the mapping), never seeing that id 2 — its own
-    // predecessor WITHIN that same turn — takes the mapping first. This IS
-    // the confirmed divergence: extend_checked and its merge_table wiring
-    // are only equivalence-tested against the sequential fold within a
-    // SINGLE call (see `extend_checked_matches_sequential_insert_checked_property`,
-    // which is unaffected — the skip filter lives in `merge_table`, not
-    // `extend_checked`). Left unfixed per explicit direction not to touch
-    // the qualified-name axis this pass.
-    assert_eq!(
-        merged_table.get_by_qualified_name("Shared.Turn.Name"),
-        Some(DataConId(51)),
-        "merge_table's skip filter does NOT reclaim — this is the pinned divergence"
-    );
-    assert_ne!(
-        merged_table.get_by_qualified_name("Shared.Turn.Name"),
-        sequential_table.get_by_qualified_name("Shared.Turn.Name"),
-        "documents that this specific shape diverges; not asserting full table equality here"
-    );
+    let merged_err =
+        merged_result.expect_err("merge_table-style path must reject the qualified-name collision");
+    let sequential_err =
+        sequential_result.expect_err("the flattened sequential fold must reject it too");
+    for err in [&merged_err, &sequential_err] {
+        match err {
+            DataConCollision::QualifiedName { qualified_name, .. } => {
+                assert_eq!(qualified_name, "Shared.Turn.Name");
+            }
+            other => panic!("expected QualifiedName collision, got {other:?}"),
+        }
+    }
 }
 
 /// When a property test wants Vec-shaped freedom for generation convenience,
@@ -505,14 +503,21 @@ fn multiturn_merge_matches_flattened_sequential_property() {
 /// overwrites, and genuine collisions all need to show up with reasonable
 /// probability for the property to be worth anything.
 ///
-/// `qualified_name` is keyed to `id` (never independently drawn): two
-/// DISTINCT ids sharing one qualified_name is the pre-existing collision
-/// hole documented at the top of this file — confirmed absent from real
-/// extracted sessions, and deliberately out of scope to touch or widen this
-/// pass. Keeping it out of the general fuzzer avoids a non-deterministic
-/// flake on a shape that is already pinned explicitly above
-/// (`distinct_ids_sharing_a_qualified_name_last_writer_wins_matches_input_order`,
-/// `merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns`).
+/// `qualified_name` is drawn INDEPENDENTLY of `id` again — it used to be keyed
+/// to `id` (`Mod.{id}`, one name per id) to keep the fuzzer out of the
+/// then-undefined region where two DISTINCT ids share one qualified_name (see
+/// `distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order`
+/// and `merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns`
+/// above, both of which used to pin an undefined last-writer-wins/divergence
+/// outcome there). The `by_qualified_name` collision guard (finding 2,
+/// `plans/self-iterating-harness/12-contags-staleness-findings.md`) makes
+/// that region well-defined: both `fold_sequential` and
+/// `via_extend_checked`/`merge_all_turns` route through the same
+/// `check_collision`, so a generated collision surfaces as an identical `Err`
+/// on every path this file compares — there's no longer a winner to dodge,
+/// only an equivalence to hold, which is exactly what the properties below
+/// assert. Keeping the id pool (5) small relative to the qualified_name pool
+/// (3 named + `None`) makes cross-id collisions common rather than rare.
 fn arb_datacon() -> impl Strategy<Value = DataCon> {
     (0u64..5).prop_flat_map(|id| {
         (
@@ -522,7 +527,11 @@ fn arb_datacon() -> impl Strategy<Value = DataCon> {
                 Just("Bar".to_string()),
                 Just("Baz".to_string())
             ],
-            prop::option::of(Just(format!("Mod.{id}"))),
+            prop::option::of(prop_oneof![
+                Just("Mod.A".to_string()),
+                Just("Mod.B".to_string()),
+                Just("Mod.C".to_string())
+            ]),
             prop_oneof![Just("TyA".to_string()), Just("TyB".to_string())],
             1u32..3,
             0u32..3,

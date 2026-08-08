@@ -1355,6 +1355,25 @@ impl JitEffectMachine {
         if let Some(ids) = tidepool_eval::time::TimeConIds::from_table(table) {
             self.time_con_ids = Some(ids);
         }
+        // Refresh `tags` too — re-resolve ConTags against THIS fragment's table
+        // rather than leaving it frozen at whatever `compile_inner` saw at
+        // bootstrap (plans/self-iterating-harness/12-contags-staleness-findings.md,
+        // finding 1/1b). The asymmetry is deliberate, not an oversight:
+        //   Err -> Ok: install. Mirrors json_con_ids/time_con_ids' accumulate-
+        //     never-clobber intent — a later turn's table may supply a freer
+        //     constructor (Val/E/Union/Leaf/Node) that bootstrap's table lacked,
+        //     and without this a session stays permanently `MissingConTags`
+        //     even once the table can classify (finding 1b, deterministic).
+        //   Ok -> Ok (re-resolved): install. An accumulated session table is a
+        //     superset of the bootstrap one, so this is a no-op in practice,
+        //     but re-resolving against the turn's own table rather than
+        //     assuming stability is the honest rule.
+        //   Ok -> Err: do NOT clobber. Overwriting an established `Ok` with a
+        //     fresh `Err` would break a session whose later turn happens to
+        //     carry a sparser table than a prior turn did.
+        if let Ok(refreshed) = ConTags::from_table(table).map_err(|kind| kind.name()) {
+            self.tags = Ok(refreshed);
+        }
         let nodes = expr.nodes.len();
         // Subtract the pre-wrap diagnostic walk's own time: it sits inside this
         // window (it needs the pre-wrap tree, which wrap_with_datacon_env then
