@@ -48,14 +48,17 @@
 # So neither command is unconditionally GHC-free, and neither takes a
 # ghc-slots slot. What bounds it is the macro's own content-addressed cache
 # (`<crate>/target/tidepool-cbor/<basename>-<key>`, keyed on source bytes +
-# target binding): 14 macro invocations across the four expanding targets
-# (tidepool-macro/tests/{basic,hs_eval}.rs, examples/{guess,tide}) collapse to
-# 5 distinct keys — measured, 3 + 1 + 1 cache dirs. That cache is gitignored
-# and lives under each CRATE's own `target/`, not the workspace target dir, so
-# `cargo clean` does not touch it. The cost is ~5 un-slotted extract spawns
-# ONCE per worktree, re-paid only on a fresh worktree or an edit to the .hs
-# source — which does mean every agent rebasing onto a batch like this pays it
-# on their first build.
+# target binding + transitive .hs deps): 14 macro invocations across the four
+# expanding targets (tidepool-macro/tests/{basic,hs_eval}.rs,
+# examples/{guess,tide}) collapse to 5 distinct keys — measured, 3 + 1 + 1
+# cache dirs. That cache is gitignored and lives under each CRATE's own
+# `target/`, not the workspace target dir, so `cargo clean` does not touch it.
+# The cost is ~5 un-slotted extract spawns ONCE per worktree. Three things
+# re-pay it: a fresh worktree, an edit to a .hs source, and a Rust toolchain
+# bump (the key is a DefaultHasher digest, which is toolchain-local by
+# construction — see content_key in tidepool-macro/src/expand.rs). All three
+# describe a batch like this one landing, so expect every agent to pay it on
+# their first build after the rebase.
 # NOT gated behind a feature, deliberately: gating tidepool-macro's test pair
 # would leave examples/guess and examples/tide expanding the same macros from
 # their bins, so the "quick tier is GHC-free by construction" claim still
