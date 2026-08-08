@@ -64,9 +64,13 @@ scripts/ghc-slots.sh run -- bash -c '
 #    don't chase; anything else is new).
 
 # 4. Expensive differential gate (one deliberate run)
+# NOTE (2026-08-08): the suite is a test BINARY in tidepool-codegen —
+# the original "-p tidepool-testing -E 'test(...)'" spelling matches
+# NOTHING (0 run, 135 skipped, exit 0: the exact zero-tests trap this
+# runbook's own counts rule exists to catch, and it caught it).
 TIDEPOOL_EXPENSIVE_TESTS=1 scripts/ghc-slots.sh run -- \
-  cargo nextest run --ignore-default-filter -p tidepool-testing \
-  -E 'test(haskell_suite_differential)' --run-ignored all --no-fail-fast
+  cargo nextest run --ignore-default-filter -p tidepool-codegen \
+  -E 'binary(haskell_suite_differential)' --run-ignored all --no-fail-fast
 # Baseline counters: tested=349 compared=312 closure_skip=34 mismatch=0
 # both_error=0 jit_only_error=0 eval_jit_diverge=3 skipped=1; floor=300.
 
