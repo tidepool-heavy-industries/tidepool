@@ -120,15 +120,36 @@ opt-level = 3
 [profile.dev.package.regalloc2]
 opt-level = 3
 
-# Also optimize the JIT/interpreter hot crates for `cargo test` specifically,
-# where their RUNTIME dominates (Cranelift emit + tree-walk over the corpus).
-# Kept out of plain `[profile.dev]` so a normal `cargo build`/edit loop on these
-# crates stays fast; `cargo test` pays a one-time optimized rebuild of just these.
-[profile.test.package.tidepool-codegen]
+# The Tidepool half of that same hot path. `harness-dogfooding/run.sh` launches
+# the DEV profile, so a real turn ran its IR translation (tidepool-codegen's
+# emit::expr, wrap_with_datacon_env) and its Core tree walks (tidepool-repr's
+# free_vars/extract_subtree) at the `package."*"` opt-level 2 default while the
+# Cranelift backend underneath ran at 3. Turn-latency stage attribution puts
+# jit_codegen at 2.7-4.4s per turn on that profile — the mismatch is the cheap
+# part of it. tidepool-heap rides along: the GC copy primitives are on the same
+# per-turn path.
+#
+# This is the edit-loop cost the [profile.test.package] block below was
+# deliberately avoiding for these crates; taken now because the dogfooding
+# runtime is the thing being optimized, and a rebuild of three crates is
+# cheaper than 2.7s a turn. The algorithmic causes (per-turn constructor
+# re-emission, the quadratic DCE scan) are a separate wave.
+[profile.dev.package.tidepool-codegen]
 opt-level = 3
+[profile.dev.package.tidepool-repr]
+opt-level = 3
+[profile.dev.package.tidepool-heap]
+opt-level = 3
+
+# Optimized for `cargo test` only: these two are hot in the differential
+# suites (the eval oracle's tree walk, the optimizer over the corpus) but not
+# on the dogfooding runtime path, so a normal `cargo build`/edit loop on them
+# stays at the `package."*"` default and only `cargo test` pays the optimized
+# rebuild. tidepool-codegen and tidepool-heap used to be listed here too;
+# they now carry opt-level 3 in `[profile.dev.package]` above, which the test
+# profile inherits (verified: a `--tests` build of a crate with a dev-profile
+# override and no test-profile one compiles at `-C opt-level=3`).
 [profile.test.package.tidepool-eval]
-opt-level = 3
-[profile.test.package.tidepool-heap]
 opt-level = 3
 [profile.test.package.tidepool-optimize]
 opt-level = 3
