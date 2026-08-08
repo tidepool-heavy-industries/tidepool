@@ -735,9 +735,9 @@ fn cfg() -> Config {
 
 macro_rules! gc_property {
     ($name:ident, $label:literal, $strat:expr, $build:expr) => {
-        #[ignore = "GC fuzz, ~154s wall for the whole lane at 400 cases (measured); kept out of the \
-                    inner loop, not out of reach: cargo nextest run -p tidepool-codegen -E \
-                    'binary(proptest_gc_recursion)' --run-ignored all"]
+        #[ignore = "GC fuzz, ~2min wall for the whole lane at 400 cases (measured 106-154s across \
+                    runs, 2026-08-08); kept out of the inner loop, not out of reach: cargo nextest \
+                    run -p tidepool-codegen -E 'binary(proptest_gc_recursion)' --run-ignored all"]
         #[test]
         #[serial]
         fn $name() {
