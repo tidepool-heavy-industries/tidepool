@@ -383,11 +383,39 @@ In wave order, with what each needs:
 
 ## Test invocation notes
 
-- The differential gate is `#[ignore]`d. Selecting its binary without
-  `--run-ignored all` runs nothing and still exits 0 — check tests-run counts,
-  never the exit code.
+Every one of these cost real time in this lane. They are here so they cost the
+next person none.
+
+- **The differential gate lives in `tidepool-codegen`**, not `tidepool-testing`,
+  and needs all three of: `-p tidepool-codegen`,
+  `-E 'binary(haskell_suite_differential)'`, `--run-ignored all`, and
+  `TIDEPOOL_EXPENSIVE_TESTS=1`. Get any of them wrong and it runs **zero tests
+  and exits 0**. Gate on tests-run, never the exit code — this is not a
+  hypothetical, it happened here.
 - That gate reads pre-built CBOR and spawns no extract subprocess, so it needs
-  no GHC slot.
-- `selfharness_compaction` is open-intermittent. Signature: a fast-abort with a
-  garbage (large 64-bit) constructor tag. A *deterministic* garbage-tag failure
-  is a different bug.
+  no GHC slot. Taking one blocks real GHC work for a CPU-bound run.
+- **`TIDEPOOL_EXTRACT` alone is not enough for GHC-heavy tests.** The extract
+  binary shells out to `ghc`, so the nix `with-packages` wrapper must be on
+  `PATH` too. Without it every test fails in well under a second with
+  `ghc: readCreateProcess: posix_spawnp: does not exist` — five simultaneous
+  failures that look alarming and mean nothing. Derive the path the way
+  `scripts/battery.sh` does, by grepping the deployed wrapper for
+  `-with-packages/bin`, rather than hardcoding a store path.
+- **Capture diagnostics whole to a file and extract afterward.** Two separate
+  runs here were piped through `tail` at capture time, destroying the panic
+  text and the shrunk proptest counterexample on exactly the runs that needed
+  forensics.
+- A failure's **mode** is the finding, never its count. Contention produces
+  timeouts; it does not produce wrong values, sub-100ms assertion failures, or
+  five identical instant environment errors.
+
+## Known-open failures, with signatures
+
+- `selfharness_compaction` — fast-abort with a garbage (large 64-bit)
+  constructor tag. A *deterministic* garbage-tag failure is a different bug.
+- `NurseryExhausted` — surfaces as `Run(Jit(HeapBridge(NurseryExhausted)))`,
+  seen on `resident_session::nested_child_runs_while_parent_suspended_then_resumes`
+  (`resident_session.rs:340`). A fix landed covering the eager-response
+  `value_to_heap` site; it resurfaced on the nested-child/stowed-continuation
+  path, so the class is landed-but-incomplete. That fix is the pattern to
+  extend.
