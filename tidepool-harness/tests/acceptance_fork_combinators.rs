@@ -3,22 +3,14 @@
 //! same discipline as `acceptance_fanout.rs`. Record-replay, CI-shaped, zero
 //! live calls.
 //!
-//! `forkFilter` always answers at a fixed `Bool`, so it composes over
-//! `runLLMTurnFanout` (the SAME merged verb `acceptance_fanout.rs`
-//! exercises directly) with no extra machinery.
+//! `forkFilter` always answers at a fixed `Bool`; it composes over the `Fork`
+//! effect's fanout with no extra machinery.
 //!
-//! `forkMap`/`forkCata` need a CALLER-chosen answer type — that used to be a
-//! hard extraction-pipeline wall (a library-defined wrapper's own
-//! definition necessarily has that type free; extract rejects a
-//! `runLLMTurnFanout` occurrence whose answer type still carries a free
-//! type variable — verified against the real extract binary with both
-//! `INLINE` and an explicit call-site `SPECIALIZE` pragma, neither closed
-//! the gap). Closed by the combinator-sites extract pass: `Translate.hs`
-//! recognizes `forkMap`/`forkCata` by name (mirroring
-//! `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout`), capturing
-//! the answer type at the USER CALL SITE — see `Tidepool.Fork`'s module
-//! haddock and `jit_surface.rs`'s `works_fork_map` for the JIT-tier half of
-//! this coverage.
+//! `forkMap`/`forkCata` need a CALLER-chosen answer type. `Translate.hs`
+//! recognizes them by name (like `fork`/`forkAll`) and head-swaps each call
+//! site to its `Fork`-effect `*Sited` sibling, capturing the answer type at
+//! the USER CALL SITE — see `Tidepool.Fork`'s module haddock and
+//! `jit_surface.rs`'s `works_fork_map` for the JIT-tier half of this coverage.
 //!
 //! Coverage:
 //! - `forkFilter` over 3 elements ("1", "2", "3") with scripted verdicts

@@ -174,10 +174,11 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
         "the answerer framing must be render-derived, not the default SYSTEM_FRAMING"
     );
 
-    // Each child's request must open with the SAME system framing (the fix:
-    // Harness::force inherits the parent framing instead of resetting to None,
-    // which would send SYSTEM_FRAMING) and the SAME first user message (the
-    // hole card) — the transcript prefix through the fork checkpoint.
+    // Exact-context: each child's request BEGINS with the parent's entire
+    // request prefix (system framing + transcript through the fork checkpoint),
+    // byte-identical, then appends the child's own turns. The system message
+    // being inherited is the fix — Harness::force keeps the parent framing
+    // instead of resetting to None (which would send the default SYSTEM_FRAMING).
     for (i, child) in reqs[1..].iter().enumerate() {
         assert_eq!(
             child.messages.first(),
@@ -190,22 +191,20 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
             "child {i}'s system message must be the inherited answerer framing, not \
              the default SYSTEM_FRAMING"
         );
-        // The parent's first user message (the hole card) is the child's first
-        // user message too — the inherited transcript prefix.
-        assert_eq!(
-            child.messages.get(1),
-            parent.messages.get(1),
-            "child {i} must inherit the parent's transcript prefix through the fork \
-             checkpoint (the hole card is the first user message on both)"
+        assert!(
+            child.messages.starts_with(&parent.messages),
+            "child {i}'s request must begin with the parent's full request prefix \
+             (system framing + transcript through the fork checkpoint), byte-identical.\n\
+             parent: {:?}\nchild:  {:?}",
+            parent.messages,
+            child.messages
         );
-        // The child sees the parent's assistant reply (the forkAll block) in its
-        // prefix — the fork happened AFTER that turn landed in the transcript.
-        assert_eq!(
-            child.messages.get(2).map(|m| &m.role),
-            Some(&Role::Assistant),
-            "child {i}'s prefix must include the parent's assistant turn"
+        // The child appends its own turns after the inherited prefix, the last
+        // being its own hole card (a User message).
+        assert!(
+            child.messages.len() > parent.messages.len(),
+            "child {i} must append its own hole card after the inherited prefix"
         );
-        // And the child's own hole card is appended last.
         assert_eq!(
             child.messages.last().map(|m| &m.role),
             Some(&Role::User),
