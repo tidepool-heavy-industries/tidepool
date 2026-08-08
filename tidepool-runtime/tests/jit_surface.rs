@@ -1538,10 +1538,14 @@ fn works_time_formatting_pinned() {
 ///
 /// `addUTCTime (-1.5) (UTCTime 1000)` both crosses the epoch boundary and
 /// applies a negative delta: 1000 + round(-1.5 * 1000) = 1000 - 1500 = -500.
-/// `addUTCTime 0.0005 (UTCTime 0)` and `addUTCTime 0.0015 (UTCTime 0)` pin
-/// the millisecond-rounding boundary: `round` is banker's rounding (ties to
-/// even, see `works_round_bankers`), so 0.5ms ties DOWN to 0 (even) while
-/// 1.5ms ties UP to 2 (even) — not simple round-half-up.
+/// `addUTCTime 0.0625 (UTCTime 0)` and `addUTCTime 0.1875 (UTCTime 0)` pin
+/// the millisecond-rounding boundary at an EXACT tie: 1/16 and 3/16 are
+/// exactly representable in binary64, and so are their *1000 products (62.5
+/// and 187.5) — no floating-point rounding noise before `round` ever sees
+/// them, unlike a decimal literal such as 0.0005 whose stored double isn't
+/// provably exactly 0.0005. `round` is banker's rounding (ties to even, see
+/// `works_round_bankers`): 62.5 ties DOWN to 62 (even), 187.5 ties UP to 188
+/// (even) — not simple round-half-up.
 ///
 /// `epochMillis (UTCTime (-500))` is the plain pre-epoch accessor: -500.
 #[test]
@@ -1553,8 +1557,8 @@ fn works_time_arithmetic_pinned() {
          \"diff_cross_epoch\" .= diffUTCTime (UTCTime 1000) (UTCTime (-500)), \
          \"diff_negative\" .= diffUTCTime (UTCTime 0) (UTCTime 5000), \
          \"add_cross_epoch_neg\" .= epochMillis (addUTCTime (-1.5) (UTCTime 1000)), \
-         \"add_round_tie_down\" .= epochMillis (addUTCTime 0.0005 (UTCTime 0)), \
-         \"add_round_tie_up\" .= epochMillis (addUTCTime 0.0015 (UTCTime 0)), \
+         \"add_round_tie_down\" .= epochMillis (addUTCTime 0.0625 (UTCTime 0)), \
+         \"add_round_tie_up\" .= epochMillis (addUTCTime 0.1875 (UTCTime 0)), \
          \"epoch_millis_pre_epoch\" .= epochMillis (UTCTime (-500))])",
         serde_json::json!({
             "days_modern": 19782,
@@ -1563,8 +1567,8 @@ fn works_time_arithmetic_pinned() {
             "diff_cross_epoch": 1.5,
             "diff_negative": -5,
             "add_cross_epoch_neg": -500,
-            "add_round_tie_down": 0,
-            "add_round_tie_up": 2,
+            "add_round_tie_down": 62,
+            "add_round_tie_up": 188,
             "epoch_millis_pre_epoch": -500
         }),
     );
@@ -1636,11 +1640,12 @@ fn works_prelude_text_shadows_pinned() {
 /// sign, uppercase hex, `0x`/`0X` alt-form prefix. `fmtInt .. (Just ',') ..
 /// 1234567` groups every 3 digits: "1,234,567".
 ///
-/// `fmtFrac` pins the millisecond-style rounding boundary at 2 decimal
-/// places: 0.125 * 100 = 12.5 exactly (0.125 is exactly representable in
-/// binary) ties DOWN to the even 12 -> "0.12"; 0.135 * 100 rounds to the
-/// even 14 -> "0.14"; at 0 decimal places, 2.5 ties to the even 2 -> "2"
-/// (same banker's-rounding `round` primop as `works_round_bankers`). A
+/// `fmtFrac` pins the rounding-tie boundary at 2 decimal places with EXACT
+/// dyadic-fraction ties, so no floating-point rounding noise reaches `round`:
+/// 0.125 (1/8) * 100 = 12.5 exactly, ties DOWN to the even 12 -> "0.12";
+/// 0.375 (3/8) * 100 = 37.5 exactly, ties UP to the even 38 -> "0.38"; at 0
+/// decimal places, 2.5 ties to the even 2 -> "2" (same banker's-rounding
+/// `round` primop as `works_round_bankers`). A
 /// negative value through a width/zero-fill: `fmtFrac .. 2 8 '0' FRight
 /// (-3.14159)` = "000-3.14". Percent mode pre-multiplies by 100 and appends
 /// "%": `fmtFrac FMinus True 1 .. 0.4567` = "45.7%".
@@ -1661,7 +1666,7 @@ fn works_fmt_runtime_helpers_pinned() {
          \"int_hex_alt_plus\" .= fmtInt FPlus 16 True True Nothing 0 ' ' FRight 255, \
          \"int_group_commas\" .= fmtInt FMinus 10 False False (Just ',') 0 ' ' FRight 1234567, \
          \"frac_tie_even_down\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.125, \
-         \"frac_tie_even_up\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.135, \
+         \"frac_tie_even_up\" .= fmtFrac FMinus False 2 0 ' ' FRight 0.375, \
          \"frac_zero_prec_round\" .= fmtFrac FMinus False 0 0 ' ' FRight 2.5, \
          \"frac_neg_padded\" .= fmtFrac FMinus False 2 8 '0' FRight (-3.14159), \
          \"frac_percent\" .= fmtFrac FMinus True 1 0 ' ' FRight 0.4567, \
@@ -1676,7 +1681,7 @@ fn works_fmt_runtime_helpers_pinned() {
             "int_hex_alt_plus": "+0XFF",
             "int_group_commas": "1,234,567",
             "frac_tie_even_down": "0.12",
-            "frac_tie_even_up": "0.14",
+            "frac_tie_even_up": "0.38",
             "frac_zero_prec_round": "2",
             "frac_neg_padded": "000-3.14",
             "frac_percent": "45.7%",
@@ -1686,6 +1691,45 @@ fn works_fmt_runtime_helpers_pinned() {
             "signed_neg": "000-42",
             "signed_pos": "000+42",
             "plain_center": "---hi---"
+        }),
+    );
+}
+
+/// The `0`-flag's SIGN-AWARE zero-padding, pinned end to end through the
+/// real `[fmt|...|]` quasiquoter — not the runtime helpers called directly
+/// (contrast `works_fmt_runtime_helpers_pinned`, which calls `fmtInt` with
+/// an EXPLICIT `FRight`, a different and also-correct path).
+///
+/// Python's format-spec grammar: preceding the width field by a `0` enables
+/// sign-aware zero-padding for numeric types — equivalent to a fill
+/// character of `0` with an alignment type of `=`. `Tidepool.QQ.PyF.Spec`'s
+/// `overrideAlignmentIfZero` implements exactly this rule (a bare `0` flag
+/// with no explicit alignment maps to fill `'0'` plus `AlignInside`), and
+/// `Tidepool.QQ.Fmt.Runtime`'s `fpad FInside = pre ++ pad need ++ body`
+/// places the sign BEFORE the padding, between it and the digits.
+///
+/// The only existing zero-pad coverage (`haskell/test/Suite.hs`'s
+/// `qq_fmt_spec_zero_pad`, `[fmt|{n:04d}|]` on `n = 42`) runs on a POSITIVE
+/// number, which has no sign to place — `AlignInside` and plain `AlignRight`
+/// produce IDENTICAL output for a positive value, so that probe cannot tell
+/// the two apart. If the zero-flag override, `extractPad`, `alignE`, or
+/// `fpad`'s `FInside` case silently fell back to `AlignRight`, nothing
+/// already pinned would catch it. `[fmt|{n:06d}|]` on a NEGATIVE `n` is the
+/// shape that can: Python's `f"{-42:06d}"` is `"-00042"`, never `"000-42"`.
+///
+/// `[fmt|{d:08.2f}|]` on a negative `Double` pins the same wiring for the
+/// fractional presentation type: `-3.14159` rounds (non-tie) to `3.14` at 2
+/// decimal places, and sign-aware zero-padding to width 8 gives `"-0003.14"`
+/// — sign, three zero-fill digits, then the 4-character body `3.14`.
+#[test]
+fn works_fmt_qq_sign_aware_zero_pad() {
+    works_with_imports(
+        "Tidepool.QQ.Fmt (fmt)",
+        "pure (object [\"int_neg\" .= [fmt|{n:06d}|], \"frac_neg\" .= [fmt|{d:08.2f}|]]) \
+         where { n = (-42) :: Int; d = (-3.14159) :: Double }",
+        serde_json::json!({
+            "int_neg": "-00042",
+            "frac_neg": "-0003.14"
         }),
     );
 }
