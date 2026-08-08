@@ -16,7 +16,6 @@ tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
 tidepool-optimize = { version = "0.1.0", path = "../tidepool-optimize" }
 tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 proptest = "1.10.0"
-criterion = { version = "0.5", features = ["html_reports"] }
 serde_json = "1.0.149"
 tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
 tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
@@ -25,6 +24,9 @@ tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
 tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
 frunk = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "eval"

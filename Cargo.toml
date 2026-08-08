@@ -81,3 +81,9 @@ opt-level = 3
 opt-level = 3
 [profile.test.package.tidepool-optimize]
 opt-level = 3
+
+# Line tables only (no full DWARF) for the crate under test and its test
+# targets: RUST_BACKTRACE=full still resolves file:line per frame; debug = 0
+# drops per-frame file:line entirely, keeping only the panic site itself.
+[profile.test]
+debug = 1
