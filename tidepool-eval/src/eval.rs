@@ -1549,6 +1549,14 @@ fn dispatch_primop(
                     got: args.len(),
                 });
             }
+            // `seq a b`: force `a` to WHNF (propagating any error/BlackHole it
+            // raises), discard the result, and return `b`. Not currently
+            // reachable from the Haskell extract (GHC desugars surface `seq`
+            // to a `case`; `mapPrimOp` in Translate.hs has no `SeqOp` arm and
+            // errors if one is ever handed unsaturated Core) — this arm exists
+            // for directly-constructed IR and keeps the oracle's semantics
+            // correct against a future emitter.
+            force(args[0].clone(), heap)?;
             Ok(args[1].clone())
         }
         PrimOpKind::DataToTag => {
@@ -3659,6 +3667,95 @@ mod tests {
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::InfiniteLoop(_))));
+    }
+
+    #[test]
+    fn test_seq_forces_failing_unforced_arg() {
+        // Just ((\y -> z) 0) where `z` is unbound — the field is a non-trivial
+        // (App) Con field, so `con_step` thunks it rather than evaluating it
+        // eagerly (same mechanism as `test_con_field_nontrivial_primop_is_lazy`).
+        // `case` binds that still-unforced field to `x`; `seq x 999` must force
+        // it and propagate the failure, not skip straight to the literal.
+        let nodes = vec![
+            CoreFrame::Var(VarId(99)), // 0: z (unbound — errors if forced)
+            CoreFrame::Lam {
+                binder: VarId(50),
+                body: 0,
+            }, // 1: \y -> z
+            CoreFrame::Lit(Literal::LitInt(0)), // 2
+            CoreFrame::App { fun: 1, arg: 2 }, // 3: (\y -> z) 0  (non-trivial)
+            CoreFrame::Con {
+                tag: DataConId(1),
+                fields: vec![3],
+            }, // 4: Just (…)
+            CoreFrame::Var(VarId(10)), // 5: x (the case binder for the field)
+            CoreFrame::Lit(Literal::LitInt(999)), // 6
+            CoreFrame::PrimOp {
+                op: PrimOpKind::SeqOp,
+                args: vec![5, 6],
+            }, // 7: seq x 999
+            CoreFrame::Case {
+                scrutinee: 4,
+                binder: VarId(11),
+                alts: vec![Alt {
+                    con: AltCon::DataAlt(DataConId(1)),
+                    binders: vec![VarId(10)],
+                    body: 7,
+                }],
+            }, // 8
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(
+            matches!(res, Err(EvalError::UnboundVar(VarId(99)))),
+            "seq must force its first argument and propagate the failure, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn test_seq_forces_succeeding_arg_and_returns_second() {
+        use crate::value::ThunkId;
+        // let x = 1 + 1 in seq x 999 — `x` is a non-trivial LetNonRec rhs, so it
+        // reaches SeqOp as an unforced ThunkRef. The fix must both return the
+        // second argument AND have actually forced the first.
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0, 0],
+            }, // 1: 1 + 1
+            CoreFrame::Var(VarId(1)),           // 2: x
+            CoreFrame::Lit(Literal::LitInt(999)), // 3
+            CoreFrame::PrimOp {
+                op: PrimOpKind::SeqOp,
+                args: vec![2, 3],
+            }, // 4: seq x 999
+            CoreFrame::LetNonRec {
+                binder: VarId(1),
+                rhs: 1,
+                body: 4,
+            }, // 5: let x = 1 + 1 in seq x 999
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(999), got {:?}", res);
+        };
+        assert_eq!(n, 999);
+
+        // `x`'s thunk (the first LetNonRec-allocated ThunkId) must now be
+        // Evaluated — seq actually forced it, not just returned the second arg.
+        let ThunkState::Evaluated(Value::Lit(Literal::LitInt(forced))) = heap.read(ThunkId(0))
+        else {
+            panic!(
+                "expected x's thunk to be forced to Evaluated(LitInt(2)), got {:?}",
+                heap.read(ThunkId(0))
+            );
+        };
+        assert_eq!(*forced, 2);
     }
 
     #[test]
