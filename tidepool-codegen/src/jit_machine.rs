@@ -414,7 +414,12 @@ impl JitEffectMachine {
             tidepool_repr::check_toplevel_varids(expr)?;
         }
         let expr = tidepool_repr::normalize(expr, table);
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        // The wrapper manifest is dropped here: `lower_jump_crosses_lam` below
+        // rebuilds the tree, so its node indices would not survive. The manifest
+        // exists for the session re-entry path (`add_function`), which has prior
+        // fragments to share constructor closures with; a one-shot compile has
+        // none.
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table).expr;
         // Defensive precondition restore: the real Haskell pipeline never emits
         // a Jump crossing a Lam boundary (Translate.hs's `jumpCrossesLam` rewrites
         // it first), but hand-built/synthetic CoreExpr producers can. Re-check
@@ -1284,11 +1289,18 @@ impl JitEffectMachine {
         table: &DataConTable,
         external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        let shape_start = std::time::Instant::now();
         // Mirror compile_inner's tree shaping so the fragment is emitted exactly
         // like the original entry; only the JITModule destination differs (it is
         // already finalized — we add a fresh round).
         let expr = tidepool_repr::normalize(expr, table);
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        // `normalize` is bracketed separately inside `shape`: it is a
+        // whole-tree rebuild whose cost tracks fragment size, while the rest of
+        // shaping tracks table size. One `shape_ms` bucket cannot tell those
+        // two apart.
+        let normalize_ms = shape_start.elapsed();
+        let crate::datacon_env::WrappedExpr { expr, wraps } =
+            crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
@@ -1308,13 +1320,44 @@ impl JitEffectMachine {
         if let Some(ids) = tidepool_eval::time::TimeConIds::from_table(table) {
             self.time_con_ids = Some(ids);
         }
+        let nodes = expr.nodes.len();
+        let shape_ms = shape_start.elapsed();
+
+        let functions_defined_before = self.pipeline.functions_defined();
+        let dce_before = self.pipeline.dce_scan;
+
+        let emit_start = std::time::Instant::now();
         let func_id =
             crate::emit::expr::compile_expr(&mut self.pipeline, &expr, name, external_env)
                 .map_err(JitError::Compilation)?;
+        let emit_ms = emit_start.elapsed();
+
+        let finalize_start = std::time::Instant::now();
         // Multi-round finalize: finalize_definitions is safe to re-run; finalize()
         // drains only THIS round's pending stack maps and appends them to the
         // registry (round-1 maps were drained on the first finalize).
         self.pipeline.finalize()?;
+        let finalize_ms = finalize_start.elapsed();
+
+        let funcs = self.pipeline.functions_defined() - functions_defined_before;
+        let dce_delta = self.pipeline.dce_scan.delta_since(&dce_before);
+        log::debug!(
+            target: "tidepool::codegen",
+            "add_function name={name} table_cons={table_cons} wrapped_cons={wrapped_cons} \
+             nodes={nodes} normalize_ms={normalize_ms:.3} shape_ms={shape_ms:.3} \
+             emit_ms={emit_ms:.3} finalize_ms={finalize_ms:.3} \
+             funcs={funcs} dce_calls={dce_calls} dce_nodes={dce_nodes} dce_ms={dce_ms:.3}",
+            table_cons = table.iter().count(),
+            wrapped_cons = wraps.len(),
+            normalize_ms = normalize_ms.as_secs_f64() * 1000.0,
+            shape_ms = shape_ms.as_secs_f64() * 1000.0,
+            emit_ms = emit_ms.as_secs_f64() * 1000.0,
+            finalize_ms = finalize_ms.as_secs_f64() * 1000.0,
+            dce_calls = dce_delta.calls,
+            dce_nodes = dce_delta.nodes_walked,
+            dce_ms = dce_delta.elapsed.as_secs_f64() * 1000.0,
+        );
+
         Ok(func_id)
     }
 

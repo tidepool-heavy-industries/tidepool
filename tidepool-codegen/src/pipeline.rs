@@ -29,6 +29,37 @@ pub enum PipelineError {
     Finalization(String),
 }
 
+/// Per-call stats for the `LetNonRec` dead-code-elimination probe in
+/// `emit_node_impl` (`emit/expr.rs`): each probe walks a candidate RHS's body
+/// subtree via `free_vars` to decide whether the binder is dead.
+///
+/// Snapshot-and-diff friendly: [`CodegenPipeline`] accumulates this for the
+/// machine's whole lifetime (never reset), so a caller wanting a per-call
+/// delta must snapshot before and diff after via [`Self::delta_since`] — a
+/// reset would race the nested/child-fragment paths, which share the same
+/// pipeline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DceScanStats {
+    /// Number of DCE probes run (one per `LetNonRec` node visited).
+    pub calls: u64,
+    /// Total nodes walked across all probed subtrees (`extract_subtree` size).
+    pub nodes_walked: u64,
+    /// Total wall time spent in the probe (subtree extraction + `free_vars`).
+    pub elapsed: std::time::Duration,
+}
+
+impl DceScanStats {
+    /// The stats accumulated since `prev` was snapshotted. `prev` must be an
+    /// earlier snapshot of the same (monotonically growing) counters.
+    pub fn delta_since(&self, prev: &DceScanStats) -> DceScanStats {
+        DceScanStats {
+            calls: self.calls - prev.calls,
+            nodes_walked: self.nodes_walked - prev.nodes_walked,
+            elapsed: self.elapsed - prev.elapsed,
+        }
+    }
+}
+
 /// Cranelift JIT compilation pipeline.
 ///
 /// Single-compile strategy: `module.define_function()` compiles and links,
@@ -56,6 +87,17 @@ pub struct CodegenPipeline {
     /// the table through its signature. Defaults to empty (no wrapper
     /// tolerance), which preserves behavior for direct test callers.
     pub lit_wrappers: crate::emit::LitWrapperIds,
+    /// Session-lifetime count of Cranelift functions successfully compiled
+    /// (fragment entries, lambda bodies, thunk bodies — every
+    /// [`Self::define_function`] call that returned `Ok`). Never reset, so
+    /// the delta across one `add_function` call is exactly how much Cranelift
+    /// work that turn caused: a delta that stays large and roughly constant
+    /// across turns on the same session means constructor closures are being
+    /// re-declared and re-compiled every turn rather than reused.
+    functions_defined: u64,
+    /// Accumulated stats for the `LetNonRec` DCE probe in `emit_node_impl`.
+    /// See [`DceScanStats`] for the snapshot-and-diff contract.
+    pub dce_scan: DceScanStats,
 }
 
 impl CodegenPipeline {
@@ -110,7 +152,15 @@ impl CodegenPipeline {
             pending_stack_maps: Vec::new(),
             lambda_names: Vec::new(),
             lit_wrappers: crate::emit::LitWrapperIds::default(),
+            functions_defined: 0,
+            dce_scan: DceScanStats::default(),
         })
+    }
+
+    /// Session-lifetime count of Cranelift functions successfully compiled.
+    /// See the `functions_defined` field doc for how to read a delta.
+    pub fn functions_defined(&self) -> u64 {
+        self.functions_defined
     }
 
     /// Create the standard function signature for compiled tidepool functions.
@@ -171,6 +221,7 @@ impl CodegenPipeline {
             .collect();
 
         self.pending_stack_maps.push((func_id, func_size, raw_maps));
+        self.functions_defined += 1;
         Ok(())
     }
 
