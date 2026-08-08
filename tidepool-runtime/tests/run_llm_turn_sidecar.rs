@@ -512,6 +512,82 @@ fn forkmap_rejects_partial_application() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// fork (Tidepool.Fork's singleton sibling of forkAll): same extract-level
+// recognition mechanism as forkAll, but routed to runLLMTurnForkSited
+// (mirroring runLLMTurnFork) so its sidecar type is recorded BARE (`T`, not
+// `[T]`) — see Tidepool.Translate's isForkVar arm and Tidepool.Fork's `fork`
+// haddock.
+// ---------------------------------------------------------------------------
+
+/// A `fork @Verdict "brief"` call site's asks.json entry records the BARE
+/// answer type (`"Verdict"`), NOT the bracketed `"[Verdict]"` forkAll/forkMap
+/// use — because `fork` head-swaps to `runLLMTurnForkSited`, the same single-
+/// answer sibling `runLLMTurnFork` itself routes through.
+#[test]
+fn fork_sidecar_entry_records_bare_answer_type() {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let code = "do\n  y <- fork @Verdict \"brief\"\n  pure (toJSON (show (y :: Verdict)))\n";
+    let src = tidepool_mcp::template_haskell(
+        &pre,
+        &stack,
+        code,
+        "Tidepool.Fork",
+        "data Verdict = Approve | Reject deriving (Show)",
+        None,
+        None,
+    );
+
+    let asks = compile_and_read_asks(&src, "result");
+    let entries = asks.as_array().expect("asks.json is an array");
+    assert_eq!(entries.len(), 1, "expected exactly 1 fork site, got {asks}");
+    let ty = entries[0]["type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("asks.json entry missing string type: {asks}"));
+    assert_eq!(
+        ty, "Verdict",
+        "fork's sidecar type must be the bare answer type, not bracketed, got {ty:?}"
+    );
+}
+
+/// Sibling check: a `forkAll @Verdict [...]` call site still records the
+/// bracketed `"[Verdict]"` list type — confirms adding `fork`/`isForkVar`
+/// left `forkAll`'s own recognition arm untouched.
+#[test]
+fn forkall_sidecar_entry_still_records_list_answer_type() {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let code =
+        "do\n  ys <- forkAll @Verdict [\"a\", \"b\"]\n  pure (toJSON (length (ys :: [Verdict])))\n";
+    let src = tidepool_mcp::template_haskell(
+        &pre,
+        &stack,
+        code,
+        "Tidepool.Fork",
+        "data Verdict = Approve | Reject deriving (Show)",
+        None,
+        None,
+    );
+
+    let asks = compile_and_read_asks(&src, "result");
+    let entries = asks.as_array().expect("asks.json is an array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly 1 forkAll site, got {asks}"
+    );
+    let ty = entries[0]["type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("asks.json entry missing string type: {asks}"));
+    assert!(
+        ty.starts_with('[') && ty.ends_with(']') && ty.contains("Verdict"),
+        "forkAll's sidecar type must still be the bracketed \"[T]\" convention, got {ty:?}"
+    );
+}
+
 /// Invoke `tidepool-extract-bin` directly (mirroring `compile_haskell`'s own
 /// `Command` construction) into a tempdir we keep alive, so `asks.json` (next
 /// to `meta.cbor`, `writeWholeModuleClosed`'s sidecar) is still on disk to

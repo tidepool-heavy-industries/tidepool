@@ -37,6 +37,7 @@
 -- rather than silently doing the wrong thing.
 module Tidepool.Fork
   ( forkFilter
+  , fork
   , forkAll
   , forkMap
   , forkMapSited
@@ -49,7 +50,7 @@ import Prelude
 import Data.Text (Text)
 import Control.Monad.Freer (Eff, Member)
 
-import Tidepool.Effects (M, RunLLMTurn, runLLMTurnFanout, runLLMTurnFanoutSited)
+import Tidepool.Effects (M, RunLLMTurn, runLLMTurnFanout, runLLMTurnFanoutSited, runLLMTurnForkSited)
 
 -- | One fanout over 'Bool' verdicts; keep the elements whose verdict is
 -- 'True', in the original order.
@@ -57,6 +58,30 @@ forkFilter :: (a -> Text) -> [a] -> M [a]
 forkFilter mkPrompt xs = do
   verdicts <- runLLMTurnFanout (map mkPrompt xs)
   pure (map fst (filter snd (zip xs verdicts)))
+
+-- | 'fork' — the SINGLETON parallel sub-answerer: one brief, parked once,
+-- answered as a single typed value. Structurally IDENTICAL to
+-- 'Tidepool.Effects.runLLMTurnFork' (one type arg, one 'Text' value arg,
+-- non-list answer), so extract's @Translate.hs@ recognizes it by name
+-- (mirroring 'runLLMTurn'\/'runLLMTurnFork'\/'runLLMTurnFanout'\/'forkAll')
+-- and head-swaps every well-formed call site straight to the EXISTING
+-- 'runLLMTurnForkSited' sibling — no separate @forkSited@ needed. The answer
+-- type @a@ is picked by an explicit type application at the call site
+-- (@fork \@T brief@).
+--
+-- Dead at runtime, same discipline as 'forkAll' (see its haddock): every
+-- extractable call site is head-swapped before this body ever runs; the
+-- bottom site-id forces an immediate 'error' if reached anyway.
+{-# OPAQUE fork #-}
+fork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
+fork brief = runLLMTurnForkSited unreachableSiteId brief
+  where
+    unreachableSiteId = error
+      "fork: unreachable — extract must head-swap every well-formed \
+      \call site to runLLMTurnForkSited; reaching this body means a \
+      \call site was not fully applied or its answer type was not \
+      \resolved to a concrete type, which extract should already have \
+      \rejected"
 
 -- | 'forkAll' — N sub-agents in parallel, @mapConcurrently@-shaped: one
 -- prompt per element, parked once, answered together as a typed batch in

@@ -1566,17 +1566,20 @@ translate expr =
     -- runLLMTurn @T prompt / runLLMTurnFork @T prompt / runLLMTurnFanout
     -- @T prompts (#R0 typed-yield pass, runLLMTurnFanout added in B1 widen) /
     -- forkAll @T prompts (Tidepool.Fork's surface verb, structurally identical
-    -- to runLLMTurnFanout so it rides the SAME arm and Sited sibling):
-    -- detected the same way as the tagToEnum# arm above (a known Var applied to
-    -- [Type ty] + one value arg — for Fanout/forkAll that one value arg is the
-    -- `[Text]` prompts list, same shape, translated like any other Core
+    -- to runLLMTurnFanout so it rides the SAME arm and Sited sibling) /
+    -- fork @T brief (Tidepool.Fork's singleton sibling of forkAll,
+    -- structurally identical to runLLMTurnFork so it rides runLLMTurnFork's
+    -- Sited sibling): detected the same way as the tagToEnum# arm above (a
+    -- known Var applied to [Type ty] + one value arg — for Fanout/forkAll
+    -- that one value arg is the `[Text]` prompts list, for Fork/fork it's the
+    -- single `Text` prompt/brief, same shape, translated like any other Core
     -- expression). The ONLY Core synthesis permitted is the head-swap to the
     -- hidden *Sited sibling (its varId resolved once, name-only, in
     -- 'translateModule') with a fresh site-id literal prepended — the
     -- sibling's REAL body (which builds the "typedSite"-tagged AskWith
     -- payload) then runs normally at JIT runtime; we never construct that
     -- payload ourselves.
-    Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v
+    Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v || isForkVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , (Type ty : _) <- typeArgs
           -- Trailing 1 value arg is the prompt; anything before it is 0+
@@ -1586,6 +1589,7 @@ translate expr =
         let sitedField
               | isRunLLMTurnVar v = tsRunLLMTurnSitedId
               | isRunLLMTurnForkVar v = tsRunLLMTurnForkSitedId
+              | isForkVar v = tsRunLLMTurnForkSitedId
               | otherwise = tsRunLLMTurnFanoutSitedId
         sitedIdM <- gets sitedField
         case sitedIdM of
@@ -2821,6 +2825,17 @@ isRunLLMTurnFanoutVar v =
 isForkAllVar :: Id -> Bool
 isForkAllVar v =
   occNameString (nameOccName (idName v)) == "forkAll"
+
+-- | Recognize @fork@ (@Tidepool.Fork@'s singleton-answerer surface verb) —
+-- same convention as 'isForkAllVar'. @fork@'s shape (@forall a. Text -> M
+-- a@) is STRUCTURALLY IDENTICAL to @runLLMTurnFork@'s (one type arg, one
+-- 'Text' value arg, non-list answer), so it reuses 'isRunLLMTurnForkVar'\'s
+-- own head-swap arm verbatim: every call site this predicate matches
+-- head-swaps straight to the EXISTING @runLLMTurnForkSited@ sibling — no
+-- new @forkSited@ needed.
+isForkVar :: Id -> Bool
+isForkVar v =
+  occNameString (nameOccName (idName v)) == "fork"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
 -- stubs, combinator-sites widen) — same convention as
