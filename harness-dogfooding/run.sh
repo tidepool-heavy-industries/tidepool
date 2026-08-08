@@ -21,4 +21,5 @@ cargo build -q -p tidepool-web --bin tidepool-selfharness
 
 HARNESS="${1:-harness-dogfooding/wizard/Harness.hs}"
 echo "==> launching: $HARNESS  (open the printed 127.0.0.1 URL)"
+export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
 exec ./target/debug/tidepool-selfharness --harness "$HARNESS"
