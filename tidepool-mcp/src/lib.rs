@@ -198,8 +198,21 @@ pub struct HelpRequest {
 /// stacks coexist and repeat startups reuse the same dir. Re-callable per eval
 /// (see [`write_generated_modules`]) to self-heal if the dir is reaped.
 pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
+    ensure_effects_module_at(effects, &RowArgs::default())
+}
+
+/// [`ensure_effects_module`] with the row's parameterized effects applied to
+/// explicit type arguments (the harness's per-hole `Finalize <answer type>`).
+/// The staging dir stays content-addressed on the generated SOURCE, and the
+/// applied types + their imports are part of that source — so two answer types
+/// get two dirs, and neither can be served the other's module.
+///
+/// The dir holds SOURCE ONLY (no `.hi`/`.o`), and a harness turn compile is
+/// uncached, so an edit to an author module named in `row` is picked up on the
+/// next compile: there is no compiled artifact for its hash to have to cover.
+pub fn ensure_effects_module_at(effects: &[EffectDecl], row: &RowArgs) -> std::io::Result<PathBuf> {
     write_generated_modules(
-        &effects_module_source(effects),
+        &effects_module_source_at(effects, row),
         &orchestrate_module_source(effects),
     )
 }
@@ -533,6 +546,8 @@ mod tests {
                 constructors: &["Print :: Text -> Console ()"],
                 type_defs: &[],
                 helpers: &[],
+                type_params: &[],
+                default_row_args: &[],
             },
             EffectDecl {
                 type_name: "KV",
@@ -543,6 +558,8 @@ mod tests {
                 ],
                 type_defs: &[],
                 helpers: &[],
+                type_params: &[],
+                default_row_args: &[],
             },
         ];
         let preamble = generated_sources(&effects, false);
@@ -592,6 +609,8 @@ mod tests {
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
             helpers: &[],
+            type_params: &[],
+            default_row_args: &[],
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -619,6 +638,8 @@ mod tests {
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
             helpers: &[],
+            type_params: &[],
+            default_row_args: &[],
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -645,6 +666,8 @@ mod tests {
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
             helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
+            type_params: &[],
+            default_row_args: &[],
         }];
         let desc = build_eval_tool_description(&effects);
         // The slim floor lists each effect name + one-liner …
@@ -1040,6 +1063,8 @@ data Console a where
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
             helpers: &[],
+            type_params: &[],
+            default_row_args: &[],
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -1063,6 +1088,8 @@ data Console a where
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
             helpers: &[],
+            type_params: &[],
+            default_row_args: &[],
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);

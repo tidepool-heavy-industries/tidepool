@@ -1,14 +1,23 @@
 //! Lane: EXHAUSTIVE PRIMOPS differential (JIT vs tree-walking eval).
 //!
-//! Goal: drive EVERY `PrimOpKind` the JIT supports through the
-//! `check_jit_vs_eval` differential oracle with EDGE operands
-//! (INT_MIN/MAX, WORD_MAX, 0, +/-1, small negatives, sign-bit patterns),
-//! and surface any JIT-vs-eval divergence with a minimal repro.
+//! Goal: drive EVERY `PrimOpKind` the JIT supports through the classified
+//! `tidepool_testing::differential` runner with EDGE operands (INT_MIN/MAX,
+//! WORD_MAX, 0, +/-1, small negatives, sign-bit patterns), and surface any
+//! JIT-vs-eval divergence with a minimal repro.
 //!
 //! This is a SELF-CONTAINED lane: it adds its own generators (it does not edit
-//! the shared `strategy.rs`), and reuses `check_jit_vs_eval` /
-//! `build_table_for_expr` / `values_equal` from `tidepool-testing` as the
-//! oracle.
+//! the shared `strategy.rs`), and drives the shared [`DiffConfig`]/[`check`]
+//! oracle from `tidepool-testing` at two nursery sizes (64 KiB + 16 KiB — these
+//! are tiny scalar programs so a 16 KiB nursery is more than enough; the second
+//! size exercises the nursery-knob as a runtime-configuration invariant).
+//!
+//! ## Tolerated-class policy: NOTHING
+//!
+//! Every property in this lane generates TOTAL, GROUND programs: the only
+//! partiality (`b == 0`, `i64::MIN / -1`) is excluded from the generator's
+//! DOMAIN via `prop_assume!`, not tolerated as an outcome. So the policy is
+//! empty — an eval error, a JIT-only error, or a nursery-size disagreement is
+//! always a failure here, never a discard.
 //!
 //! ## Why the result is left as a BARE Lit (not wrapped in `I#`)
 //!
@@ -40,18 +49,25 @@
 //! (INT_MIN, INT_MAX, WORD_MAX, 0, ±1, sign-bit, byte/half-word boundaries) so
 //! the small case budget spends itself on the operands most likely to expose
 //! sign-extension, narrowing, and overflow bugs.
-
-use std::sync::atomic::{AtomicU64, Ordering};
+//!
+//! ## Reach accounting
+//!
+//! Each property drives `proptest::test_runner::TestRunner` directly (not the
+//! `proptest!` macro) so it can own a local [`ReachCounter`] and assert its
+//! floor in the SAME process as the cases that fed it — a `zzz_`-ordered floor
+//! test reading a `static` populated by separate `#[test]` fns would always see
+//! zero under nextest's process-per-test isolation.
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::types::{DataConId, Literal, PrimOpKind};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
-use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval};
+use tidepool_testing::differential::{check, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::build_table_for_expr;
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 
@@ -59,27 +75,10 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 const PAIR: DataConId = DataConId(4);
 
 // ---------------------------------------------------------------------------
-// Reach / coverage instrumentation.
+// The oracle: two nursery sizes, nothing tolerated (see module docs).
 // ---------------------------------------------------------------------------
-static REACHED: AtomicU64 = AtomicU64::new(0);
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-
-fn bump(c: &AtomicU64) {
-    c.fetch_add(1, Ordering::Relaxed);
-}
-
-// ---------------------------------------------------------------------------
-// The oracle wrapper: run an expression through the differential at TWO nursery
-// sizes (default 64KB + a 16KB nursery — these are tiny scalar programs so a
-// 16KB nursery is more than enough; the second size exercises the nursery-knob
-// determinism). Counts reach.
-// ---------------------------------------------------------------------------
-fn run_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-    check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-    check_jit_vs_eval(expr, 16 * 1024)?;
-    bump(&REACHED);
-    Ok(())
+fn dcfg() -> DiffConfig {
+    DiffConfig::new("primops").nurseries(&[64 * 1024, 16 * 1024])
 }
 
 // ---------------------------------------------------------------------------
@@ -398,141 +397,270 @@ fn prog_triple_slots_int(
 // ===========================================================================
 // Int arithmetic / bitwise / shift / compare.
 // ===========================================================================
-proptest! {
-    #![proptest_config(cfg_int())]
 
-    #[test]
-    #[serial]
-    fn prop_int_binary(a in arb_edge_i64(), b in arb_edge_i64()) {
-        // wrapping ops: add/sub/mul/and/or/xor — total for ALL operands.
-        for op in [
-            PrimOpKind::IntAdd, PrimOpKind::IntSub, PrimOpKind::IntMul,
-            PrimOpKind::IntAnd, PrimOpKind::IntOr, PrimOpKind::IntXor,
-            PrimOpKind::IntEq, PrimOpKind::IntNe, PrimOpKind::IntLt,
-            PrimOpKind::IntLe, PrimOpKind::IntGt, PrimOpKind::IntGe,
-            // 64-bit variants share the same lowering.
-            PrimOpKind::Int64Add, PrimOpKind::Int64Sub, PrimOpKind::Int64Mul,
-            PrimOpKind::Int64Lt, PrimOpKind::Int64Le, PrimOpKind::Int64Gt,
-            PrimOpKind::Int64Ge,
-            // carry/overflow VALUE + CARRY slots (each its own primop).
-            PrimOpKind::AddIntCVal, PrimOpKind::AddIntCCarry,
-        ] {
-            run_oracle(prog_binary_int(op, a, b))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_int_binary() {
+    let reach = ReachCounter::new("primops/int_binary");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_i64(), arb_edge_i64()), |(a, b)| {
+            // wrapping ops: add/sub/mul/and/or/xor — total for ALL operands.
+            for op in [
+                PrimOpKind::IntAdd,
+                PrimOpKind::IntSub,
+                PrimOpKind::IntMul,
+                PrimOpKind::IntAnd,
+                PrimOpKind::IntOr,
+                PrimOpKind::IntXor,
+                PrimOpKind::IntEq,
+                PrimOpKind::IntNe,
+                PrimOpKind::IntLt,
+                PrimOpKind::IntLe,
+                PrimOpKind::IntGt,
+                PrimOpKind::IntGe,
+                // 64-bit variants share the same lowering.
+                PrimOpKind::Int64Add,
+                PrimOpKind::Int64Sub,
+                PrimOpKind::Int64Mul,
+                PrimOpKind::Int64Lt,
+                PrimOpKind::Int64Le,
+                PrimOpKind::Int64Gt,
+                PrimOpKind::Int64Ge,
+                // carry/overflow VALUE + CARRY slots (each its own primop).
+                PrimOpKind::AddIntCVal,
+                PrimOpKind::AddIntCCarry,
+            ] {
+                check(prog_binary_int(op, a, b), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_int_quot_rem(a in arb_edge_i64(), b in arb_edge_i64()) {
-        // Avoid b==0 (JIT traps, eval errors → both fail → skip, no value cmp).
-        // NOTE: INT_MIN / -1 OVERFLOWS in both sdiv (JIT) and wrapping_div
-        // (eval) — both define it as INT_MIN (eval uses wrapping_div, Cranelift
-        // sdiv on x86 would TRAP). We exclude that single pair to keep the
-        // success lane clean and not mask it as a both-fail skip.
-        prop_assume!(b != 0);
-        prop_assume!(!(a == i64::MIN && b == -1));
-        for op in [PrimOpKind::IntQuot, PrimOpKind::IntRem] {
-            run_oracle(prog_binary_int(op, a, b))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_int_quot_rem() {
+    let reach = ReachCounter::new("primops/int_quot_rem");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_i64(), arb_edge_i64()), |(a, b)| {
+            // Avoid b==0 (JIT traps, eval errors → both fail → skip, no value cmp).
+            // NOTE: INT_MIN / -1 OVERFLOWS in both sdiv (JIT) and wrapping_div
+            // (eval) — both define it as INT_MIN (eval uses wrapping_div, Cranelift
+            // sdiv on x86 would TRAP). We exclude that single pair to keep the
+            // success lane clean and not mask it as a both-fail skip.
+            prop_assume!(b != 0);
+            prop_assume!(!(a == i64::MIN && b == -1));
+            for op in [PrimOpKind::IntQuot, PrimOpKind::IntRem] {
+                check(prog_binary_int(op, a, b), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_int_shift(a in arb_edge_i64(), sh in arb_shift()) {
-        // IntShl/IntShra/IntShrl/Int64Shl use wrapping_* in eval → strict.
-        for op in [PrimOpKind::IntShl, PrimOpKind::IntShra, PrimOpKind::IntShrl,
-                   PrimOpKind::Int64Shl] {
-            run_oracle(prog_binary_int(op, a, sh))?;
-        }
-        // Int64Shra uses wrapping_shr in eval (CONFIRMED-BUG EVAL-2, fixed) → strict.
-        run_oracle(prog_binary_int(PrimOpKind::Int64Shra, a, sh))?;
-    }
+#[test]
+#[serial]
+fn prop_int_shift() {
+    let reach = ReachCounter::new("primops/int_shift");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_i64(), arb_shift()), |(a, sh)| {
+            // IntShl/IntShra/IntShrl/Int64Shl use wrapping_* in eval → strict.
+            for op in [
+                PrimOpKind::IntShl,
+                PrimOpKind::IntShra,
+                PrimOpKind::IntShrl,
+                PrimOpKind::Int64Shl,
+            ] {
+                check(prog_binary_int(op, a, sh), &dcfg(), &reach)?;
+            }
+            // Int64Shra uses wrapping_shr in eval (fixed, pinned by evalbug2 below) → strict.
+            check(
+                prog_binary_int(PrimOpKind::Int64Shra, a, sh),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_int_unary(a in arb_edge_i64()) {
-        for op in [PrimOpKind::IntNegate, PrimOpKind::IntNot,
-                   PrimOpKind::Narrow8Int, PrimOpKind::Narrow16Int,
-                   PrimOpKind::Narrow32Int,
-                   PrimOpKind::Int2Word, PrimOpKind::Int2Double,
-                   PrimOpKind::Int2Float, PrimOpKind::IntToInt64,
-                   PrimOpKind::Int64ToInt] {
-            run_oracle(prog_unary_int(op, a))?;
-        }
-        // Int64Negate uses wrapping_neg in eval (CONFIRMED-BUG EVAL-1, fixed) → strict.
-        run_oracle(prog_unary_int(PrimOpKind::Int64Negate, a))?;
-    }
+#[test]
+#[serial]
+fn prop_int_unary() {
+    let reach = ReachCounter::new("primops/int_unary");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&arb_edge_i64(), |a| {
+            // Int64ToWord64 is deliberately NOT in this list — see
+            // `jitbug_int64_to_word64_result_tag` below: correcting its
+            // operand kind (int64ToWord64# :: Int64# -> Word64# takes an
+            // Int#, so it belongs here, not in prop_word_unary) unmasks a
+            // SEPARATE, confirmed JIT bug in the result's lit-tag, which the
+            // runner's `ValueMismatch` verdict has no tolerance escape hatch
+            // for (by design) and which production code is out of scope to
+            // fix here.
+            for op in [
+                PrimOpKind::IntNegate,
+                PrimOpKind::IntNot,
+                PrimOpKind::Narrow8Int,
+                PrimOpKind::Narrow16Int,
+                PrimOpKind::Narrow32Int,
+                PrimOpKind::Int2Word,
+                PrimOpKind::Int2Double,
+                PrimOpKind::Int2Float,
+                PrimOpKind::IntToInt64,
+                PrimOpKind::Int64ToInt,
+            ] {
+                check(prog_unary_int(op, a), &dcfg(), &reach)?;
+            }
+            // Int64Negate uses wrapping_neg in eval (fixed, pinned by evalbug1 below) → strict.
+            check(prog_unary_int(PrimOpKind::Int64Negate, a), &dcfg(), &reach)?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
 }
 
 // ===========================================================================
 // Word arithmetic / bitwise / shift / compare + Word multi-output.
 // ===========================================================================
-proptest! {
-    #![proptest_config(cfg_int())]
 
-    #[test]
-    #[serial]
-    fn prop_word_binary(a in arb_edge_u64(), b in arb_edge_u64()) {
-        for op in [
-            PrimOpKind::WordAdd, PrimOpKind::WordSub, PrimOpKind::WordMul,
-            PrimOpKind::WordAnd, PrimOpKind::WordOr, PrimOpKind::WordXor,
-            PrimOpKind::WordEq, PrimOpKind::WordNe, PrimOpKind::WordLt,
-            PrimOpKind::WordLe, PrimOpKind::WordGt, PrimOpKind::WordGe,
-            PrimOpKind::Word64And, PrimOpKind::Word64Or,
-            // carry/borrow value + flag slots.
-            PrimOpKind::AddWordCVal, PrimOpKind::AddWordCCarry,
-            PrimOpKind::SubWordCVal, PrimOpKind::SubWordCCarry,
-            // multi-output product hi/lo slots.
-            PrimOpKind::TimesWord2Hi, PrimOpKind::TimesWord2Lo,
-        ] {
-            run_oracle(prog_binary_word(op, a, b))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_word_binary() {
+    let reach = ReachCounter::new("primops/word_binary");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            for op in [
+                PrimOpKind::WordAdd,
+                PrimOpKind::WordSub,
+                PrimOpKind::WordMul,
+                PrimOpKind::WordAnd,
+                PrimOpKind::WordOr,
+                PrimOpKind::WordXor,
+                PrimOpKind::WordEq,
+                PrimOpKind::WordNe,
+                PrimOpKind::WordLt,
+                PrimOpKind::WordLe,
+                PrimOpKind::WordGt,
+                PrimOpKind::WordGe,
+                PrimOpKind::Word64And,
+                PrimOpKind::Word64Or,
+                // carry/borrow value + flag slots.
+                PrimOpKind::AddWordCVal,
+                PrimOpKind::AddWordCCarry,
+                PrimOpKind::SubWordCVal,
+                PrimOpKind::SubWordCCarry,
+                // multi-output product hi/lo slots.
+                PrimOpKind::TimesWord2Hi,
+                PrimOpKind::TimesWord2Lo,
+            ] {
+                check(prog_binary_word(op, a, b), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_word_quot_rem(a in arb_edge_u64(), b in arb_edge_u64()) {
-        prop_assume!(b != 0);
-        for op in [PrimOpKind::WordQuot, PrimOpKind::WordRem,
-                   PrimOpKind::QuotRemWordVal, PrimOpKind::QuotRemWordRem] {
-            run_oracle(prog_binary_word(op, a, b))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_word_quot_rem() {
+    let reach = ReachCounter::new("primops/word_quot_rem");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            prop_assume!(b != 0);
+            for op in [
+                PrimOpKind::WordQuot,
+                PrimOpKind::WordRem,
+                PrimOpKind::QuotRemWordVal,
+                PrimOpKind::QuotRemWordRem,
+            ] {
+                check(prog_binary_word(op, a, b), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_word_shift(a in arb_edge_u64(), sh in arb_shift()) {
-        // WordShl/WordShrl/Word64Shl/Word64Shrl all use wrapping_* in eval → strict.
-        for op in [PrimOpKind::WordShl, PrimOpKind::WordShrl,
-                   PrimOpKind::Word64Shl, PrimOpKind::Word64Shrl] {
-            run_oracle(prog_word_shift(op, a, sh))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_word_shift() {
+    let reach = ReachCounter::new("primops/word_shift");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_shift()), |(a, sh)| {
+            // WordShl/WordShrl/Word64Shl/Word64Shrl all use wrapping_* in eval → strict.
+            for op in [
+                PrimOpKind::WordShl,
+                PrimOpKind::WordShrl,
+                PrimOpKind::Word64Shl,
+                PrimOpKind::Word64Shrl,
+            ] {
+                check(prog_word_shift(op, a, sh), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_word_unary(a in arb_edge_u64()) {
-        for op in [PrimOpKind::WordNot,
-                   PrimOpKind::Narrow8Word, PrimOpKind::Narrow16Word,
-                   PrimOpKind::Narrow32Word,
-                   PrimOpKind::Word2Int, PrimOpKind::WordToWord8,
-                   PrimOpKind::Word8ToWord,
-                   PrimOpKind::Int64ToWord64, PrimOpKind::Word64ToInt64,
-                   PrimOpKind::Clz8] {
-            run_oracle(prog_unary_word(op, a))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_word_unary() {
+    let reach = ReachCounter::new("primops/word_unary");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&arb_edge_u64(), |a| {
+            for op in [
+                PrimOpKind::WordNot,
+                PrimOpKind::Narrow8Word,
+                PrimOpKind::Narrow16Word,
+                PrimOpKind::Narrow32Word,
+                PrimOpKind::Word2Int,
+                PrimOpKind::WordToWord8,
+                PrimOpKind::Word8ToWord,
+                PrimOpKind::Word64ToInt64,
+                PrimOpKind::Clz8,
+            ] {
+                check(prog_unary_word(op, a), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    // Word8 arithmetic/compare (masked to 8 bits).
-    #[test]
-    #[serial]
-    fn prop_word8(a in arb_edge_u64(), b in arb_edge_u64()) {
-        for op in [PrimOpKind::Word8Add, PrimOpKind::Word8Sub,
-                   PrimOpKind::Word8Lt, PrimOpKind::Word8Le,
-                   PrimOpKind::Word8Ge] {
-            run_oracle(prog_binary_word(op, a, b))?;
-        }
-    }
+// Word8 arithmetic/compare (masked to 8 bits).
+#[test]
+#[serial]
+fn prop_word8() {
+    let reach = ReachCounter::new("primops/word8");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            for op in [
+                PrimOpKind::Word8Add,
+                PrimOpKind::Word8Sub,
+                PrimOpKind::Word8Lt,
+                PrimOpKind::Word8Le,
+                PrimOpKind::Word8Ge,
+            ] {
+                check(prog_binary_word(op, a, b), &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
 }
 
 // ===========================================================================
@@ -541,237 +669,412 @@ proptest! {
 // Probe each tuple's slots TOGETHER inside a Con so a hi/lo (or val/carry)
 // swap surfaces with both slots visible in the failure dump.
 // ===========================================================================
-proptest! {
-    #![proptest_config(cfg_int())]
 
-    #[test]
-    #[serial]
-    fn prop_times_int2_slots(a in arb_edge_i64(), b in arb_edge_i64()) {
-        // (hi, lo, overflow) — the timesInt2# triple. A hi/lo swap (the
-        // recently-shipped bug class) makes the Con fields disagree.
-        run_oracle(prog_triple_slots_int(
-            PrimOpKind::TimesInt2Hi,
-            PrimOpKind::TimesInt2Lo,
-            PrimOpKind::TimesInt2Overflow,
-            a,
-            b,
-        ))?;
-        // also pairwise hi+lo for an extra-tight repro surface.
-        run_oracle(prog_pair_slots_int(
-            PrimOpKind::TimesInt2Hi,
-            PrimOpKind::TimesInt2Lo,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_times_int2_slots() {
+    let reach = ReachCounter::new("primops/times_int2_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_i64(), arb_edge_i64()), |(a, b)| {
+            // (hi, lo, overflow) — the timesInt2# triple. A hi/lo swap (the
+            // recently-shipped bug class) makes the Con fields disagree.
+            check(
+                prog_triple_slots_int(
+                    PrimOpKind::TimesInt2Hi,
+                    PrimOpKind::TimesInt2Lo,
+                    PrimOpKind::TimesInt2Overflow,
+                    a,
+                    b,
+                ),
+                &dcfg(),
+                &reach,
+            )?;
+            // also pairwise hi+lo for an extra-tight repro surface.
+            check(
+                prog_pair_slots_int(PrimOpKind::TimesInt2Hi, PrimOpKind::TimesInt2Lo, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_times_word2_slots(a in arb_edge_u64(), b in arb_edge_u64()) {
-        run_oracle(prog_pair_slots_word(
-            PrimOpKind::TimesWord2Hi,
-            PrimOpKind::TimesWord2Lo,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_times_word2_slots() {
+    let reach = ReachCounter::new("primops/times_word2_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            check(
+                prog_pair_slots_word(PrimOpKind::TimesWord2Hi, PrimOpKind::TimesWord2Lo, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_quot_rem_word_slots(a in arb_edge_u64(), b in arb_edge_u64()) {
-        prop_assume!(b != 0);
-        run_oracle(prog_pair_slots_word(
-            PrimOpKind::QuotRemWordVal,
-            PrimOpKind::QuotRemWordRem,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_quot_rem_word_slots() {
+    let reach = ReachCounter::new("primops/quot_rem_word_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            prop_assume!(b != 0);
+            check(
+                prog_pair_slots_word(PrimOpKind::QuotRemWordVal, PrimOpKind::QuotRemWordRem, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_add_int_c_slots(a in arb_edge_i64(), b in arb_edge_i64()) {
-        run_oracle(prog_pair_slots_int(
-            PrimOpKind::AddIntCVal,
-            PrimOpKind::AddIntCCarry,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_add_int_c_slots() {
+    let reach = ReachCounter::new("primops/add_int_c_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_i64(), arb_edge_i64()), |(a, b)| {
+            check(
+                prog_pair_slots_int(PrimOpKind::AddIntCVal, PrimOpKind::AddIntCCarry, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_add_word_c_slots(a in arb_edge_u64(), b in arb_edge_u64()) {
-        run_oracle(prog_pair_slots_word(
-            PrimOpKind::AddWordCVal,
-            PrimOpKind::AddWordCCarry,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_add_word_c_slots() {
+    let reach = ReachCounter::new("primops/add_word_c_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            check(
+                prog_pair_slots_word(PrimOpKind::AddWordCVal, PrimOpKind::AddWordCCarry, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_sub_word_c_slots(a in arb_edge_u64(), b in arb_edge_u64()) {
-        run_oracle(prog_pair_slots_word(
-            PrimOpKind::SubWordCVal,
-            PrimOpKind::SubWordCCarry,
-            a,
-            b,
-        ))?;
-    }
+#[test]
+#[serial]
+fn prop_sub_word_c_slots() {
+    let reach = ReachCounter::new("primops/sub_word_c_slots");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_edge_u64(), arb_edge_u64()), |(a, b)| {
+            check(
+                prog_pair_slots_word(PrimOpKind::SubWordCVal, PrimOpKind::SubWordCCarry, a, b),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
 }
 
 // ===========================================================================
 // Double / Float arithmetic + compare + conversions + math (libm).
 // ===========================================================================
-proptest! {
-    #![proptest_config(cfg_float())]
 
-    #[test]
-    #[serial]
-    fn prop_double_binary(a in arb_double(), b in arb_double()) {
-        for op in [PrimOpKind::DoubleAdd, PrimOpKind::DoubleSub,
-                   PrimOpKind::DoubleMul, PrimOpKind::DoubleDiv,
-                   PrimOpKind::DoubleEq, PrimOpKind::DoubleNe,
-                   PrimOpKind::DoubleLt, PrimOpKind::DoubleLe,
-                   PrimOpKind::DoubleGt, PrimOpKind::DoubleGe,
-                   PrimOpKind::DoublePower] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_double(b_, a);
-                let y = lit_double(b_, b);
-                vec![x, y]
-            }))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_double_binary() {
+    let reach = ReachCounter::new("primops/double_binary");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&(arb_double(), arb_double()), |(a, b)| {
+            for op in [
+                PrimOpKind::DoubleAdd,
+                PrimOpKind::DoubleSub,
+                PrimOpKind::DoubleMul,
+                PrimOpKind::DoubleDiv,
+                PrimOpKind::DoubleEq,
+                PrimOpKind::DoubleNe,
+                PrimOpKind::DoubleLt,
+                PrimOpKind::DoubleLe,
+                PrimOpKind::DoubleGt,
+                PrimOpKind::DoubleGe,
+                PrimOpKind::DoublePower,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_double(b_, a);
+                        let y = lit_double(b_, b);
+                        vec![x, y]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_double_unary(a in arb_double()) {
-        for op in [PrimOpKind::DoubleNegate, PrimOpKind::DoubleFabs,
-                   PrimOpKind::DoubleSqrt, PrimOpKind::FfiRintDouble,
-                   PrimOpKind::Double2Int, PrimOpKind::Double2Float] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_double(b_, a);
-                vec![x]
-            }))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_double_unary() {
+    let reach = ReachCounter::new("primops/double_unary");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_double(), |a| {
+            for op in [
+                PrimOpKind::DoubleNegate,
+                PrimOpKind::DoubleFabs,
+                PrimOpKind::DoubleSqrt,
+                PrimOpKind::FfiRintDouble,
+                PrimOpKind::Double2Int,
+                PrimOpKind::Double2Float,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_double(b_, a);
+                        vec![x]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    // Transcendental math goes through libm runtime calls on the JIT side and
-    // Rust std on the eval side — these are the SAME platform libm, so they
-    // should agree bit-for-bit. Probe them all.
-    #[test]
-    #[serial]
-    fn prop_double_math(a in arb_double()) {
-        for op in [PrimOpKind::DoubleExp, PrimOpKind::DoubleExpM1,
-                   PrimOpKind::DoubleLog, PrimOpKind::DoubleLog1P,
-                   PrimOpKind::DoubleSin, PrimOpKind::DoubleCos,
-                   PrimOpKind::DoubleTan, PrimOpKind::DoubleAsin,
-                   PrimOpKind::DoubleAcos, PrimOpKind::DoubleAtan,
-                   PrimOpKind::DoubleSinh, PrimOpKind::DoubleCosh,
-                   PrimOpKind::DoubleTanh, PrimOpKind::DoubleAsinh,
-                   PrimOpKind::DoubleAcosh, PrimOpKind::DoubleAtanh] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_double(b_, a);
-                vec![x]
-            }))?;
-        }
-    }
+// Transcendental math goes through libm runtime calls on the JIT side and
+// Rust std on the eval side — these are the SAME platform libm, so they
+// should agree bit-for-bit. Probe them all.
+#[test]
+#[serial]
+fn prop_double_math() {
+    let reach = ReachCounter::new("primops/double_math");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_double(), |a| {
+            for op in [
+                PrimOpKind::DoubleExp,
+                PrimOpKind::DoubleExpM1,
+                PrimOpKind::DoubleLog,
+                PrimOpKind::DoubleLog1P,
+                PrimOpKind::DoubleSin,
+                PrimOpKind::DoubleCos,
+                PrimOpKind::DoubleTan,
+                PrimOpKind::DoubleAsin,
+                PrimOpKind::DoubleAcos,
+                PrimOpKind::DoubleAtan,
+                PrimOpKind::DoubleSinh,
+                PrimOpKind::DoubleCosh,
+                PrimOpKind::DoubleTanh,
+                PrimOpKind::DoubleAsinh,
+                PrimOpKind::DoubleAcosh,
+                PrimOpKind::DoubleAtanh,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_double(b_, a);
+                        vec![x]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_float_binary(a in arb_float(), b in arb_float()) {
-        for op in [PrimOpKind::FloatAdd, PrimOpKind::FloatSub,
-                   PrimOpKind::FloatMul, PrimOpKind::FloatDiv,
-                   PrimOpKind::FloatEq, PrimOpKind::FloatNe,
-                   PrimOpKind::FloatLt, PrimOpKind::FloatLe,
-                   PrimOpKind::FloatGt, PrimOpKind::FloatGe] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_float(b_, a);
-                let y = lit_float(b_, b);
-                vec![x, y]
-            }))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_float_binary() {
+    let reach = ReachCounter::new("primops/float_binary");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&(arb_float(), arb_float()), |(a, b)| {
+            for op in [
+                PrimOpKind::FloatAdd,
+                PrimOpKind::FloatSub,
+                PrimOpKind::FloatMul,
+                PrimOpKind::FloatDiv,
+                PrimOpKind::FloatEq,
+                PrimOpKind::FloatNe,
+                PrimOpKind::FloatLt,
+                PrimOpKind::FloatLe,
+                PrimOpKind::FloatGt,
+                PrimOpKind::FloatGe,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_float(b_, a);
+                        let y = lit_float(b_, b);
+                        vec![x, y]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_float_unary(a in arb_float()) {
-        for op in [PrimOpKind::FloatNegate, PrimOpKind::Float2Int,
-                   PrimOpKind::Float2Double] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_float(b_, a);
-                vec![x]
-            }))?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_float_unary() {
+    let reach = ReachCounter::new("primops/float_unary");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_float(), |a| {
+            for op in [
+                PrimOpKind::FloatNegate,
+                PrimOpKind::Float2Int,
+                PrimOpKind::Float2Double,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_float(b_, a);
+                        vec![x]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    // decodeDouble# mantissa/exponent slots (each its own primop).
-    #[test]
-    #[serial]
-    fn prop_decode_double(a in arb_double()) {
-        for op in [PrimOpKind::DecodeDoubleMantissa,
-                   PrimOpKind::DecodeDoubleExponent] {
-            run_oracle(prog_op(op, |b_| {
-                let x = lit_double(b_, a);
-                vec![x]
-            }))?;
-        }
-    }
+// decodeDouble# mantissa/exponent slots (each its own primop).
+#[test]
+#[serial]
+fn prop_decode_double() {
+    let reach = ReachCounter::new("primops/decode_double");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_double(), |a| {
+            for op in [
+                PrimOpKind::DecodeDoubleMantissa,
+                PrimOpKind::DecodeDoubleExponent,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_double(b_, a);
+                        vec![x]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
 }
 
 // ===========================================================================
 // Char comparison + Chr/Ord round-trips.
 // ===========================================================================
-proptest! {
-    #![proptest_config(cfg_int())]
 
-    #[test]
-    #[serial]
-    fn prop_char_compare(a in arb_codepoint(), b in arb_codepoint()) {
-        let ca = char::from_u32(a as u32).unwrap_or('\0');
-        let cb = char::from_u32(b as u32).unwrap_or('\0');
-        for op in [PrimOpKind::CharEq, PrimOpKind::CharNe,
-                   PrimOpKind::CharLt, PrimOpKind::CharLe,
-                   PrimOpKind::CharGt, PrimOpKind::CharGe] {
-            let expr = prog_op(op, |bld| {
-                let x = lit_char(bld, ca);
-                let y = lit_char(bld, cb);
-                vec![x, y]
-            });
-            run_oracle(expr)?;
-        }
-    }
+#[test]
+#[serial]
+fn prop_char_compare() {
+    let reach = ReachCounter::new("primops/char_compare");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&(arb_codepoint(), arb_codepoint()), |(a, b)| {
+            let ca = char::from_u32(a as u32).unwrap_or('\0');
+            let cb = char::from_u32(b as u32).unwrap_or('\0');
+            for op in [
+                PrimOpKind::CharEq,
+                PrimOpKind::CharNe,
+                PrimOpKind::CharLt,
+                PrimOpKind::CharLe,
+                PrimOpKind::CharGt,
+                PrimOpKind::CharGe,
+            ] {
+                let expr = prog_op(op, |bld| {
+                    let x = lit_char(bld, ca);
+                    let y = lit_char(bld, cb);
+                    vec![x, y]
+                });
+                check(expr, &dcfg(), &reach)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_ord(a in arb_codepoint()) {
-        let ca = char::from_u32(a as u32).unwrap_or('\0');
-        run_oracle(prog_op(PrimOpKind::Ord, |b| {
-            let x = lit_char(b, ca);
-            vec![x]
-        }))?;
-    }
+#[test]
+#[serial]
+fn prop_ord() {
+    let reach = ReachCounter::new("primops/ord");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&arb_codepoint(), |a| {
+            let ca = char::from_u32(a as u32).unwrap_or('\0');
+            check(
+                prog_op(PrimOpKind::Ord, |b| {
+                    let x = lit_char(b, ca);
+                    vec![x]
+                }),
+                &dcfg(),
+                &reach,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
 
-    #[test]
-    #[serial]
-    fn prop_chr(a in arb_codepoint()) {
-        // Valid codepoints only (both sides succeed → value comparison).
-        run_oracle(prog_unary_int(PrimOpKind::Chr, a))?;
-    }
+#[test]
+#[serial]
+fn prop_chr() {
+    let reach = ReachCounter::new("primops/chr");
+    let mut runner = TestRunner::new(cfg_int());
+    runner
+        .run(&arb_codepoint(), |a| {
+            // Valid codepoints only (both sides succeed → value comparison).
+            check(prog_unary_int(PrimOpKind::Chr, a), &dcfg(), &reach)?;
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
 }
 
 // ===========================================================================
-// FIXED-BUG REPROS (minimal, hand-built) for class EVAL-1/2/3: the
-// tree-walking interpreter's `Int64Negate` / `Int64Shra` / `Word64Shl`
-// handlers used RAW arithmetic where their `IntNegate`/`IntShra`/`WordShl`
-// siblings (and the JIT, via Cranelift `ineg`/`sshr`/`ishl`) use wrapping /
-// mod-width semantics — now fixed to `wrapping_neg`/`wrapping_shr`/
-// `wrapping_shl`, matching the JIT. `Word64Shrl` had the same raw-`>>` gap
-// (never had its own EVAL-N repro) and is now `wrapping_shr` too. These pin
-// the fix; the corresponding lanes above (`prop_int_shift`, `prop_int_unary`,
-// `prop_word_shift`) route all four ops through the strict `run_oracle`.
+// FIXED-BUG REPROS (minimal, hand-built): the tree-walking interpreter's
+// `Int64Negate` / `Int64Shra` / `Word64Shl` handlers used RAW arithmetic where
+// their `IntNegate`/`IntShra`/`WordShl` siblings (and the JIT, via Cranelift
+// `ineg`/`sshr`/`ishl`) use wrapping / mod-width semantics — now fixed to
+// `wrapping_neg`/`wrapping_shr`/`wrapping_shl`, matching the JIT. `Word64Shrl`
+// had the same raw-`>>` gap and is now `wrapping_shr` too. These pin the fix;
+// the corresponding lanes above (`prop_int_shift`, `prop_int_unary`,
+// `prop_word_shift`) route all four ops through the strict `check`.
 
 /// Confirm + run one (op, args) repro: returns (eval_result_dbg_or_panic, jit_result_dbg).
 fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (String, String) {
@@ -799,7 +1102,7 @@ fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (String, String) {
     (eval_dbg, format!("{:?}", jit))
 }
 
-/// CONFIRMED-BUG EVAL-1 (fixed): `Int64Negate` on `INT_MIN` now wraps like the JIT.
+/// `Int64Negate` on `INT_MIN` wraps like the JIT.
 #[test]
 fn evalbug1_int64_negate_int_min() {
     let (eval, jit) = run_one(PrimOpKind::Int64Negate, vec![Literal::LitInt(i64::MIN)]);
@@ -807,8 +1110,8 @@ fn evalbug1_int64_negate_int_min() {
     assert_eq!(eval, "Ok(Lit(LitInt(-9223372036854775808)))");
 }
 
-/// CONFIRMED-BUG EVAL-2 (fixed): `Int64Shra` with shift >= 64 (here INT_MIN >> 64)
-/// now masks mod 64 like the JIT's Cranelift `sshr`.
+/// `Int64Shra` with shift >= 64 (here INT_MIN >> 64) masks mod 64 like the
+/// JIT's Cranelift `sshr`.
 #[test]
 fn evalbug2_int64_shra_shift_64() {
     let (eval, jit) = run_one(
@@ -819,8 +1122,8 @@ fn evalbug2_int64_shra_shift_64() {
     assert_eq!(eval, "Ok(Lit(LitInt(-9223372036854775808)))");
 }
 
-/// CONFIRMED-BUG EVAL-3 (fixed): `Word64Shl` with shift >= 64 (here 1 << 64)
-/// now masks mod 64 like the JIT's Cranelift `ishl`.
+/// `Word64Shl` with shift >= 64 (here 1 << 64) masks mod 64 like the JIT's
+/// Cranelift `ishl`.
 #[test]
 fn evalbug3_word64_shl_shift_64() {
     let (eval, jit) = run_one(
@@ -831,9 +1134,9 @@ fn evalbug3_word64_shl_shift_64() {
     assert_eq!(eval, "Ok(Lit(LitWord(1)))");
 }
 
-/// F5 regression: `Word64Shrl` with shift >= 64 (here 1 >> 64) now masks mod
-/// 64 like the JIT's Cranelift `ushr`, instead of panicking ("shift right
-/// with overflow") on the old raw `>>`.
+/// `Word64Shrl` with shift >= 64 (here 1 >> 64) masks mod 64 like the JIT's
+/// Cranelift `ushr`, instead of panicking ("shift right with overflow") on the
+/// old raw `>>`.
 #[test]
 fn evalbug4_word64_shrl_shift_64() {
     let (eval, jit) = run_one(
@@ -844,52 +1147,56 @@ fn evalbug4_word64_shrl_shift_64() {
     assert_eq!(eval, "Ok(Lit(LitWord(1)))");
 }
 
+/// CONFIRMED BUG, OPEN (JIT result mis-tag, out of scope to fix here — the
+/// migration boundary forbids production-code edits): `int64ToWord64# ::
+/// Int64# -> Word64#` must tag its result Word, but
+/// `tidepool-codegen/src/emit/primop.rs:1102-1106` folds `Word64ToInt64 |
+/// Int64ToInt | Int64ToWord64` into ONE match arm that unconditionally tags
+/// `LIT_TAG_INT` — correct for the first two (whose output really is Int),
+/// wrong for `Int64ToWord64`. Both engines compute the SAME bit pattern; only
+/// the JIT's output lit-tag is wrong, so this is a `Verdict::ValueMismatch`
+/// (`LitWord` vs `LitInt` are different `Value`s) that the runner's
+/// `ExpectedErrorPolicy` has no tolerance for BY DESIGN (there is no
+/// `ValueMismatch` escape hatch) — it can only be pinned as a captured, open
+/// bug, not silently accepted. This was unreachable before the operand-kind
+/// generator fix above (`prop_int_unary`): with the old `prog_unary_word`
+/// (`LitWord`) operand, eval's strict Int64 unbox rejected the case as
+/// ill-typed Core before either side ever reached a value to compare.
+#[test]
+#[ignore = "confirmed open JIT bug (result lit-tag), out of scope: primop.rs is production code"]
+fn jitbug_int64_to_word64_result_tag() {
+    let (eval, jit) = run_one(PrimOpKind::Int64ToWord64, vec![Literal::LitInt(i64::MIN)]);
+    assert_eq!(eval, "Ok(Lit(LitWord(9223372036854775808)))");
+    // BUG: observed today is `Ok(Lit(LitInt(-9223372036854775808)))` — same
+    // bits, wrong tag. This assertion documents the desired (currently
+    // unmet) contract; it is expected to FAIL until primop.rs's shared match
+    // arm is split to give Int64ToWord64 its own `LIT_TAG_WORD` result.
+    assert_eq!(jit, "Ok(Lit(LitWord(9223372036854775808)))");
+}
+
 // ===========================================================================
 // Configs.
 //
 // Two budgets per the lane spec: a larger "default" lane and a deterministic
-// re-run. The int/word lanes loop over MANY ops per case, so 300 cases is
+// re-run. The int/word lanes loop over MANY ops per case, so 350 cases is
 // thousands of compiled programs; the float lanes are lighter.
 // ===========================================================================
 fn cfg_int() -> Config {
     let mut c = Config::with_cases(350);
     c.max_shrink_iters = 5000;
-    // Deterministic seed so reruns reproduce. (proptest persists failures to
-    // .proptest-regressions regardless.)
+    // The `proptest!` macro sets this implicitly from `file!()`; a hand-built
+    // Config driven through TestRunner does not, and FileFailurePersistence::
+    // SourceParallel (the default) silently resolves to NO PATH without it —
+    // counterexamples would stop persisting/replaying with no test failure to
+    // report it. Must be set at THIS call site, not a shared helper, so
+    // `file!()` expands to this lane's own path.
+    c.source_file = Some(file!());
     c
 }
 
 fn cfg_float() -> Config {
     let mut c = Config::with_cases(400);
     c.max_shrink_iters = 5000;
+    c.source_file = Some(file!());
     c
-}
-
-// ===========================================================================
-// Reach floor (runs last; alphabetical ordering puts `zzz_` after all props).
-// ===========================================================================
-#[test]
-#[serial]
-fn zzz_reach_floor() {
-    let total = TOTAL.load(Ordering::Relaxed);
-    let reached = REACHED.load(Ordering::Relaxed);
-    eprintln!(
-        "PRIMOPS-DIFF REACH: {}/{} oracle invocations reached value comparison ({:.1}%)",
-        reached,
-        total,
-        if total > 0 {
-            100.0 * reached as f64 / total as f64
-        } else {
-            0.0
-        }
-    );
-    if total >= 100 {
-        let ratio = reached as f64 / total as f64;
-        assert!(
-            ratio >= 0.85,
-            "reach floor: only {:.1}% of {} oracle calls reached value comparison (need >= 85%)",
-            100.0 * ratio,
-            total
-        );
-    }
 }

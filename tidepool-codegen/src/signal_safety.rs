@@ -228,24 +228,37 @@ mod inner {
         pub(crate) static FAULTING_ADDR: Cell<usize> = const { Cell::new(0) };
     }
 
+    /// Caller-owned payload for a `with_signal_protection` call. Lives on the
+    /// `with_signal_protection` stack frame; the trampoline only ever borrows
+    /// it through a raw pointer. `f` and `result` are `Option` so the
+    /// trampoline can take the closure out to call it, and write the result
+    /// back, without the payload ever changing owner.
+    struct Payload<F, R> {
+        f: Option<F>,
+        result: Option<R>,
+    }
+
     /// Trampoline called from C after sigsetjmp returns 0.
-    /// Casts userdata back to a `Box<dyn FnOnce()>` and calls it.
-    /// Panics are caught to prevent unwinding across the C FFI boundary (which is UB).
-    // SAFETY: userdata was created via Box::into_raw in with_signal_protection and
-    // points to a valid Box<Box<dyn FnOnce()>>. Panics are caught to prevent UB
-    // from unwinding across the C FFI boundary.
-    unsafe extern "C" fn trampoline(userdata: *mut libc::c_void) {
-        let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(userdata as *mut Box<dyn FnOnce()>);
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            (*closure)();
-        }))
-        .is_err()
-        {
-            // Panic crossed into the trampoline. We can't propagate it across C,
-            // so abort. The caller (with_signal_protection) already wraps JIT calls
-            // in catch_unwind at a higher level, so this should never fire.
-            write_crash_dump_msg(b"panic in JIT trampoline");
-            std::process::abort();
+    /// Reborrows `userdata` as `&mut Payload<F, R>`, takes the closure out of
+    /// it, and calls it. Panics are caught to prevent unwinding across the C
+    /// FFI boundary (which is UB).
+    // SAFETY: userdata is `&mut Payload<F, R> as *mut c_void`, produced by
+    // `with_signal_protection` and kept alive for the duration of this call by
+    // its stack frame. Panics are caught to prevent UB from unwinding across
+    // the C FFI boundary.
+    unsafe extern "C" fn trampoline<F: FnOnce() -> R, R>(userdata: *mut libc::c_void) {
+        let payload = &mut *(userdata as *mut Payload<F, R>);
+        let f = payload.f.take();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f.unwrap()()));
+        match outcome {
+            Ok(r) => payload.result = Some(r),
+            Err(_) => {
+                // Panic crossed into the trampoline. We can't propagate it across C,
+                // so abort. The caller (with_signal_protection) already wraps JIT calls
+                // in catch_unwind at a higher level, so this should never fire.
+                write_crash_dump_msg(b"panic in JIT trampoline");
+                std::process::abort();
+            }
         }
     }
 
@@ -258,20 +271,36 @@ mod inner {
     ///
     /// The closure `f` must not hold Rust objects with Drop impls that would be
     /// skipped by siglongjmp. Raw pointers and references are fine.
+    ///
+    /// The payload never leaves this stack frame: `trampoline` only ever
+    /// reborrows it through a raw pointer, so there is exactly one place —
+    /// `payload`'s drop glue at the end of this function — that can drop its
+    /// contents. The three exit paths land in three different payload
+    /// states:
+    ///
+    /// - Normal completion: `f` is `None` (taken and called by the
+    ///   trampoline) and `result` is `Some`; `.ok_or` moves it out to the
+    ///   caller, so `payload` itself holds nothing by the time it drops.
+    /// - Fault mid-closure: `f` is `None` because the trampoline took it
+    ///   before calling it. The trampoline's stack frame is abandoned by
+    ///   `siglongjmp`, which skips Rust destructors, so the closure's
+    ///   captured environment — already moved out of `payload` — leaks. It
+    ///   is not, and cannot be, dropped a second time: `payload` never had
+    ///   it to begin with.
+    /// - Fault after the closure returns but before `JMP_BUF` is cleared:
+    ///   `f` is `None` and `result` is `Some` (the trampoline finished and
+    ///   wrote it), but `siglongjmp` still fires because the jump buffer was
+    ///   still armed. The early `Err` return leaves `result` in `payload`,
+    ///   which drops it exactly once when this function returns.
     pub unsafe fn with_signal_protection<F, R>(f: F) -> Result<R, SignalError>
     where
         F: FnOnce() -> R,
     {
-        // We need to pass the closure through C's void* callback interface.
-        // Use an UnsafeCell to get the return value out of the type-erased closure.
-        let result_cell = std::cell::UnsafeCell::new(None::<R>);
-        let result_ptr = &result_cell as *const std::cell::UnsafeCell<Option<R>>;
-
-        let wrapper: Box<dyn FnOnce()> = Box::new(move || {
-            let r = f();
-            // SAFETY: we're the only writer, and the reader waits until after we return.
-            unsafe { *(*result_ptr).get() = Some(r) };
-        });
+        let mut payload = Payload {
+            f: Some(f),
+            result: None,
+        };
+        let userdata = &mut payload as *mut Payload<F, R> as *mut libc::c_void;
 
         // SAFETY: SigJmpBuf is repr(C) POD — zeroed is a valid initial state for sigsetjmp.
         let mut buf: SigJmpBuf = std::mem::zeroed();
@@ -280,23 +309,16 @@ mod inner {
         JMP_BUF.with(|cell| cell.set(&mut buf as *mut SigJmpBuf));
         FAULTING_ADDR.with(|c| c.set(0));
 
-        // Double-box: outer Box for the fat pointer, inner Box<dyn FnOnce()>.
-        let boxed: Box<Box<dyn FnOnce()>> = Box::new(wrapper);
-        let userdata = Box::into_raw(boxed) as *mut libc::c_void;
-
-        let val = tidepool_sigsetjmp_call(&mut buf, trampoline, userdata);
+        let val = tidepool_sigsetjmp_call(&mut buf, trampoline::<F, R>, userdata);
 
         JMP_BUF.with(|cell| cell.set(null_mut()));
 
         if val != 0 {
-            // SAFETY: Signal was caught before trampoline ran. The Box is still valid
-            // because it was never consumed — reclaim and drop it to avoid a leak.
-            drop(Box::from_raw(userdata as *mut Box<dyn FnOnce()>));
             return Err(SignalError(val));
         }
 
-        // Closure completed normally — result_cell is guaranteed to be Some.
-        result_cell.into_inner().ok_or(SignalError(-1))
+        // Closure completed normally — payload.result is guaranteed to be Some.
+        payload.result.take().ok_or(SignalError(-1))
     }
 
     extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {

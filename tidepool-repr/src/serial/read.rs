@@ -129,7 +129,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
 
     let (entries, warnings) = match root.as_slice() {
         [Value::Array(entries), warnings_map @ Value::Map(_)] => {
-            (entries.clone(), parse_warnings(warnings_map))
+            (entries.clone(), parse_warnings(warnings_map)?)
         }
         _ => {
             return Err(ReadError::InvalidStructure(
@@ -191,24 +191,38 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             })
             .collect::<Result<Vec<_>, ReadError>>()?;
 
-        // 6th element: module-qualified name; an empty string encodes `None`.
+        // 6th element: module-qualified name; an empty string encodes `None`,
+        // a non-empty string is `Some`. Any non-text value is malformed.
         let qualified_name = match &arr[5] {
-            Value::Text(t) if !t.is_empty() => Some(t.clone()),
-            _ => None,
+            Value::Text(t) if t.is_empty() => None,
+            Value::Text(t) => Some(t.clone()),
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field: "qualified_name",
+                    detail: "expected text (empty string encodes None)".to_string(),
+                })
+            }
         };
 
-        // 7th element: record field labels, in field order (empty when none).
+        // 7th element: record field labels, in field order (empty array when
+        // none). Must be an array; a non-array value is malformed.
         let field_labels: Vec<String> = match &arr[6] {
             Value::Array(labels) => labels
                 .iter()
                 .map(|l| match l {
                     Value::Text(t) => Ok(t.clone()),
-                    _ => Err(ReadError::InvalidStructure(
-                        "Field label must be text".to_string(),
-                    )),
+                    _ => Err(ReadError::MalformedMetadataField {
+                        field: "field_labels",
+                        detail: "each label must be text".to_string(),
+                    }),
                 })
                 .collect::<Result<Vec<_>, ReadError>>()?,
-            _ => Vec::new(),
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field: "field_labels",
+                    detail: "expected an array".to_string(),
+                })
+            }
         };
 
         // 8th element: rendered name of the constructor's parent TyCon (e.g.
@@ -238,52 +252,130 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     Ok((table, warnings))
 }
 
-fn parse_warnings(val: &Value) -> MetaWarnings {
+/// Parses the metadata warnings map. Every key a conforming writer emits
+/// (`has_io`, `captured_type`, `var_names`, `warnings`) must carry a value of
+/// the exact shape that key's field expects; a non-text map key, a duplicate
+/// key, or a key this reader does not recognize are each a decode error, not
+/// a silent skip.
+fn parse_warnings(val: &Value) -> Result<MetaWarnings, ReadError> {
     let mut warnings = MetaWarnings::default();
-    if let Value::Map(pairs) = val {
-        for (k, v) in pairs {
-            if let Value::Text(key) = k {
-                match key.as_str() {
-                    "has_io" => {
-                        if let Value::Bool(b) = v {
-                            warnings.has_io = *b;
-                        }
+    let pairs = match val {
+        Value::Map(pairs) => pairs,
+        _ => {
+            return Err(ReadError::MalformedMetadataField {
+                field: "warnings_map",
+                detail: "expected a CBOR map".to_string(),
+            })
+        }
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    for (k, v) in pairs {
+        let key = match k {
+            Value::Text(key) => key,
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field: "warnings_map",
+                    detail: "map key must be text".to_string(),
+                })
+            }
+        };
+        if !seen.insert(key.as_str()) {
+            return Err(ReadError::DuplicateMetadataKey(key.clone()));
+        }
+
+        match key.as_str() {
+            "has_io" => match v {
+                Value::Bool(b) => warnings.has_io = *b,
+                _ => {
+                    return Err(ReadError::MalformedMetadataField {
+                        field: "has_io",
+                        detail: "expected a bool".to_string(),
+                    })
+                }
+            },
+            "captured_type" => match v {
+                Value::Text(t) => warnings.captured_type = Some(t.clone()),
+                _ => {
+                    return Err(ReadError::MalformedMetadataField {
+                        field: "captured_type",
+                        detail: "expected text".to_string(),
+                    })
+                }
+            },
+            "var_names" => {
+                let items = match v {
+                    Value::Array(items) => items,
+                    _ => {
+                        return Err(ReadError::MalformedMetadataField {
+                            field: "var_names",
+                            detail: "expected an array".to_string(),
+                        })
                     }
-                    "captured_type" => {
-                        if let Value::Text(t) = v {
-                            warnings.captured_type = Some(t.clone());
+                };
+                for item in items {
+                    let kv = match item {
+                        Value::Array(kv) if kv.len() == 2 => kv,
+                        _ => {
+                            return Err(ReadError::MalformedMetadataField {
+                                field: "var_names",
+                                detail: "each item must be a 2-element [id, name] array"
+                                    .to_string(),
+                            })
                         }
-                    }
-                    "var_names" => {
-                        if let Value::Array(items) = v {
-                            for item in items {
-                                if let Value::Array(kv) = item {
-                                    if let (Some(Value::Integer(id)), Some(Value::Text(nm))) =
-                                        (kv.first(), kv.get(1))
-                                    {
-                                        if let Ok(id) = u64::try_from(*id) {
-                                            warnings.var_names.push((id, nm.clone()));
-                                        }
-                                    }
-                                }
-                            }
+                    };
+                    let id = match &kv[0] {
+                        Value::Integer(id) => {
+                            u64::try_from(*id).map_err(|_| ReadError::MalformedMetadataField {
+                                field: "var_names",
+                                detail: "id does not fit in u64".to_string(),
+                            })?
                         }
-                    }
-                    "warnings" => {
-                        if let Value::Array(items) = v {
-                            for item in items {
-                                if let Value::Text(t) = item {
-                                    warnings.warnings.push(t.clone());
-                                }
-                            }
+                        _ => {
+                            return Err(ReadError::MalformedMetadataField {
+                                field: "var_names",
+                                detail: "id must be an integer".to_string(),
+                            })
                         }
-                    }
-                    _ => {}
+                    };
+                    let name = match &kv[1] {
+                        Value::Text(nm) => nm.clone(),
+                        _ => {
+                            return Err(ReadError::MalformedMetadataField {
+                                field: "var_names",
+                                detail: "name must be text".to_string(),
+                            })
+                        }
+                    };
+                    warnings.var_names.push((id, name));
                 }
             }
+            "warnings" => {
+                let items = match v {
+                    Value::Array(items) => items,
+                    _ => {
+                        return Err(ReadError::MalformedMetadataField {
+                            field: "warnings",
+                            detail: "expected an array".to_string(),
+                        })
+                    }
+                };
+                for item in items {
+                    match item {
+                        Value::Text(t) => warnings.warnings.push(t.clone()),
+                        _ => {
+                            return Err(ReadError::MalformedMetadataField {
+                                field: "warnings",
+                                detail: "each item must be text".to_string(),
+                            })
+                        }
+                    }
+                }
+            }
+            _ => return Err(ReadError::UnknownMetadataKey(key.clone())),
         }
     }
-    warnings
+    Ok(warnings)
 }
 
 /// A child index must reference a strictly EARLIER node than its parent.
@@ -829,8 +921,10 @@ mod tests {
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {
-            Err(ReadError::InvalidStructure(_)) => {}
-            other => panic!("expected InvalidStructure for a non-Text field label, got {other:?}"),
+            Err(ReadError::MalformedMetadataField { field, .. }) => assert_eq!(field, "field_labels"),
+            other => panic!(
+                "expected MalformedMetadataField(\"field_labels\") for a non-Text field label, got {other:?}"
+            ),
         }
     }
 

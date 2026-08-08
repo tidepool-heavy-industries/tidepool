@@ -3874,6 +3874,7 @@ dependencies = [
  "tidepool-runtime",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -4020,6 +4021,7 @@ dependencies = [
  "tidepool-repr",
  "tidepool-testing",
  "tokio",
+ "tracing",
  "which",
 ]
 
@@ -4029,6 +4031,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "frunk",
+ "libc",
  "proptest",
  "serde_json",
  "tidepool-bridge",

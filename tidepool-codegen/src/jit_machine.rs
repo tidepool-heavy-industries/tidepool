@@ -1988,6 +1988,14 @@ impl JitEffectMachine {
         self.machine_state.persistent_roots_count()
     }
 
+    /// Number of write-barrier remembered slots currently registered on this
+    /// machine (test/diagnostic accessor) — the barrier's sibling of
+    /// `persistent_roots_count`. Reads `self.machine_state` directly, same
+    /// rationale as `persistent_roots_count`.
+    pub fn remembered_slots_count(&self) -> usize {
+        self.machine_state.remembered_slots_count()
+    }
+
     /// Whether this machine is currently suspended at a typed yield (`Ask`),
     /// holding a stowed continuation awaiting `resume_suspended`.
     pub fn is_suspended(&self) -> bool {
@@ -2181,6 +2189,15 @@ impl Drop for JitEffectMachine {
         // clears exactly this machine's own registries, never a different
         // one (see the `free_session_heap` doc on `MachineState`).
         if self.session.is_some() {
+            // Retire every old-space arena BEFORE the arena Vec<u8>s
+            // themselves drop (which happens when `self.session` drops,
+            // after this fn body returns): forgets any remembered write-
+            // barrier slot pointing into that arena so it never outlives the
+            // memory it points into, and deregisters the range so a
+            // diagnostic pass never reads freed memory as live old-space.
+            for (start, end) in self.machine_state.old_space_arena_ranges() {
+                self.machine_state.retire_old_space_arena(start, end);
+            }
             self.machine_state.free_session_heap();
         }
     }

@@ -31,9 +31,12 @@ import GHC.Unit.Module (mkModuleName)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.SrcLoc (noSrcSpan)
 
-import Tidepool.Translate (stableVarId, fieldParentDisamb)
+import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx)
 
+import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM_, unless)
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import System.Exit (exitFailure, exitSuccess)
 
 main :: IO ()
@@ -46,6 +49,24 @@ main = do
       pathFileRead  = mkNm 2 (mkRecFieldOccFS (fsLit "FileRead") (fsLit "path"))
       plain    = mkNm 3 (mkVarOccFS (fsLit "path"))
 
+      -- Module-scoping checks for 'normalizeMod' / 'stableVarId' / 'checkedKeyToIdx'.
+      nmIn m u o = mkExternalName (mkUniqueGrimily u)
+                     (mkModule (stringToUnit "main") (mkModuleName m)) (mkVarOccFS (fsLit o)) noSrcSpan
+
+      -- (a) a user module merely containing "Internal" as a path segment
+      -- must NOT alias against its non-"Internal" counterpart.
+      fooInternalBarThing = nmIn "Foo.Internal.Bar" 10 "thing"
+      fooBarThing         = nmIn "Foo.Bar" 11 "thing"
+
+      -- (b) bare "Internal" / "Internal.Foo" are not entries in the
+      -- allowlist and must pass through normalizeMod unchanged.
+      -- (c) the allowlist's real entries still alias, both as strings and
+      -- (via 'stableVarId') as ids for the same occurrence name.
+      dataTextInternalEmpty = nmIn "Data.Text.Internal" 20 "empty"
+      dataTextEmpty         = nmIn "Data.Text" 21 "empty"
+      ghcInternalMaybeJust  = nmIn "GHC.Internal.Maybe" 22 "Just"
+      ghcMaybeJust          = nmIn "GHC.Maybe" 23 "Just"
+
       checks :: [(String, Bool)]
       checks =
         [ ("field parent Hit -> \"@Hit\"", fieldParentDisamb pathHit == "@Hit")
@@ -55,11 +76,39 @@ main = do
         , ("non-field -> empty disamb", fieldParentDisamb plain == "")
         , ("shared label, different parent -> distinct stableVarId",
             stableVarId pathHit /= stableVarId pathFileRead)
+        , ("Foo.Internal.Bar vs Foo.Bar -> distinct stableVarId",
+            stableVarId fooInternalBarThing /= stableVarId fooBarThing)
+        , ("bare \"Internal\" not rewritten", normalizeMod "Internal" == "Internal")
+        , ("\"Internal.Foo\" not rewritten", normalizeMod "Internal.Foo" == "Internal.Foo")
+        , ("Data.Text.Internal -> Data.Text", normalizeMod "Data.Text.Internal" == "Data.Text")
+        , ("GHC.Internal.Maybe -> GHC.Maybe", normalizeMod "GHC.Internal.Maybe" == "GHC.Maybe")
+        , ("Data.Text.Internal/Data.Text empty -> same stableVarId",
+            stableVarId dataTextInternalEmpty == stableVarId dataTextEmpty)
+        , ("GHC.Internal.Maybe/GHC.Maybe Just -> same stableVarId",
+            stableVarId ghcInternalMaybeJust == stableVarId ghcMaybeJust)
         ]
 
   forM_ checks $ \(label, ok) ->
     putStrLn ((if ok then "ok   - " else "FAIL - ") ++ label)
 
-  unless (all snd checks) exitFailure
+  -- (d) checkedKeyToIdx: distinct qualified names sharing an id error loudly;
+  -- the SAME qualified name recorded twice (same entity, revisited) is silent.
+  collisionResult <- try (evaluate (Map.size (checkedKeyToIdx
+    [(0x1, T.pack "Mod.A"), (0x1, T.pack "Mod.B")]))) :: IO (Either SomeException Int)
+  sameNameResult <- try (evaluate (Map.size (checkedKeyToIdx
+    [(0x1, T.pack "Mod.A"), (0x1, T.pack "Mod.A")]))) :: IO (Either SomeException Int)
+
+  let collisionChecks :: [(String, Bool)]
+      collisionChecks =
+        [ ("checkedKeyToIdx errors on distinct qualified names sharing an id",
+            either (const True) (const False) collisionResult)
+        , ("checkedKeyToIdx is silent on the same qualified name sharing an id",
+            either (const False) (== 1) sameNameResult)
+        ]
+
+  forM_ collisionChecks $ \(label, ok) ->
+    putStrLn ((if ok then "ok   - " else "FAIL - ") ++ label)
+
+  unless (all snd checks && all snd collisionChecks) exitFailure
   putStrLn "all varId-mechanism checks passed"
   exitSuccess

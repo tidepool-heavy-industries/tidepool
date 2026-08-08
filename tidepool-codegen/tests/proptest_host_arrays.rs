@@ -794,7 +794,13 @@ fn apply_box_op(
             } else {
                 cur.wrapping_add(1)
             };
-            let old = runtime_cas_boxed_array(real[s].ptr, i as i64, expected, *new);
+            let old = runtime_cas_boxed_array(
+                std::ptr::null_mut(),
+                real[s].ptr,
+                i as i64,
+                expected,
+                *new,
+            );
             if old != cur {
                 return Err(format!(
                     "CAS returned old={old} but model slot was {cur} (B1) slot={s} idx={i}"
@@ -838,6 +844,7 @@ fn apply_box_op(
             let src = src_slot % n;
             let dst = if *same { src } else { dst_slot % n };
             runtime_copy_boxed_array(
+                std::ptr::null_mut(),
                 real[src].ptr,
                 *src_off as i64,
                 real[dst].ptr,

@@ -335,15 +335,19 @@ where
         // Empty until the first bind materializes, so a value-plane-free session
         // behaves exactly as before.
         let env = self.core.seed_external_env();
+        let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
+        super::record_turn_stage("jit_codegen", jit_codegen_started.elapsed(), 0);
 
         let ask_tag = self.core.ask_tag();
+        let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             Threadless::run_fragment(machine, func_id, table, handlers, captured, ask_tag)
         })?;
+        super::record_turn_stage("run_exec", run_exec_started.elapsed(), 0);
         Ok(self.classify(outcome))
     }
 
@@ -369,20 +373,24 @@ where
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
         let env = self.core.seed_external_env();
+        let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
+        super::record_turn_stage("jit_codegen", jit_codegen_started.elapsed(), 0);
 
         let ask_tag = self.core.ask_tag();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
+        let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine.run_fragment_suspendable_binding(
                 func_id, table, handlers, captured, ask_tag, forced,
             )
         })?;
+        super::record_turn_stage("run_exec", run_exec_started.elapsed(), 0);
         // A completion (no suspension) tenured the result — bind it now. A
         // suspension defers the bind to `resume_bind`.
         if matches!(outcome, SuspendableOutcome::Completed(_)) {

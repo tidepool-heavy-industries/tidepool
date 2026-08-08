@@ -72,6 +72,31 @@ fn derive_stdlib_include() -> Vec<std::path::PathBuf> {
     vec![]
 }
 
+/// Mirrors `tidepool-harness/src/timing.rs`'s `record_stage` event shape
+/// (same target, message, and field names/order) by hand: `tidepool-runtime`
+/// cannot depend on `tidepool-harness` (that crate depends on this one, so a
+/// back-dependency would be a cycle). Shared by [`resident`] (the
+/// `jit_codegen`/`run_exec` stages) and [`turn`] (the classify/bind-turn
+/// extract-spawn stages and their forwarded phases) — factored here once
+/// duplication crossed two call sites, rather than copying the macro at each.
+///
+/// `node`/`round` are always the harness's `NO_NODE`/`NO_ROUND` sentinels
+/// (`u64::MAX`) here: none of this crate's call sites have an answerer node or
+/// round of their own to attribute to (that context lives one layer up, in
+/// `tidepool-harness`). `NodeId(0)` is a REAL, LIVE node id — never pass bare
+/// `0`, only the sentinel.
+fn record_turn_stage(stage: &str, elapsed: std::time::Duration, bytes: u64) {
+    tracing::debug!(
+        target: "tidepool_harness::timing",
+        node = u64::MAX,
+        round = u64::MAX,
+        stage,
+        ms = elapsed.as_millis() as u64,
+        bytes,
+        "turn stage"
+    );
+}
+
 /// Errors from the declaration-accumulation path.
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {

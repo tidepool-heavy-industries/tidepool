@@ -5,9 +5,7 @@
 //! 4+ test files.
 
 use proptest::prelude::*;
-use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
-use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
 use tidepool_eval::value::Value;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, Env, VecHeap};
@@ -115,74 +113,71 @@ fn watchdog_this_case(expr: &CoreExpr) -> crate::watchdog::Guard {
     crate::watchdog::begin(&label)
 }
 
-/// Compare JIT and interpreter results for a given expression.
+/// The legacy synthetic-IR JIT-vs-eval policy, retained ONLY for the
+/// out-of-boundary `tidepool-runtime` lanes (`proptest_jit_vs_eval`,
+/// `proptest_letrec`, `proptest_gc_pressure`) that still call
+/// [`check_jit_vs_eval`] directly. In-boundary lanes configure
+/// [`crate::differential::DiffConfig`] with a strict (empty-by-default)
+/// policy instead — see that module's docs.
 ///
-/// Evaluates the expression with both the tree-walking interpreter and the
-/// Cranelift JIT, then structurally compares the results. Acceptable JIT-only
-/// failures (HeapOverflow, UnresolvedVar, HeapBridge) are skipped via
-/// `prop_assume!`.
+/// `tidepool-testing`'s synthetic `CoreExpr` generator (`gen::arb_core_expr`)
+/// is partial by construction, not total/ground like the hand-built lanes in
+/// `tidepool-codegen/tests/`: it can produce `LetRec` shapes with
+/// inter-dependent simple bindings that the interpreter thunks but the JIT
+/// evaluates sequentially (`UnresolvedVar`), those unresolved vars can leave
+/// garbage heap objects behind a later read (`HeapBridge`), and a tiny
+/// nursery can legitimately overflow (`HeapOverflow`) — the three JIT classes
+/// this policy names.
+///
+/// Two eval classes are also named:
+///
+/// - `TypeMismatch`: numeric-conversion chains (e.g.
+///   `tidepool-codegen/tests/proptest_numeric_conversions.rs`, an in-boundary
+///   lane still on this shim) can feed an out-of-range `Int#` through `Chr`.
+///   Both engines correctly REJECT that input — eval as `TypeMismatch`
+///   ("valid Unicode codepoint"), the JIT as a runtime `UserError`
+///   ("Prelude.chr: bad argument") — so a both-fail outcome there is the
+///   generator producing invalid input, not a bug.
+/// - `InfiniteLoop`: the synthetic generator can build a self-referencing
+///   thunk (e.g. `tidepool-optimize/tests/proptest_shadowing.rs`). Both
+///   engines correctly detect it — eval as `InfiniteLoop` (a thunk forcing
+///   itself), the JIT as the same phenomenon under its own name,
+///   `JitErrorClass::BlackHole`. `BlackHole` is deliberately NOT in this
+///   policy's `expect_jit` list (unlike `HeapOverflow`/`UnresolvedVar`/
+///   `HeapBridge`): a JIT-only blackhole (eval succeeds, JIT loops) would
+///   still be a real divergence worth catching; only the BOTH-fail shape,
+///   where eval independently confirms the loop, is tolerated here.
+///
+/// No other eval class is named: eval failing on this generator is otherwise
+/// always a failure, not a skip — the wildcard arm this shim replaces used
+/// to discard every eval failure silently.
+fn legacy_synthetic_policy(label: &'static str) -> crate::differential::DiffConfig {
+    use crate::differential::{DiffConfig, EvalErrorClass, JitErrorClass};
+    DiffConfig::new(label)
+        .expect_jit(&[
+            JitErrorClass::HeapOverflow,
+            JitErrorClass::UnresolvedVar,
+            JitErrorClass::HeapBridge,
+        ])
+        .expect_eval(&[EvalErrorClass::TypeMismatch, EvalErrorClass::InfiniteLoop])
+}
+
+/// Compare JIT and interpreter results for a given expression, under the
+/// [`legacy_synthetic_policy`]. A thin shim over
+/// [`crate::differential::check`] — see that module's docs for the runner
+/// this drives.
 pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCaseError> {
-    let _guard = watchdog_this_case(&expr);
-    let table = build_table_for_expr(&expr);
+    use crate::differential::{check, ReachCounter};
 
-    // Tree-walking evaluation, deep-forced to NF: the JIT's result conversion
-    // forces lazy fields, so the eval side must observe the same demand or a
-    // program whose RESULT hides a bottom under a lazy field (e.g.
-    // `let x = x in (0, x)`) compares eval-Ok-with-ThunkRef against
-    // JIT-BlackHole and reads as a false divergence (#336). The corpus
-    // harness (haskell_suite_differential) applies the same policy.
-    let mut heap_eval = VecHeap::new();
-    let env_eval = env_from_datacon_table(&table);
-    let res_eval =
-        eval(&expr, &env_eval, &mut heap_eval).and_then(|v| deep_force(v, &mut heap_eval));
-
-    // JIT compilation and execution
-    let res_jit = match JitEffectMachine::compile(&expr, &table, nursery_size) {
-        Ok(mut machine) => machine.run_pure(),
-        Err(e) => Err(e),
-    };
-
-    match (res_eval, res_jit) {
-        (Ok(v1), Ok(v2)) => {
-            prop_assert!(
-                values_equal(&v1, &v2),
-                "JIT and Eval results differ.\nEval: {:?}\nJIT:  {:?}\nExpr: {:#?}",
-                v1,
-                v2,
-                expr
-            );
-        }
-        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow)))) => {
-            // HeapOverflow is acceptable — means GC couldn't free enough space
-            // for a very small nursery. Skip these rather than failing.
-            prop_assume!(false, "HeapOverflow with tiny nursery");
-        }
-        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(..))))) => {
-            // UnresolvedVar in synthetic IR: LetRec simple bindings with
-            // inter-dependencies are thunked by the interpreter but evaluated
-            // sequentially by the JIT. GHC Core LetRec always has Lam/Con RHS.
-            prop_assume!(false, "UnresolvedVar in synthetic LetRec");
-        }
-        (Ok(_), Err(JitError::HeapBridge(_))) => {
-            // UnexpectedHeapTag: consequence of JIT limitation with synthetic IR
-            // (e.g., unresolved vars producing garbage heap objects).
-            prop_assume!(false, "HeapBridge error in synthetic IR");
-        }
-        (Ok(v1), Err(e)) => {
-            prop_assert!(
-                false,
-                "JIT failed but eval succeeded.\nEval: {:?}\nJIT error: {:?}\nExpr: {:#?}",
-                v1,
-                e,
-                expr
-            );
-        }
-        _ => {
-            // Both fail or eval fails — skip
-        }
-    }
-
-    Ok(())
+    // `DiffConfig::nurseries` wants a `&'static [usize]`, but callers pass
+    // `nursery_size` at runtime; a one-element leak is negligible next to a
+    // proptest run's own allocation volume and keeps this a thin shim rather
+    // than a config type built for a runtime-sized nursery list.
+    let nurseries: &'static [usize] = Box::leak(vec![nursery_size].into_boxed_slice());
+    let cfg = legacy_synthetic_policy("check_jit_vs_eval (legacy synthetic-IR shim)")
+        .nurseries(nurseries);
+    static REACH: ReachCounter = ReachCounter::new("check_jit_vs_eval (legacy synthetic-IR shim)");
+    check(expr, &cfg, &REACH)
 }
 
 /// The full, UN-SKIPPED classification of one JIT-vs-eval run. Unlike

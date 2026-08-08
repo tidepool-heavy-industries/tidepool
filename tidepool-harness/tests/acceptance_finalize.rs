@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use tidepool_eval::value::Value;
 use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
@@ -125,6 +126,17 @@ async fn finalize_hands_up_a_plain_data_value() {
         .create_root("finalize data root", "Finalize with plain Int data.")
         .unwrap();
     harness.force(root, Actor::Operator).unwrap();
+    // `Finalize` is type-indexed (`Member (Finalize T) effs`): the block below
+    // calls `finalize @Int`, so the row this turn compiles against must name
+    // `Finalize Int` — the config's own default row (`Finalize NoAnswer`) is
+    // uninhabited by design.
+    harness.set_answer_contract(
+        root,
+        Some(AnswerContract {
+            ty: "Int".to_string(),
+            imports: vec![],
+        }),
+    );
 
     let outcome = harness
         .run_to_hole_or_done(root)
@@ -209,15 +221,24 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
     }
 
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let target = cfg
+        .turn_target(Some(("Int -> Int", &[])))
+        .expect("turn target");
     let src = tidepool_harness::engine::template_turn(
         &cfg,
+        &target.stack,
         "(finalize @(Int -> Int) (\\x -> x + 1) :: M ())\n",
         "",
         "",
-        None,
     );
-    let result =
-        tidepool_harness::compile::compile_turn(&cfg.extract_bin, &src, "result", &cfg.include);
+    let result = tidepool_harness::compile::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    );
     assert!(
         result.is_ok(),
         "a function-typed finalize site must compile cleanly (the relaxed \
@@ -247,6 +268,15 @@ async fn finalize_a_closure() -> (std::sync::Arc<Harness>, NodeId) {
         .create_root("finalize closure root", "Finalize with a function value.")
         .unwrap();
     harness.force(root, Actor::Operator).unwrap();
+    // See `finalize_hands_up_a_plain_data_value`: the row must name the type
+    // this block finalizes at.
+    harness.set_answer_contract(
+        root,
+        Some(AnswerContract {
+            ty: "Int -> Int".to_string(),
+            imports: vec![],
+        }),
+    );
 
     let outcome = harness
         .run_to_hole_or_done(root)

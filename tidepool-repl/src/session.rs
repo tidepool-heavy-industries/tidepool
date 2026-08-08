@@ -2976,6 +2976,8 @@ mod slim_tests {
                     "-- | Run a shell command; returns a `Proc`.\nrun :: Text -> M Proc\nrun cmd = undefined",
                     "readProcess :: Text -> M Text\nreadProcess cmd = undefined",
                 ],
+                type_params: &[],
+                default_row_args: &[],
             },
             EffectDecl {
                 type_name: "KV",
@@ -2983,6 +2985,8 @@ mod slim_tests {
                 constructors: &["KvSet :: Text -> Value -> KV ()"],
                 type_defs: &[],
                 helpers: &["kvSet :: Text -> Value -> M ()\nkvSet k v = undefined"],
+                type_params: &[],
+                default_row_args: &[],
             },
         ]
     }

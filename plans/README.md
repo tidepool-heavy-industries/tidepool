@@ -1,23 +1,30 @@
 # Plans
 
-**Active: [`self-iterating-harness/09-askuser-form-gui.md`](self-iterating-harness/09-askuser-form-gui.md)**
-— Wave 2: the `AskUser` typed-form effect (`askUser :: Form a -> M a`,
-enum/int/text/bool) + a fresh minimal operator GUI (Swiss-minimal, lifts the
-Datastar/SSE transport). The self-iterating harness (`render`/`loop`,
-`RunLLMTurn`/`Finalize`) is the target; the older Fork/Dialog
-interaction-surface plan is superseded. Exo fan-out; frozen contracts in the
-plan's "Frozen contracts" section.
+**Active — the self-iterating harness line** (`render`/`loop` +
+`RunLLMTurn`/`Finalize`, dogfooded via `harness-dogfooding/`):
+
+- **Landed:** `AskUser` typed-form effect + minimal web operator GUI
+  ([`self-iterating-harness/09-askuser-form-gui.md`](self-iterating-harness/09-askuser-form-gui.md));
+  `Fork` as a distinct effect with a fork-free leaf row; finalize pinned to
+  the hole's answer type (shim mechanism, being replaced by the row-indexed
+  `Finalize t` — in flight).
+- **In flight (exo swarm):** row-indexed `Finalize t`; harness durability
+  (lifecycle/checkpoint/turn-lease + crash recovery); turn-latency
+  instrumentation + report; one-spawn-per-turn (extract classifies raw turn
+  text in-session, returns one rich result; removes `--emit-stmt-binders`/
+  `--emit-binders`); extraction-fidelity fixes (Translate/GhcPipeline);
+  classified differential runner + lane consolidation; GC write-barrier +
+  soundness hardening; stdlib semantic-fidelity fixes.
+- **Findings ledger:**
+  [`self-iterating-harness/10-external-review-findings.md`](self-iterating-harness/10-external-review-findings.md)
+  — status of externally-reviewed defects; stays active until the durability
+  wave folds its rows.
 
 **Prior (self-iterating-harness Wave 1):** `01`–`08` + `W1-IMPLEMENTATION-MAP.md`
-— thesis, runtime, agent surface, compaction (C1–C4), siteid, finalize
-closures. Landed + green on `harness-interaction-surface`.
+— thesis, runtime, agent surface, compaction, siteid, finalize closures.
+Landed on `harness-interaction-surface`.
 
 **Superseded:** [`harness-r0/`](harness-r0/README.md) — typed yield
-(`returnControl @T`), session tree over the E2 stow engine, durable event
-log, Datastar observatory skeleton. The 7-pane observatory it built is being
-replaced by Wave 2's focused GUI.
-
-The prior plan (`repo-review-2026-07-06`, a full-repo bug hunt: ~60
-findings across every crate, fixed and merged to `ghci-session`) is
-closed out; see git history (`git log --all -- 'plans/repo-review-2026-07-06/*'`)
-for the full writeup.
+(`returnControl @T`), session tree, 7-pane observatory (replaced by the
+focused operator GUI). The older Fork/Dialog interaction-surface plan is
+retired outright. `repo-review-2026-07-06` is closed; see git history.

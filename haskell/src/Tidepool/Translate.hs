@@ -21,6 +21,9 @@ module Tidepool.Translate
   , varId
   , stableVarId
   , fieldParentDisamb
+  , normalizeMod
+  , binderQualName
+  , checkedKeyToIdx
   ) where
 
 import GHC
@@ -442,12 +445,17 @@ translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
       -- runLLMTurn (#R0): the hidden Sited siblings are ordinary home-module
-      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text),
-      -- so a name-only scan over the FULL (pre-reachability) bind pool finds
-      -- their real Ids — mirroring findTargetId's own name lookup. `translate`
-      -- can't do an HscEnv/environment lookup itself (TransM is pure State, no
-      -- IO), so both varIds are resolved ONCE here and threaded through
-      -- TransState for the interception arm to consult.
+      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text,
+      -- or Tidepool.Fork's own forkMapSited/forkCataSited), so a name-only
+      -- scan over the FULL (pre-reachability) bind pool finds their real Ids
+      -- — mirroring findTargetId's own name lookup. `translate` can't do an
+      -- HscEnv/environment lookup itself (TransM is pure State, no IO), so
+      -- both varIds are resolved ONCE here and threaded through TransState
+      -- for the interception arm to consult. Each lookup is qualified on the
+      -- sibling's own defining module (auxVerbModules), same discipline as
+      -- 'isIntrinsicVerb' for the call-site predicates: a user binding that
+      -- merely shares one of these names is never picked as a head-swap
+      -- target.
       initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
                     (findAuxVarId "runLLMTurnSited" allBinds)
                     (findAuxVarId "runLLMTurnForkSited" allBinds)
@@ -479,18 +487,50 @@ translateModule allBinds targetName unresolvedIds =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
 
-    -- | Name-only lookup for a helper binding that may or may not be present
-    -- (unlike 'findTargetId', absence is not an error — it just means the
-    -- corresponding runLLMTurn/runLLMTurnFork interception can't fire).
+    -- | (occurrence name, defining module) for every hidden *Sited helper
+    -- 'findAuxVarId' looks up. The only pass between resolveExternals and
+    -- this scan that touches binder identity is 'uniquifyDuplicateBinders':
+    -- its 'goTop' rewrites only each bind's RHS (@NonRec b <$> goE ...@ /
+    -- @Rec ... (b,) <$> goE ...@) and returns the TOP binder @b@ unchanged.
+    -- 'findAuxVarId' scans exactly those top binders, so a *Sited sibling's
+    -- Name — and its defining module — is still whatever it was before that
+    -- pass ran, same as the call-site Vars 'isIntrinsicVerb' relies on.
+    auxVerbModules :: [(String, String)]
+    auxVerbModules =
+      [ ("runLLMTurnSited",       "Tidepool.Effects")
+      , ("runLLMTurnForkSited",   "Tidepool.Effects")
+      , ("runLLMTurnFanoutSited", "Tidepool.Effects")
+      , ("finalizeSited",         "Tidepool.Effects")
+      , ("forkSited",             "Tidepool.Effects")
+      , ("forkAllSited",          "Tidepool.Effects")
+      , ("forkMapSited",          "Tidepool.Fork")
+      , ("forkCataSited",         "Tidepool.Fork")
+      ]
+
+    -- | Lookup for a hidden *Sited helper binding that may or may not be
+    -- present (unlike 'findTargetId', absence is not an error — it just
+    -- means the corresponding head-swap can't fire). Qualified on the
+    -- binder's own defining module ('auxVerbModules'), same discipline as
+    -- 'isIntrinsicVerb': a user binding that merely shares a *Sited
+    -- occurrence name is never picked as a head-swap target.
     findAuxVarId :: String -> [CoreBind] -> Maybe Word64
     findAuxVarId name binds =
       case filter isMatch (concatMap bindersOf binds) of
         (b:_) -> Just (varId b)
         []    -> Nothing
       where
+        -- A name absent from auxVerbModules is a wiring mistake, not a
+        -- non-match: answering Nothing would silently retire the head-swap
+        -- that lookup feeds.
+        expectedModule = case lookup name auxVerbModules of
+          Just m  -> m
+          Nothing -> error $ "findAuxVarId: no defining module registered for '"
+                             ++ name ++ "' — add it to auxVerbModules"
         isMatch b =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
+          && maybe False ((== expectedModule) . moduleNameString . moduleName)
+                   (nameModule_maybe (idName b))
 
     bindersOf (NonRec b _) = [b]
     bindersOf (Rec pairs)  = map fst pairs
@@ -513,10 +553,11 @@ translateModule allBinds targetName unresolvedIds =
           pairInfo = map (\p@(b, rhs) ->
             (p, varId b, exprFreeVarKeys rhs)) allPairs
 
-          -- Map from binder key -> index into pairInfo
+          -- Map from binder key -> index into pairInfo, guarded against a
+          -- silent varId collision between two distinct bindings.
           keyToIdx :: Map.Map Word64 Int
-          keyToIdx = Map.fromList
-            [(k, i) | (i, (_, k, _)) <- zip [0..] pairInfo]
+          keyToIdx = checkedKeyToIdx
+            [ (k, binderQualName b) | ((b, _), k, _) <- pairInfo ]
 
           pairInfoLen = length pairInfo
           pairInfoAt idx = case drop idx pairInfo of
@@ -559,10 +600,10 @@ translateModule allBinds targetName unresolvedIds =
     exprFreeVarKeys :: CoreExpr -> Set.Set Word64
     exprFreeVarKeys = go Set.empty
       where
-        bindV b bound | isTyVar b || isCoVar b = bound
+        bindV b bound | isErasedBinder b = bound
                       | otherwise = Set.insert (varId b) bound
         go bound expr = case expr of
-          Var v | isTyVar v || isCoVar v -> Set.empty
+          Var v | isErasedBinder v -> Set.empty
                 | varId v `Set.member` bound -> Set.empty
                 | otherwise -> Set.singleton (varId v)
           Lit{} -> Set.empty
@@ -586,7 +627,7 @@ translateModule allBinds targetName unresolvedIds =
     wrapAllBinds :: [CoreBind] -> Id -> TransM Int
     wrapAllBinds [] target = emitNode (NVar (varId target))
     wrapAllBinds (NonRec b rhs : rest) target
-      | isTyVar b = wrapAllBinds rest target  -- skip type bindings
+      | isErasedBinder b = wrapAllBinds rest target  -- skip erased (type/coercion) bindings
       | isShowDoubleSpecVar b = do
           -- Replace body with safe lambda wrapper instead of compiling the
           -- original body which pulls in floatToDigits/Integer arithmetic.
@@ -600,7 +641,7 @@ translateModule allBinds targetName unresolvedIds =
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
     wrapAllBinds (Rec pairs : rest) target = do
-      let valPairs = filter (\(b, _) -> not (isTyVar b)) pairs
+      let valPairs = filter (\(b, _) -> not (isErasedBinder b)) pairs
       if null valPairs
         then wrapAllBinds rest target
         else do
@@ -676,7 +717,7 @@ translateModuleClosed hscEnv allBinds targetName = do
   auditEnv <- System.Environment.lookupEnv "TIDEPOOL_VARID_AUDIT"
   case auditEnv of
     Just _ -> do
-      let sites = filter (not . isTyVar . fst) (concatMap bindingSites closedBinds)
+      let sites = filter (not . isErasedBinder . fst) (concatMap bindingSites closedBinds)
           grouped = Map.fromListWith (++)
             [ (varId b, [(b, top)]) | (b, top) <- sites ]
           collisions = Map.filter (\xs -> length xs > 1) grouped
@@ -859,7 +900,7 @@ uniquifyDuplicateBinders binds = do
     -- Visit a binder: rename iff its unique key was already seen.
     goB :: VarEnv Var -> Var -> State (UniqSupply, Set.Set Word64) (VarEnv Var, Var)
     goB env b
-      | isTyVar b || isCoVar b = return (env, b)
+      | isErasedBinder b = return (env, b)
       | otherwise = do
           (us, seen) <- get
           let k = getKey (varUnique b)
@@ -1734,15 +1775,14 @@ translate expr =
     -- fallback" — every well-formed call site head-swaps to the *Sited
     -- sibling, and a call extract genuinely cannot rewrite must fail HERE,
     -- naming the site, rather than silently falling through to the
-    -- (OPAQUE, dead-at-runtime) stub. Gated on the Var's own DEFINING
-    -- MODULE (not just its occurrence name, which isForkMapVar/
-    -- isForkCataVar alone can't disambiguate) so this stays disjoint from
-    -- the fallthrough below: a user's own same-named-but-different-module
-    -- forkMap/forkCata (see `user_defined_forkmap_does_not_abort_extract`,
-    -- fork-catchall-fallthrough) is never actually defined in
-    -- "Tidepool.Fork", so it can never match 'isTidepoolForkVar' and always
+    -- (OPAQUE, dead-at-runtime) stub. isForkMapVar/isForkCataVar already
+    -- gate on the Var's own DEFINING MODULE (not just its occurrence name),
+    -- so this stays disjoint from the fallthrough below: a user's own
+    -- same-named-but-different-module forkMap/forkCata (see
+    -- `user_defined_forkmap_does_not_abort_extract`,
+    -- fork-catchall-fallthrough) never matches either predicate and always
     -- falls through untouched.
-    Var v | (isForkMapVar v || isForkCataVar v), isTidepoolForkVar v -> do
+    Var v | isForkMapVar v || isForkCataVar v -> do
         binder <- gets tsCurrentBinder
         let siteDesc = maybe "<top level>" T.unpack binder
             which = if isForkMapVar v then "forkMap" else "forkCata" :: String
@@ -1823,7 +1863,7 @@ translateHead = \case
           else emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
-    | isTyVar b -> translate body
+    | isErasedBinder b -> translate body
     | otherwise -> do
         bodyIdx <- translate body
         emitNode $ NLam (varId b) bodyIdx
@@ -1884,7 +1924,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitMultiReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -1904,7 +1944,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitWord2DivPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b, c] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -1922,7 +1962,7 @@ translateHead = \case
     , Just (op1Name, op2Name) <- splitUnaryMultiReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [r1Binder, r2Binder] <- vBinders -> do
         aIdx <- translate a
         v1Idx <- emitOp op1Name [aIdx]
@@ -1938,7 +1978,7 @@ translateHead = \case
     , Just (op1Name, op2Name, op3Name) <- splitTripleReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
     , [a, b] <- valArgs
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , [b1, b2, b3] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
@@ -1964,7 +2004,7 @@ translateHead = \case
     -- Only drop the last value arg if the first result binder has State# type
     -- (stateful primops like readSmallArray#). For pure primops returning unboxed
     -- tuples (like indexSmallArray# :: SmallArray# a -> Int# -> (# a #)), keep all args.
-    , vBinders <- filter (not . isTyVar) binders
+    , vBinders <- filter (not . isErasedBinder) binders
     , let hasStateBinder = case vBinders of
             (b:_) -> case splitTyConApp_maybe (idType b) of
                        Just (tc, _) -> tc == statePrimTyCon
@@ -1995,7 +2035,7 @@ translateHead = \case
               inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
             [_, _, _]   ->
-              -- M5: this generic fallback can't split a real 2-result unboxed
+              -- this generic fallback can't split a real 2-result unboxed
               -- tuple — both binders would bind to the SAME primop node
               -- (aliasing, not the distinct old-value/flag fields a real op
               -- like casSmallArray# returns), and re-casing primIdx per
@@ -2005,12 +2045,17 @@ translateHead = \case
               error $ "Unsupported 2-result stateful unboxed-tuple primop/FFI call: "
                 ++ showPprUnsafe v
                 ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
-            [s', r1, r2, r3] -> do
-              bodyIdx <- translate body
-              c3 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-              c2 <- emitNode $ NCase primIdx (varId r3) [FlatAlt FDefault [] c3]
-              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
-              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            [_, _, _, _] ->
+              -- this generic fallback can't split a real 3-result unboxed
+              -- tuple — all three binders would bind to the SAME primop node
+              -- (aliasing, not the distinct fields the op actually returns),
+              -- and re-casing primIdx per binder risks running a stateful
+              -- primop twice. Fail loud at
+              -- extract time instead of silently miscompiling; a real 3-result
+              -- stateful op needs a dedicated split (see splitMultiReturnPrimOp).
+              error $ "Unsupported 3-result stateful unboxed-tuple primop/FFI call: "
+                ++ showPprUnsafe v
+                ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
             _ -> error $ "Unsupported stateful unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
         else do
           -- Pure primop returning unboxed tuple (e.g. indexSmallArray# -> (# a #))
@@ -2020,7 +2065,7 @@ translateHead = \case
               bodyIdx <- translate body
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] bodyIdx]
             [_, _] ->
-              -- M5: same landmine as the stateful 2-result arm above — both
+              -- same landmine as the stateful 2-result arm above — both
               -- binders would alias the same primop node. Fail loud.
               error $ "Unsupported 2-result pure unboxed-tuple primop: "
                 ++ showPprUnsafe v
@@ -2029,7 +2074,7 @@ translateHead = \case
   Case scrut b _alts_ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc -> do
         scrutIdx <- translate scrut
-        let vBinders = filter (not . isTyVar) binders
+        let vBinders = filter (not . isErasedBinder) binders
         bodyIdx <- translate body
         case vBinders of
           [valBinder] -> do
@@ -2078,7 +2123,7 @@ translateAlt (Alt con binders body) = do
   -- AND coercion args / `valueRepArity = dataConRepArity - |eqSpec|`), so an
   -- unfiltered alt reads past the stored fields: eval ArityMismatch, JIT SIGSEGV.
   -- Exclude coercion binders too, matching the build's value-field count.
-  let vBinders = filter (\b -> not (isTyVar b) && not (isCoVar b)) binders
+  let vBinders = filter (not . isErasedBinder) binders
   altCon <- mapAltCon con
   bodyIdx <- translate body
   return $ FlatAlt altCon (map varId vBinders) bodyIdx
@@ -2111,13 +2156,32 @@ localVarId v =
       Fingerprint h1 _ = fingerprintString combined
   in h1 .&. 0x00FFFFFFFFFFFFFF
 
--- | Normalize a module name by stripping ".Internal" / "Internal." segments.
+-- | Alias an exact module name to its canonical spelling, so the same
+-- entity reached through two module paths gets ONE 'stableVarId'. Every
+-- module name NOT in this table passes through unchanged — no prefix or
+-- infix matching.
+--
+-- 'Data.Text.Internal' -> 'Data.Text': the @text@ package defines 'Text'
+-- and its primitives in @Data.Text.Internal@ and re-exports them from
+-- @Data.Text@; 'isDataTextEmptyVar' already special-cases both spellings
+-- for @empty@, direct evidence both are observed as the defining module
+-- for the same binding.
+--
+-- 'GHC.Internal.Maybe' -> 'GHC.Maybe': GHC's base-library split
+-- (GHC >= 9.10) moved 'Maybe'\'s definition into the @ghc-internal@
+-- package's @GHC.Internal.Maybe@, re-exported from @base@'s @GHC.Maybe@;
+-- both are real, separately-exposed modules in this toolchain
+-- (@ghc-pkg field ghc-internal\/base exposed-modules@). This alias was
+-- introduced alongside the Maybe-unboxing fix in 805099c3.
+moduleAliasTable :: [(String, String)]
+moduleAliasTable =
+  [ ("Data.Text.Internal", "Data.Text")
+  , ("GHC.Internal.Maybe", "GHC.Maybe")
+  ]
+
+-- | Normalize a module name via 'moduleAliasTable', an exact-match lookup.
 normalizeMod :: String -> String
-normalizeMod s =
-  let t = T.pack s
-      t1 = T.replace ".Internal" "" t
-      t2 = T.replace "Internal." "" t1
-  in T.unpack t2
+normalizeMod s = Data.Maybe.fromMaybe s (lookup s moduleAliasTable)
 
 -- | Module-qualified name for a DataCon (e.g. "Data.Map.Bin").
 -- Falls back to just the OccName for wired-in names without a module.
@@ -2125,6 +2189,39 @@ qualifiedName :: Name -> Text
 qualifiedName name = case nameModule_maybe name of
   Just m  -> T.pack (normalizeMod (moduleNameString (moduleName m)) ++ "." ++ occNameString (nameOccName name))
   Nothing -> T.pack (occNameString (nameOccName name))
+
+-- | Diagnostic label for a binder, mirroring 'varId'\'s own case split so the
+-- label always names the identity 'varId' actually hashed. A local binder
+-- has no stable module-qualified name, so it falls back to its occurrence
+-- name tagged @(local)@ — still actionable in a collision error.
+binderQualName :: Id -> Text
+binderQualName v = case isDataConId_maybe v of
+  Just dc -> qualifiedName (varName (dataConWorkId dc))
+  Nothing
+    | isExternalName (varName v) -> qualifiedName (varName v)
+    | otherwise -> T.pack (occNameString (nameOccName (varName v))
+                           ++ "#" ++ show (getKey (varUnique v)) ++ " (local)")
+
+-- | Build a varId -> list-position map from ordered (varId, qualified-name)
+-- pairs. Errors loudly when two entries share a varId but carry DIFFERENT
+-- qualified names — a genuine 'stableVarId' collision, which would
+-- otherwise silently drop one binding from a reachability DFS keyed on this
+-- map. Repeated entries for the SAME qualified name (the same entity
+-- reached more than once) are not a collision.
+--
+-- The names compared here come from 'qualifiedName', which applies
+-- 'moduleAliasTable'. Two bindings the table deliberately aliases therefore
+-- compare EQUAL and pass — which is the point for a correct alias (one
+-- entity, two spellings), and is why a wrong entry in that table is the one
+-- collision class this guard cannot see. Keep the table minimal.
+checkedKeyToIdx :: [(Word64, Text)] -> Map.Map Word64 Int
+checkedKeyToIdx pairs = Map.map fst (foldl' step Map.empty (zip [0 :: Int ..] pairs))
+  where
+    step acc (i, (k, qn)) = case Map.lookup k acc of
+      Just (_, qn') | qn' /= qn ->
+        error $ "varId collision: 0x" ++ Numeric.showHex k ""
+          ++ " maps to both " ++ T.unpack qn' ++ " and " ++ T.unpack qn
+      _ -> Map.insert k (i, qn) acc
 
 stableVarId :: Name -> Word64
 stableVarId name = stableVarIdWith (fieldParentDisamb name) name
@@ -2175,7 +2272,7 @@ stripTicksAndCasts e          = e
 collectValueBinders :: Int -> CoreExpr -> ([Var], CoreExpr)
 collectValueBinders 0 e = ([], e)
 collectValueBinders n (Lam b e)
-  | isTyVar b = collectValueBinders (n-1) e  -- type args count toward join arity
+  | isErasedBinder b = collectValueBinders (n-1) e  -- type/coercion args count toward join arity
   | otherwise = let (bs, body) = collectValueBinders (n-1) e in (b:bs, body)
 -- GHC may eta-reduce join point RHSes; return what we found.
 collectValueBinders _ e = ([], e)
@@ -2184,6 +2281,13 @@ isValueArg :: CoreExpr -> Bool
 isValueArg (Type _) = False
 isValueArg (Coercion _) = False
 isValueArg _ = True
+
+-- | A binder carrying no runtime value: type evidence ('TyVar') or coercion
+-- evidence ('CoVar'). Both are erased on the Haskell side, so such a binder
+-- emits no runtime lambda and occupies no parameter/argument slot — matching
+-- 'isValueArg', which drops both 'Type' and 'Coercion' at call sites.
+isErasedBinder :: Var -> Bool
+isErasedBinder b = isTyVar b || isCoVar b
 
 -- | Split a typed-yield call site's (already 'isValueArg'-filtered) value-arg
 -- list into "0+ leading extra args" and "the trailing @n@ args the verb's own
@@ -2785,39 +2889,87 @@ isShowDoubleVar v =
   in name == "showDouble" || name == "showDouble'"
      || name == "$fShowDouble_$cshow"
 
+-- | (occurrence name, defining module) for every intrinsic verb this file
+-- either lowers directly to a primop or head-swaps to a hidden @*Sited@
+-- sibling. GHC preserves a Name's defining module across re-exports, so a
+-- verb reaching user code through the generated @Tidepool.Effects@ module
+-- or a stdlib import still qualifies here; a user's own function that
+-- merely shares one of these occurrence names, defined anywhere else, does
+-- not.
+--
+-- Every verb listed here carries @{-\# OPAQUE \#-}@ at its definition, and
+-- must: @NOINLINE@ alone leaves -O2 free to worker\/wrapper a verb whose
+-- argument is unused into a fresh @$w\<verb\>_u...@ at the call site, whose
+-- occurrence name matches nothing below. OPAQUE blocks that as well as
+-- inlining, keeping the name — and the call site's type application —
+-- intact for these recognizers.
+intrinsicVerbModules :: [(String, String)]
+intrinsicVerbModules =
+  [ ("eitherDecodeValue", "Tidepool.Aeson.Value")
+  , ("parseISO8601",      "Tidepool.Data.Time")
+  , ("runLLMTurn",        "Tidepool.Effects")
+  , ("runLLMTurnFork",    "Tidepool.Effects")
+  , ("runLLMTurnFanout",  "Tidepool.Effects")
+  , ("finalize",          "Tidepool.Effects")
+  , ("fork",              "Tidepool.Fork")
+  , ("forkAll",           "Tidepool.Fork")
+  , ("forkMap",           "Tidepool.Fork")
+  , ("forkCata",          "Tidepool.Fork")
+  ]
+
+-- | Is @v@ the intrinsic verb named @name@: its occurrence name matches AND
+-- it is actually DEFINED in 'intrinsicVerbModules's paired module, read
+-- from @v@'s ORIGINAL defining module ('nameModule_maybe') — not merely
+-- occurrence-name-alike. Distinguishes the real stdlib/generated verb from
+-- a user's own, differently-moduled, same-named function.
+--
+-- A @name@ absent from 'intrinsicVerbModules' is a wiring mistake, not a
+-- non-match: answering 'False' would silently retire whichever recognizer
+-- passed it. Raised only once the occurrence name matches, so the lookup
+-- stays off the common path.
+isIntrinsicVerb :: String -> Id -> Bool
+isIntrinsicVerb name v =
+  occNameString (nameOccName (idName v)) == name
+  && definedIn (intrinsicVerbModule name) v
+
+intrinsicVerbModule :: String -> String
+intrinsicVerbModule name = case lookup name intrinsicVerbModules of
+  Just m  -> m
+  Nothing -> error $ "isIntrinsicVerb: no defining module registered for '"
+                     ++ name ++ "' — add it to intrinsicVerbModules"
+
+-- | Is @v@'s ORIGINAL defining module exactly @modStr@? Wired-in and other
+-- module-less names are never a match.
+definedIn :: String -> Id -> Bool
+definedIn modStr v =
+  maybe False ((== modStr) . moduleNameString . moduleName)
+        (nameModule_maybe (idName v))
+
 -- | Recognize @eitherDecodeValue@ (the stdlib stub in Tidepool.Aeson.Value). Its
 -- calls are lowered to the pure @JsonDecode@ primop; the OPAQUE stub body
 -- itself is dead. The surface @eitherDecode@ is a pure wrapper over it, so it
--- lowers through the same primop. Matched by unqualified occurrence name (same
--- convention as showDouble); OPAQUE keeps that name stable against -O2 w/w.
+-- lowers through the same primop.
 isEitherDecodeValueVar :: Id -> Bool
-isEitherDecodeValueVar v =
-  occNameString (nameOccName (idName v)) == "eitherDecodeValue"
+isEitherDecodeValueVar = isIntrinsicVerb "eitherDecodeValue"
 
 -- | Recognize @parseISO8601@ (the stdlib OPAQUE stub in Tidepool.Data.Time).
 -- Its calls are lowered to the pure @ParseISO8601@ primop (Rust chrono);
--- the stub body itself is dead. Matched by unqualified occurrence name (same
--- convention as eitherDecodeValue); OPAQUE keeps the name stable against -O2 w/w.
+-- the stub body itself is dead.
 isParseISO8601Var :: Id -> Bool
-isParseISO8601Var v =
-  occNameString (nameOccName (idName v)) == "parseISO8601"
+isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 
 -- | Recognize @runLLMTurn@/@runLLMTurnFork@ (the stdlib OPAQUE surface
 -- verbs in ask_effect_def!'s helper text, Tidepool.Effects). OPAQUE keeps
--- their calls un-inlined (matched here by unqualified occurrence name, same
--- convention as eitherDecodeValue/parseISO8601) so the type application at
--- each call site survives to this interception.
+-- their calls un-inlined so the type application at each call site
+-- survives to this interception.
 isRunLLMTurnVar :: Id -> Bool
-isRunLLMTurnVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurn"
+isRunLLMTurnVar = isIntrinsicVerb "runLLMTurn"
 
 isRunLLMTurnForkVar :: Id -> Bool
-isRunLLMTurnForkVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurnFork"
+isRunLLMTurnForkVar = isIntrinsicVerb "runLLMTurnFork"
 
 isRunLLMTurnFanoutVar :: Id -> Bool
-isRunLLMTurnFanoutVar v =
-  occNameString (nameOccName (idName v)) == "runLLMTurnFanout"
+isRunLLMTurnFanoutVar = isIntrinsicVerb "runLLMTurnFanout"
 
 -- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
 -- verb) — same convention as 'isRunLLMTurnVar' et al. @forkAll@'s shape
@@ -2826,8 +2978,7 @@ isRunLLMTurnFanoutVar v =
 -- answer), so it rides the SAME head-swap arm, but resolves its own
 -- @forkAllSited@ sibling (riding the @Fork@ effect, not @RunLLMTurn@).
 isForkAllVar :: Id -> Bool
-isForkAllVar v =
-  occNameString (nameOccName (idName v)) == "forkAll"
+isForkAllVar = isIntrinsicVerb "forkAll"
 
 -- | Recognize @fork@ (@Tidepool.Fork@'s singleton-answerer surface verb) —
 -- same convention as 'isForkAllVar'. @fork@'s shape (@forall a. Text -> M
@@ -2836,8 +2987,7 @@ isForkAllVar v =
 -- but resolves its own @forkSited@ sibling (riding the @Fork@ effect, not
 -- @RunLLMTurn@).
 isForkVar :: Id -> Bool
-isForkVar v =
-  occNameString (nameOccName (idName v)) == "fork"
+isForkVar = isIntrinsicVerb "fork"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
 -- stubs) — same convention as 'isRunLLMTurnVar' et al. Their hidden
@@ -2849,29 +2999,15 @@ isForkVar v =
 -- "pass-through" arm is needed: it holds by construction of the naming,
 -- not by an extra runtime check.
 isForkMapVar :: Id -> Bool
-isForkMapVar v =
-  occNameString (nameOccName (idName v)) == "forkMap"
+isForkMapVar = isIntrinsicVerb "forkMap"
 
 isForkCataVar :: Id -> Bool
-isForkCataVar v =
-  occNameString (nameOccName (idName v)) == "forkCata"
-
--- | Is @v@ actually DEFINED in "Tidepool.Fork" (not merely occurrence-name-
--- alike)? Distinguishes a genuine misuse of the real forkMap/forkCata
--- (Fork.hs's own haddock: OPAQUE stubs with "no runtime fallback") from a
--- user's own, differently-moduled, same-named function — the
--- fork-catchall-fallthrough regression test needs that case to keep falling
--- through untouched.
-isTidepoolForkVar :: Id -> Bool
-isTidepoolForkVar v =
-  maybe False ((== "Tidepool.Fork") . moduleNameString . moduleName)
-        (nameModule_maybe (idName v))
+isForkCataVar = isIntrinsicVerb "forkCata"
 
 -- | Recognize @finalize@ (the @Tidepool.Effects@ OPAQUE surface verb,
 -- self-iterating-harness WS-B) — same convention as 'isRunLLMTurnVar' et al.
 isFinalizeVar :: Id -> Bool
-isFinalizeVar v =
-  occNameString (nameOccName (idName v)) == "finalize"
+isFinalizeVar = isIntrinsicVerb "finalize"
 
 -- | The shared extract-time rejection every typed-yield site (runLLMTurn
 -- family, finalize) applies: a leftover type variable means the site isn't
@@ -3083,7 +3219,7 @@ jumpCrossesLam vid = go False
     go underLam (Var v)   = underLam && varId v == vid
     go underLam (App f a) = go underLam f || go underLam a
     go _        (Lam b e)
-      | isTyVar b         = go False e  -- type lambdas don't create new functions
+      | isErasedBinder b   = go False e  -- erased (type/coercion) lambdas don't create new functions
       | otherwise          = go True e
     go underLam (Let (NonRec b rhs) e)
       | isJoinId b =

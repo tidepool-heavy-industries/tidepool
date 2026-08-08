@@ -56,8 +56,41 @@ fn compile_against(
     imports: &str,
 ) -> Result<compile::CompiledTurn, compile::CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
-    let source = template_turn_for(&cfg.decls, &cfg, code, imports, "", None);
-    compile::compile_turn(&cfg.extract_bin, &source, "result", &cfg.include)
+    let target = cfg.turn_target(None).expect("turn target");
+    let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
+    compile::compile_turn(
+        &cfg.extract_bin,
+        &source,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    )
+}
+
+/// Like [`compile_against`], but with the row's `Finalize` entry instantiated
+/// at `finalize_ty` — `Finalize` is type-indexed, so a block calling `finalize
+/// @T` needs the row to name `T` (`Finalize NoAnswer`, the default, is
+/// uninhabited by design).
+fn compile_pinned(
+    decls: Vec<tidepool_mcp::EffectDecl>,
+    code: &str,
+    imports: &str,
+    finalize_ty: &str,
+) -> Result<compile::CompiledTurn, compile::CompileError> {
+    let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
+    let target = cfg
+        .turn_target(Some((finalize_ty, &[])))
+        .expect("turn target");
+    let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
+    compile::compile_turn(
+        &cfg.extract_bin,
+        &source,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    )
 }
 
 /// THE answerer-side structural guarantee: `runLLMTurn @T` does NOT typecheck
@@ -122,7 +155,7 @@ fn fork_child_leaf_row_cannot_fork() {
 
     // Positive control: finalize still compiles on the leaf row — a child
     // answers its own brief directly.
-    let fin = compile_against(leaf, "(finalize @Int 1 :: M ())", "");
+    let fin = compile_pinned(leaf, "(finalize @Int 1 :: M ())", "", "Int");
     assert!(
         fin.is_ok(),
         "finalize must compile against the fork-child leaf row '[AskUser, Finalize], \
@@ -140,7 +173,12 @@ fn finalize_compiles_in_the_answerer_stack() {
         return;
     }
 
-    let result = compile_against(answerer_decls(), "(finalize @Int (41 + 1) :: M ())", "");
+    let result = compile_pinned(
+        answerer_decls(),
+        "(finalize @Int (41 + 1) :: M ())",
+        "",
+        "Int",
+    );
     assert!(
         result.is_ok(),
         "finalize @Int must compile against the answerer stack '[AskUser, Fork, \

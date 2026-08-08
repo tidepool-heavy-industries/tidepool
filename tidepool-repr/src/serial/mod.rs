@@ -51,6 +51,22 @@ pub enum ReadError {
     /// (a `stableVarId` collision) — loud instead of a silent table overwrite.
     #[error(transparent)]
     DataConCollision(#[from] crate::datacon_table::DataConCollision),
+    /// A metadata field carries a CBOR value of the wrong shape, or a value
+    /// outside the range its Rust type can represent. Names the offending
+    /// field and what was expected.
+    #[error("malformed metadata field `{field}`: {detail}")]
+    MalformedMetadataField { field: &'static str, detail: String },
+    /// The same key appears more than once in the metadata warnings map.
+    #[error("duplicate metadata key: {0}")]
+    DuplicateMetadataKey(String),
+    /// A key in the metadata warnings map is not one this reader recognizes.
+    /// Every key a conforming writer at or below this build's `VERSION_MINOR`
+    /// can emit is already handled below; the version gate in `strip_header`
+    /// rejects any payload with a newer minor before this code ever sees it,
+    /// so an unrecognized key here cannot be a legitimate forward-compat
+    /// addition — it names a foreign or corrupt payload.
+    #[error("unknown metadata key: {0}")]
+    UnknownMetadataKey(String),
 }
 
 /// 4-byte magic: ASCII 'TPLR'

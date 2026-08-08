@@ -33,11 +33,9 @@ fn prelude_dir() -> std::path::PathBuf {
 
 /// A Fork-capable stack: the general eval decls plus the `Fork` effect, so
 /// `Tidepool.Fork`'s `forkAll` (which lowers to the `Fork` effect, not
-/// `RunLLMTurn`) resolves. `EngineConfig::standard` alone does not declare
-/// `Fork`.
+/// `RunLLMTurn`) resolves. `standard_decls()` declares `Fork` at the roster tail (tag 11).
 fn fork_cfg() -> EngineConfig {
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    let decls = tidepool_mcp::standard_decls();
     EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config")
 }
 

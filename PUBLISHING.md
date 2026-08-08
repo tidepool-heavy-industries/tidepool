@@ -17,11 +17,13 @@ Crates must be published in dependency order. Wait for each crate to appear on c
 10. tidepool-runtime
 11. tidepool-mcp
 12. tidepool-handlers
-13. tidepool-macro
-14. tidepool-optimize
-15. tidepool (binary)
-16. tidepool-lsp (binary)
-17. tidepool-repl (binary)
+13. tidepool-harness
+14. tidepool-macro
+15. tidepool-optimize
+16. tidepool (binary)
+17. tidepool-lsp (binary)
+18. tidepool-repl (binary)
+19. tidepool-web (binary)
 ```
 
 This order is derived from the workspace dependency graph (`cargo metadata`,
@@ -30,7 +32,8 @@ dependencies rather than editing the list by hand.
 
 `tidepool-testing` and the two example crates (`tidepool-guess`, `tidepool-tide`)
 have `publish = false` — crates.io ignores them. Everything else in the workspace
-publishes, including the three binaries at the end of the list.
+publishes, including the four binaries at the end of the list (`tidepool-web`
+depends on `tidepool-harness`, which publishes earlier as a library).
 
 ## Dry Run
 

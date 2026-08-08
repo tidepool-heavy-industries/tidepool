@@ -56,12 +56,12 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use frunk::hlist;
 use proptest::prelude::*;
-use proptest::test_runner::Config as PtConfig;
+use proptest::test_runner::{Config as PtConfig, TestRunner};
 
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -507,35 +507,78 @@ fn val_summary(v: &Value) -> (u8, i64) {
     }
 }
 
+/// Total: every `EffectError` variant is named, no wildcard arm. A variant
+/// added upstream breaks this match at compile time rather than silently
+/// falling into a catch-all — the same discipline
+/// `tidepool_testing::differential::classify_eval` uses for `EvalError`
+/// (a different type: this lane drives the effect machine, whose errors are
+/// `EffectError`, not the pure-eval `EvalError` that module classifies).
 fn eval_err_class(e: &EffectError) -> (u8, i64) {
     match e {
         EffectError::UnhandledEffect { tag } => (errclass::UNHANDLED, *tag as i64),
         EffectError::Eval(_) => (errclass::EVAL, -1),
         EffectError::Bridge(_) => (errclass::BRIDGE, -1),
         EffectError::Handler(_) => (errclass::HANDLER, -1),
-        _ => (errclass::OTHER, -1),
+        EffectError::MissingConstructor { .. } => (errclass::OTHER, -1),
+        EffectError::FieldCountMismatch { .. } => (errclass::OTHER, -1),
+        EffectError::UnexpectedValue { .. } => (errclass::OTHER, -1),
     }
 }
 
+/// Total: every `RuntimeError` variant is named (mirrors
+/// `differential::classify_runtime`'s coverage, in this lane's own byte
+/// scheme).
+fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
+    match e {
+        RuntimeError::CaseTrap => (errclass::CASE_TRAP, -1),
+        RuntimeError::HeapOverflow => (errclass::HEAP_OVERFLOW, -1),
+        RuntimeError::DivisionByZero
+        | RuntimeError::Overflow
+        | RuntimeError::UserError
+        | RuntimeError::UserErrorMsg(_)
+        | RuntimeError::Undefined
+        | RuntimeError::BadPointer
+        | RuntimeError::TypeMetadata
+        | RuntimeError::UnresolvedVar(..)
+        | RuntimeError::NullFunPtr
+        | RuntimeError::BadFunPtrTag(_)
+        | RuntimeError::StackOverflow
+        | RuntimeError::BlackHole
+        | RuntimeError::BadThunkState(_)
+        | RuntimeError::Cancelled => (errclass::OTHER, -1),
+    }
+}
+
+/// Total: every `YieldError` variant is named.
+fn yield_err_class(e: &YieldError) -> (u8, i64) {
+    match e {
+        YieldError::Signal(_) => (errclass::SIGNAL, -1),
+        YieldError::Runtime(rt) => runtime_err_class(rt),
+        YieldError::UnexpectedTag(_) => (errclass::OTHER, -1),
+        YieldError::UnexpectedConTag(_) => (errclass::OTHER, -1),
+        YieldError::BadValFields(_) => (errclass::OTHER, -1),
+        YieldError::BadEFields(_) => (errclass::OTHER, -1),
+        YieldError::BadUnionFields(_) => (errclass::OTHER, -1),
+        YieldError::NullPointer => (errclass::OTHER, -1),
+    }
+}
+
+/// Total: every `JitError` variant is named, no wildcard arm — the
+/// classified-not-wildcard discipline this lane's bespoke half must uphold
+/// even though it can't reuse `differential::classify_jit` directly (this
+/// lane needs the `UnhandledEffect` tag payload for tag-routing assertions,
+/// which `JitErrorClass::Effect` collapses away).
 fn jit_err_class(e: &JitError) -> (u8, i64) {
     match e {
-        JitError::Effect(EffectError::UnhandledEffect { tag }) => {
-            (errclass::UNHANDLED, *tag as i64)
-        }
-        JitError::Effect(EffectError::Eval(_)) => (errclass::EVAL, -1),
-        JitError::Effect(EffectError::Bridge(_)) => (errclass::BRIDGE, -1),
-        JitError::Effect(EffectError::Handler(_)) => (errclass::HANDLER, -1),
-        JitError::Effect(_) => (errclass::OTHER, -1),
+        JitError::Effect(eff) => eval_err_class(eff),
         JitError::HeapBridge(_) => (errclass::BRIDGE, -1),
         JitError::Signal(_) => (errclass::SIGNAL, -1),
         JitError::EffectResponseTooLarge { .. } => (errclass::TOO_LARGE, -1),
-        JitError::Yield(y) => match y {
-            YieldError::Signal(_) => (errclass::SIGNAL, -1),
-            YieldError::Runtime(RuntimeError::CaseTrap) => (errclass::CASE_TRAP, -1),
-            YieldError::Runtime(RuntimeError::HeapOverflow) => (errclass::HEAP_OVERFLOW, -1),
-            _ => (errclass::OTHER, -1),
-        },
-        _ => (errclass::OTHER, -1),
+        JitError::Yield(y) => yield_err_class(y),
+        JitError::Compilation(_) => (errclass::OTHER, -1),
+        JitError::Pipeline(_) => (errclass::OTHER, -1),
+        JitError::MissingConTags(_) => (errclass::OTHER, -1),
+        JitError::VarIdCollision(_) => (errclass::OTHER, -1),
     }
 }
 
@@ -879,32 +922,122 @@ fn shape_mismatch_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
 
 // ---------------------------------------------------------------------------
 // Properties.
+//
+// `full_differential` and `huge_complete_and_stream` are the two "success
+// path" properties (a valid-tag program is expected to reach a final-value
+// comparison), so each drives `TestRunner` directly (not the `proptest!`
+// macro) to own a local, in-process reach floor — the same discipline
+// `tidepool_testing::differential`'s lanes use, reimplemented here as
+// `ReachTally` because this lane's outcome type (`Outcome`/the byte
+// `Verdict`) is bespoke, not the pure-value runner's `differential::Verdict`.
+// `err_at_k` / `invalid_tag_never_signals` / `shape_mismatch_resume` stay on
+// the `proptest!` macro: they deliberately probe error/edge paths where
+// "reached a value comparison" isn't the metric under test (invalid tags
+// never produce a comparable value at all, by design).
+//
+// Neither converted fn's NAME changed — this file's checked-in
+// `.proptest-regressions` seeds are irrelevant to test name (verified from
+// proptest 1.11's own source: `FileFailurePersistence::load_persisted_
+// failures2` resolves purely off `source_file`; `Config::test_name` exists
+// only for the opt-in process-`fork` feature, unused here) but renaming
+// anyway would violate the letter of the review guidance this lane was
+// flagged under, so names are preserved regardless.
 // ---------------------------------------------------------------------------
 
-proptest! {
-    #![proptest_config(PtConfig::with_cases(200))]
+/// A local, in-process reach counter — `tidepool_testing::differential::
+/// ReachCounter`'s shape, reimplemented here for this lane's bespoke
+/// `Outcome` type. `Cell`, not an atomic: `TestRunner::run` drives the case
+/// closure through `Fn`, not `FnMut`, but each property runs single-threaded.
+struct ReachTally {
+    label: &'static str,
+    total: Cell<u64>,
+    reached: Cell<u64>,
+}
 
-    /// Full differential: valid-tag arithmetic chains. Both machines must agree
-    /// on the final value AND the dispatch sequence; the JIT must be
-    /// deterministic across two runs.
-    #[test]
-    fn full_differential((expr, script) in arith_chain_strategy()) {
-        let outcome = run_case(expr, script);
-        assert_differential(&outcome)?;
+impl ReachTally {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            total: Cell::new(0),
+            reached: Cell::new(0),
+        }
     }
+
+    fn record(&self, reached: bool) {
+        self.total.set(self.total.get() + 1);
+        if reached {
+            self.reached.set(self.reached.get() + 1);
+        }
+    }
+
+    fn assert_floor(&self, min_ratio: f64) {
+        let (total, reached) = (self.total.get(), self.reached.get());
+        let pct = if total > 0 {
+            100.0 * reached as f64 / total as f64
+        } else {
+            0.0
+        };
+        eprintln!("{} REACH: {}/{} ({:.1}%)", self.label, reached, total, pct);
+        assert!(
+            total > 0,
+            "{}: reach floor asserted over zero cases — an empty run is not a pass",
+            self.label
+        );
+        let ratio = reached as f64 / total as f64;
+        assert!(
+            ratio >= min_ratio,
+            "{}: reach floor failed — {}/{} ({:.1}%) is below the required {:.1}%",
+            self.label,
+            reached,
+            total,
+            pct,
+            min_ratio * 100.0
+        );
+    }
+}
+
+/// Full differential: valid-tag arithmetic chains. Both machines must agree
+/// on the final value AND the dispatch sequence; the JIT must be
+/// deterministic across two runs.
+#[test]
+fn full_differential() {
+    let mut cfg = PtConfig::with_cases(200);
+    cfg.source_file = Some(file!()); // TestRunner-driven, not the proptest! macro — see cfg note above.
+    let reach = ReachTally::new("jit-dispatch/full_differential");
+    let mut runner = TestRunner::new(cfg);
+    runner
+        .run(&arith_chain_strategy(), |(expr, script)| {
+            let outcome = run_case(expr, script);
+            let reached = assert_differential(&outcome)?;
+            reach.record(reached);
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.80);
+}
+
+/// Huge `Complete` lists and chunk-boundary `Stream`s: the JIT's spine
+/// dismantle / re-park / parked-iterator paths must reduce to the same head
+/// element the eval oracle computes, with no fatal fault.
+#[test]
+fn huge_complete_and_stream() {
+    let mut cfg = PtConfig::with_cases(100);
+    cfg.source_file = Some(file!());
+    let reach = ReachTally::new("jit-dispatch/huge_complete_and_stream");
+    let mut runner = TestRunner::new(cfg);
+    runner
+        .run(&huge_strategy(), |(expr, script)| {
+            let outcome = run_case(expr, script);
+            let reached = assert_differential(&outcome)?;
+            reach.record(reached);
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.80);
 }
 
 proptest! {
     #![proptest_config(PtConfig::with_cases(100))]
-
-    /// Huge `Complete` lists and chunk-boundary `Stream`s: the JIT's spine
-    /// dismantle / re-park / parked-iterator paths must reduce to the same head
-    /// element the eval oracle computes, with no fatal fault.
-    #[test]
-    fn huge_complete_and_stream((expr, script) in huge_strategy()) {
-        let outcome = run_case(expr, script);
-        assert_differential(&outcome)?;
-    }
 
     /// Handler errors mid-chain (trampoline error path): both machines must
     /// stop at the same dispatch and neither may fault.

@@ -17,6 +17,7 @@ pub mod provider;
 pub mod registry;
 pub mod replay;
 pub mod selfharness;
+pub mod timing;
 pub mod tree;
 pub mod ui;
 pub mod uiof;
@@ -33,6 +34,7 @@ pub use selfharness::{
     FormSpec, HarnessSource, HarnessSourceError, JsonlObserver, LogObserver, Observer,
     OperatorGate, PersistenceError, SelfHarnessDriver, SelfHarnessState, StdinGate, Submission,
 };
+pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
 pub use ui::{BadgeKind, Ui};
 pub use uiof::{defining_module, resume_expr_from_submission, ui_of};

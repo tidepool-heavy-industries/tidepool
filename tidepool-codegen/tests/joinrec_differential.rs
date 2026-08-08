@@ -10,7 +10,9 @@
 //!
 //! With the eval knot-tying fix in place these cases now evaluate, so this file
 //! pins the recursive-join class to the JIT differentially (eval == JIT) AND
-//! against the hand-computed arithmetic answer.
+//! against the hand-computed arithmetic answer, via the classified
+//! `tidepool_testing::differential` runner (nurseries [64KiB, 4KiB], nothing
+//! tolerated — this generator is total/ground by construction).
 //!
 //! Construction style mirrors `proptest_ghc_idioms.rs`: hand-built
 //! `RecursiveTree<CoreFrame<usize>>` IR, total and ground by construction.
@@ -20,7 +22,12 @@ use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
-use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval};
+use tidepool_testing::differential::{check, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::build_table_for_expr;
+
+fn dcfg() -> DiffConfig {
+    DiffConfig::new("joinrec").nurseries(&[64 * 1024, 4 * 1024])
+}
 
 /// Build a recursive-join counting loop with `n_lead` extra leading params
 /// shaped like GHC type-args (always passed `0`, never used):
@@ -189,15 +196,14 @@ fn joinrec_with_type_arg_leads_eval_equals_jit() {
 
 #[test]
 fn joinrec_through_differential_oracle() {
-    // Run the now-un-blinded class through the actual differential oracle used by
-    // the proptest fuzzers. Pre-fix, eval errored and these cases were silently
-    // skipped via the oracle's catch-all arm.
+    // Run the now-un-blinded class through the classified differential
+    // runner. Pre-fix, eval errored and these cases were silently skipped via
+    // the (now-retired) shim's catch-all arm.
+    let reach = ReachCounter::new("joinrec/through_differential_oracle");
     for limit in [0i64, 1, 5, 100, 200] {
         let expr = build_sum_joinrec(limit, 1, 3);
-        check_jit_vs_eval(expr.clone(), 64 * 1024).unwrap_or_else(|e| {
-            panic!("differential oracle (64KB) failed at limit {limit}: {e:?}")
-        });
-        check_jit_vs_eval(expr, 4 * 1024)
-            .unwrap_or_else(|e| panic!("differential oracle (4KB) failed at limit {limit}: {e:?}"));
+        check(expr, &dcfg(), &reach)
+            .unwrap_or_else(|e| panic!("differential oracle failed at limit {limit}: {e:?}"));
     }
+    reach.assert_floor(1.0);
 }

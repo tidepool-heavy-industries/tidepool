@@ -3,16 +3,23 @@
 //!
 //! These were missing from the tree-walking interpreter's primop dispatch
 //! (`UnsupportedPrimOp`), so on the corpus's Double-literal / Rational→Double
-//! paths eval errored while the JIT ran — `check_jit_vs_eval`'s both-fail /
+//! paths eval errored while the JIT ran — the (now-retired) shim's both-fail /
 //! eval-fail arms then MASKED whatever the JIT did. Now that eval implements
-//! them to spec, this pins eval == JIT == the defined semantics.
+//! them to spec, this pins eval == JIT == the defined semantics via the
+//! classified `tidepool_testing::differential` runner (nursery [64KiB],
+//! nothing tolerated — every input here is total/ground).
 
 use tidepool_repr::types::{Literal, PrimOpKind};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
-use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval};
+use tidepool_testing::differential::{check, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::build_table_for_expr;
+
+fn dcfg() -> DiffConfig {
+    DiffConfig::new("primop-bitcount").nurseries(&[64 * 1024])
+}
 
 /// `op applied to (Word# n)` as a standalone program.
 fn build_unary_word(op: PrimOpKind, n: u64) -> CoreExpr {
@@ -120,11 +127,13 @@ fn bitcount_eval_equals_jit() {
 
 #[test]
 fn bitcount_through_differential_oracle() {
+    let reach = ReachCounter::new("primop-bitcount/through_differential_oracle");
     for &op in OPS {
         for &n in INPUTS {
             let expr = build_unary_word(op, n);
-            check_jit_vs_eval(expr, 64 * 1024)
+            check(expr, &dcfg(), &reach)
                 .unwrap_or_else(|e| panic!("differential oracle failed for {op} {n:#x}: {e:?}"));
         }
     }
+    reach.assert_floor(1.0);
 }

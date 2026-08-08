@@ -118,26 +118,50 @@ decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
 it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
 the general eval/Agent surface.
 
-### The answer contract — `finalize` is pinned to the hole's type
+### The answer contract — `finalize` is pinned by the ROW
 
-An answerer turn does not compile against the polymorphic `finalize`. While a
+An answerer turn does not compile against a polymorphic `finalize`. While a
 node is answering a typed hole it carries an `AnswerContract` (set per hole by
 the driver via `Harness::set_answer_contract`, since the per-loop answerer node
 is reused across holes whose types differ), and its turns compile with:
 
-- **`finalize` pinned to the hole's type** — `engine::finalize_shim` emits
-  `finalize :: forall v a effs. (v ~ T, Member Finalize effs) => v -> Eff effs
-  a` as a top-level binding, with `finalize` hidden from the unqualified
-  `Tidepool.Effects` import and the module also imported `qualified as
-  TidepoolEffects` so the shim reaches the original
-  (`tidepool_mcp::build_preamble_shadowing_effects`). `Tidepool.Effects`' own
-  `finalize` leaves `v` unconstrained, which let a wrong-typed value compile and
-  then cross in-heap into a `T`-typed continuation and case-trap there. The
-  tyvar shape is preserved, not collapsed to `T -> M a`: `v` first (so
-  `finalize @T x` still binds it), `a` free (so the template's `toJSON _r`
-  defaults it rather than demanding `ToJSON T`), `Member` a real constraint (so
-  the dictionary rides as the leading value arg `Translate.hs` re-applies when
-  head-swapping to `finalizeSited`).
+- **`Finalize` instantiated at the hole's type IN THE ROW.** `Finalize` is
+  type-indexed — `data Finalize v a where FinalizeWith :: Int -> v -> Finalize
+  v a`, `finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs
+  a` — so a turn answering a `Decision` hole compiles against `'[AskUser, Fork,
+  Finalize Decision]` and `Member (Finalize Decision)` IS the pin. Canonical
+  freer-simple, the same shape as `State s`. A wrong-typed answer is an
+  ordinary GHC error naming the row (`'Finalize Text' is not a member of the
+  type-level list '[AskUser, Fork, Finalize Decision]'`), which the
+  corrective-retry loop feeds back. Nothing is shimmed, hidden, or
+  qualified-aliased: the turn uses the ordinary `build_preamble`.
+
+  The tyvar shape is load-bearing and unchanged: `v` first (so `finalize @T x`
+  binds it), `a` free (so the template's `toJSON _r` defaults it rather than
+  demanding `ToJSON T`), `Member` a real constraint (so the dictionary rides as
+  the leading value arg `Translate.hs` re-applies when head-swapping to
+  `finalizeSited`). Extract is untouched by the indexing — `asks.json` records
+  the site type exactly as before, and `v` is erased in Core, so `FinalizeWith`
+  keeps its arity and `Finalize` its positional union tag.
+
+  `EngineConfig::turn_target` resolves one turn's compile target, returning a
+  `TurnTarget { include, stack }` derived from a SINGLE `tidepool_mcp::RowArgs`
+  — the effects-module dir (via `ensure_effects_module_at`) and the promoted
+  row string (via `build_effect_stack_type_at`) come from the same place, so
+  they cannot name different rows. Because the row lives in the generated
+  `type M`, a pinned turn gets its own effects-module dir; the dir is
+  content-addressed on the generated source, so two answer types can never be
+  served each other's module and a repeat of the same type is free. The
+  generated module also imports the contract's author modules — naming
+  `Decision` in `type M` needs it in scope THERE, not only in the turn module.
+
+  A turn with no contract compiles at `Finalize NoAnswer` — an uninhabited type
+  declared by `Finalize` itself. Such a turn is not answering a typed hole and
+  therefore has no finalize capability at all, which is the true statement, and
+  GHC says it by name. There is no "unpinned finalize" any more: the row admits
+  exactly one answer type, so the old failure mode (any `v` compiles, then
+  crosses in-heap into a `T`-typed continuation and case-traps past every
+  check) is not expressible.
 - **The author modules that define the type** — `HarnessSource::answerer_imports`,
   derived structurally as the sibling modules the harness file itself imports.
   Not a naming convention: a module the harness does not import is never pulled
@@ -152,7 +176,8 @@ without the imports the model cannot name the type it is being asked for and
 substitutes one that compiles. A harness that inlines its author types alongside
 `loop` fails the second half — `SelfHarnessDriver::types_in_scope_hint` says so
 in the retry rather than looping to the round cap. A node with no contract
-compiles exactly as before. Pinned by `tests/finalize_type_pinning.rs`.
+compiles at `Finalize NoAnswer` and simply cannot finalize. Pinned by
+`tests/finalize_type_pinning.rs`.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a

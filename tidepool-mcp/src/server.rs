@@ -682,6 +682,7 @@ where
         let ask_tag = decls.len() as u64;
         decls.push(ask_decl());
         decls.push(runllmturn_decl());
+        decls.push(fork_decl());
         let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
         // The generated Tidepool.Effects module must be on the include path
         // for every eval (the preamble imports it). Keep its source so the
@@ -790,6 +791,8 @@ where
             // Rebuild preamble with the user library import
             let mut decls = H::collect_decls();
             decls.push(ask_decl());
+            decls.push(runllmturn_decl());
+            decls.push(fork_decl());
             self.inner.haskell_preamble = build_preamble(&decls, true);
             // The full vocabulary digest now lives in `tidepool://vocab` (pulled on
             // demand); the description keeps a short pointer instead of inlining it.

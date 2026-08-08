@@ -79,3 +79,7 @@ viz/index.html
 
 # per-worktree MCP config (holds a worktree-specific --papers path; never commit)
 .mcp.json
+
+# extract test harness scratch (synthetic fixture modules + their .hi/.o)
+haskell/test-session/work/
+haskell/test-fidelity/work/

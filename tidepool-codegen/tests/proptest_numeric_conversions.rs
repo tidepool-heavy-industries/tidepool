@@ -24,10 +24,12 @@
 //! rounding-mode divergence between the tree-walker (Rust `as` casts) and the
 //! JIT (Cranelift `fcvt_*` / `ireduce`+`*extend`) is caught, not masked.
 //!
-//! ORACLE: reuses the project differential oracle `check_jit_vs_eval`
-//! (tidepool-testing) so this lane piggybacks on the same JIT-vs-eval contract
-//! every other lane uses. We ALSO run a direct in-process comparison so that a
-//! divergence's exact JIT-vs-eval `Value`s are surfaced for the report.
+//! ORACLE: the shared classified differential runner
+//! (`tidepool_testing::differential`) at two nursery sizes (64 KiB + 4 KiB),
+//! nothing tolerated — every conversion op here is total bar `chr#`, whose
+//! domain is restricted to valid codepoints by the generator itself (a
+//! `prop_assume`-shaped domain restriction baked into the seed pool, not an
+//! accepted error class).
 //!
 //! STRUCTURALLY OUT OF SYNTHETIC REACH (flagged for the build-dependent lane,
 //! `tidepool-runtime/tests/proptest_haskell_pipeline.rs`):
@@ -40,32 +42,35 @@
 //!     (`rintDouble`) in the real pipeline, not a Core primop — no synthetic
 //!     PrimOpKind exists for it, so it can only be reached through Haskell source.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 use tidepool_repr::types::{Literal, PrimOpKind};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
-use tidepool_eval::value::Value;
-use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
-
-use tidepool_codegen::jit_machine::JitEffectMachine;
-
-use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval, values_equal};
+use tidepool_testing::differential::{
+    check_with_table, run_case, DiffConfig, EvalErrorClass, ReachCounter,
+};
+use tidepool_testing::proptest::build_table_for_expr;
 
 // ---------------------------------------------------------------------------
-// Reach instrumentation.
+// The oracle: two nursery sizes. ONE tolerance, proven necessary by a real run
+// (not assumed): `arb_chain_for` has no domain restriction on the Int value
+// feeding a chain-internal `Chr` (unlike `arb_codepoint` in the primops lane),
+// so a chain like `Narrow8Int -> Chr` can and does feed `Chr` an out-of-range
+// codepoint. Both engines correctly REJECT it — eval as `TypeMismatch`
+// ("valid Unicode codepoint"), the JIT as a runtime `UserError`
+// ("Prelude.chr: bad argument") — so a both-fail outcome there is the
+// generator producing invalid input, not a divergence. `AcceptedBothError`
+// only fires when the JIT ALSO failed (see `differential::classify_run`): a
+// JIT that wrongly "succeeded" on the same input still fails as an
+// `EvalOnlyFailure`, so this cannot mask a real bug.
 // ---------------------------------------------------------------------------
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-static REACHED: AtomicU64 = AtomicU64::new(0);
-static N_SINGLE: AtomicU64 = AtomicU64::new(0);
-static N_CHAIN: AtomicU64 = AtomicU64::new(0);
-
-fn bump(c: &AtomicU64) {
-    c.fetch_add(1, Ordering::Relaxed);
+fn dcfg() -> DiffConfig {
+    DiffConfig::new("numeric-conv")
+        .nurseries(&[64 * 1024, 4 * 1024])
+        .expect_eval(&[EvalErrorClass::TypeMismatch])
 }
 
 // ---------------------------------------------------------------------------
@@ -381,85 +386,56 @@ fn arb_chain() -> impl Strategy<Value = ConvSpec> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Oracle wrapper: run the shared differential oracle at two nursery sizes, and
-// also do a direct comparison so a divergence prints both Values cleanly.
-// ---------------------------------------------------------------------------
-fn run_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-
-    // Direct compare (also surfaces the exact Values on mismatch).
-    let table = build_table_for_expr(&expr);
-    let mut heap = VecHeap::new();
-    let env = env_from_datacon_table(&table);
-    let ev = eval(&expr, &env, &mut heap);
-    let jit = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-
-    if let (Ok(v1), Ok(v2)) = (&ev, &jit) {
-        prop_assert!(
-            values_equal(v1, v2),
-            "NUMERIC-CONV DIVERGENCE.\nEval: {:?}\nJIT:  {:?}\nExpr: {:#?}",
-            v1,
-            v2,
-            expr
-        );
-        // Surface a JIT-only success/failure mismatch loudly (B2 class).
-    } else if ev.is_ok() != jit.is_ok() {
-        // Conversions never legitimately diverge on success-vs-error: every op
-        // is total except chr#, and chr# rejects the SAME domain in both impls.
-        // So a one-sided result is a real divergence.
-        prop_assert!(
-            false,
-            "NUMERIC-CONV ONE-SIDED RESULT (B2).\nEval: {:?}\nJIT:  {:?}\nExpr: {:#?}",
-            ev,
-            jit,
-            expr
-        );
-    }
-    if ev.is_ok() && jit.is_ok() {
-        bump(&REACHED);
-    }
-
-    // Shared oracle, both nursery sizes (B1/B2/B4 contract; chr#-domain errors
-    // both-fail so they're skipped, not a divergence).
-    check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-    check_jit_vs_eval(expr, 4 * 1024)?;
-    Ok(())
-}
-
 fn cfg(cases: u32) -> Config {
     let mut c = Config::with_cases(cases);
     c.max_shrink_iters = 8000;
+    // The `proptest!` macro sets this implicitly from `file!()`; a hand-built
+    // Config driven through TestRunner does not, and FileFailurePersistence::
+    // SourceParallel (the default) silently resolves to NO PATH without it.
+    // `file!()` here expands to THIS file (cfg is local to it, called only
+    // from this file's own properties, not a cross-file shared helper).
+    c.source_file = Some(file!());
     c
 }
 
-proptest! {
-    #![proptest_config(cfg(400))]
-
-    /// Single conversion op over an edge value. Highest signal: every divergence
-    /// here is one op + one value.
-    #[test]
-    #[serial]
-    fn prop_single_conversion(spec in arb_single()) {
-        bump(&N_SINGLE);
-        let expr = build_conv(&spec);
-        run_oracle(expr)?;
-    }
+// ---------------------------------------------------------------------------
+// Single conversion op over an edge value. Highest signal: every divergence
+// here is one op + one value. TestRunner-driven with a local ReachCounter (see
+// module docs on nextest process isolation).
+// ---------------------------------------------------------------------------
+#[test]
+#[serial]
+fn prop_single_conversion() {
+    let reach = ReachCounter::new("numeric-conv/single");
+    let mut runner = TestRunner::new(cfg(400));
+    runner
+        .run(&arb_single(), |spec| {
+            let expr = build_conv(&spec);
+            let table = build_table_for_expr(&expr);
+            check_with_table(&expr, &table, &dcfg(), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
-proptest! {
-    #![proptest_config(cfg(500))]
-
-    /// Conversion CHAINS (depth 2..6): int2Double -> double2Float -> float2Int
-    /// etc. Stresses round-trip error accumulation, repeated NaN propagation,
-    /// and width-narrowing interleaved with repr casts.
-    #[test]
-    #[serial]
-    fn prop_conversion_chains(spec in arb_chain()) {
-        bump(&N_CHAIN);
-        let expr = build_conv(&spec);
-        run_oracle(expr)?;
-    }
+// ---------------------------------------------------------------------------
+// Conversion CHAINS (depth 2..6): int2Double -> double2Float -> float2Int
+// etc. Stresses round-trip error accumulation, repeated NaN propagation, and
+// width-narrowing interleaved with repr casts.
+// ---------------------------------------------------------------------------
+#[test]
+#[serial]
+fn prop_conversion_chains() {
+    let reach = ReachCounter::new("numeric-conv/chain");
+    let mut runner = TestRunner::new(cfg(500));
+    runner
+        .run(&arb_chain(), |spec| {
+            let expr = build_conv(&spec);
+            let table = build_table_for_expr(&expr);
+            check_with_table(&expr, &table, &dcfg(), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
 // ===========================================================================
@@ -467,30 +443,13 @@ proptest! {
 // edge value of its input type. This is fully enumerable (no randomness) and is
 // the bedrock of the lane — proptest adds the chains and the cross-products.
 //
-// A failure here aborts with the precise (op, value, jit, eval) tuple. We do NOT
-// stop at the first divergence: we collect them all so one run names the whole
-// failing set.
+// Routed through the SAME runner (`run_case`/`Verdict`) as the proptest
+// properties above, so a divergence here is classified identically — the
+// difference is purely in HOW cases are chosen (exhaustive vs generated), not
+// in what counts as a failure. We do NOT stop at the first divergence: every
+// case's verdict is inspected and failures are collected, so one run names the
+// whole failing set.
 // ===========================================================================
-
-fn run_single(op: PrimOpKind, in_ty: NumTy, raw: u64) -> Result<(Value, Value), (String, String)> {
-    let mut b = TreeBuilder::new();
-    let seed = push_seed(&mut b, in_ty, raw);
-    let _root = b.push(CoreFrame::PrimOp {
-        op,
-        args: vec![seed],
-    });
-    let expr = b.build();
-    let table = build_table_for_expr(&expr);
-    let mut heap = VecHeap::new();
-    let env = env_from_datacon_table(&table);
-    let ev = eval(&expr, &env, &mut heap);
-    let jit = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    match (ev, jit) {
-        (Ok(v1), Ok(v2)) => Ok((v1, v2)),
-        (Err(_), Err(_)) => Err(("both-error".into(), "both-error".into())),
-        (e, j) => Err((format!("{:?}", e), format!("{:?}", j))),
-    }
-}
 
 fn seeds_for(ty: NumTy) -> Vec<u64> {
     match ty {
@@ -509,36 +468,34 @@ fn seeds_for(ty: NumTy) -> Vec<u64> {
 fn exhaustive_single_op_x_edge_values() {
     let mut divergences: Vec<String> = Vec::new();
     let mut compared = 0u64;
-    let mut both_err = 0u64;
+    let mut both_ok_disagree = 0u64;
 
     for &(op, in_ty, _out_ty) in CONV_OPS {
         for raw in seeds_for(in_ty) {
-            match run_single(op, in_ty, raw) {
-                Ok((v1, v2)) => {
-                    compared += 1;
-                    if !values_equal(&v1, &v2) {
-                        divergences.push(format!(
-                            "{:?}(seed_ty={:?}, raw=0x{:016X}): eval={:?} jit={:?}",
-                            op, in_ty, raw, v1, v2
-                        ));
-                    }
-                }
-                Err((e, j)) => {
-                    if e == "both-error" {
-                        both_err += 1;
-                    } else {
-                        divergences.push(format!(
-                            "{:?}(seed_ty={:?}, raw=0x{:016X}) ONE-SIDED: eval={} jit={}",
-                            op, in_ty, raw, e, j
-                        ));
-                    }
-                }
+            let mut b = TreeBuilder::new();
+            let seed = push_seed(&mut b, in_ty, raw);
+            b.push(CoreFrame::PrimOp {
+                op,
+                args: vec![seed],
+            });
+            let expr = b.build();
+            let table = build_table_for_expr(&expr);
+            let run = run_case(&expr, &table, &dcfg());
+            if run.verdict.is_compared() {
+                compared += 1;
+            } else if run.verdict.is_failure() {
+                divergences.push(format!(
+                    "{:?}(seed_ty={:?}, raw=0x{:016X}): {:?}\nEval: {:?}\nJIT (64KiB): {:?}",
+                    op, in_ty, raw, run.verdict, run.eval, run.nurseries[0].runs[0]
+                ));
+            } else {
+                both_ok_disagree += 1; // AcceptedJitError/AcceptedBothError — not reached here (empty policy)
             }
         }
     }
 
     eprintln!(
-        "EXHAUSTIVE numeric-conv sweep: compared={compared}, both_error={both_err}, \
+        "EXHAUSTIVE numeric-conv sweep: compared={compared}, accepted={both_ok_disagree}, \
          divergences={}",
         divergences.len()
     );
@@ -548,35 +505,4 @@ fn exhaustive_single_op_x_edge_values() {
         divergences.len(),
         divergences.join("\n")
     );
-}
-
-/// Reach floor: at least 90% of attempted proptest cases reached value
-/// comparison (conversions are total bar chr#, so this should be very high).
-/// `zzz_` orders it last within the file (proptest runs tests alphabetically).
-#[test]
-#[serial]
-fn zzz_reach_floor() {
-    let total = TOTAL.load(Ordering::Relaxed);
-    let reached = REACHED.load(Ordering::Relaxed);
-    eprintln!(
-        "NUMERIC-CONV REACH: {}/{} cases reached value comparison ({:.1}%) [single={} chain={}]",
-        reached,
-        total,
-        if total > 0 {
-            100.0 * reached as f64 / total as f64
-        } else {
-            0.0
-        },
-        N_SINGLE.load(Ordering::Relaxed),
-        N_CHAIN.load(Ordering::Relaxed),
-    );
-    if total >= 100 {
-        let ratio = reached as f64 / total as f64;
-        assert!(
-            ratio >= 0.90,
-            "reach floor: only {:.1}% of {} cases reached value comparison (need >= 90%)",
-            100.0 * ratio,
-            total
-        );
-    }
 }

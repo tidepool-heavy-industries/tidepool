@@ -106,8 +106,9 @@ encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toS
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
   <> warningsMap)
   where
-    -- Optional keys are simply omitted; the Rust reader skips unknown keys,
-    -- so both directions are version-tolerant.
+    -- Optional keys are simply omitted when absent; the Rust reader accepts
+    -- omitted keys but rejects unknown ones (metadata_strictness.rs), so new
+    -- keys require a version bump on both sides.
     warningsMap =
       encodeMapLen (1 + maybe 0 (const 1) mCapturedType
                       + (if null varNames then 0 else 1)

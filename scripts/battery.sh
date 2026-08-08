@@ -18,6 +18,16 @@
 # effectful_lazy_ab_x8, corpus_report, haskell_suite_differential,
 # tidepool-testing::haskell_verified) are additionally gated behind
 # TIDEPOOL_EXPENSIVE_TESTS=1 and stay skipped even here unless you set it.
+# `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d (a
+# default nextest run must report them as ignored, not silently "passed" via
+# early return) — reaching them needs BOTH TIDEPOOL_EXPENSIVE_TESTS=1 AND
+# `--run-ignored all`. Do not pass `--run-ignored all` bare to this script:
+# tidepool-codegen also carries `#[ignore]`d known-bug repros and heavy fuzz
+# lanes (proptest_gc_recursion/host_arrays/ghc_idioms/jit_dispatch/
+# boundary_roundtrip) that are deliberately off by default and will FAIL or
+# run for ~68min if un-ignored. Scope with `-E`, e.g.:
+#   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery.sh -p tidepool-codegen \
+#     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -70,4 +80,20 @@ echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 # GHC-extract-heavy ones that .config/nextest.toml's default-filter skips for
 # quick inner-loop `cargo nextest run`. Same profile, so slow-timeout + the
 # ghc-heavy thread cap still apply.
-exec cargo nextest run --workspace --ignore-default-filter "$@"
+#
+# `exec` here would replace this shell before any check could run — same
+# zero-tests-as-a-pass trap scripts/battery-shard.sh closes; see that script's
+# comment for the reasoning. Capture the run instead of masking it behind exec.
+tmp_log="$(mktemp)"
+trap 'rm -f "$tmp_log"' EXIT
+set +e
+cargo nextest run --workspace --ignore-default-filter "$@" 2> >(tee "$tmp_log" >&2)
+run_status=$?
+set -e
+
+if grep -qE '\b0 tests run:' "$tmp_log"; then
+  echo "error: battery selected/ran ZERO tests — a silent no-op, not a pass" >&2
+  [ "$run_status" -eq 0 ] && run_status=1
+fi
+
+exit "$run_status"

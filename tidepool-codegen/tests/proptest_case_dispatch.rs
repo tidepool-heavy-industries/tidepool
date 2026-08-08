@@ -35,30 +35,34 @@
 //! no-default program. Programs WITH a `Default` additionally sweep
 //! deliberately-out-of-range scrutinees to exercise the fall-through arm.
 //!
-//! Oracle: reuse `check_jit_vs_eval` (64KB + 4KB nursery) and `values_equal`
-//! from `tidepool_testing::proptest`, plus a JIT-determinism re-run, plus a
-//! fork-per-case crash guard (a child killed by a signal is a reportable
-//! divergence the parent shrinks).
+//! Oracle: `tidepool_testing::differential` — one [`DiffConfig`] sweeping the
+//! 64KiB/4KiB nursery pair with `repeat_count(2)` (determinism) and
+//! `CrashContainment::ForkProbe` (a child killed by a signal is a reportable
+//! divergence the parent shrinks). Every property drives `TestRunner`
+//! directly so its `ReachCounter` lives and asserts in the SAME process as
+//! the cases it counts.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
-use tidepool_testing::proptest::{check_jit_vs_eval, values_equal};
+use tidepool_testing::differential::{check, CrashContainment, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::values_equal;
 
 // ---------------------------------------------------------------------------
-// Reach + shape instrumentation.
+// Shape instrumentation. Each property's local `ReachCounter` (see `dcfg`
+// call sites below) carries reach; these counters carry shape frequency and
+// are printed at the end of the property that bumps them — nextest gives
+// every test its own process, so a counter is only meaningful within the
+// test that both bumps and reads it.
 // ---------------------------------------------------------------------------
-static REACHED: AtomicU64 = AtomicU64::new(0);
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-
 static N_DENSE_INT: AtomicU64 = AtomicU64::new(0);
 static N_SPARSE_INT: AtomicU64 = AtomicU64::new(0);
 static N_CHAR: AtomicU64 = AtomicU64::new(0);
@@ -90,114 +94,16 @@ fn fresh_var() -> VarId {
 }
 
 // ---------------------------------------------------------------------------
-// B3 crash containment: fork-per-case (same shape as proptest_ghc_idioms.rs).
-// A child killed by a signal is a reportable divergence the parent can shrink.
+// Differential config: the nursery pair, determinism repeats, and fork probe
+// that used to be reinvented per-lane now live in one DiffConfig. Nothing is
+// tolerated — this generator is total and ground by construction, so an eval
+// or JIT error is a failure, not a skip.
 // ---------------------------------------------------------------------------
-#[cfg(unix)]
-fn run_in_fork(expr: &CoreExpr, nursery: usize) -> Result<(), i32> {
-    use std::io::Read;
-
-    let table = tidepool_testing::proptest::build_table_for_expr(expr);
-
-    let mut fds = [0i32; 2];
-    // SAFETY: pipe with a valid 2-int array.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        let _ = JitEffectMachine::compile(expr, &table, nursery).map(|mut m| m.run_pure());
-        return Ok(());
-    }
-    let (read_fd, write_fd) = (fds[0], fds[1]);
-
-    // SAFETY: fork in a single-threaded test child; the child only touches its
-    // own JIT state and the write end of the pipe, then _exit.
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        unsafe {
-            libc::close(read_fd);
-        }
-        if let Ok(mut machine) = JitEffectMachine::compile(expr, &table, nursery) {
-            let _ = machine.run_pure();
-        }
-        let ok: u8 = 1;
-        unsafe {
-            libc::write(write_fd, &ok as *const u8 as *const libc::c_void, 1);
-            libc::close(write_fd);
-            libc::_exit(0);
-        }
-    }
-
-    unsafe {
-        libc::close(write_fd);
-    }
-    let mut f = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(read_fd) };
-    let mut buf = [0u8; 1];
-    let _ = f.read(&mut buf);
-    drop(f);
-
-    let mut status: libc::c_int = 0;
-    // SAFETY: waitpid on the child we just forked.
-    unsafe {
-        libc::waitpid(pid, &mut status as *mut libc::c_int, 0);
-    }
-    if libc::WIFSIGNALED(status) {
-        Err(libc::WTERMSIG(status))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(unix))]
-fn run_in_fork(_expr: &CoreExpr, _nursery: usize) -> Result<(), i32> {
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shared oracle wrapper.
-// ---------------------------------------------------------------------------
-fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-
-    // Crash containment at both nursery sizes FIRST.
-    for &n in &[64 * 1024usize, 4 * 1024usize] {
-        if let Err(sig) = run_in_fork(&expr, n) {
-            prop_assert!(
-                false,
-                "B3 fatal signal {} in forked JIT (nursery {}).\nExpr: {:#?}",
-                sig,
-                n,
-                expr
-            );
-        }
-    }
-
-    // JIT vs eval at 64KB and 4KB nursery.
-    check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-    check_jit_vs_eval(expr.clone(), 4 * 1024)?;
-
-    // JIT determinism: compile+run twice, compare.
-    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
-    let r1 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    let r2 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    if let (Ok(v1), Ok(v2)) = (&r1, &r2) {
-        prop_assert!(
-            values_equal(v1, v2),
-            "JIT non-determinism across two runs.\nRun1: {:?}\nRun2: {:?}\nExpr: {:#?}",
-            v1,
-            v2,
-            expr
-        );
-        bump(&REACHED);
-    } else if r1.is_ok() != r2.is_ok() {
-        prop_assert!(
-            false,
-            "JIT determinism: one run errored, the other succeeded.\nRun1: {:?}\nRun2: {:?}\nExpr: {:#?}",
-            r1,
-            r2,
-            expr
-        );
-    }
-
-    Ok(())
+fn dcfg(label: &'static str) -> DiffConfig {
+    DiffConfig::new(label)
+        .nurseries(&[64 * 1024, 4 * 1024])
+        .repeat_count(2)
+        .crash_containment(CrashContainment::ForkProbe)
 }
 
 // ---------------------------------------------------------------------------
@@ -847,80 +753,136 @@ fn build_partial(spec: &PartialSpec) -> CoreExpr {
 //
 // 400 cases each. `serial` because the JIT effect machine + the fork guard are
 // not safe to run concurrently. A NURSERY pair (64KB/4KB) is swept inside
-// `run_oracles` so the small-nursery GC path is covered without a second harness.
+// each property's `DiffConfig` so the small-nursery GC path is covered
+// without a second harness. Each property drives `TestRunner` directly (not
+// the `proptest!` macro) so its `ReachCounter` closes over the SAME process
+// as the cases it counts and its floor assertion can actually fail.
 // ===========================================================================
 
 fn cfg() -> Config {
     let mut c = Config::with_cases(400);
     c.max_shrink_iters = 6000;
+    // Counterexample persistence resolves against the calling source file. The
+    // `proptest!` macro supplies it implicitly; a hand-built `Config` leaves it
+    // `None`, and proptest then neither replays the checked-in seeds nor saves
+    // a new one — a red run's seed would die with the process.
+    c.source_file = Some(file!());
     c
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_dense_int(spec in arb_dense_int()) {
-        let expr = build_dense_int(&spec);
-        prop_assert!(expr.nodes.len() <= 256);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_dense_int() {
+    let reach = ReachCounter::new("case-dispatch/dense_int");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_dense_int(), |spec| {
+            let expr = build_dense_int(&spec);
+            prop_assert!(expr.nodes.len() <= 256);
+            check(expr, &dcfg("case-dispatch/dense_int"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ dense_int: n={} no_default={} hit_default={}",
+        N_DENSE_INT.load(Ordering::Relaxed),
+        N_NO_DEFAULT.load(Ordering::Relaxed),
+        N_HIT_DEFAULT.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_sparse_int(spec in arb_sparse_int()) {
-        let expr = build_sparse_int(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_sparse_int() {
+    let reach = ReachCounter::new("case-dispatch/sparse_int");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_sparse_int(), |spec| {
+            let expr = build_sparse_int(&spec);
+            check(expr, &dcfg("case-dispatch/sparse_int"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ sparse_int: n={} no_default={} hit_default={}",
+        N_SPARSE_INT.load(Ordering::Relaxed),
+        N_NO_DEFAULT.load(Ordering::Relaxed),
+        N_HIT_DEFAULT.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_char(spec in arb_char()) {
-        let expr = build_char(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_char() {
+    let reach = ReachCounter::new("case-dispatch/char");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_char(), |spec| {
+            let expr = build_char(&spec);
+            check(expr, &dcfg("case-dispatch/char"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ char: n={} no_default={} hit_default={}",
+        N_CHAR.load(Ordering::Relaxed),
+        N_NO_DEFAULT.load(Ordering::Relaxed),
+        N_HIT_DEFAULT.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_wide_con(spec in arb_wide_con()) {
-        let expr = build_wide_con(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_wide_con() {
+    let reach = ReachCounter::new("case-dispatch/wide_con");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_wide_con(), |spec| {
+            let expr = build_wide_con(&spec);
+            check(expr, &dcfg("case-dispatch/wide_con"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ wide_con: n={} no_default={} hit_default={}",
+        N_WIDE_CON.load(Ordering::Relaxed),
+        N_NO_DEFAULT.load(Ordering::Relaxed),
+        N_HIT_DEFAULT.load(Ordering::Relaxed),
+    );
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_nested_case(spec in arb_nested()) {
-        let expr = build_nested(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_nested_case() {
+    let reach = ReachCounter::new("case-dispatch/nested_case");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_nested(), |spec| {
+            let expr = build_nested(&spec);
+            check(expr, &dcfg("case-dispatch/nested_case"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!("SHAPE FREQ nested: n={}", N_NESTED.load(Ordering::Relaxed));
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_partial_default(spec in arb_partial()) {
-        let expr = build_partial(&spec);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_partial_default() {
+    let reach = ReachCounter::new("case-dispatch/partial_default");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_partial(), |spec| {
+            let expr = build_partial(&spec);
+            check(expr, &dcfg("case-dispatch/partial_default"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
+    eprintln!(
+        "SHAPE FREQ partial: n={} hit_default={}",
+        N_PARTIAL.load(Ordering::Relaxed),
+        N_HIT_DEFAULT.load(Ordering::Relaxed),
+    );
 }
 
 // ===========================================================================
@@ -1093,43 +1055,4 @@ fn edge_wide_con_16() {
     assert_jit_eq_eval(&build(15, false), "wide_last");
     // out-of-subset con with a default present (con 99 not listed).
     assert_jit_eq_eval(&build(99, true), "wide_default");
-}
-
-/// Reach floor + shape histogram. `zzz_` prefix orders it last within the file
-/// (proptest test order is alphabetical) so the counters are populated.
-#[test]
-#[serial]
-fn zzz_reach_floor() {
-    let total = TOTAL.load(Ordering::Relaxed);
-    let reached = REACHED.load(Ordering::Relaxed);
-    eprintln!(
-        "CASE-DISPATCH REACH: {}/{} cases reached value comparison ({:.1}%)",
-        reached,
-        total,
-        if total > 0 {
-            100.0 * reached as f64 / total as f64
-        } else {
-            0.0
-        }
-    );
-    eprintln!(
-        "SHAPE FREQ: dense_int={} sparse_int={} char={} wide_con={} nested={} partial={} | no_default={} hit_default={}",
-        N_DENSE_INT.load(Ordering::Relaxed),
-        N_SPARSE_INT.load(Ordering::Relaxed),
-        N_CHAR.load(Ordering::Relaxed),
-        N_WIDE_CON.load(Ordering::Relaxed),
-        N_NESTED.load(Ordering::Relaxed),
-        N_PARTIAL.load(Ordering::Relaxed),
-        N_NO_DEFAULT.load(Ordering::Relaxed),
-        N_HIT_DEFAULT.load(Ordering::Relaxed),
-    );
-    if total >= 100 {
-        let ratio = reached as f64 / total as f64;
-        assert!(
-            ratio >= 0.90,
-            "reach floor: only {:.1}% of {} cases reached value comparison (need >= 90%)",
-            100.0 * ratio,
-            total
-        );
-    }
 }

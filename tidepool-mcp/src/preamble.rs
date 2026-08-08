@@ -184,30 +184,11 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
 // (see 71d77fb, reverted) or upstream lazy provisioning.
 // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
 // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
-/// The qualified alias the `Tidepool.Effects` module is ALSO imported under
-/// when a caller shadows one of its verbs ([`build_preamble_shadowing_effects`]).
-/// `hiding (v)` drops `v` in BOTH its unqualified and its `Tidepool.Effects.`
-/// forms, so the shadowing definition needs a second, unhidden import to reach
-/// the original.
-pub const EFFECTS_QUALIFIER: &str = "TidepoolEffects";
-
-fn pragmas_and_imports(
-    out: &mut String,
-    effects: &[EffectDecl],
-    user_library: bool,
-    shadowed: &[&str],
-) {
+fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: bool) {
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
     for imp in eval_import_lines(user_library) {
-        if imp == "import Tidepool.Effects" && !shadowed.is_empty() {
-            out.push_str(&format!(
-                "import Tidepool.Effects hiding ({})\nimport qualified Tidepool.Effects as {EFFECTS_QUALIFIER}\n",
-                shadowed.join(", ")
-            ));
-            continue;
-        }
         out.push_str(imp);
         out.push('\n');
     }
@@ -676,28 +657,7 @@ fn paginate_alias(out: &mut String, effects: &[EffectDecl], mode: PaginateMode) 
 /// not spliced here (the namespace-poison fix).
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, &[]);
-    paginate_alias(&mut out, effects, PaginateMode::Interactive);
-    out
-}
-
-/// Like [`build_preamble`], but with `shadowed` verbs hidden from the
-/// unqualified `Tidepool.Effects` import and the module additionally imported
-/// `qualified as `[`EFFECTS_QUALIFIER`]. The turn module can then define its own
-/// top-level binding of that name — a bare use resolves to the definition, not
-/// ambiguously to both — while the definition still reaches the original as
-/// `TidepoolEffects.<verb>`.
-///
-/// The self-iterating harness's answerer turn uses this to pin `finalize` to the
-/// hole's answer type (`tidepool_harness::engine::finalize_shim`): a shim can
-/// only shadow a name it first hides.
-pub fn build_preamble_shadowing_effects(
-    effects: &[EffectDecl],
-    user_library: bool,
-    shadowed: &[&str],
-) -> String {
-    let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, shadowed);
+    pragmas_and_imports(&mut out, effects, user_library);
     paginate_alias(&mut out, effects, PaginateMode::Interactive);
     out
 }
@@ -721,7 +681,7 @@ pub fn build_preamble_non_interactive_mode(
     mode: PaginateMode,
 ) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, &[]);
+    pragmas_and_imports(&mut out, effects, user_library);
     paginate_alias(&mut out, effects, mode);
     out
 }

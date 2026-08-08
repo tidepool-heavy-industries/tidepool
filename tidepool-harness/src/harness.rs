@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -56,6 +57,7 @@ use crate::engine::{
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
+use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
@@ -102,8 +104,10 @@ pub enum HarnessError {
 ///
 /// Both halves are required for the "GHC validates the answer against `T`"
 /// guarantee to hold for `finalize`. `ty` pins `finalize` to the hole's answer
-/// type ([`crate::engine::finalize_shim`]) so a wrong-typed answer is a compile
-/// error instead of a value that crosses in-heap into a `T`-typed continuation.
+/// type — [`Harness::run_block`] resolves it into a `Finalize T` ROW entry via
+/// [`crate::engine::EngineConfig::turn_target`] (`Member (Finalize T) effs` is
+/// the whole pin), so a wrong-typed answer is a compile error naming the row
+/// instead of a value that crosses in-heap into a `T`-typed continuation.
 /// `imports` puts `T` itself in scope: `T` is an author type (the wizard's
 /// `Contribution`, defined in the harness source module), and a turn that cannot
 /// NAME `T` cannot construct one — the model tries `@T`, gets "not in scope",
@@ -324,6 +328,14 @@ pub struct LiveTurn {
 pub struct Harness {
     tree: NodeTree<()>,
     cfg: EngineConfig,
+    /// Unique per-construction run identity (F3 fix), scoping this
+    /// instance's node decl-plane directories to
+    /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
+    /// sharing the same cache root (a different process, or a second
+    /// Harness in this one) can never construct the same node dir and
+    /// `remove_dir_all` the other's live declarations out from under it.
+    /// See [`generate_run_id`] and [`node_session_dir`].
+    run_id: String,
     /// The row a FORK CHILD's answer block compiles against: the node's own
     /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
     /// structurally cannot fork — a `forkAll` in a child block is a GHC
@@ -379,10 +391,26 @@ impl Harness {
         cfg: EngineConfig,
         provider: Arc<dyn DynModelProvider>,
     ) -> Result<Self, HarnessError> {
+        let run_id = generate_run_id();
+        // Best-effort: sweep run dirs left behind by processes that are
+        // provably dead (see `sweep_stale_run_dirs`). Never blocks
+        // construction — a failed/skipped sweep just leaves stale dirs on
+        // disk a little longer.
+        sweep_stale_run_dirs();
         // A trivial effectful seed carrying the full effect-stack ConTags.
-        let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "", None);
-        let boot = compile::compile_turn(&cfg.extract_bin, &boot_src, "result", &cfg.include)
-            .map_err(|e| HarnessError::Compile(e.to_string()))?;
+        let boot_stack = cfg.turn_target(None)?.stack;
+        let boot_src = engine::template_turn(&cfg, &boot_stack, "pure (toJSON (0 :: Int))", "", "");
+        // No real answerer node exists yet (this is the one-time boot compile) —
+        // NO_NODE/NO_ROUND. `NodeId(0)` is a real, live node id, never a sentinel.
+        let boot = compile::compile_turn(
+            &cfg.extract_bin,
+            &boot_src,
+            "result",
+            &cfg.include,
+            timing::NO_NODE,
+            timing::NO_ROUND,
+        )
+        .map_err(|e| HarnessError::Compile(e.to_string()))?;
         // The fork-child compile config: this node's row minus the
         // fork-spawning effects, so a child cannot fork (see `child_cfg`).
         let child_cfg = EngineConfig::from_decls(
@@ -394,6 +422,7 @@ impl Harness {
         Ok(Harness {
             tree: NodeTree::new(writer),
             cfg,
+            run_id,
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
@@ -825,14 +854,92 @@ impl Harness {
     /// the node's compile include, so a decl can resolve the same imports a turn
     /// does (stdlib, the generated effects module).
     fn node_decl_plane(&self, node: NodeId) -> Option<SessionLib> {
-        let root = tidepool_runtime::paths::cache_dir()
-            .join("harness-sessions")
-            .join(format!("node-{}", node.0));
-        // Fresh: clear any stale gen modules left by a prior run at this node id.
+        let root = node_session_dir(&self.run_id, node);
+        // Fresh: clear any stale gen modules left by a prior run of THIS
+        // instance at this node id. Scoped under `run_id`, so this can never
+        // reach into another live Harness's node dir (F3).
         let _ = std::fs::remove_dir_all(&root);
         SessionLib::open(SessionId(node.0), &root, ModuleEnv::standalone_default())
             .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
             .ok()
+    }
+}
+
+/// The one place the node decl-plane path shape is constructed:
+/// `<cache>/harness-sessions/<run_id>/node-<node-id>`. `run_id` scopes the
+/// whole subtree to ONE `Harness` instance (see [`generate_run_id`]), so two
+/// Harnesses sharing a cache root — two processes, or two instances in one
+/// process — never resolve to the same node directory (F3: without this,
+/// both number nodes from 0 and `node_decl_plane`'s `remove_dir_all` on
+/// node-0 creation would delete the survivor's live declarations).
+fn node_session_dir(run_id: &str, node: NodeId) -> PathBuf {
+    tidepool_runtime::paths::cache_dir()
+        .join("harness-sessions")
+        .join(run_id)
+        .join(format!("node-{}", node.0))
+}
+
+/// Process-lifetime counter backing [`generate_run_id`] — process id alone is
+/// not a unique run identity, since one process can hold more than one
+/// `Harness` (e.g. a parent + fork-child harness, or two in one test binary).
+static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A run identity unique to this `Harness::new` call: `<pid>-<nanos>-<seq>`.
+/// `seq` (a per-process monotonic counter) alone already guarantees
+/// in-process uniqueness; `pid` distinguishes concurrent processes; the
+/// wall-clock component is extra defense against pid reuse across a long
+/// uptime (relevant only to [`sweep_stale_run_dirs`], which reads `pid` back
+/// out of the directory name).
+fn generate_run_id() -> String {
+    let pid = std::process::id();
+    let seq = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}-{nanos}-{seq}")
+}
+
+/// Best-effort cleanup of run-scoped session dirs left behind by processes
+/// that exited without ever tearing down (killed, crashed, `kill -9`'d).
+/// NOT a daemon: runs synchronously, once, inline in [`Harness::new`].
+///
+/// Deletion is gated on PID LIVENESS, not age: a dir is removed only when
+/// `/proc/<pid>` (parsed back out of the `<pid>-<nanos>-<seq>` dir name — see
+/// [`generate_run_id`]) does not exist, i.e. the owning process is
+/// *provably* gone. This is what makes the sweep safe to run unconditionally
+/// at every construction: it can never touch a run dir whose process is
+/// still alive, however old the dir looks, so it cannot race a live Harness
+/// (long-idle or otherwise) the way an age-only sweep could. Linux-only
+/// (`/proc`); on any other platform (or if `/proc` is unreadable) this is a
+/// silent no-op — stale dirs just accumulate, which is the documented
+/// trade-off for not building a daemon.
+fn sweep_stale_run_dirs() {
+    let proc_dir = Path::new("/proc");
+    if !proc_dir.is_dir() {
+        return;
+    }
+    let root = tidepool_runtime::paths::cache_dir().join("harness-sessions");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(pid) = name.split('-').next() else {
+            continue;
+        };
+        if !proc_dir.join(pid).exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
 }
 
@@ -866,9 +973,17 @@ impl Harness {
         // Stream the provider call into `node`'s live-turn buffer (rendered
         // token-by-token), then log the completed turn with its thinking and
         // swap the buffer for the durable turn in one frame.
+        let provider_started = std::time::Instant::now();
         let driven = self
             .stream_turn(node, &transcript, framing.as_deref())
             .await?;
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_PROVIDER_CALL,
+            provider_started.elapsed(),
+            0,
+        );
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -1001,6 +1116,7 @@ impl Harness {
         // expression; a classify failure falls through to the expression path,
         // which re-reports any real error.
         let block_owned = block.to_string();
+        let classify_started = std::time::Instant::now();
         let classification = {
             let b = block_owned.clone();
             tokio::task::spawn_blocking(move || classify_turn(&b))
@@ -1008,6 +1124,13 @@ impl Harness {
                 .map_err(|e| HarnessError::Resident(format!("classify task join: {e}")))?
                 .ok()
         };
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_CLASSIFY_EXTRACT,
+            classify_started.elapsed(),
+            0,
+        );
         let kind = classification.as_ref().map(|c| c.kind);
 
         if kind == Some(TurnKind::Decl) {
@@ -1054,8 +1177,11 @@ impl Harness {
         // once a compiled fragment is in hand — as the original path did).
         let (session_module, session_include) = self.session_decl_context(node);
         // The node's answer contract (when it is driving toward a `finalize`)
-        // contributes both halves: its `imports` put the answer type in scope,
-        // and its `ty` pins `finalize` to that type inside `template_turn`.
+        // contributes both halves: its `imports` put the answer type in scope
+        // for the turn's own module, and its `ty` instantiates the ROW
+        // (`Finalize <ty>`) this turn compiles against — ONE computation
+        // (`turn_target`) resolves both the include dir and the stack string
+        // from the SAME row, so they cannot disagree.
         let contract = self.answer_contract(node);
         let mut import_lines: Vec<String> = contract
             .iter()
@@ -1066,32 +1192,44 @@ impl Harness {
         }
         import_lines.extend(session_module);
         let merged_imports = import_lines.join("\n");
-        let src = engine::template_turn(
-            &self.cfg,
-            block,
-            &merged_imports,
-            helpers,
-            contract.as_ref().map(|c| c.ty.as_str()),
+        // Resolved BEFORE the STAGE_TEMPLATE window: for a new answer type this
+        // materializes an effects module (a filesystem write), which is not
+        // templating cost and would inflate that stage's attribution.
+        let target = self.cfg.turn_target(
+            contract
+                .as_ref()
+                .map(|c| (c.ty.as_str(), c.imports.as_slice())),
+        )?;
+        let template_started = std::time::Instant::now();
+        let src = engine::template_turn(&self.cfg, &target.stack, block, &merged_imports, helpers);
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_TEMPLATE,
+            template_started.elapsed(),
+            src.len() as u64,
         );
-        let mut include = self.cfg.include.clone();
+        let mut include = target.include;
         if let Some(dir) = session_include {
             include.push(dir);
         }
 
         // Compile off-reactor (the session is still resident — no leak on a
         // compile failure).
-        let compile_started = std::time::Instant::now();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile task join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
-        tracing::debug!(
-            node = node.0,
-            elapsed_ms = compile_started.elapsed().as_millis() as u64,
-            "answerer turn compile"
-        );
 
         // Run the compiled fragment against the session (move it onto the
         // blocking pool and back — the resident session is `Send`).
@@ -2087,8 +2225,16 @@ impl Harness {
             engine::template_answer_turn(&self.cfg, &format!("resume {expr}"), &imports, &helpers);
         let cfg_bin = self.cfg.extract_bin.clone();
         let include = self.cfg.include.clone();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
@@ -2183,8 +2329,16 @@ impl Harness {
         let src = engine::template_answer_turn(&self.cfg, &body, &imports, "");
         let cfg_bin = self.cfg.extract_bin.clone();
         let include = self.cfg.include.clone();
+        let node_id = node.0;
         let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(&cfg_bin, &src, "result", &include)
+            compile::compile_turn(
+                &cfg_bin,
+                &src,
+                "result",
+                &include,
+                node_id,
+                timing::NO_ROUND,
+            )
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
@@ -2327,8 +2481,16 @@ impl Harness {
             let src = engine::template_answer_turn(compile_cfg, &body, &imports, &helpers);
             let cfg_bin = compile_cfg.extract_bin.clone();
             let include = compile_cfg.include.clone();
+            let answerer_id = answerer.0;
             let compiled = tokio::task::spawn_blocking(move || {
-                compile::compile_turn(&cfg_bin, &src, "result", &include)
+                compile::compile_turn(
+                    &cfg_bin,
+                    &src,
+                    "result",
+                    &include,
+                    answerer_id,
+                    timing::NO_ROUND,
+                )
             })
             .await
             .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?;

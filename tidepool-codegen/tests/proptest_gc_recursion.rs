@@ -30,21 +30,21 @@
 //!                       cycles, one long-lived root (the accumulator) amid a
 //!                       torrent of dead allocations.
 //!
-//! Oracle: each generated program is run through `check_jit_vs_eval` (JIT vs the
-//! tree-walking interpreter) at SEVERAL nursery sizes from 64 KiB down to 2 KiB.
-//! A divergence at ANY size — or a JIT result that varies BETWEEN nursery sizes
-//! (the nursery is a runtime knob; a correct GC is nursery-invariant) — is a
-//! reportable bug. `HeapOverflow` / `UnresolvedVar` / `HeapBridge` JIT-only
-//! errors are tolerated (a 2 KiB nursery legitimately can't hold every program).
+//! Oracle: each generated program is run through the classified
+//! `tidepool_testing::differential` runner, whose `DiffConfig::nurseries` IS
+//! this lane's `NURSERY_LADDER` (64 KiB down to 2 KiB) — the runner runs the
+//! JIT once per nursery size and classifies eval-vs-JIT AND JIT-vs-JIT-across-
+//! nurseries agreement from that ONE recorded run (`Verdict::ValueMismatch` /
+//! `Verdict::NurseryVariance`). `HeapOverflow` / `UnresolvedVar` / `HeapBridge`
+//! JIT-only errors are tolerated (a 2 KiB nursery legitimately can't hold every
+//! program).
 //!
-//! This lane reuses `check_jit_vs_eval` / `build_table_for_expr` / `values_equal`
-//! from `tidepool_testing::proptest` as the differential oracle and only adds
-//! its own allocation-shape generators (no edits to shared `strategy.rs`).
-
-use std::sync::atomic::{AtomicU64, Ordering};
+//! This lane reuses `run_case` / `assert_case` / `build_table_for_expr` /
+//! `values_equal` from `tidepool_testing` as the differential oracle and only
+//! adds its own allocation-shape generators (no edits to shared `strategy.rs`).
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 /// Host-thread stack budget for every test in this lane.
@@ -76,7 +76,10 @@ use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
-use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval, values_equal};
+use tidepool_testing::differential::{
+    assert_case, run_case, DiffConfig, JitErrorClass, ReachCounter,
+};
+use tidepool_testing::proptest::{build_table_for_expr, values_equal};
 
 #[path = "support/gc_scaffold.rs"]
 mod gc_scaffold;
@@ -100,21 +103,28 @@ const JUST: DataConId = DataConId(1);
 const NURSERY_LADDER: &[usize] = &[64 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024];
 
 // ---------------------------------------------------------------------------
-// Instrumentation.
+// The oracle: the full ladder as one DiffConfig. The runner runs the JIT once
+// per nursery size and reads BOTH eval-vs-JIT agreement (`Verdict::
+// ValueMismatch`) and JIT-vs-JIT-across-nurseries agreement (`Verdict::
+// NurseryVariance`) off that single recorded run — AT LEAST as strong as the
+// hand-rolled check this replaces: the old check only compared JIT results
+// against each other (relying on separate `check_jit_vs_eval` calls, one per
+// nursery, to catch a JIT-vs-eval mismatch); the runner's `classify_run`
+// checks every nursery's JIT value against eval FIRST (`ValueMismatch` takes
+// precedence), then checks the surviving JIT values against each other
+// (`NurseryVariance`) — so two nurseries that happen to agree with each other
+// but disagree with eval are still caught, which the old two-separate-checks
+// version also caught (via `check_jit_vs_eval`) but not through the SAME
+// mechanism the nursery-invariance check itself used.
 // ---------------------------------------------------------------------------
-static REACHED: AtomicU64 = AtomicU64::new(0);
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-
-static N_CONSSPINE: AtomicU64 = AtomicU64::new(0);
-static N_WIDELIVE: AtomicU64 = AtomicU64::new(0);
-static N_BIGCON: AtomicU64 = AtomicU64::new(0);
-static N_ACCUMLOOP: AtomicU64 = AtomicU64::new(0);
-// How many cases reached value comparison at the SMALLEST nursery that did not
-// overflow (a proxy for "GC actually fired and the program still completed").
-static N_GC_COMPLETED_TINY: AtomicU64 = AtomicU64::new(0);
-
-fn bump(c: &AtomicU64) {
-    c.fetch_add(1, Ordering::Relaxed);
+fn dcfg() -> DiffConfig {
+    DiffConfig::new("gc-recursion")
+        .nurseries(NURSERY_LADDER)
+        .expect_jit(&[
+            JitErrorClass::HeapOverflow,
+            JitErrorClass::UnresolvedVar,
+            JitErrorClass::HeapBridge,
+        ])
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +134,7 @@ fn bump(c: &AtomicU64) {
 // (NOT join points): the tree-walking interpreter — the differential oracle —
 // does not support self-recursive join points (a `jump go` inside `go`'s own
 // rhs is `UnboundJoin`, because `Join` captures the env *before* its binding),
-// so a join-based loop would be silently SKIPPED by `check_jit_vs_eval` rather
+// so a join-based loop would be silently SKIPPED by the differential rather
 // than compared. A `LetRec` of a curried lambda is run by BOTH engines (the JIT
 // still tail-call-optimizes it, PR #154), keeping the differential live.
 //
@@ -132,69 +142,6 @@ fn bump(c: &AtomicU64) {
 // append children after the structural parent, so guarantee the root is last by
 // wrapping it in `let v = <root> in v` when needed.
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Shared GC-pressure oracle.
-//
-// Runs `check_jit_vs_eval` at every nursery size in the ladder, and ALSO checks
-// the JIT is nursery-invariant: among the sizes where the JIT succeeded, every
-// result must be `values_equal`. (A divergence purely between nursery sizes is a
-// GC bug even if eval happens to agree with one of them.)
-// ---------------------------------------------------------------------------
-fn run_gc_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
-    bump(&TOTAL);
-
-    // 1. Differential at every nursery size (B1 value-diff, B2 JIT-only error).
-    for &n in NURSERY_LADDER {
-        check_jit_vs_eval(expr.clone(), n)?;
-    }
-
-    // 2. Nursery-invariance: collect every successful JIT result across the
-    //    ladder; all must agree. Also tracks reach + tiny-nursery completion.
-    let table = build_table_for_expr(&expr);
-    let mut jit_results: Vec<(usize, tidepool_eval::value::Value)> = Vec::new();
-    let mut tolerated_smallest: Option<usize> = None;
-    for &n in NURSERY_LADDER {
-        match JitEffectMachine::compile(&expr, &table, n).and_then(|mut m| m.run_pure()) {
-            Ok(v) => jit_results.push((n, v)),
-            Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow)))
-            | Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(..))))
-            | Err(JitError::HeapBridge(_)) => {
-                tolerated_smallest = Some(n);
-            }
-            Err(e) => {
-                // A non-tolerated JIT error at some nursery size while OTHER
-                // sizes (or eval) succeed is already caught by check_jit_vs_eval
-                // above for that size; record nothing here.
-                let _ = e;
-            }
-        }
-    }
-
-    if let Some(((n0, v0), rest)) = jit_results.split_first() {
-        for (n, v) in rest {
-            prop_assert!(
-                values_equal(v0, v),
-                "JIT result varies with nursery size (GC-dependent output).\n\
-                 nursery {} -> {:?}\nnursery {} -> {:?}\nExpr: {:#?}",
-                n0,
-                v0,
-                n,
-                v,
-                expr
-            );
-        }
-        bump(&REACHED);
-        // The program completed at the smallest nursery in the ladder iff the
-        // smallest ladder entry produced a result (i.e. GC fired & succeeded).
-        if jit_results.iter().any(|(n, _)| *n <= 4 * 1024) {
-            bump(&N_GC_COMPLETED_TINY);
-        }
-        let _ = tolerated_smallest;
-    }
-
-    Ok(())
-}
 
 // ===========================================================================
 // (a) ConsSpine
@@ -348,7 +295,6 @@ fn push_list_fold(b: &mut TreeBuilder, list_var: VarId, seed: i64, combine: Comb
 
 fn build_consspine(spec: &ConsSpineSpec) -> CoreExpr {
     reset_ctrs();
-    bump(&N_CONSSPINE);
     let mut b = TreeBuilder::new();
 
     let spine = push_spine(&mut b, &spec.elems);
@@ -411,7 +357,6 @@ fn arb_widelive() -> impl Strategy<Value = WideLiveSpec> {
 
 fn build_widelive(spec: &WideLiveSpec) -> CoreExpr {
     reset_ctrs();
-    bump(&N_WIDELIVE);
     let mut b = TreeBuilder::new();
 
     // Allocate one binder per cell.
@@ -538,7 +483,6 @@ fn arb_bigcon() -> impl Strategy<Value = BigConSpec> {
 
 fn build_bigcon(spec: &BigConSpec) -> CoreExpr {
     reset_ctrs();
-    bump(&N_BIGCON);
     let mut b = TreeBuilder::new();
 
     match spec {
@@ -612,7 +556,6 @@ fn arb_accumloop() -> impl Strategy<Value = AccumLoopSpec> {
 
 fn build_accumloop(spec: &AccumLoopSpec) -> CoreExpr {
     reset_ctrs();
-    bump(&N_ACCUMLOOP);
     let mut b = TreeBuilder::new();
 
     // Self-recursive LetRec lambda (NOT a join — see push_list_fold rationale):
@@ -756,24 +699,33 @@ fn build_accumloop(spec: &AccumLoopSpec) -> CoreExpr {
 // ===========================================================================
 // Properties.
 //
-// Two configs per shape: a default-cases run and (via the same generator) the
-// small-nursery ladder is ALWAYS applied inside run_gc_oracle, so every case is
-// a nursery sweep. We run 400 cases per property (the spec's 300-500 band).
+// One DiffConfig (the full NURSERY_LADDER) per case: every case is a nursery
+// sweep. We run 400 cases per property (the spec's 300-500 band). Each
+// property drives `TestRunner` directly (not the `proptest!` macro) so it can
+// own a local `ReachCounter` and assert its 0.90 floor in the SAME process as
+// the cases that fed it, plus its own "GC-completed at <=4KiB nursery" count
+// (this lane's `N_GC_COMPLETED_TINY` proxy for "GC actually fired and the
+// program still completed") — both were previously read from `static`s
+// populated by OTHER `#[test]` fns, which nextest's process-per-test
+// isolation makes structurally unable to ever see a nonzero total.
 // ===========================================================================
 
 fn cfg() -> Config {
     // Case count is overridable via PROPTEST_CASES (env) for a small "nursery"
-    // run vs. the default 400 (the spec's 300-500 band). Failure persistence is
-    // OFF: these tests run proptest's runner directly inside a big-stack thread,
-    // so the source-file-relative regressions path can't be resolved and only
-    // emits a noisy warning.
+    // run vs. the default 400 (the spec's 300-500 band).
+    //
+    // Counterexample persistence resolves against the calling source file, which
+    // a hand-built `Config` must supply — the `proptest!` macro does it
+    // implicitly. Running the runner inside a big-stack thread is irrelevant to
+    // that resolution; without `source_file` the path is simply unresolvable, and
+    // a failing seed would die with the process instead of being replayed.
     let cases = std::env::var("PROPTEST_CASES")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(400);
     let mut c = Config::with_cases(cases);
     c.max_shrink_iters = 6000;
-    c.failure_persistence = Some(Box::new(proptest::test_runner::FileFailurePersistence::Off));
+    c.source_file = Some(file!());
     c
 }
 
@@ -782,28 +734,73 @@ fn cfg() -> Config {
 // trees that overflow the default 2 MiB test stack during eval / Value-drop.
 
 macro_rules! gc_property {
-    ($name:ident, $strat:expr, $build:expr) => {
-        #[ignore = "heavy GC fuzz (~68min at 400 cases); on-demand: cargo test -p tidepool-codegen --test proptest_gc_recursion -- --ignored"]
+    ($name:ident, $label:literal, $strat:expr, $build:expr) => {
+        #[ignore = "GC fuzz, ~2min wall for the whole lane at 400 cases (measured 106-154s across \
+                    runs, 2026-08-08); kept out of the inner loop, not out of reach: cargo nextest \
+                    run -p tidepool-codegen -E 'binary(proptest_gc_recursion)' --run-ignored all"]
         #[test]
         #[serial]
         fn $name() {
             with_big_stack(|| {
-                let mut runner = proptest::test_runner::TestRunner::new(cfg());
+                let reach = ReachCounter::new($label);
+                // How many cases reached value comparison at a nursery <=4KiB
+                // (a proxy for "GC actually fired and the program still
+                // completed") — Cell, not a plain local, because TestRunner
+                // drives the case closure through `Fn`, not `FnMut`.
+                let gc_completed_tiny = std::cell::Cell::new(0u64);
+                let mut runner = TestRunner::new(cfg());
                 runner
                     .run(&$strat, |spec| {
                         let expr = $build(&spec);
-                        run_gc_oracle(expr)
+                        let table = build_table_for_expr(&expr);
+                        let run = run_case(&expr, &table, &dcfg());
+                        reach.record(&run.verdict);
+                        if run.verdict.is_compared()
+                            && run
+                                .nurseries
+                                .iter()
+                                .any(|n| n.nursery <= 4 * 1024 && n.runs[0].is_ok())
+                        {
+                            gc_completed_tiny.set(gc_completed_tiny.get() + 1);
+                        }
+                        assert_case(&run, &expr)
                     })
                     .unwrap();
+                eprintln!(
+                    "{}: GC-completed at <=4KiB nursery: {}",
+                    $label,
+                    gc_completed_tiny.get()
+                );
+                reach.assert_floor(0.90);
             });
         }
     };
 }
 
-gc_property!(prop_cons_spine, arb_consspine(), build_consspine);
-gc_property!(prop_wide_live, arb_widelive(), build_widelive);
-gc_property!(prop_big_con, arb_bigcon(), build_bigcon);
-gc_property!(prop_accum_loop, arb_accumloop(), build_accumloop);
+gc_property!(
+    prop_cons_spine,
+    "gc-recursion/cons_spine",
+    arb_consspine(),
+    build_consspine
+);
+gc_property!(
+    prop_wide_live,
+    "gc-recursion/wide_live",
+    arb_widelive(),
+    build_widelive
+);
+gc_property!(
+    prop_big_con,
+    "gc-recursion/big_con",
+    arb_bigcon(),
+    build_bigcon
+);
+gc_property!(
+    prop_accum_loop,
+    "gc-recursion/accum_loop",
+    arb_accumloop(),
+    build_accumloop
+);
 
 // ===========================================================================
 // Deterministic anchor cases: large, fixed allocation shapes at the tiniest
@@ -811,7 +808,7 @@ gc_property!(prop_accum_loop, arb_accumloop(), build_accumloop);
 // seed) so a regression that the random sweep happens to miss still trips.
 // ===========================================================================
 
-#[ignore = "heavy GC anchor (tiny-nursery sweep); on-demand: --ignored"]
+#[ignore = "GC anchor: 500-element spine under a 2 KiB nursery, ~0.5s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_long_spine_sum_tiny_nursery() {
@@ -856,7 +853,7 @@ fn anchor_long_spine_sum_tiny_nursery_body() {
     }
 }
 
-#[ignore = "heavy GC anchor (1500-iter loop, tiny nursery, >60s); on-demand: --ignored"]
+#[ignore = "GC anchor: 1500-iter loop under a 4 KiB nursery, ~0.1s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_accum_loop_tiny_nursery() {
@@ -900,43 +897,8 @@ fn anchor_accum_loop_tiny_nursery_body() {
     }
 }
 
-// ===========================================================================
-// Reach report. Ordered last (alphabetical: zzz_ prefix).
-// ===========================================================================
-#[ignore = "reach report for the --ignored GC fuzz lane (no-op without it)"]
-#[test]
-#[serial]
-fn zzz_reach_report() {
-    let total = TOTAL.load(Ordering::Relaxed);
-    let reached = REACHED.load(Ordering::Relaxed);
-    eprintln!(
-        "GC-RECURSION REACH: {}/{} cases reached value comparison ({:.1}%)",
-        reached,
-        total,
-        if total > 0 {
-            100.0 * reached as f64 / total as f64
-        } else {
-            0.0
-        }
-    );
-    eprintln!(
-        "SHAPE FREQ: consspine={} widelive={} bigcon={} accumloop={}",
-        N_CONSSPINE.load(Ordering::Relaxed),
-        N_WIDELIVE.load(Ordering::Relaxed),
-        N_BIGCON.load(Ordering::Relaxed),
-        N_ACCUMLOOP.load(Ordering::Relaxed),
-    );
-    eprintln!(
-        "GC-COMPLETED at <=4KiB nursery: {} cases",
-        N_GC_COMPLETED_TINY.load(Ordering::Relaxed),
-    );
-    if total >= 100 {
-        let ratio = reached as f64 / total as f64;
-        assert!(
-            ratio >= 0.90,
-            "reach floor: only {:.1}% of {} cases reached value comparison (need >= 90%)",
-            100.0 * ratio,
-            total
-        );
-    }
-}
+// Reach + "GC-completed at <=4KiB" reporting is now per-shape, local to each
+// `gc_property!`-generated test (see the macro above) — no trailing zzz_
+// aggregate test needed, and none of the four properties' floors can silently
+// pass over zero cases the way the old cross-process static-counter design
+// could.

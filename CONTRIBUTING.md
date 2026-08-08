@@ -20,10 +20,11 @@ This will provide you with the correct versions of Rust, GHC, and other dependen
 Always verify your changes by running the workspace-wide tests and checks:
 
 ```bash
-cargo check --workspace   # Type check the entire workspace
-scripts/battery.sh        # Run ALL tests (cargo-nextest; builds TIDEPOOL_EXTRACT if unset)
-cargo nextest run         # Quick tier: pure-Rust crates only
-cargo clippy --workspace  # Run lints
+cargo check --workspace           # Type check the entire workspace
+cargo nextest run                 # Quick tier: pure-Rust crates only (the normal local command)
+scripts/battery-shard.sh <crate>  # One GHC-heavy crate's full test suite
+scripts/battery.sh                # Full workspace battery (hours long; not the normal local command)
+cargo clippy --workspace          # Run lints
 ```
 
 The test runner is `cargo-nextest` (`cargo install cargo-nextest --locked`), which
@@ -53,9 +54,8 @@ and `tidepool-handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
 
 When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep the following in mind:
 
-- **Monomorphization**: Polymorphic base functions that use typeclass dictionaries often crash when JIT-compiled because error branches in dictionaries are eagerly evaluated.
-- **Shadowing**: Shadow polymorphic base functions with monomorphic versions that use primops directly (e.g., use `rem` instead of the `Integral` typeclass version).
-- **Monomorphic shadows over dictionaries**: `Tidepool.Prelude` exports monomorphic versions of dictionary-heavy functions like `sum`, `product`, `maximum`, and `minimum`; follow that pattern for new additions.
+- **Dictionary polymorphism runs on the JIT**: custom classes, multi-param classes, and GADT type-indexed dispatch all compile and execute — write the polymorphic version by default.
+- **Monomorphic shadows are the exception**: a few functions carry monomorphic shadows in the Prelude only for genuine FFI gaps (e.g. `round`, `showDouble`), not as a general pattern to follow. See `haskell/CLAUDE.md`'s "Adding new Prelude functions" section for the enforcement mechanism (`tidepool-runtime/tests/jit_surface.rs`).
 
 ## Testing Approach
 

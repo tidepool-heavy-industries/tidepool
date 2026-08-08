@@ -45,8 +45,8 @@
 //! and/or installs it as `CURRENT_MACHINE`, exercising the same reach paths
 //! as production instead of a test-only backdoor.
 
-use std::cell::{Cell, RefCell, RefMut};
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -98,6 +98,28 @@ pub struct MachineState {
     /// (`free_session_heap`). NOT touched by `clear_run_scratch` — a child
     /// turn's per-run teardown must not strand the parent's continuation.
     stowed_roots: RefCell<Vec<*mut *mut u8>>,
+    /// Write-barrier armed flag: false until `OldSpace::tenure` first runs.
+    /// Before the first tenure there is no old-space, so no old-to-young
+    /// store is possible — see `old_space.rs`'s module doc for the invariant.
+    /// `host_fns::write_barrier` checks this FIRST and returns before any
+    /// hashing/borrow when unarmed.
+    write_barrier_armed: Cell<bool>,
+    /// The write barrier's remembered set: slot addresses of every recorded
+    /// old/external-to-young store (`host_fns::write_barrier`). A `HashSet`,
+    /// not a `Vec` — the same slot can be re-targeted by repeated writes
+    /// (e.g. a loop over `writeSmallArray#` on one index), and an unbounded
+    /// `Vec` would grow without limit. `perform_gc` folds this into
+    /// `root_slots` on every collection (both the initial Cheney pass and the
+    /// doubling re-evacuate, since both reuse the same `root_slots` vector),
+    /// so a remembered slot's target is evacuated and the slot rewritten in
+    /// place exactly like any other root.
+    remembered_slots: RefCell<HashSet<*mut *mut u8>>,
+    /// Byte ranges of every currently-live old-space arena. `OldSpace` owns
+    /// its arenas but hangs off `JitEffectMachine`/`SessionState`, not
+    /// reachable from `perform_gc` (vmctx -> `MachineState` only) — recording
+    /// each arena's range here as it is allocated gives a diagnostic pass
+    /// old-space bounds without threading `OldSpace` itself through vmctx.
+    old_space_arenas: RefCell<Vec<(*const u8, *const u8)>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -122,6 +144,9 @@ impl MachineState {
             rust_roots: RefCell::new(Vec::new()),
             persistent_roots: RefCell::new(Vec::new()),
             stowed_roots: RefCell::new(Vec::new()),
+            write_barrier_armed: Cell::new(false),
+            remembered_slots: RefCell::new(HashSet::new()),
+            old_space_arenas: RefCell::new(Vec::new()),
         }
     }
 
@@ -203,15 +228,14 @@ impl MachineState {
     /// write wins, because the earliest record is the one closest to the
     /// fault.
     ///
-    /// Uses `try_borrow_mut` defensively (M4, repo-review-2026-07-06/01-gc-
-    /// memory-safety.md): `perform_gc` holds a RefMut across the Cheney copy,
-    /// and a fault + `siglongjmp` there skips that RefMut's `Drop`, leaving
-    /// the cell PERMANENTLY marked as mutably borrowed. A plain `borrow_mut`
-    /// here would then panic — on the signal-recovery path, i.e. inside
-    /// unwind/cleanup, which double-panics into `abort()` instead of
-    /// surfacing `YieldError::Signal`. If the borrow fails we simply can't
-    /// record this cause; silently dropping it (rather than panicking) is
-    /// the same tradeoff `take_runtime_error` already makes.
+    /// Uses `try_borrow_mut` defensively: a fault + `siglongjmp` while
+    /// something holds this cell mutably borrowed would leave it PERMANENTLY
+    /// marked as mutably borrowed (a `RefCell` has no "unpoison"), and a
+    /// plain `borrow_mut` on the signal-recovery path — inside unwind/cleanup
+    /// — double-panics into `abort()` instead of surfacing
+    /// `YieldError::Signal`. If the borrow fails we simply can't record this
+    /// cause; silently dropping it (rather than panicking) is the same
+    /// tradeoff `take_runtime_error` already makes.
     pub(crate) fn set_first_cause(&self, cause: RuntimeError) {
         if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
             if slot.is_none() {
@@ -336,63 +360,39 @@ impl MachineState {
 
     /// Set the active GC region for this machine. Mirrors the old
     /// `GC_STATE.with(|cell| *cell.borrow_mut() = Some(GcState { .. }))` body.
-    ///
-    /// Uses `try_borrow_mut` defensively (M4): `perform_gc` holds a `gc_state`
-    /// `RefMut` across the Cheney copy, and a fault + `siglongjmp` there skips
-    /// that `RefMut`'s `Drop`, permanently marking the cell mutably borrowed.
-    /// A plain `borrow_mut` here would then panic on the signal-recovery
-    /// path — same defense as `take_runtime_error`. If the borrow fails we
-    /// simply can't install the new region; the caller surfaces
-    /// `YieldError::Signal` instead of this panicking.
     pub fn set_gc_state(&self, start: *mut u8, size: usize) {
-        if let Ok(mut slot) = self.gc_state.try_borrow_mut() {
-            *slot = Some(GcState {
-                active_start: start,
-                active_size: size,
-                active_buffer: None,
-            });
-        }
+        *self.gc_state.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: None,
+        });
     }
 
     /// Install a retained session heap buffer as the active GC region (see
     /// the free-fn doc this replaces, `host_fns::gc::install_session_buffer`).
-    ///
-    /// Same `try_borrow_mut` defense as [`Self::set_gc_state`] (M4).
     pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u64>) {
         let start = buffer.as_mut_ptr() as *mut u8;
         let size = buffer.len() * 8;
-        if let Ok(mut slot) = self.gc_state.try_borrow_mut() {
-            *slot = Some(GcState {
-                active_start: start,
-                active_size: size,
-                active_buffer: Some(buffer),
-            });
-        }
+        *self.gc_state.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: Some(buffer),
+        });
     }
 
     /// Reclaim the live heap buffer + high-water cursor from this machine's
     /// GC state, called from `RegistryGuard::drop` BEFORE `clear_run_scratch`
     /// takes the `GcState`. See the free-fn doc this replaces for the
-    /// `(buffer, cursor)` contract.
-    ///
-    /// Uses `try_borrow_mut` defensively (M4): this runs from `Drop`, exactly
-    /// where a stuck-mutably-borrowed `gc_state` cell (left behind by a fault
-    /// and `siglongjmp` during `perform_gc`'s Cheney copy) is most dangerous
-    /// — a plain `borrow_mut` panicking here panics INSIDE a `Drop`, which
-    /// during unwind aborts the whole process instead of surfacing
-    /// `YieldError::Signal`. Falls back to `(None, 0)`, the same shape
-    /// already used when there's no `GcState` at all.
+    /// `(buffer, cursor)` contract. `(None, 0)` when there's no `GcState`
+    /// installed (e.g. a run that never reached GC setup).
     pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u64>>, usize) {
-        match self.gc_state.try_borrow_mut() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(state) => {
-                    let cursor = (alloc_ptr as usize).saturating_sub(state.active_start as usize);
-                    let buf = state.active_buffer.take();
-                    (buf, cursor)
-                }
-                None => (None, 0),
-            },
-            Err(_) => (None, 0),
+        match self.gc_state.borrow_mut().as_mut() {
+            Some(state) => {
+                let cursor = (alloc_ptr as usize).saturating_sub(state.active_start as usize);
+                let buf = state.active_buffer.take();
+                (buf, cursor)
+            }
+            None => (None, 0),
         }
     }
 
@@ -430,13 +430,29 @@ impl MachineState {
         // Defensive: a machine dropped mid-nested-child (a child panicked and
         // its guard unwound) must not leave a dangling stowed slot registered.
         self.clear_stowed_roots();
+        // Per-arena `retire_old_space_arena` calls (JitEffectMachine::drop,
+        // before this runs) already forget slots pointing into old-space; this
+        // is the blanket net for anything left (e.g. a boxed-array payload
+        // slot, which lives in an external malloc'd buffer outside every
+        // arena range).
+        self.clear_remembered_slots();
         self.gc_state.borrow_mut().take();
     }
 
-    /// Borrow this machine's `GcState` cell mutably — used by `perform_gc`'s
-    /// Cheney-copy body, which needs to swap `active_buffer` in place.
-    pub(crate) fn gc_state_mut(&self) -> RefMut<'_, Option<GcState>> {
-        self.gc_state.borrow_mut()
+    /// Take this machine's `GcState` out of its cell, leaving the cell empty.
+    /// `perform_gc` uses this to operate on an OWNED `GcState` across the
+    /// Cheney copy instead of holding a live borrow across faultable code: a
+    /// signal there abandons the owned value on the dead frame (it leaks,
+    /// nothing double-frees) rather than leaving the `RefCell` permanently
+    /// marked borrowed. Pair with [`Self::put_gc_state`].
+    pub(crate) fn take_gc_state(&self) -> Option<GcState> {
+        self.gc_state.borrow_mut().take()
+    }
+
+    /// Put a `GcState` previously removed by [`Self::take_gc_state`] back
+    /// into the cell.
+    pub(crate) fn put_gc_state(&self, state: GcState) {
+        *self.gc_state.borrow_mut() = Some(state);
     }
 
     // --- rust roots (run-scoped GC roots, T6 leaf 3) ----------------------
@@ -522,6 +538,84 @@ impl MachineState {
     /// `extend_persistent_roots`, used by `perform_gc`.
     pub(crate) fn extend_stowed_roots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.stowed_roots.borrow().iter().copied());
+    }
+
+    // --- write barrier / remembered set (generational write barrier) ------
+
+    /// Arm the barrier. Idempotent; `OldSpace::tenure` calls this unconditionally
+    /// on every tenure (cheap even when already armed).
+    pub(crate) fn arm_write_barrier(&self) {
+        self.write_barrier_armed.set(true);
+    }
+
+    /// Whether the barrier is armed — the cheap disarmed-check
+    /// `host_fns::write_barrier` reads before any hashing or borrow.
+    pub(crate) fn write_barrier_armed(&self) -> bool {
+        self.write_barrier_armed.get()
+    }
+
+    /// Record `slot` in the remembered set.
+    pub(crate) fn register_remembered_slot(&self, slot: *mut *mut u8) {
+        self.remembered_slots.borrow_mut().insert(slot);
+    }
+
+    /// Number of remembered slots (test/diagnostic accessor).
+    pub(crate) fn remembered_slots_count(&self) -> usize {
+        self.remembered_slots.borrow().len()
+    }
+
+    /// Clear all remembered slots (machine-teardown path, alongside
+    /// `clear_persistent_roots`).
+    pub(crate) fn clear_remembered_slots(&self) {
+        self.remembered_slots.borrow_mut().clear();
+    }
+
+    /// Append this machine's remembered slots to `out` — the remembered-set
+    /// sibling of `extend_stowed_roots`, used by `perform_gc`.
+    pub(crate) fn extend_remembered_slots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.remembered_slots.borrow().iter().copied());
+    }
+
+    /// Snapshot of every currently-remembered slot. Read-only; does not
+    /// affect GC. Read by `host_fns::gc`'s post-GC `verify_remembered_slots`
+    /// pass under `TIDEPOOL_HEAP_VERIFY`.
+    pub(crate) fn remembered_slots_snapshot(&self) -> Vec<*mut *mut u8> {
+        self.remembered_slots.borrow().iter().copied().collect()
+    }
+
+    /// Remove every remembered slot whose address falls in `[start, end)`.
+    /// Invariant: no remembered slot outlives the memory it points into.
+    pub(crate) fn forget_remembered_range(&self, start: *const u8, end: *const u8) {
+        let (s, e) = (start as usize, end as usize);
+        self.remembered_slots.borrow_mut().retain(|&slot| {
+            let a = slot as usize;
+            a < s || a >= e
+        });
+    }
+
+    // --- old-space arena ranges (diagnostic reach) -------------------------
+
+    /// Register a newly-allocated old-space arena's byte range.
+    pub(crate) fn register_old_space_arena(&self, start: *const u8, end: *const u8) {
+        self.old_space_arenas.borrow_mut().push((start, end));
+    }
+
+    /// Retire an old-space arena: forget any remembered slot pointing into
+    /// `[start, end)` and deregister the range itself. Call exactly once per
+    /// arena, at the point its backing memory is about to be freed, so a
+    /// stale range is never read as live old-space.
+    pub(crate) fn retire_old_space_arena(&self, start: *const u8, end: *const u8) {
+        self.forget_remembered_range(start, end);
+        self.old_space_arenas
+            .borrow_mut()
+            .retain(|&(s, e)| !(s == start && e == end));
+    }
+
+    /// Snapshot of every currently-live old-space arena's byte range, for a
+    /// diagnostic verifier pass that needs old-space bounds and can only
+    /// reach `MachineState` (via vmctx), not `OldSpace` itself.
+    pub(crate) fn old_space_arena_ranges(&self) -> Vec<(*const u8, *const u8)> {
+        self.old_space_arenas.borrow().iter().copied().collect()
     }
 }
 
@@ -663,17 +757,16 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
 
-    /// M4 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
-    /// a fault + `siglongjmp` during `perform_gc`'s Cheney copy skips the
-    /// `RefMut` guard's `Drop`, leaving `gc_state`/`runtime_error`
+    /// `runtime_error` still relies on `try_borrow_mut` defenses: a fault +
+    /// `siglongjmp` while something holds it mutably borrowed would leave it
     /// PERMANENTLY marked as mutably borrowed (`RefCell` has no "unpoison"
-    /// once a guard's release never runs). We reproduce that exact
-    /// `RefCell` state directly — hold a live `borrow_mut()` guard across
-    /// the calls under test — rather than actually raising a signal;
-    /// `signal_safety.rs` separately covers signal delivery/recovery
-    /// itself. Before the fix, every one of these panicked (a plain
-    /// `borrow`/`borrow_mut` on an already-mutably-borrowed cell); after,
-    /// each returns its documented graceful fallback instead.
+    /// once a guard's release never runs). We reproduce that exact `RefCell`
+    /// state directly — hold a live `borrow_mut()` guard across the calls
+    /// under test — rather than actually raising a signal; `signal_safety.rs`
+    /// separately covers signal delivery/recovery itself. `gc_state` no
+    /// longer has this hazard class — see the `gc_state_take_put_back_*`
+    /// tests below, which exercise the take/put-back discipline that
+    /// replaced its own `try_borrow_mut` defenses.
     #[test]
     fn stuck_runtime_error_cell_does_not_panic() {
         let ms = MachineState::new();
@@ -689,18 +782,39 @@ mod tests {
     }
 
     #[test]
-    fn stuck_gc_state_cell_does_not_panic() {
+    fn gc_state_take_put_back_round_trips() {
         let ms = MachineState::new();
-        ms.set_gc_state(std::ptr::null_mut(), 0);
-        let _guard = ms.gc_state.borrow_mut(); // simulates a stuck signal-path borrow
-
-        // set_gc_state / install_session_buffer: silently no-op, not a panic.
         ms.set_gc_state(std::ptr::dangling_mut(), 128);
-        ms.install_session_buffer(vec![0u64; 1]);
-        // reclaim_session_heap: (None, 0) fallback, not a panic (this is the
-        // one the plan calls out as running from `RegistryGuard::drop` —
-        // panicking here is a panic-inside-Drop, which during unwind
-        // aborts the process instead of surfacing `YieldError::Signal`).
+
+        let state = ms.take_gc_state();
+        assert!(state.is_some());
+        assert!(
+            ms.gc_active_range().is_none(),
+            "cell must be empty while the state is out"
+        );
+
+        ms.put_gc_state(state.unwrap());
+        assert!(
+            ms.gc_active_range().is_some(),
+            "put_gc_state must restore the cell"
+        );
+    }
+
+    /// Simulates a fault mid-`perform_gc`: the `GcState` is taken out and the
+    /// frame holding it is abandoned (a `siglongjmp` skips the put-back). The
+    /// cell is left EMPTY rather than stuck mutably-borrowed, so every
+    /// teardown path that runs during signal recovery — including
+    /// `clear_run_scratch`, called from `RegistryGuard::drop` — completes
+    /// without panicking.
+    #[test]
+    fn gc_state_abandoned_take_leaves_cell_empty_and_teardown_is_safe() {
+        let ms = MachineState::new();
+        ms.set_gc_state(std::ptr::dangling_mut(), 128);
+
+        let _abandoned = ms.take_gc_state(); // never put back
+
         assert_eq!(ms.reclaim_session_heap(std::ptr::null_mut()), (None, 0));
+        ms.clear_run_scratch();
+        ms.free_session_heap();
     }
 }
