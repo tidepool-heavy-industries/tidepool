@@ -2006,11 +2006,18 @@ impl EmitContext {
                                 let body = *body;
                                 // Dead code elimination: skip RHS if binder is unused in body.
                                 let dce_start = std::time::Instant::now();
-                                let body_subtree = args.sess.tree.extract_subtree(body);
-                                let body_fvs = tidepool_repr::free_vars::free_vars(&body_subtree);
+                                // The extracted subtree is scoped to the walk so it is
+                                // freed before the branches below re-enter emission —
+                                // an emit_thunk recursion holding one clone per level
+                                // would otherwise stack them up.
+                                let (body_fvs, scanned_nodes) = {
+                                    let body_subtree = args.sess.tree.extract_subtree(body);
+                                    let fvs = tidepool_repr::free_vars::free_vars(&body_subtree);
+                                    (fvs, body_subtree.nodes.len() as u64)
+                                };
                                 let dce_scan = &mut args.sess.pipeline.dce_scan;
                                 dce_scan.calls += 1;
-                                dce_scan.nodes_walked += body_subtree.nodes.len() as u64;
+                                dce_scan.nodes_walked += scanned_nodes;
                                 dce_scan.elapsed += dce_start.elapsed();
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if is_trivial_field(rhs, args.sess.tree) {
