@@ -2048,9 +2048,9 @@ translateHead = \case
             [_, _, _, _] ->
               -- this generic fallback can't split a real 3-result unboxed
               -- tuple — all three binders would bind to the SAME primop node
-              -- (aliasing, not the distinct old-value/flag fields a real op
-              -- like casSmallArray# returns), and re-casing primIdx per
-              -- binder risks running a stateful primop twice. Fail loud at
+              -- (aliasing, not the distinct fields the op actually returns),
+              -- and re-casing primIdx per binder risks running a stateful
+              -- primop twice. Fail loud at
               -- extract time instead of silently miscompiling; a real 3-result
               -- stateful op needs a dedicated split (see splitMultiReturnPrimOp).
               error $ "Unsupported 3-result stateful unboxed-tuple primop/FFI call: "
