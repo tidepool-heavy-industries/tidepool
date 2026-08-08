@@ -98,12 +98,17 @@
             pkgs.cabal-install
             pkgs.openssl
             pkgs.jq
-            # sccache/cargo-nextest binaries only: the flake pins WHICH binary
-            # is on PATH, not the rustc-wrapper policy. `~/.cargo/config.toml`
-            # (host-global, outside this flake) is what actually turns sccache
-            # on via `build.rustc-wrapper` and sets its cache-size/jobs env —
-            # that policy is intentionally left alone here.
-            pkgs.sccache
+            # No sccache here, deliberately. It IS active for every build on
+            # this box, but via `build.rustc-wrapper` in ~/.cargo/config.toml
+            # (host-global, outside this flake), naming an absolute store path
+            # — which is already an exact pin, tighter than a version string.
+            # This shell used to add `pkgs.sccache` alongside it; under the
+            # current flake.lock that resolves to 0.14.0 while the live wrapper
+            # is 0.16.0, so it put a DIFFERENT sccache client on PATH than the
+            # one doing the caching. Every agent worktree on this box shares
+            # one sccache server; a second client version reaching it is at
+            # best redundant. `checks.sccache-pin` below is the tripwire that
+            # catches the two drifting further apart.
             pkgs.cargo-nextest
           ];
 
@@ -111,6 +116,7 @@
             echo "tidepool dev shell"
             echo "  Rust: $(rustc --version)"
             echo "  GHC:  $(ghc --version)"
+            echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')"
           '';
         };
 
@@ -236,6 +242,41 @@
               exit 1
             fi
 
+            touch $out
+          '';
+
+          # sccache is the fleet's compile cache: one ~30 GiB store on this box,
+          # shared by every agent worktree, and the reason a fresh worktree's
+          # `cargo check --workspace` costs a minute rather than ten. Cache keys
+          # are sccache's own hashing scheme, so a version change re-fills the
+          # whole store from cold — on a machine already at its size limit.
+          #
+          # The live pin is `build.rustc-wrapper` in ~/.cargo/config.toml: an
+          # absolute /nix/store path, exact by construction. This check records
+          # what this FLAKE would supply, and asserts it against that live
+          # version. They disagree today (nixpkgs 0.14.0 vs live 0.16.0), which
+          # is why the dev shell no longer ships one — see the devShell comment.
+          # The check is the tripwire for the decision that closes the gap:
+          # either the lock moves to 0.16.0 (then the shell can own sccache
+          # again and rustc-wrapper can go back to a bare "sccache"), or the
+          # host wrapper moves, and whichever happens this fails until the two
+          # numbers here are reconciled deliberately.
+          sccache-pin = pkgs.runCommand "sccache-pin-check" { } ''
+            nixpkgs_version="${pkgs.sccache.version}"
+            known_nixpkgs="0.14.0"
+            live_wrapper="0.16.0"
+
+            if [ "$nixpkgs_version" != "$known_nixpkgs" ]; then
+              echo "nixpkgs' sccache moved: $known_nixpkgs -> $nixpkgs_version." >&2
+              if [ "$nixpkgs_version" = "$live_wrapper" ]; then
+                echo "It now MATCHES the live rustc-wrapper ($live_wrapper) — the dev shell" >&2
+                echo "can take pkgs.sccache back and this check can collapse to one number." >&2
+              else
+                echo "Still != the live rustc-wrapper ($live_wrapper). Update both numbers" >&2
+                echo "here in the same commit as the lock, and expect a cold cache." >&2
+              fi
+              exit 1
+            fi
             touch $out
           '';
 
