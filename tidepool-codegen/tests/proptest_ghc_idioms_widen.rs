@@ -18,9 +18,20 @@
 //!                      and a mixed multi-field worker record, with PrimOps
 //!                      between unwraps. Worker/wrapper unboxing at -O2.
 //!
-//! Oracle: the EXISTING differential oracle, `check_jit_vs_eval`, at 64KB and 4KB
-//! nurseries, plus JIT determinism. Every program is TOTAL + GROUND (returns an
+//! Oracle: `tidepool_testing::differential` — one [`DiffConfig`] sweeping the
+//! 64KiB/4KiB nursery pair with `repeat_count(2)` (determinism) and
+//! `CrashContainment::ForkProbe`. Every program is TOTAL + GROUND (returns an
 //! Int#) by construction, so ~100% of cases reach value comparison.
+//!
+//! This lane previously had NO fork crash probe while its siblings
+//! (`proptest_case_dispatch.rs`, `proptest_ghc_idioms.rs`) did — an
+//! unexplained inconsistency. Resolved here by enabling
+//! `CrashContainment::ForkProbe`: these are the same class of generated,
+//! hand-built `TreeBuilder` program as the other two lanes (closures stored in
+//! Con fields and applied through mixed-representation dispatch are, if
+//! anything, MORE likely to hit a bad-pointer/heap-bridge fault than plain
+//! Int# dispatch), so there is no principled reason for this lane alone to
+//! accept a JIT fault taking down the whole test process.
 //!
 //! Construction: hand-built `RecursiveTree<CoreFrame<usize>>` via `TreeBuilder`,
 //! same style as `proptest_ghc_idioms.rs`. Self-contained: re-implements the tiny
@@ -30,14 +41,15 @@
 use std::cell::Cell;
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
 use tidepool_repr::types::{Alt, AltCon, DataConId, JoinId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
-use tidepool_testing::proptest::{check_jit_vs_eval, values_equal};
+use tidepool_testing::differential::{check, CrashContainment, DiffConfig, ReachCounter};
+use tidepool_testing::proptest::values_equal;
 
 // ---------------------------------------------------------------------------
 // Constructor universe.
@@ -138,24 +150,17 @@ fn mul(b: &mut TreeBuilder, x: usize, y: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Shared oracle: differential at two nursery sizes + determinism.
+// Differential config: the nursery pair, determinism repeats, and (newly
+// enabled — see the module doc) fork probe now live in one DiffConfig.
+// Nothing is tolerated: every program here is total and ground by
+// construction, and an empty-policy run against all four properties (see the
+// migration commit message) came back 100% Compared.
 // ---------------------------------------------------------------------------
-fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
-    check_jit_vs_eval(expr.clone(), 64 * 1024)?;
-    check_jit_vs_eval(expr.clone(), 4 * 1024)?;
-    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
-    let r1 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    let r2 = JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    if let (Ok(v1), Ok(v2)) = (&r1, &r2) {
-        prop_assert!(
-            values_equal(v1, v2),
-            "B4 JIT non-determinism.\nRun1: {:?}\nRun2: {:?}\nExpr: {:#?}",
-            v1,
-            v2,
-            expr
-        );
-    }
-    Ok(())
+fn dcfg(label: &'static str) -> DiffConfig {
+    DiffConfig::new(label)
+        .nurseries(&[64 * 1024, 4 * 1024])
+        .repeat_count(2)
+        .crash_containment(CrashContainment::ForkProbe)
 }
 
 // ===========================================================================
@@ -1302,52 +1307,64 @@ fn cfg() -> Config {
     c
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_nway_case(spec in arb_nway()) {
-        let expr = build_nway(&spec);
-        prop_assert!(expr.nodes.len() <= 400);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_nway_case() {
+    let reach = ReachCounter::new("ghc-idioms-widen/nway_case");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_nway(), |spec| {
+            let expr = build_nway(&spec);
+            prop_assert!(expr.nodes.len() <= 400);
+            check(expr, &dcfg("ghc-idioms-widen/nway_case"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_nway_case_double(spec in arb_nway()) {
-        let expr = build_nway_double(&spec);
-        prop_assert!(expr.nodes.len() <= 400);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_nway_case_double() {
+    let reach = ReachCounter::new("ghc-idioms-widen/nway_case_double");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_nway(), |spec| {
+            let expr = build_nway_double(&spec);
+            prop_assert!(expr.nodes.len() <= 400);
+            check(expr, &dcfg("ghc-idioms-widen/nway_case_double"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_closure_field(spec in arb_clos()) {
-        let expr = build_clos(&spec);
-        prop_assert!(expr.nodes.len() <= 400);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_closure_field() {
+    let reach = ReachCounter::new("ghc-idioms-widen/closure_field");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_clos(), |spec| {
+            let expr = build_clos(&spec);
+            prop_assert!(expr.nodes.len() <= 400);
+            check(expr, &dcfg("ghc-idioms-widen/closure_field"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
-proptest! {
-    #![proptest_config(cfg())]
-
-    #[test]
-    #[serial]
-    fn prop_worker_wrapper(spec in arb_ww()) {
-        let expr = build_ww(&spec);
-        prop_assert!(expr.nodes.len() <= 400);
-        run_oracles(expr)?;
-    }
+#[test]
+#[serial]
+fn prop_worker_wrapper() {
+    let reach = ReachCounter::new("ghc-idioms-widen/worker_wrapper");
+    let mut runner = TestRunner::new(cfg());
+    runner
+        .run(&arb_ww(), |spec| {
+            let expr = build_ww(&spec);
+            prop_assert!(expr.nodes.len() <= 400);
+            check(expr, &dcfg("ghc-idioms-widen/worker_wrapper"), &reach)
+        })
+        .unwrap();
+    reach.assert_floor(0.90);
 }
 
 // ===========================================================================
