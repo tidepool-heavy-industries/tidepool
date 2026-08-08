@@ -5,6 +5,8 @@
 !.tidepool/PATTERNS.md
 target/
 dist-newstyle/
+# per-worktree XDG_CACHE_HOME (tidepool_runtime::paths::cache_dir compile cache)
+/.cache/
 *.hi
 *.o
 *.dyn_hi
