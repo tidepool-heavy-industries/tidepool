@@ -30,6 +30,21 @@ pub enum SelfHarnessState {
     Compacting,
     /// Teardown in progress — the driver accepts no further loop ticks.
     Closing,
+    /// A cycle's fallible body (`loop`, hole servicing, state serialization,
+    /// or the post-loop render) raised an error. The driver has discarded
+    /// every mutable resident component the failed cycle could have left
+    /// behind — the per-loop answerer, its framing, the current cycle's
+    /// compaction, the inference-call counter, and the outer resident
+    /// session itself, which may have been parked mid-fragment on a hole —
+    /// so none of it carries into the next cycle. Recoverable: the next
+    /// `run_one_cycle` rebuilds the outer session from the harness source
+    /// and proceeds normally.
+    Failed { reason: String },
+    /// Recovery from a `Failed` cycle could not rebuild a usable outer
+    /// session. The driver holds no resident state it can trust, and its
+    /// public entry points (`run_one_cycle`/`run_loop`/`restore`) refuse to
+    /// run until a new driver is constructed.
+    Poisoned { reason: String },
 }
 
 impl SelfHarnessState {
@@ -46,6 +61,8 @@ impl SelfHarnessState {
             SelfHarnessState::SuspendedOnHole => "suspended on a runLLMTurn hole",
             SelfHarnessState::Compacting => "compacting",
             SelfHarnessState::Closing => "closing",
+            SelfHarnessState::Failed { .. } => "failed",
+            SelfHarnessState::Poisoned { .. } => "poisoned",
         }
     }
 }

@@ -1,0 +1,245 @@
+//! F3 acceptance: the outer driver lifecycle carries failure instead of
+//! publishing a cosmetic `Idle`, and an errored cycle discards the failed
+//! cycle's resident state (the per-loop answerer, its framing, this cycle's
+//! compaction, the inference-call counter, and — critically — the outer
+//! resident session, which may be parked mid-fragment on a hole) so the next
+//! cycle re-bootstraps cleanly rather than running against stale state.
+//!
+//! Drives the real `SelfHarnessDriver` + `Harness` against the reference
+//! harness module (mirrors `tests/selfharness_spine.rs`), with a scripted
+//! `ModelProvider` that fails on demand instead of a hand-wired
+//! mini-harness — the failure is induced through the real turn loop, not
+//! injected past it. Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on
+//! PATH — run inside `nix develop` (see `haskell/CLAUDE.md`).
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::log::LogHeader;
+use tidepool_harness::provider::{
+    DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
+};
+use tidepool_harness::{
+    answerer_decls, load_harness_source, DriverError, Harness, HarnessSource, LogObserver,
+    SelfHarnessDriver, SelfHarnessState,
+};
+
+fn extract_available() -> bool {
+    std::env::var("TIDEPOOL_EXTRACT").is_ok()
+        || std::process::Command::new("tidepool-extract")
+            .arg("--help")
+            .output()
+            .is_ok()
+}
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tidepool-harness has a parent (the repo root)")
+        .to_path_buf()
+}
+
+fn prelude_dir() -> std::path::PathBuf {
+    repo_root().join("haskell/lib")
+}
+
+fn examples_harness_dir() -> std::path::PathBuf {
+    repo_root().join("examples/harness")
+}
+
+fn header() -> LogHeader {
+    LogHeader {
+        prelude_hash: "selfharness-lifecycle".into(),
+        extract_fingerprint: "selfharness-lifecycle".into(),
+        harness_version: "test".into(),
+    }
+}
+
+fn source() -> HarnessSource {
+    load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads")
+}
+
+fn decision_block(action: &str, confidence: &str) -> String {
+    format!(
+        "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
+         (finalize @Decision (Decision {{ action = \"{action}\", rationale = \"because\", \
+         confidence = {confidence} }}) :: M ())\n```"
+    )
+}
+
+/// A [`ModelProvider`] that fails the first `fail_first` calls with a
+/// [`ProviderError`] and serves `reply` (a scripted `finalize` block) for
+/// every call after — every real GHC compile still runs; only the model
+/// call itself is under test control, so the test decides exactly which
+/// round of the real turn loop fails.
+struct FlakyProvider {
+    calls: AtomicU32,
+    fail_first: u32,
+    reply: String,
+}
+
+impl ModelProvider for FlakyProvider {
+    async fn complete(
+        &self,
+        _req: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if n <= self.fail_first {
+            return Err(ProviderError::Api(format!("scripted failure #{n}")));
+        }
+        Ok(TurnResponse {
+            text: self.reply.clone(),
+            usage: Usage {
+                input_tokens: 50,
+                output_tokens: 10,
+            },
+            reasoning: None,
+        })
+    }
+}
+
+fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "selfharness-lifecycle-{log_tag}-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let agent =
+        Arc::new(Harness::new(writer, agent_cfg, dyn_provider).expect("agent harness boots"));
+    SelfHarnessDriver::new(agent, Arc::new(LogObserver))
+}
+
+/// A cycle whose answerer turn fails (the real turn loop, not a bypassed
+/// one) leaves `lifecycle()` as `Failed`, not the old cosmetic `Idle` — and
+/// the FOLLOWING cycle on the SAME driver succeeds, proving the failed
+/// cycle's outer session (parked mid-fragment on the `runLLMTurn` hole) was
+/// discarded and re-bootstrapped rather than reused. If it had not been
+/// discarded, the second `run_one_cycle` would hit the resident session's
+/// own "already suspended" guard instead of completing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let mut driver = driver_over(
+        FlakyProvider {
+            calls: AtomicU32::new(0),
+            fail_first: 1,
+            reply: decision_block("observe", "Medium"),
+        },
+        "recover",
+    );
+    let harness_source = source();
+
+    let cycle1 = driver.run_one_cycle(&harness_source, None);
+    assert!(
+        cycle1.is_err(),
+        "the scripted first model call fails, so the cycle must error"
+    );
+    assert!(
+        matches!(driver.lifecycle(), SelfHarnessState::Failed { .. }),
+        "an errored cycle must publish Failed, not the cosmetic Idle, got {:?}",
+        driver.lifecycle()
+    );
+
+    let cycle2 = driver
+        .run_one_cycle(&harness_source, None)
+        .expect("the cycle after a failure must re-bootstrap and succeed");
+    assert!(
+        matches!(driver.lifecycle(), SelfHarnessState::Idle),
+        "a successful cycle must publish Idle, got {:?}",
+        driver.lifecycle()
+    );
+    assert_eq!(
+        cycle2.state_json.get("loopCount").and_then(|v| v.as_i64()),
+        Some(1),
+        "the recovered cycle must run loop from a fresh bootstrap, got {:?}",
+        cycle2.state_json
+    );
+    assert_eq!(
+        cycle2.state_json.get("mode").and_then(|v| v.as_str()),
+        Some("Deciding"),
+    );
+}
+
+/// When recovery from a `Failed` cycle cannot itself rebuild a usable outer
+/// session, the driver escalates to `Poisoned` — and every public entry
+/// point (`run_one_cycle`, `run_loop`, `restore`) then refuses with
+/// `DriverError::Poisoned` instead of attempting to run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poisoned_driver_refuses_entry_points() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let mut driver = driver_over(
+        FlakyProvider {
+            calls: AtomicU32::new(0),
+            fail_first: 1,
+            reply: decision_block("observe", "Medium"),
+        },
+        "poison",
+    );
+    let harness_source = source();
+
+    driver
+        .run_one_cycle(&harness_source, None)
+        .expect_err("the scripted first model call fails, so the cycle must error");
+    assert!(matches!(
+        driver.lifecycle(),
+        SelfHarnessState::Failed { .. }
+    ));
+
+    // Recovery re-bootstraps from scratch (the prior cycle discarded `outer`)
+    // — point it at an extract binary that cannot possibly exist, so THIS
+    // bootstrap attempt fails deterministically, without depending on GHC.
+    let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
+    std::env::set_var(
+        "TIDEPOOL_EXTRACT",
+        "/nonexistent/tidepool-extract-bin-poisoned-test",
+    );
+    let recovery = driver.run_one_cycle(&harness_source, None);
+    match original_extract {
+        Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
+        None => std::env::remove_var("TIDEPOOL_EXTRACT"),
+    }
+    assert!(
+        recovery.is_err(),
+        "a re-bootstrap against a nonexistent extract binary must fail"
+    );
+    assert!(
+        matches!(driver.lifecycle(), SelfHarnessState::Poisoned { .. }),
+        "a re-bootstrap failure while recovering from Failed must escalate to Poisoned, got {:?}",
+        driver.lifecycle()
+    );
+
+    assert!(matches!(
+        driver.run_one_cycle(&harness_source, None),
+        Err(DriverError::Poisoned(_))
+    ));
+    assert!(matches!(
+        driver.run_loop(&harness_source, true),
+        Err(DriverError::Poisoned(_))
+    ));
+    assert!(matches!(driver.restore(), Err(DriverError::Poisoned(_))));
+}
