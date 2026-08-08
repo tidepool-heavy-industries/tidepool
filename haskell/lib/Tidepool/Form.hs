@@ -1,56 +1,49 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Typed forms — author a form, get a typed value. A 'Form' carries BOTH how
--- to render (to the 'Ui' eDSL) and how to decode the operator's submission into
--- @a@; the two halves thread a positional field index (@f0@, @f1@, …)
--- identically, so render and decode always agree on each field's key without a
--- state monad or unique-label requirement. Compose applicatively:
+-- | Typed operator forms — author a form, get a typed value back from a
+-- human. A 'Form' carries BOTH how to RENDER a typed 'FormSpec' JSON (the
+-- wire contract shared with the operator GUI, @tidepool-harness@'s
+-- @selfharness::operator@) and how to DECODE the operator's flat submission
+-- into @a@; the two halves thread a positional field index (@f0@, @f1@, …)
+-- identically, so render and decode always agree on each field's key without
+-- a state monad or unique-label requirement. Compose applicatively:
 --
--- > data Reply = Reply { lane :: Lane, notes :: Text }
+-- > data Reply = Reply { lane :: Lane, count :: Int }
 -- > form :: Form Reply
--- > form = Reply <$> choiceField "Pick a lane" [("a", Alpha), ("b", Beta)]
--- >              <*> textField   "Notes"
--- > r <- dialogForm form            -- :: M (Either FormError Reply)
+-- > form = Reply <$> enumField "Lane" [("alpha", Alpha), ("beta", Beta)]
+-- >              <*> intField  "Count"
+-- > r <- askUser form            -- :: M Reply
 --
 -- The GUI (a single multi-field form) and the result type are linked by
--- construction. Decoding is pure Haskell (this module); the harness renders the
--- widgets and returns the raw @{values, prose}@ submission over the existing
--- @dialogAsk :: Ui -> M Value@ primitive, which stays as the untyped escape
--- hatch.
+-- construction. Four field kinds only: 'enumField' (1-of-N), 'intField',
+-- 'textField', 'boolField'. 'askUser' blocks for the human and, on a
+-- malformed submission, re-prompts by re-presenting the SAME form rather
+-- than surfacing the failure to the caller.
 module Tidepool.Form
   ( Form
-  , FormError (..)
-  , prose
-  , code
-  , textField
-  , textField'
-  , multilineField
-  , multilineField'
-  , choiceField
-  , multiChoiceField
-  , boolField
+  , enumField
   , intField
-  , dialogForm
+  , textField
+  , boolField
+  , askUser
   ) where
 
 import Prelude
 import Data.Text (Text, pack, unpack)
 import Control.Lens ((^?))
 
-import Tidepool.Ui (Ui, card, keyedChoice, keyedText, keyedTextInitial, keyedMultiChoice)
-import qualified Tidepool.Ui as U
-import Tidepool.Effects (M, dialogAsk)
-import Tidepool.Aeson.Value (Object, Value)
-import Tidepool.Aeson.FromJSON (Result (..), eitherDecode, (.:), (.:?), (.!=))
-import Tidepool.Aeson.Lens (key, _Object)
+import Tidepool.Effects (M, askUserRaw)
+import Tidepool.Aeson.Value (Object, Value, object, (.=))
+import Tidepool.Aeson.FromJSON (Result (..), (.:))
+import Tidepool.Aeson.Lens (_Object)
 
--- | A form yielding an @a@. Build with the field constructors and '<$>'/'<*>'.
--- @formRender@ emits this form's widgets (each keyed @f<i>@) given the next free
--- index; @formDecode@ reads them back from the submission's @values@ object
--- with the SAME index walk, so keys line up.
+-- | A form yielding an @a@. @formFields@ emits this form's field-spec JSON
+-- objects (each keyed @f<i>@) given the next free index; @formDecode@ reads
+-- them back from the flat submission object with the SAME index walk, so
+-- keys line up.
 data Form a = Form
-  { formRender :: Int -> ([Ui], Int)
+  { formFields :: Int -> ([Value], Int)
   , formDecode :: Object -> Int -> (Result a, Int)
   }
 
@@ -87,105 +80,64 @@ apR _ (Error e) = Error e
 keyName :: Int -> Text
 keyName i = pack ('f' : show i)
 
--- | Markdown display context between fields — no input, consumes NO field
--- index, so @prose "context" *> choiceField ...@ shows the prose then the
--- choice field keeps the same @f<i>@ key a bare @choiceField@ would get.
-prose :: Text -> Form ()
-prose t = Form (\i -> ([U.prose t], i)) (\_ i -> (Success (), i))
+-- | One field-spec JSON object: @{"key":"f<i>","label":<label>,"kind":<kind>}@.
+fieldSpec :: Int -> Text -> Value -> Value
+fieldSpec i label kind = object ["key" .= keyName i, "label" .= label, "kind" .= kind]
 
--- | A fenced source block — display context, same non-consuming shape as
--- 'prose': language, then source text.
-code :: Text -> Text -> Form ()
-code lang src = Form (\i -> ([U.code lang src], i)) (\_ i -> (Success (), i))
-
--- | A single-line text field.
+-- | A single-line text field. Decodes a JSON string.
 textField :: Text -> Form Text
 textField label =
   Form
-    (\i -> ([keyedText (keyName i) label False], i + 1))
+    (\i -> ([fieldSpec i label (object ["kind" .= ("text" :: Text)])], i + 1))
     (\o i -> (o .: keyName i, i + 1))
 
--- | A single-line text field seeded with an initial (editable) draft.
-textField' :: Text -> Text -> Form Text
-textField' label initial =
-  Form
-    (\i -> ([keyedTextInitial (keyName i) label False initial], i + 1))
-    (\o i -> (o .: keyName i, i + 1))
-
--- | A multiline (textarea) text field.
-multilineField :: Text -> Form Text
-multilineField label =
-  Form
-    (\i -> ([keyedText (keyName i) label True], i + 1))
-    (\o i -> (o .: keyName i, i + 1))
-
--- | A multiline (textarea) text field seeded with an initial (editable) draft.
-multilineField' :: Text -> Text -> Form Text
-multilineField' label initial =
-  Form
-    (\i -> ([keyedTextInitial (keyName i) label True initial], i + 1))
-    (\o i -> (o .: keyName i, i + 1))
-
--- | A radio choice over @(label-key, typed value)@ pairs. Renders the keys as a
--- radio group; decodes the selected key back to its typed value. A missing
--- selection is a decode 'Error' (the field was required).
-choiceField :: Text -> [(Text, a)] -> Form a
-choiceField label opts =
-  Form
-    (\i -> ([keyedChoice (keyName i) label [(k, k) | (k, _) <- opts]], i + 1))
-    (\o i -> (decodeChoice (o .: keyName i), i + 1))
-  where
-    decodeChoice (Success k) =
-      maybe (Error "unknown option") Success (lookup k opts)
-    decodeChoice (Error e) = Error e
-
--- | A checkbox group over @(label-key, typed value)@ pairs — the operator
--- picks a SUBSET. Renders the keys as checkboxes; decodes the checked keys
--- (an array under @values.<key>@) back to their typed values. An unknown
--- key is a decode 'Error'; no keys checked (the key absent from the
--- submission) decodes to @[]@, not an error.
-multiChoiceField :: Text -> [(Text, a)] -> Form [a]
-multiChoiceField label opts =
-  Form
-    (\i -> ([keyedMultiChoice (keyName i) label [(k, k) | (k, _) <- opts]], i + 1))
-    (\o i -> (decodeMulti ((o .:? keyName i) .!= []), i + 1))
-  where
-    decodeMulti (Success ks) = traverse lookupOne (ks :: [Text])
-    decodeMulti (Error e) = Error e
-    lookupOne k = maybe (Error ("unknown option: " ++ unpack k)) Success (lookup k opts)
-
--- | A Yes/No radio decoding to 'Bool'.
-boolField :: Text -> Form Bool
-boolField label = choiceField label [("yes", True), ("no", False)]
-
--- | An integer field (a text input whose contents parse as an 'Int').
+-- | An integer field. Decodes a genuine JSON number — the operator GUI
+-- submits a real number, not a string to be read-parsed.
 intField :: Text -> Form Int
 intField label =
   Form
-    (\i -> ([keyedText (keyName i) label False], i + 1))
-    (\o i -> (decodeInt (o .: keyName i), i + 1))
+    (\i -> ([fieldSpec i label (object ["kind" .= ("int" :: Text)])], i + 1))
+    (\o i -> (o .: keyName i, i + 1))
+
+-- | A boolean field. Decodes a genuine JSON bool — a v1 primitive, not a
+-- yes\/no choice desugaring.
+boolField :: Text -> Form Bool
+boolField label =
+  Form
+    (\i -> ([fieldSpec i label (object ["kind" .= ("bool" :: Text)])], i + 1))
+    (\o i -> (o .: keyName i, i + 1))
+
+-- | A 1-of-N choice over @(tag, typed value)@ pairs. Each pair renders one
+-- 'EnumOption' with BOTH @label@ and @tag@ set to the tag 'Text'. Decodes the
+-- submitted tag string and looks it up; an unrecognized tag is a decode
+-- 'Error' (and so triggers 'askUser'\'s re-prompt).
+enumField :: Text -> [(Text, a)] -> Form a
+enumField label opts =
+  Form
+    (\i -> ([fieldSpec i label (object ["kind" .= ("enum" :: Text), "options" .= map enumOption opts])], i + 1))
+    (\o i -> (decodeEnum (o .: keyName i), i + 1))
   where
-    decodeInt (Success t) = case eitherDecode t of
-      Right n -> Success (n :: Int)
-      Left _ -> Error "not an integer"
-    decodeInt (Error e) = Error e
+    enumOption (tag, _) = object ["label" .= tag, "tag" .= tag]
+    decodeEnum (Success tag) =
+      maybe (Error ("unknown option: " ++ unpack tag)) Success (lookup tag opts)
+    decodeEnum (Error e) = Error e
 
--- | A form decode failure: a field was missing or the wrong shape.
-newtype FormError = FormError Text
-  deriving (Eq, Show)
+-- | Render a 'Form' as a @FormSpec@, send it to the operator via
+-- 'askUserRaw', and decode the flat @{key: scalar}@ submission into @a@. On
+-- a decode failure (a missing key, a wrong-shaped value, or an unrecognized
+-- enum tag) RE-PROMPTS by re-presenting the same form — no 'Either' escapes
+-- this surface.
+askUser :: Form a -> M a
+askUser form = do
+  let (fields, _) = formFields form 0
+  sub <- askUserRaw (object ["fields" .= fields])
+  case decodeSubmission form sub of
+    Success a -> pure a
+    Error _ -> askUser form
 
--- | Render a 'Form', elicit the operator's submission, and decode it into @a@.
--- 'Left' on a missing/ill-typed field — a typed, total failure like @run@/@llm@,
--- so the caller handles it as data rather than aborting.
-dialogForm :: Form a -> M (Either FormError a)
-dialogForm form = do
-  let (widgets, _) = formRender form 0
-  sub <- dialogAsk (card "" widgets)
-  pure (decodeSubmission form sub)
-
-decodeSubmission :: Form a -> Value -> Either FormError a
-decodeSubmission form sub = case sub ^? key "values" . _Object of
-  Just o -> case fst (formDecode form o 0) of
-    Success a -> Right a
-    Error e -> Left (FormError (pack e))
-  Nothing -> Left (FormError (pack "submission has no values object"))
+-- | Decode a flat submission object against a 'Form'. A submission that is
+-- not itself a JSON object is a decode failure.
+decodeSubmission :: Form a -> Value -> Result a
+decodeSubmission form sub = case sub ^? _Object of
+  Just o -> fst (formDecode form o 0)
+  Nothing -> Error "submission is not an object"

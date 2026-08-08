@@ -50,7 +50,8 @@ data Ui
     -- | @options@ are (option-key, label) pairs. @key@ is the FORM-FIELD key:
     -- 'Just' makes this a field of an enclosing form (renders as a radio group
     -- submitted under @values.<key>@); 'Nothing' is a standalone one-click
-    -- choice. (@Tidepool.Form@ sets it; hand-authored @choice@ leaves it off.)
+    -- choice. (The @keyed*@ smart constructors below set it; hand-authored
+    -- @choice@ leaves it off.)
     -- @selected@ is the option-key pre-selected as the radio group's default.
   | Choice { prompt :: Text, options :: [(Text, Text)], key :: Maybe Text, selected :: Maybe Text }
     -- | @initial@ seeds the input's starting text (a draft to edit).
@@ -113,8 +114,8 @@ choice p os = Choice p os Nothing Nothing
 textIn :: Text -> Bool -> Ui
 textIn p m = TextIn p m Nothing Nothing
 
--- | A FORM-FIELD text input, submitted under @values.<key>@ (used by
--- 'Tidepool.Form'): field key, prompt, multiline flag.
+-- | A FORM-FIELD text input, submitted under @values.<key>@: field key,
+-- prompt, multiline flag.
 keyedText :: Text -> Text -> Bool -> Ui
 keyedText k p m = TextIn p m (Just k) Nothing
 
@@ -123,8 +124,8 @@ keyedText k p m = TextIn p m (Just k) Nothing
 keyedTextInitial :: Text -> Text -> Bool -> Text -> Ui
 keyedTextInitial k p m initial = TextIn p m (Just k) (Just initial)
 
--- | A FORM-FIELD radio choice, submitted under @values.<key>@ (used by
--- 'Tidepool.Form'): field key, prompt, (option-key, label) options.
+-- | A FORM-FIELD radio choice, submitted under @values.<key>@: field key,
+-- prompt, (option-key, label) options.
 keyedChoice :: Text -> Text -> [(Text, Text)] -> Ui
 keyedChoice k p os = Choice p os (Just k) Nothing
 
@@ -133,8 +134,7 @@ keyedChoiceSelected :: Text -> Text -> [(Text, Text)] -> Text -> Ui
 keyedChoiceSelected k p os sel = Choice p os (Just k) (Just sel)
 
 -- | A FORM-FIELD checkbox group, submitted under @values.<key>@ as an ARRAY
--- of the checked option-keys (used by 'Tidepool.Form'\'s @multiChoiceField@):
--- field key, prompt, (option-key, label) options.
+-- of the checked option-keys: field key, prompt, (option-key, label) options.
 keyedMultiChoice :: Text -> Text -> [(Text, Text)] -> Ui
 keyedMultiChoice k p os = MultiChoice p os (Just k)
 
