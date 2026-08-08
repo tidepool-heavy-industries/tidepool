@@ -1,4 +1,4 @@
-//! Workstream W2: GHC-idiom bug hunting via proptest.
+//! GHC-idiom bug hunting via proptest.
 //!
 //! Targets the three highest-bug-density JIT subsystems:
 //!   * `emit_letrec_phases` (5-phase ordering, deferred Con field filling,
@@ -14,15 +14,16 @@
 //! reach value comparison rather than being skipped as eval-errors.
 //!
 //! Oracle: `tidepool_testing::differential` — one [`DiffConfig`] per property
-//! sweeping the 64KiB/4KiB nursery pair (B1 value-diff, B4 nursery-knob
-//! divergence) with `repeat_count(2)` (B4 determinism) and
-//! `CrashContainment::ForkProbe` (B3: a child killed by a signal is a
-//! reportable divergence the parent shrinks). Every property drives
-//! `TestRunner` directly so its `ReachCounter` lives and asserts in the SAME
-//! process as the cases it counts.
+//! sweeping the 64KiB/4KiB nursery pair (a value divergence at either size, and
+//! any disagreement BETWEEN the sizes, both fail) with `repeat_count(2)` for
+//! determinism and `CrashContainment::ForkProbe` so a child killed by a signal
+//! is a reportable divergence the parent shrinks rather than a dead test
+//! process. Every property drives `TestRunner` directly so its `ReachCounter`
+//! lives and asserts in the SAME process as the cases it counts.
 //!
-//! The optimize-then-compare oracle (#3 in the spec) is SKIPPED: tidepool-codegen
-//! does not depend on tidepool-optimize and we may not edit Cargo.toml.
+//! There is no optimize-then-compare oracle here: tidepool-codegen does not
+//! depend on tidepool-optimize. That coverage lives in tidepool-optimize's own
+//! pass × generator matrix.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1095,13 +1096,15 @@ fn prop_joincross() {
 }
 
 // ===========================================================================
-// CONFIRMED BUG REPROS (minimal, hand-built, <= 25 nodes).
+// CAPTURED BUG REPROS (minimal, hand-built, <= 25 nodes).
 //
-// Each is `#[ignore]`d so the suite stays green; remove the `#[ignore]` (and the
-// matching gate in `run_oracles`) once the underlying bug is fixed.
+// A repro stays here after its bug is fixed: it is the regression gate for that
+// shape. A repro for a bug that is still open is `#[ignore]`d so the suite stays
+// green, and the `#[ignore]` comes off when the fix lands. Every repro below is
+// currently live — none is ignored.
 // ===========================================================================
 
-/// BUG #1 (FIXED): Jump-crosses-Lam — was a JIT-only compilation error (B2).
+/// Jump-crosses-Lam (FIXED): was a JIT-only compilation error.
 ///
 /// component: join-point compilation (`tidepool-codegen/src/emit/join.rs`,
 ///            fixed by the pre-emit lowering pass in `tidepool-codegen/src/lower.rs`)
