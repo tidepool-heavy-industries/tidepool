@@ -13,8 +13,8 @@ the production executable. Its `Main.hs` depends on the internal library
 `tidepool-extract-internal` (`hs-source-dirs: src`), which holds the extractor
 implementation (`Tidepool.Binders`, `.GhcPipeline`, `.Session`, `.Translate`,
 `.Resolve`, `.FatIface`, `.CborEncode`, `.DiagJson`, `.Timing`) — compiled ONCE
-and shared by the production binary and the three `src`-dependent test-suites
-below, instead of once per component. Four non-production components exist as
+and shared by the production binary and the four `src`-dependent test-suites
+below, instead of once per component. Five non-production components exist as
 `test-suite` stanzas, so `cabal build` skips them by default:
 
 | Component | Purpose | Run |
@@ -23,8 +23,9 @@ below, instead of once per component. Four non-production components exist as
 | `session-c-test` | Wave-3a session-binder acceptance pin | `cabal test session-c-test` |
 | `varid-mechanism-test` | `stableVarId`/`fieldParentDisamb` contract pin | `cabal test varid-mechanism-test` |
 | `formqq-parser-test` | `[form\|...\|]` DSL line-parser unit tests | `cabal test formqq-parser-test` |
+| `extract-fidelity-test` | erasure symmetry, recognizer qualification, unboxed-tuple arity — through the real pipeline | `cabal test extract-fidelity-test` |
 
-`cabal build --enable-tests` builds all four without running them. Each
+`cabal build --enable-tests` builds all five without running them. Each
 `.cabal` stanza carries its own `Run:` comment; this table just indexes them.
 
 **How the extract binary is resolved.** `tidepool-extract` is the GHC→Core

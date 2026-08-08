@@ -156,21 +156,25 @@ test-suite formqq-parser-test
 -- recognizer module qualification, unboxed-tuple result-arity fail-loud.
 -- Drives the real runPipeline + translateModuleClosed path on synthetic
 -- fixture modules written under test-fidelity/work/.
--- Run: cabal run extract-fidelity-test  (needs the nix with-packages GHC on PATH).
-executable extract-fidelity-test
+-- Run: cabal test extract-fidelity-test  (needs the nix with-packages GHC on PATH).
+-- A test-suite, not an executable: `cabal build` builds only the production
+-- exe, and every non-production component here is a test-suite so it stays
+-- that way. `Main.hs` already exits non-zero unless every check passes, which
+-- is exactly the exitcode-stdio-1.0 contract.
+-- Reaches the extractor through `tidepool-extract-internal` rather than
+-- re-listing src/ modules on its own hs-source-dirs — the whole point of the
+-- internal library is that the extractor compiles ONCE per configuration.
+test-suite extract-fidelity-test
+  type:             exitcode-stdio-1.0
   main-is:          Main.hs
-  hs-source-dirs:   test-fidelity, src
+  hs-source-dirs:   test-fidelity
   other-modules:
     Fidelity.Harness
     Fidelity.Erasure
     Fidelity.Recognizers
     Fidelity.PrimopArity
-    Tidepool.Translate
-    Tidepool.Resolve
-    Tidepool.FatIface
-    Tidepool.GhcPipeline
-    Tidepool.Session
   build-depends:
+    tidepool-extract-internal,
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
