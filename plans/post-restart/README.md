@@ -125,6 +125,15 @@ call, fits harness-lifecycle's scope).
   exists, an mtime that didn't move, an in-flight-run check before
   reading an mtime as a write-source), never prose — every level,
   root and TL included.
+  REFINEMENT (cherry-pick episode, same day): a CHECK can test the
+  wrong property while looking rigorous. "67 insertions, 0 deletions,
+  tests-only, compile-checked standalone" — every word true, and the
+  commit still wasn't separable: additive hunks sit on context another
+  commit created (diffstat shape ≠ separability), and a tests-only
+  tree COMPILES fine against behavior it would fail at RUNTIME. The
+  settling check for any separability claim: `git cherry-pick` onto a
+  throwaway branch at the target base + test RUN. The conflict alone
+  surfaces entanglement in seconds.
   WATCHDOG VERDICT (end-to-end, timed): agent killed ~21:00 → ledger
   alive/busy, watchdog SILENT for 30 min (the human caught it by
   looking); pane killed ~21:30 (deliberate reclaim) → watchdog fired
