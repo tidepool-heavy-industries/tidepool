@@ -120,3 +120,104 @@ one for `validate answer → run child → resume continuation → consume hole`
 guard/cleanup objects so a mid-sequence failure can't leave a half-live node.**
 This is the post-recovery consolidation wave; see [[no-scar-tissue]] and the
 banked dead-`SessionRegistry` cleanup.
+
+---
+
+# Codex pass #2 (2026-08-07) — status reconciliation
+
+A second read-only external review (`codex-review.md.tmp`). Its fair meta-point:
+the statuses above read as *routing labels*, not evidence that a behavior
+changed. This section is the honest dashboard — status + evidence/commit.
+
+## Verified fixed (evidence)
+- **Completion-instruction mismatch** — the self-harness answerer gets a
+  dedicated `finalize @T` hole card, not the generic `resume expr`
+  (`engine::answerer_hole_card`; core-tl2 `c477a63c`). Codex confirms.
+- **Sync-blocking `OperatorGate`** — consistent across impl + driver bridge +
+  plan (`61897716`). Codex confirms.
+- **Fork/fanout cardinality + child cleanup on all exits** (`ecfaad4e`). Codex
+  confirms fixed.
+- **AskUser = explicit constructor arm**, not JSON-key probing; both outer +
+  answerer form chains have bounded reprompt loops (`c477a63c`). Codex confirms.
+- **`TurnStart.source` records extracted Haskell** — WS4 (`c477a63c`). Codex
+  confirms the observability gap is closed (but see F15 below).
+- **7-pane observatory replaced by the minimal gate** (`54a9196c`). Codex
+  confirms the old-endpoint findings are obsolete.
+- **fmt gate** — reconciled to the flake's stable rustfmt 1.8.0 (`this branch`).
+
+## Dogfood-blocking — IN FLIGHT (dogfood-wiring dev)
+- **F1** real web gate not connected to the real driver (two disconnected
+  binaries). — wiring now.
+- **F8** answerer include path disconnected from `--harness` (sibling
+  `HarnessTypes` won't resolve under the real bin). — fixing now.
+- **F5** production wires only `LogObserver`, no composite → no durable outer
+  transcript. — folded into dogfood-wiring (add a fanout Observer + JsonlObserver).
+- **F10** focused-panel SSE race: after a submit, the Form→Idle tick is DROPPED
+  because focus is in the panel → operator sees a stale form, resubmits, gets
+  "no form pending". Breaks the actual dogfood UX. — flagged to dogfood-wiring
+  (revision-tag interactions; always apply cross-revision transitions); focused
+  follow-up if it balloons.
+
+## DESIGN DECISION for the human — F2 (fork capability contract)
+Fork's reuse-approach re-exposed **bare `runLLMTurn`** on the answerer row
+(`[AskUser, RunLLMTurn, Finalize]`), so "controlled bounded recursion" is now
+PROMPT POLICY (`ANSWERER_FRAMING`) backed only by the coarse `LOOP_INFERENCE_CALL_CAP`,
+not a structural limit. Also: "recursive fork" is mislabeled — first-level fork
+works, but a fork child that itself forks / `askUser`s is hard-rejected (v1). The
+options (this is exactly the [[type-system-expresses-capability]] axis):
+  (a) accept prompt-policy fork + FIX the docs to say so honestly (cheap now);
+  (b) give fork its OWN effect/constructor so the answerer gets fork-shaped
+      delegation WITHOUT bare `runLLMTurn` (structural — the tighter boundary);
+  (c) hide the raw verb at the generated Haskell surface.
+I accepted (a)-for-v1 during recovery (reversible). Recommend: do (a)'s doc
+honesty now (fix the "recursive"/"does not reopen" claims), hold (b) as the
+principled follow-on. **Awaiting your call on (b).**
+
+## Post-recovery ROBUSTNESS WAVE (parked, with Codex's acceptance criteria)
+- **F3** lifecycle: unconditional `Idle` is the cosmetic half — needs
+  `Failed`/`Poisoned` or an error guard that restores/discards every mutable
+  resident component before publishing `Idle`.
+- **F4** state+compaction = ONE generation-tagged checkpoint. Acceptance: after
+  a crash at every write boundary, restart selects a state + summary from the
+  SAME committed generation + harness source.
+- **F6** `flush_effects` drains then discards write failures + advances
+  `effect_seq` — don't advance past a failed append; fail the turn or queue for
+  retry. (Note: the scoped self-harness stacks emit NO `Event::Effect` by
+  construction, so this bites general Agent nodes, not the dogfood path.)
+- **F7** per-node turn race: a turn LEASE must cover snapshot → provider await →
+  log append → resident run → outcome publish (broader than `SessionRegistry`).
+- **F9** unknown/malformed suspension constructor → a classification ERROR
+  naming the constructor, not a silent `Ask` wildcard (still open for general
+  callers + the malformed-`AskUserWith` case).
+- **F11** `OperatorGate` returns `Submission`/`()` — make it a `Result` with
+  cancelled/disconnected/EOF/malformed/superseded (the reprompt cap is a
+  backstop, not error handling; a closed-stdin `await_continue` currently
+  returns success → non-auto run loops forever).
+- **F12** outbound `state_out` uses the structural renderer, not the author's
+  `toJSON` — evaluate Haskell `toJSON` in the resident session, or narrow the
+  contract + fix the misleading "ToJSON/FromJSON non-inverse" diagnostic.
+- **F13** `HarnessEff` (`[RunLLMTurn]`) knowingly disagrees with the real outer
+  row (`[RunLLMTurn, AskUser]`) — reconcile the named boundary or introduce
+  explicit base/form-capable aliases; don't keep a stale alias as fiction.
+- **F14** `retire_answerer` drops the session but writes no terminal/cancel
+  event to the durable tree → live session and logged lifecycle diverge. One
+  cleanup op should update both ownership and the tree with a reason.
+- **F15** `TurnStart.source` carries the whole model reply on a prose-only
+  (`NoBlock`) turn — two incompatible meanings. Use a separate `NoBlock` event
+  or make `source` optional.
+- **F16** `AppState::publish` silently replaces a pending interaction (drops its
+  oneshot → old caller continues as if answered). Reject-while-pending or make
+  supersession an explicit error.
+- **F17** historical W1/W2/WS narration buries current invariants (esp. the
+  `answerer_decls` comment). Move chronology to plan/ADR; keep comments to
+  current invariants + failure behavior.
+- **F18** GUI accepts structurally invalid forms (null int, omitted enum) and
+  relies on distant Haskell re-prompt with no per-field error; `FormSpec` dup
+  keys/tags unvalidated. Validate at the server boundary for usability (Haskell
+  stays the type authority).
+
+**Throughline (both reviews agree):** the risk is scar tissue — documented
+exceptions ("stale-but-unused", "rides along", "dropped rather than aborting")
+accumulating exactly where capability/durability guarantees should be strongest.
+The consolidation (F3/F7/F14 — one transactional boundary per orchestration
+step, the four state machines unified) is the wave's spine. See [[no-scar-tissue]].
