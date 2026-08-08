@@ -98,7 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let log_path = new_log_path();
+    // The per-node durable log, colocated with transcript.jsonl and state.json
+    // under <cache>/selfharness/ so `tail -f .../selfharness/log.jsonl` works.
+    let log_path = persistence::default_log_path();
+    if let Some(dir) = log_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let header = LogHeader {
         prelude_hash: "self-harness".to_string(),
         extract_fingerprint: cfg.extract_bin.clone(),
@@ -167,26 +172,4 @@ fn project_lib_dir() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lib = manifest.parent().map(|r| r.join(".tidepool/lib"))?;
     lib.exists().then_some(lib)
-}
-
-fn new_log_path() -> PathBuf {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dir = tidepool_runtime_paths_logs();
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join(format!("selfharness-run-{ts}.jsonl"))
-}
-
-/// Log dir: `$XDG_STATE_HOME/tidepool/logs` or `~/.local/state/tidepool/logs`,
-/// falling back to a temp dir.
-fn tidepool_runtime_paths_logs() -> PathBuf {
-    if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(state).join("tidepool/logs");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".local/state/tidepool/logs");
-    }
-    std::env::temp_dir().join("tidepool-logs")
 }

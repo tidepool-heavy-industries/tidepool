@@ -42,7 +42,7 @@ pub mod state_cross;
 pub use driver::{answerer_decls, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
-pub use observer::{Event, GuiObserver, LogObserver, Observer, ReactiveHook};
+pub use observer::{Event, LogObserver, Observer};
 pub use operator::{EnumOption, Field, FieldKind, FormSpec, OperatorGate, StdinGate, Submission};
 pub use persistence::{JsonlObserver, PersistenceError};
 pub use state_cross::{state_in, state_out};

@@ -1,12 +1,8 @@
-//! WS-H seam: a pluggable event-observer extension point the
-//! [`driver`](crate::selfharness::driver) emits to at each lifecycle event,
-//! so logging, a future Datastar-GUI subscriber, and the distillation
-//! loop's future "observe and react to events" hooks are all just
-//! [`Observer`] (or [`ReactiveHook`]) impls — never hardwired into the
-//! driver itself. Reference point: `crate::forcing`'s durable `Event` log is
-//! the equivalent extension point for a single node's turn-level history;
-//! this is the outer render/loop hylo's analogue, in-memory and pluggable
-//! rather than durable and fixed-schema.
+//! Pluggable observers for the driver's lifecycle events: the driver emits an
+//! [`Event`] at each loop/turn/compaction boundary to whatever [`Observer`] it
+//! was built with. Ships [`LogObserver`] (events to stderr); `persistence`
+//! adds `JsonlObserver` (appends them to a durable transcript). This is the
+//! render/loop analogue of `crate::forcing`'s durable per-node event log.
 
 use serde::Serialize;
 
@@ -69,24 +65,4 @@ impl Observer for LogObserver {
     fn on_event(&self, event: &Event) {
         eprintln!("[selfharness] {event:?}");
     }
-}
-
-/// Stub seam for a future Datastar-GUI subscriber (pushing [`Event`]s as SSE
-/// fragments to the `tidepool-web` observatory, mirroring how
-/// `crate::forcing::Event` already feeds the node-tree pane) — out of scope
-/// for this wave (07-impl-orchestration.md's "Out of scope" section).
-pub struct GuiObserver;
-
-impl Observer for GuiObserver {
-    fn on_event(&self, _event: &Event) {
-        unimplemented!("future work: push Event as a Datastar SSE fragment to the observatory")
-    }
-}
-
-/// Stub seam for the distillation loop's future event reactions — a
-/// subscriber that can TRIGGER follow-up work (not just record), the
-/// "observe and react to events" extension point named in
-/// 07-impl-orchestration.md WS-H. No implementation this wave.
-pub trait ReactiveHook: Send + Sync {
-    fn react(&self, event: &Event);
 }
