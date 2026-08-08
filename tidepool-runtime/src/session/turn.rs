@@ -1778,10 +1778,24 @@ mod tests {
                     let result = run_turn(req)
                         .unwrap_or_else(|e| panic!("{}: run_turn failed: {e}", case.name));
                     match (case.kind, result) {
-                        (TurnKind::Decl, TurnResult::Decl { binders, .. }) => {
+                        (TurnKind::Decl, TurnResult::Decl { binders, items }) => {
+                            // The protocol's fourth closed gap: when the
+                            // supplied verdict's own binders are empty (a
+                            // data/class/instance decl — classifyTurn rule 5
+                            // has no term-level name to report), the extract
+                            // derives `TDecl`'s binders from the harvested
+                            // items' head names instead of echoing the empty
+                            // list, so the single-turn and batch decl paths
+                            // agree. An `instance` decl still yields no items
+                            // (no exportable head name), so it stays `[]`.
+                            let expected: Vec<&str> = if case.binders.is_empty() {
+                                items.iter().map(ExportItem::head_name).collect()
+                            } else {
+                                case.binders.to_vec()
+                            };
                             assert_eq!(
                                 binder_names(&binders),
-                                case.binders,
+                                expected,
                                 "{}: new-path decl binders mismatch",
                                 case.name
                             );
