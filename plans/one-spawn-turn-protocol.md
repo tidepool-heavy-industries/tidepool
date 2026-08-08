@@ -230,6 +230,29 @@ So the turn mode emits a phase around its classify step, and keeps the existing
 `writeWholeModuleClosed`. Reproducing the stage table through the new entry point
 is part of Phase B, not a follow-up.
 
+That needs a vocabulary addition this workstream does not own. The stage names
+live in `tidepool-harness/src/timing.rs` (arriving with the rebase — the file does
+not exist on this branch yet):
+
+- `EXTRACT_PHASES` is `startup`, `ghc_session`, `typecheck`, `core`, `translate`,
+  `cbor_encode`, `write`, `total`. **There is no classify phase**, so the
+  in-process classify has no name to emit under.
+- Reusing `typecheck` would be actively wrong. No typecheck runs in that step,
+  and that name is *already* a misnomer in the parse-only lane — its own doc
+  comment says so. Compounding an acknowledged wart to avoid adding a constant is
+  the wrong trade.
+- `RUST_STAGES` carries `classify_extract`, emitted at
+  `tidepool-harness/src/harness.rs:1040` — precisely the call site Phase B
+  deletes. So one stage leaves the Rust timeline as another joins the extract
+  timeline.
+
+Both halves are edits to the shared latency vocabulary and to `harness.rs`, which
+this workstream is meant to touch only minimally and mechanically. Phase B
+therefore agrees the naming with the latency workstream before implementing:
+whether `classify_extract` is retired or repurposed, and what the new extract-side
+phase is called. Coordinating a two-line constant change is cheaper than shipping
+a bench whose stage table silently changed shape.
+
 Recognizer qualification needs no work here, and the reason is worth stating: the
 turn mode reaches `translateModuleClosed` through the shared
 `writeWholeModuleClosed`, so the base's recognizer and module-qualification
