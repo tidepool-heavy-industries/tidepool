@@ -845,6 +845,13 @@ pub fn template_turn(
 /// '[RunLLMTurn]` compile needs a preamble matching ITS OWN (narrower)
 /// decls, not the Agent's. `stack` must be rendered from the SAME `decls` —
 /// see [`EngineConfig::turn_target`].
+///
+/// `stack` pinned to a real (non-`NoAnswer`) `Finalize T` entry routes
+/// through [`tidepool_mcp::template_haskell_anchored`] instead of the plain
+/// [`tidepool_mcp::template_haskell`] — see [`finalize_pin_active`]'s doc for
+/// why, and `template_haskell_anchored`'s doc (`eval_prep.rs`) for the
+/// mechanism. Every other row (no `Finalize` entry, or the `NoAnswer`
+/// default) compiles exactly as before.
 pub fn template_turn_for(
     decls: &[tidepool_mcp::EffectDecl],
     stack: &str,
@@ -853,7 +860,29 @@ pub fn template_turn_for(
     helpers: &str,
 ) -> String {
     let preamble = tidepool_mcp::build_preamble(decls, false);
-    tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+    if finalize_pin_active(stack) {
+        tidepool_mcp::template_haskell_anchored(
+            &preamble, stack, code, imports, helpers, None, None,
+        )
+    } else {
+        tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+    }
+}
+
+/// Whether `stack` (the promoted row string a turn compiles against, e.g.
+/// `'[AskUser, Finalize Decision]`) pins `Finalize` to a REAL author type —
+/// `false` for the uninhabited default `Finalize NoAnswer` (a turn not
+/// currently answering a typed hole — every non-answerer turn, and an
+/// answerer turn before its first `AnswerContract` is set) or a row with no
+/// `Finalize` entry at all (the general Agent stack never carries one).
+///
+/// A presence check, not a type extraction: `template_turn_for` only needs a
+/// boolean (route this turn's `_r` through the anchor, or don't), never the
+/// concrete `T` itself — `EngineConfig::turn_target`'s caller already has `T`
+/// in hand were it needed for anything else, so there is nothing to recover
+/// from this string, only whether to flip the anchor on.
+fn finalize_pin_active(stack: &str) -> bool {
+    stack.contains("Finalize ") && !stack.contains("Finalize NoAnswer")
 }
 
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —
@@ -1135,5 +1164,21 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    #[test]
+    fn finalize_pin_active_true_for_a_real_answer_type() {
+        assert!(finalize_pin_active("'[AskUser, Finalize Decision]"));
+        assert!(finalize_pin_active("'[Finalize (Int -> Int)]"));
+    }
+
+    #[test]
+    fn finalize_pin_active_false_for_the_noanswer_sentinel() {
+        assert!(!finalize_pin_active("'[AskUser, Finalize NoAnswer]"));
+    }
+
+    #[test]
+    fn finalize_pin_active_false_with_no_finalize_entry() {
+        assert!(!finalize_pin_active("'[Console, KV]"));
     }
 }

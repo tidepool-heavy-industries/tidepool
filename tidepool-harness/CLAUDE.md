@@ -174,12 +174,41 @@ is reused across holes whose types differ), and its turns compile with:
   qualified-aliased: the turn uses the ordinary `build_preamble`.
 
   The tyvar shape is load-bearing and unchanged: `v` first (so `finalize @T x`
-  binds it), `a` free (so the template's `toJSON _r` defaults it rather than
-  demanding `ToJSON T`), `Member` a real constraint (so the dictionary rides as
-  the leading value arg `Translate.hs` re-applies when head-swapping to
-  `finalizeSited`). Extract is untouched by the indexing — `asks.json` records
-  the site type exactly as before, and `v` is erased in Core, so `FinalizeWith`
-  keeps its arity and `Finalize` its positional union tag.
+  binds it), `a` genuinely free (`finalize :: forall v a effs. Member
+  (Finalize v) effs => v -> Eff effs a` never constrains `a` to anything —
+  `finalize` diverges, it never returns), `Member` a real constraint (so the
+  dictionary rides as the leading value arg `Translate.hs` re-applies when
+  head-swapping to `finalizeSited`). Extract is untouched by the indexing —
+  `asks.json` records the site type exactly as before, and `v` is erased in
+  Core, so `FinalizeWith` keeps its arity and `Finalize` its positional union
+  tag.
+
+  `a` being free does NOT mean the shared template's `toJSON _r`/`toWire _r`
+  "defaults it" — GHC's defaulting (even under `ExtendedDefaultRules`, even
+  with the explicit `default (Int, Double, Text)` already in the eval
+  preamble) only fires when the ambiguous variable's constraint set carries
+  at least one class from GHC's own fixed "standard" set (the GHC User's
+  Guide's `ExtendedDefaultRules` section states rule 3 as relaxed to "at
+  least one of the classes Ci is numeric, or is Show, Eq, or Ord" — a
+  relaxation of the anchor requirement, never its removal). `ToJSON`/`ToWire`
+  are ordinary library classes with no superclass, so a solitary `ToJSON a0`
+  never qualifies — `_r <- __user; … (toJSON _r)` is ambiguous by construction
+  whenever a turn's block terminates in `finalize`, confirmed empirically (a
+  minimal `IO` repro and a real `freer-simple` `Eff`-row repro with an
+  identical custom class fail IDENTICALLY under identical pragmas — not an
+  `Eff`-row/`MonoLocalBinds`/implication effect). `template_turn_for`
+  (`engine.rs`) supplies the missing anchor instead: a turn compiled against a
+  real (non-`NoAnswer`) `Finalize T` row routes through
+  `tidepool_mcp::template_haskell_anchored`, which routes `_r` through a
+  generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
+  rendering it — additive (`id` never forces `_r`'s type), so an
+  already-concretely-typed result (an ordinary eval, or an answerer turn that
+  suspends on `askUser` without finalizing) is unaffected, and only
+  `finalize`'s genuinely-ambiguous `_r` newly resolves (picking the first
+  candidate in the existing `default (Int, Double, Text)` list with both
+  `Show` and `ToJSON`/`ToWire` instances — observed to be `Int`, not `()`).
+  Every other caller of the shared template (`tidepool_mcp::template_haskell`)
+  is untouched.
 
   `EngineConfig::turn_target` resolves one turn's compile target, returning a
   `TurnTarget { include, stack }` derived from a SINGLE `tidepool_mcp::RowArgs`
