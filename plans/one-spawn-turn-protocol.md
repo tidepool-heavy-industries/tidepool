@@ -93,24 +93,45 @@ stdout, non-zero exit. A caller distinguishes a real GHC rejection
 (`ExtractFailed` / `Diagnostics`) from an unparseable report
 (`MalformedDiagnostics` → version skew) exactly as it does today.
 
-### `--emit-stmt-binders` is deleted, not deprecated
+### `--emit-stmt-binders` and `--emit-binders` are deleted, not deprecated
 
-When this mode lands, the `--emit-stmt-binders` flag is removed from the extract
-CLI and every use of it across the tree goes with it (`session/turn.rs`,
-`session/binders.rs`, the repl path that shares them, any script or test
-referencing it). Its parse-only mode **is** the second spawn being deleted;
-keeping it would preserve exactly the seam this work removes. Afterwards
-statement binders have one source: the rich result variant. No parallel channel,
-no deprecation shim.
+When this mode lands, both flags are removed from the extract CLI and every use
+of them across the tree goes with them (`session/turn.rs`, `session/binders.rs`,
+`session/mod.rs`'s decl-batch path, the repl path that shares them, any script or
+test referencing them). `--emit-stmt-binders`' parse-only mode **is** the second
+spawn being deleted; keeping it would preserve exactly the seam this work
+removes. Afterwards binders and exports have one source: the rich result
+variant. No parallel channel, no deprecation shim.
 
 Consequence, deliberate: the new Rust side is incompatible with an older
 deployed extract binary. That is correct under the one-format wire policy — a
 stale extract fails loud, and `scripts/redeploy.sh` ships both sides together.
 Any merge of this work carries a redeploy requirement.
 
-`--emit-binders` (declaration export items) is a separate flag whose payload the
-`Decl` variant subsumes. Removing it follows the same no-parallel-channel logic
-but has not been directed; treat it as an open question, not a decision.
+`--emit-binders` (declaration export items) goes the same way, for the same
+reason: its payload is what the `Decl` variant carries, and binders and exports
+having one source is the whole principle. Keeping one legacy flag while deleting
+its sibling would preserve exactly the seam-shape being removed.
+
+That removal carries a constraint worth stating, because missing it breaks the
+decl plane quietly. `--emit-binders`' caller is `define_batch_with_vals`, which
+joins N declaration texts with a blank line and passes the **combined
+multi-declaration module**. Its Haskell side (`Tidepool.Binders.extractBinders`)
+is a whole-module parse — `guessTarget` / `parseModule` over every declaration.
+`classifyTurn`, which serves the verdict, parses ONE statement-or-declaration
+and cannot cover a batch. So the `Decl` variant's `declItems` must be harvested
+by the module parse, not the statement parse. The two parses already live side by
+side in `Binders.hs`; the turn mode needs both, picked by what it is looking at:
+
+- a single turn whose verdict is `decl` → statement parse for the verdict,
+  module parse for the items;
+- a decl batch (`--turn-verdict decl` over combined declaration text, the
+  `define_batch_with_vals` path) → module parse only; there is no per-statement
+  verdict to compute and the caller already knows the kind.
+
+Get this wrong and multi-declaration batches lose export items, so the selective
+re-export silently stops shadowing — a failure that shows up as a stale binding
+several turns later, not as an error.
 
 ### Variant retry
 
