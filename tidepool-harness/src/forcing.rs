@@ -1,9 +1,9 @@
-//! The node tree + forcing gates (C3). Owns the `NodeId` ↔ `SessionId`
-//! binding: [`NodeTree`] is the session-tree state machine C4 (protocol
-//! server, a later leaf) serves over HTTP.
+//! The node tree + forcing gates. Owns the `NodeId` ↔ `SessionId`
+//! binding: [`NodeTree`] is the session-tree state machine the protocol
+//! server serves over HTTP.
 //!
 //! A node is minted as [`NodeState::Thunk`] — no session, no tokens, no
-//! effects (C1: forcing is the only work-begins mechanism). [`NodeTree::force`]
+//! effects (forcing is the only work-begins mechanism). [`NodeTree::force`]
 //! is the ONLY way out of `Thunk`: it emits `Event::Forced` BEFORE any
 //! session exists, then mints a fresh [`SessionId`] and registers the
 //! caller-supplied machine with the session registry. Every other
@@ -17,7 +17,7 @@
 //! calls [`NodeTree::force`] itself, regardless of the fan badge. A
 //! `Dynamic`-fan parent's materialized children are ordinary `Thunk` nodes
 //! like any other — each one still needs its own `Forced` event. There is
-//! no policy ladder to bypass (that's R2/C5).
+//! no policy ladder to bypass.
 
 use std::collections::HashMap;
 
@@ -46,7 +46,7 @@ pub enum ForkShape {
     Dynamic,
 }
 
-/// Pre-force fan badge derivation (C3): pure function of [`ForkShape`].
+/// Pre-force fan badge derivation: pure function of [`ForkShape`].
 /// `Dynamic` converts to `Exact` only at materialization, and that
 /// conversion re-checks the (hard-coded `never`) forcing policy — since
 /// `create_node` never auto-forces, every materialized child under a
@@ -60,7 +60,7 @@ pub fn fan_badge(shape: ForkShape) -> FanBadge {
     }
 }
 
-/// Pre-force price-class derivation (C3): pure function of the node's
+/// Pre-force price-class derivation: pure function of the node's
 /// static effect row and whether it spawns calling-model (frontier)
 /// children. `Frontier` dominates — a node with an otherwise `Llm`-free row
 /// that still forks frontier children is priced `Frontier`, not `Zero`.
@@ -75,9 +75,9 @@ pub fn price_class(effect_row: &[String], spawns_frontier_children: bool) -> Pri
     }
 }
 
-/// Harness-generated teaser text (C7 — never program-authored). C3 emits a
-/// minimal deterministic composition of the title hint and effect row so
-/// the invariant holds from the first commit; C7 may grow this further.
+/// Harness-generated teaser text — never program-authored. Currently a
+/// minimal deterministic composition of the title hint and effect row; may
+/// grow richer over time without breaking that invariant.
 #[must_use]
 pub fn derive_teaser(title: &str, effect_row: &[String]) -> String {
     if effect_row.is_empty() {
@@ -377,7 +377,7 @@ impl<M> NodeTree<M> {
     }
 
     /// Log one conversation-turn delta on `node` (the transcript store's
-    /// append — F2 turn schema). Requires `Running` OR `Suspended`: a fork
+    /// append). Requires `Running` OR `Suspended`: a fork
     /// answerer's assistant turn lands while its own node is `Running`, but the
     /// operator's answer to a still-`Suspended` node is also a turn worth
     /// recording, so both non-terminal working states are accepted.
@@ -603,8 +603,8 @@ mod tests {
     }
 
     /// Stand-in for the machine handle `M` — the tree's contract is pure
-    /// lifecycle bookkeeping, so a counter proves the transitions without
-    /// the JIT.
+    /// lifecycle bookkeeping, so a counter is enough to exercise the
+    /// transitions without the JIT.
     #[derive(Debug, PartialEq, Eq)]
     struct FakeMachine {
         #[allow(dead_code)]

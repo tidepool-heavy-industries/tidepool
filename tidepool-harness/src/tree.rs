@@ -1,7 +1,7 @@
 //! Session-tree vocabulary: nodes, states, holes, badges.
 //!
-//! A NODE is a branch of the cognition tree — a thunk until forced (C1:
-//! forcing is the only way work begins), a resident session once running.
+//! A NODE is a branch of the cognition tree — a thunk until forced (forcing
+//! is the only way work begins), a resident session once running.
 //! A HOLE is a published typed suspension (`runLLMTurn @T`): the model's
 //! next task, the operator's next form, and the approval gate, all at once.
 
@@ -30,7 +30,7 @@ pub struct SiteId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum NodeState {
-    /// Unforced: no session, no tokens, no effects (C1).
+    /// Unforced: no session, no tokens, no effects.
     Thunk,
     Running,
     Suspended {
@@ -42,7 +42,7 @@ pub enum NodeState {
     },
 }
 
-/// Pre-force fan-out badge (C3, three-valued by amendment): `Dynamic`
+/// Pre-force fan-out badge, three-valued: `Dynamic`
 /// converts to `Exact` at materialization and re-checks forcing policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "fan", rename_all = "snake_case")]
@@ -52,7 +52,7 @@ pub enum FanBadge {
     Dynamic,
 }
 
-/// Pre-force price class (C3). DRAFT granularity — segment 30 (forcing)
+/// Pre-force price class. DRAFT granularity — segment 30 (forcing)
 /// may refine; the contract is that a class exists and renders as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

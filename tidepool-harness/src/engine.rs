@@ -47,8 +47,8 @@ use crate::provider::{
 use crate::tree::FanBadge;
 
 /// How a suspended request routes — decoded from its constructor name +
-/// payload (self-iterating-harness WS-B: `Ask`, `RunLLMTurn`, and `Finalize`
-/// are each their own GADT/union-tag now, see [`classify_hole`]).
+/// payload: `Ask`, `RunLLMTurn`, and `Finalize`
+/// are each their own GADT/union-tag, see [`classify_hole`].
 ///
 /// `PartialEq` only (not `Eq`): [`HoleRouting::AskUser`] carries a
 /// [`crate::selfharness::operator::FormSpec`], which derives `PartialEq` but
@@ -75,14 +75,14 @@ pub enum HoleRouting {
     /// `dialogAsk ui` — operator routing; the `Ui` value renders in the form
     /// pane.
     Dialog { ui: Json },
-    /// `askUserRaw spec` (self-iterating-harness Wave 2) — a typed form
+    /// `askUserRaw spec` — a typed form
     /// suspends to a HUMAN OPERATOR, routed by CONSTRUCTOR NAME
     /// (`AskUserWith`), not JSON-key probing. `spec` is the decoded
     /// [`crate::selfharness::operator::FormSpec`] the operator gate renders.
     AskUser {
         spec: crate::selfharness::operator::FormSpec,
     },
-    /// `finalize @T x` (self-iterating-harness WS-B) — an Agent turn hands a
+    /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
     /// does. Its own GADT/union-tag (`Finalize`/`FinalizeWith`), decoded by
@@ -106,10 +106,10 @@ pub struct ClassifiedHole {
 }
 
 /// Decode a suspended request `Value` into a [`ClassifiedHole`] — the ONE
-/// shared classify path `Ask`, `RunLLMTurn`, and `Finalize` all go through
-/// (self-iterating-harness WS-B: each is now its own GADT/union-tag, so this
+/// shared classify path `Ask`, `RunLLMTurn`, and `Finalize` all go through.
+/// Each is its own GADT/union-tag, so this
 /// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
-/// constructor's own wire shape):
+/// constructor's own wire shape:
 ///
 /// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`fan`/
 ///   `prompts` payload shape carried on the `RunLLMTurn` constructor: `fork` →
@@ -252,9 +252,9 @@ fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRoutin
 }
 
 /// Strip one layer of `[...]` from a rendered type string — the FANOUT
-/// element-type derivation (F3: a `runLLMTurnFanout` site's recorded
+/// element-type derivation: a `runLLMTurnFanout` site's recorded
 /// asks.json type is the LIST type `[T]`; the harness recovers the
-/// per-child element type `T` by stripping the outer brackets). `None` if
+/// per-child element type `T` by stripping the outer brackets. `None` if
 /// `ty` isn't bracket-wrapped.
 pub fn strip_list_type(ty: &str) -> Option<&str> {
     ty.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
@@ -471,14 +471,12 @@ pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
 /// Finalize]` stack), which can ONLY resolve a hole via `finalize @T` — it has
 /// no `resume` (the generic [`hole_card`] tells the model to write `resume
 /// expr`, which does not compile against this scoped stack and costs a needless
-/// compile-error/retry round; external-review finding 1). This card names
+/// compile-error/retry round). This card names
 /// `finalize @T` directly.
 /// `imports` are the author modules the turn already imports
 /// (`crate::harness::AnswerContract`) — say so, because a model that believes
 /// `{ty}` is out of scope stops trying to build one and finalizes whatever does
-/// compile instead. That was the live failure this card heads off: three
-/// dogfood runs where the answerer tried `finalize @Contribution`, hit "not in
-/// scope", and settled for a `Text`/tuple.
+/// compile instead (e.g. a `Text`/tuple) rather than the real type.
 pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) -> String {
     let ty = ty.unwrap_or("A");
     let scope = if imports.is_empty() {
@@ -591,18 +589,18 @@ pub struct EngineConfig {
     /// not a hardcoded Agent stack: the self-iterating harness's answerer
     /// session is built from [`crate::selfharness::driver::answerer_decls`]
     /// (gui + finalize only), and its turns must NOT advertise verbs
-    /// (`run`/`runLLMTurn`/…) it cannot compile (W1 effect-scoping).
+    /// (`run`/`runLLMTurn`/…) it cannot compile.
     pub decls: Vec<tidepool_mcp::EffectDecl>,
     /// The suspend THRESHOLD: the tag (position) of the FIRST interposed
     /// effect (`Ask`|`RunLLMTurn`|`Finalize`) in [`Self::decls`] — every effect
     /// at or past this tag suspends the machine rather than dispatching to a
-    /// handler (H3: named for what it is, the suspend threshold, not just
-    /// `Ask`, since `RunLLMTurn`/`Finalize` share the same suspend path).
+    /// handler. Named for what it is, the suspend threshold, not just
+    /// `Ask`, since `RunLLMTurn`/`Finalize` share the same suspend path.
     pub suspend_tag: u64,
     /// The stdlib include dir this config was built from (`include[0]`,
     /// carried separately so a caller building a NARROWER decls list against
     /// the same stdlib — e.g. the self-iterating harness's outer `Eff
-    /// '[RunLLMTurn]` compile, WS-A — doesn't have to reverse-engineer it out
+    /// '[RunLLMTurn]` compile — doesn't have to reverse-engineer it out
     /// of `include`).
     pub prelude_dir: PathBuf,
     /// The project-lib dir this config was built from, if any (see
@@ -629,7 +627,7 @@ pub struct EngineConfig {
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
     /// The context-window budget (in tokens) the runtime watches for MID-LOOP
-    /// emergency compaction (self-iterating-harness W2 / 02-runtime.md
+    /// emergency compaction (self-iterating-harness, 02-runtime.md
     /// Compaction). DISTINCT from [`Self::max_tokens`], which is the ~2048
     /// per-turn *output* cap — this is the whole answerer session's
     /// accumulated *context* size, summed across its turns. At ~80% of this,
@@ -641,14 +639,14 @@ pub struct EngineConfig {
     pub context_window_tokens: Option<u32>,
 }
 
-/// Default context-window budget the emergency-compaction trigger watches
-/// (self-iterating-harness W2). A representative small-model context window;
+/// Default context-window budget the emergency-compaction trigger watches.
+/// A representative small-model context window;
 /// distinct from [`EngineConfig::max_tokens`] (the 2048 per-turn output cap).
 /// The driver's `compaction_threshold_percent` (~80%) is taken against THIS.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
 
 /// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
-/// RunLLMTurn) with `Finalize` (self-iterating-harness WS-B) appended last —
+/// RunLLMTurn) with `Finalize` appended last —
 /// its own interposed effect/tag, sharing `Ask`/`RunLLMTurn`'s suspend path
 /// (see `jit_machine::drive_effect_loop`'s `suspend_tag` threshold: every tag
 /// from the FIRST interposed effect onward suspends, so appending a third
@@ -702,7 +700,7 @@ impl EngineConfig {
 
     /// Build a config for an EXPLICIT decls list — not necessarily the full
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
-    /// driver (WS-A) uses this for its `Eff '[RunLLMTurn]`-only compile
+    /// driver uses this for its `Eff '[RunLLMTurn]`-only compile
     /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
     /// to the literal single-effect row 02-runtime.md locks in, rather than
     /// the full Agent stack.
@@ -844,7 +842,7 @@ pub fn template_turn(
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
 /// hardcoded Agent stack — the self-iterating harness driver's outer `Eff
-/// '[RunLLMTurn]` compile (WS-A) needs a preamble matching ITS OWN (narrower)
+/// '[RunLLMTurn]` compile needs a preamble matching ITS OWN (narrower)
 /// decls, not the Agent's. `stack` must be rendered from the SAME `decls` —
 /// see [`EngineConfig::turn_target`].
 pub fn template_turn_for(
@@ -1108,9 +1106,9 @@ mod tests {
         }
     }
 
-    /// W1/C1: a `Some(framing)` becomes the request's System message verbatim,
-    /// NOT the default `SYSTEM_FRAMING` — the render output actually reaching
-    /// the model is the whole thesis this wave wires.
+    /// A `Some(framing)` becomes the request's System message verbatim,
+    /// NOT the default `SYSTEM_FRAMING` — the self-iterating harness's
+    /// `render` output must reach the model as-is.
     #[test]
     fn assemble_request_uses_framing_as_system_message() {
         let framing = "RENDERED: you are in Deciding mode, loop 3.";
