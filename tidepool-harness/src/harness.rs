@@ -1263,8 +1263,9 @@ impl Harness {
                 }
             }
             // A value-plane BIND turn (`x <- e`) materializes its result into
-            // the node's value plane so a later turn can reference it.
-            // Single-binder only for now (multi-bind is a follow-up).
+            // the node's value plane so a later turn can reference it. ONE
+            // name only: a multi-binder pattern is rejected below rather than
+            // partially materialized.
             TurnResult::Bind {
                 binders,
                 bound,
@@ -1276,6 +1277,23 @@ impl Harness {
                         "value-plane bind requires a node decl plane".into(),
                     ));
                 };
+                // A multi-binder pattern (`(a, b) <- e`) compiles fine and the
+                // extract writes a thin iface naming EVERY bound name, but only
+                // one binding is registered on this node's value plane below.
+                // Taking the first and dropping the rest would leave the type
+                // plane promising names the value plane cannot resolve — a
+                // later turn referencing `b` would typecheck and then fail at
+                // run time. Rejecting is the loud form of the same limit.
+                if binders.len() > 1 {
+                    let names = binders.join(", ");
+                    let msg = format!(
+                        "This node binds one name per turn; `{names}` binds {}. \
+                         Bind them one at a time.",
+                        binders.len()
+                    );
+                    self.push_user_turn(node, &msg)?;
+                    return Err(HarnessError::Resident(msg));
+                }
                 let binder = bound.into_iter().next().ok_or_else(|| {
                     HarnessError::Resident("session-bind emitted no binder metadata".into())
                 })?;

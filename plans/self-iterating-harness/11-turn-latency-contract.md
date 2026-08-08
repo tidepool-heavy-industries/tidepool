@@ -309,7 +309,7 @@ rows appear — see the gap note below. Medians in ms:
 | `template`, `cbor_read`, `asks_parse` | 0 | 0 | 0 |
 | `provider_call` | 0 | 0 | 0 (replayed, not a live model) |
 
-> **`classify_extract` — RETIRED at `f320d21949feffe3d22ac64bee9dc0ffe0802d79`, successor
+> **`classify_extract` — RETIRED at `8d952eca7aa8c6d65871f3b5e66437db5f6a85b4`, successor
 > `extract.classify`.** Its semantics were a SEPARATE process spawn's wall
 > clock — the parse-only `--emit-stmt-binders` lane `run_block` called before
 > compiling. That spawn no longer exists: the one-spawn-per-turn migration
