@@ -95,6 +95,28 @@ pub enum HarnessError {
     NoPendingEscalation(NodeId),
 }
 
+/// What a node must produce to resolve the hole it is answering, and what its
+/// turns need in scope to produce it.
+///
+/// Both halves are required for the "GHC validates the answer against `T`"
+/// guarantee to hold for `finalize`. `ty` pins `finalize` to the hole's answer
+/// type ([`crate::engine::finalize_shim`]) so a wrong-typed answer is a compile
+/// error instead of a value that crosses in-heap into a `T`-typed continuation.
+/// `imports` puts `T` itself in scope: `T` is an author type (the wizard's
+/// `Contribution`, defined in the harness source module), and a turn that cannot
+/// NAME `T` cannot construct one — the model tries `@T`, gets "not in scope",
+/// and settles for whatever does compile. Importing the module that defines `T`
+/// also fixes WHICH `T` the turn means: the same defining module the parent
+/// resolved, hence the same `DataConId` at the crossing.
+#[derive(Debug, Clone)]
+pub struct AnswerContract {
+    /// The hole's rendered answer type, as it appears in `asks.json`.
+    pub ty: String,
+    /// Import lines (without the leading `import`) prepended to every turn on
+    /// this node — the module(s) defining `ty`.
+    pub imports: Vec<String>,
+}
+
 /// Per-node conversation state the Harness keeps live (also derivable from the
 /// log by folding). `transcript` is the message list the turn engine assembles
 /// prompts from; `turn_seq` is the monotonic per-node turn index logged with
@@ -113,6 +135,12 @@ struct NodeConvo {
     /// Monotonic per-node effect sequence number for the logged `Event::Effect`s.
     effect_seq: u64,
     pending: Option<PendingHole>,
+    /// The typed hole this node is currently answering, when it answers by
+    /// `finalize` (the self-iterating harness's answerer). Set per hole by
+    /// [`Harness::set_answer_contract`]; read by [`Harness::run_block`] to pin
+    /// `finalize` to the hole's type and to put that type in scope. `None` for
+    /// every node that isn't driving toward a `finalize`.
+    answer_contract: Option<AnswerContract>,
     /// Compile artifacts of the turn that suspended — the table is needed to
     /// bridge an answer Value against the same constructor set.
     suspend_table: Option<DataConTable>,
@@ -326,7 +354,7 @@ impl Harness {
         provider: Arc<dyn DynModelProvider>,
     ) -> Result<Self, HarnessError> {
         // A trivial effectful seed carrying the full effect-stack ConTags.
-        let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "");
+        let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "", None);
         let boot = compile::compile_turn(&cfg.extract_bin, &boot_src, "result", &cfg.include)
             .map_err(|e| HarnessError::Compile(e.to_string()))?;
         // The fork-child compile config: this node's row minus the
@@ -680,6 +708,7 @@ impl Harness {
                 effect_trace,
                 effect_seq: 0,
                 pending: None,
+                answer_contract: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
                 pending_bind: None,
@@ -934,12 +963,26 @@ impl Harness {
         // so a compile failure below never leaks it (the session is taken only
         // once a compiled fragment is in hand — as the original path did).
         let (session_module, session_include) = self.session_decl_context(node);
-        let merged_imports = match session_module {
-            Some(m) if imports.is_empty() => m,
-            Some(m) => format!("{imports}\n{m}"),
-            None => imports.to_string(),
-        };
-        let src = engine::template_turn(&self.cfg, block, &merged_imports, helpers);
+        // The node's answer contract (when it is driving toward a `finalize`)
+        // contributes both halves: its `imports` put the answer type in scope,
+        // and its `ty` pins `finalize` to that type inside `template_turn`.
+        let contract = self.answer_contract(node);
+        let mut import_lines: Vec<String> = contract
+            .iter()
+            .flat_map(|c| c.imports.iter().cloned())
+            .collect();
+        if !imports.is_empty() {
+            import_lines.push(imports.to_string());
+        }
+        import_lines.extend(session_module);
+        let merged_imports = import_lines.join("\n");
+        let src = engine::template_turn(
+            &self.cfg,
+            block,
+            &merged_imports,
+            helpers,
+            contract.as_ref().map(|c| c.ty.as_str()),
+        );
         let mut include = self.cfg.include.clone();
         if let Some(dir) = session_include {
             include.push(dir);
@@ -2629,6 +2672,27 @@ impl Harness {
             Some(s) => (s.session_import_module(), s.lib_include_dir()),
             None => (None, None),
         }
+    }
+
+    /// Declare what `node` must produce to resolve the hole it is now
+    /// answering — see [`AnswerContract`]. The self-iterating harness driver
+    /// sets this per hole, before pushing the hole card, because its per-loop
+    /// answerer node is REUSED across holes whose types differ. `None` clears
+    /// it (back to the polymorphic `finalize`).
+    ///
+    /// Takes effect from the node's next turn: every turn compiled while it is
+    /// set gets the answer type in scope and `finalize` pinned to it.
+    pub fn set_answer_contract(&self, node: NodeId, contract: Option<AnswerContract>) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.answer_contract = contract;
+        }
+    }
+
+    /// `node`'s current [`AnswerContract`], if one is set.
+    fn answer_contract(&self, node: NodeId) -> Option<AnswerContract> {
+        let convos = self.convos.lock();
+        convos.get(&node).and_then(|c| c.answer_contract.clone())
     }
 
     fn take_session(&self, node: NodeId) -> Result<Session, HarnessError> {

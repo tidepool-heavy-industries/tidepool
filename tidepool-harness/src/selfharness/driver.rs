@@ -38,7 +38,7 @@ use tidepool_runtime::session::ResidentOutcome;
 
 use crate::compile::{self, CompiledTurn};
 use crate::engine::{self, EngineConfig, HoleRouting, TurnOutcome};
-use crate::harness::{Harness, HarnessError};
+use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
@@ -118,6 +118,10 @@ struct OuterSession {
     session: crate::harness::Session,
     cfg: EngineConfig,
     module_name: String,
+    /// The author modules every answerer turn imports
+    /// ([`HarnessSource::answerer_imports`]), so the hole's answer type is in
+    /// scope and resolves to the SAME defining module the outer loop used.
+    answerer_imports: Vec<String>,
 }
 
 /// The outer Harness-monad's OWN decl list — `Eff '[RunLLMTurn, AskUser]`,
@@ -388,6 +392,50 @@ impl SelfHarnessDriver {
         &self.lifecycle
     }
 
+    /// The author modules an answerer turn imports, once bootstrapped — what
+    /// brings the hole's answer type into scope.
+    fn answerer_imports(&self) -> &[String] {
+        self.outer.as_ref().map_or(&[], |o| &o.answerer_imports)
+    }
+
+    /// The [`AnswerContract`] for a hole of type `ty`: pin `finalize` to it and
+    /// import the author modules so the type resolves — to the SAME defining
+    /// module the outer loop resolved, so the finalized value's constructor ids
+    /// match at the crossing.
+    ///
+    /// `None` when the hole's type is unknown (no `asks.json` entry): there is
+    /// nothing to pin `finalize` to, so the turn keeps the polymorphic verb.
+    fn answer_contract(&self, ty: Option<&str>) -> Option<AnswerContract> {
+        Some(AnswerContract {
+            ty: ty?.to_string(),
+            imports: self.answerer_imports().to_vec(),
+        })
+    }
+
+    /// The author-facing explanation appended to a compile-error retry when the
+    /// pinned answer type is what failed to resolve.
+    ///
+    /// Pinning `finalize` to the hole's type means the turn cannot compile
+    /// unless that type is importable by the answerer — so a harness whose
+    /// author types live in the same module as `loop` fails here, every round,
+    /// until the round cap. That must not read as a mysterious not-in-scope
+    /// loop: say what was imported and what the author has to change.
+    fn types_in_scope_hint(&self, ty: &str, error: &str) -> Option<String> {
+        if !(error.contains("Not in scope") && error.contains(ty)) {
+            return None;
+        }
+        let imported = match self.answerer_imports() {
+            [] => "no author modules are importable by this stack".to_string(),
+            mods => format!("this turn imports {}", mods.join(", ")),
+        };
+        Some(format!(
+            "\n\nNOTE: `{ty}` is not in scope and {imported}. The answering stack \
+             cannot import the module that defines `loop` (its `runLLMTurn` is not \
+             in this effect row), so the harness author must move `{ty}` into a \
+             separate module that `loop`'s module imports."
+        ))
+    }
+
     /// Override the operator-input gate (default [`StdinGate`]). A web/GUI
     /// implementation of [`OperatorGate`] replaces the headless stdin
     /// behavior; a test can inject a scripted gate instead of driving real
@@ -490,6 +538,7 @@ impl SelfHarnessDriver {
             "pure (toJSON (0 :: Int))",
             "",
             "",
+            None,
         );
         let boot = compile::compile_turn(
             &outer_cfg.extract_bin,
@@ -529,6 +578,7 @@ impl SelfHarnessDriver {
             session,
             cfg: outer_cfg,
             module_name: source.module_name.clone(),
+            answerer_imports: source.answerer_imports.clone(),
         });
         Ok(())
     }
@@ -549,7 +599,8 @@ impl SelfHarnessDriver {
             outer.module_name,
             state_cross::LOADED_QUALIFIER
         );
-        let src = engine::template_turn_for(&outer_decls(), &outer.cfg, code, &imports, helpers);
+        let src =
+            engine::template_turn_for(&outer_decls(), &outer.cfg, code, &imports, helpers, None);
         compile::compile_turn(&outer.cfg.extract_bin, &src, "result", &outer.cfg.include)
             .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))
     }
@@ -855,11 +906,18 @@ impl SelfHarnessDriver {
             )
         })?;
 
+        // Declare THIS hole's answer contract on the (reused) answerer node
+        // before it takes a turn: the type pins `finalize`, and the harness's
+        // types module puts that type in scope. Set per hole, because
+        // consecutive holes in one loop can want different types.
+        self.agent
+            .set_answer_contract(node, self.answer_contract(ty));
+
         // Push the hole card onto the EXISTING answerer node, accumulating
         // context rather than spawning a fresh one. The SCOPED answerer card
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
         // `resume expr` (which does not compile against this stack — finding 1).
-        let child_prompt = engine::answerer_hole_card(prompt, ty);
+        let child_prompt = engine::answerer_hole_card(prompt, ty, self.answerer_imports());
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
@@ -1034,13 +1092,17 @@ impl SelfHarnessDriver {
                 }
                 // A compile error: feed it back so the answerer can correct,
                 // same as the corrective-retry loop in `run_to_hole_or_done`.
+                // A wrong-typed `finalize` now lands HERE rather than crossing
+                // in-heap and case-trapping — that is what pinning `finalize`
+                // to the hole's type buys.
                 Err(HarnessError::Compile(msg)) => {
+                    let hint = self.types_in_scope_hint(ty_label, &msg).unwrap_or_default();
                     self.agent.push_user_turn(
                         node,
                         &format!(
                             "That Haskell did not compile. Fix it and reply with a corrected \
                              single ```haskell block that evaluates `finalize @{ty_label} \
-                             (value :: {ty_label})`.\n\nGHC error:\n{msg}"
+                             (value :: {ty_label})`.\n\nGHC error:\n{msg}{hint}"
                         ),
                     )?;
                 }

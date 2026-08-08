@@ -473,15 +473,30 @@ pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
 /// expr`, which does not compile against this scoped stack and costs a needless
 /// compile-error/retry round; external-review finding 1). This card names
 /// `finalize @T` directly.
-pub fn answerer_hole_card(prompt: &str, ty: Option<&str>) -> String {
+/// `imports` are the author modules the turn already imports
+/// (`crate::harness::AnswerContract`) — say so, because a model that believes
+/// `{ty}` is out of scope stops trying to build one and finalizes whatever does
+/// compile instead. That was the live failure this card heads off: three
+/// dogfood runs where the answerer tried `finalize @Contribution`, hit "not in
+/// scope", and settled for a `Text`/tuple.
+pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) -> String {
     let ty = ty.unwrap_or("A");
+    let scope = if imports.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " `{ty}` is already in scope (this turn imports {}) — construct a \
+             real one, do not substitute a tuple or `Text`.",
+            imports.join(", ")
+        )
+    };
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
          Answer by evaluating `finalize @{ty} (value :: {ty})` in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop. (To gather operator input first, evaluate a `askUser` form; bind \
-         its result, then `finalize`.)"
+         loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
+         bind its result, then `finalize`.)"
     )
 }
 
@@ -720,12 +735,56 @@ impl EngineConfig {
 // Turn templating
 // ---------------------------------------------------------------------------
 
+/// The monomorphic `finalize` a turn compiles against when the hole it is
+/// answering has a known type `T` — the shim that makes "GHC validates the
+/// answer against T" TRUE for `finalize`.
+///
+/// `Tidepool.Effects`' own `finalize` is `forall v a effs. Member Finalize effs
+/// => v -> Eff effs a`: `v` is unconstrained, so `finalize someText` against a
+/// `T`-typed hole compiles and the `Text` crosses in-heap into a `T`-typed
+/// continuation — a constructor-tag trap at the far side, past every check.
+/// Pinning `v` turns that into a GHC error the corrective-retry loop feeds back.
+///
+/// The signature keeps `finalize`'s TYVAR SHAPE rather than collapsing to
+/// `T -> M a`, because both are load-bearing at the call sites models actually
+/// write:
+/// - `v` stays the FIRST tyvar, so a visible `finalize @T x` still binds `v`
+///   (collapsing to `forall a. T -> M a` would silently bind `a` instead).
+/// - `a` stays free, so the template's `toJSON _r` wrapper defaults it. Pinning
+///   `a` to `T` would demand a `ToJSON T` the hole's type need not have.
+/// - `Member Finalize effs` stays a real constraint, so the dictionary rides as
+///   a leading value argument at the shim's call site — the shape
+///   `Translate.hs`'s `splitTrailingArgs` re-applies verbatim when it head-swaps
+///   to `finalizeSited`.
+///
+/// The body applies `@T` explicitly so the intercepted call site is monomorphic
+/// in Core (`checkFinalizeType` rejects a leftover tyvar); the given `v ~ T`
+/// supplies the cast for the argument.
+pub fn finalize_shim(ty: &str) -> String {
+    let q = tidepool_mcp::EFFECTS_QUALIFIER;
+    format!(
+        "finalize :: forall v a effs. (v ~ ({ty}), Member Finalize effs) => v -> Eff effs a\n\
+         finalize __answer = {q}.finalize @({ty}) __answer"
+    )
+}
+
 /// Wrap a model-written `M a` block as a full templated module the extract can
 /// compile, with optional extra `helpers` (e.g. the answerer's `resume`) and
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
-pub fn template_turn(cfg: &EngineConfig, code: &str, imports: &str, helpers: &str) -> String {
-    template_turn_for(&cfg.decls, cfg, code, imports, helpers)
+///
+/// `finalize_ty` pins `finalize` to the answer type of the hole this turn is
+/// answering (see [`finalize_shim`]); `None` leaves the polymorphic
+/// `Tidepool.Effects` verb in scope unchanged, which is what every turn that
+/// isn't answering a typed hole compiles against.
+pub fn template_turn(
+    cfg: &EngineConfig,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    finalize_ty: Option<&str>,
+) -> String {
+    template_turn_for(&cfg.decls, cfg, code, imports, helpers, finalize_ty)
 }
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
@@ -739,10 +798,30 @@ pub fn template_turn_for(
     code: &str,
     imports: &str,
     helpers: &str,
+    finalize_ty: Option<&str>,
 ) -> String {
-    let preamble = tidepool_mcp::build_preamble(decls, false);
     let stack = cfg.effect_stack_type();
-    tidepool_mcp::template_haskell(&preamble, &stack, code, imports, helpers, None, None)
+    let (preamble, helpers) = match finalize_ty {
+        Some(ty) => (
+            tidepool_mcp::build_preamble_shadowing_effects(decls, false, &["finalize"]),
+            merge_helpers(&finalize_shim(ty), helpers),
+        ),
+        None => (
+            tidepool_mcp::build_preamble(decls, false),
+            helpers.to_string(),
+        ),
+    };
+    tidepool_mcp::template_haskell(&preamble, &stack, code, imports, &helpers, None, None)
+}
+
+/// Join two `helpers` blocks into one, dropping an empty side (both land as
+/// top-level declarations, so a blank line between them is enough).
+fn merge_helpers(first: &str, rest: &str) -> String {
+    if rest.trim().is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}\n\n{rest}")
+    }
 }
 
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —

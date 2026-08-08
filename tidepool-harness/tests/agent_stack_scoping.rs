@@ -56,7 +56,7 @@ fn compile_against(
     imports: &str,
 ) -> Result<compile::CompiledTurn, compile::CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
-    let source = template_turn_for(&cfg.decls, &cfg, code, imports, "");
+    let source = template_turn_for(&cfg.decls, &cfg, code, imports, "", None);
     compile::compile_turn(&cfg.extract_bin, &source, "result", &cfg.include)
 }
 

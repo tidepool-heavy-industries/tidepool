@@ -214,6 +214,7 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
         "(finalize @(Int -> Int) (\\x -> x + 1) :: M ())\n",
         "",
         "",
+        None,
     );
     let result =
         tidepool_harness::compile::compile_turn(&cfg.extract_bin, &src, "result", &cfg.include);
