@@ -15,6 +15,7 @@
 //! for the pure / effectful / compile-only recipes.
 
 pub mod compare;
+pub mod differential;
 pub mod dispatch;
 pub mod eval_harness;
 pub mod gen;
