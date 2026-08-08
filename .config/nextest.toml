@@ -34,6 +34,38 @@
 # `cargo test` too — a pre-existing bug from the MachineState migration,
 # unrelated to nextest; see branch report).
 #
+# COMPILING A PROC-MACRO TEST *IS* EXTRACTION (stdlib-fidelity's find).
+# `haskell_eval!`/`haskell_inline!` run tidepool-extract during macro
+# EXPANSION, so the GHC work happens at BUILD time, in rustc, not in a test
+# process. Three consequences, none of which any setting in this file can fix:
+#   - `default-filter` below is a RUN-time filter. `cargo nextest run` still
+#     BUILDS tidepool-macro's integration binaries; it only declines to run
+#     them.
+#   - `cargo check --workspace --all-targets` — everyone's standard gate —
+#     does the same.
+#   - the `ghc-heavy` test group cannot see any of it. A group caps concurrent
+#     test PROCESSES; this is rustc.
+# So neither command is unconditionally GHC-free, and neither takes a
+# ghc-slots slot. What bounds it is the macro's own content-addressed cache
+# (`<crate>/target/tidepool-cbor/<basename>-<key>`, keyed on source bytes +
+# target binding): 14 macro invocations across the four expanding targets
+# (tidepool-macro/tests/{basic,hs_eval}.rs, examples/{guess,tide}) collapse to
+# 5 distinct keys — measured, 3 + 1 + 1 cache dirs. That cache is gitignored
+# and lives under each CRATE's own `target/`, not the workspace target dir, so
+# `cargo clean` does not touch it. The cost is ~5 un-slotted extract spawns
+# ONCE per worktree, re-paid only on a fresh worktree or an edit to the .hs
+# source — which does mean every agent rebasing onto a batch like this pays it
+# on their first build.
+# NOT gated behind a feature, deliberately: gating tidepool-macro's test pair
+# would leave examples/guess and examples/tide expanding the same macros from
+# their bins, so the "quick tier is GHC-free by construction" claim still
+# would not hold — and gating the examples costs the demos their build
+# coverage. A partial gate buys churn and leaves the false claim standing.
+# If that ~5 ever stops being the bound, the fix is a slot at the spawn point
+# in tidepool-macro/src/expand.rs, not a filter here; note that tidepool-macro
+# is published, so the semaphore path would have to arrive by env, not be
+# hard-coded.
+#
 # Net result: no nextest `test-group` overrides are needed for correctness.
 # The `#[serial]`/`serial_test` annotations left in test sources are now
 # vestigial (serial_test's default lock is in-process only — this workspace
@@ -60,7 +92,9 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # Every test in tidepool-runtime/repl/mcp/handlers forks a heavyweight GHC
 # `extract` compile (seconds each) — they are "run sometimes", not on every
 # quick inner-loop check. The pure-Rust crates (codegen/eval/repr/effect/bridge/
-# optimize/bignum) still run by default and stay fast.
+# optimize/bignum) still run by default and stay fast. This filter governs what
+# RUNS; it says nothing about what gets BUILT — see the proc-macro note above
+# before calling this tier GHC-free.
 #
 # To run EVERYTHING (the full battery), add `--ignore-default-filter` — this is
 # what `scripts/battery.sh` does, so it keeps the slow-timeout + ghc-heavy cap
