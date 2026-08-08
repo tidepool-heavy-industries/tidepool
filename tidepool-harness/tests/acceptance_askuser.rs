@@ -12,6 +12,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -109,6 +111,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),

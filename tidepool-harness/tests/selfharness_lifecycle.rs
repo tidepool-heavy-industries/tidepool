@@ -15,6 +15,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -137,6 +139,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {
@@ -193,6 +196,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {
@@ -251,6 +255,7 @@ async fn poisoned_driver_refuses_entry_points() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {

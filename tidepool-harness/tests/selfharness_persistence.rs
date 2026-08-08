@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -149,6 +151,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("restart").join("checkpoint.json");
 
@@ -361,6 +364,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("crash").join("checkpoint.json");
     let (mut driver, source) = compaction_driver(checkpoint_path.clone());
@@ -475,6 +479,7 @@ fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
 /// sanity check independent of `TIDEPOOL_EXTRACT`.
 #[test]
 fn default_checkpoint_path_is_under_the_cache_dir() {
+    let _cache_guard = support::isolate_cache();
     let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![]));
@@ -533,6 +538,7 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("stale-fp").join("checkpoint.json");
     std::fs::copy(
@@ -624,6 +630,7 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("decode-retry").join("checkpoint.json");
     let current_source = source();

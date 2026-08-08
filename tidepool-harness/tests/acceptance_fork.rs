@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -82,6 +84,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),

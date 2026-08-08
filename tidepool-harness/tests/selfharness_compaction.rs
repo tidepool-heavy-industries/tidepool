@@ -27,6 +27,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -174,6 +176,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let second_hole = Arc::new(Mutex::new(None));
     let provider: Arc<dyn DynModelProvider> = Arc::new(InPlaceProbeProvider {
@@ -349,6 +352,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let saw_summarize = Arc::new(Mutex::new(false));
     let provider: Arc<dyn DynModelProvider> = Arc::new(MultiRoundProvider {

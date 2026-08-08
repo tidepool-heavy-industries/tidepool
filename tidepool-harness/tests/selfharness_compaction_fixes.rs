@@ -18,6 +18,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -198,6 +200,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let (mut driver, source) = make_driver(&scratch("c2"), 600, Arc::new(LogObserver));
     // The first hole finalizes in ONE answerer round (call #1). Cap = 1: after
@@ -229,6 +232,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     // Both drivers share the SAME checkpoint path — that IS the restart.
     let durable = scratch("c3");
@@ -281,6 +285,7 @@ async fn c4_compaction_trigger_event_carries_payload() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let observer = Arc::new(CaptureObserver::default());
     let triggers = observer.triggers.clone();

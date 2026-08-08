@@ -16,6 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -107,6 +109,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let calls = Arc::new(Mutex::new(0u32));
     let nudge_seen_at = Arc::new(Mutex::new(None));
