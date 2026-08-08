@@ -367,12 +367,39 @@ never changes behavior and never fails. A new path that silently supports fewer
 extensions than the one it replaces breaks that rule at the only place it is
 load-bearing.
 
-The corpus is what enforces it. Extension-bearing decl shapes (a `\case` decl, a
-`[fmt|…|]` decl, and a few more) belong in the equivalence corpus *now*, while
-they still pass — the corpus validates the old path against the new interface
-while `run_turn` still two-spawns, so extract-side narrowing is invisible until
-the swap. Adding them before the swap makes it gated by a failing test instead of
-by someone remembering. The note documents; the corpus enforces.
+The corpus is what enforces it. Extension-bearing decl shapes belong in the
+equivalence corpus *now*, while they still pass — the corpus validates the old
+path against the new interface while `run_turn` still two-spawns, so extract-side
+narrowing is invisible until the swap. Adding them before the swap makes it gated
+by a failing test instead of by someone remembering. The note documents; the
+corpus enforces.
+
+**Only lexer- and parser-level extensions can serve as tripwires here, which
+bounds what the corpus can cover.** Probed directly against the built extract,
+comparing `--emit-binders` on raw text versus text behind `wrap_decls`' pragma
+block:
+
+| Extension | raw | wrapped | usable as a tripwire |
+|---|---|---|---|
+| `LambdaCase` | fails, *Illegal \case* | parses | yes |
+| `QuasiQuotes` | fails, quasiquote parse error | parses | yes |
+| `MultiWayIf` | fails, *Illegal multi-way if-expression* | parses | yes |
+| `GADTs` | parses | parses | no |
+| `RecordWildCards` | parses | parses | no |
+| `TypeApplications` | parses | parses | no |
+
+The three that work are the ones GHC rejects in the lexer/parser. The rest have
+their legality check deferred to the renamer, which a parse-only binder
+extraction never reaches, so they behave identically with and without the pragma
+block and cannot detect its absence.
+
+Two consequences. First, the corpus covers the *detectable* part of the decl
+path's extension surface, not all seventeen extensions — a regression confined to
+a renamer-deferred extension would be invisible to any parse-only corpus case, so
+this is a partial guard rather than a complete one. Second, most of `wrap_decls`'
+pragma block has no effect on parse-only binder extraction today. That is an
+observation, not a cleanup proposal: the block costs nothing, and it would start
+mattering again the moment that path does more than parse.
 
 Fix: `--turn-template decl=<file>`, the caller supplying the decl *parse* wrapper
 the same way it supplies bind and expr wrappers. That keeps the pragma set
