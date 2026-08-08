@@ -297,9 +297,22 @@ pNumber = do
                    Just '-' -> nextC >> pure True
                    _        -> pure False
           ds  <- takeWhile1P isDigit "expected a digit in the exponent"
-          let n = fromInteger (accumDigits ds) :: Int
-          pure (Just (if es then negate n else n))
+          if length ds > maxExponentDigits
+            then fail ("exponent has too many digits (" ++ show (length ds) ++ "); JSON permits "
+                       ++ "an arbitrarily large exponent, but this parser rejects one over "
+                       ++ show maxExponentDigits ++ " digits rather than silently wrapping the "
+                       ++ "Int magnitude")
+            else let n = fromInteger (accumDigits ds) :: Int
+                 in pure (Just (if es then negate n else n))
         _ -> pure Nothing
+
+-- | Exponent digit-count cap: keeps the narrowing @'fromInteger' :: Integer ->
+-- 'Int'@ in 'pNumber''s exponent path from silently wrapping on a
+-- pathological literal (e.g. @[j|1e99999999999999999999|]@, valid JSON
+-- grammar). 6 digits (magnitude up to 999999) is orders of magnitude beyond
+-- any real exponent while leaving Int's ~19-digit range no chance of overflow.
+maxExponentDigits :: Int
+maxExponentDigits = 6
 
 -- | Accumulate a run of decimal digit characters into a non-negative 'Integer'.
 accumDigits :: String -> Integer

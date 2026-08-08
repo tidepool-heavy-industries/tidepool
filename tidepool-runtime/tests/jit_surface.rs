@@ -1467,6 +1467,20 @@ fn qq_json_pattern_matches_exact_large_integer() {
     );
 }
 
+/// JSON permits an arbitrarily large exponent, but `pNumber` narrows the
+/// exponent digits to `Int` (`fromInteger :: Integer -> Int`) before
+/// splicing — unguarded, a pathological exponent like this one would
+/// silently WRAP the Int rather than erroring, producing a wrong-but-quiet
+/// `Scientific`. `maxExponentDigits` (Json.hs) rejects it instead. NOTE:
+/// per the TL's fold-before-verify instruction, this probe has not executed
+/// — the marker is derived by hand from the error string `pNumber`
+/// constructs (`"exponent has too many digits (" ++ show (length ds) ++
+/// ") ..."`), not confirmed by a run.
+#[test]
+fn qq_json_exponent_overflow_rejected_not_wrapped() {
+    fails_loudly_with_imports(QQ_IMPORTS, "pure [j|1e9999999|]", "too many digits");
+}
+
 /// A raw (unescaped) control character inside a `[j|…|]` string literal is a
 /// compile-time error naming the offending code point — the JSON grammar the
 /// quoter advertises never allowed a literal control byte inside a string.
