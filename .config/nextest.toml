@@ -140,8 +140,10 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # required before launching GHC-heavy work (scripts/battery.sh and
 # scripts/battery-shard.sh now take one for you).
 #
-# 3 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh is at 5
-# and moves with box capacity). The two numbers answer different questions:
+# 3 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
+# moves with box capacity — it has been 3, 5, and 4 within a day; do not
+# copy whatever it says today into here). The two numbers answer different
+# questions:
 # slots bound how many GHC-heavy RUNS proceed at once, this bounds how many
 # extract compiles ONE run fans out to. Worst case is their product, so
 # raising this multiplies against every slot — the incident budget is "one
