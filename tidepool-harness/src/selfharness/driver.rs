@@ -651,14 +651,24 @@ impl SelfHarnessDriver {
         // rebuilds it. If recovery itself cannot bootstrap, the driver has no
         // path back to a usable outer session — escalate past `Failed`
         // (recoverable) to `Poisoned` (not) rather than sit in a stale
-        // `Failed` that will never clear.
+        // `Failed` that will never clear. A bootstrap failure that is NOT a
+        // recovery attempt (the very first cycle a driver ever runs) is an
+        // ordinary cycle error: discard whatever partial state accumulated
+        // and publish `Failed`, same as any other cycle error, so the next
+        // call retries bootstrap rather than leaving `lifecycle()` reporting
+        // the cosmetic `Idle` a driver starts in.
         let recovering_from_failure = matches!(self.lifecycle, SelfHarnessState::Failed { .. });
         if let Err(e) = self.bootstrap(source) {
-            if recovering_from_failure {
-                self.lifecycle = SelfHarnessState::Poisoned {
+            self.discard_resident_state();
+            self.lifecycle = if recovering_from_failure {
+                SelfHarnessState::Poisoned {
                     reason: e.to_string(),
-                };
-            }
+                }
+            } else {
+                SelfHarnessState::Failed {
+                    reason: e.to_string(),
+                }
+            };
             return Err(e);
         }
         self.emit(Event::LoopBoundary);
