@@ -27,19 +27,25 @@
 use crate::layout;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use tidepool_heap::layout as heap_layout;
 
 // ── Lambda Registry ──────────────────────────────────────────
 
 thread_local! {
-    static LAMBDA_REGISTRY: RefCell<Option<LambdaRegistry>> = const { RefCell::new(None) };
+    // Rc, not an owned LambdaRegistry: `CodegenPipeline` keeps its own Rc to
+    // the same accumulated registry (see `build_lambda_registry`) and extends
+    // it in place via `Rc::make_mut` between runs. Installing/clearing here is
+    // then a refcount bump/drop (O(1)), not a clone of the whole map — the
+    // thing that made the per-run rebuild quadratic in session length (D7).
+    static LAMBDA_REGISTRY: RefCell<Option<Rc<LambdaRegistry>>> = const { RefCell::new(None) };
 }
 
 /// Maps JIT code pointers to human-readable lambda names.
 ///
 /// Populated during compilation, queried during execution to identify
 /// which closure is being called when debugging crashes.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LambdaRegistry {
     /// code_ptr → lambda name
     entries: HashMap<usize, String>,
@@ -89,12 +95,20 @@ impl LambdaRegistry {
 }
 
 /// Install a registry as the thread-local singleton. Returns the old one if any.
-pub fn set_lambda_registry(registry: LambdaRegistry) -> Option<LambdaRegistry> {
+pub fn set_lambda_registry(registry: Rc<LambdaRegistry>) -> Option<Rc<LambdaRegistry>> {
     LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().replace(registry))
 }
 
 /// Clear the thread-local registry.
-pub fn clear_lambda_registry() -> Option<LambdaRegistry> {
+///
+/// This only drops the thread-local's *handle* (an `Rc` clone) to the
+/// registry a run installed — it does not touch `CodegenPipeline`'s own copy,
+/// which is the accumulating source of truth across the pipeline's whole
+/// lifetime (D7). Dropping this handle is exactly what lets the next
+/// `build_lambda_registry` call extend the shared registry in place via
+/// `Rc::make_mut` instead of falling back to a clone: once this is the only
+/// remaining reference, the refcount is back to 1.
+pub fn clear_lambda_registry() -> Option<Rc<LambdaRegistry>> {
     LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().take())
 }
 

@@ -381,6 +381,12 @@ impl Drop for RegistryGuard {
             (*self.machine_state).clear_parked_streams();
             (*self.machine_state).reset_call_depth();
         }
+        // D7: this drops only the thread-local's Rc *handle* to the lambda
+        // registry this run installed — the accumulated registry itself lives
+        // in `self.pipeline` (an `Rc<LambdaRegistry>` field) and is untouched.
+        // Dropping the handle here is what lets the NEXT `install_registries`
+        // call's `build_lambda_registry` extend that shared registry in place
+        // (refcount back to 1) instead of falling back to a clone.
         crate::debug::clear_lambda_registry();
         crate::host_fns::set_exec_context("");
         crate::machine_state::restore_current_machine(self.prev_machine);
