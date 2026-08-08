@@ -17,7 +17,7 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 /// with Meta appended, then the interposed effects (Ask, RunLLMTurn, Fork)
 /// appended last. This is the SAME order `build_debug_stack`'s handler HList wires
 /// (the interposed effects are appended separately by `TidepoolMcpServer::new`,
-/// which pushes `ask_decl()`/`runllmturn_decl()` onto whatever
+/// which pushes `ask_decl()`/`runllmturn_decl()`/`fork_decl()` onto whatever
 /// `H::collect_decls()` reports) — so a `TidepoolMcpServer` built on
 /// `build_debug_stack`'s handlers reproduces this exact list independently,
 /// and `effect_names`/`helper_sigs` (derived from it below) can never drift
