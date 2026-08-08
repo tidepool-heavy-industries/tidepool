@@ -712,17 +712,20 @@ fn build_accumloop(spec: &AccumLoopSpec) -> CoreExpr {
 
 fn cfg() -> Config {
     // Case count is overridable via PROPTEST_CASES (env) for a small "nursery"
-    // run vs. the default 400 (the spec's 300-500 band). Failure persistence is
-    // OFF: these tests run proptest's runner directly inside a big-stack thread,
-    // so the source-file-relative regressions path can't be resolved and only
-    // emits a noisy warning.
+    // run vs. the default 400 (the spec's 300-500 band).
+    //
+    // Counterexample persistence resolves against the calling source file, which
+    // a hand-built `Config` must supply — the `proptest!` macro does it
+    // implicitly. Running the runner inside a big-stack thread is irrelevant to
+    // that resolution; without `source_file` the path is simply unresolvable, and
+    // a failing seed would die with the process instead of being replayed.
     let cases = std::env::var("PROPTEST_CASES")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(400);
     let mut c = Config::with_cases(cases);
     c.max_shrink_iters = 6000;
-    c.failure_persistence = Some(Box::new(proptest::test_runner::FileFailurePersistence::Off));
+    c.source_file = Some(file!());
     c
 }
 
