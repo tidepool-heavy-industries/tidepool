@@ -241,6 +241,46 @@ Revisiting rule 2 in full is a standalone piece of work whose prerequisite is
 exposing the typechecked module from the pipeline. It is not blocked by anything
 here.
 
+## What the two-placeholder contract does not cover
+
+Building the interface surfaced three cases the `{{TURN}}` / `{{BINDERS}}` pair
+cannot express as-is. Resolutions, none of which move a classification decision
+into Rust:
+
+**The input payload lane — no change needed.** Several wrappers splice a runtime
+JSON blob as an `input :: Aeson.Value` binding (`begin_user_module`'s
+`input: Option<&serde_json::Value>`). This is not a third placeholder: the
+payload does not vary with the verdict, so the caller bakes it into
+`TurnTemplate.source` when it builds the template, exactly as it bakes in the
+pragma block, imports, helpers, and effect stack. Anything knowable before the
+verdict belongs in the template source, not in a placeholder.
+
+**Placement is the template's business, so the template declares it.** A bind
+turn whose text begins with `let ` is rewritten to the layout-safe explicit-brace
+form `let { … }` before being spliced into a `do` block (`push_braced_stmt`) —
+without it, a `let` at column 1 breaks the block's layout. That is a *transform*
+of the turn text, so a byte-exact verbatim splice cannot reproduce it. The fix is
+a second placement placeholder rather than a template language: `{{TURN}}` places
+the text verbatim, `{{TURN_STMT}}` places it as a `do`-block statement, applying
+exactly the normalization `push_braced_stmt` performs today. Which one a template
+uses is a property of where its splice point sits, decided when the template is
+written; byte-identity against the current wrapper stays testable either way.
+
+**The verdict space has four shapes, not three.** A bind that binds no name
+(`_ <- e`, `(_, _) <- e`) is a different wrapper choice from a bind that binds
+one: the discarding form runs the right-hand side for its effects and keeps no
+value. Today the repl detects the empty binder list, strips the pattern with
+`split_discard_bind`, and re-routes the right-hand side as an expression. Passing
+an empty name list through to a bind compile does not work — the extract rejects
+it (`session-bind requires at least one --bind-name`) — so the discarding bind
+needs its own template kind, selected by the extract from its own verdict.
+
+Doing it that way is also more correct than the status quo, incidentally: the
+extract splices the right-hand side from the parsed statement, whereas
+`split_discard_bind` finds the first `<-` in the raw text. The lexical split
+happens to hold for the shapes seen so far, but it is a text scan standing in for
+a parse.
+
 ## Rust side
 
 `tidepool-runtime/src/session/turn.rs` grows the request/result pair the
@@ -271,6 +311,13 @@ wrapped: while the extract mode is being built it performs the two spawns
 deleted outright, along with the bind-turn binder spawn. There is no
 configuration switch between the two and no surviving two-spawn path — the
 interim body is scaffolding with a deletion date, not a fallback seam.
+
+Verifying this crate: `cargo nextest run -p tidepool-runtime` runs **nothing** —
+`.config/nextest.toml`'s `default-filter` classifies `tidepool-runtime` as
+GHC-extract-heavy and skips all 48 of its binaries, so the command exits "no
+tests to run" and reads as a pass to anything not checking the count. The turn
+lane's pure tests need
+`cargo nextest run --ignore-default-filter -p tidepool-runtime --lib -E 'test(turn::tests)'`.
 
 Non-negotiable invariants:
 
