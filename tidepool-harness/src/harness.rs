@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -301,6 +302,14 @@ pub struct LiveTurn {
 pub struct Harness {
     tree: NodeTree<()>,
     cfg: EngineConfig,
+    /// Unique per-construction run identity (F3 fix), scoping this
+    /// instance's node decl-plane directories to
+    /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
+    /// sharing the same cache root (a different process, or a second
+    /// Harness in this one) can never construct the same node dir and
+    /// `remove_dir_all` the other's live declarations out from under it.
+    /// See [`generate_run_id`] and [`node_session_dir`].
+    run_id: String,
     /// The row a FORK CHILD's answer block compiles against: the node's own
     /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
     /// structurally cannot fork — a `forkAll` in a child block is a GHC
@@ -356,6 +365,12 @@ impl Harness {
         cfg: EngineConfig,
         provider: Arc<dyn DynModelProvider>,
     ) -> Result<Self, HarnessError> {
+        let run_id = generate_run_id();
+        // Best-effort: sweep run dirs left behind by processes that are
+        // provably dead (see `sweep_stale_run_dirs`). Never blocks
+        // construction — a failed/skipped sweep just leaves stale dirs on
+        // disk a little longer.
+        sweep_stale_run_dirs();
         // A trivial effectful seed carrying the full effect-stack ConTags.
         let boot_stack = cfg.turn_target(None)?.stack;
         let boot_src = engine::template_turn(&cfg, &boot_stack, "pure (toJSON (0 :: Int))", "", "");
@@ -381,6 +396,7 @@ impl Harness {
         Ok(Harness {
             tree: NodeTree::new(writer),
             cfg,
+            run_id,
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
@@ -757,14 +773,92 @@ impl Harness {
     /// the node's compile include, so a decl can resolve the same imports a turn
     /// does (stdlib, the generated effects module).
     fn node_decl_plane(&self, node: NodeId) -> Option<SessionLib> {
-        let root = tidepool_runtime::paths::cache_dir()
-            .join("harness-sessions")
-            .join(format!("node-{}", node.0));
-        // Fresh: clear any stale gen modules left by a prior run at this node id.
+        let root = node_session_dir(&self.run_id, node);
+        // Fresh: clear any stale gen modules left by a prior run of THIS
+        // instance at this node id. Scoped under `run_id`, so this can never
+        // reach into another live Harness's node dir (F3).
         let _ = std::fs::remove_dir_all(&root);
         SessionLib::open(SessionId(node.0), &root, ModuleEnv::standalone_default())
             .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
             .ok()
+    }
+}
+
+/// The one place the node decl-plane path shape is constructed:
+/// `<cache>/harness-sessions/<run_id>/node-<node-id>`. `run_id` scopes the
+/// whole subtree to ONE `Harness` instance (see [`generate_run_id`]), so two
+/// Harnesses sharing a cache root — two processes, or two instances in one
+/// process — never resolve to the same node directory (F3: without this,
+/// both number nodes from 0 and `node_decl_plane`'s `remove_dir_all` on
+/// node-0 creation would delete the survivor's live declarations).
+fn node_session_dir(run_id: &str, node: NodeId) -> PathBuf {
+    tidepool_runtime::paths::cache_dir()
+        .join("harness-sessions")
+        .join(run_id)
+        .join(format!("node-{}", node.0))
+}
+
+/// Process-lifetime counter backing [`generate_run_id`] — process id alone is
+/// not a unique run identity, since one process can hold more than one
+/// `Harness` (e.g. a parent + fork-child harness, or two in one test binary).
+static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A run identity unique to this `Harness::new` call: `<pid>-<nanos>-<seq>`.
+/// `seq` (a per-process monotonic counter) alone already guarantees
+/// in-process uniqueness; `pid` distinguishes concurrent processes; the
+/// wall-clock component is extra defense against pid reuse across a long
+/// uptime (relevant only to [`sweep_stale_run_dirs`], which reads `pid` back
+/// out of the directory name).
+fn generate_run_id() -> String {
+    let pid = std::process::id();
+    let seq = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}-{nanos}-{seq}")
+}
+
+/// Best-effort cleanup of run-scoped session dirs left behind by processes
+/// that exited without ever tearing down (killed, crashed, `kill -9`'d).
+/// NOT a daemon: runs synchronously, once, inline in [`Harness::new`].
+///
+/// Deletion is gated on PID LIVENESS, not age: a dir is removed only when
+/// `/proc/<pid>` (parsed back out of the `<pid>-<nanos>-<seq>` dir name — see
+/// [`generate_run_id`]) does not exist, i.e. the owning process is
+/// *provably* gone. This is what makes the sweep safe to run unconditionally
+/// at every construction: it can never touch a run dir whose process is
+/// still alive, however old the dir looks, so it cannot race a live Harness
+/// (long-idle or otherwise) the way an age-only sweep could. Linux-only
+/// (`/proc`); on any other platform (or if `/proc` is unreadable) this is a
+/// silent no-op — stale dirs just accumulate, which is the documented
+/// trade-off for not building a daemon.
+fn sweep_stale_run_dirs() {
+    let proc_dir = Path::new("/proc");
+    if !proc_dir.is_dir() {
+        return;
+    }
+    let root = tidepool_runtime::paths::cache_dir().join("harness-sessions");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(pid) = name.split('-').next() else {
+            continue;
+        };
+        if !proc_dir.join(pid).exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
 }
 
