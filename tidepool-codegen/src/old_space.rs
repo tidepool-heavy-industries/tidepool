@@ -27,11 +27,14 @@
 //! The minor GC's from-range is the nursery ONLY (`raw::cheney_copy`'s
 //! `is_in_range` excludes old-space addresses), so tenured objects are never
 //! scanned, moved, or evacuated by a minor collection, and their addresses
-//! are stable for the session's life. `TIDEPOOL_HEAP_VERIFY` does not cover
-//! this class of corruption: the post-GC verifier walks only the packed
-//! to-space a collection just produced, never a boxed array's external
-//! malloc'd payload buffer — the write barrier is the only thing keeping a
-//! store into that buffer visible to GC.
+//! are stable for the session's life. Under `TIDEPOOL_HEAP_VERIFY` a second
+//! pass (`host_fns::gc`'s `verify_tenured_graph`) walks the tenured graph
+//! from the persistent roots and classifies every slot it reaches, including
+//! a boxed array's external malloc'd payload slots. That pass follows the
+//! object graph rather than the remembered set, so it is independent of this
+//! barrier and detects a store the barrier failed to record — at the
+//! collection that strands the target, rather than whenever something next
+//! dereferences it.
 //!
 //! Old-space is compacted only on an explicit *major* pass (when a binding
 //! generation dies) — never during a minor GC.

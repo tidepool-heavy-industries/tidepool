@@ -423,6 +423,130 @@ fn classify_field_ptr(
     FieldPtrVerdict::Ok
 }
 
+/// Post-GC walk of the TENURED graph, reachable from this machine's
+/// persistent roots (see `heap_verify_enabled`).
+///
+/// A minor collection never scans old-space, and `verify_heap_post_gc` walks
+/// only the packed to-space it just produced — so neither sees a pointer slot
+/// living in old-space or in a boxed array's external malloc'd payload
+/// buffer. This pass covers exactly that population: starting from each
+/// persistent root (a tenured binding's stable slot), it follows the object
+/// graph and classifies every pointer slot `for_each_pointer_field` yields,
+/// including a `TAG_LIT` array wrapper's payload slots.
+///
+/// It is deliberately INDEPENDENT of the write barrier. The barrier's
+/// remembered set enumerates only the stores the barrier itself recorded, so
+/// a verifier built on it would inherit the barrier's blind spot and could
+/// never see the failure that matters — a store the barrier MISSED. Following
+/// the object graph instead means an unrecorded old-to-young store still
+/// leaves a slot pointing into a retired range, and it fails loudly here, at
+/// the collection that stranded it, instead of as a tag-221 case trap
+/// whenever something next dereferences it.
+///
+/// Recursion is confined to memory that is safe to read: a target is followed
+/// only when it lies in to-space or inside a live old-space arena. Targets
+/// outside both (external payload buffers, poison, statics) are classified
+/// but never dereferenced, and a target in a `retired` range fails before any
+/// dereference — that memory is freed and possibly poisoned.
+///
+/// # Safety
+/// `persistent_roots` must hold valid, registered root slots; `arenas` must
+/// bound live old-space allocations; `retired` ranges are compared, never
+/// dereferenced.
+unsafe fn verify_tenured_graph(
+    persistent_roots: &[*mut *mut u8],
+    arenas: &[(*const u8, *const u8)],
+    to_start: *const u8,
+    to_end: *const u8,
+    retired: &[(*const u8, *const u8)],
+) {
+    let in_arena =
+        |p: *const u8| arenas.iter().any(|&(start, end)| p >= start && p < end);
+    let readable = |p: *const u8| (p >= to_start && p < to_end) || in_arena(p);
+
+    let fail = |owner: *const u8, target: *const u8, what: &str| -> ! {
+        panic!(
+            "[HEAP VERIFY] tenured-graph violation after GC: {what}\n  \
+             slot owner object at {owner:p}, target {target:p}\n  \
+             retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}\n  \
+             a tenured slot pointing into a retired range means an old-to-young \
+             store was never recorded by the write barrier (see old_space.rs)"
+        )
+    };
+
+    let mut visited: std::collections::HashSet<*mut u8> = std::collections::HashSet::new();
+    let mut work: Vec<*mut u8> = Vec::new();
+
+    for &slot in persistent_roots {
+        let root = *slot;
+        if !root.is_null() && readable(root as *const u8) {
+            work.push(root);
+        }
+    }
+
+    while let Some(obj) = work.pop() {
+        if !visited.insert(obj) {
+            continue;
+        }
+        tidepool_heap::gc::raw::for_each_pointer_field(obj, |field_slot| {
+            let target = *field_slot;
+            match classify_field_ptr(target as *const u8, to_start, to_end, retired) {
+                FieldPtrVerdict::Ok => {}
+                FieldPtrVerdict::DanglingIntoRetired => fail(
+                    obj as *const u8,
+                    target as *const u8,
+                    "a slot reachable from a tenured binding points into a RETIRED space \
+                     (dangling old-to-young reference)",
+                ),
+                FieldPtrVerdict::MisalignedToSpace => fail(
+                    obj as *const u8,
+                    target as *const u8,
+                    "a slot reachable from a tenured binding holds a misaligned to-space pointer",
+                ),
+            }
+            if !target.is_null() && readable(target as *const u8) && !visited.contains(&target) {
+                work.push(target);
+            }
+        });
+    }
+}
+
+/// Post-GC check that every slot the write barrier remembered still holds an
+/// acceptable target (see `heap_verify_enabled`).
+///
+/// Defense-in-depth on the barrier's own tracing, NOT on its coverage: a
+/// remembered slot is handed to `perform_gc` as a root, so its target must
+/// have been evacuated and the slot rewritten. A stale target here means the
+/// GC mishandled a root it was given — a different failure from the barrier
+/// failing to record the slot at all, which is [`verify_tenured_graph`]'s job.
+///
+/// # Safety
+/// `slots` must hold valid remembered-slot addresses; `retired` ranges are
+/// compared, never dereferenced.
+unsafe fn verify_remembered_slots(
+    slots: &[*mut *mut u8],
+    to_start: *const u8,
+    to_end: *const u8,
+    retired: &[(*const u8, *const u8)],
+) {
+    for &slot in slots {
+        let target = *slot;
+        match classify_field_ptr(target as *const u8, to_start, to_end, retired) {
+            FieldPtrVerdict::Ok => {}
+            FieldPtrVerdict::DanglingIntoRetired => panic!(
+                "[HEAP VERIFY] remembered slot {slot:p} holds a RETIRED-space pointer \
+                 {target:p} after GC — the barrier recorded this slot, so the collector \
+                 was handed it as a root and should have rewritten it\n  \
+                 retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}"
+            ),
+            FieldPtrVerdict::MisalignedToSpace => panic!(
+                "[HEAP VERIFY] remembered slot {slot:p} holds a misaligned to-space \
+                 pointer {target:p} after GC"
+            ),
+        }
+    }
+}
+
 /// Post-GC heap invariant walk (see `heap_verify_enabled`).
 ///
 /// Walks the packed live set `to_start..+live_bytes` exactly like the Cheney
@@ -455,8 +579,9 @@ fn classify_field_ptr(
 /// fresh, larger buffer before the prior one is dropped).
 ///
 /// Scope: this walk covers only the packed to-space `perform_gc` just
-/// produced. It does not follow old-space's external malloc'd array payload
-/// buffers — a pointer stranded in one of those is not yet checked here.
+/// produced. Old-space and boxed arrays' external malloc'd payload buffers
+/// are covered separately by [`verify_tenured_graph`], which `perform_gc`
+/// runs immediately after this.
 unsafe fn verify_heap_post_gc(
     to_start: *const u8,
     live_bytes: usize,
@@ -870,6 +995,36 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 // `verify_heap_post_gc`'s doc).
                 unsafe {
                     verify_heap_post_gc(to_start, live_bytes, &retired_ranges);
+                }
+
+                // The to-space walk above cannot reach old-space or a boxed
+                // array's external payload buffer. These two cover that
+                // population: the tenured-graph traversal catches an
+                // old-to-young store the write barrier never recorded
+                // (independent of the barrier, so it sees the barrier's own
+                // misses), and the remembered-slot check confirms the
+                // collector correctly rewrote every slot it WAS handed.
+                let to_end = unsafe { to_start.add(live_bytes) as *const u8 };
+                let mut persistent: Vec<*mut *mut u8> = Vec::new();
+                ms.extend_persistent_roots(&mut persistent);
+                let arenas = ms.old_space_arena_ranges();
+                // SAFETY: persistent roots and arena ranges are this
+                // machine's own registrations; retired ranges are compared,
+                // never dereferenced.
+                unsafe {
+                    verify_tenured_graph(
+                        &persistent,
+                        &arenas,
+                        to_start as *const u8,
+                        to_end,
+                        &retired_ranges,
+                    );
+                    verify_remembered_slots(
+                        &ms.remembered_slots_snapshot(),
+                        to_start as *const u8,
+                        to_end,
+                        &retired_ranges,
+                    );
                 }
             }
         }

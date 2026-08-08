@@ -577,9 +577,8 @@ impl MachineState {
     }
 
     /// Snapshot of every currently-remembered slot. Read-only; does not
-    /// affect GC. Reserved for a defense-in-depth diagnostic pass over the
-    /// barrier's own tracing — no in-tree caller yet.
-    #[allow(dead_code)]
+    /// affect GC. Read by `host_fns::gc`'s post-GC `verify_remembered_slots`
+    /// pass under `TIDEPOOL_HEAP_VERIFY`.
     pub(crate) fn remembered_slots_snapshot(&self) -> Vec<*mut *mut u8> {
         self.remembered_slots.borrow().iter().copied().collect()
     }
