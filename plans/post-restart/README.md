@@ -31,6 +31,21 @@ call, fits harness-lifecycle's scope).
 
 ## Open threads that gate or shadow the dogfood
 
+- **finalize-template ambiguity — cause RESOLVED (2026-08-08), fix in
+  flight (`finalize-template-pin`).** The ambiguous-`ToJSON a0` on the
+  template's `toJSON _r` is GHC's defaulting ANCHOR rule: defaulting
+  fires only when the constraint set contains a standard-class anchor
+  (numeric, or Show/Eq/Ord under `ExtendedDefaultRules` — a relaxation of
+  the anchor requirement, never its removal). A solitary user-defined
+  class (`ToJSON` alone) is never eligible; the default list's contents
+  are irrelevant. Discriminator: plain `IO` fails identically to
+  `Eff <row>` — refuting d82cf099's recorded hypothesis (untouchability
+  under the row implication), which this entry supersedes. Fix direction:
+  supply an ANCHOR (e.g. a `Show` constraint riding alongside in the
+  pinned wrapper) rather than a hard type pin — additive, keeps bare
+  `askUser` turns compiling; hard pin pre-approved as fallback. The
+  prompt's annotated-shape stopgap (d82cf099) is correct either way.
+
 - **Intermittent garbage con_tag** (`selfharness_compaction`, open):
   `YieldError::UnexpectedConTag` with a raw-pointer-shaped tag + fast-abort
   (65.7s vs 193–201s band), one sighting under peak memory pressure, same
