@@ -101,3 +101,29 @@ precomputed ConTags shipped without GHC at all — removes ~30s of every
 launch. Render/loop compiles (3)+(4) are per-cycle and belong to the
 existing D1/D2/E1 work. Sequencing unchanged (after Phase B); this entry
 just pins the measured boot shape so the win is sized honestly.
+
+### D7 revised (Inanna's design question, same day): the seeds shouldn't exist
+
+"Why do we need boot seeds at all?" — answer: we don't, structurally.
+`Session::bootstrap` is program-shaped at construction (needs expr+table
+to bring up the machine), and at boot no real program exists yet, so a
+fake one (`pure (toJSON 0)`) is manufactured to fit the API slot. The
+seed is scaffolding become load-bearing.
+
+Fix ladder, in order of principle:
+1. **Eliminate** (the mechanism fix): each session's FIRST REAL compile
+   (outer: render; answerer node: the model's first block) already
+   yields the (expr, table) bootstrap consumes — defer machine
+   construction to first turn, or make construction not demand a
+   program. Seeds stop existing. Touches Session::bootstrap
+   (tidepool-runtime/harness) + both boot sites; sequence after
+   driver-async's fold (driver.rs) — candidate first item of the
+   extract wave.
+2. **Cache** (interim, hour-sized): seed source is constant per
+   (decl-list, stack) — content-addressed disk cache of (CBOR, table),
+   zero GHC per launch. Land whenever; superseded harmlessly by 1.
+3. One extract invocation for both seeds: strictly weaker than either;
+   only if 1 hits a deep blocker.
+
+The two-rows fact stays real either way (positional union tags per row);
+only the per-launch GHC cost for constant artifacts is the defect.
