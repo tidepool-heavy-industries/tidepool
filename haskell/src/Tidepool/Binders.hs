@@ -23,6 +23,12 @@ module Tidepool.Binders
   , extractStmtBinders
   , renderStmtBindersJson
   , emitStmtBinders
+    -- * Turn-mode rich result (--turn)
+  , TurnOut(..)
+  , BoundBinder(..)
+  , renderTurnOutJson
+  , renderBoundBinderJson
+  , renderAskJson
   ) where
 
 import GHC
@@ -46,6 +52,9 @@ import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
 import Data.List (intercalate, foldl', nub)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Word (Word64)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
 import Tidepool.Timing (timeSection, emitPhase, timePhase)
@@ -310,3 +319,81 @@ emitStmtBinders timing srcFile out = do
   src <- readFile srcFile
   sb  <- extractStmtBinders timing src
   timePhase timing "write" (writeFile out (renderStmtBindersJson sb))
+
+--------------------------------------------------------------------------------
+-- Turn-mode rich result (--turn) — a tagged variant over the verdict
+--------------------------------------------------------------------------------
+
+-- | One bound-value record from a BIND turn: the mint'd 'stableVarId', the
+-- thin session iface module it was written under, its closure/data tier, and
+-- its rendered type. Shared by the legacy @--emit-bound-binders@ sidecar and
+-- the 'Bind' variant below — one record shape, two call sites.
+data BoundBinder = BoundBinder
+  { bbName        :: String
+  , bbVarId       :: Word64
+  , bbModule      :: String
+  , bbTier        :: String
+  , bbTypeDisplay :: String
+  } deriving (Eq, Show)
+
+-- | The rich result of a @--turn@ run: a tagged variant over the verdict
+-- (see @plans/one-spawn-turn-protocol.md@). 'TDecl' never compiles — its
+-- 'toDeclItems' come from the whole-module parse ('extractBinders'), not this
+-- module's statement parse, because a decl-batch caller
+-- (@--turn-verdict decl@ over N declarations joined into one module) has no
+-- single statement to parse. 'TBind'/'TExpr' carry what the selected template
+-- variant actually compiled to. The wire-visible tag ('renderTurnOutJson'
+-- \/ the CBOR encoder) is @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these
+-- constructor names.
+data TurnOut
+  = TDecl
+      { toBinders   :: [Text]
+      , toDeclItems :: [ExportItem]
+      }
+  | TBind
+      { toBinders       :: [Text]
+      , toVariant       :: Int
+      , toBoundBinders  :: [BoundBinder]
+      , toAsks          :: [(Word64, Text)]
+      , toWrappedSource :: Text
+      }
+  | TExpr
+      { toVariant       :: Int
+      , toAsks          :: [(Word64, Text)]
+      , toWrappedSource :: Text
+      }
+  deriving (Eq, Show)
+
+renderTurnOutJson :: TurnOut -> String
+renderTurnOutJson (TDecl bs items) =
+  "{\"kind\":\"Decl\",\"binders\":[" ++ jstrList bs
+    ++ "],\"declItems\":[" ++ intercalate "," (map renderItem items) ++ "]}"
+renderTurnOutJson (TBind bs var bbs aks wrapped) =
+  "{\"kind\":\"Bind\",\"binders\":[" ++ jstrList bs
+    ++ "],\"variant\":" ++ show var
+    ++ ",\"boundBinders\":[" ++ intercalate "," (map renderBoundBinderJson bbs)
+    ++ "],\"asks\":[" ++ intercalate "," (map renderAskJson aks)
+    ++ "],\"wrappedSource\":" ++ jstr (T.unpack wrapped) ++ "}"
+renderTurnOutJson (TExpr var aks wrapped) =
+  "{\"kind\":\"Expr\",\"variant\":" ++ show var
+    ++ ",\"asks\":[" ++ intercalate "," (map renderAskJson aks)
+    ++ "],\"wrappedSource\":" ++ jstr (T.unpack wrapped) ++ "}"
+
+jstrList :: [Text] -> String
+jstrList = intercalate "," . map (jstr . T.unpack)
+
+-- | One 'BoundBinder' as JSON. @varId@ is a DECIMAL STRING of the u64 (an f64
+-- would lose precision) — same shape the legacy @--emit-bound-binders@
+-- sidecar always used.
+renderBoundBinderJson :: BoundBinder -> String
+renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
+  "{\"name\":" ++ jstr name
+    ++ ",\"varId\":" ++ jstr (show varid)
+    ++ ",\"module\":" ++ jstr modul
+    ++ ",\"tier\":" ++ jstr tier
+    ++ ",\"typeDisplay\":" ++ jstr tdisp ++ "}"
+
+-- | One runLLMTurn/runLLMTurnFork @{site, type}@ pair as JSON — same shape the
+-- @asks.json@ sidecar always used.
+renderAskJson :: (Word64, Text) -> String
+renderAskJson (site, ty) = "{\"site\":" ++ show site ++ ",\"type\":" ++ jstr (T.unpack ty) ++ "}"
