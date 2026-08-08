@@ -73,23 +73,25 @@ ordinary eval would then demand `Show` on its result type.
 
 ## Recovering the prior work — do this FIRST
 
-`6b2f5e9d` already contains a substantially complete `__anchor` implementation
-(`engine.rs`, `tidepool-harness/CLAUDE.md`, and a fuller
-`finalize_type_pinning.rs`), PLUS a competing abandoned mechanism
-(`FINALIZE_PINNED_HELPERS` in `eval_prep.rs`) that adds a `Show a` constraint
-to `finalize`'s own signature.
-
-It **does not build** — `finalize_type_pinning.rs` was mid-reconciliation.
+`6b2f5e9d` contains a substantially complete `__anchor` implementation
+(`eval_prep.rs`, `engine.rs`, `tidepool-harness/CLAUDE.md`, and a fuller
+`finalize_type_pinning.rs`).
 
 1. Recover the files from that commit into your worktree — e.g.
    `git checkout root.harness-lifecycle.finalize-template-pin -- <paths>`, or
    cherry-pick `6b2f5e9d`. Inspect before you trust: `git show --stat 6b2f5e9d`
    lists `CLAUDE.md`, `engine.rs`, `acceptance_finalize.rs`,
    `finalize_type_pinning.rs`, `eval_prep.rs`.
-2. **Keep the `__anchor` mechanism. Delete `FINALIZE_PINNED_HELPERS` entirely.**
-   One mechanism, not two — a second path kept "for safety" is exactly the jank
-   this lane exists to remove.
-3. Finish the `finalize_type_pinning.rs` reconciliation and get it building.
+2. `__anchor` is the sole mechanism and the tree builds clean.
+
+**Correction, verified after this file was first written:** an earlier draft
+said `6b2f5e9d` did not build and carried a competing `FINALIZE_PINNED_HELPERS`
+mechanism in `eval_prep.rs` to be deleted. Both were wrong. `git grep` finds
+that name nowhere in `6b2f5e9d` or any working tree — the predecessor had
+already finished reconciling to a single `__anchor` implementation before its
+snapshot, and warned the tree might not build only because it had not
+re-verified after its last edit. It builds, and check/fmt/clippy come back
+clean but for the three pre-existing named warnings. Nothing needs deleting.
 
 Do not preserve `6b2f5e9d` as a commit in your own history if a clean
 recovery is simpler; it exists on the old branch as the durable record.
