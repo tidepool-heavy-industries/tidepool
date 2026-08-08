@@ -221,14 +221,36 @@ constructor id stability across invocations. Work that changes how the
 extractor mints ids will trip these rather than silently misclassifying a
 session's yields.
 
-**What `populated_session_second_fragment` does not prove.** It does not
-reproduce `selfharness_compaction`; it drives hand-built trees rather than real
-GHC-extracted Core; and it applies no GC pressure, so it is blind to the
-allocation-profile hypothesis. It gates one thing: that a second fragment
-compiled against an accumulated table and run through `run_child_fragment`
-classifies its result correctly. It also runs through the nested-child path
-whose `NurseryExhausted` guard is known-incomplete, so an intermittent failure
-there is ambient rather than a signal about the fragment path.
+**What `populated_session_second_fragment` does not prove**, established by
+mutation rather than asserted. Two breaks were induced:
+
+- *Run-and-classify axis — teeth proven.* Minting `Val` in the bootstrap table
+  under a different id than the fragment emits turns all four tests red, the
+  child run failing as `Yield(UnexpectedConTag(10))` — the incident's own error
+  variant. This axis is genuinely constrained.
+- *Emission axis — teeth absent.* Compiling the second fragment against the
+  **bootstrap** table instead of the accumulated one leaves all four tests
+  green. Emission bakes each `DataConId` straight out of the `Con`/`Case` frame
+  and never consults the table to resolve a constructor reference.
+  `add_function`'s `table` argument feeds `normalize`,
+  `wrap_with_datacon_env`, `lit_wrappers` and the primop id bundles — none of
+  which a synthetic `Con`/`Case` fragment reaches. "Compiled against the
+  accumulated table" is therefore *setup* in that file, not an assertion, and a
+  wrong table there is invisible to it.
+
+Giving it emission-axis teeth requires a fragment that reaches one of those
+four consumers. Real GHC-extracted Core would; hand-built trees do not. That is
+the concrete upgrade path if someone wants this gate to cover both axes.
+
+The file's doc comment previously claimed the emission axis outright; the
+mutation disproved it and the claim was narrowed. Both results are stated
+inline in the test file.
+
+It also does not reproduce `selfharness_compaction` and applies no GC pressure,
+so it is blind to the allocation-profile hypothesis. And it runs through the
+nested-child path whose `NurseryExhausted` guard is known-incomplete, so an
+intermittent failure there is ambient rather than a signal about the fragment
+path.
 
 The prior gate in this area, `datacon_never_used_as_value.rs`, was blind for a
 specific and instructive reason: it read each fixture tree raw off disk against
