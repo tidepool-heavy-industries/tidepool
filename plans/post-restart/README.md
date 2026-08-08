@@ -78,3 +78,12 @@ call, fits harness-lifecycle's scope).
   occurred TWICE (a TL, then a leaf) — detection is priority 1; merge
   teardown half-fails on already-pruned worktrees (1.1G orphan dir cleaned
   by hand); stale orphaned panes from the first TL death still need reaping.
+- exo wishlist NEW (2026-08-08, post-restart): **duplicate spawn / silent
+  child birth** — spawn_dev produced TWO panes running the identical
+  generated spec in the SAME worktree with ONE ledger entry; the stray was
+  invisible to ListAgents and the peer list (its messages arrived
+  from-mode=bypass), and was caught only because the ledger dev noticed
+  edits it hadn't made. Two concurrent writers interleaved uncommitted
+  edits in one file before containment (WIP-commit + freeze + root killed
+  the stray by verified PID). Spawn should be idempotent per worktree, and
+  a pane whose registration failed should die loudly, not run the spec.
