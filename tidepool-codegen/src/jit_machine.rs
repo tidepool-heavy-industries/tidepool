@@ -2105,6 +2105,26 @@ impl JitEffectMachine {
         self.machine_state.remembered_slots_count()
     }
 
+    /// Session-lifetime count of Cranelift functions successfully compiled
+    /// into this machine's `JITModule` (test/diagnostic accessor — realm-
+    /// lifetime spike, COST B). Delegates to [`CodegenPipeline::functions_defined`],
+    /// which has no other reach from `JitEffectMachine` today.
+    pub fn functions_defined(&self) -> u64 {
+        self.pipeline.functions_defined()
+    }
+
+    /// Total bytes currently tenured in this session's old-space (test/
+    /// diagnostic accessor — realm-lifetime spike, COST A). 0 for a one-shot
+    /// machine (no session, no old-space). Delegates to
+    /// [`crate::old_space::OldSpace::bytes_used`], which has no other reach
+    /// from `JitEffectMachine` today.
+    pub fn old_space_bytes_used(&self) -> usize {
+        self.session
+            .as_ref()
+            .map(|s| s.old_space.bytes_used())
+            .unwrap_or(0)
+    }
+
     /// Whether this machine is currently suspended at a typed yield (`Ask`),
     /// holding a stowed continuation awaiting `resume_suspended`.
     pub fn is_suspended(&self) -> bool {
