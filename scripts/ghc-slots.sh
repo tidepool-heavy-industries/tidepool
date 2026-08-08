@@ -21,11 +21,12 @@
 # which is what a measurement wants.
 set -euo pipefail
 
-# TEMP throttle 2026-08-08 (root): 4 slots x per-run extract fan-out (3-4)
-# multiplied to 16 concurrent extracts, load 40+, swap 5/7G. Two slots bound
-# the product at ~6-8 while five lanes are live. Restore slot2/slot3 when the
-# wave quiets (holders of the removed slot files drain naturally).
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1)
+# 3-slot semaphore (the protocol-v3 norm). Slot count x per-run extract
+# fan-out MULTIPLY: the 2026-08-08 incident hit 16 concurrent extracts
+# (load 40+, swap 5/7G) at 4 slots; the temporary 2-slot throttle bounded it
+# during dogfooding. Restored to 3 on 2026-08-08 (dogfood paused, wave
+# turnover). Do not add a 4th slot while 3+ lanes are live.
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,

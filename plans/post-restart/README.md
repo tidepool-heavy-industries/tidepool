@@ -24,6 +24,26 @@ context window.
 6. Dogfood launch (release-profile binaries) once the golden_path verdict
    and the open-intermittent triage below permit.
 
+## Next-wave lanes (decided 2026-08-08, spawn as current lanes close)
+
+Three-lane cap; dogfood is PAUSED (Inanna), so no redeploy is owed until
+she resumes — the harness fixes ship in the next natural redeploy.
+
+- [`generic-surface.md`](generic-surface.md) — the `deriving (Generic)`
+  author-contract wave (askUser @T, choose/chooseMany, Form retirement).
+  Spike-gated; may spawn first as a lane closes.
+- [`extract-wave.md`](extract-wave.md) — now carries item 0 (one-compile
+  bootstrap Track 1) and 0b (nameable effect vocabulary). Still gated on
+  Phase B.
+- [`realm-spike.md`](realm-spike.md) — Track 2 GO/NO-GO, own parallel
+  lane BY DESIGN as a merge-conflict-cost experiment (conflict ledger is
+  a deliverable).
+
+Composed gate for this wave-set closed 2026-08-08: section 4 differential
+re-run field-identical to baseline (tested=349 compared=312
+closure_skip=34 mismatch=0 eval_jit_diverge=3, same three names). GHC
+slots restored to 3.
+
 Also queued: retire-or-wire decision on the observatory-orphan API cluster
 (Harness::first_operator_hole / live_turn / pending_dialog_ui /
 tree_snapshot / tree_snapshot_page — pub, zero callers; architectural

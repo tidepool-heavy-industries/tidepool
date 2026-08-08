@@ -5,6 +5,36 @@ over-collection chain's root plus the declaration-path cluster. MUST wait
 for the one-spawn-turn Phase B TL to land (single owner of
 writeWholeModuleClosed at every point in time).
 
+## Item 0 (FIRST): one-compile bootstrap, Track 1
+
+`plans/post-restart/one-compile-bootstrap.md` Track 1 is the confirmed
+recipe — unbootstrapped `ResidentSession` constructor over the
+already-lazy `PersistentSession`, first real run boots the machine
+(mirror the REPL), DELETE both boot seeds, render+loop in one extract
+invocation (needs Phase B's multi-binder — hence the gate above),
+answerer boots from the model's first block. Supersedes D7's
+cache-interim (step 2 of the fix ladder below) if it lands first.
+Keep separate source-level capability rows regardless.
+
+## Item 0b: nameable effect vocabulary (one-file-harness prerequisite)
+
+Effect vocabulary available in scope ≠ effects present in M's row. Today
+the answerer compile omits the `RunLLMTurn` GADT/helpers entirely
+(`haskell/lib/Tidepool/Harness.hs` module haddock). Make stable effect
+types/helpers nameable in EVERY compile, with `Member` controlling
+executability — this is the recorded prerequisite for the one-file
+harness (see `plans/self-iterating-harness/15-generic-surface-wave.md`);
+the one-file cut itself lands only after this exists and typechecks the
+answerer path.
+
+## Coexistence note (Inanna, 2026-08-08)
+
+The realm-machine spike (`realm-spike.md`) runs as a PARALLEL lane
+deliberately not partitioned away from this lane's runtime files — it is
+an experiment in merge-conflict cost. Do not pre-negotiate file
+boundaries with it; resolve conflicts at fold and log anything
+non-mechanical.
+
 ## The measured motivation (jit-chain's experiment, 2026-08-09, pre-wrap on
 ## real session Core — size all absolute wins from THESE figures)
 
