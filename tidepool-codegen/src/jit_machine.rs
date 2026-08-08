@@ -2765,15 +2765,39 @@ fn materialize_response_and_resume(
                 });
             }
             // SAFETY: Converting a Value back to a heap object in
-            // the nursery. vmctx has sufficient nursery space (GC
-            // may have reclaimed).
-            unsafe {
+            // the nursery.
+            let conv = unsafe {
                 crate::signal_safety::with_signal_protection(|| {
                     heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
                 })
             }
-            .map_err(JitError::Signal)?
-            .map_err(JitError::HeapBridge)?
+            .map_err(JitError::Signal)?;
+            match conv {
+                Ok(p) => p,
+                Err(heap_bridge::BridgeError::NurseryExhausted) => {
+                    // One GC-and-retry, matching every other value_to_heap
+                    // call site (primops.rs eitherDecode/parseISO8601,
+                    // streaming.rs build_cons_cells): `continuation` is
+                    // already a registered rust_root (above), so the
+                    // retry's collection evacuates it safely, and a
+                    // transient nursery-full at response-materialization
+                    // time is recoverable rather than fatal.
+                    unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            crate::host_fns::gc_trigger(vmctx_ptr)
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                        })
+                    }
+                    .map_err(JitError::Signal)?
+                    .map_err(JitError::HeapBridge)?
+                }
+                Err(e) => return Err(JitError::HeapBridge(e)),
+            }
         }
     };
     // SAFETY: as above.
