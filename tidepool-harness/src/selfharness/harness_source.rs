@@ -35,6 +35,8 @@
 //! unqualified-name collisions with the ambient `Tidepool.Prelude` — that's
 //! unrelated to this module-identity concern.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// The authored harness's location: everything the driver needs to `import`
@@ -75,6 +77,12 @@ pub struct HarnessSource {
     /// scope and the driver tells the author to split them out
     /// (`SelfHarnessDriver::types_in_scope_hint`).
     pub answerer_imports: Vec<String>,
+    /// A content fingerprint of the loaded source text — not a manifest, just
+    /// a hash, so a checkpoint restored against a since-edited harness file
+    /// can be told apart from one restored against the same file (a harness
+    /// file is expected to change across a self-iteration run; this is what
+    /// lets a restart detect that rather than silently assume nothing moved).
+    pub fingerprint: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +91,11 @@ pub enum HarnessSourceError {
     NotFound { path: String },
     #[error("harness source path {path} has no usable file stem for a module name")]
     BadFileName { path: String },
+    #[error("harness source {path} could not be read for fingerprinting: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 /// Resolve a harness source file (e.g. `examples/harness/Harness.hs`) at
@@ -106,12 +119,27 @@ pub fn load_harness_source(path: &Path) -> Result<HarnessSource, HarnessSourceEr
             path: path.display().to_string(),
         })?;
     let answerer_imports = answerer_imports(path, &source_dir);
+    let fingerprint = fingerprint_source(path)?;
     Ok(HarnessSource {
         path: path.to_path_buf(),
         source_dir,
         module_name,
         answerer_imports,
+        fingerprint,
     })
+}
+
+/// A hash of `path`'s source text, formatted as hex — cheap and sufficient
+/// for change detection (see [`HarnessSource::fingerprint`]'s doc); not a
+/// cryptographic digest.
+fn fingerprint_source(path: &Path) -> Result<String, HarnessSourceError> {
+    let text = std::fs::read_to_string(path).map_err(|source| HarnessSourceError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
 }
 
 /// The sibling modules `path` imports — the author's own vocabulary modules,
@@ -172,6 +200,24 @@ mod tests {
         assert_eq!(source.module_name, "Harness");
         assert_eq!(source.source_dir, path.parent().unwrap());
         assert_eq!(source.answerer_imports, vec!["HarnessTypes".to_string()]);
+        assert!(!source.fingerprint.is_empty());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinguishes_different_sources() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let a = load_harness_source(&fixtures.join("TwoHoleHarness.hs")).expect("fixture resolves");
+        let b = load_harness_source(&fixtures.join("TwoHoleHarness.hs")).expect("fixture resolves");
+        let c =
+            load_harness_source(&fixtures.join("CompactionHarness.hs")).expect("fixture resolves");
+        assert_eq!(
+            a.fingerprint, b.fingerprint,
+            "same file must fingerprint identically"
+        );
+        assert_ne!(
+            a.fingerprint, c.fingerprint,
+            "different source text must fingerprint differently"
+        );
     }
 
     /// The sibling set is what the harness IMPORTS, not what shares its

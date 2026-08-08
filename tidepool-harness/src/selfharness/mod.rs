@@ -23,9 +23,9 @@
 //! - [`operator`] (Wave 2) — the frozen [`operator::OperatorGate`] seam the
 //!   driver blocks on for operator input + the `FormSpec`/`Submission` wire
 //!   types; ships a headless [`operator::StdinGate`].
-//! - [`persistence`] (W3) — local-file `State` json persist/restore +
-//!   transcript-jsonl [`Observer`] impl (D5: "State-to-disk +
-//!   restart-reload") + the durable-log path helpers (WS4).
+//! - [`persistence`] — local-file checkpoint (state + compaction + harness-
+//!   source fingerprint, one generation-tagged record) persist/restore +
+//!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
 //!
 //! `crate::engine::HoleRouting::Finalize` is the other half of the S3 freeze
 //! (routing for the `finalize` effect WS-B adds); it lives in `engine.rs`
@@ -44,5 +44,5 @@ pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError}
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};
 pub use operator::{EnumOption, Field, FieldKind, FormSpec, OperatorGate, StdinGate, Submission};
-pub use persistence::{JsonlObserver, PersistenceError};
+pub use persistence::{Checkpoint, JsonlObserver, PersistenceError};
 pub use state_cross::{state_in, state_out};

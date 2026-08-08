@@ -4,8 +4,9 @@
 //!
 //!   - C-2: the summarize turn's model call counts against the per-loop
 //!     inference-call cap (it cannot escape the runaway guard).
-//!   - C-3: `last_compaction` is persisted, so a simulated restart (a fresh
-//!     driver over the same paths) restores the summary rather than `None`.
+//!   - a cycle that fires a mid-loop compaction commits its own state AND its
+//!     own summary into the SAME checkpoint generation, so a fresh driver
+//!     restored from that checkpoint gets both back together.
 //!   - C-4: `Event::CompactionTrigger` carries a payload (summary + pre/post
 //!     context size + node), emitted after the summary exists.
 //!
@@ -153,12 +154,11 @@ impl Observer for CaptureObserver {
 
 static NEXT_LOG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Build a driver whose DURABLE files (State + compaction summary) live in
-/// `durable_dir` — passing the SAME `durable_dir` to two `make_driver` calls
-/// simulates a restart against the same on-disk state (C-3). The event LOG,
-/// by contrast, is a fresh unique file per call (`LogWriter::create` refuses
-/// an existing file), so a restart driver does not collide with the first's
-/// log.
+/// Build a driver whose checkpoint lives in `durable_dir` — passing the SAME
+/// `durable_dir` to two `make_driver` calls simulates a restart against the
+/// same on-disk checkpoint. The event LOG, by contrast, is a fresh unique
+/// file per call (`LogWriter::create` refuses an existing file), so a
+/// restart driver does not collide with the first's log.
 fn make_driver(
     durable_dir: &std::path::Path,
     pre_input: u64,
@@ -180,8 +180,7 @@ fn make_driver(
         .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     let mut driver = SelfHarnessDriver::new(agent, observer);
-    driver.set_state_path(durable_dir.join("state.json"));
-    driver.set_compaction_path(durable_dir.join("compaction.txt"));
+    driver.set_checkpoint_path(durable_dir.join("checkpoint.json"));
     driver.set_compaction_threshold_percent(50);
     let source = load_harness_source(&fixtures_dir().join("CompactionHarness.hs"))
         .expect("compaction harness source loads");
@@ -218,18 +217,20 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
     );
 }
 
-/// C-3: `last_compaction` survives a simulated restart. Driver 1 fires a
-/// compaction (persisting the summary to `compaction_path`). A fresh Driver 2
-/// pointed at the SAME paths, on `restore()`, reloads the summary — the
-/// in-memory-only field would otherwise roll back to `None`.
+/// A cycle that fires a mid-loop compaction and completes commits ITS OWN
+/// state and ITS OWN summary together, as one checkpoint generation — a
+/// fresh driver restored from that same checkpoint path gets both back
+/// together, never the summary alone (the in-memory-only `last_compaction`
+/// would otherwise roll back to `None` on a fresh driver, and the state
+/// would otherwise never have been committed by `run_one_cycle` at all).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn c3_last_compaction_survives_restart() {
+async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
 
-    // Both drivers share the SAME durable dir — that IS the restart.
+    // Both drivers share the SAME checkpoint path — that IS the restart.
     let durable = scratch("c3");
     let (mut driver1, source) = make_driver(&durable, 600, Arc::new(LogObserver));
     let outcome = driver1
@@ -242,29 +243,32 @@ async fn c3_last_compaction_survives_restart() {
             .is_some_and(|s| s.contains(SUMMARY_SENTINEL)),
         "driver 1 must have compacted and produced the summary"
     );
-    // Driver 1 is dropped here — its in-memory `last_compaction` is gone.
+    // Driver 1 is dropped here — its in-memory state is gone; only what it
+    // committed to the checkpoint survives.
     drop(driver1);
 
-    // Simulate a restart: a brand-new driver over the same durable dir (its own
-    // fresh event log).
-    let (mut driver2, _src2) = make_driver(&durable, 600, Arc::new(LogObserver));
+    // Simulate a restart: a brand-new driver over the same checkpoint path
+    // (its own fresh event log).
+    let (mut driver2, source2) = make_driver(&durable, 600, Arc::new(LogObserver));
     assert_eq!(
         driver2.last_compaction(),
         None,
         "a fresh driver starts with no in-memory compaction"
     );
 
-    // `restore()` reloads BOTH the persisted State and the compaction summary.
-    // (This test drives `run_one_cycle` directly, which persists the compaction
-    // summary mid-loop but not State — State persistence is `run_loop`'s job,
-    // covered by `selfharness_persistence.rs` — so `restore()` may return
-    // `None` for State here; C-3 is specifically about the compaction summary.)
-    let _restored_state = driver2.restore().expect("restore reloads durable state");
+    let restored_state = driver2
+        .restore(&source2)
+        .expect("restore reloads the committed checkpoint")
+        .expect("driver 1's completed cycle committed a checkpoint");
+    assert_eq!(
+        restored_state, outcome.state_json,
+        "the restored state must be exactly driver 1's own committed state"
+    );
     assert!(
         driver2
             .last_compaction()
             .is_some_and(|s| s.contains(SUMMARY_SENTINEL)),
-        "C-3: the persisted compaction summary must reload on restart, got: {:?}",
+        "the restored summary must be driver 1's own compaction, got: {:?}",
         driver2.last_compaction()
     );
 }

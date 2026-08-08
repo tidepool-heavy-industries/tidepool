@@ -45,6 +45,17 @@ pub enum Event {
         pre_input_tokens: u64,
         post_input_tokens: u64,
     },
+    /// A restored checkpoint's harness-source fingerprint does not match the
+    /// fingerprint of the harness file this process just loaded — expected
+    /// during self-iteration (the harness file is the thing being edited),
+    /// so the driver restores anyway rather than refusing to start. Recorded
+    /// so a subsequent `StateDecode` failure (the restored `State` no longer
+    /// matching the edited author types) is diagnosable instead of
+    /// mysterious.
+    HarnessSourceChanged {
+        restored_fingerprint: String,
+        current_fingerprint: String,
+    },
 }
 
 /// A subscriber the driver emits [`Event`]s to. Implementations MUST NOT

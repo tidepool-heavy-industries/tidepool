@@ -1,32 +1,35 @@
-//! W3: local-file persistence for the self-iterating harness (D5,
-//! 08-wave1-correctness.md "Persistence = local files" — locked). Two
-//! pieces, both plain files, no DB:
+//! Local-file persistence for the self-iterating harness: no DB, plain
+//! files under `<cache_dir>/selfharness/`.
 //!
-//! - **State → json**: [`save_state`]/[`load_state`] round-trip the
-//!   loop-boundary `State` JSON ([`crate::selfharness::state_cross::state_out`])
-//!   through a file, so [`crate::selfharness::driver::SelfHarnessDriver::run_loop`]
-//!   can restore it on a fresh process start rather than always falling
-//!   back to `initialState`. `save_state` writes to a sibling `.tmp` file
-//!   and renames over the target, so a kill mid-write never leaves the
-//!   restart-reload path with a half-written `state.json`.
+//! - **[`Checkpoint`]**: the one durable record a restart reads. It carries
+//!   a completed cycle's `State` json, the compaction summary in force at
+//!   that same cycle, a monotonic `generation`, and a fingerprint of the
+//!   harness source that produced it, all written together so a restart can
+//!   never pair a state from one cycle with a summary from another.
+//!   [`save_checkpoint`]/[`load_checkpoint`] round-trip it through a file,
+//!   written atomically (a sibling `.tmp` file, then renamed over the
+//!   target) so a kill mid-write never leaves a torn file for
+//!   [`load_checkpoint`] to observe.
 //! - **transcript → jsonl**: [`JsonlObserver`] is an
 //!   [`crate::selfharness::observer::Observer`] impl that appends every
 //!   driver [`Event`](crate::selfharness::observer::Event) as one jsonl
-//!   line — reuses the existing pluggable observer seam (WS-H) rather than
-//!   adding a second logging path into `driver.rs`.
+//!   line — reuses the existing pluggable observer seam rather than adding
+//!   a second logging path into `driver.rs`.
 //!
-//! Harness-module reload on restart (the other half of D5) needs no code
-//! here: [`crate::selfharness::harness_source::load_harness_source`] always
-//! resolves from the on-disk path, and [`crate::selfharness::driver::SelfHarnessDriver::bootstrap`]
-//! compiles from that source fresh for a new process — a restarted process
+//! Harness-module reload on restart needs no code here:
+//! [`crate::selfharness::harness_source::load_harness_source`] always
+//! resolves from the on-disk path, and
+//! [`crate::selfharness::driver::SelfHarnessDriver::bootstrap`] compiles
+//! from that source fresh for a new process — a restarted process
 //! constructing a new driver and calling `load_harness_source` again
-//! already picks up an edited harness file; only `State` needed an
+//! already picks up an edited harness file; only the checkpoint needs an
 //! explicit save/restore path.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use super::observer::{Event, Observer};
@@ -45,13 +48,37 @@ pub enum PersistenceError {
     },
 }
 
-/// Default `State` json path: `<cache_dir>/selfharness/state.json`. A test
-/// (or the binary's caller) can point [`crate::selfharness::driver::SelfHarnessDriver::set_state_path`]
+/// The one durable record a restart reads: a completed cycle's `State`,
+/// the compaction summary in force at that same cycle, a monotonic
+/// generation counter, and a fingerprint of the harness source that
+/// produced it. Written as a whole at one commit boundary — never assembled
+/// from two separately-timed writes — so a state and a summary read back
+/// together are always from the same generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Monotonic, incremented by one per committed cycle. `0` never appears
+    /// on disk — the first commit is generation `1`.
+    pub generation: u64,
+    /// The loop-boundary `State` json this generation's cycle produced
+    /// ([`crate::selfharness::state_cross::state_out`]).
+    pub state: Json,
+    /// The compaction summary in force when this generation committed —
+    /// `None` if no compaction has fired yet at any point up to and
+    /// including this cycle.
+    pub compaction: Option<String>,
+    /// [`crate::selfharness::harness_source::HarnessSource::fingerprint`] of
+    /// the source that produced this generation.
+    pub harness_source: String,
+}
+
+/// Default checkpoint path: `<cache_dir>/selfharness/checkpoint.json`. A
+/// test (or the binary's caller) can point
+/// [`crate::selfharness::driver::SelfHarnessDriver::set_checkpoint_path`]
 /// elsewhere instead — this is only the production default.
-pub fn default_state_path() -> PathBuf {
+pub fn default_checkpoint_path() -> PathBuf {
     tidepool_runtime::paths::cache_dir()
         .join("selfharness")
-        .join("state.json")
+        .join("checkpoint.json")
 }
 
 /// Default transcript jsonl path: `<cache_dir>/selfharness/transcript.jsonl`.
@@ -71,31 +98,18 @@ pub fn default_transcript_path() -> PathBuf {
 /// stream. A caller booting the answerer `Harness` points its `LogWriter` here
 /// (`LogWriter::create(&default_log_path(), &header)`) so `tail -f` on this one
 /// path shows the executed source + effect req/resp interleaved. Sits alongside
-/// `state.json`/`transcript.jsonl`/`compaction.txt` under the same dir.
+/// `checkpoint.json`/`transcript.jsonl` under the same dir.
 pub fn default_log_path() -> PathBuf {
     tidepool_runtime::paths::cache_dir()
         .join("selfharness")
         .join("log.jsonl")
 }
 
-/// Default compaction-summary path: `<cache_dir>/selfharness/compaction.txt`
-/// (review C-3). The driver's `last_compaction` is otherwise in-memory only,
-/// so a crash after a mid-loop compaction would lose the summary the next
-/// render depends on and roll it back to `None`. Persisting it as a sidecar
-/// (plain text, not a DB — same "local files" discipline as `State`) lets a
-/// restarted process reload the latest summary alongside the persisted `State`.
-pub fn default_compaction_path() -> PathBuf {
-    tidepool_runtime::paths::cache_dir()
-        .join("selfharness")
-        .join("compaction.txt")
-}
-
-/// Restore the persisted `State` JSON from `path`, if any file exists there
+/// Restore the persisted [`Checkpoint`] from `path`, if one exists there
 /// yet — `Ok(None)` (NOT an error) when the file is simply absent, which is
-/// the expected case for the very first run: [`crate::selfharness::driver::SelfHarnessDriver::run_loop`]
-/// then falls back to `initialState` exactly as it does for the in-process
-/// very-first-cycle case.
-pub fn load_state(path: &Path) -> Result<Option<Json>, PersistenceError> {
+/// the expected case for the very first run. A file that exists but fails to
+/// parse is a typed [`PersistenceError`], never a silent reset to `None`.
+pub fn load_checkpoint(path: &Path) -> Result<Option<Checkpoint>, PersistenceError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -106,67 +120,31 @@ pub fn load_state(path: &Path) -> Result<Option<Json>, PersistenceError> {
             })
         }
     };
-    let value = serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Json {
+    let checkpoint = serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Json {
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(Some(value))
+    Ok(Some(checkpoint))
 }
 
-/// Persist `state` to `path`, creating the containing directory if needed.
-/// Writes to a `.tmp` sibling then renames over `path` — an atomic
-/// replace on the platforms this runs on, so [`load_state`] never observes
-/// a partially-written file even if the process is killed mid-write.
-pub fn save_state(path: &Path, state: &Json) -> Result<(), PersistenceError> {
+/// Persist `checkpoint` to `path`, creating the containing directory if
+/// needed. Writes to a `.tmp` sibling then renames over `path` — an atomic
+/// replace on the platforms this runs on, so [`load_checkpoint`] never
+/// observes a partially-written file even if the process is killed
+/// mid-write.
+pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), PersistenceError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| PersistenceError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let bytes = serde_json::to_vec_pretty(state).map_err(|source| PersistenceError::Json {
+    let bytes = serde_json::to_vec_pretty(checkpoint).map_err(|source| PersistenceError::Json {
         path: path.to_path_buf(),
         source,
     })?;
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| PersistenceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-/// Restore the persisted compaction summary from `path`, if a file exists
-/// there yet (review C-3) — `Ok(None)` (NOT an error) when absent, the
-/// expected case before any compaction has fired. Mirrors [`load_state`]'s
-/// missing-file-is-none contract.
-pub fn load_compaction(path: &Path) -> Result<Option<String>, PersistenceError> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(PersistenceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-/// Persist the latest compaction `summary` to `path` (review C-3), creating
-/// the containing directory if needed. Same atomic `.tmp`-then-rename write as
-/// [`save_state`], so a kill mid-write never leaves a half-written summary that
-/// a restart would reload.
-pub fn save_compaction(path: &Path, summary: &str) -> Result<(), PersistenceError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| PersistenceError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    std::fs::write(&tmp, summary.as_bytes()).map_err(|source| PersistenceError::Io {
         path: tmp.clone(),
         source,
     })?;
@@ -241,49 +219,58 @@ impl Observer for JsonlObserver {
 mod tests {
     use super::*;
 
+    fn checkpoint(generation: u64) -> Checkpoint {
+        Checkpoint {
+            generation,
+            state: serde_json::json!({"loopCount": generation, "mode": "Deciding"}),
+            compaction: Some("a summary".to_string()),
+            harness_source: "fingerprint-abc".to_string(),
+        }
+    }
+
     #[test]
-    fn load_state_missing_file_is_none_not_error() {
+    fn load_checkpoint_missing_file_is_none_not_error() {
         let dir = tempfile_dir();
-        let path = dir.join("nope").join("state.json");
-        assert_eq!(load_state(&path).expect("missing file is Ok(None)"), None);
+        let path = dir.join("nope").join("checkpoint.json");
+        assert_eq!(
+            load_checkpoint(&path).expect("missing file is Ok(None)"),
+            None
+        );
     }
 
     #[test]
     fn save_then_load_round_trips() {
         let dir = tempfile_dir();
-        let path = dir.join("nested").join("state.json");
-        let state = serde_json::json!({"loopCount": 3, "mode": "Deciding"});
-        save_state(&path, &state).expect("save_state");
-        let loaded = load_state(&path).expect("load_state").expect("some state");
-        assert_eq!(loaded, state);
+        let path = dir.join("nested").join("checkpoint.json");
+        let cp = checkpoint(3);
+        save_checkpoint(&path, &cp).expect("save_checkpoint");
+        let loaded = load_checkpoint(&path)
+            .expect("load_checkpoint")
+            .expect("some checkpoint");
+        assert_eq!(loaded, cp);
     }
 
     #[test]
-    fn save_state_leaves_no_tmp_file_behind() {
+    fn save_checkpoint_leaves_no_tmp_file_behind() {
         let dir = tempfile_dir();
-        let path = dir.join("state.json");
-        save_state(&path, &serde_json::json!({"x": 1})).expect("save_state");
+        let path = dir.join("checkpoint.json");
+        save_checkpoint(&path, &checkpoint(1)).expect("save_checkpoint");
         let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         assert!(!tmp.exists(), "temp file should be renamed away");
         assert!(path.exists());
     }
 
     #[test]
-    fn load_compaction_missing_file_is_none_not_error() {
+    fn truncated_checkpoint_file_is_a_typed_error() {
         let dir = tempfile_dir();
-        let path = dir.join("none").join("compaction.txt");
-        assert_eq!(load_compaction(&path).expect("missing is Ok(None)"), None);
-    }
+        let path = dir.join("checkpoint.json");
+        save_checkpoint(&path, &checkpoint(1)).expect("save_checkpoint");
+        let mut bytes = std::fs::read(&path).expect("read back");
+        bytes.truncate(bytes.len() / 2);
+        std::fs::write(&path, &bytes).expect("write truncated bytes");
 
-    #[test]
-    fn save_then_load_compaction_round_trips() {
-        // C-3: the persisted summary survives a "restart" (a fresh read).
-        let dir = tempfile_dir();
-        let path = dir.join("nested").join("compaction.txt");
-        let summary = "loop 3 distilled: decided X, learned Y";
-        save_compaction(&path, summary).expect("save_compaction");
-        let loaded = load_compaction(&path).expect("load").expect("some");
-        assert_eq!(loaded, summary);
+        let err = load_checkpoint(&path).expect_err("truncated json must not silently reset");
+        assert!(matches!(err, PersistenceError::Json { .. }));
     }
 
     #[test]
@@ -305,8 +292,6 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("loop_boundary"));
         assert!(lines[1].contains("compaction_trigger"));
-        // C-4: the jsonl line carries WHAT compaction produced, not just that
-        // it fired — the summary and the pre/post context sizes.
         assert!(lines[1].contains("distilled work summary"));
         assert!(lines[1].contains("900"));
     }

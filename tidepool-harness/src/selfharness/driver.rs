@@ -339,22 +339,21 @@ pub struct SelfHarnessDriver {
     /// model call — e.g. the compaction summarize turn (review C-2) — counts
     /// against it with a small cap instead of scripting 1024 real turns.
     loop_inference_call_cap: u32,
-    /// W3: the `State` json persistence path — [`Self::run_loop`] restores
-    /// from this file on start (falling back to `initialState` if absent,
-    /// same as the very first cycle ever) and saves the returned `State`
-    /// here after every cycle, so a killed-and-restarted process resumes
-    /// where it left off. Default [`persistence::default_state_path`];
-    /// override via [`Self::set_state_path`] (mainly for tests, which point
-    /// it at a scratch dir rather than the real cache dir).
-    state_path: PathBuf,
-    /// The compaction-summary sidecar path (review C-3): the LATEST
-    /// `self.last_compaction` is persisted here every time a compaction fires
-    /// ([`Self::set_last_compaction`]) and reloaded on start by
-    /// [`Self::run_loop`], so a crash-and-restart preserves the summary the
-    /// next render depends on rather than rolling `last_compaction` back to
-    /// `None`. Default [`persistence::default_compaction_path`]; override via
-    /// [`Self::set_compaction_path`] (mainly for tests).
-    compaction_path: PathBuf,
+    /// The checkpoint file path: [`Self::restore`] reads it on start, and a
+    /// completed cycle commits a fresh [`persistence::Checkpoint`] here (see
+    /// [`Self::commit_checkpoint`]) — the one place a checkpoint is ever
+    /// written, so a killed-and-restarted process resumes from a state and a
+    /// summary that were always committed together. Default
+    /// [`persistence::default_checkpoint_path`]; override via
+    /// [`Self::set_checkpoint_path`] (mainly for tests, which point it at a
+    /// scratch dir rather than the real cache dir).
+    checkpoint_path: PathBuf,
+    /// The generation of the last checkpoint this driver committed or
+    /// restored — `0` before either has happened. A commit writes
+    /// `checkpoint_generation + 1` and then adopts it, so generation
+    /// increases by exactly one per committed cycle and stays monotonic
+    /// across a restart (restore adopts the reloaded generation first).
+    checkpoint_generation: u64,
     /// The operator-input seam (self-iterating-harness Wave 2): the driver
     /// blocks on this for `askUser` form presentation
     /// ([`Self::drive_answerer_to_finalize`]) and the between-loops human
@@ -386,8 +385,8 @@ impl SelfHarnessDriver {
             answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
-            state_path: persistence::default_state_path(),
-            compaction_path: persistence::default_compaction_path(),
+            checkpoint_path: persistence::default_checkpoint_path(),
+            checkpoint_generation: 0,
             gate: Arc::new(StdinGate),
         }
     }
@@ -501,37 +500,24 @@ impl SelfHarnessDriver {
         self.loop_inference_call_cap = cap;
     }
 
-    /// Override the `State` json persistence path (W3; default
-    /// [`persistence::default_state_path`]). Mainly for tests: point it at a
-    /// scratch dir so a test's persisted `State` never touches the real
-    /// cache dir, and so a "simulated restart" (a second, fresh driver
-    /// pointed at the same path) can restore what the first one wrote.
-    pub fn set_state_path(&mut self, path: PathBuf) {
-        self.state_path = path;
+    /// Override the checkpoint file path (default
+    /// [`persistence::default_checkpoint_path`]). Mainly for tests: point it
+    /// at a scratch dir so a test's checkpoint never touches the real cache
+    /// dir, and so a "simulated restart" (a second, fresh driver pointed at
+    /// the same path) can restore what the first one committed.
+    pub fn set_checkpoint_path(&mut self, path: PathBuf) {
+        self.checkpoint_path = path;
     }
 
-    /// The current `State` json persistence path (W3).
-    pub fn state_path(&self) -> &Path {
-        &self.state_path
-    }
-
-    /// Override the compaction-summary sidecar path (review C-3; default
-    /// [`persistence::default_compaction_path`]). Mainly for tests: point it at
-    /// a scratch dir so a "simulated restart" (a second driver pointed at the
-    /// same path) restores the summary the first one persisted.
-    pub fn set_compaction_path(&mut self, path: PathBuf) {
-        self.compaction_path = path;
-    }
-
-    /// The current compaction-summary sidecar path (review C-3).
-    pub fn compaction_path(&self) -> &Path {
-        &self.compaction_path
+    /// The current checkpoint file path.
+    pub fn checkpoint_path(&self) -> &Path {
+        &self.checkpoint_path
     }
 
     /// The latest compaction summary the driver holds (`self.last_compaction`)
     /// — what the next render receives as `lastCompaction`. Reflects a
-    /// reload from [`Self::compaction_path`] after [`Self::run_loop`] starts,
-    /// or the most recent mid-loop compaction. `None` before any has fired.
+    /// reload from [`Self::checkpoint_path`] after [`Self::restore`] runs, or
+    /// the most recent mid-loop compaction. `None` before any has fired.
     pub fn last_compaction(&self) -> Option<&str> {
         self.last_compaction.as_deref()
     }
@@ -715,6 +701,11 @@ impl SelfHarnessDriver {
             let prompt_after =
                 self.render_framing(Some(&state_json), next_compaction.as_deref())?;
 
+            // One writer, one boundary: a cycle that reaches this point
+            // completed successfully, so its state and the compaction summary
+            // in force right now commit together as the next generation.
+            self.commit_checkpoint(source, &state_json)?;
+
             Ok(CycleOutcome {
                 prompt_before,
                 state_json,
@@ -735,14 +726,15 @@ impl SelfHarnessDriver {
     }
 
     /// Bootstrap the outer session over `source`, restore the last
-    /// persisted `State` from [`Self::state_path`] if a file is there yet
-    /// (W3 restart-reload — falls back to `initialState`, exactly the
-    /// in-process very-first-cycle case, when no file has been written
-    /// yet), then run [`Self::run_one_cycle`] FOREVER, persisting each
-    /// cycle's returned `State` back to [`Self::state_path`] and threading
-    /// it into the next cycle. Production entry point — see the module doc
-    /// for why this (and everything it calls) must run on a thread with an
-    /// active multi-thread tokio runtime.
+    /// committed checkpoint from [`Self::checkpoint_path`] if one is there
+    /// yet (restart-reload — falls back to `initialState`, exactly the
+    /// in-process very-first-cycle case, when nothing has been committed
+    /// yet), then run [`Self::run_one_cycle`] FOREVER, threading each
+    /// cycle's returned `State` into the next one (each cycle commits its
+    /// own checkpoint on success — see [`Self::commit_checkpoint`] — so
+    /// this loop does no persistence of its own). Production entry point —
+    /// see the module doc for why this (and everything it calls) must run
+    /// on a thread with an active multi-thread tokio runtime.
     ///
     /// Between-loops human gate (W1 runaway cap 3): before each new cycle
     /// AFTER the first, unless `auto` is set, print "press Enter to continue"
@@ -750,26 +742,9 @@ impl SelfHarnessDriver {
     /// misbehaving harness from running away across loops. `auto` (the
     /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
     /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
-    /// Reload persisted durable state from [`Self::state_path`] and
-    /// [`Self::compaction_path`] (review C-3), returning the restored `State`
-    /// JSON (or `None` for a first-ever run). Restores `self.last_compaction`
-    /// as a side effect, so the first render after a restart feeds the same
-    /// `lastCompaction` the prior process distilled rather than starting from
-    /// `None` (which would silently drop the summary). Called by
-    /// [`Self::run_loop`] at start; exposed so a restart-durability test can
-    /// drive the same reload path without entering the forever-loop.
-    pub fn restore(&mut self) -> Result<Option<Json>, DriverError> {
-        self.refuse_if_poisoned()?;
-        let state_json = persistence::load_state(&self.state_path)?;
-        if let Some(summary) = persistence::load_compaction(&self.compaction_path)? {
-            self.last_compaction = Some(summary);
-        }
-        Ok(state_json)
-    }
-
     pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
         self.refuse_if_poisoned()?;
-        let mut state_json: Option<Json> = self.restore()?;
+        let mut state_json: Option<Json> = self.restore(source)?;
         let mut first = true;
         loop {
             if !first && !auto {
@@ -777,9 +752,68 @@ impl SelfHarnessDriver {
             }
             first = false;
             let outcome = self.run_one_cycle(source, state_json.as_ref())?;
-            persistence::save_state(&self.state_path, &outcome.state_json)?;
             state_json = Some(outcome.state_json);
         }
+    }
+
+    /// Reload the checkpoint at [`Self::checkpoint_path`], if one is there
+    /// yet, returning its `State` JSON (or `None` for a first-ever run — no
+    /// checkpoint has been committed). Restores `self.last_compaction` and
+    /// `self.checkpoint_generation` from the same record, so the first
+    /// render after a restart feeds the same `lastCompaction` the prior
+    /// process distilled, and the next commit continues the generation
+    /// sequence rather than restarting it at 1.
+    ///
+    /// `source`'s fingerprint identifies the harness file THIS process just
+    /// loaded. A restored checkpoint whose fingerprint disagrees does not
+    /// block the restore — a harness file is expected to change across a
+    /// self-iteration run — but is reported via
+    /// [`Event::HarnessSourceChanged`] so a later
+    /// [`DriverError::StateDecode`] is diagnosable rather than mysterious.
+    ///
+    /// Called by [`Self::run_loop`] at start; exposed so a restart-durability
+    /// test can drive the same reload path without entering the
+    /// forever-loop.
+    pub fn restore(&mut self, source: &HarnessSource) -> Result<Option<Json>, DriverError> {
+        self.refuse_if_poisoned()?;
+        let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
+            return Ok(None);
+        };
+        self.last_compaction = checkpoint.compaction;
+        self.checkpoint_generation = checkpoint.generation;
+        if checkpoint.harness_source != source.fingerprint {
+            self.emit(Event::HarnessSourceChanged {
+                restored_fingerprint: checkpoint.harness_source,
+                current_fingerprint: source.fingerprint.clone(),
+            });
+        }
+        Ok(Some(checkpoint.state))
+    }
+
+    /// Commit the checkpoint for a cycle that just completed successfully:
+    /// `state` (that cycle's own returned `State`) and `self.last_compaction`
+    /// (the compaction summary in force at this same moment — a mid-loop
+    /// compaction already updated it in place, so a cycle that compacted and
+    /// one that didn't commit through the same path) go into one
+    /// [`persistence::Checkpoint`], written atomically under the next
+    /// generation. Called once, at the end of [`Self::run_one_cycle`]'s
+    /// success path — the ONLY place a checkpoint is written, so a state and
+    /// a summary read back together are always from the same generation.
+    fn commit_checkpoint(
+        &mut self,
+        source: &HarnessSource,
+        state: &Json,
+    ) -> Result<(), DriverError> {
+        let generation = self.checkpoint_generation + 1;
+        let checkpoint = persistence::Checkpoint {
+            generation,
+            state: state.clone(),
+            compaction: self.last_compaction.clone(),
+            harness_source: source.fingerprint.clone(),
+        };
+        persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
+        self.checkpoint_generation = generation;
+        Ok(())
     }
 
     /// The between-loops human checkpoint: block on [`OperatorGate::await_continue`]
@@ -1563,14 +1597,15 @@ impl SelfHarnessDriver {
         Ok(())
     }
 
-    /// Record `summary` as the latest compaction (`self.last_compaction`, fed to
-    /// the next render's `Maybe Text`) AND persist it to
-    /// [`Self::compaction_path`] so a crash-and-restart preserves the summary
-    /// (review C-3): the in-memory field alone rolls back to `None` on restart,
-    /// losing the summary the next render depends on. [`Self::run_loop`] reloads
-    /// it on start alongside the persisted `State`.
+    /// Record `summary` as the latest compaction (`self.last_compaction`, fed
+    /// to the next render's `Maybe Text`) — in-memory only. The loop
+    /// CONTINUES under this summary immediately, but it does not reach disk
+    /// on its own: [`Self::commit_checkpoint`] picks up whatever
+    /// `self.last_compaction` holds at the cycle's own commit boundary, so a
+    /// crash between a mid-loop compaction and that commit restores the
+    /// PRIOR generation's summary, never a summary paired with a state it
+    /// was never produced alongside.
     fn set_last_compaction(&mut self, summary: String) -> Result<(), DriverError> {
-        persistence::save_compaction(&self.compaction_path, &summary)?;
         self.last_compaction = Some(summary);
         Ok(())
     }

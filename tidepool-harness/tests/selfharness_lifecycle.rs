@@ -241,5 +241,8 @@ async fn poisoned_driver_refuses_entry_points() {
         driver.run_loop(&harness_source, true),
         Err(DriverError::Poisoned(_))
     ));
-    assert!(matches!(driver.restore(), Err(DriverError::Poisoned(_))));
+    assert!(matches!(
+        driver.restore(&harness_source),
+        Err(DriverError::Poisoned(_))
+    ));
 }

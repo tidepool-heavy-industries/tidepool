@@ -193,8 +193,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    driver.set_state_path(scratch("inplace").join("state.json"));
-    driver.set_compaction_path(scratch("inplace").join("compaction.txt"));
+    driver.set_checkpoint_path(scratch("inplace").join("checkpoint.json"));
     // 50% of 1000 = 500: the first hole's 600-token LAST-turn input trips
     // compaction between the holes, deterministically.
     driver.set_compaction_threshold_percent(50);
@@ -371,8 +370,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    driver.set_state_path(scratch("c1").join("state.json"));
-    driver.set_compaction_path(scratch("c1").join("compaction.txt"));
+    driver.set_checkpoint_path(scratch("c1").join("checkpoint.json"));
     // 50% of 1000 = 500. Summed 3×300 = 900 > 500 (would over-trip); the
     // high-water 300 < 500 (must NOT trip).
     driver.set_compaction_threshold_percent(50);
