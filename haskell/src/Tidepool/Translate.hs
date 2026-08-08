@@ -485,12 +485,13 @@ translateModule allBinds targetName unresolvedIds =
           && not (isSystemName (idName b))
 
     -- | (occurrence name, defining module) for every hidden *Sited helper
-    -- 'findAuxVarId' looks up. A *Sited binder reaches this scan as an
-    -- ordinary top-level Id in the closed bind pool (resolveExternals does
-    -- not rename Ids, and every *Sited binder is exported with no hiding
-    -- from its home module), so 'nameModule_maybe' reports its true
-    -- defining module here exactly as it does for the call-site Vars
-    -- 'isIntrinsicVerb' already relies on.
+    -- 'findAuxVarId' looks up. The only pass between resolveExternals and
+    -- this scan that touches binder identity is 'uniquifyDuplicateBinders':
+    -- its 'goTop' rewrites only each bind's RHS (@NonRec b <$> goE ...@ /
+    -- @Rec ... (b,) <$> goE ...@) and returns the TOP binder @b@ unchanged.
+    -- 'findAuxVarId' scans exactly those top binders, so a *Sited sibling's
+    -- Name — and its defining module — is still whatever it was before that
+    -- pass ran, same as the call-site Vars 'isIntrinsicVerb' relies on.
     auxVerbModules :: [(String, String)]
     auxVerbModules =
       [ ("runLLMTurnSited",       "Tidepool.Effects")
