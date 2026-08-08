@@ -5,7 +5,33 @@ capability, not substrate, and (2) reasonably citeable — one line going up
 across harness generations. Substrate/latency curves are explicitly NOT
 the goal (useful internally; not the pitch).
 
-## The line
+## Revised (same day): three tiers by marginal cost — no agent-farm budget;
+## real tasks are the substrate, not a separate benchmark workload
+
+**Tier 0 — telemetry from real use (FREE, starts at dogfood launch).**
+Metrics that normalize across heterogeneous tasks because they measure the
+HARNESS: first-compile success rate (the dialect thesis as a number),
+corrective-retry loops per hole, turns-to-finalize, tokens per completed
+hole, operator interventions per session. All already in the event log —
+the "benchmark" is a fold over jsonl that exists. The citeable artifact is
+a longitudinal case study ("first-compile success X%→Y% over N generations,
+M real turns"), which serves the pitch better than a leaderboard.
+
+**Tier 1 — distill real tasks into a replayable corpus (near-zero).** The
+repo's own fixtures-from-real-defects philosophy, one level up: after a
+real session, distill it into a replayable mini-task (scripted operator
+via replay machinery, pinned snapshot, typed success predicate on the
+Finalize value). Suite grows organically, stays 10-20 tasks, one
+slot-batch per generation. Pass-rate + efficiency per generation is the
+line, on tasks real by construction.
+
+**Tier 2 — public benchmark, sparse + small (bounded, per-release
+ritual).** A 10-20 task Terminal-Bench subset once per GENERATION (weeks
+apart): tens of dollars per point, like tagging a release. Keeps the
+external-comparability anchor. EXPLICITLY OUT: continuous runs, full
+suites, standing compute.
+
+Original tier-2 framing (retained for when budget allows):
 
 **Terminal-Bench first.** Public, recognized, and the thesis's home turf —
 "bash++ for LLM agents" is tested exactly where agents do terminal work.
