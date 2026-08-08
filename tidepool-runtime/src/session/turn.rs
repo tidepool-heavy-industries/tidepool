@@ -821,20 +821,38 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     // return below.
     forward_extract_timing(&String::from_utf8_lossy(&output.stderr), "classify");
     if !output.status.success() {
-        // A parsed report is a real GHC rejection of one of the items. An
-        // UNPARSEABLE report is a stale/skewed extractor — `MalformedDiagnostics`
-        // (→ VersionSkew), same as every other extract call site.
-        let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-            Ok(report) => report,
-            Err(msg) => return Err(CompileError::MalformedDiagnostics(msg)),
+        // THIS LANE HAS NO USER-ERROR MODE, so a non-zero exit is always an
+        // infrastructure problem and never the user's Haskell.
+        // `classifyTurn`'s rule 6 turns an item that parses as neither a
+        // declaration nor a statement into an `expr` verdict — the classify
+        // itself cannot reject input. What a non-zero exit really means is a
+        // stale extract: one predating `--classify` swallows the flag as a
+        // positional file and falls through to the ordinary compile path,
+        // which then reports a perfectly parseable GHC diagnostic about a
+        // target it cannot find. Classifying that as `ExtractFailed` would
+        // route a version skew into the caller's user-Haskell lane, where the
+        // repl degrades resiliently and the operator sees `parse error on
+        // input '<-'` on every bind instead of "your extract is stale".
+        //
+        // So both shapes are `MalformedDiagnostics` (→ VersionSkew), the same
+        // fails-loud reading every other call site gives an unparseable
+        // report. This is what makes the one-format wire policy true here:
+        // `--emit-stmt-binders`' removal means a new runtime REQUIRES a
+        // matching extract, and `scripts/redeploy.sh` ships both together.
+        let detail = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => report
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Err(msg) => msg,
         };
-        let text = report
-            .diagnostics
-            .iter()
-            .map(|d| d.message.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        return Err(CompileError::ExtractFailed(text));
+        return Err(CompileError::MalformedDiagnostics(format!(
+            "block classify failed; the deployed tidepool-extract is probably stale \
+             (it must support --classify). Redeploy both sides — scripts/redeploy.sh. \
+             Extract reported: {detail}"
+        )));
     }
 
     let json = std::fs::read_to_string(&out_path).map_err(CompileError::Io)?;
@@ -1085,6 +1103,37 @@ mod tests {
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics, got {err:?}"
+        );
+    }
+
+    /// A STALE extract — one predating `--classify` — swallows the flag as a
+    /// positional file, falls through to the ordinary compile path, and exits
+    /// non-zero with a perfectly PARSEABLE diagnostics report about a target
+    /// it cannot find. That must still read as version skew, not as the
+    /// user's Haskell: routing it into the user lane makes the repl degrade
+    /// resiliently and the operator sees a parse error on every bind instead
+    /// of "your extract is stale". Reproduced here with the exact stdout a
+    /// pre-`--classify` extract emits.
+    #[test]
+    fn classify_block_stale_extract_parseable_report_is_still_version_skew() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"version\":1,\"diagnostics\":[{\"span\":null,\
+             \"severity\":\"error\",\"message\":\"target is not a module name or a source file\"}]}'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let err = classify_block(&["x <- pure 1"]).unwrap_err();
+        let CompileError::MalformedDiagnostics(msg) = &err else {
+            panic!("a parseable report from a stale extract must be MalformedDiagnostics (version skew), got {err:?}");
+        };
+        assert!(
+            msg.contains("--classify") && msg.contains("redeploy.sh"),
+            "the skew message must name the missing flag and the redeploy path: {msg}"
         );
     }
 

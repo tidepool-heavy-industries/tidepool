@@ -291,10 +291,17 @@ impl Session {
                 // `run_block`'s batch path) — classify this one item with a
                 // one-item `classify_block` slice, exactly the pattern its doc
                 // names for a caller needing a single verdict.
-                let verdict = classify_block(&[expr.0.as_str()])
-                    .ok()
-                    .and_then(|v| v.into_iter().next());
-                self.run_eval(&expr.0, verdict.as_ref(), handlers, captured)
+                match classify_block(&[expr.0.as_str()]) {
+                    Ok(v) => {
+                        let verdict = v.into_iter().next();
+                        self.run_eval(&expr.0, verdict.as_ref(), handlers, captured)
+                    }
+                    // Version skew stops the turn with the real reason; any
+                    // other failure keeps the resilient plain-eval path (see
+                    // `run_block`'s batch classify for the same split).
+                    Err(CompileError::MalformedDiagnostics(msg)) => TurnOutcome::Error(msg),
+                    Err(_) => self.run_eval(&expr.0, None, handlers, captured),
+                }
             }
             SessionCommand::Cmd(meta) => self.run_meta(meta),
             SessionCommand::Block { items, verbose } => {
@@ -384,10 +391,24 @@ impl Session {
                 .iter()
                 .map(|&i| block_item_text(&items[i]).expect("filtered to Auto/Stmt above"))
                 .collect();
-            if let Ok(classified) = classify_block(&texts) {
-                for (slot, v) in verdict_indices.into_iter().zip(classified) {
-                    verdicts[slot] = Some(v);
+            match classify_block(&texts) {
+                Ok(classified) => {
+                    for (slot, v) in verdict_indices.into_iter().zip(classified) {
+                        verdicts[slot] = Some(v);
+                    }
                 }
+                // A stale extract is NOT something to degrade around. Without
+                // verdicts every bind would fall to the plain-eval path and
+                // fail with `parse error on input '<-'` — an error about the
+                // user's Haskell, for a deployment problem they cannot see.
+                // `MalformedDiagnostics` is the boundary's version-skew
+                // reading, so it stops the block with the real reason.
+                Err(CompileError::MalformedDiagnostics(msg)) => return TurnOutcome::Error(msg),
+                // Any other failure (the extractor genuinely unavailable) keeps
+                // the resilient path: verdicts stay `None`, decl-shaped items
+                // take the per-item route, and GHC re-reports any real error
+                // from the compile itself.
+                Err(_) => {}
             }
         }
 
