@@ -246,12 +246,48 @@ not exist on this branch yet):
   deletes. So one stage leaves the Rust timeline as another joins the extract
   timeline.
 
-Both halves are edits to the shared latency vocabulary and to `harness.rs`, which
-this workstream is meant to touch only minimally and mechanically. Phase B
-therefore agrees the naming with the latency workstream before implementing:
-whether `classify_extract` is retired or repurposed, and what the new extract-side
-phase is called. Coordinating a two-line constant change is cheaper than shipping
-a bench whose stage table silently changed shape.
+### The decision (arbitrated; implement against it)
+
+- New extract-side phase **`classify`**, sitting between `ghc_session` and
+  `typecheck` in `EXTRACT_PHASES` pipeline order — where it actually runs, inside
+  the booted session and before any compile work. Flat like every other phase, no
+  overlap with `typecheck`/`core`, and it lives inside `extract_spawn`'s envelope
+  as an `extract.*` substage, so a collector reading at Rust granularity must not
+  double-count it.
+- **`classify_extract` is retired** from `RUST_STAGES`, never repurposed. Its
+  semantics are a separate process spawn's wall clock, and that ceases to exist; a
+  same-named stage carrying different meaning would silently poison every
+  longitudinal comparison, whereas an absent stage is a loud, obvious shape
+  change. Same fails-loud principle as the one-format wire policy.
+- When Phase B lands, the contract doc's stage table is updated in the same
+  commit: `classify_extract` marked retired-at-`<SHA>` with successor
+  `extract.classify`, so the historical 33–75ms rows stay interpretable and the
+  reframe-justifying measurement remains readable rather than merely archived.
+
+### Two consequences of that, found while checking the call graph
+
+**The misnomer does not need renaming — it gets deleted.** The mislabeled
+`typecheck` phase is emitted by `extractStmtBinders`, reached from
+`--emit-stmt-binders`, and that flag is deleted by this very work. So the wrong
+label leaves with the lane that emitted it. Nothing to rename, which is the
+cheapest possible resolution of that judgment call.
+
+**`extractStmtBinders` self-emits three phases, and that breaks inside the turn
+mode.** It currently emits `startup`, `ghc_session`, and `typecheck` itself,
+because it was a standalone lane where one process meant one lane. As a *substep*
+of the turn mode those collide with the compile's own phases in the same process:
+two `ghc_session` lines from one spawn, plus a `typecheck` line that is not the
+compile's typecheck. Phase B must strip the self-timing and let the caller time
+that step as the single `classify` phase. A phase's owner has to be the thing that
+knows it is a whole lane, and once it is a substep it no longer does.
+
+Related, and worth knowing before someone reads too much into "classify inside the
+already-booted session": `extractStmtBinders` calls `runGhc`, so it boots a
+session of its own. The turn mode as currently built therefore boots two GHC
+sessions per process. The cost is small — the parse-only boot loads no packages,
+which is why the whole classify process measured tens of milliseconds — so this is
+a tidiness and phase-attribution issue rather than a performance one. Reusing the
+compile's session for the classify parse is the clean end state.
 
 Recognizer qualification needs no work here, and the reason is worth stating: the
 turn mode reaches `translateModuleClosed` through the shared
