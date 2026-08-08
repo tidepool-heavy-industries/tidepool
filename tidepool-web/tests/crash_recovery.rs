@@ -39,6 +39,23 @@ use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{answerer_decls, Harness, LogObserver, NodeId, SelfHarnessDriver};
 
+/// How long a wait tolerates NO new durable-log event before treating the
+/// child as genuinely stuck rather than slow under load — sized above the
+/// worst single-compile gap observed under real contention (a full
+/// boot+turn cycle ran 555s end to end on a contended box in dogfood), with
+/// margin.
+const STALL_WINDOW: Duration = Duration::from_secs(500);
+
+/// Absolute ceiling for [`wait_for_turn_start_count`] — needs one full
+/// committed cycle's worth of compiles (2 boot + 1 turn) to complete before
+/// the second cycle's turn even starts.
+const TURN_START_WAIT_CEILING: Duration = Duration::from_secs(600);
+
+/// Absolute ceiling for [`wait_for_exit`] on the restarted process — needs
+/// 2 more full committed cycles (see the module doc) before the loop
+/// naturally exhausts the replay queue and exits.
+const EXIT_WAIT_CEILING: Duration = Duration::from_secs(800);
+
 fn extract_available() -> bool {
     std::env::var("TIDEPOOL_EXTRACT").is_ok()
         || std::process::Command::new("tidepool-extract")
@@ -137,52 +154,125 @@ fn count_turn_starts(path: &Path) -> usize {
         .count()
 }
 
-/// Block until the newest log file under `dir` holds at least `target`
-/// `TurnStart` events, or panic loudly past `timeout` rather than hang.
-/// `TurnStart` is logged with the model's extracted Haskell block already in
-/// hand but BEFORE that block is compiled and run (`harness.rs::drive_turn`)
-/// — a real GHC extract call sits between this marker and the turn actually
-/// finishing, which is the window this test kills inside.
-fn wait_for_turn_start_count(dir: &Path, target: usize, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    let mut last_seen = 0usize;
+/// How many events of ANY kind the newest log file under `dir` currently
+/// holds — finer-grained than [`count_turn_starts`] alone
+/// (`NodeCreated`/`Forced`/`HolePublished`/`HoleConsumed`/`NodeDone` all
+/// land between one `TurnStart` and the next), used as the progress signal
+/// a stall watchdog polls. `0` if no log file exists yet or it's mid-write.
+fn total_log_events(dir: &Path) -> usize {
+    let Some(path) = newest_log_file(dir) else {
+        return 0;
+    };
+    let Ok((_header, events)) = LogReader::open(&path) else {
+        return 0;
+    };
+    events.filter_map(Result::ok).count()
+}
+
+/// Poll `poll` at a fixed interval until it returns `Some(_)`. Fails loudly
+/// — rather than hang — the moment EITHER bound trips: `progress()`'s
+/// return value hasn't changed for `stall_after` (genuinely stuck, not just
+/// slow: a wall-clock-only deadline can't tell those apart under the
+/// 4-6x compile-time inflation a contended box produces, since a legitimate
+/// multi-compile wait needs more wall time than a single compile does, but
+/// a REAL hang produces no new durable-log event at all), or `timeout`, the
+/// absolute backstop, elapses. `on_stall`/`on_timeout` render a
+/// self-diagnosing message from (time in that state, last progress value
+/// observed) — naming which bound tripped, not just that time ran out.
+fn poll_with_stall_watchdog<T>(
+    mut poll: impl FnMut() -> Option<T>,
+    mut progress: impl FnMut() -> usize,
+    stall_after: Duration,
+    timeout: Duration,
+    on_stall: impl FnOnce(Duration, usize) -> String,
+    on_timeout: impl FnOnce(Duration, usize) -> String,
+) -> T {
+    let start = Instant::now();
+    let mut last_value = progress();
+    let mut last_change = start;
     loop {
-        if let Some(path) = newest_log_file(dir) {
-            last_seen = count_turn_starts(&path);
-            if last_seen >= target {
-                return;
-            }
+        if let Some(result) = poll() {
+            return result;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "timed out after {timeout:?} waiting for turn_start #{target} under \
-                 {}; saw {last_seen} so far",
-                dir.display()
-            );
+        let now = Instant::now();
+        let current = progress();
+        if current != last_value {
+            last_value = current;
+            last_change = now;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        if now.duration_since(last_change) >= stall_after {
+            panic!("{}", on_stall(now.duration_since(last_change), last_value));
+        }
+        if now.duration_since(start) >= timeout {
+            panic!("{}", on_timeout(now.duration_since(start), last_value));
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
+/// Block until the newest log file under `dir` holds at least `target`
+/// `TurnStart` events. `TurnStart` is logged with the model's extracted
+/// Haskell block already in hand but BEFORE that block is compiled and run
+/// (`harness.rs::drive_turn`) — a real GHC extract call sits between this
+/// marker and the turn actually finishing, which is the window this test
+/// kills inside.
+fn wait_for_turn_start_count(dir: &Path, target: usize, stall_after: Duration, timeout: Duration) {
+    poll_with_stall_watchdog(
+        || {
+            let path = newest_log_file(dir)?;
+            (count_turn_starts(&path) >= target).then_some(())
+        },
+        || total_log_events(dir),
+        stall_after,
+        timeout,
+        |stalled_for, events| {
+            format!(
+                "no new durable-log event for {stalled_for:?} (stuck at {events} total \
+                 events) while waiting for turn_start #{target} under {}",
+                dir.display()
+            )
+        },
+        |elapsed, events| {
+            format!(
+                "hit the {timeout:?} absolute ceiling waiting for turn_start #{target} \
+                 under {} ({elapsed:?} elapsed, {events} events observed — still making \
+                 progress, just too slowly)",
+                dir.display()
+            )
+        },
+    )
+}
+
 /// Block until `child` (named `label` for a self-diagnosing panic message)
-/// exits, or kill it and panic past `timeout`.
+/// exits, watching `progress` the same way [`wait_for_turn_start_count`]
+/// does. A panic here unwinds through the caller's owning [`ChildGuard`],
+/// whose `Drop` reaps `child` — this function itself does not kill it.
 fn wait_for_exit(
     child: &mut ChildGuard,
     label: &str,
+    progress: impl FnMut() -> usize,
+    stall_after: Duration,
     timeout: Duration,
 ) -> std::process::ExitStatus {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("poll child process status") {
-            return status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("timed out after {timeout:?} waiting for {label} to exit; still running when killed");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    poll_with_stall_watchdog(
+        || child.try_wait().expect("poll child process status"),
+        progress,
+        stall_after,
+        timeout,
+        |stalled_for, events| {
+            format!(
+                "{label}: no new durable-log progress for {stalled_for:?} (stuck at \
+                 {events} events) — treating as genuinely stuck, not just slow under load"
+            )
+        },
+        |elapsed, events| {
+            format!(
+                "{label}: hit the {timeout:?} absolute ceiling ({elapsed:?} elapsed, \
+                 {events} events observed — still making progress, just too slowly); \
+                 still running when killed"
+            )
+        },
+    )
 }
 
 /// No `.tmp` sibling survives under `dir` — the atomic-write discipline
@@ -261,12 +351,16 @@ impl Drop for ChildGuard {
 
 /// This is the only test function in this binary, so its worst case is the
 /// binary's worst case against nextest's 1800s (`.config/nextest.toml`
-/// profile.default `slow-timeout`) hard-kill: the two explicit bounded
-/// waits below (480s + 480s) plus the two `checker_driver` boot compiles
-/// bracketing them (uncapped, but each one real `tidepool-extract` call —
-/// generously ~120s apiece under contention) sums to roughly 1200s, leaving
-/// several hundred seconds of margin rather than running up against the
-/// ceiling.
+/// profile.default `slow-timeout`) hard-kill. The two waits below are each
+/// bounded by an absolute ceiling — [`TURN_START_WAIT_CEILING`] (600s) then
+/// [`EXIT_WAIT_CEILING`] (800s) — plus the single `checker_driver` boot
+/// compile between them (uncapped, but one real `tidepool-extract` call;
+/// generously ~150s under contention) sums to roughly 1550s, leaving a few
+/// hundred seconds of real margin rather than running up against the
+/// ceiling. [`STALL_WINDOW`] (500s, smaller than either absolute ceiling)
+/// is what actually fires first on a genuine hang; the absolute ceilings
+/// are the backstop for "technically still progressing, just never
+/// finishing."
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
     if !extract_available() {
@@ -313,7 +407,7 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
 
     // Two TurnStart events: cycle 1's (committed) answerer turn, then cycle
     // 2's answerer turn genuinely starting.
-    wait_for_turn_start_count(&selfharness_dir, 2, Duration::from_secs(480));
+    wait_for_turn_start_count(&selfharness_dir, 2, STALL_WINDOW, TURN_START_WAIT_CEILING);
 
     // Kill only this test's own child PID — never a pattern match.
     child1.kill().expect("SIGKILL process 1");
@@ -369,7 +463,13 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
     // finds the queue empty and the loop exits. This is the test's own
     // designed termination signal, not a claim about the harness's normal
     // shutdown behavior.
-    let status2 = wait_for_exit(&mut child2, "process 2 (restart)", Duration::from_secs(480));
+    let status2 = wait_for_exit(
+        &mut child2,
+        "process 2 (restart)",
+        || total_log_events(&selfharness_dir),
+        STALL_WINDOW,
+        EXIT_WAIT_CEILING,
+    );
     assert!(
         !status2.success(),
         "process 2 was expected to run out of scripted replies and exit non-zero; \
