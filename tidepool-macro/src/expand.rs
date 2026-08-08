@@ -103,6 +103,11 @@ fn resolve_hs_path(
     // (the extractor subprocess's cwd, inherited unchanged from this process
     // — see `extractionDynFlags` in haskell/src/Tidepool/GhcPipeline.hs). The
     // cache key must walk the SAME search order or it can miss a real input.
+    //
+    // RESIDUAL GAP: `[cwd]` below is that search order ONLY because no
+    // includes are passed today — that coupling is not enforced by anything
+    // in this function. See the `run_tidepool_extract` doc comment before
+    // ever adding `--include` support to either this macro or that call.
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -386,6 +391,15 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     // every included file's own content into `full_source` (and thus into
     // the hash below); this closes the remaining gap — an import that
     // survives filtering and points at a local (non-package) module.
+    //
+    // RESIDUAL GAP: `[cwd]` below is the search order ONLY because
+    // `include_dirs` (validated above) is never forwarded to
+    // `run_tidepool_extract` as `--include` — it is a text-splicing input
+    // here, not a GHC search path. That's an easy trap: passing
+    // `include_dirs`'s paths to `run_tidepool_extract` for extra robustness
+    // WITHOUT also adding them to the `roots` slice below would silently
+    // reopen the exact bug this file exists to close. See the
+    // `run_tidepool_extract` doc comment.
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -593,6 +607,19 @@ fn capitalize(s: &str) -> String {
 /// (a real GHC diagnostic) is reported directly, never masked behind a
 /// redundant (and slower) nix re-run that would only reproduce the same
 /// error (#F3).
+///
+/// RESIDUAL GAP (named, not enforced): neither invocation below passes
+/// `--include`, so both callers' `resolve_transitive_hs_deps` roots are
+/// exactly `[cwd]` today — that's a load-bearing assumption this function's
+/// signature does NOT enforce. If this function ever grows an
+/// `extra_includes: &[PathBuf]` parameter to pass `--include <dir>` here,
+/// EVERY caller must extend the exact same `roots` list it already passes to
+/// `resolve_transitive_hs_deps` — not a separately-maintained list — or the
+/// cache key silently stops covering the real input set again, which is the
+/// exact bug this file exists to close. There is no compiler-enforced
+/// coupling between "what GHC searches" and "what gets hashed"; whoever adds
+/// `--include` here owns re-establishing it by construction (single source
+/// list), not by remembering to update two places.
 fn run_tidepool_extract(
     hs_path: &Path,
     output_dir: &Path,
