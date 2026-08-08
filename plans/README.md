@@ -1,24 +1,34 @@
 # Plans
 
+**Read first after the exo restart:** [`post-restart/README.md`](post-restart/README.md)
+— the respawn agenda, gate runbook, and per-lane specs written during the
+2026-08-09 quiesce. Everything below it is context.
+
 **Active — the self-iterating harness line** (`render`/`loop` +
 `RunLLMTurn`/`Finalize`, dogfooded via `harness-dogfooding/`):
 
-- **Landed:** `AskUser` typed-form effect + minimal web operator GUI
-  ([`self-iterating-harness/09-askuser-form-gui.md`](self-iterating-harness/09-askuser-form-gui.md));
-  `Fork` as a distinct effect with a fork-free leaf row; finalize pinned to
-  the hole's answer type (shim mechanism, being replaced by the row-indexed
-  `Finalize t` — in flight).
-- **In flight (exo swarm):** row-indexed `Finalize t`; harness durability
-  (lifecycle/checkpoint/turn-lease + crash recovery); turn-latency
-  instrumentation + report; one-spawn-per-turn (extract classifies raw turn
-  text in-session, returns one rich result; removes `--emit-stmt-binders`/
-  `--emit-binders`); extraction-fidelity fixes (Translate/GhcPipeline);
-  classified differential runner + lane consolidation; GC write-barrier +
-  soundness hardening; stdlib semantic-fidelity fixes.
+- **Landed (through 2026-08-09):** `AskUser` typed-form effect + web operator
+  GUI; `Fork` as a distinct effect (now in the standard roster, tag 11);
+  row-indexed `Finalize t` (shim machinery deleted, live in-heap crossing
+  proven); harness durability wave (append-failure fails the turn,
+  generation-tagged checkpoint, turn lease, crash-recovery acceptance);
+  decl-plane run-scoping (two harnesses can no longer delete each other's
+  planes); one-spawn-per-turn **Phase A** (`--turn` extract mode + Rust seam +
+  equivalence corpus; Phase B spec: [`one-spawn-turn-protocol.md`](one-spawn-turn-protocol.md));
+  extraction-fidelity fixes; classified differential runner (13 mutation
+  probes); GC write barrier; stdlib fidelity wave (98 probes); the
+  build-system cache-invalidation batch (default-deny extract fan-out cap,
+  toolchain pin, cabal freeze, workspace-dep centralization, dev-profile
+  opt3 for the JIT hot path); turn-latency instrumentation + stage
+  attribution (extract_spawn ~70%, jit_codegen ~28%, classify 33-75ms).
+- **In flight at quiesce:** harness-robustness submit (durability receipts +
+  the bounded GC_POISON discriminator run); jit-chain submit (JIT-side
+  latency wave 1: free-vars index, batched table ingestion, measured
+  reachability ratio 6.8:1→11.1:1).
 - **Findings ledger:**
-  [`self-iterating-harness/10-external-review-findings.md`](self-iterating-harness/10-external-review-findings.md)
-  — status of externally-reviewed defects; stays active until the durability
-  wave folds its rows.
+  [`self-iterating-harness/10-external-review-findings.md`](self-iterating-harness/10-external-review-findings.md);
+  ConTags/constructor-identity findings:
+  [`self-iterating-harness/12-contags-staleness-findings.md`](self-iterating-harness/12-contags-staleness-findings.md).
 
 **Prior (self-iterating-harness Wave 1):** `01`–`08` + `W1-IMPLEMENTATION-MAP.md`
 — thesis, runtime, agent surface, compaction, siteid, finalize closures.
