@@ -2035,7 +2035,7 @@ translateHead = \case
               inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
             [_, _, _]   ->
-              -- M5: this generic fallback can't split a real 2-result unboxed
+              -- this generic fallback can't split a real 2-result unboxed
               -- tuple — both binders would bind to the SAME primop node
               -- (aliasing, not the distinct old-value/flag fields a real op
               -- like casSmallArray# returns), and re-casing primIdx per
@@ -2045,12 +2045,17 @@ translateHead = \case
               error $ "Unsupported 2-result stateful unboxed-tuple primop/FFI call: "
                 ++ showPprUnsafe v
                 ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
-            [s', r1, r2, r3] -> do
-              bodyIdx <- translate body
-              c3 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-              c2 <- emitNode $ NCase primIdx (varId r3) [FlatAlt FDefault [] c3]
-              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
-              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            [_, _, _, _] ->
+              -- this generic fallback can't split a real 3-result unboxed
+              -- tuple — all three binders would bind to the SAME primop node
+              -- (aliasing, not the distinct old-value/flag fields a real op
+              -- like casSmallArray# returns), and re-casing primIdx per
+              -- binder risks running a stateful primop twice. Fail loud at
+              -- extract time instead of silently miscompiling; a real 3-result
+              -- stateful op needs a dedicated split (see splitMultiReturnPrimOp).
+              error $ "Unsupported 3-result stateful unboxed-tuple primop/FFI call: "
+                ++ showPprUnsafe v
+                ++ " (extract-pipeline landmine — needs a dedicated result split, not the generic fallback)"
             _ -> error $ "Unsupported stateful unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
         else do
           -- Pure primop returning unboxed tuple (e.g. indexSmallArray# -> (# a #))
@@ -2060,7 +2065,7 @@ translateHead = \case
               bodyIdx <- translate body
               emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] bodyIdx]
             [_, _] ->
-              -- M5: same landmine as the stateful 2-result arm above — both
+              -- same landmine as the stateful 2-result arm above — both
               -- binders would alias the same primop node. Fail loud.
               error $ "Unsupported 2-result pure unboxed-tuple primop: "
                 ++ showPprUnsafe v

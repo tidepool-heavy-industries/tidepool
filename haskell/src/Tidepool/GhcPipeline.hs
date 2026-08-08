@@ -171,8 +171,16 @@ runNormalPipeline path includes = do
     -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
-    _ <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
+    loadFlag <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
                (mapMG unpoison modGraphRaw)
+    -- Phase barrier: 'load'' already ran the downsweep's diagnostics through
+    -- mkUnknownDiagnostic/batchMsg above; a 'Failed' here means the session is
+    -- in GHC error recovery, so stop rather than continue into parse/typecheck
+    -- against a half-populated environment.
+    case loadFlag of
+      Failed    -> liftIO $ ioError $ userError $
+        "runPipeline: module load failed compiling " ++ path
+      Succeeded -> pure ()
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
     when (null summaries) $
@@ -369,8 +377,16 @@ runSessionPipeline scope path includes = do
     -- (injected as ifaces in PHASE 2), so it cannot go through @load'@. We use
     -- LoadAllTargets on depGraph (target filtered out above) — equivalent to the
     -- old @LoadDependenciesOf@ but without compiling the target prematurely.
-    _ <- load' Nothing LoadAllTargets
+    loadFlag <- load' Nothing LoadAllTargets
                mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
+    -- Phase barrier: same policy as 'runNormalPipeline' — a 'Failed' PHASE 1
+    -- dependency load stops here, before the module-graph restore, PHASE 2's
+    -- Val iface injection, or PHASE 3's per-module compile ever see a
+    -- half-populated HPT.
+    case loadFlag of
+      Failed    -> liftIO $ ioError $ userError $
+        "runSessionPipeline: PHASE 1 dependency load failed compiling " ++ path
+      Succeeded -> pure ()
     -- Restore the FULL module graph (target included) so PHASE 3's typecheck can
     -- see HPT instances from dep modules: @hptSomeThingsBelowUs@ walks
     -- @moduleGraphModulesBelow (hsc_mod_graph) target@, and @load'@ left
