@@ -111,6 +111,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
     // The PRE-loop render reflects `initialState`: Observing mode, no prior

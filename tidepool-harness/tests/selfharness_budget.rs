@@ -140,7 +140,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
-    let result = driver.run_one_cycle(&source, None);
+    let result = driver.run_one_cycle(&source, None).await;
 
     // The hole hard-fails the runLLMTurn effect at the configured hard cap (6).
     let err = result.expect_err("a never-finalizing answerer must hard-fail the cycle");

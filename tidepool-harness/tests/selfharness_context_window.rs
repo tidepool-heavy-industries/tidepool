@@ -135,6 +135,7 @@ async fn second_hole_sees_first_holes_exchange() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full two-hole cycle");
 
     // Both answers landed in State — the loop ran both holes.

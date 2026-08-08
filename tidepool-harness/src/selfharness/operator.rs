@@ -3,12 +3,16 @@
 //! never redefined at those call sites. Single source for the form-spec /
 //! submission wire types and the [`OperatorGate`] the driver blocks on.
 //!
-//! The gate is **sync-blocking**, mirroring the existing between-loops stdin
-//! gate ([`super::driver::SelfHarnessDriver::between_loops_gate`]) and the
-//! driver's `block_in_place`/`block_on` turn-driving: `present_form` blocks the
-//! driver thread until the operator submits; `await_continue` blocks until the
-//! operator advances the loop. A web implementation parks a channel; the
-//! headless [`StdinGate`] reads a line.
+//! The gate is **sync-blocking by frozen contract**, mirroring the existing
+//! between-loops stdin gate
+//! ([`super::driver::SelfHarnessDriver::between_loops_gate`]): `present_form`
+//! blocks the calling thread until the operator submits; `await_continue`
+//! blocks until the operator advances the loop. A web implementation parks a
+//! channel; the headless [`StdinGate`] reads a line. The driver's turn loop
+//! is `async fn` and `.await`s the `Harness` directly — the ONE place it
+//! still reaches for `tokio::task::block_in_place` is around a call into
+//! this genuinely sync-blocking gate, so that block yields the tokio worker
+//! to other tasks instead of stalling it.
 
 use serde::{Deserialize, Serialize};
 

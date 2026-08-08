@@ -151,7 +151,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     );
     let harness_source = source();
 
-    let cycle1 = driver.run_one_cycle(&harness_source, None);
+    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
     assert!(
         cycle1.is_err(),
         "the scripted first model call fails, so the cycle must error"
@@ -164,6 +164,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
 
     let cycle2 = driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("the cycle after a failure must re-bootstrap and succeed");
     assert!(
         matches!(driver.lifecycle(), SelfHarnessState::Idle),
@@ -214,7 +215,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         "TIDEPOOL_EXTRACT",
         "/nonexistent/tidepool-extract-bin-fresh-bootstrap-test",
     );
-    let first = driver.run_one_cycle(&harness_source, None);
+    let first = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -235,6 +236,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
 
     let second = driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("a working extract binary lets the driver recover from the fresh Failed");
     assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
     assert_eq!(
@@ -269,6 +271,7 @@ async fn poisoned_driver_refuses_entry_points() {
 
     driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect_err("the scripted first model call fails, so the cycle must error");
     assert!(matches!(
         driver.lifecycle(),
@@ -283,7 +286,7 @@ async fn poisoned_driver_refuses_entry_points() {
         "TIDEPOOL_EXTRACT",
         "/nonexistent/tidepool-extract-bin-poisoned-test",
     );
-    let recovery = driver.run_one_cycle(&harness_source, None);
+    let recovery = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -299,15 +302,15 @@ async fn poisoned_driver_refuses_entry_points() {
     );
 
     assert!(matches!(
-        driver.run_one_cycle(&harness_source, None),
+        driver.run_one_cycle(&harness_source, None).await,
         Err(DriverError::Poisoned(_))
     ));
     assert!(matches!(
-        driver.run_loop(&harness_source, true),
+        driver.run_loop(&harness_source, true).await,
         Err(DriverError::Poisoned(_))
     ));
     assert!(matches!(
-        driver.restore(&harness_source),
+        driver.restore(&harness_source).await,
         Err(DriverError::Poisoned(_))
     ));
 }

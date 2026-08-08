@@ -203,6 +203,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one two-hole cycle with a mid-loop compaction");
 
     // (1) The mid-loop compaction produced its Text.
@@ -383,6 +384,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("two-hole cycle, multi-round first hole, NO compaction");
 
     assert!(

@@ -150,6 +150,7 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one render->loop->forkAll(2 children)->finalize->render cycle");
 
     let reqs = requests.lock().unwrap();

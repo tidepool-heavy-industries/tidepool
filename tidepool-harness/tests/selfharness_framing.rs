@@ -117,6 +117,7 @@ async fn render_output_is_the_answerer_system_message() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
     let systems = systems.lock().unwrap();

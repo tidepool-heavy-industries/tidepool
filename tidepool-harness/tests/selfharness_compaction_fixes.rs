@@ -212,6 +212,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
 
     let err = driver
         .run_one_cycle(&source, None)
+        .await
         .expect_err("cap=1 must hard-stop when compaction tries its own inference call");
     let msg = format!("{err}");
     assert!(
@@ -239,6 +240,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
     let (mut driver1, source) = make_driver(&durable, 600, Arc::new(LogObserver));
     let outcome = driver1
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle with a mid-loop compaction");
     assert!(
         outcome
@@ -262,6 +264,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
 
     let restored_state = driver2
         .restore(&source2)
+        .await
         .expect("restore reloads the committed checkpoint")
         .expect("driver 1's completed cycle committed a checkpoint");
     assert_eq!(
@@ -293,6 +296,7 @@ async fn c4_compaction_trigger_event_carries_payload() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle with a mid-loop compaction");
 
     let captured = triggers.lock().unwrap();

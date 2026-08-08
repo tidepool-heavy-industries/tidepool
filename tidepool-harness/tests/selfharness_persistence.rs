@@ -170,6 +170,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     driver1.set_checkpoint_path(checkpoint_path.clone());
     let outcome1 = driver1
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("cycle 1 (initialState)");
     assert_eq!(
         outcome1
@@ -199,6 +200,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
 
     let restored = driver2
         .restore(&harness_source)
+        .await
         .expect("restore after restart")
         .expect("cycle 1's checkpoint was committed to disk");
     assert_eq!(
@@ -210,6 +212,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // restored state instead of `None`.
     let outcome2 = driver2
         .run_one_cycle(&harness_source, Some(&restored))
+        .await
         .expect("cycle 2 (from restored state)");
 
     // The PRE-loop render for cycle 2 must reflect the RESTORED mode
@@ -255,6 +258,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // A third cycle, same process, no restart — generation keeps climbing.
     let _ = driver2
         .run_one_cycle(&harness_source, Some(&outcome2.state_json))
+        .await
         .expect_err("no more scripted replies for a third cycle");
     // The failed third cycle must NOT have overwritten generation 2's
     // checkpoint (only a SUCCESSFUL cycle commits).
@@ -374,6 +378,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     // generation 1 with ITS OWN final compaction summary.
     let outcome1 = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle 1 completes and commits");
     assert!(
         outcome1
@@ -397,6 +402,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     driver.set_loop_inference_call_cap(2);
     let err = driver
         .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
         .expect_err("cycle 2 must hard-fail before finishing its second hole");
     assert!(
         format!("{err}").contains("inference-call cap"),
@@ -422,6 +428,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     let (mut restart_driver, restart_source) = compaction_driver(checkpoint_path.clone());
     let restored_state = restart_driver
         .restore(&restart_source)
+        .await
         .expect("restore after the crash")
         .expect("generation 1's checkpoint is still on disk");
     assert_eq!(
@@ -569,6 +576,7 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
 
     let restored = driver
         .restore(&current_source)
+        .await
         .expect("restore must not error on a mismatched fingerprint");
     assert_eq!(
         restored, None,
@@ -595,6 +603,7 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
     // commits generation 2, not 1.
     let outcome = driver
         .run_one_cycle(&current_source, restored.as_ref())
+        .await
         .expect("a cycle from fresh initialState after a discarded checkpoint must succeed");
     assert_eq!(
         outcome.state_json.get("loopCount").and_then(|v| v.as_i64()),
@@ -658,6 +667,7 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
 
     let err = driver
         .run_loop(&current_source, true)
+        .await
         .expect_err("the replay queue runs out on the second cycle");
     assert!(
         !matches!(err, DriverError::StateDecode(_)),

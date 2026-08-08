@@ -99,9 +99,16 @@ Two independent pieces, both in `replay.rs`:
   previously-recorded assistant `TurnDelta` replies back in order instead of
   calling a live model — a CI run re-drives the same golden path with zero
   API calls.
-- **Crash-replay** (`fold_tree_state`): folds a log's events into the
-  terminal per-node `NodeState` + tree structure, so a `kill -9`'d process
-  restores a browsable history tree from the durable log alone.
+- **Offline log inspection** (`fold_tree_state`/`FoldedTree`): folds a log's
+  events into the terminal per-node `NodeState` + tree structure, so a
+  finished or crashed run's browsable history tree can be reconstructed from
+  the durable log alone — an inspection tool, in the same family as
+  `tail -f log.jsonl`. It is NOT the startup recovery path: that is the
+  generation-tagged `persistence::Checkpoint` the driver restores from at
+  boot (`SelfHarnessDriver::restore`) — a second recovery source folding the
+  log at startup would be dual lifecycle machinery, the thing this lane
+  exists to remove. `golden_path`'s crash-replay assertion (a killed
+  process's log folds back to the terminal tree) is what pins this contract.
 
 **`Event::Effect` IS written by the live turn loop; effect-response
 SUBSTITUTION on replay is what remains out of scope.** The writer
@@ -227,9 +234,10 @@ into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
 — consume it, never redefine it there: `present_form(&FormSpec) ->
-Submission` and `await_continue()`, both SYNC-BLOCKING by design (the driver
-already runs its turn loop via `block_in_place`/`block_on`, not `async fn`).
-`SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`, defaulting to
+Submission` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
+`OperatorGate` contract) even though the driver's turn loop is `async fn` and
+`.await`s the `Harness` directly. `SelfHarnessDriver` holds
+`gate: Arc<dyn OperatorGate>`, defaulting to
 `StdinGate` (headless: reads one JSON line per form, one line per continue)
 and overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
 parks on a channel instead. `between_loops_gate` (the human-clicks-continue

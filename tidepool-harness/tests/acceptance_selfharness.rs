@@ -133,6 +133,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     {
         let outcome = driver
             .run_one_cycle(&source, prior_state.as_ref())
+            .await
             .unwrap_or_else(|e| panic!("cycle {i} failed: {e}"));
 
         let state = &outcome.state_json;
