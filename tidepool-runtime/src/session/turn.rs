@@ -1,11 +1,19 @@
 //! Wave 3b — session-eval turn compilation (the bind/reference extract seam).
 //!
 //! A `session_eval` turn is classified by GHC's parser (parse-only) into a BIND
-//! (`x <- action` / `let x = e`) or an EXPR (bare expression), then compiled
-//! through the session-aware extract path with the live `Tidepool.Session.Val.G<g>`
-//! ifaces injected. On a BIND turn the extract also writes the thin session iface
-//! (under `session_root`) and emits the [`BoundBinder`] sidecar this module
-//! parses.
+//! (`x <- action` / `let x = e`), an EXPR (bare expression), or a DECL
+//! (top-level declaration), then compiled through the session-aware extract
+//! path with the live `Tidepool.Session.Val.G<g>` ifaces injected. On a BIND
+//! turn the extract also writes the thin session iface (under `session_root`)
+//! and returns the [`BoundBinder`]s this module decodes.
+//!
+//! [`run_turn`] performs exactly ONE `tidepool-extract --turn` spawn per call:
+//! the extract classifies the turn itself (unless a caller-supplied verdict is
+//! forwarded via `--turn-verdict`), picks its own wrapper template by
+//! wire-name lookup, compiles, and returns the `TurnOut` CBOR sidecar this
+//! module decodes into a [`TurnResult`]. Rust never classifies — every verdict
+//! is GHC-sourced, whether it arrives from [`classify_block`]'s batch spawn or
+//! from inside the turn spawn itself.
 //!
 //! These calls deliberately bypass the memo cache in [`crate::compile_haskell`]:
 //! a session turn has on-disk side effects (the iface write) and depends on
@@ -14,6 +22,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
 
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
@@ -21,9 +30,7 @@ use tidepool_repr::{CoreExpr, DataConTable};
 
 use crate::{extract_module_name, CompileError};
 
-use super::binders::extract_binders;
 use super::render::ExportItem;
-use super::SessionError;
 
 /// Strict-force tier of a bound value (mirrors the extract's `BoundBinder.tier`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,13 +41,12 @@ pub enum ValueTier {
     Tier1Closure,
 }
 
-/// One binder a BIND turn introduces — the extract's `BoundBinder` JSON record.
+/// One binder a BIND turn introduces — the extract's `BoundBinder` record.
 #[derive(Clone, Debug)]
 pub struct BoundBinder {
     /// The user-facing name (`"x"`).
     pub name: String,
-    /// The `0xFE`-tagged stable id minted by `Translate.stableVarId` (carried as
-    /// a decimal string in JSON to avoid f64 precision loss).
+    /// The `0xFE`-tagged stable id minted by `Translate.stableVarId`.
     pub var_id: u64,
     /// `Tidepool.Session.Val.G<g>` — the module whose thin iface was written.
     pub module: String,
@@ -59,6 +65,26 @@ pub enum TurnKind {
     Bind,
     /// A bare expression.
     Expr,
+}
+
+/// The wire-name string the extract's `--turn-verdict <kind>[:<names>]` and
+/// the block-classify JSON `kind` field both use.
+fn turn_kind_wire_name(kind: TurnKind) -> &'static str {
+    match kind {
+        TurnKind::Decl => "decl",
+        TurnKind::Bind => "bind",
+        TurnKind::Expr => "expr",
+    }
+}
+
+/// `classifyTurn` rule 6: neither parse succeeds → `expr`, so the real error
+/// surfaces at compile rather than here.
+fn parse_turn_kind(kind: &str) -> TurnKind {
+    match kind {
+        "decl" => TurnKind::Decl,
+        "bind" => TurnKind::Bind,
+        _ => TurnKind::Expr,
+    }
 }
 
 /// Decl-vs-bind-vs-expr classification of a turn (GHC-sourced, parse-only).
@@ -93,8 +119,8 @@ pub struct SessionTurnResult {
 /// Arguments for the bind half of a turn (omit for an EXPR turn).
 #[derive(Clone, Debug)]
 pub struct SessionBind<'a> {
-    /// The bound names (GHC-sourced, from [`classify_turn`]). One name for a
-    /// single-binder turn; N names for a flat-tuple multi-binder turn.
+    /// The bound names (GHC-sourced). One name for a single-binder turn; N
+    /// names for a flat-tuple multi-binder turn.
     pub names: &'a [String],
     /// The generation of the `Val.G<g>` module to mint (shared by all N names).
     pub gen: u64,
@@ -107,10 +133,14 @@ pub struct SessionBind<'a> {
 /// empty `--bind-name` list), so it needs its own wrapper. [`TurnKind`] stays
 /// a plain 3-value mirror of the extract's wire-contract `kind` string
 /// ([`Decl`]/[`Bind`]/[`Expr`](TurnKind)); this is the separate, Rust-only
-/// selection key template lookup is keyed on. `Decl` never reaches a
-/// selector — it doesn't compile through a template (see [`run_turn`]).
+/// selection key template lookup is keyed on. `Decl` also selects a template
+/// — the extract's decl path requires `--turn-template decl=<file>` and
+/// errors without one — but a `Decl` verdict still never compiles through it;
+/// the template is only the parse wrapper (`wrap_decls`'s pragma block).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateSelector {
+    /// A top-level declaration — selects the parse wrapper (never compiles).
+    Decl,
     /// A bind that binds at least one name (`x <- e`, `let x = e`,
     /// `(a, b) <- e`).
     Bind,
@@ -122,14 +152,26 @@ pub enum TemplateSelector {
 }
 
 impl TemplateSelector {
-    /// Compute the selector a verdict maps to, or `None` for `Decl` (which
-    /// never selects a template).
+    /// Compute the selector a verdict maps to. Total over every [`TurnKind`]
+    /// now that `Decl` also selects a template — kept `Option`-returning for
+    /// a minimal signature; the `None` arm is unreachable.
     fn for_verdict(kind: TurnKind, binders: &[String]) -> Option<Self> {
-        match kind {
-            TurnKind::Decl => None,
-            TurnKind::Bind if binders.is_empty() => Some(TemplateSelector::BindDiscard),
-            TurnKind::Bind => Some(TemplateSelector::Bind),
-            TurnKind::Expr => Some(TemplateSelector::Expr),
+        Some(match kind {
+            TurnKind::Decl => TemplateSelector::Decl,
+            TurnKind::Bind if binders.is_empty() => TemplateSelector::BindDiscard,
+            TurnKind::Bind => TemplateSelector::Bind,
+            TurnKind::Expr => TemplateSelector::Expr,
+        })
+    }
+
+    /// The wire-name string the extract's `--turn-template <kind>=<file>`
+    /// keys its template lookup on.
+    fn wire_name(self) -> &'static str {
+        match self {
+            TemplateSelector::Decl => "decl",
+            TemplateSelector::Bind => "bind",
+            TemplateSelector::BindDiscard => "binddiscard",
+            TemplateSelector::Expr => "expr",
         }
     }
 }
@@ -147,45 +189,59 @@ impl TemplateSelector {
 ///   exactly one of the two — this is two placement modes, not a template
 ///   language: no conditionals, loops, or further placeholders.
 ///
-/// Byte-exactness is the contract: for a given verdict, the module
-/// [`run_turn`] compiles must be byte-identical to the module a caller wraps
-/// by hand today.
+/// Byte-exactness is the contract: for a given verdict, the module the
+/// extract compiles must be byte-identical to the module a caller wraps by
+/// hand today (see [`render_template`], the byte-identity anchor).
 ///
 /// Several [`TurnTemplate`]s may share a `kind`, forming an ordered variant
-/// list (the extract mode's retry: try each in order, first that typechecks
-/// wins). [`run_turn`] only ever attempts variant 0 — the list is carried now
-/// so the later swap to the extract's own retry needs no signature change.
+/// list — the extract's own retry: try each in order (per kind), first that
+/// typechecks wins, `variant` (on the `Bind`/`Expr` result) reports which.
+/// [`run_turn`] forwards every supplied template to the extract in order; it
+/// does not pick a variant itself.
 #[derive(Clone, Debug)]
 pub struct TurnTemplate {
     pub kind: TemplateSelector,
     pub source: String,
 }
 
+/// The decl template source `run_turn`'s `Decl` verdict selects — the parse
+/// wrapper the deleted `binders.rs`'s `wrap_decls` used to build per-call, now
+/// authored once and spliced via `{{TURN}}`. The pragma block is
+/// byte-identical to `wrap_decls`'s (moved verbatim, not retyped).
+pub(crate) const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes #-}\nmodule SessionDecls where\n{{TURN}}\n";
+
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
-/// need, the session context [`compile_session_turn`] already takes, the bind
-/// generation, and an optional caller-supplied verdict.
+/// need, the session context, the bind generation, and an optional
+/// caller-supplied verdict.
 ///
-/// When `verdict` is `Some`, [`run_turn`] uses it verbatim and does not spawn
-/// the classify — this is the batch-classify case, where a caller already
-/// holds a GHC-sourced verdict for the whole block.
+/// When `verdict` is `Some`, [`run_turn`] forwards it to the extract via
+/// `--turn-verdict`, skipping the extract's own re-parse — this is the
+/// batch-classify case, where a caller already holds a GHC-sourced verdict
+/// for the whole block (from [`classify_block`]). GHC-sourced either way.
 pub struct TurnRequest<'a> {
     /// The raw turn text (`x <- e` / `let x = e` / a bare expression / a
-    /// declaration), spliced verbatim into `{{TURN}}`.
+    /// declaration), written to `turn.txt` and spliced by the extract into
+    /// whichever template the verdict selects.
     pub turn_text: &'a str,
-    /// Wrapper templates, keyed by [`TurnKind`]. Selection is a lookup by the
-    /// verdict's kind, never a guess.
+    /// Wrapper templates. Every template is written to its own file and
+    /// passed as `--turn-template <kind>=<path>`, in the order supplied; the
+    /// extract picks which one applies from its own verdict.
     pub templates: &'a [TurnTemplate],
-    /// Extra `--include` dirs, forwarded to [`compile_session_turn`] (BIND/EXPR)
-    /// or [`extract_binders`] (DECL).
+    /// Extra `--include` dirs, forwarded to the extract on every call.
     pub include: &'a [&'a Path],
-    /// Where the `Val` ifaces are written/read (BIND/EXPR only).
+    /// Where the `Val` ifaces are written/read. Passed as `--session-root` on
+    /// every call — the decl verdict doesn't use it, but the flag is
+    /// unconditional in the one-spawn wire.
     pub session_root: &'a Path,
-    /// Live `Tidepool.Session.Val.G<g'>` modules to inject (BIND/EXPR only).
+    /// Live `Tidepool.Session.Val.G<g'>` modules to inject, passed one per
+    /// `--inject-val`.
     pub inject_modules: &'a [String],
-    /// The generation of the `Val.G<g>` module a BIND turn mints.
+    /// The generation of the `Val.G<g>` module a BIND turn mints, passed as
+    /// `--bind-gen` on every call.
     pub gen: u64,
-    /// A verdict the caller already holds from a batch classify. Skips the
-    /// classify spawn when present; GHC-sourced either way.
+    /// A verdict the caller already holds from a batch classify
+    /// ([`classify_block`]). Forwarded as `--turn-verdict`, skipping the
+    /// extract's internal re-parse.
     pub verdict: Option<TurnClassification>,
 }
 
@@ -200,7 +256,7 @@ pub struct CompiledTurn {
     pub table: DataConTable,
     /// Compile warnings (e.g. `has_io`).
     pub warnings: MetaWarnings,
-    /// Typed-yield sites from the `asks.json` sidecar.
+    /// Typed-yield sites, decoded from the `TurnOut` wire payload.
     pub asks: Vec<(u32, String)>,
 }
 
@@ -210,7 +266,8 @@ pub struct CompiledTurn {
 #[derive(Debug)]
 pub enum TurnResult {
     /// A top-level declaration. Does not compile: `items` is the decl's
-    /// export items ([`extract_binders`]'s payload).
+    /// export items, harvested by the extract's whole-module decl parse (the
+    /// payload `--emit-binders` used to produce before Phase B).
     Decl {
         /// The declared names (GHC-sourced).
         binders: Vec<String>,
@@ -220,11 +277,9 @@ pub enum TurnResult {
     Bind {
         /// The verdict's bound/declared names.
         binders: Vec<String>,
-        /// The compiled bound-binder records ([`compile_session_turn`]'s
-        /// `binders` sidecar payload).
+        /// The compiled bound-binder records.
         bound: Vec<BoundBinder>,
-        /// Which template variant of the `Bind` kind compiled (always `0` in
-        /// this interim body).
+        /// Which template variant of the `Bind` kind compiled.
         variant: usize,
         compiled: CompiledTurn,
         /// The full wrapped module actually compiled — the byte-identity
@@ -233,8 +288,7 @@ pub enum TurnResult {
     },
     /// A bare expression.
     Expr {
-        /// Which template variant of the `Expr` kind compiled (always `0` in
-        /// this interim body).
+        /// Which template variant of the `Expr` kind compiled.
         variant: usize,
         compiled: CompiledTurn,
         /// The full wrapped module actually compiled — the byte-identity
@@ -282,6 +336,11 @@ fn place_turn_stmt(turn_text: &str) -> String {
 /// [`place_turn_stmt`]) — is substituted last, so turn text containing
 /// literal `{{BINDERS}}`/`{{TURN}}`/`{{TURN_STMT}}` text is never re-scanned
 /// — the turn splice is byte-exact regardless of its content.
+///
+/// This is the byte-identity anchor `tidepool-repl`'s
+/// `turn_template_byte_identity_tests` asserts against: the extract does its
+/// own splice at runtime (this function isn't called from [`run_turn`]
+/// anymore), but that test is what proves the two agree.
 pub fn render_template(source: &str, turn_text: &str, binders: &[String]) -> String {
     let source = source.replace("{{BINDERS}}", &binders.join(", "));
     if source.contains("{{TURN_STMT}}") {
@@ -291,10 +350,13 @@ pub fn render_template(source: &str, turn_text: &str, binders: &[String]) -> Str
     }
 }
 
-/// Look up the variant-0 template for `selector` — the first template in
-/// declaration order whose `kind` matches. Later same-selector entries are
-/// the ordered retry list [`TurnTemplate`] documents; this shim only ever
-/// attempts the first.
+/// Find the first template in `templates` matching `selector` (declaration
+/// order) — used by [`run_turn`]'s preflight check that a required template
+/// was actually supplied before spawning the extract at all. The extract
+/// receives every supplied template (an ordered `--turn-template` list per
+/// kind) and does its own variant-retry selection; this lookup exists only to
+/// fail fast, in Rust, on a caller wiring bug (a verdict with no matching
+/// template) rather than let it surface as a confusing extract-side error.
 fn select_template(
     templates: &[TurnTemplate],
     selector: TemplateSelector,
@@ -303,109 +365,10 @@ fn select_template(
 }
 
 /// A missing template for a verdict is a caller wiring bug, not a GHC
-/// rejection — reported the same way the turn/binder lanes report every other
+/// rejection — reported the same way the turn lane reports every other
 /// synthetic shape violation (`CompileError::ExtractFailed`, never a panic).
 fn missing_template_error(selector: TemplateSelector) -> CompileError {
     CompileError::ExtractFailed(format!("run_turn: no template supplied for {selector:?}"))
-}
-
-/// [`SessionError`] → [`CompileError`], preserving the `Io`/`MalformedDiagnostics`
-/// split intact (an environment problem stays `Io`, a stale/skewed extractor
-/// stays `MalformedDiagnostics`); only the two user-Haskell-shaped variants
-/// (`BinderExtraction`, `ValidationFailed`) collapse into `ExtractFailed`,
-/// mirroring how this module already reports every other turn-lane synthetic
-/// shape violation.
-fn session_error_to_compile_error(e: SessionError) -> CompileError {
-    match e {
-        SessionError::Io(io) => CompileError::Io(io),
-        SessionError::MalformedDiagnostics(msg) => CompileError::MalformedDiagnostics(msg),
-        SessionError::BinderExtraction(msg) | SessionError::ValidationFailed(msg) => {
-            CompileError::ExtractFailed(msg)
-        }
-    }
-}
-
-/// The one entry point for a session-eval turn: classify (unless the caller
-/// already supplies a verdict), pick the wrapper template the verdict needs,
-/// and compile. For now the body performs today's two (or three, on a DECL
-/// turn) spawns — [`classify_turn`], template selection, then
-/// [`compile_session_turn`] or [`extract_binders`]. This is scaffolding with
-/// a deletion date: when the extract's own `--turn` mode lands, this body
-/// becomes a single call and the interim spawns are deleted outright. There
-/// is exactly one code path through this function — no flag, no fallback.
-pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
-    let TurnClassification { kind, binders } = match req.verdict {
-        Some(v) => v,
-        None => classify_turn(req.turn_text)?,
-    };
-
-    match kind {
-        TurnKind::Decl => {
-            let items = extract_binders(req.turn_text, req.include)
-                .map_err(session_error_to_compile_error)?;
-            Ok(TurnResult::Decl { binders, items })
-        }
-        TurnKind::Bind => {
-            // Four-shape selection (protocol note, "the verdict space has
-            // four shapes, not three"): a bind that binds no name can't flow
-            // through `SessionBind` — the extract rejects an empty
-            // `--bind-name` list — so it selects its OWN template and skips
-            // `--session-bind` entirely, running as a plain compile that
-            // discards its result. `binders`/`bound` both stay empty for
-            // that shape, so a caller reading `TurnResult::Bind` sees a
-            // uniform "this bind introduced no names" signal either way.
-            let selector = TemplateSelector::for_verdict(kind, &binders)
-                .expect("TurnKind::Bind always selects Bind or BindDiscard");
-            let template = select_template(req.templates, selector)
-                .ok_or_else(|| missing_template_error(selector))?;
-            let wrapped_source = render_template(&template.source, req.turn_text, &binders);
-            let bind = (selector == TemplateSelector::Bind).then(|| SessionBind {
-                names: &binders,
-                gen: req.gen,
-            });
-            let result = compile_session_turn(
-                &wrapped_source,
-                req.include,
-                req.session_root,
-                req.inject_modules,
-                bind,
-            )?;
-            Ok(TurnResult::Bind {
-                binders,
-                bound: result.binders,
-                variant: 0,
-                compiled: CompiledTurn {
-                    expr: result.expr,
-                    table: result.table,
-                    warnings: result.warnings,
-                    asks: result.asks,
-                },
-                wrapped_source,
-            })
-        }
-        TurnKind::Expr => {
-            let template = select_template(req.templates, TemplateSelector::Expr)
-                .ok_or_else(|| missing_template_error(TemplateSelector::Expr))?;
-            let wrapped_source = render_template(&template.source, req.turn_text, &binders);
-            let result = compile_session_turn(
-                &wrapped_source,
-                req.include,
-                req.session_root,
-                req.inject_modules,
-                None,
-            )?;
-            Ok(TurnResult::Expr {
-                variant: 0,
-                compiled: CompiledTurn {
-                    expr: result.expr,
-                    table: result.table,
-                    warnings: result.warnings,
-                    asks: result.asks,
-                },
-                wrapped_source,
-            })
-        }
-    }
 }
 
 fn extract_bin() -> String {
@@ -424,8 +387,8 @@ fn map_notfound(e: std::io::Error) -> CompileError {
 ///
 /// `prefix` selects which `tidepool-extract` spawn these phases came from —
 /// pass `"classify"` (matching `timing.rs`'s `CLASSIFY_STAGE_PREFIX`) for the
-/// parse-only `classify_turn` spawn, `"extract"` (matching
-/// `EXTRACT_STAGE_PREFIX`) for a full-pipeline spawn like
+/// parse-only [`classify_block`] spawn, `"extract"` (matching
+/// `EXTRACT_STAGE_PREFIX`) for a full-pipeline spawn like [`run_turn`]'s or
 /// `compile_session_turn`'s. Two DIFFERENT subprocess spawns must never share
 /// a prefix — a collector summing by stage name would silently merge their
 /// costs into one row. Malformed lines are skipped (diagnostics only, never a
@@ -451,34 +414,404 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
     }
 }
 
-/// Classify a raw turn (`x <- e` / `let x = e` / a bare expression) via the
-/// extract's parse-only `--emit-stmt-binders`. The binder name(s) come from
-/// GHC's parser, never a Rust scanner (plan §5.0 / domain §6 R5).
-pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError> {
-    let temp = TempDir::new()?;
-    let src = temp.path().join("turn.hs");
-    std::fs::write(&src, turn_text)?;
-    let out = temp.path().join("stmt.json");
+/// The one entry point for a session-eval turn. Writes the turn text and
+/// every supplied wrapper template to a [`TempDir`], then performs exactly
+/// ONE `tidepool-extract --turn` spawn: `--turn-template <kind>=<path>` per
+/// template (in order), `--turn-out`/`--output-dir` into the same temp dir,
+/// `--include`/`--session-root`/`--inject-val`/`--bind-gen`, and
+/// `--turn-verdict` when `req.verdict` is supplied (skipping the extract's
+/// internal re-parse). Decodes the `TurnOut` CBOR sidecar into the matching
+/// [`TurnResult`] variant; for `Bind`/`Expr` also reads `result.cbor` /
+/// `meta.cbor` off the same output dir, exactly as [`compile_session_turn`]
+/// does for its own compile.
+///
+/// When `req.verdict` is supplied, a missing template for the verdict's
+/// selector is caught here, before any process is spawned.
+pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
+    let verdict_arg = match &req.verdict {
+        Some(TurnClassification { kind, binders }) => {
+            let selector = TemplateSelector::for_verdict(*kind, binders)
+                .expect("TemplateSelector::for_verdict is total over TurnKind");
+            if select_template(req.templates, selector).is_none() {
+                return Err(missing_template_error(selector));
+            }
+            let mut arg = turn_kind_wire_name(*kind).to_string();
+            if !binders.is_empty() {
+                arg.push(':');
+                arg.push_str(&binders.join(","));
+            }
+            Some(arg)
+        }
+        None => None,
+    };
 
-    let output = Command::new(extract_bin())
-        .arg(&src)
-        .arg("--emit-stmt-binders")
-        .arg(&out)
-        .output()
-        .map_err(map_notfound)?;
+    let temp = TempDir::new()?;
+    let turn_path = temp.path().join("turn.txt");
+    std::fs::write(&turn_path, req.turn_text)?;
+    let turn_out_path = temp.path().join("turn.cbor");
+
+    let mut cmd = Command::new(extract_bin());
+    cmd.arg(&turn_path).arg("--turn");
+
+    for (i, tmpl) in req.templates.iter().enumerate() {
+        let path = temp.path().join(format!("template-{i}.hs"));
+        std::fs::write(&path, &tmpl.source)?;
+        cmd.arg("--turn-template")
+            .arg(format!("{}={}", tmpl.kind.wire_name(), path.display()));
+    }
+
+    cmd.arg("--turn-out")
+        .arg(&turn_out_path)
+        .arg("--output-dir")
+        .arg(temp.path());
+    for p in req.include {
+        cmd.arg("--include").arg(p);
+    }
+    cmd.arg("--session-root").arg(req.session_root);
+    for m in req.inject_modules {
+        cmd.arg("--inject-val").arg(m);
+    }
+    cmd.arg("--bind-gen").arg(req.gen.to_string());
+    if let Some(arg) = verdict_arg {
+        cmd.arg("--turn-verdict").arg(arg);
+    }
+
+    let spawn_start = std::time::Instant::now();
+    let output = cmd.output().map_err(map_notfound)?;
+    super::record_turn_stage("extract_spawn", spawn_start.elapsed(), 0);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A failed compile is still a real spawn — attribute its extract phases
+    // the same as a successful one, before the early return below.
+    forward_extract_timing(&stderr, "extract");
+    if !output.status.success() {
+        return Err(
+            match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+                Ok(report) => CompileError::Diagnostics(report.diagnostics),
+                Err(msg) => CompileError::MalformedDiagnostics(msg),
+            },
+        );
+    }
+
+    if !turn_out_path.exists() {
+        return Err(CompileError::MissingOutput(turn_out_path));
+    }
+    let turn_out_bytes = std::fs::read(&turn_out_path)?;
+    let turn_out = decode_turn_out(&turn_out_bytes)?;
+
+    match turn_out {
+        DecodedTurnOut::Decl { binders, items } => Ok(TurnResult::Decl { binders, items }),
+        DecodedTurnOut::Bind {
+            binders,
+            variant,
+            bound,
+            asks,
+            wrapped_source,
+        } => {
+            let compiled = read_compiled_turn(temp.path(), asks)?;
+            Ok(TurnResult::Bind {
+                binders,
+                bound,
+                variant,
+                compiled,
+                wrapped_source,
+            })
+        }
+        DecodedTurnOut::Expr {
+            variant,
+            asks,
+            wrapped_source,
+        } => {
+            let compiled = read_compiled_turn(temp.path(), asks)?;
+            Ok(TurnResult::Expr {
+                variant,
+                compiled,
+                wrapped_source,
+            })
+        }
+    }
+}
+
+/// Read `result.cbor`/`meta.cbor` off `output_dir` and register warning var
+/// names — the same post-compile bookkeeping [`compile_session_turn`]
+/// performs, shared here because [`run_turn`]'s `Bind`/`Expr` arms need it
+/// too. `asks` comes from the already-decoded wire variant, not a sidecar
+/// read.
+fn read_compiled_turn(
+    output_dir: &Path,
+    asks: Vec<(u32, String)>,
+) -> Result<CompiledTurn, CompileError> {
+    let expr_path = output_dir.join("result.cbor");
+    let meta_path = output_dir.join("meta.cbor");
+    if !expr_path.exists() {
+        return Err(CompileError::MissingOutput(expr_path));
+    }
+    if !meta_path.exists() {
+        return Err(CompileError::MissingOutput(meta_path));
+    }
+    let cbor_read_start = std::time::Instant::now();
+    let expr_bytes = std::fs::read(&expr_path)?;
+    let meta_bytes = std::fs::read(&meta_path)?;
+    let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
+    super::record_turn_stage("cbor_read", cbor_read_start.elapsed(), cbor_read_bytes);
+
+    let deserialize_start = std::time::Instant::now();
+    let expr = read_cbor(&expr_bytes)?;
+    let (table, warnings) = read_metadata(&meta_bytes)?;
+    super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
+    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
+
+    Ok(CompiledTurn {
+        expr,
+        table,
+        warnings,
+        asks,
+    })
+}
+
+/// The decoded shape of the `TurnOut` CBOR sidecar, before `run_turn` reads
+/// `result.cbor`/`meta.cbor` to build the final [`CompiledTurn`].
+#[derive(Debug)]
+enum DecodedTurnOut {
+    Decl {
+        binders: Vec<String>,
+        items: Vec<ExportItem>,
+    },
+    Bind {
+        binders: Vec<String>,
+        variant: usize,
+        bound: Vec<BoundBinder>,
+        asks: Vec<(u32, String)>,
+        wrapped_source: String,
+    },
+    Expr {
+        variant: usize,
+        asks: Vec<(u32, String)>,
+        wrapped_source: String,
+    },
+}
+
+fn cbor_shape_error(what: &str, expected: &str, got: &CborValue) -> CompileError {
+    CompileError::ExtractFailed(format!(
+        "TurnOut CBOR: expected {expected} for {what}, got {got:?}"
+    ))
+}
+
+fn cbor_expect_array<'a>(v: &'a CborValue, what: &str) -> Result<&'a [CborValue], CompileError> {
+    match v {
+        CborValue::Array(a) => Ok(a),
+        other => Err(cbor_shape_error(what, "array", other)),
+    }
+}
+
+fn cbor_expect_array_len<'a>(
+    v: &'a CborValue,
+    n: usize,
+    what: &str,
+) -> Result<&'a [CborValue], CompileError> {
+    let a = cbor_expect_array(v, what)?;
+    if a.len() != n {
+        return Err(CompileError::ExtractFailed(format!(
+            "TurnOut CBOR: expected {what} array of length {n}, got {}",
+            a.len()
+        )));
+    }
+    Ok(a)
+}
+
+fn cbor_expect_text<'a>(v: &'a CborValue, what: &str) -> Result<&'a str, CompileError> {
+    match v {
+        CborValue::Text(t) => Ok(t.as_str()),
+        other => Err(cbor_shape_error(what, "text", other)),
+    }
+}
+
+fn cbor_as_u64(v: &CborValue, what: &str) -> Result<u64, CompileError> {
+    match v {
+        CborValue::Integer(i) => u64::try_from(*i).map_err(|_| cbor_shape_error(what, "u64", v)),
+        other => Err(cbor_shape_error(what, "integer", other)),
+    }
+}
+
+fn cbor_as_usize(v: &CborValue, what: &str) -> Result<usize, CompileError> {
+    let u = cbor_as_u64(v, what)?;
+    usize::try_from(u)
+        .map_err(|_| CompileError::ExtractFailed(format!("TurnOut CBOR: {what} too large")))
+}
+
+fn decode_string_array(v: &CborValue, what: &str) -> Result<Vec<String>, CompileError> {
+    cbor_expect_array(v, what)?
+        .iter()
+        .map(|s| cbor_expect_text(s, what).map(str::to_string))
+        .collect()
+}
+
+fn decode_export_item(v: &CborValue) -> Result<ExportItem, CompileError> {
+    let arr = cbor_expect_array(v, "ExportItem")?;
+    let tag = arr
+        .first()
+        .ok_or_else(|| CompileError::ExtractFailed("TurnOut CBOR: empty ExportItem array".into()))
+        .and_then(|t| cbor_expect_text(t, "ExportItem tag"))?;
+    match (tag, arr.len()) {
+        ("EValue", 2) => Ok(ExportItem::Value {
+            name: cbor_expect_text(&arr[1], "EValue name")?.to_string(),
+        }),
+        ("EType", 3) => Ok(ExportItem::Type {
+            name: cbor_expect_text(&arr[1], "EType name")?.to_string(),
+            cons: decode_string_array(&arr[2], "EType cons")?,
+        }),
+        ("EClass", 3) => Ok(ExportItem::Class {
+            name: cbor_expect_text(&arr[1], "EClass name")?.to_string(),
+            methods: decode_string_array(&arr[2], "EClass methods")?,
+        }),
+        (tag, len) => Err(CompileError::ExtractFailed(format!(
+            "TurnOut CBOR: unknown ExportItem tag {tag:?} with arity {len}"
+        ))),
+    }
+}
+
+fn decode_export_items(v: &CborValue) -> Result<Vec<ExportItem>, CompileError> {
+    cbor_expect_array(v, "declItems")?
+        .iter()
+        .map(decode_export_item)
+        .collect()
+}
+
+fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
+    let arr = cbor_expect_array_len(v, 5, "BoundBinder")?;
+    let name = cbor_expect_text(&arr[0], "BoundBinder name")?.to_string();
+    let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
+    let module = cbor_expect_text(&arr[2], "BoundBinder module")?.to_string();
+    let tier = match cbor_expect_text(&arr[3], "BoundBinder tier")? {
+        "Tier1Closure" => ValueTier::Tier1Closure,
+        "Tier0Data" => ValueTier::Tier0Data,
+        other => {
+            return Err(CompileError::ExtractFailed(format!(
+                "TurnOut CBOR: unknown BoundBinder tier {other:?}"
+            )))
+        }
+    };
+    let type_display = cbor_expect_text(&arr[4], "BoundBinder typeDisplay")?.to_string();
+    Ok(BoundBinder {
+        name,
+        var_id,
+        module,
+        tier,
+        type_display,
+    })
+}
+
+fn decode_bound_binders(v: &CborValue) -> Result<Vec<BoundBinder>, CompileError> {
+    cbor_expect_array(v, "boundBinders")?
+        .iter()
+        .map(decode_bound_binder)
+        .collect()
+}
+
+fn decode_ask(v: &CborValue) -> Result<(u32, String), CompileError> {
+    let arr = cbor_expect_array_len(v, 2, "Ask")?;
+    let site = cbor_as_u64(&arr[0], "Ask site")?;
+    let site = u32::try_from(site).map_err(|_| {
+        CompileError::ExtractFailed("TurnOut CBOR: Ask site too large for u32".into())
+    })?;
+    let answer_type = cbor_expect_text(&arr[1], "Ask answer type")?.to_string();
+    Ok((site, answer_type))
+}
+
+fn decode_asks(v: &CborValue) -> Result<Vec<(u32, String)>, CompileError> {
+    cbor_expect_array(v, "asks")?
+        .iter()
+        .map(decode_ask)
+        .collect()
+}
+
+/// Decode the bare (no `TPLR` header — that belongs to the tree wire format
+/// only) `TurnOut` CBOR value: a tagged 2-element list `[tag, payload]`. A
+/// shape mismatch (wrong tag, wrong arity, wrong type) is a clean
+/// [`CompileError::ExtractFailed`] naming what was expected, never a panic.
+fn decode_turn_out(bytes: &[u8]) -> Result<DecodedTurnOut, CompileError> {
+    let value: CborValue = ciborium::de::from_reader(bytes)
+        .map_err(|e| CompileError::ExtractFailed(format!("TurnOut CBOR: malformed: {e}")))?;
+    let root = cbor_expect_array_len(&value, 2, "TurnOut")?;
+    let tag = cbor_expect_text(&root[0], "TurnOut tag")?;
+    match tag {
+        "Decl" => {
+            let payload = cbor_expect_array_len(&root[1], 2, "Decl payload")?;
+            let binders = decode_string_array(&payload[0], "Decl binders")?;
+            let items = decode_export_items(&payload[1])?;
+            Ok(DecodedTurnOut::Decl { binders, items })
+        }
+        "Bind" => {
+            let payload = cbor_expect_array_len(&root[1], 5, "Bind payload")?;
+            let binders = decode_string_array(&payload[0], "Bind binders")?;
+            let variant = cbor_as_usize(&payload[1], "Bind variant")?;
+            let bound = decode_bound_binders(&payload[2])?;
+            let asks = decode_asks(&payload[3])?;
+            let wrapped_source = cbor_expect_text(&payload[4], "Bind wrappedSource")?.to_string();
+            Ok(DecodedTurnOut::Bind {
+                binders,
+                variant,
+                bound,
+                asks,
+                wrapped_source,
+            })
+        }
+        "Expr" => {
+            let payload = cbor_expect_array_len(&root[1], 3, "Expr payload")?;
+            let variant = cbor_as_usize(&payload[0], "Expr variant")?;
+            let asks = decode_asks(&payload[1])?;
+            let wrapped_source = cbor_expect_text(&payload[2], "Expr wrappedSource")?.to_string();
+            Ok(DecodedTurnOut::Expr {
+                variant,
+                asks,
+                wrapped_source,
+            })
+        }
+        other => Err(CompileError::ExtractFailed(format!(
+            "TurnOut CBOR: unknown tag {other:?}"
+        ))),
+    }
+}
+
+/// One parse-only extract spawn classifying N items in order — the batch
+/// replacement for the old per-turn `--emit-stmt-binders` spawn. A repl block
+/// runner needs verdicts for a whole block before compiling any item (it
+/// segments consecutive decl-shaped items into one generation, and a
+/// statement item may reference decls earlier in the same block), so it
+/// classifies the block in one spawn rather than one spawn per item. One GHC
+/// session boots for the whole batch.
+pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, CompileError> {
+    if items.is_empty() {
+        // With no positional files the extract falls through to its usage
+        // branch, exits 0, and writes no `--classify-out` file — spawning
+        // would surface as a confusing missing-file error for what is
+        // obviously a no-op.
+        return Ok(Vec::new());
+    }
+    let temp = TempDir::new()?;
+    let mut paths = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let path = temp.path().join(format!("item-{i}.hs"));
+        std::fs::write(&path, item)?;
+        paths.push(path);
+    }
+    let out_path = temp.path().join("classify.json");
+
+    let mut cmd = Command::new(extract_bin());
+    for path in &paths {
+        cmd.arg(path);
+    }
+    cmd.arg("--classify").arg("--classify-out").arg(&out_path);
+
+    let output = cmd.output().map_err(map_notfound)?;
     // A failed classification still cost a real subprocess spawn — attribute
-    // its extract phases the same as a successful one, before the early return
-    // below. "classify", not "extract": this is the parse-only lane, a
-    // distinct tidepool-extract spawn from the full compile lane.
+    // its extract phases the same as a successful one, before the early
+    // return below.
     forward_extract_timing(&String::from_utf8_lossy(&output.stderr), "classify");
     if !output.status.success() {
-        // A parsed report is a real GHC rejection of the turn text; this lane
-        // never has a live GHC session distinguishing multiple diagnostics, so
-        // joining is realistically a single message, kept as plain
-        // `ExtractFailed` (a parse-classification lane, not a
-        // compile-diagnostics lane). An UNPARSEABLE report is a stale/skewed
-        // extractor — `MalformedDiagnostics` (→ VersionSkew), same as every
-        // other extract call site.
+        // A parsed report is a real GHC rejection of one of the items. An
+        // UNPARSEABLE report is a stale/skewed extractor — `MalformedDiagnostics`
+        // (→ VersionSkew), same as every other extract call site.
         let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
             Ok(report) => report,
             Err(msg) => return Err(CompileError::MalformedDiagnostics(msg)),
@@ -491,13 +824,37 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
             .join("\n\n");
         return Err(CompileError::ExtractFailed(text));
     }
-    let json = std::fs::read_to_string(&out).map_err(CompileError::Io)?;
-    parse_stmt_json(&json)
+
+    let json = std::fs::read_to_string(&out_path).map_err(CompileError::Io)?;
+    parse_classify_json(&json, items.len())
 }
 
-fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
+/// Parse `{"verdicts":[{kind,binders}, ...]}`. A verdict count that does not
+/// match the item count is a clean, loud [`CompileError::ExtractFailed`] — a
+/// silent length mismatch would misalign every downstream item against the
+/// wrong verdict.
+fn parse_classify_json(
+    json: &str,
+    expected: usize,
+) -> Result<Vec<TurnClassification>, CompileError> {
     let v: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| CompileError::ExtractFailed(format!("invalid stmt-binder JSON: {e}")))?;
+        .map_err(|e| CompileError::ExtractFailed(format!("invalid classify-block JSON: {e}")))?;
+    let verdicts = v
+        .get("verdicts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("classify-block JSON missing `verdicts`".into())
+        })?;
+    if verdicts.len() != expected {
+        return Err(CompileError::ExtractFailed(format!(
+            "classify-block: expected {expected} verdict(s), got {}",
+            verdicts.len()
+        )));
+    }
+    verdicts.iter().map(parse_one_verdict).collect()
+}
+
+fn parse_one_verdict(v: &serde_json::Value) -> Result<TurnClassification, CompileError> {
     let kind = v
         .get("kind")
         .and_then(serde_json::Value::as_str)
@@ -511,12 +868,10 @@ fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
                 .collect()
         })
         .unwrap_or_default();
-    let kind = match kind {
-        "decl" => TurnKind::Decl,
-        "bind" => TurnKind::Bind,
-        _ => TurnKind::Expr,
-    };
-    Ok(TurnClassification { kind, binders })
+    Ok(TurnClassification {
+        kind: parse_turn_kind(kind),
+        binders,
+    })
 }
 
 /// Compile one session-eval turn through the session-aware extract path.
@@ -707,39 +1062,78 @@ mod tests {
     /// as `compile_session_turn` and `lib.rs::compile_haskell`. Env mutation is
     /// safe: nextest runs each test in its own process.
     #[test]
-    fn classify_turn_unparseable_report_is_malformed_diagnostics() {
+    fn classify_block_unparseable_report_is_malformed_diagnostics() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let fake = dir.path().join("fake-extract");
         std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("TIDEPOOL_EXTRACT", &fake);
-        let err = classify_turn("x <- pure 1").unwrap_err();
+        let err = classify_block(&["x <- pure 1"]).unwrap_err();
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics, got {err:?}"
         );
     }
 
+    /// An empty item list must short-circuit in Rust and never spawn the
+    /// extractor: with no positional files the extract falls through to its
+    /// usage branch and writes no `--classify-out` file, so spawning would
+    /// surface as a confusing missing-file error for what is obviously a
+    /// no-op.
+    #[test]
+    fn classify_block_empty_items_short_circuits_without_spawning() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("calls.log");
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log_path.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let result = classify_block(&[]).unwrap();
+        assert!(result.is_empty());
+        assert!(
+            !log_path.exists(),
+            "classify_block(&[]) spawned the extractor"
+        );
+    }
+
+    #[test]
+    fn classify_block_verdict_count_mismatch_is_clean_error() {
+        let err = parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x"]}]}"#, 2)
+            .unwrap_err();
+        assert!(
+            matches!(err, CompileError::ExtractFailed(_)),
+            "expected ExtractFailed, got {err:?}"
+        );
+    }
+
     #[test]
     fn parses_bind_classification() {
-        let c = parse_stmt_json(r#"{"kind":"bind","binders":["x"]}"#).unwrap();
-        assert_eq!(c.kind, TurnKind::Bind);
-        assert_eq!(c.binders, vec!["x".to_string()]);
+        let cs =
+            parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x"]}]}"#, 1).unwrap();
+        assert_eq!(cs[0].kind, TurnKind::Bind);
+        assert_eq!(cs[0].binders, vec!["x".to_string()]);
     }
 
     #[test]
     fn parses_expr_classification() {
-        let c = parse_stmt_json(r#"{"kind":"expr","binders":[]}"#).unwrap();
-        assert_eq!(c.kind, TurnKind::Expr);
-        assert!(c.binders.is_empty());
+        let cs = parse_classify_json(r#"{"verdicts":[{"kind":"expr","binders":[]}]}"#, 1).unwrap();
+        assert_eq!(cs[0].kind, TurnKind::Expr);
+        assert!(cs[0].binders.is_empty());
     }
 
     #[test]
     fn parses_decl_classification() {
-        let c = parse_stmt_json(r#"{"kind":"decl","binders":["sq"]}"#).unwrap();
-        assert_eq!(c.kind, TurnKind::Decl);
-        assert_eq!(c.binders, vec!["sq".to_string()]);
+        let cs =
+            parse_classify_json(r#"{"verdicts":[{"kind":"decl","binders":["sq"]}]}"#, 1).unwrap();
+        assert_eq!(cs[0].kind, TurnKind::Decl);
+        assert_eq!(cs[0].binders, vec!["sq".to_string()]);
     }
 
     #[test]
@@ -832,7 +1226,10 @@ mod tests {
 
     #[test]
     fn template_selector_for_verdict_four_shapes() {
-        assert_eq!(TemplateSelector::for_verdict(TurnKind::Decl, &[]), None);
+        assert_eq!(
+            TemplateSelector::for_verdict(TurnKind::Decl, &[]),
+            Some(TemplateSelector::Decl)
+        );
         assert_eq!(
             TemplateSelector::for_verdict(TurnKind::Bind, &["x".to_string()]),
             Some(TemplateSelector::Bind)
@@ -902,14 +1299,13 @@ mod tests {
         );
     }
 
-    /// A caller-supplied verdict must skip the classify spawn entirely: the
-    /// only extractor invocation observed is the compile call, never
-    /// `--emit-stmt-binders`. The fake extractor logs its argv and exits
-    /// non-zero (the compile is allowed to fail; only the spawn count and
-    /// arguments matter here). Env mutation is safe: nextest runs each test
-    /// in its own process.
+    /// `run_turn` must spawn the extractor EXACTLY ONCE, carrying `--turn`,
+    /// never a deleted classify/binder flag. The fake extractor logs its argv
+    /// and exits non-zero (the compile is allowed to fail; only the spawn
+    /// count and arguments matter here). Env mutation is safe: nextest runs
+    /// each test in its own process.
     #[test]
-    fn run_turn_supplied_verdict_skips_classify_spawn() {
+    fn run_turn_spawns_extract_exactly_once_with_turn_flag() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let log_path = dir.path().join("calls.log");
@@ -946,11 +1342,141 @@ mod tests {
         assert_eq!(
             calls.lines().count(),
             1,
-            "expected exactly one extract spawn (compile only), got:\n{calls}"
+            "expected exactly one extract spawn, got:\n{calls}"
         );
+        let call = calls.lines().next().unwrap_or_default();
+        assert!(call.contains("--turn"), "spawn missing --turn:\n{call}");
         assert!(
-            !calls.contains("--emit-stmt-binders"),
-            "classify spawn ran despite a supplied verdict:\n{calls}"
+            !call.contains("--emit-stmt-binders") && !call.contains("--emit-binders"),
+            "spawn carried a deleted classify/binder flag:\n{call}"
+        );
+    }
+
+    // ---- TurnOut CBOR decoding ----
+
+    fn build_cbor(v: &CborValue) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(v, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decode_turn_out_decl_variant() {
+        let v = CborValue::Array(vec![
+            CborValue::Text("Decl".into()),
+            CborValue::Array(vec![
+                CborValue::Array(vec![CborValue::Text("sq".into())]),
+                CborValue::Array(vec![CborValue::Array(vec![
+                    CborValue::Text("EValue".into()),
+                    CborValue::Text("sq".into()),
+                ])]),
+            ]),
+        ]);
+        match decode_turn_out(&build_cbor(&v)).unwrap() {
+            DecodedTurnOut::Decl { binders, items } => {
+                assert_eq!(binders, vec!["sq".to_string()]);
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].head_name(), "sq");
+            }
+            other => panic!("expected Decl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_turn_out_bind_variant() {
+        let v = CborValue::Array(vec![
+            CborValue::Text("Bind".into()),
+            CborValue::Array(vec![
+                CborValue::Array(vec![CborValue::Text("x".into())]),
+                CborValue::Integer(0.into()),
+                CborValue::Array(vec![CborValue::Array(vec![
+                    CborValue::Text("x".into()),
+                    CborValue::Integer(42.into()),
+                    CborValue::Text("Tidepool.Session.Val.G3".into()),
+                    CborValue::Text("Tier0Data".into()),
+                    CborValue::Text("Int".into()),
+                ])]),
+                CborValue::Array(vec![CborValue::Array(vec![
+                    CborValue::Integer(7.into()),
+                    CborValue::Text("Text".into()),
+                ])]),
+                CborValue::Text("module M where\nresult = x <- pure 1\n".into()),
+            ]),
+        ]);
+        match decode_turn_out(&build_cbor(&v)).unwrap() {
+            DecodedTurnOut::Bind {
+                binders,
+                variant,
+                bound,
+                asks,
+                wrapped_source,
+            } => {
+                assert_eq!(binders, vec!["x".to_string()]);
+                assert_eq!(variant, 0);
+                assert_eq!(bound.len(), 1);
+                assert_eq!(bound[0].name, "x");
+                assert_eq!(bound[0].var_id, 42);
+                assert_eq!(bound[0].tier, ValueTier::Tier0Data);
+                assert_eq!(asks, vec![(7, "Text".to_string())]);
+                assert!(wrapped_source.contains("result ="));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_turn_out_expr_variant() {
+        let v = CborValue::Array(vec![
+            CborValue::Text("Expr".into()),
+            CborValue::Array(vec![
+                CborValue::Integer(1.into()),
+                CborValue::Array(vec![]),
+                CborValue::Text("module M where\nresult = 1 + 1\n".into()),
+            ]),
+        ]);
+        match decode_turn_out(&build_cbor(&v)).unwrap() {
+            DecodedTurnOut::Expr {
+                variant,
+                asks,
+                wrapped_source,
+            } => {
+                assert_eq!(variant, 1);
+                assert!(asks.is_empty());
+                assert!(wrapped_source.contains("1 + 1"));
+            }
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_turn_out_unknown_tag_is_clean_error() {
+        let v = CborValue::Array(vec![
+            CborValue::Text("Bogus".into()),
+            CborValue::Array(vec![]),
+        ]);
+        let err = decode_turn_out(&build_cbor(&v)).unwrap_err();
+        assert!(
+            matches!(err, CompileError::ExtractFailed(_)),
+            "expected ExtractFailed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_turn_out_wrong_arity_is_clean_error() {
+        // Bind payload with 4 elements instead of 5 (missing wrappedSource).
+        let v = CborValue::Array(vec![
+            CborValue::Text("Bind".into()),
+            CborValue::Array(vec![
+                CborValue::Array(vec![]),
+                CborValue::Integer(0.into()),
+                CborValue::Array(vec![]),
+                CborValue::Array(vec![]),
+            ]),
+        ]);
+        let err = decode_turn_out(&build_cbor(&v)).unwrap_err();
+        assert!(
+            matches!(err, CompileError::ExtractFailed(_)),
+            "expected ExtractFailed, got {err:?}"
         );
     }
 
@@ -960,9 +1486,9 @@ mod tests {
     // `Tidepool.Binders.classifyTurn`'s documented precedence (its doc
     // comment, not by running the code) — the corpus is a check ON the
     // verdict, not a mirror of whatever the code happens to produce. Each
-    // entry asserts the OLD path (`classify_turn`, a direct call) and the NEW
-    // path (`run_turn`'s returned verdict) agree, and that both match the
-    // table.
+    // entry asserts the OLD path ([`classify_block`], a direct call) and the
+    // NEW path ([`run_turn`]'s returned verdict) agree, and that both match
+    // the table.
 
     /// One corpus entry.
     struct Case {
@@ -1027,22 +1553,21 @@ mod tests {
         },
         // -- decl (rule 3), extension-gated syntax --
         //
-        // `run_turn`'s decl branch (today: `extract_binders`, which wraps the
-        // turn text in `wrap_decls`'s 17-extension pragma block before
-        // compiling) must accept a canonical declaration whose syntax only
-        // parses with one of those extensions enabled — dropping the wrapper
-        // is a compile-boundary narrowing (a valid declaration stops
-        // compiling), which is exactly the strict-superset violation the
-        // dialect rule forbids. These three are confirmed (by direct probe of
+        // `run_turn`'s decl branch wraps the turn text in the decl template's
+        // 17-extension pragma block before compiling (moved verbatim from
+        // the deleted `binders.rs`'s `wrap_decls`). Dropping the wrapper is a
+        // compile-boundary narrowing (a valid declaration stops compiling),
+        // which is exactly the strict-superset violation the dialect rule
+        // forbids. These three are confirmed (by direct probe of
         // `--emit-binders`, wrapped vs. unwrapped) to actually regress
         // without the wrapper: their legality check lives in GHC's
         // lexer/parser, not the renamer, so it fires even under a parse-only
         // extraction. `RecordWildCards`/`GADTs`/`TypeApplications` were also
         // considered — their extension-legality check is deferred to the
-        // renamer, a phase `extract_binders`'s parse-only extraction never
-        // reaches, so a declaration using them compiles identically wrapped
-        // or raw and would NOT catch the wrapper being dropped from this
-        // particular decl path; not included here for that reason.
+        // renamer, a phase the decl parse-only extraction never reaches, so
+        // a declaration using them compiles identically wrapped or raw and
+        // would NOT catch the wrapper being dropped from this particular
+        // decl path; not included here for that reason.
         Case {
             name: "lambda_case_decl",
             text: "f = \\case { 0 -> 1 ; _ -> 2 }",
@@ -1172,9 +1697,8 @@ mod tests {
         // parenthesized) binder tuple — valid for both a single name and an
         // N-tuple. A discarding bind runs the statement for its effects and
         // yields `()` — no `{{BINDERS}}` splice, so it needs no bound name at
-        // all (Part 3's fix: it no longer flows an empty name list into
-        // `SessionBind`). An expr places the turn verbatim as the whole
-        // binding.
+        // all. An expr places the turn verbatim as the whole binding. A decl
+        // selects the parse wrapper (17-extension pragma block).
         let mut bind_source = preamble.clone();
         bind_source.push_str(&format!("__result :: Eff {effect_stack} _\n"));
         bind_source.push_str("__result = do {\n");
@@ -1203,13 +1727,18 @@ mod tests {
                 kind: TemplateSelector::Expr,
                 source: expr_source,
             },
+            TurnTemplate {
+                kind: TemplateSelector::Decl,
+                source: DECL_TEMPLATE_SOURCE.to_string(),
+            },
         ];
 
         for case in CORPUS {
             log::debug!("turn_classification_corpus: {}", case.name);
-            // Old path: a direct `classify_turn` call.
-            let old = classify_turn(case.text)
-                .unwrap_or_else(|e| panic!("{}: classify_turn failed: {e}", case.name));
+            // Old path: a direct `classify_block` call (single-item batch).
+            let old = classify_block(&[case.text])
+                .map(|mut v| v.remove(0))
+                .unwrap_or_else(|e| panic!("{}: classify_block failed: {e}", case.name));
             assert_eq!(old.kind, case.kind, "{}: old-path kind mismatch", case.name);
             assert_eq!(
                 binder_names(&old.binders),

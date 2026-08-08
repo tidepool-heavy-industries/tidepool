@@ -19,6 +19,7 @@ tidepool-bridge.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+ciborium.workspace = true
 blake3.workspace = true
 which.workspace = true
 log.workspace = true
@@ -28,7 +29,6 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 proptest.workspace = true
-ciborium.workspace = true
 tidepool-testing.workspace = true
 tidepool-optimize = { path = "../tidepool-optimize" }
 frunk.workspace = true
