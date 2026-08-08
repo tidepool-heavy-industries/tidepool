@@ -142,6 +142,11 @@ data TransState = TransState
   -- sibling, resolved the same way as the runLLMTurn family's (Nothing when
   -- the Finalize effect's helper text isn't in the closed program).
   , tsFinalizeSitedId :: !(Maybe Word64)
+  -- Tidepool.Fork's own effect (distinct from RunLLMTurn): varIds of
+  -- fork/forkAll's hidden Sited siblings, resolved the same way (Nothing
+  -- when the Fork effect's helper text isn't in the closed program).
+  , tsForkSitedId :: !(Maybe Word64)
+  , tsForkAllSitedId :: !(Maybe Word64)
   }
 
 type TransM = State TransState
@@ -405,7 +410,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -413,7 +418,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -451,6 +456,8 @@ translateModule allBinds targetName unresolvedIds =
                     (findAuxVarId "forkCataSited" allBinds)
                     0 Seq.empty Nothing
                     (findAuxVarId "finalizeSited" allBinds)
+                    (findAuxVarId "forkSited" allBinds)
+                    (findAuxVarId "forkAllSited" allBinds)
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsRunLLMTurnSites finalState)
   where
@@ -982,11 +989,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1564,21 +1571,18 @@ translate expr =
           _ -> error $ "tagToEnum# without resolvable type argument"
 
     -- runLLMTurn @T prompt / runLLMTurnFork @T prompt / runLLMTurnFanout
-    -- @T prompts (#R0 typed-yield pass, runLLMTurnFanout added in B1 widen) /
-    -- forkAll @T prompts (Tidepool.Fork's surface verb, structurally identical
-    -- to runLLMTurnFanout so it rides the SAME arm and Sited sibling) /
-    -- fork @T brief (Tidepool.Fork's singleton sibling of forkAll,
-    -- structurally identical to runLLMTurnFork so it rides runLLMTurnFork's
-    -- Sited sibling): detected the same way as the tagToEnum# arm above (a
-    -- known Var applied to [Type ty] + one value arg — for Fanout/forkAll
-    -- that one value arg is the `[Text]` prompts list, for Fork/fork it's the
-    -- single `Text` prompt/brief, same shape, translated like any other Core
-    -- expression). The ONLY Core synthesis permitted is the head-swap to the
-    -- hidden *Sited sibling (its varId resolved once, name-only, in
+    -- @T prompts (riding the RunLLMTurn effect) / fork @T brief / forkAll
+    -- @T prompts (Tidepool.Fork's surface verbs, riding the distinct Fork
+    -- effect): detected the same way as the tagToEnum# arm above (a known
+    -- Var applied to [Type ty] + one value arg — for Fanout/forkAll that one
+    -- value arg is the `[Text]` prompts list, for runLLMTurnFork/fork it's
+    -- the single `Text` prompt/brief, same shape, translated like any other
+    -- Core expression). The ONLY Core synthesis permitted is the head-swap
+    -- to the hidden *Sited sibling (its varId resolved once, name-only, in
     -- 'translateModule') with a fresh site-id literal prepended — the
-    -- sibling's REAL body (which builds the "typedSite"-tagged AskWith
-    -- payload) then runs normally at JIT runtime; we never construct that
-    -- payload ourselves.
+    -- sibling's REAL body (which builds the "typedSite"-tagged payload)
+    -- then runs normally at JIT runtime; we never construct that payload
+    -- ourselves.
     Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v || isForkVar v
           , let typeArgs = filter (not . isValueArg) allArgs
           , (Type ty : _) <- typeArgs
@@ -1589,7 +1593,8 @@ translate expr =
         let sitedField
               | isRunLLMTurnVar v = tsRunLLMTurnSitedId
               | isRunLLMTurnForkVar v = tsRunLLMTurnForkSitedId
-              | isForkVar v = tsRunLLMTurnForkSitedId
+              | isForkVar v = tsForkSitedId
+              | isForkAllVar v = tsForkAllSitedId
               | otherwise = tsRunLLMTurnFanoutSitedId
         sitedIdM <- gets sitedField
         case sitedIdM of
@@ -2816,37 +2821,33 @@ isRunLLMTurnFanoutVar v =
 
 -- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
 -- verb) — same convention as 'isRunLLMTurnVar' et al. @forkAll@'s shape
--- (@forall a. [Text] -> M [a]@) is STRUCTURALLY IDENTICAL to
+-- (@forall a. [Text] -> M [a]@) is structurally identical to
 -- @runLLMTurnFanout@'s (one type arg, one @[Text]@ value arg, list-typed
--- answer), so it reuses 'isRunLLMTurnFanoutVar'\'s own head-swap arm
--- verbatim rather than growing a parallel one: every call site this
--- predicate matches head-swaps straight to the EXISTING
--- @runLLMTurnFanoutSited@ sibling — no new @forkAllSited@ needed.
+-- answer), so it rides the SAME head-swap arm, but resolves its own
+-- @forkAllSited@ sibling (riding the @Fork@ effect, not @RunLLMTurn@).
 isForkAllVar :: Id -> Bool
 isForkAllVar v =
   occNameString (nameOccName (idName v)) == "forkAll"
 
 -- | Recognize @fork@ (@Tidepool.Fork@'s singleton-answerer surface verb) —
 -- same convention as 'isForkAllVar'. @fork@'s shape (@forall a. Text -> M
--- a@) is STRUCTURALLY IDENTICAL to @runLLMTurnFork@'s (one type arg, one
--- 'Text' value arg, non-list answer), so it reuses 'isRunLLMTurnForkVar'\'s
--- own head-swap arm verbatim: every call site this predicate matches
--- head-swaps straight to the EXISTING @runLLMTurnForkSited@ sibling — no
--- new @forkSited@ needed.
+-- a@) is structurally identical to @runLLMTurnFork@'s (one type arg, one
+-- 'Text' value arg, non-list answer), so it rides the SAME head-swap arm,
+-- but resolves its own @forkSited@ sibling (riding the @Fork@ effect, not
+-- @RunLLMTurn@).
 isForkVar :: Id -> Bool
 isForkVar v =
   occNameString (nameOccName (idName v)) == "fork"
 
 -- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
--- stubs, combinator-sites widen) — same convention as
--- 'isRunLLMTurnVar' et al. Their hidden @*Sited@ siblings
--- ('forkMapSited'\/'forkCataSited') are matched by NEITHER this predicate
--- NOR any other arm in this file (disjoint names), so occurrences of the
--- Sited siblings — the head-swap target's own real logic, referencing
--- @runLLMTurnFanoutSited@, itself a third, also-unmatched name — always
--- fall through to ordinary Var/App translation. No separate "pass-through"
--- arm is needed: it holds by construction of the naming, not by an extra
--- runtime check.
+-- stubs) — same convention as 'isRunLLMTurnVar' et al. Their hidden
+-- @*Sited@ siblings ('forkMapSited'\/'forkCataSited') are matched by
+-- NEITHER this predicate NOR any other arm in this file (disjoint names),
+-- so occurrences of the Sited siblings — the head-swap target's own real
+-- logic, referencing @forkAllSited@, itself a third, also-unmatched name —
+-- always fall through to ordinary Var/App translation. No separate
+-- "pass-through" arm is needed: it holds by construction of the naming,
+-- not by an extra runtime check.
 isForkMapVar :: Id -> Bool
 isForkMapVar v =
   occNameString (nameOccName (idName v)) == "forkMap"

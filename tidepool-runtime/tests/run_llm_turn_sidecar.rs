@@ -23,7 +23,7 @@ use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
-use tidepool_testing::eval_harness::{effects_include, extract_env, prelude_path, EvalHarness};
+use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 
 /// RunLLMTurn's position in the standard effect stack: 9 base effects
 /// (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time — `base_effects!`'s
@@ -176,7 +176,7 @@ fn runllmturn_site_ids_match_under_branch_and_loop() {
 
     // Sidecar: read asks.json from a kept-alive extract invocation over the
     // SAME source (bypassing `compile_haskell`'s auto-cleaned tempdir).
-    let asks = compile_and_read_asks(&src, "result");
+    let asks = compile_and_read_asks(&src, "result", &decls);
     assert_eq!(
         asks.as_array().map(|a| a.len()),
         Some(4),
@@ -332,7 +332,7 @@ fn runllmturn_member_polymorphic_helper_gets_distinct_site_ids() {
         recorder.sites
     );
 
-    let asks = compile_and_read_asks(&src, "result");
+    let asks = compile_and_read_asks(&src, "result", &decls);
     assert_eq!(
         asks.as_array().map(|a| a.len()),
         Some(2),
@@ -410,18 +410,24 @@ fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Same as `try_compile_runllmturn`, but imports `Tidepool.Fork` so
-/// `forkMap`/`forkCata` are in scope.
+/// `forkMap`/`forkCata` are in scope. `Tidepool.Fork` now rides the `Fork`
+/// effect (not `RunLLMTurn`), so the compiled stack needs `fork_decl()`
+/// alongside the standard decls for its `Tidepool.Effects` import to
+/// resolve.
 fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
     let src =
         tidepool_mcp::template_haskell(&pre, &stack, &code, "Tidepool.Fork", helpers, None, None);
 
+    let effects_dir =
+        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
     EvalHarness::new()
         .with_stdlib()
-        .with_effects_module()
+        .with_include(effects_dir)
         .with_extract_env()
         .compile(&src, "result")
         .map(|_| ())
@@ -442,12 +448,13 @@ fn forkmap_accepts_monomorphic_answer_type() {
 }
 
 /// The forkMap @Verdict call site's asks.json entry is INDISTINGUISHABLE in
-/// shape from a bare `runLLMTurnFanout @Verdict` site — same "[Verdict]"
-/// type string, same single-entry sidecar — because forkMapSited routes
-/// through exactly one runLLMTurnFanoutSited dispatch.
+/// shape from a bare `forkAll @Verdict` site — same "[Verdict]" type
+/// string, same single-entry sidecar — because forkMapSited routes through
+/// exactly one forkAllSited dispatch.
 #[test]
 fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  ys <- forkMap @Verdict (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]\n  pure (toJSON (length (ys :: [Verdict])))\n";
@@ -461,7 +468,7 @@ fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
         None,
     );
 
-    let asks = compile_and_read_asks(&src, "result");
+    let asks = compile_and_read_asks(&src, "result", &decls);
     let entries = asks.as_array().expect("asks.json is an array");
     assert_eq!(
         entries.len(),
@@ -526,7 +533,8 @@ fn forkmap_rejects_partial_application() {
 /// answer sibling `runLLMTurnFork` itself routes through.
 #[test]
 fn fork_sidecar_entry_records_bare_answer_type() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  y <- fork @Verdict \"brief\"\n  pure (toJSON (show (y :: Verdict)))\n";
@@ -540,7 +548,7 @@ fn fork_sidecar_entry_records_bare_answer_type() {
         None,
     );
 
-    let asks = compile_and_read_asks(&src, "result");
+    let asks = compile_and_read_asks(&src, "result", &decls);
     let entries = asks.as_array().expect("asks.json is an array");
     assert_eq!(entries.len(), 1, "expected exactly 1 fork site, got {asks}");
     let ty = entries[0]["type"]
@@ -557,7 +565,8 @@ fn fork_sidecar_entry_records_bare_answer_type() {
 /// left `forkAll`'s own recognition arm untouched.
 #[test]
 fn forkall_sidecar_entry_still_records_list_answer_type() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code =
@@ -572,7 +581,7 @@ fn forkall_sidecar_entry_still_records_list_answer_type() {
         None,
     );
 
-    let asks = compile_and_read_asks(&src, "result");
+    let asks = compile_and_read_asks(&src, "result", &decls);
     let entries = asks.as_array().expect("asks.json is an array");
     assert_eq!(
         entries.len(),
@@ -594,7 +603,17 @@ fn forkall_sidecar_entry_still_records_list_answer_type() {
 /// read afterward — `compile_haskell`'s own tempdir is dropped before it
 /// returns, and Rust-side sidecar consumption is a later segment, so there is
 /// no production API yet that surfaces this path.
-fn compile_and_read_asks(source: &str, target: &str) -> serde_json::Value {
+///
+/// `decls` must be the SAME effect declarations `src` was templated against
+/// (its `pre`/`stack` text names types like `Fork` that only exist in the
+/// `Tidepool.Effects` module generated from a matching decl list) — the
+/// fixed `effects_include()` dir is generated from `standard_decls()` alone
+/// and does not carry `Fork` when a test adds `fork_decl()` on top of it.
+fn compile_and_read_asks(
+    source: &str,
+    target: &str,
+    decls: &[tidepool_mcp::EffectDecl],
+) -> serde_json::Value {
     assert!(
         extract_env(),
         "tidepool-extract-bin must be resolvable (TIDEPOOL_EXTRACT or cabal build)"
@@ -605,11 +624,13 @@ fn compile_and_read_asks(source: &str, target: &str) -> serde_json::Value {
     let input_path = temp_dir.path().join("Expr.hs");
     std::fs::write(&input_path, source).expect("write source");
 
+    let effects_dir =
+        tidepool_mcp::ensure_effects_module(decls).expect("write Tidepool.Effects module");
     let mut cmd = Command::new(&extract_bin);
     cmd.arg(&input_path);
     cmd.arg("--output-dir").arg(temp_dir.path());
     cmd.arg("--target").arg(target);
-    for path in [prelude_path(), effects_include()] {
+    for path in [prelude_path(), effects_dir] {
         cmd.arg("--include").arg(path);
     }
     let output = cmd.output().expect("spawn tidepool-extract-bin");
