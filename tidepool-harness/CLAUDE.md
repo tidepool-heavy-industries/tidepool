@@ -28,7 +28,7 @@ Module map:
 - `log` — event-log wire schema (header pins prelude+extract fingerprints).
   `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
   a "model" tag; `Event::Effect{req,resp}` is written by the live
-  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`/`eval_in_binding`)
+  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`)
   whenever a turn dispatches a HANDLED effect — see Replay below for the
   substitution boundary and the scoped-stack caveat.
 - `provider` — `ModelProvider` trait (calling-model turns; not the Llm
@@ -76,7 +76,7 @@ Two independent pieces, both in `replay.rs`:
 **`Event::Effect` IS written by the live turn loop; effect-response
 SUBSTITUTION on replay is what remains out of scope.** The writer
 (`NodeTree::effect` ← `Harness::flush_effects`, which drains the node's
-`effect_trace` after each `run_block`/`answer_*`/`eval_in_binding`) is wired
+`effect_trace` after each `run_block`/`answer_*`) is wired
 into the live path: every turn that dispatches a HANDLED (non-suspending)
 effect produces one `Event::Effect{req,resp}` per effect. A SUSPENDING effect
 (`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never reaches a handler, so it logs

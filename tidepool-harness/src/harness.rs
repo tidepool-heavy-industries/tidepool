@@ -2306,64 +2306,6 @@ impl Harness {
         Ok(())
     }
 
-    /// Evaluate `expr` (a plain `M a` expression — no `resume`/hole semantics)
-    /// against `node`'s currently SUSPENDED session heap: a non-consuming
-    /// heap-browser peek (widen C4 / PRD D4). The pending hole, the tree
-    /// state, and the event log are all untouched — `run_child` nests the
-    /// eval against the suspended machine and restores it afterward, the same
-    /// discipline [`Self::drive_answerer_to_value`] uses for a real answer,
-    /// minus the model loop and the `resume`. `name` labels the compiled
-    /// fragment (surfaces in JIT diagnostics); it is NOT persisted as a
-    /// session binding — each call is independent, same as `run_child`
-    /// elsewhere in this file. Requires `node` to be suspended (the
-    /// precondition `run_child` itself enforces).
-    pub async fn eval_in_binding(
-        &self,
-        node: NodeId,
-        name: &str,
-        expr: &str,
-    ) -> Result<String, HarnessError> {
-        let (imports, body) = engine::split_imports(expr);
-        let src = engine::template_answer_turn(&self.cfg, &body, &imports, "");
-        let cfg_bin = self.cfg.extract_bin.clone();
-        let include = self.cfg.include.clone();
-        let node_id = node.0;
-        let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(
-                &cfg_bin,
-                &src,
-                "result",
-                &include,
-                node_id,
-                timing::NO_ROUND,
-            )
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
-        .map_err(|e| HarnessError::Compile(e.to_string()))?;
-
-        let mut session = self.take_session(node)?;
-        let cexpr = compiled.expr;
-        let ctable = compiled.table.clone();
-        let label = name.to_string();
-        let (session, out) = tokio::task::spawn_blocking(move || {
-            let out = session.run_child(
-                &label,
-                &cexpr,
-                &ctable,
-                &tidepool_codegen::emit::ExternalEnv::new(),
-            );
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
-        self.put_session(node, session, None, AsksSidecar::default());
-        self.flush_effects(node)?;
-
-        out.map(|r| r.to_string_pretty())
-            .map_err(|e| HarnessError::Resident(e.to_string()))
-    }
-
     /// Drive `answerer`'s turn loop until it emits an answering block, then run
     /// that block via `run_child` against `target`'s suspended session to
     /// produce a Value. On a compile failure (the GHC-verbatim retry), feed the
