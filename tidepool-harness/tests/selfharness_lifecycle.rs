@@ -1,6 +1,6 @@
-//! F3 acceptance: the outer driver lifecycle carries failure instead of
-//! publishing a cosmetic `Idle`, and an errored cycle discards the failed
-//! cycle's resident state (the per-loop answerer, its framing, this cycle's
+//! The outer driver lifecycle carries failure instead of publishing a
+//! cosmetic `Idle`, and an errored cycle discards the failed cycle's
+//! resident state (the per-loop answerer, its framing, this cycle's
 //! compaction, the inference-call counter, and — critically — the outer
 //! resident session, which may be parked mid-fragment on a hole) so the next
 //! cycle re-bootstraps cleanly rather than running against stale state.
@@ -124,9 +124,9 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 
 /// A cycle whose answerer turn fails (the real turn loop, not a bypassed
 /// one) leaves `lifecycle()` as `Failed`, not the old cosmetic `Idle` — and
-/// the FOLLOWING cycle on the SAME driver succeeds, proving the failed
-/// cycle's outer session (parked mid-fragment on the `runLLMTurn` hole) was
-/// discarded and re-bootstrapped rather than reused. If it had not been
+/// the FOLLOWING cycle on the SAME driver succeeds. The failed cycle's outer
+/// session (parked mid-fragment on the `runLLMTurn` hole) must have been
+/// discarded and re-bootstrapped rather than reused: if it had not been
 /// discarded, the second `run_one_cycle` would hit the resident session's
 /// own "already suspended" guard instead of completing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -176,6 +176,66 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     assert_eq!(
         cycle2.state_json.get("mode").and_then(|v| v.as_str()),
         Some("Deciding"),
+    );
+}
+
+/// A bootstrap failure on a driver that has never run a cycle before (not
+/// recovering from a prior `Failed`) leaves `lifecycle()` as `Failed`, not
+/// the driver's starting `Idle` — and is an ORDINARY error (`DriverError`
+/// other than `Poisoned`), distinct from the recovery-failure escalation
+/// path. A later cycle against a working extract binary then succeeds,
+/// since `Failed` discarded nothing to rebuild but is itself recoverable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+
+    let mut driver = driver_over(
+        FlakyProvider {
+            calls: AtomicU32::new(0),
+            fail_first: 0,
+            reply: decision_block("observe", "Medium"),
+        },
+        "fresh-bootstrap-fail",
+    );
+    let harness_source = source();
+    assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
+
+    let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
+    std::env::set_var(
+        "TIDEPOOL_EXTRACT",
+        "/nonexistent/tidepool-extract-bin-fresh-bootstrap-test",
+    );
+    let first = driver.run_one_cycle(&harness_source, None);
+    match original_extract {
+        Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
+        None => std::env::remove_var("TIDEPOOL_EXTRACT"),
+    }
+    assert!(
+        first.is_err(),
+        "a first-ever bootstrap against a nonexistent extract binary must fail"
+    );
+    assert!(
+        !matches!(first, Err(DriverError::Poisoned(_))),
+        "a fresh driver's first bootstrap failure must be an ordinary error, not Poisoned, got {first:?}"
+    );
+    assert!(
+        matches!(driver.lifecycle(), SelfHarnessState::Failed { .. }),
+        "a fresh driver's failed bootstrap must publish Failed, not the starting Idle, got {:?}",
+        driver.lifecycle()
+    );
+
+    let second = driver
+        .run_one_cycle(&harness_source, None)
+        .expect("a working extract binary lets the driver recover from the fresh Failed");
+    assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
+    assert_eq!(
+        second.state_json.get("loopCount").and_then(|v| v.as_i64()),
+        Some(1),
     );
 }
 
