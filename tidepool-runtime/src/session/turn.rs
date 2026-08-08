@@ -100,11 +100,56 @@ pub struct SessionBind<'a> {
     pub gen: u64,
 }
 
-/// A wrapper-module source for one [`TurnKind`], with two substitution
-/// points: `{{TURN}}` (the raw turn text, spliced verbatim) and `{{BINDERS}}`
-/// (the verdict's binder names, comma-joined). Byte-exactness is the
-/// contract: for a given verdict, the module [`run_turn`] compiles must be
-/// byte-identical to the module a caller wraps by hand today.
+/// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
+/// a `Bind` verdict maps to one of two distinct template shapes depending on
+/// whether it actually binds a name (`binders.is_empty()`) — a discarding
+/// bind (`_ <- e`) can't flow through [`SessionBind`] (the extract rejects an
+/// empty `--bind-name` list), so it needs its own wrapper. [`TurnKind`] stays
+/// a plain 3-value mirror of the extract's wire-contract `kind` string
+/// ([`Decl`]/[`Bind`]/[`Expr`](TurnKind)); this is the separate, Rust-only
+/// selection key template lookup is keyed on. `Decl` never reaches a
+/// selector — it doesn't compile through a template (see [`run_turn`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateSelector {
+    /// A bind that binds at least one name (`x <- e`, `let x = e`,
+    /// `(a, b) <- e`).
+    Bind,
+    /// A bind whose pattern binds no name (`_ <- e`, `(_, _) <- e`): runs the
+    /// statement for its effects and discards the result.
+    BindDiscard,
+    /// A bare expression.
+    Expr,
+}
+
+impl TemplateSelector {
+    /// Compute the selector a verdict maps to, or `None` for `Decl` (which
+    /// never selects a template).
+    fn for_verdict(kind: TurnKind, binders: &[String]) -> Option<Self> {
+        match kind {
+            TurnKind::Decl => None,
+            TurnKind::Bind if binders.is_empty() => Some(TemplateSelector::BindDiscard),
+            TurnKind::Bind => Some(TemplateSelector::Bind),
+            TurnKind::Expr => Some(TemplateSelector::Expr),
+        }
+    }
+}
+
+/// A wrapper-module source for one [`TemplateSelector`], with two
+/// SUBSTITUTION-POINT placeholders — `{{BINDERS}}` (the verdict's binder
+/// names, comma-joined) — and two PLACEMENT modes for the turn text itself,
+/// a property of where a template's splice point sits:
+///
+/// - `{{TURN}}` places the raw turn text VERBATIM.
+/// - `{{TURN_STMT}}` places it as a `do`-block statement, applying exactly
+///   the normalization the repl's `push_braced_stmt` performs today (a `let`
+///   turn is rewritten to the layout-safe explicit-brace `let { … }` form, so
+///   a `let` at column 1 can't break the block's layout). A template uses
+///   exactly one of the two — this is two placement modes, not a template
+///   language: no conditionals, loops, or further placeholders.
+///
+/// Byte-exactness is the contract: for a given verdict, the module
+/// [`run_turn`] compiles must be byte-identical to the module a caller wraps
+/// by hand today.
 ///
 /// Several [`TurnTemplate`]s may share a `kind`, forming an ordered variant
 /// list (the extract mode's retry: try each in order, first that typechecks
@@ -112,7 +157,7 @@ pub struct SessionBind<'a> {
 /// so the later swap to the extract's own retry needs no signature change.
 #[derive(Clone, Debug)]
 pub struct TurnTemplate {
-    pub kind: TurnKind,
+    pub kind: TemplateSelector,
     pub source: String,
 }
 
@@ -198,29 +243,70 @@ pub enum TurnResult {
     },
 }
 
-/// Splice `turn_text` and `binders` into a template `source`. `{{BINDERS}}`
-/// is substituted first, `{{TURN}}` last, so turn text containing literal
-/// `{{BINDERS}}`/`{{TURN}}` text is never re-scanned — the turn splice is
-/// byte-exact regardless of its content.
-fn render_template(source: &str, turn_text: &str, binders: &[String]) -> String {
-    source
-        .replace("{{BINDERS}}", &binders.join(", "))
-        .replace("{{TURN}}", turn_text)
+/// Place `turn_text` as a `do`-block statement — the `{{TURN_STMT}}`
+/// placement mode. Mirrors `tidepool-repl`'s `push_braced_stmt` byte-for-byte:
+/// a `let` turn (at column 1, since a raw turn has no leading indentation)
+/// needs explicit decl braces there (a layout `let` swallows the following
+/// `;`), so it is rewritten to `let { <rest> }`; anything else is placed
+/// verbatim. Both branches guarantee a trailing newline so a template's own
+/// following text always starts on a fresh line.
+fn place_turn_stmt(turn_text: &str) -> String {
+    let trimmed = turn_text.trim_start();
+    let let_rest = trimmed
+        .strip_prefix("let")
+        .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
+    match let_rest {
+        Some(rest) if !rest.trim_start().starts_with('{') => {
+            let mut out = String::from("let {");
+            out.push_str(rest);
+            if !rest.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(" }\n");
+            out
+        }
+        _ => {
+            let mut out = turn_text.to_string();
+            if !turn_text.ends_with('\n') {
+                out.push('\n');
+            }
+            out
+        }
+    }
 }
 
-/// Look up the variant-0 template for `kind` — the first template in
-/// declaration order whose `kind` matches. Later same-kind entries are the
-/// ordered retry list [`TurnTemplate`] documents; this shim only ever
+/// Splice `turn_text` and `binders` into a template `source`. `{{BINDERS}}`
+/// is substituted first (it never depends on `turn_text`, so this is always
+/// safe), then whichever ONE placement placeholder the template uses —
+/// `{{TURN}}` (verbatim) or `{{TURN_STMT}}` (as a `do`-statement, see
+/// [`place_turn_stmt`]) — is substituted last, so turn text containing
+/// literal `{{BINDERS}}`/`{{TURN}}`/`{{TURN_STMT}}` text is never re-scanned
+/// — the turn splice is byte-exact regardless of its content.
+pub fn render_template(source: &str, turn_text: &str, binders: &[String]) -> String {
+    let source = source.replace("{{BINDERS}}", &binders.join(", "));
+    if source.contains("{{TURN_STMT}}") {
+        source.replace("{{TURN_STMT}}", &place_turn_stmt(turn_text))
+    } else {
+        source.replace("{{TURN}}", turn_text)
+    }
+}
+
+/// Look up the variant-0 template for `selector` — the first template in
+/// declaration order whose `kind` matches. Later same-selector entries are
+/// the ordered retry list [`TurnTemplate`] documents; this shim only ever
 /// attempts the first.
-fn select_template(templates: &[TurnTemplate], kind: TurnKind) -> Option<&TurnTemplate> {
-    templates.iter().find(|t| t.kind == kind)
+fn select_template(
+    templates: &[TurnTemplate],
+    selector: TemplateSelector,
+) -> Option<&TurnTemplate> {
+    templates.iter().find(|t| t.kind == selector)
 }
 
 /// A missing template for a verdict is a caller wiring bug, not a GHC
 /// rejection — reported the same way the turn/binder lanes report every other
 /// synthetic shape violation (`CompileError::ExtractFailed`, never a panic).
-fn missing_template_error(kind: TurnKind) -> CompileError {
-    CompileError::ExtractFailed(format!("run_turn: no template supplied for {kind:?}"))
+fn missing_template_error(selector: TemplateSelector) -> CompileError {
+    CompileError::ExtractFailed(format!("run_turn: no template supplied for {selector:?}"))
 }
 
 /// [`SessionError`] → [`CompileError`], preserving the `Io`/`MalformedDiagnostics`
@@ -260,19 +346,29 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             Ok(TurnResult::Decl { binders, items })
         }
         TurnKind::Bind => {
-            let template = select_template(req.templates, TurnKind::Bind)
-                .ok_or_else(|| missing_template_error(TurnKind::Bind))?;
+            // Four-shape selection (protocol note, "the verdict space has
+            // four shapes, not three"): a bind that binds no name can't flow
+            // through `SessionBind` — the extract rejects an empty
+            // `--bind-name` list — so it selects its OWN template and skips
+            // `--session-bind` entirely, running as a plain compile that
+            // discards its result. `binders`/`bound` both stay empty for
+            // that shape, so a caller reading `TurnResult::Bind` sees a
+            // uniform "this bind introduced no names" signal either way.
+            let selector = TemplateSelector::for_verdict(kind, &binders)
+                .expect("TurnKind::Bind always selects Bind or BindDiscard");
+            let template = select_template(req.templates, selector)
+                .ok_or_else(|| missing_template_error(selector))?;
             let wrapped_source = render_template(&template.source, req.turn_text, &binders);
-            let bind = SessionBind {
+            let bind = (selector == TemplateSelector::Bind).then(|| SessionBind {
                 names: &binders,
                 gen: req.gen,
-            };
+            });
             let result = compile_session_turn(
                 &wrapped_source,
                 req.include,
                 req.session_root,
                 req.inject_modules,
-                Some(bind),
+                bind,
             )?;
             Ok(TurnResult::Bind {
                 binders,
@@ -288,8 +384,8 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             })
         }
         TurnKind::Expr => {
-            let template = select_template(req.templates, TurnKind::Expr)
-                .ok_or_else(|| missing_template_error(TurnKind::Expr))?;
+            let template = select_template(req.templates, TemplateSelector::Expr)
+                .ok_or_else(|| missing_template_error(TemplateSelector::Expr))?;
             let wrapped_source = render_template(&template.source, req.turn_text, &binders);
             let result = compile_session_turn(
                 &wrapped_source,
@@ -707,27 +803,78 @@ mod tests {
     fn select_template_picks_first_matching_kind_variant_zero() {
         let templates = vec![
             TurnTemplate {
-                kind: TurnKind::Bind,
+                kind: TemplateSelector::Bind,
                 source: "bind-a".to_string(),
             },
             TurnTemplate {
-                kind: TurnKind::Expr,
+                kind: TemplateSelector::Expr,
                 source: "expr-a".to_string(),
             },
             TurnTemplate {
-                kind: TurnKind::Bind,
+                kind: TemplateSelector::Bind,
                 source: "bind-b".to_string(),
             },
         ];
         assert_eq!(
-            select_template(&templates, TurnKind::Bind).unwrap().source,
+            select_template(&templates, TemplateSelector::Bind)
+                .unwrap()
+                .source,
             "bind-a"
         );
         assert_eq!(
-            select_template(&templates, TurnKind::Expr).unwrap().source,
+            select_template(&templates, TemplateSelector::Expr)
+                .unwrap()
+                .source,
             "expr-a"
         );
-        assert!(select_template(&templates, TurnKind::Decl).is_none());
+        assert!(select_template(&templates, TemplateSelector::BindDiscard).is_none());
+    }
+
+    #[test]
+    fn template_selector_for_verdict_four_shapes() {
+        assert_eq!(TemplateSelector::for_verdict(TurnKind::Decl, &[]), None);
+        assert_eq!(
+            TemplateSelector::for_verdict(TurnKind::Bind, &["x".to_string()]),
+            Some(TemplateSelector::Bind)
+        );
+        assert_eq!(
+            TemplateSelector::for_verdict(TurnKind::Bind, &["a".to_string(), "b".to_string()]),
+            Some(TemplateSelector::Bind),
+            "a multi-binder bind is still the named-bind selector"
+        );
+        assert_eq!(
+            TemplateSelector::for_verdict(TurnKind::Bind, &[]),
+            Some(TemplateSelector::BindDiscard)
+        );
+        assert_eq!(
+            TemplateSelector::for_verdict(TurnKind::Expr, &[]),
+            Some(TemplateSelector::Expr)
+        );
+    }
+
+    #[test]
+    fn render_template_turn_stmt_places_verbatim_when_not_a_let() {
+        let source = "M {{TURN_STMT}} ; pure ({{BINDERS}})\n";
+        let out = render_template(source, "x <- pure 1", &["x".to_string()]);
+        assert_eq!(out, "M x <- pure 1\n ; pure (x)\n");
+    }
+
+    /// The case Part 2 of the spec calls out: a bind turn whose text begins
+    /// with `let ` must be rewritten to the layout-safe explicit-brace form,
+    /// matching `tidepool-repl`'s `push_braced_stmt` exactly — a verbatim
+    /// `{{TURN}}` splice cannot reproduce this (a `let` at column 1 would
+    /// break the enclosing `do` block's layout).
+    #[test]
+    fn render_template_turn_stmt_rewrites_column_1_let() {
+        let source = "{{TURN_STMT}}pure ({{BINDERS}})\n";
+        let out = render_template(source, "let y = 2", &["y".to_string()]);
+        assert_eq!(out, "let { y = 2\n }\npure (y)\n");
+    }
+
+    #[test]
+    fn render_template_turn_stmt_and_turn_text_containing_placeholder_syntax_not_resubstituted() {
+        let out = render_template("S={{TURN_STMT}}", "contains {{TURN_STMT}} literally", &[]);
+        assert_eq!(out, "S=contains {{TURN_STMT}} literally\n");
     }
 
     /// A verdict for a kind with no matching template is a clean error, not a
@@ -778,7 +925,7 @@ mod tests {
         let session_root = dir.path().join("session");
         std::fs::create_dir_all(&session_root).unwrap();
         let templates = vec![TurnTemplate {
-            kind: TurnKind::Expr,
+            kind: TemplateSelector::Expr,
             source: "module M where\nresult = {{TURN}}\n".to_string(),
         }];
         let req = TurnRequest {
@@ -805,5 +952,288 @@ mod tests {
             !calls.contains("--emit-stmt-binders"),
             "classify spawn ran despite a supplied verdict:\n{calls}"
         );
+    }
+
+    // ---- Part 1: the classification-equivalence corpus (GHC-heavy) ----
+    //
+    // Every entry's expected `(kind, binders)` is derived from
+    // `Tidepool.Binders.classifyTurn`'s documented precedence (its doc
+    // comment, not by running the code) — the corpus is a check ON the
+    // verdict, not a mirror of whatever the code happens to produce. Each
+    // entry asserts the OLD path (`classify_turn`, a direct call) and the NEW
+    // path (`run_turn`'s returned verdict) agree, and that both match the
+    // table.
+
+    /// One corpus entry.
+    struct Case {
+        name: &'static str,
+        text: &'static str,
+        kind: TurnKind,
+        binders: &'static [&'static str],
+    }
+
+    /// classifyTurn rule 1: `<-` / top-level `let` are bind-only markers.
+    /// classifyTurn rule 2: a signature (`SigD`) is a decl (resolves the
+    /// two-faced `sq :: T`). Rule 3: a name-binding `ValD` is a decl. Rule 4:
+    /// a valid bare expression is an expr — runs BEFORE the other-decl
+    /// catch-all so `parseDeclaration`'s spurious accept of a bare
+    /// application/pipeline as a binder-less splice doesn't misclassify it as
+    /// a decl. Rule 5: any other parsed decl (data/class/instance — no
+    /// exportable term-level name) is a decl with no binders. Rule 6: neither
+    /// parse succeeds → expr, so the real error surfaces at compile.
+    const CORPUS: &[Case] = &[
+        // -- decl (rules 2/3/5) --
+        Case {
+            name: "fn_decl",
+            text: "sq x = x * x",
+            kind: TurnKind::Decl,
+            binders: &["sq"],
+        },
+        Case {
+            name: "value_decl",
+            text: "x = 5",
+            kind: TurnKind::Decl,
+            binders: &["x"],
+        },
+        Case {
+            name: "pattern_decl",
+            text: "(a, b) = p",
+            kind: TurnKind::Decl,
+            binders: &["a", "b"],
+        },
+        Case {
+            name: "standalone_signature",
+            text: "sq :: Int -> Int",
+            kind: TurnKind::Decl,
+            binders: &["sq"],
+        },
+        Case {
+            name: "data_decl",
+            text: "data Foo = Bar | Baz",
+            kind: TurnKind::Decl,
+            binders: &[],
+        },
+        Case {
+            name: "class_decl",
+            text: "class MyClass a where\n  cls :: a -> a",
+            kind: TurnKind::Decl,
+            binders: &[],
+        },
+        Case {
+            name: "instance_decl",
+            text: "instance Show Foo where\n  show _ = \"foo\"",
+            kind: TurnKind::Decl,
+            binders: &[],
+        },
+        // -- bind (rule 1) --
+        Case {
+            name: "monadic_bind",
+            text: "x <- pure 1",
+            kind: TurnKind::Bind,
+            binders: &["x"],
+        },
+        // Also the `{{TURN_STMT}}` layout case: text begins with `let `.
+        Case {
+            name: "let_bind",
+            text: "let y = 2",
+            kind: TurnKind::Bind,
+            binders: &["y"],
+        },
+        Case {
+            name: "multi_binder_tuple_bind",
+            text: "(a, b) <- pure (1, 2)",
+            kind: TurnKind::Bind,
+            binders: &["a", "b"],
+        },
+        // #321-class regression: a quasiquote must still classify as a bind
+        // (QuasiQuotes is parse-only here — the quote is one token to the
+        // parser).
+        Case {
+            name: "quasiquote_bind",
+            text: "x <- pure [fmt|hi|]",
+            kind: TurnKind::Bind,
+            binders: &["x"],
+        },
+        // -- zero-binder bind (Part 3: the discarding shape) --
+        Case {
+            name: "discard_bind",
+            text: "_ <- pure ()",
+            kind: TurnKind::Bind,
+            binders: &[],
+        },
+        Case {
+            name: "discard_tuple_bind",
+            text: "(_, _) <- pure ((), ())",
+            kind: TurnKind::Bind,
+            binders: &[],
+        },
+        // -- expr (rule 4: `parseDeclaration`'s spurious decl-shaped accept) --
+        Case {
+            name: "bare_application",
+            text: "id 7",
+            kind: TurnKind::Expr,
+            binders: &[],
+        },
+        Case {
+            name: "pipeline",
+            text: "(+1) . (*2) $ 5",
+            kind: TurnKind::Expr,
+            binders: &[],
+        },
+        // -- neither parse succeeds (rule 6) --
+        Case {
+            name: "unparseable",
+            text: "1 +",
+            kind: TurnKind::Expr,
+            binders: &[],
+        },
+    ];
+
+    fn binder_names(binders: &[String]) -> Vec<&str> {
+        binders.iter().map(String::as_str).collect()
+    }
+
+    /// Insert an `import Tidepool.QQ (…)` line before the preamble's
+    /// `default (…)` decl — the same injection point `tidepool-repl`'s
+    /// `insert_imports` uses — so the quasiquote corpus entry has `fmt` in
+    /// scope. A no-op fallback (unused import) for every other entry.
+    fn with_qq_import(preamble: &str) -> String {
+        match preamble.find(tidepool_mcp::PREAMBLE_DEFAULT_DECL) {
+            Some(idx) => {
+                let mut out = String::with_capacity(preamble.len() + 64);
+                out.push_str(&preamble[..idx]);
+                out.push_str("import Tidepool.QQ (fmt, j, patch, uri, form)\n");
+                out.push_str(&preamble[idx..]);
+                out
+            }
+            None => preamble.to_string(),
+        }
+    }
+
+    #[test]
+    fn turn_classification_corpus_old_and_new_path_agree() {
+        if !tidepool_testing::eval_harness::extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+
+        let decls = tidepool_mcp::standard_decls();
+        let effects_dir =
+            tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        let prelude_dir = tidepool_testing::eval_harness::prelude_path();
+        let preamble = with_qq_import(&tidepool_mcp::build_preamble_non_interactive_mode(
+            &decls,
+            false,
+            tidepool_mcp::PaginateMode::Passthrough,
+        ));
+        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
+        let include: Vec<&Path> = vec![&effects_dir, &prelude_dir];
+
+        // A named bind runs the statement, then yields the (comma-joined,
+        // parenthesized) binder tuple — valid for both a single name and an
+        // N-tuple. A discarding bind runs the statement for its effects and
+        // yields `()` — no `{{BINDERS}}` splice, so it needs no bound name at
+        // all (Part 3's fix: it no longer flows an empty name list into
+        // `SessionBind`). An expr places the turn verbatim as the whole
+        // binding.
+        let mut bind_source = preamble.clone();
+        bind_source.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+        bind_source.push_str("__result = do {\n");
+        bind_source.push_str("{{TURN_STMT}}");
+        bind_source.push_str(" ; pure ({{BINDERS}})\n }\n");
+
+        let mut bind_discard_source = preamble.clone();
+        bind_discard_source.push_str(&format!("__result :: Eff {effect_stack} _\n"));
+        bind_discard_source.push_str("__result = do {\n");
+        bind_discard_source.push_str("{{TURN_STMT}}");
+        bind_discard_source.push_str(" ; pure ()\n }\n");
+
+        let mut expr_source = preamble.clone();
+        expr_source.push_str("__result = {{TURN}}\n");
+
+        let templates = vec![
+            TurnTemplate {
+                kind: TemplateSelector::Bind,
+                source: bind_source,
+            },
+            TurnTemplate {
+                kind: TemplateSelector::BindDiscard,
+                source: bind_discard_source,
+            },
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: expr_source,
+            },
+        ];
+
+        for case in CORPUS {
+            log::debug!("turn_classification_corpus: {}", case.name);
+            // Old path: a direct `classify_turn` call.
+            let old = classify_turn(case.text)
+                .unwrap_or_else(|e| panic!("{}: classify_turn failed: {e}", case.name));
+            assert_eq!(old.kind, case.kind, "{}: old-path kind mismatch", case.name);
+            assert_eq!(
+                binder_names(&old.binders),
+                case.binders,
+                "{}: old-path binders mismatch",
+                case.name
+            );
+
+            // New path: `run_turn`, fed the SAME verdict just obtained (the
+            // batch-classify shape) so this exercises template
+            // selection/compile, not a second classify spawn.
+            let session_root = TempDir::new().unwrap();
+            let req = TurnRequest {
+                turn_text: case.text,
+                templates: &templates,
+                include: &include,
+                session_root: session_root.path(),
+                inject_modules: &[],
+                gen: 0,
+                verdict: Some(old.clone()),
+            };
+
+            match case.name {
+                "unparseable" => {
+                    // classifyTurn rule 6: both parses failed, so the verdict
+                    // is "expr" — but the text isn't valid Haskell, so the
+                    // compile itself must fail loudly (the documented
+                    // behavior), not silently succeed or panic.
+                    let err = run_turn(req).unwrap_err();
+                    assert!(
+                        matches!(err, CompileError::Diagnostics(_)),
+                        "{}: expected a real GHC diagnostic, got {err:?}",
+                        case.name
+                    );
+                }
+                _ => {
+                    let result = run_turn(req)
+                        .unwrap_or_else(|e| panic!("{}: run_turn failed: {e}", case.name));
+                    match (case.kind, result) {
+                        (TurnKind::Decl, TurnResult::Decl { binders, .. }) => {
+                            assert_eq!(
+                                binder_names(&binders),
+                                case.binders,
+                                "{}: new-path decl binders mismatch",
+                                case.name
+                            );
+                        }
+                        (TurnKind::Bind, TurnResult::Bind { binders, .. }) => {
+                            assert_eq!(
+                                binder_names(&binders),
+                                case.binders,
+                                "{}: new-path bind binders mismatch",
+                                case.name
+                            );
+                        }
+                        (TurnKind::Expr, TurnResult::Expr { .. }) => {}
+                        (kind, other) => panic!(
+                            "{}: verdict kind {kind:?} produced the wrong TurnResult variant: {other:?}",
+                            case.name
+                        ),
+                    }
+                }
+            }
+        }
     }
 }
