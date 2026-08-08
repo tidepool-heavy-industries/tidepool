@@ -381,6 +381,38 @@ In wave order, with what each needs:
 5. **The three latent defects** in `12-contags-staleness-findings.md`, and the
    `by_qualified_name` guard, which can now be a hard error.
 
+## Gates run on the composed branch
+
+| gate | result |
+|---|---|
+| quick tier (`--no-fail-fast`) | 1775 run, **1775 passed**, 9 skipped |
+| differential (`--run-ignored all`, `TIDEPOOL_EXPENSIVE_TESTS=1`) | 1 run, 1 passed |
+| GHC accumulation (`session_table_qualified_identity` + `resident_session`) | 5 run, 4 passed, 1 known-open |
+| `cargo check --workspace --all-targets`, `fmt --check` | clean |
+
+Differential counters, **identical to the 2026-08-08 baseline in every field**:
+
+```
+tested=349, compared=312, closure_skip=34, mismatch=0,
+both_error=0, jit_only_error=0, eval_jit_diverge=3, skipped=1
+eval_jit_diverge_names: ["xs'_u8286623314361937461", "thunk_blackhole",
+                         "xs_u8286623314361937397"]
+```
+
+`mismatch=0` against baseline is what licenses cluster B: an indexed free-vars
+analysis and a replaced emission-ordering algorithm are both places where a
+wrong answer is a miscompile rather than a slowdown.
+
+The one GHC failure is `NurseryExhausted`, verified by its error
+(`Run(Jit(HeapBridge(NurseryExhausted)))`) rather than by test name.
+`session_table_qualified_identity` and `multi_turn_accumulates_across_suspend_resume`
+both pass, which is the evidence that real multi-turn accumulation still works
+through cluster C's rewritten ingestion path.
+
+Not run: the turn-latency bench, and cluster B's before/after `emit_ms`. The
+performance claims in this branch are therefore *unevidenced*; the correctness
+claims are gated.
+
 ## Test invocation notes
 
 Every one of these cost real time in this lane. They are here so they cost the
