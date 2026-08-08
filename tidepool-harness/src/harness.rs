@@ -3142,7 +3142,7 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log::LogHeader;
+    use crate::log::{Event, LogHeader, LogReader};
     use crate::provider::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
     use tidepool_repr::{CoreExpr, CoreFrame, Literal, TreeBuilder};
 
@@ -3201,6 +3201,50 @@ mod tests {
             escalations: Mutex::new(HashMap::new()),
             operator_decisions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Like [`test_harness`] but keeps the log's tempdir alive and returns its
+    /// path, for a test that reads the durable log back after driving the
+    /// harness — `test_harness`'s own tempdir is dropped (and the file
+    /// unlinked) before it returns. Uses the same trivial single-`Lit` boot
+    /// expr [`fake_session`] does, so `Harness::force` (which bootstraps
+    /// from `self.boot`, unlike `fake_session`) succeeds without GHC/extract.
+    fn test_harness_with_log() -> (Harness, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let writer = LogWriter::create(
+            &path,
+            &LogHeader {
+                prelude_hash: "test".into(),
+                extract_fingerprint: "test".into(),
+                harness_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let provider: Arc<dyn DynModelProvider> = Arc::new(UnusedProvider);
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let boot_expr = b.build();
+        let harness = Harness {
+            run_id: generate_run_id(),
+            tree: NodeTree::new(writer),
+            cfg: test_engine_cfg(),
+            child_cfg: test_engine_cfg(),
+            provider,
+            convos: Mutex::new(HashMap::new()),
+            live_turns: Mutex::new(HashMap::new()),
+            notifier: std::sync::OnceLock::new(),
+            boot: Arc::new(compile::CompiledTurn {
+                expr: boot_expr,
+                table: DataConTable::default(),
+                asks: AsksSidecar::default(),
+            }),
+            seeds: Mutex::new(HashMap::new()),
+            forked_transcripts: Mutex::new(HashMap::new()),
+            escalations: Mutex::new(HashMap::new()),
+            operator_decisions: Mutex::new(HashMap::new()),
+        };
+        (harness, path, dir)
     }
 
     /// A trivially-bootstrapped `Session` for tests that only need
@@ -3341,5 +3385,65 @@ mod tests {
 
         assert!(harness.flush_effects(node).is_ok());
         assert_eq!(harness.convos.lock().get(&node).unwrap().effect_seq, 0);
+    }
+
+    /// The empty-`turn_delta` fix: a node created with an EMPTY seed (the
+    /// self-iterating harness's framing-only answerer,
+    /// `create_root_framed(_, "", _)`) must have no opening user turn — not
+    /// in its live transcript, not in the durable log. A node created WITH a
+    /// prompt must still have both.
+    #[tokio::test]
+    async fn force_skips_the_seed_turn_delta_only_when_the_seed_is_empty() {
+        let (harness, log_path, _dir) = test_harness_with_log();
+
+        let answerer = harness
+            .create_root_framed("loop answerer", "", None)
+            .unwrap();
+        harness.force(answerer, Actor::Operator).unwrap();
+
+        let prompted = harness.create_root_framed("agent", "hello", None).unwrap();
+        harness.force(prompted, Actor::Operator).unwrap();
+
+        {
+            let convos = harness.convos.lock();
+            assert!(
+                convos.get(&answerer).unwrap().transcript.is_empty(),
+                "an empty-seed node must have no opening user turn in its transcript"
+            );
+            assert_eq!(
+                convos.get(&prompted).unwrap().transcript.len(),
+                1,
+                "a node created with a prompt must have one opening user turn"
+            );
+        }
+
+        let (_header, events) = LogReader::open(&log_path).unwrap();
+        let mut answerer_has_turn_delta = false;
+        let mut prompted_turn0_content = None;
+        for record in events {
+            if let Event::TurnDelta {
+                node,
+                turn,
+                content,
+                ..
+            } = record.unwrap().event
+            {
+                if node == answerer {
+                    answerer_has_turn_delta = true;
+                }
+                if node == prompted && turn == 0 {
+                    prompted_turn0_content = Some(content);
+                }
+            }
+        }
+        assert!(
+            !answerer_has_turn_delta,
+            "an empty-seed answerer must have NO turn_delta at all, let alone an empty one"
+        );
+        assert_eq!(
+            prompted_turn0_content,
+            Some("hello".to_string()),
+            "a node created with a prompt must still log its opening user turn_delta"
+        );
     }
 }
