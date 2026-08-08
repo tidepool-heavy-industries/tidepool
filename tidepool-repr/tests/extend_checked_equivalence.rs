@@ -433,10 +433,10 @@ fn duplicate_ids_within_one_turn_diverge_but_cannot_occur_in_production() {
     // `merge_all_turns`/`flatten_and_fold_sequential` a turn with TWO
     // entries for the same id, a shape only reachable through this test
     // file's `Vec<DataCon>`-typed turn representation, never through
-    // production's `DataConTable`-typed one. Do not read the `assert_ne!`
-    // below as a lurking bug in the skip-identical filter and do not "fix"
-    // it there — see `dedup_turn_by_id_keep_last`, which excludes this shape
-    // from the property fuzzer for exactly this reason.
+    // production's `DataConTable`-typed one. Do not read the asserted
+    // divergence below as a lurking bug in the skip-identical filter and do
+    // not "fix" it there — see `dedup_turn_by_id_keep_last`, which excludes
+    // this shape from the property fuzzer for exactly this reason.
     let turns = vec![
         vec![dc(4, "Bar", 1, 2, Some("Mod.4"), "TyA")],
         vec![
