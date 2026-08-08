@@ -171,7 +171,7 @@ runNormalPipeline path includes = do
     -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
-    _ <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
+    loadFlag <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
                (mapMG unpoison modGraphRaw)
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
@@ -218,6 +218,21 @@ runNormalPipeline path includes = do
     totalCoreMs <- liftIO (readIORef coreMsRef)
     liftIO (emitPhase timing "typecheck" totalTcMs)
     liftIO (emitPhase timing "core" totalCoreMs)
+    -- Phase barrier (backstop): a target or dependency compile error already
+    -- threw a spanned 'SourceError' from inside the loop above (each summary's
+    -- own 'parseModule'/'typecheckModule' redoes its typecheck independently
+    -- of 'load'', so a real user type error surfaces there with its span
+    -- intact) — this MUST run after the loop, not before, or that spanned
+    -- diagnostic never fires and callers get this generic message instead.
+    -- The phase timings above are emitted first, so a run that dies here still
+    -- reports the work it did. Reaching here with 'loadFlag' still 'Failed'
+    -- means the loop finished without re-surfacing whatever 'load'' choked on;
+    -- stop rather than return a 'PipelineResult' built against a
+    -- half-populated environment.
+    case loadFlag of
+      Failed    -> liftIO $ ioError $ userError $
+        "runPipeline: module load failed compiling " ++ path
+      Succeeded -> pure ()
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
@@ -369,8 +384,16 @@ runSessionPipeline scope path includes = do
     -- (injected as ifaces in PHASE 2), so it cannot go through @load'@. We use
     -- LoadAllTargets on depGraph (target filtered out above) — equivalent to the
     -- old @LoadDependenciesOf@ but without compiling the target prematurely.
-    _ <- load' Nothing LoadAllTargets
+    loadFlag <- load' Nothing LoadAllTargets
                mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
+    -- Phase barrier: same policy as 'runNormalPipeline' — a 'Failed' PHASE 1
+    -- dependency load stops here, before the module-graph restore, PHASE 2's
+    -- Val iface injection, or PHASE 3's per-module compile ever see a
+    -- half-populated HPT.
+    case loadFlag of
+      Failed    -> liftIO $ ioError $ userError $
+        "runSessionPipeline: PHASE 1 dependency load failed compiling " ++ path
+      Succeeded -> pure ()
     -- Restore the FULL module graph (target included) so PHASE 3's typecheck can
     -- see HPT instances from dep modules: @hptSomeThingsBelowUs@ walks
     -- @moduleGraphModulesBelow (hsc_mod_graph) target@, and @load'@ left

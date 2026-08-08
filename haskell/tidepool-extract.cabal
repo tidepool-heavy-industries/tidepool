@@ -151,3 +151,35 @@ test-suite formqq-parser-test
   build-depends:
     base >= 4.20 && < 5
   default-language: GHC2024
+
+-- Extract-fidelity regressions: coercion-binder erasure symmetry, intrinsic
+-- recognizer module qualification, unboxed-tuple result-arity fail-loud.
+-- Drives the real runPipeline + translateModuleClosed path on synthetic
+-- fixture modules written under test-fidelity/work/.
+-- Run: cabal run extract-fidelity-test  (needs the nix with-packages GHC on PATH).
+executable extract-fidelity-test
+  main-is:          Main.hs
+  hs-source-dirs:   test-fidelity, src
+  other-modules:
+    Fidelity.Harness
+    Fidelity.Erasure
+    Fidelity.Recognizers
+    Fidelity.PrimopArity
+    Tidepool.Translate
+    Tidepool.Resolve
+    Tidepool.FatIface
+    Tidepool.GhcPipeline
+    Tidepool.Session
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
