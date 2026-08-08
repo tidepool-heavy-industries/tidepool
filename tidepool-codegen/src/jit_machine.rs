@@ -44,7 +44,24 @@
 //! computation on the heap at a time). Module accretion (a child's
 //! `add_function`) is inert for the parent — it mints a fresh `FuncId` and does
 //! not touch the stowed continuation.
+//!
+//! # The parked-continuation registry (realm prototype)
+//!
+//! [`JitEffectMachine::run_suspendable_parked`] and [`JitEffectMachine::resume_parked`]
+//! are an ADDITIVE second suspension path that generalizes the single
+//! `suspended_continuation` slot to a map of many. A parked continuation is
+//! never protected by the temporal argument: it is a registered `stowed_roots`
+//! entry from the moment it parks until the moment it resumes, so a collection
+//! triggered by ANY later computation on the machine — a sibling park, a plain
+//! fragment, another realm's resume — evacuates it and rewrites its cell.
+//!
+//! The parked path deliberately leaves `suspended_continuation` as `None`, so
+//! the L7 asserts on every plain run entry keep passing and keep protecting the
+//! single-slot path. The two paths do not interact: a machine using the parked
+//! registry never stows into the slot, and a machine using the slot never
+//! populates the registry.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -113,6 +130,139 @@ pub struct HeapStats {
     pub live_bytes: usize,
     /// Number of collections this machine has run ([`MachineState::gc_generation`]).
     pub gc_count: u64,
+}
+
+/// Identity of one continuation parked in a machine's continuation registry.
+/// Minted by [`JitEffectMachine::run_suspendable_parked`], consumed by
+/// [`JitEffectMachine::resume_parked`]. Ids are never reused within a machine:
+/// a resume that suspends AGAIN mints a fresh id (same realm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContinuationId(pub u64);
+
+/// Identity of a realm — the ownership scope a parked continuation belongs to
+/// (an outer loop turn, one answerer subtree, …). Carried on the frame so a
+/// caller can group, cancel, or drain a realm's parks without tracking ids
+/// externally. The machine itself attaches no semantics to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RealmId(pub u64);
+
+/// What kind of turn parked a continuation — the registry's spelling of the
+/// single-slot path's `bind_forced: Option<bool>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkKind {
+    /// A plain suspendable turn: on completion the `Done` pointer is bridged
+    /// and returned (`bind_forced == None`).
+    Plain,
+    /// A value-plane BIND turn: on completion the result is tenured into
+    /// old-space and its [`crate::old_space::RootSlot`] stashed on the machine
+    /// (`bind_forced == Some(forced)`). `forced` deep-forces to NF before
+    /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
+    Binding { forced: bool },
+}
+
+impl ParkKind {
+    /// Project to the `bind_forced` shape the shared suspendable epilogue takes.
+    fn bind_forced(self) -> Option<bool> {
+        match self {
+            ParkKind::Plain => None,
+            ParkKind::Binding { forced } => Some(forced),
+        }
+    }
+}
+
+/// One parked continuation in a machine's continuation registry.
+///
+/// `cell` is a heap-stable `Box` holding the continuation pointer, exactly the
+/// `stowed_root_cell` pattern: the machine itself moves between threads (stow
+/// XOR run), but the `Box`'s POINTEE address is a stable heap allocation, so
+/// the `stowed_roots` registration (the cell's address) stays valid across the
+/// move. The GC reads and rewrites `*cell` in place on every collection, so the
+/// pointer read back out at resume is the GC-current one.
+pub struct ContinuationFrame {
+    /// Heap-stable cell holding the (GC-current) continuation pointer.
+    cell: Box<*mut u8>,
+    /// The realm this park belongs to.
+    realm: RealmId,
+    /// The union tag the turn suspended at, replayed on resume so the caller
+    /// does not have to remember it per-park.
+    suspend_tag: u64,
+    /// Plain park vs value-plane binding park.
+    kind: ParkKind,
+}
+
+/// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
+/// [`ContinuationId`] a suspension parked under.
+pub enum ParkedOutcome {
+    /// The turn ran to completion; `Value` is the bridged result.
+    Completed(tidepool_eval::value::Value),
+    /// The turn suspended and its continuation was PARKED in the registry as a
+    /// registered GC root. Resume it with [`JitEffectMachine::resume_parked`].
+    Suspended {
+        /// The registry key this continuation parked under.
+        id: ContinuationId,
+        /// The bridged suspend request.
+        request: tidepool_eval::value::Value,
+        /// See [`SuspendableOutcome::Suspended::has_finalized_closure`].
+        has_finalized_closure: bool,
+    },
+}
+
+/// Where the shared suspendable epilogue puts a continuation when a turn
+/// suspends. Internal: the public entries pick one and project the result.
+#[derive(Debug, Clone, Copy)]
+enum ParkTarget {
+    /// The single `suspended_continuation` slot (every pre-existing entry).
+    Slot,
+    /// The continuation registry, under a fresh id in this realm.
+    Registry { realm: RealmId, kind: ParkKind },
+}
+
+/// Result of the shared suspendable body before it is projected into whichever
+/// public outcome type the caller's entry returns. `id` is `Some` exactly when
+/// the park target was [`ParkTarget::Registry`].
+enum ParkedRaw {
+    Completed(tidepool_eval::value::Value),
+    Suspended {
+        request: tidepool_eval::value::Value,
+        has_finalized_closure: bool,
+        id: Option<ContinuationId>,
+    },
+}
+
+impl ParkedRaw {
+    /// Project onto the single-slot path's outcome type.
+    fn into_suspendable(self) -> SuspendableOutcome {
+        match self {
+            ParkedRaw::Completed(v) => SuspendableOutcome::Completed(v),
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => {
+                debug_assert!(id.is_none(), "slot park target must not mint an id");
+                SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+        }
+    }
+
+    /// Project onto the registry path's outcome type.
+    fn into_parked(self) -> ParkedOutcome {
+        match self {
+            ParkedRaw::Completed(v) => ParkedOutcome::Completed(v),
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => ParkedOutcome::Suspended {
+                id: id.expect("registry park target mints an id on suspension"),
+                request,
+                has_finalized_closure,
+            },
+        }
+    }
 }
 
 /// High-level JIT effect machine.
@@ -215,6 +365,34 @@ pub struct JitEffectMachine {
     /// like `last_bound_root`, because a `RootSlot` (`*mut *mut u8`) is `!Send`
     /// and cannot cross the eval-thread scope boundary as a bare value.
     suspended_finalized_root: Option<crate::old_space::RootSlot>,
+    /// REALM PROTOTYPE — the many-continuation generalization of
+    /// `suspended_continuation`: every continuation parked by
+    /// [`Self::run_suspendable_parked`], keyed by [`ContinuationId`] and tagged
+    /// with the [`RealmId`] that owns it. Empty on every machine that only uses
+    /// the single-slot path.
+    ///
+    /// THE INVARIANT: a frame's `cell` is registered in `stowed_roots` from the
+    /// moment it is parked until the moment it is resumed — not just while a
+    /// child runs. The single-slot path protects an idle-suspended continuation
+    /// by a TEMPORAL argument (no GC can run on a suspended machine, enforced by
+    /// the L7 `suspended_continuation.is_none()` asserts) and only falls back to
+    /// a registered root for the window a nested child occupies. A parked frame
+    /// has no such window: it is a root for its whole parked lifetime, so any
+    /// collection — from a sibling park's turn, a plain fragment, another
+    /// realm's resume, or a heap doubling in any of them — evacuates its
+    /// continuation tree and rewrites `*cell` in place. Dropping the temporal
+    /// argument is exactly what lets several continuations coexist on one heap
+    /// while unrelated computation keeps running.
+    ///
+    /// Consequently `stowed_roots_count()` equals `continuations.len()` at
+    /// every quiescent point on the parked path (plus one transiently while a
+    /// `run_child_fragment*` guard is alive on the single-slot path).
+    continuations: HashMap<ContinuationId, ContinuationFrame>,
+    /// Monotonic source of [`ContinuationId`]s for `continuations`. Never
+    /// rewound — a resumed id is not reused, so a stale id from a caller is a
+    /// clean "unknown continuation" error rather than a silent aliasing of some
+    /// later park.
+    next_continuation_id: u64,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -482,6 +660,8 @@ impl JitEffectMachine {
             nested_child_depth: 0,
             last_bound_root: None,
             suspended_finalized_root: None,
+            continuations: HashMap::new(),
+            next_continuation_id: 0,
         })
     }
 
@@ -518,6 +698,8 @@ impl JitEffectMachine {
             nested_child_depth: 0,
             last_bound_root: None,
             suspended_finalized_root: None,
+            continuations: HashMap::new(),
+            next_continuation_id: 0,
         })
     }
 
@@ -782,6 +964,34 @@ impl JitEffectMachine {
         suspend_tag: u64,
         bind_forced: Option<bool>,
     ) -> Result<SuspendableOutcome, JitError> {
+        self.run_suspendable_shared(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            bind_forced,
+            ParkTarget::Slot,
+        )
+        .map(ParkedRaw::into_suspendable)
+    }
+
+    /// Shared suspendable run body for BOTH suspension paths, parametrized by
+    /// the entry `func_id` and by `park` — where a suspension puts its
+    /// continuation (the single `suspended_continuation` slot, or the
+    /// continuation registry). Everything before the epilogue is identical, so
+    /// the pre-existing entries stay byte-identical to the pre-registry body.
+    #[allow(clippy::too_many_arguments)]
+    fn run_suspendable_shared<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        bind_forced: Option<bool>,
+        park: ParkTarget,
+    ) -> Result<ParkedRaw, JitError> {
         assert!(
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
@@ -819,7 +1029,7 @@ impl JitEffectMachine {
             Some(suspend_tag),
             yield_result,
         ) {
-            Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+            Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced, park, suspend_tag),
             Err(e) => Err(e),
         };
         // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
@@ -917,6 +1127,37 @@ impl JitEffectMachine {
             .suspended_continuation
             .take()
             .expect("suspended_continuation present (checked is_some above)");
+        self.resume_applied(
+            continuation,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            bind_forced,
+            ParkTarget::Slot,
+        )
+        .map(ParkedRaw::into_suspendable)
+    }
+
+    /// Apply an already-acquired continuation to a resume `input` and drive to
+    /// the next suspension or completion. Shared by BOTH resume paths: the
+    /// single-slot [`Self::resume_suspended_inner`] (which `take()`s the slot)
+    /// and the registry [`Self::resume_parked`] (which removes the frame and
+    /// deregisters its root). Both callers have already run the A5 NF-force, so
+    /// by the time control reaches here the continuation is committed.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_applied<U, H: DispatchEffect<U>>(
+        &mut self,
+        continuation: *mut u8,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        bind_forced: Option<bool>,
+        park: ParkTarget,
+    ) -> Result<ParkedRaw, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
         // Re-points GC state at the retained heap (heap `Some` → session buffer,
@@ -985,7 +1226,7 @@ impl JitEffectMachine {
                 Some(suspend_tag),
                 yield_result,
             ) {
-                Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+                Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced, park, suspend_tag),
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -1009,12 +1250,19 @@ impl JitEffectMachine {
     /// bind branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
     /// have armed reclaim before this call (the guard's `*mut self.session` would
     /// alias) — see `run_fragment_and_bind`'s arm-last ordering.
+    ///
+    /// `park` selects where a SUSPENSION puts its continuation: the single
+    /// `suspended_continuation` slot ([`ParkTarget::Slot`], every pre-existing
+    /// entry) or the continuation registry ([`ParkTarget::Registry`]). The
+    /// `Done` branch is identical for both.
     fn finish_suspendable(
         &mut self,
         machine: &mut CompiledEffectMachine,
         outcome: DriveOutcome,
         bind_forced: Option<bool>,
-    ) -> Result<SuspendableOutcome, JitError> {
+        park: ParkTarget,
+        suspend_tag: u64,
+    ) -> Result<ParkedRaw, JitError> {
         match outcome {
             DriveOutcome::Done(done_ptr) => {
                 if let Some(forced) = bind_forced {
@@ -1073,7 +1321,7 @@ impl JitEffectMachine {
                     .map_err(JitError::Signal)?;
                     let value =
                         crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                    return Ok(SuspendableOutcome::Completed(value));
+                    return Ok(ParkedRaw::Completed(value));
                 }
                 // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
                 // vmctx is valid for forcing thunks; signal protection guards
@@ -1087,7 +1335,7 @@ impl JitEffectMachine {
                 .map_err(JitError::Signal)?;
                 let value =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                Ok(SuspendableOutcome::Completed(value))
+                Ok(ParkedRaw::Completed(value))
             }
             DriveOutcome::Suspended {
                 request,
@@ -1106,10 +1354,19 @@ impl JitEffectMachine {
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
                     self.suspended_finalized_root = Some(slot);
                 }
-                self.suspended_continuation = Some(continuation);
-                Ok(SuspendableOutcome::Suspended {
+                let id = match park {
+                    ParkTarget::Slot => {
+                        self.suspended_continuation = Some(continuation);
+                        None
+                    }
+                    ParkTarget::Registry { realm, kind } => {
+                        Some(self.park_continuation(continuation, realm, kind, suspend_tag))
+                    }
+                };
+                Ok(ParkedRaw::Suspended {
                     request,
                     has_finalized_closure,
+                    id,
                 })
             }
         }
@@ -2261,6 +2518,197 @@ impl JitEffectMachine {
         let _nested = self.enter_nested_child();
         self.run_pure_with_entry(func_id)
     }
+
+    // ----------------------------------------------------------------------
+    // REALM PROTOTYPE — the parked-continuation registry.
+    //
+    // Many continuations parked in ONE machine, each a REGISTERED GC ROOT for
+    // its whole parked lifetime, resumable in any order. The temporal argument
+    // ("no GC runs on a suspended machine") is dropped entirely here: the
+    // parked path never populates `suspended_continuation`, so the L7 asserts
+    // on the plain entries pass and arbitrary further computation — including
+    // computation that collects and doubles the heap — runs freely against a
+    // machine holding N parks.
+    // ----------------------------------------------------------------------
+
+    /// Park a suspended continuation into the registry as a registered GC root
+    /// and mint its [`ContinuationId`]. The heap-stable `Box` cell is the same
+    /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
+    /// this registration is released by [`Self::resume_parked`], not by a guard
+    /// at the end of the next child run.
+    fn park_continuation(
+        &mut self,
+        continuation: *mut u8,
+        realm: RealmId,
+        kind: ParkKind,
+        suspend_tag: u64,
+    ) -> ContinuationId {
+        let mut cell = Box::new(continuation);
+        let slot: *mut *mut u8 = &mut *cell;
+        // SAFETY: `slot` is the address of the Box's inner cell — a stable heap
+        // allocation that does not move when the Box moves into the map or the
+        // machine moves between threads. It stays valid until `resume_parked`
+        // deregisters it and drops the frame. The GC reads and rewrites `*slot`
+        // in place on every collection until then.
+        self.machine_state.register_stowed_root(slot);
+        let id = ContinuationId(self.next_continuation_id);
+        self.next_continuation_id += 1;
+        self.continuations.insert(
+            id,
+            ContinuationFrame {
+                cell,
+                realm,
+                suspend_tag,
+                kind,
+            },
+        );
+        id
+    }
+
+    /// Parked sibling of [`Self::run_suspendable`]: drive the machine's entry
+    /// through the same suspend path, but PARK a suspension in the continuation
+    /// registry under `realm` instead of stowing it in the single slot.
+    ///
+    /// `suspended_continuation` is left `None` throughout, so the machine stays
+    /// usable: further fragments, further parked turns, and resumes of OTHER
+    /// parked continuations all run against it while this one waits.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine — heap retention across the suspension
+    /// requires [`Self::compile_session`].
+    pub fn run_suspendable_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        realm: RealmId,
+    ) -> Result<ParkedOutcome, JitError> {
+        let func_id = self.func_id;
+        self.run_fragment_suspendable_parked(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            realm,
+            ParkKind::Plain,
+        )
+    }
+
+    /// Parked sibling of [`Self::run_fragment_suspendable`] /
+    /// [`Self::run_fragment_suspendable_binding`]: drive an
+    /// [`Self::add_function`]-minted fragment through the suspend path, parking
+    /// a suspension in the registry under `realm`. `kind` picks the completion
+    /// discipline — [`ParkKind::Plain`] bridges the `Done` pointer,
+    /// [`ParkKind::Binding`] tenures it as a value-plane bind.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        realm: RealmId,
+        kind: ParkKind,
+    ) -> Result<ParkedOutcome, JitError> {
+        self.run_suspendable_shared(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            kind.bind_forced(),
+            ParkTarget::Registry { realm, kind },
+        )
+        .map(ParkedRaw::into_parked)
+    }
+
+    /// Re-enter the continuation parked under `id`, feeding the answer (or an
+    /// abort) and driving to the next suspension or completion. The frame's own
+    /// `suspend_tag` and [`ParkKind`] are replayed — the caller supplies only
+    /// the id and the input.
+    ///
+    /// Resumes in ANY order: the registry imposes none. A re-suspension parks
+    /// again under a FRESH id in the same realm.
+    ///
+    /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
+    /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
+    /// answer leaves the frame PARKED and still ROOTED and the caller can retry
+    /// with a corrected answer.
+    pub fn resume_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        id: ContinuationId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        input: ResumeInput,
+    ) -> Result<ParkedOutcome, JitError> {
+        // PEEK the frame — do NOT remove it yet (A5).
+        let (realm, kind, suspend_tag) = match self.continuations.get(&id) {
+            Some(frame) => (frame.realm, frame.kind, frame.suspend_tag),
+            None => {
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "resume_parked: no continuation parked under {id:?}"
+                ))))
+            }
+        };
+        if let ResumeInput::Answer(val) = &input {
+            answer_force_nf(val).map_err(|reason| {
+                JitError::Effect(EffectError::Handler(format!(
+                    "resume answer is not in normal form (bottom in the answer): {reason}"
+                )))
+            })?;
+        }
+        // Answer verified NF (or this is an Abort) — NOW take the frame and
+        // release its root. Every early return above left it parked and rooted.
+        let mut frame = self
+            .continuations
+            .remove(&id)
+            .expect("frame present (peeked above, &mut self held throughout)");
+        let slot: *mut *mut u8 = &mut *frame.cell;
+        self.machine_state.deregister_stowed_root(slot);
+        // Read the GC-CURRENT pointer out of the cell: collections since the
+        // park rewrote it in place through the registered slot.
+        let continuation = *frame.cell;
+        drop(frame);
+        self.resume_applied(
+            continuation,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            kind.bind_forced(),
+            ParkTarget::Registry { realm, kind },
+        )
+        .map(ParkedRaw::into_parked)
+    }
+
+    /// Number of continuations currently parked in the registry. Equal to
+    /// [`Self::stowed_roots_count`] at every quiescent point on the parked path
+    /// — that equality IS the rooting receipt.
+    pub fn parked_count(&self) -> usize {
+        self.continuations.len()
+    }
+
+    /// The ids currently parked, ascending. Ordering is imposed here (a
+    /// `HashMap` has none) purely so callers and tests can enumerate
+    /// deterministically.
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        let mut ids: Vec<ContinuationId> = self.continuations.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The realm owning the continuation parked under `id`, if any.
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        self.continuations.get(&id).map(|f| f.realm)
+    }
 }
 
 /// RAII proof that a nested child is running against a suspended parent
@@ -2310,6 +2758,16 @@ impl Drop for NestedChildGuard {
 
 impl Drop for JitEffectMachine {
     fn drop(&mut self) {
+        // REALM PROTOTYPE: deregister every parked continuation's stowed root
+        // BEFORE its `Box` cell is freed (the `HashMap` drops with `self` after
+        // this body returns). `free_session_heap` below also clears stowed
+        // roots, but only on a session machine — doing it here makes the
+        // "registered from park until resume, and no longer" invariant hold on
+        // every drop path.
+        for (_, mut frame) in self.continuations.drain() {
+            let slot: *mut *mut u8 = &mut *frame.cell;
+            self.machine_state.deregister_stowed_root(slot);
+        }
         // Clear this machine's persistent-root registry (whose slots point
         // into the session heap Vec, which drops with self after this).
         // Harmless for one-shot machines (free_session_heap does nothing if
