@@ -12,7 +12,7 @@ source.
 |---|---|---|
 | A | case-trap intern arena (D13), `Int64ToWord64` result tag, blackhole gap | see below |
 | B | indexed free-vars analysis + petgraph topo sort (C4+C5) | **held, WIP branch** |
-| C | `DataConTable` accumulation hygiene (D3) | see below |
+| C | `DataConTable` accumulation hygiene (D3) | **landed**, two items deferred |
 | D | `runtime_apply`/`runtime_tail_apply` + `FunctionImports` (D4+D5) | **not started** |
 | E | lambda registry, stack-map lookup, `seed_external_env` (D7/D8/D9) | **not started** |
 | F | `declare_env` (D6) | **not started** |
@@ -86,6 +86,31 @@ direct declaration. Conform it on resume.
 `petgraph` is mandatory for graph algorithms in this codebase — hand-rolled
 traversals are not an accepted alternative.
 
+## Cluster C — landed; two items deferred with reasons
+
+`merge_table` filters out constructors already held with identical metadata,
+then batches the remainder through `DataConTable::extend_checked`, which sorts
+each affected `by_type_name` bucket once instead of once per insert.
+
+Both step-4 items were investigated and deferred on evidence, not on time:
+
+- **Global/session metadata split.** The bootstrap Prelude table (~124-164
+  entries) is very nearly all of what a steady-state turn re-presents, so the
+  win is marginal. Splitting storage means either rewriting every
+  `DataConTable` accessor to consult two backing stores — CBOR serialization
+  included — or re-merging per call, which reintroduces the O(N) cost steps 1-3
+  just removed.
+- **Structural sharing into suspension snapshots.** Three call sites in
+  `resident.rs` (~505, ~592, ~782) deep-clone `session_table()` per
+  child/suspension result. Making that cheap requires `EvalResult`'s table
+  field to become `Arc`-backed, but `EvalResult` is a public facade type
+  re-exported from the top-level `tidepool` crate and consumed across four-plus
+  `tidepool-runtime` test suites plus `tidepool-mcp`. Not locally contained.
+
+A permanent `log::debug!` on `merge_table` (target `tidepool::session`) reports
+`turn_cons`/`skipped`/`applied`/`session_cons_before`. No live measurement was
+captured.
+
 ## Constructor-wrapper prune — reverted, re-land held
 
 `cb1b131d` (`wrap_with_datacon_env` binds only referenced constructors) is
@@ -147,6 +172,30 @@ silently absorbed.
 
 The `Result` frozen at `MissingConTags` (defect 1b) is deterministic and live
 today — it needs no precondition and is not masked by id stability.
+
+### The guard has a waiting follow-up in cluster C's tests
+
+`merge_table`'s skip-identical filter can select a different
+`by_qualified_name` winner than the sequential fold, in one shape: when a later
+turn's identical re-insert would have *reclaimed* ownership from a distinct id
+that claimed the same qualified name earlier in the same turn. The pre-filter
+cannot see that same-turn reordering. It is pinned by
+`merge_table_skip_filter_reclaims_qualified_name_ownership_across_turns` and
+deliberately not fixed — real sessions cannot reach it, since the accumulated
+table is proven collision-free.
+
+Because production's winner on that axis is decided by randomized `HashMap`
+iteration, there is no canonical outcome to compare against. Every equivalence
+check therefore drives both paths from the same explicit ordered vector, never
+from `.iter()`, and `arb_datacon` keys `qualified_name` to `id` so the fuzzer
+cannot wander into the undefined region. The `name` axis is still drawn
+independently, so identity collisions remain fuzzed — only this one axis is
+constrained.
+
+**When the hard-error guard lands, re-widen that generator.** A guard makes the
+collision case well-defined (an error), so the axis becomes fuzzable and the
+narrowing stops being justified. The pinned divergence test should then become
+a collision-error assertion.
 
 ## Gates this work added
 
