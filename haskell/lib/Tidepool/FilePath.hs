@@ -10,6 +10,15 @@
 --
 -- Predicate-taking helpers route through 'Tidepool.Data.Text' (the vendored,
 -- JIT-safe bodies), never an external-package unfolding.
+--
+-- 'normalise', 'splitExtension', and 'takeExtensions' are ports of
+-- @System.FilePath.Posix.normalise@\/@splitExtension@\/@splitExtensions@
+-- (the @filepath@ package, filepath-1.5.2.0, BSD-3-Clause, (c) 2005-2020
+-- Neil Mitchell), translated from @String@ to 'Text' and specialized to the
+-- POSIX branch of the (String\/CHAR-generic in the real package) source —
+-- see
+-- <https://hackage.haskell.org/package/filepath-1.5.2.0/docs/System-FilePath-Posix.html>
+-- and its linked @docs\/src@ source.
 module Tidepool.FilePath
   ( FilePath
     -- * Separator
@@ -86,20 +95,48 @@ splitDirectories p =
   let parts = filter (not . T.null) (T.splitOn "/" p)
   in if isAbsolute p then "/" : parts else parts
 
--- | Normalise a path: collapse @.@ and redundant empty segments, keep
--- absolute-ness. Like @System.FilePath.normalise@, @..@ segments are PRESERVED,
--- not resolved — resolving @..@ lexically is unsound when the path crosses a
+-- | Normalise a path: collapse a run of leading separators to one, collapse
+-- interior separator runs, and drop @.@ components — and, matching
+-- upstream, PRESERVE a meaningful trailing separator, including a bare
+-- @\"./\"@.
+--
+-- Any number of leading @\/@ collapse to exactly one — POSIX.1 leaves
+-- exactly-two-leading-slashes implementation-defined, but @filepath@ itself
+-- always collapses to one (@normalise \"\/\/home\" == \"\/home\"@ is one of
+-- its own doctests), and this port follows @filepath@, not the standard.
+--
+-- Like @System.FilePath.normalise@, @..@ segments are PRESERVED, not
+-- resolved — resolving @..@ lexically is unsound when the path crosses a
 -- symlink (the lexical parent is not the real parent), so the canonical
 -- function deliberately leaves @..@ for the OS. Do NOT use this for sandbox
 -- containment checks; it is a lexical tidy-up, not a safe-path oracle.
 --
 -- >>> normalise "a/./b/../c" == "a/b/../c"
 -- >>> normalise "/test/./file" == "/test/file"
+-- >>> normalise "a/" == "a/"
+-- >>> normalise "/test////" == "/test/"
+-- >>> normalise "./" == "./"
+-- >>> normalise "" == "."
 normalise :: FilePath -> FilePath
-normalise p =
-  let parts = filter (\s -> not (T.null s) && s /= ".") (T.splitOn "/" p)
-      body  = T.intercalate "/" parts
-  in if isAbsolute p then "/" <> body else if T.null body then "." else body
+normalise p = body <> trailingSep
+  where
+    lead = T.takeWhile (== pathSeparator) p
+    rest = T.dropWhile (== pathSeparator) p
+    drv  = if T.null lead then "" else T.singleton pathSeparator
+
+    comps  = filter (/= ".") (filter (not . T.null) (T.splitOn "/" rest))
+    joined = T.intercalate "/" comps
+
+    body | T.null drv && T.null joined = "."
+         | otherwise                   = drv <> joined
+
+    hasTrailingSep xs = not (T.null xs) && T.last xs == pathSeparator
+    isDirPath xs = hasTrailingSep xs
+      || (not (T.null xs) && T.last xs == '.' && hasTrailingSep (T.init xs))
+
+    trailingSep
+      | isDirPath rest && not (hasTrailingSep body) = T.singleton pathSeparator
+      | otherwise                                   = ""
 
 -- | The component after the final separator.
 --
@@ -115,37 +152,35 @@ takeDirectory p = case T.breakOnEnd "/" p of
   (d, _)  -> let d' = T.dropWhileEnd (== '/') d
              in if T.null d' then "/" else d'
 
--- | The filename without directory or extension.
+-- | The filename without directory or extension. A name that begins with a
+-- @.@ (a hidden file, e.g. @\".bashrc\"@) has an EMPTY base name — see
+-- 'splitExtension'.
 --
 -- >>> takeBaseName "a/b/c.tar.gz" == "c.tar"
+-- >>> takeBaseName ".bashrc" == ""
 takeBaseName :: FilePath -> FilePath
 takeBaseName = dropExtension . takeFileName
 
 -- | The final extension, including the leading @\'.\'@, or @\"\"@ if none.
--- A leading dot (hidden file) is not an extension.
 --
 -- >>> takeExtension "file.txt"  == ".txt"
 -- >>> takeExtension "file"      == ""
--- >>> takeExtension ".bashrc"   == ""
+-- >>> takeExtension ".bashrc"   == ".bashrc"
 takeExtension :: FilePath -> Text
-takeExtension p = case T.breakOnEnd "." (takeFileName p) of
-  (pre, post) | T.null pre || pre == "." -> ""
-              | otherwise                -> T.cons '.' post
+takeExtension = snd . splitExtension
 
--- | All extensions, e.g. @\".tar.gz\"@.
+-- | All extensions, e.g. @\".tar.gz\"@ — everything from the first @.@ in
+-- the final path component onward.
+--
+-- >>> takeExtensions "file.tar.gz" == ".tar.gz"
 takeExtensions :: FilePath -> Text
-takeExtensions p =
-  let fn = takeFileName p
-      body = case T.uncons fn of { Just ('.', r) -> r; _ -> fn }   -- skip a hidden-file dot
-  in snd (T.breakOn "." body)
+takeExtensions p = snd (T.breakOn "." (takeFileName p))
 
 -- | Drop the final extension.
 --
 -- >>> dropExtension "file.txt" == "file"
 dropExtension :: FilePath -> FilePath
-dropExtension p =
-  let ext = takeExtension p
-  in if T.null ext then p else T.dropEnd (T.length ext) p
+dropExtension = fst . splitExtension
 
 -- | Drop every extension.
 dropExtensions :: FilePath -> FilePath
@@ -176,11 +211,27 @@ replaceExtension p ext = addExtension (dropExtension p) ext
 (-<.>) = replaceExtension
 infixr 7 -<.>
 
--- | Split into @(path-without-final-ext, final-ext-with-dot)@.
+-- | Split into @(path-without-final-ext, final-ext-with-dot)@. The extension
+-- is taken from the LAST @.@ in the whole path, not just the final
+-- component — if what follows that @.@ crosses a @\/@, it doesn't count as
+-- an extension. A name that begins with a @.@ (a hidden file, e.g.
+-- @\".bashrc\"@) has no non-dot text before its first separator, so it
+-- splits as an empty base name and an all-extension — surprising, but
+-- upstream's own canonical behavior; a fluent-Haskell caller expects it.
+--
+-- >>> splitExtension "file.txt" == ("file", ".txt")
+-- >>> splitExtension "file.txt/boris" == ("file.txt/boris", "")
+-- >>> splitExtension ".bashrc" == ("", ".bashrc")
 splitExtension :: FilePath -> (FilePath, Text)
-splitExtension p = (dropExtension p, takeExtension p)
+splitExtension p
+  | T.null nameDot     = (p, "")
+  | T.any (== '/') ext = (p, "")
+  | otherwise          = (T.init nameDot, T.cons '.' ext)
+  where (nameDot, ext) = T.breakOnEnd "." p
 
 -- | Does the path have an extension?
+--
+-- >>> hasExtension ".bashrc" == True
 hasExtension :: FilePath -> Bool
 hasExtension = not . T.null . takeExtension
 

@@ -1386,6 +1386,107 @@ fn works_pack_show_output_dialect_win() {
 // for `normalise` and the sibling path functions.
 // =========================================================================
 
+/// `normalise` ported from `System.FilePath.Posix.normalise`
+/// (filepath-1.5.2.0, BSD-3-Clause) — trailing-separator and leading-`/`
+/// vectors, the ones the HIGH finding was about (the old splitOn-based
+/// shadow dropped a meaningful trailing separator and collapsed `"./"`).
+/// Vectors are upstream's own doctests, plus the finding's own repro shapes.
+/// <https://hackage.haskell.org/package/filepath-1.5.2.0/docs/System-FilePath-Posix.html>
+#[test]
+fn works_filepath_normalise_trailing_and_leading_separators() {
+    works(
+        r#"pure (object
+            [ "a_slash" .= normalise "a/"
+            , "test_many_slash" .= normalise "/test////"
+            , "dot_slash" .= normalise "./"
+            , "file_test_many_slash" .= normalise "/file/test////"
+            , "dotdot_bob_fred_slash" .= normalise "../bob/fred/"
+            , "bob_fred_dot" .= normalise "bob/fred/."
+            , "dot_bob_fred_slash" .= normalise "./bob/fred/"
+            , "empty" .= normalise ""
+            , "double_leading_slash_home" .= normalise "//home"
+            , "backslash_literal" .= normalise "/file/\\test////"
+            ])"#,
+        serde_json::json!({
+            "a_slash": "a/",
+            "test_many_slash": "/test/",
+            "dot_slash": "./",
+            "file_test_many_slash": "/file/test/",
+            "dotdot_bob_fred_slash": "../bob/fred/",
+            "bob_fred_dot": "bob/fred/",
+            "dot_bob_fred_slash": "bob/fred/",
+            "empty": ".",
+            "double_leading_slash_home": "/home",
+            "backslash_literal": "/file/\\test/",
+        }),
+    );
+}
+
+/// `normalise` — vectors upstream documents as UNCHANGED by normalisation
+/// (interior `.` collapsed, `..` left alone, no trailing separator to add).
+/// Confirms the port doesn't touch what the old shadow already got right.
+/// Same upstream URL as `works_filepath_normalise_trailing_and_leading_separators`.
+#[test]
+fn works_filepath_normalise_interior_dots_and_clean_paths() {
+    works(
+        r#"pure (object
+            [ "a_dot_b_dotdot_c" .= normalise "a/./b/../c"
+            , "test_dot_file" .= normalise "/test/./file"
+            , "file_dot_test" .= normalise "/file/./test"
+            , "test_file_dotdot_bob_fred_slash" .= normalise "/test/file/../bob/fred/"
+            , "a_dotdot_c" .= normalise "/a/../c"
+            , "dot" .= normalise "."
+            , "dot_dot" .= normalise "./."
+            , "slash_dot_slash" .= normalise "/./"
+            , "root" .= normalise "/"
+            ])"#,
+        serde_json::json!({
+            "a_dot_b_dotdot_c": "a/b/../c",
+            "test_dot_file": "/test/file",
+            "file_dot_test": "/file/test",
+            "test_file_dotdot_bob_fred_slash": "/test/file/../bob/fred/",
+            "a_dotdot_c": "/a/../c",
+            "dot": ".",
+            "dot_dot": "./",
+            "slash_dot_slash": "/",
+            "root": "/",
+        }),
+    );
+}
+
+/// Sibling-diff fix: `splitExtension`/`takeExtension`/`takeBaseName`/
+/// `hasExtension` no longer special-case a leading `.` (a hidden file like
+/// `.bashrc`) as "no extension" — upstream's `System.FilePath.Posix.splitExtension`
+/// (filepath-1.5.2.0) finds the extension from the LAST `.` in the whole
+/// path with no hidden-file exception, so a name that begins with `.` and
+/// has no other `.` splits as an EMPTY base name and an ALL-extension. The
+/// old Tidepool shadow silently gave the opposite (canonical-name,
+/// non-canonical semantics) answer for every dotfile.
+/// <https://hackage.haskell.org/package/filepath-1.5.2.0/docs/System-FilePath-Posix.html>
+#[test]
+fn works_filepath_extension_dotfile_fidelity() {
+    works(
+        r#"pure (object
+            [ "take_extension_bashrc" .= takeExtension ".bashrc"
+            , "take_extension_dot" .= takeExtension "."
+            , "split_extension_bashrc" .= (let (b, e) = splitExtension ".bashrc" in object ["base" .= b, "ext" .= e])
+            , "take_base_name_bashrc" .= takeBaseName ".bashrc"
+            , "has_extension_bashrc" .= hasExtension ".bashrc"
+            , "split_extension_crossing_slash" .= (let (b, e) = splitExtension "file.txt/boris" in object ["base" .= b, "ext" .= e])
+            , "take_extension_regular" .= takeExtension "file.txt"
+            ])"#,
+        serde_json::json!({
+            "take_extension_bashrc": ".bashrc",
+            "take_extension_dot": ".",
+            "split_extension_bashrc": {"base": "", "ext": ".bashrc"},
+            "take_base_name_bashrc": "",
+            "has_extension_bashrc": true,
+            "split_extension_crossing_slash": {"base": "file.txt/boris", "ext": ""},
+            "take_extension_regular": ".txt",
+        }),
+    );
+}
+
 // =========================================================================
 // `Tidepool.Data.Time` and the Prelude/Fmt-runtime shadows: the names the
 // stdlib claims are JIT-safe, each pinned by a probe that calls it.
