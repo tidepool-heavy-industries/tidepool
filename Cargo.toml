@@ -45,15 +45,39 @@ rust-version = "1.89"
 [profile.dev.package."*"]
 opt-level = 2
 
+# The hottest JIT-path crates go to full optimization: Cranelift's emit
+# pipeline and regalloc dominate per-fixture JIT compile time behind every
+# differential suite and harness turn. External crates rebuild once and cache.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.cranelift-jit]
+opt-level = 3
+[profile.dev.package.cranelift-module]
+opt-level = 3
+[profile.dev.package.cranelift-native]
+opt-level = 3
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+[profile.dev.package.cranelift-control]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+
 # Also optimize the JIT/interpreter hot crates for `cargo test` specifically,
 # where their RUNTIME dominates (Cranelift emit + tree-walk over the corpus).
 # Kept out of plain `[profile.dev]` so a normal `cargo build`/edit loop on these
 # crates stays fast; `cargo test` pays a one-time optimized rebuild of just these.
 [profile.test.package.tidepool-codegen]
-opt-level = 2
+opt-level = 3
 [profile.test.package.tidepool-eval]
-opt-level = 2
+opt-level = 3
 [profile.test.package.tidepool-heap]
-opt-level = 2
+opt-level = 3
 [profile.test.package.tidepool-optimize]
-opt-level = 2
+opt-level = 3
