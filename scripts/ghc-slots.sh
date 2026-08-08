@@ -9,12 +9,16 @@
 # Slot 0 is the legacy lock file, so processes still using the old single-lock
 # protocol occupy slot 0 and total concurrency stays bounded during migration.
 #
-# Properties: single-slot waiters hold nothing while blocked (no deadlock);
-# exclusive acquires slots in canonical order (no deadlock between exclusives)
-# and has drain semantics — under continuous single-slot demand it waits for a
-# lull, which is what a measurement wants anyway. When all slots are busy, a
-# single-slot waiter blocks with NO timeout on a PID-spread slot (flock is not
-# FIFO-fair; timed retry loops starve).
+# Properties: single-slot waiters hold nothing while blocked (no deadlock).
+# When all slots are busy, a single-slot waiter POLLS ALL slots with jitter
+# rather than blocking untimed on one: committing to a single slot strands
+# waiters while another slot sits free (observed 2026-08-09 — three waiters
+# PID-hashed onto the same slot, two slots idle). With every waiter polling,
+# no protocol class holds kernel-queue priority over another, so the old
+# timed-retry starvation argument no longer applies; grant order among pollers
+# is random but capacity is never wasted. `exclusive` still blocks untimed per
+# slot in canonical order, so it out-queues pollers on each slot as it drains —
+# which is what a measurement wants.
 set -euo pipefail
 
 SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2)
@@ -51,18 +55,22 @@ fi
 case "$mode" in
   run)
     await_memory
-    for f in "${SLOTS[@]}"; do
-      exec {fd}>"$f"
-      if flock -n "$fd"; then
-        exec "$@"
+    announced=0
+    while :; do
+      for f in "${SLOTS[@]}"; do
+        exec {fd}>"$f"
+        if flock -n "$fd"; then
+          await_memory
+          exec "$@"
+        fi
+        exec {fd}>&-
+      done
+      if [ "$announced" = 0 ]; then
+        echo "ghc-slots: all slots busy — polling for any free slot" >&2
+        announced=1
       fi
-      exec {fd}>&-
+      sleep $((5 + RANDOM % 10))
     done
-    f="${SLOTS[$(($$ % ${#SLOTS[@]}))]}"
-    exec {fd}>"$f"
-    flock "$fd"
-    await_memory
-    exec "$@"
     ;;
   exclusive)
     await_memory
