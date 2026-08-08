@@ -125,13 +125,17 @@ side in `Binders.hs`; the turn mode needs both, picked by what it is looking at:
 
 - a single turn whose verdict is `decl` → statement parse for the verdict,
   module parse for the items;
-- a decl batch (`--turn-verdict decl` over combined declaration text, the
-  `define_batch_with_vals` path) → module parse only; there is no per-statement
-  verdict to compute and the caller already knows the kind.
+- a decl batch → module parse only; there is no per-statement verdict to compute
+  and the caller already knows the kind.
 
 Get this wrong and multi-declaration batches lose export items, so the selective
 re-export silently stops shadowing — a failure that shows up as a stale binding
 several turns later, not as an error.
+
+Under rule 1 below, the decl batch arrives as a block of items rather than as
+joined text, and the extract assembles the module it parses. The constraint is
+unchanged; what changes is that the two parses can no longer be handed different
+inputs.
 
 ### Variant retry
 
@@ -158,6 +162,84 @@ The block runner segments items by verdict before running any of them, so it
 needs verdicts for the whole list up front. One batch classify covers that,
 and each item's `--turn` run then carries `--turn-verdict` so nothing
 re-parses.
+
+## One input shape; where harvested data may come from
+
+The wrong-parse bug class above exists because two parses produce data that
+outlives them. Two rules were proposed to make it unrepresentable rather than
+merely documented. Verdicts differ, so they are recorded separately.
+
+### Rule 1 — one input shape, a block of items. ADOPTED.
+
+The entry point takes a **block of items**, each classified by the trial-parse
+ladder (`import` | `decl` | `stmt`) that `classifyTurn` already mirrors. The decl
+batch stops being a separate entry point with its own joined-text convention: it
+becomes a block whose items all classify as decls. One grammar, one entry, N
+items. Mirroring canonical GHCi is the project's api-is-the-prompt rule paying
+out rather than costing.
+
+This is what actually kills the bug class. The two parses were not dangerous
+because they were two — they were dangerous because they saw **different
+inputs**: a single turn for the ladder, joined text for the module parse. Remove
+the different-inputs condition and a verdict computed for item *i* can no longer
+be applied to a text that is not item *i*.
+
+Note what this does NOT buy: a block containing several statements still needs
+one compile per statement, because statement *i+1* may depend on effects that
+statement *i* performed and on bindings it introduced, and a statement may
+suspend mid-block. The block collapses *classification* to one call and compiles
+the leading decl group as one artifact; it does not collapse N statements into
+one compile.
+
+### Rule 2 — harvest only from the compiled artifact. NO-GO.
+
+The proposal: the verdict parse yields exactly one thing, the wrapper choice, and
+no data that outlives it; binder names, export items, and types all come from the
+one wrapped module GHC typechecks and compiles. Three independent obstacles, any
+one of which is disqualifying:
+
+1. **The bind case is circular.** The wrapper is
+   `__result = do { x <- e ; pure (x) }` — the binder name is an *input* to
+   wrapper construction. A name needed in order to produce the artifact cannot be
+   discovered from that artifact; harvesting it post-hoc could only confirm what
+   the wrapper already asserted. GHCi's `execStmt` returning bound names is not a
+   counterexample: it runs the statement in the interactive context and lets GHC
+   name the bindings, whereas this pipeline wraps into a module and extracts Core
+   for the JIT. Adopting the `execStmt` shape means giving up module-wrapping,
+   which is the architecture.
+2. **The decl case is circular too, less obviously.** `render.rs` builds the
+   module's export list from *this* turn's items, and the items additionally drive
+   the import `hiding` computation and the ambiguous-occurrence avoidance. Items
+   are therefore required to render the very module whose compilation would supply
+   them. Breaking that needs the export list restructured to not depend on the
+   current turn's items — a change to the decl plane's shadowing mechanism, far
+   outside this work and in a file the repl leans on heavily.
+3. **The hook is not reachable.** `PipelineResult` carries `prBinds` (Core),
+   `prTyCons`, `prHscEnv`, `prCapturedType`, `prResultType`, `prWarnings`. The
+   typechecked module is a local inside `runPipeline`/`runPipelineSession`,
+   consumed and dropped. Exposing it means editing `GhcPipeline.hs`. Harvesting
+   from Core instead is worse: `do { x <- e ; pure x }` desugars to
+   `>>= e (\x -> pure x)` and the name survives only as a lambda binder whose
+   shape depends on the monad and on which passes ran.
+
+### What is adopted from rule 2's intent
+
+- Each parse produces exactly one kind of thing: the ladder produces the verdict
+  and nothing else; the module parse produces export items and nothing else.
+  Under rule 1 both see the same block, so there is no second input to mismatch.
+- Everything about a *compiled* turn that can come from the typechecked module
+  already does: `boundBinders`' types, `varId`s, and tiers are computed from
+  `prResultType` / `sessionBinderName` / `isClosureType`, not from the parse. Only
+  the name string is echoed from the verdict.
+- That echo is **corroborated, and fails loud**: `emitBindArtifacts` errors when
+  `result`'s type was not captured, and when N binder names do not match an
+  N-tuple bound type. A name the parse invented but the module does not bind
+  cannot reach the caller silently. This is the invariant to preserve — it is the
+  reachable form of "unrepresentable" without `GhcPipeline` surgery.
+
+Revisiting rule 2 in full is a standalone piece of work whose prerequisite is
+exposing the typechecked module from the pipeline. It is not blocked by anything
+here.
 
 ## Rust side
 
