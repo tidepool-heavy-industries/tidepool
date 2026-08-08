@@ -61,11 +61,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use proptest::prelude::TestCaseError;
-use tidepool_codegen::jit_machine::JitError;
+use tidepool_codegen::host_fns::RuntimeError;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
 use tidepool_eval::value::Value;
+use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::CoreExpr;
+
+use crate::compare::values_equal;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -144,7 +149,11 @@ impl DiffConfig {
 
     /// Sweep these nursery sizes (each a distinct runtime configuration).
     pub fn nurseries(mut self, ns: &'static [usize]) -> Self {
-        assert!(!ns.is_empty(), "{}: nurseries must be non-empty", self.label);
+        assert!(
+            !ns.is_empty(),
+            "{}: nurseries must be non-empty",
+            self.label
+        );
         self.nurseries = ns;
         self
     }
@@ -271,14 +280,72 @@ pub enum EvalErrorClass {
 
 /// Reduce a [`JitError`] to its class. Total: every variant maps.
 pub fn classify_jit(e: &JitError) -> JitErrorClass {
-    let _ = e;
-    unimplemented!("Dev A: implement in the runner core")
+    match e {
+        JitError::Compilation(_) => JitErrorClass::Compilation,
+        JitError::Pipeline(_) => JitErrorClass::Pipeline,
+        JitError::MissingConTags(_) => JitErrorClass::Other,
+        JitError::Effect(_) => JitErrorClass::Effect,
+        JitError::Yield(y) => classify_yield(y),
+        JitError::HeapBridge(_) => JitErrorClass::HeapBridge,
+        JitError::Signal(_) => JitErrorClass::Signal,
+        JitError::EffectResponseTooLarge { .. } => JitErrorClass::Other,
+        JitError::VarIdCollision(_) => JitErrorClass::Other,
+    }
+}
+
+/// Reduce a [`YieldError`] to its class. Total: every variant maps.
+fn classify_yield(e: &YieldError) -> JitErrorClass {
+    match e {
+        YieldError::UnexpectedTag(_) => JitErrorClass::Other,
+        YieldError::UnexpectedConTag(_) => JitErrorClass::Other,
+        YieldError::BadValFields(_) => JitErrorClass::Other,
+        YieldError::BadEFields(_) => JitErrorClass::Other,
+        YieldError::BadUnionFields(_) => JitErrorClass::Other,
+        YieldError::NullPointer => JitErrorClass::Other,
+        YieldError::Signal(_) => JitErrorClass::Signal,
+        YieldError::Runtime(rt) => classify_runtime(rt),
+    }
+}
+
+/// Reduce a [`RuntimeError`] to its class. Total: every variant maps.
+fn classify_runtime(e: &RuntimeError) -> JitErrorClass {
+    match e {
+        RuntimeError::DivisionByZero => JitErrorClass::DivisionByZero,
+        RuntimeError::Overflow => JitErrorClass::Overflow,
+        RuntimeError::UserError | RuntimeError::UserErrorMsg(_) => JitErrorClass::UserError,
+        RuntimeError::Undefined => JitErrorClass::Undefined,
+        RuntimeError::CaseTrap => JitErrorClass::CaseTrap,
+        RuntimeError::BadPointer => JitErrorClass::BadPointer,
+        RuntimeError::TypeMetadata => JitErrorClass::TypeMetadata,
+        RuntimeError::UnresolvedVar(..) => JitErrorClass::UnresolvedVar,
+        RuntimeError::NullFunPtr => JitErrorClass::NullFunPtr,
+        RuntimeError::BadFunPtrTag(_) => JitErrorClass::BadFunPtrTag,
+        RuntimeError::HeapOverflow => JitErrorClass::HeapOverflow,
+        RuntimeError::StackOverflow => JitErrorClass::StackOverflow,
+        RuntimeError::BlackHole => JitErrorClass::BlackHole,
+        RuntimeError::BadThunkState(_) => JitErrorClass::BadThunkState,
+        RuntimeError::Cancelled => JitErrorClass::Cancelled,
+    }
 }
 
 /// Reduce an [`EvalError`] to its class. Total: every variant maps.
 pub fn classify_eval(e: &EvalError) -> EvalErrorClass {
-    let _ = e;
-    unimplemented!("Dev A: implement in the runner core")
+    match e {
+        EvalError::UnboundVar(_) => EvalErrorClass::UnboundVar,
+        EvalError::ArityMismatch { .. } => EvalErrorClass::ArityMismatch,
+        EvalError::TypeMismatch { .. } => EvalErrorClass::TypeMismatch,
+        EvalError::NoMatchingAlt => EvalErrorClass::NoMatchingAlt,
+        EvalError::InfiniteLoop(_) => EvalErrorClass::InfiniteLoop,
+        EvalError::UnsupportedPrimOp(_) => EvalErrorClass::UnsupportedPrimOp,
+        EvalError::NotAFunction => EvalErrorClass::NotAFunction,
+        EvalError::UnboundJoin(_) => EvalErrorClass::UnboundJoin,
+        EvalError::UserError => EvalErrorClass::UserError,
+        EvalError::Undefined => EvalErrorClass::Undefined,
+        EvalError::DepthLimit => EvalErrorClass::DepthLimit,
+        // A leaked `Jump`-in-flight control signal is itself the internal
+        // invariant violation the `InternalError` class documents.
+        EvalError::InternalError(_) | EvalError::JumpInFlight => EvalErrorClass::InternalError,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,26 +482,294 @@ impl Verdict {
 /// Execute one case: eval once, the JIT once per nursery × repeat, the fork
 /// probe once per nursery. Classifies the result. Never asserts.
 pub fn run_case(expr: &CoreExpr, table: &DataConTable, cfg: &DiffConfig) -> CaseRun {
-    let _ = (expr, table, cfg);
-    unimplemented!("Dev A: implement in the runner core")
+    let _guard = cfg.watchdog.then(|| {
+        crate::watchdog::arm();
+        let label: String = format!("{expr:?}").chars().take(2000).collect();
+        crate::watchdog::begin(&label)
+    });
+
+    let mut heap_eval = VecHeap::new();
+    let env_eval = env_from_datacon_table(table);
+    let eval_result = eval(expr, &env_eval, &mut heap_eval);
+    let eval_result = if cfg.deep_force_eval {
+        eval_result.and_then(|v| deep_force(v, &mut heap_eval))
+    } else {
+        eval_result
+    };
+
+    let mut nurseries = Vec::with_capacity(cfg.nurseries.len());
+    for &nursery in cfg.nurseries {
+        let crash = match cfg.crash_containment {
+            CrashContainment::ForkProbe => fork_probe(expr, table, nursery),
+            CrashContainment::Off => CrashStatus::NotProbed,
+        };
+        let mut runs = Vec::with_capacity(cfg.repeat_count);
+        for _ in 0..cfg.repeat_count {
+            let run = match JitEffectMachine::compile(expr, table, nursery) {
+                Ok(mut machine) => machine.run_pure(),
+                Err(e) => Err(e),
+            };
+            runs.push(run);
+        }
+        nurseries.push(NurseryRun {
+            nursery,
+            runs,
+            crash,
+        });
+    }
+
+    let verdict = classify_run(&eval_result, &nurseries, &cfg.expected);
+
+    CaseRun {
+        label: cfg.label,
+        eval: eval_result,
+        nurseries,
+        verdict,
+    }
+}
+
+/// Fork a child, compile+run one nursery configuration in it, and report
+/// whether it died to a fatal signal. Unix-only; a non-unix build (or a
+/// `pipe`/`fork` failure) reports [`CrashStatus::NotProbed`] rather than
+/// silently skipping the probe under a misleading `Clean`.
+#[cfg(unix)]
+fn fork_probe(expr: &CoreExpr, table: &DataConTable, nursery: usize) -> CrashStatus {
+    use std::io::Read;
+
+    let mut fds = [0i32; 2];
+    // SAFETY: pipe with a valid 2-int array.
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return CrashStatus::NotProbed;
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+
+    // SAFETY: fork in a single-threaded test process; the child only touches
+    // its own JIT state and the write end of the pipe, then _exit.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        unsafe {
+            libc::close(read_fd);
+        }
+        if let Ok(mut machine) = JitEffectMachine::compile(expr, table, nursery) {
+            let _ = machine.run_pure();
+        }
+        let ok: u8 = 1;
+        unsafe {
+            libc::write(write_fd, &ok as *const u8 as *const libc::c_void, 1);
+            libc::close(write_fd);
+            libc::_exit(0);
+        }
+    }
+
+    unsafe {
+        libc::close(write_fd);
+    }
+    // SAFETY: read_fd is a valid, freshly-opened pipe read end owned by this
+    // process; wrapping it in a File takes ownership for the RAII close.
+    let mut f = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(read_fd) };
+    let mut buf = [0u8; 1];
+    let _ = f.read(&mut buf);
+    drop(f);
+
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid on the child we just forked.
+    unsafe {
+        libc::waitpid(pid, &mut status as *mut libc::c_int, 0);
+    }
+    if libc::WIFSIGNALED(status) {
+        CrashStatus::FatalSignal(libc::WTERMSIG(status))
+    } else {
+        CrashStatus::Clean
+    }
+}
+
+#[cfg(not(unix))]
+fn fork_probe(_expr: &CoreExpr, _table: &DataConTable, _nursery: usize) -> CrashStatus {
+    CrashStatus::NotProbed
+}
+
+/// Read off the single [`Verdict`] a recorded [`CaseRun`] resolves to, in
+/// precedence order: a fatal signal always wins; non-determinism at a
+/// nursery size is checked next (it makes any single JIT result at that size
+/// unreliable to compare); then the eval outcome decides which branch
+/// applies.
+fn classify_run(
+    eval: &Result<Value, EvalError>,
+    nurseries: &[NurseryRun],
+    expected: &ExpectedErrorPolicy,
+) -> Verdict {
+    for n in nurseries {
+        if let CrashStatus::FatalSignal(signal) = n.crash {
+            return Verdict::Crash {
+                nursery: n.nursery,
+                signal,
+            };
+        }
+    }
+
+    for n in nurseries {
+        let mut runs = n.runs.iter();
+        let Some(first) = runs.next() else {
+            continue;
+        };
+        for other in runs {
+            let disagree = match (first, other) {
+                (Ok(v1), Ok(v2)) => !values_equal(v1, v2),
+                (Ok(_), Err(_)) | (Err(_), Ok(_)) => true,
+                (Err(_), Err(_)) => false,
+            };
+            if disagree {
+                return Verdict::NonDeterministic { nursery: n.nursery };
+            }
+        }
+    }
+
+    // Every repeat at a given nursery agrees (checked above), so the first
+    // repeat is representative of that nursery's outcome.
+    let reps: Vec<(usize, &Result<Value, JitError>)> =
+        nurseries.iter().map(|n| (n.nursery, &n.runs[0])).collect();
+
+    match eval {
+        Ok(eval_val) => {
+            let ok_vals: Vec<(usize, &Value)> = reps
+                .iter()
+                .filter_map(|(n, r)| r.as_ref().ok().map(|v| (*n, v)))
+                .collect();
+            let err_entries: Vec<(usize, JitErrorClass)> = reps
+                .iter()
+                .filter_map(|(n, r)| r.as_ref().err().map(|e| (*n, classify_jit(e))))
+                .collect();
+
+            if !ok_vals.is_empty() {
+                for &(nursery, v) in &ok_vals {
+                    if !values_equal(eval_val, v) {
+                        return Verdict::ValueMismatch { nursery };
+                    }
+                }
+                let (a_nursery, a_val) = ok_vals[0];
+                for &(b_nursery, b_val) in &ok_vals[1..] {
+                    if !values_equal(a_val, b_val) {
+                        return Verdict::NurseryVariance {
+                            a: a_nursery,
+                            b: b_nursery,
+                        };
+                    }
+                }
+                for &(nursery, class) in &err_entries {
+                    if !expected.jit.contains(&class) {
+                        return Verdict::JitOnlyFailure { nursery, class };
+                    }
+                }
+                Verdict::Compared
+            } else if err_entries
+                .iter()
+                .all(|(_, class)| expected.jit.contains(class))
+            {
+                Verdict::AcceptedJitError {
+                    class: err_entries[0].1,
+                }
+            } else {
+                let (nursery, class) = err_entries
+                    .iter()
+                    .copied()
+                    .find(|(_, class)| !expected.jit.contains(class))
+                    .expect("at least one nursery's class is not in expected.jit");
+                Verdict::JitOnlyFailure { nursery, class }
+            }
+        }
+        Err(eval_err) => {
+            let any_jit_ok = reps.iter().any(|(_, r)| r.is_ok());
+            let eval_class = classify_eval(eval_err);
+            if any_jit_ok {
+                return Verdict::EvalOnlyFailure { class: eval_class };
+            }
+            let jit_class = reps[0]
+                .1
+                .as_ref()
+                .err()
+                .map(classify_jit)
+                .expect("no nursery produced a value, so the first nursery must have errored");
+            if expected.eval.contains(&eval_class) {
+                Verdict::AcceptedBothError {
+                    eval: eval_class,
+                    jit: jit_class,
+                }
+            } else {
+                Verdict::UnexpectedEvalError {
+                    eval: eval_class,
+                    jit: jit_class,
+                }
+            }
+        }
+    }
 }
 
 /// Turn a recorded run's verdict into a proptest result, with a failure message
 /// carrying the expression and the disagreeing values.
 pub fn assert_case(run: &CaseRun, expr: &CoreExpr) -> Result<(), TestCaseError> {
-    let _ = (run, expr);
-    unimplemented!("Dev A: implement in the runner core")
+    let nursery_run = |nursery: usize| run.nurseries.iter().find(|n| n.nursery == nursery);
+
+    match &run.verdict {
+        Verdict::Compared
+        | Verdict::AcceptedJitError { .. }
+        | Verdict::AcceptedBothError { .. } => Ok(()),
+        Verdict::ValueMismatch { nursery } => {
+            let jit_val = nursery_run(*nursery).and_then(|n| n.runs[0].as_ref().ok());
+            Err(TestCaseError::fail(format!(
+                "{}: JIT and eval results differ at nursery {} bytes.\nEval: {:?}\nJIT:  {:?}\nExpr: {:#?}",
+                run.label, nursery, run.eval, jit_val, expr
+            )))
+        }
+        Verdict::NurseryVariance { a, b } => {
+            let va = nursery_run(*a).and_then(|n| n.runs[0].as_ref().ok());
+            let vb = nursery_run(*b).and_then(|n| n.runs[0].as_ref().ok());
+            Err(TestCaseError::fail(format!(
+                "{}: JIT result varies with nursery size (GC is not nursery-invariant) — \
+                 nursery {} bytes -> {:?}, nursery {} bytes -> {:?}.\nEval: {:?}\nExpr: {:#?}",
+                run.label, a, va, b, vb, run.eval, expr
+            )))
+        }
+        Verdict::NonDeterministic { nursery } => {
+            let runs = nursery_run(*nursery).map(|n| &n.runs);
+            Err(TestCaseError::fail(format!(
+                "{}: JIT non-determinism at nursery {} bytes — repeats disagree.\nRuns: {:?}\nExpr: {:#?}",
+                run.label, nursery, runs, expr
+            )))
+        }
+        Verdict::JitOnlyFailure { nursery, class } => {
+            let jit_err = nursery_run(*nursery).and_then(|n| n.runs[0].as_ref().err());
+            Err(TestCaseError::fail(format!(
+                "{}: JIT failed at nursery {} bytes with disallowed class {:?} but eval succeeded.\n\
+                 Eval: {:?}\nJIT error: {:?}\nExpr: {:#?}",
+                run.label, nursery, class, run.eval, jit_err, expr
+            )))
+        }
+        Verdict::EvalOnlyFailure { class } => Err(TestCaseError::fail(format!(
+            "{}: JIT produced a value but eval failed — an oracle bug (class {:?}).\n\
+             Eval: {:?}\nJIT: {:?}\nExpr: {:#?}",
+            run.label, class, run.eval, run.nurseries, expr
+        ))),
+        Verdict::UnexpectedEvalError {
+            eval: eval_class,
+            jit: jit_class,
+        } => Err(TestCaseError::fail(format!(
+            "{}: eval failed with disallowed class {:?} (JIT also failed, class {:?}).\n\
+             Eval: {:?}\nExpr: {:#?}",
+            run.label, eval_class, jit_class, run.eval, expr
+        ))),
+        Verdict::Crash { nursery, signal } => Err(TestCaseError::fail(format!(
+            "{}: fatal signal {} in the forked JIT at nursery {} bytes.\nExpr: {:#?}",
+            run.label, signal, nursery, expr
+        ))),
+    }
 }
 
 /// The lane entry point: build a synthetic `DataConTable` for `expr`, run it,
 /// record reach, and assert. This is what a `proptest!` body calls.
-pub fn check(
-    expr: CoreExpr,
-    cfg: &DiffConfig,
-    reach: &ReachCounter,
-) -> Result<(), TestCaseError> {
-    let _ = (expr, cfg, reach);
-    unimplemented!("Dev A: implement in the runner core")
+pub fn check(expr: CoreExpr, cfg: &DiffConfig, reach: &ReachCounter) -> Result<(), TestCaseError> {
+    let table = crate::proptest::build_table_for_expr(&expr);
+    check_with_table(&expr, &table, cfg, reach)
 }
 
 /// [`check`] against a caller-supplied `DataConTable` — for lanes replaying real
@@ -446,8 +781,9 @@ pub fn check_with_table(
     cfg: &DiffConfig,
     reach: &ReachCounter,
 ) -> Result<(), TestCaseError> {
-    let _ = (expr, table, cfg, reach);
-    unimplemented!("Dev A: implement in the runner core")
+    let run = run_case(expr, table, cfg);
+    reach.record(&run.verdict);
+    assert_case(&run, expr)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +834,145 @@ impl ReachCounter {
     /// Print the reach line and assert the floor. Panics when no case was
     /// recorded at all: a floor over an empty run is not a pass.
     pub fn assert_floor(&self, min_ratio: f64) {
-        let _ = (self.label, min_ratio);
-        unimplemented!("Dev A: implement in the runner core")
+        let (total, reached) = self.counts();
+        let pct = if total > 0 {
+            100.0 * reached as f64 / total as f64
+        } else {
+            0.0
+        };
+        eprintln!("{} REACH: {}/{} ({:.1}%)", self.label, reached, total, pct);
+        assert!(
+            total > 0,
+            "{}: reach floor asserted over zero cases — an empty run is not a pass",
+            self.label
+        );
+        let ratio = reached as f64 / total as f64;
+        assert!(
+            ratio >= min_ratio,
+            "{}: reach floor failed — {}/{} ({:.1}%) is below the required {:.1}%",
+            self.label,
+            reached,
+            total,
+            pct,
+            min_ratio * 100.0
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The runner's own gate: every Verdict variant class must be reachable and
+// correctly assigned. This module is what makes the runner a gate rather
+// than a trusted-on-faith black box — see the mutation-check evidence in the
+// commit message for the complementary "does a broken oracle/lying JIT
+// actually go red" proof, which this suite alone cannot demonstrate (it uses
+// synthetic recorded runs, not a mutated production path).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_repr::types::{Literal, VarId};
+    use tidepool_repr::{CoreFrame, TreeBuilder};
+
+    fn lit_int(n: i64) -> CoreExpr {
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(n)));
+        b.build()
+    }
+
+    /// A bare reference to a `VarId` no table/env binds — a legitimate
+    /// `EvalError::UnboundVar` on the eval side.
+    fn unbound_var() -> CoreExpr {
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Var(VarId(999_999)));
+        b.build()
+    }
+
+    fn eval_deep(expr: &CoreExpr, table: &DataConTable) -> Result<Value, EvalError> {
+        let mut heap = VecHeap::new();
+        let env = env_from_datacon_table(table);
+        eval(expr, &env, &mut heap).and_then(|v| deep_force(v, &mut heap))
+    }
+
+    #[test]
+    fn agreeing_case_is_compared() {
+        let expr = lit_int(42);
+        let table = DataConTable::new();
+        let cfg = DiffConfig::new("test/agree");
+        let run = run_case(&expr, &table, &cfg);
+        assert!(
+            matches!(run.verdict, Verdict::Compared),
+            "expected Compared, got {:?}",
+            run.verdict
+        );
+        assert!(assert_case(&run, &expr).is_ok());
+    }
+
+    /// A real eval result paired with a deliberately WRONG recorded JIT
+    /// value (no actual JIT bug — the recorded run is hand-built) proves
+    /// `classify_run` actually catches a value divergence instead of
+    /// silently agreeing.
+    #[test]
+    fn deliberate_value_disagreement_is_a_value_mismatch() {
+        let expr = lit_int(42);
+        let table = DataConTable::new();
+        let eval_result = eval_deep(&expr, &table);
+        assert!(
+            eval_result.is_ok(),
+            "eval should produce a value for Lit 42"
+        );
+        let lying_jit_value = Ok(Value::Lit(Literal::LitInt(999)));
+        let nurseries = vec![NurseryRun {
+            nursery: 64 * 1024,
+            runs: vec![lying_jit_value],
+            crash: CrashStatus::NotProbed,
+        }];
+        let verdict = classify_run(&eval_result, &nurseries, &ExpectedErrorPolicy::default());
+        assert!(
+            matches!(verdict, Verdict::ValueMismatch { nursery } if nursery == 64 * 1024),
+            "expected ValueMismatch, got {:?}",
+            verdict
+        );
+    }
+
+    #[test]
+    fn eval_error_under_empty_policy_is_a_failure() {
+        let expr = unbound_var();
+        let table = DataConTable::new();
+        let cfg = DiffConfig::new("test/unbound-strict");
+        let run = run_case(&expr, &table, &cfg);
+        assert!(
+            run.verdict.is_failure(),
+            "an eval error under an empty policy must be a failure (never a discard), got {:?}",
+            run.verdict
+        );
+        assert!(assert_case(&run, &expr).is_err());
+    }
+
+    #[test]
+    fn eval_error_under_named_policy_is_accepted() {
+        let expr = unbound_var();
+        let table = DataConTable::new();
+        let cfg =
+            DiffConfig::new("test/unbound-tolerant").expect_eval(&[EvalErrorClass::UnboundVar]);
+        let run = run_case(&expr, &table, &cfg);
+        assert!(
+            matches!(
+                run.verdict,
+                Verdict::AcceptedBothError {
+                    eval: EvalErrorClass::UnboundVar,
+                    ..
+                }
+            ),
+            "expected AcceptedBothError, got {:?}",
+            run.verdict
+        );
+        assert!(assert_case(&run, &expr).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "reach floor asserted over zero cases")]
+    fn reach_floor_over_empty_run_panics() {
+        let reach = ReachCounter::new("test/empty");
+        reach.assert_floor(0.0);
     }
 }

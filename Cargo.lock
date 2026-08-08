@@ -4031,6 +4031,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "frunk",
+ "libc",
  "proptest",
  "serde_json",
  "tidepool-bridge",
