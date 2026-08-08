@@ -105,15 +105,20 @@ fn map_notfound(e: std::io::Error) -> CompileError {
 }
 
 /// Scan `stderr` for `tidepool-timing phase=<name> ms=<int>` lines and re-emit
-/// each as an `extract.<phase>` stage. Mirrors `tidepool-harness/src/timing.rs`'s
-/// `ExtractTiming::parse` + `record_extract_phases` by hand: `tidepool-runtime`
-/// cannot depend on `tidepool-harness` (that crate depends on this one, so a
-/// back-dependency would be a cycle), and `classify_turn` has no answerer node
-/// id of its own — `node = 0`, `round = u64::MAX` unconditionally, same
-/// convention as `ResidentSession::run`'s mirror. Malformed lines are skipped
-/// (diagnostics only, never a failure path); absent timing lines forward zero
-/// phases.
-fn forward_extract_timing(stderr: &str) {
+/// each as a `<prefix>.<phase>` stage via [`super::record_turn_stage`]. Mirrors
+/// `tidepool-harness/src/timing.rs`'s `ExtractTiming::parse` +
+/// `record_extract_phases`/`record_classify_phases`-shaped forwarding by hand
+/// (see `record_turn_stage`'s doc for why this crate can't just import them).
+///
+/// `prefix` selects which `tidepool-extract` spawn these phases came from —
+/// pass `"classify"` (matching `timing.rs`'s `CLASSIFY_STAGE_PREFIX`) for the
+/// parse-only `classify_turn` spawn, `"extract"` (matching
+/// `EXTRACT_STAGE_PREFIX`) for a full-pipeline spawn like
+/// `compile_session_turn`'s. Two DIFFERENT subprocess spawns must never share
+/// a prefix — a collector summing by stage name would silently merge their
+/// costs into one row. Malformed lines are skipped (diagnostics only, never a
+/// failure path); absent timing lines forward zero phases.
+fn forward_extract_timing(stderr: &str, prefix: &str) {
     for line in stderr.lines() {
         let Some(rest) = line.trim().strip_prefix("tidepool-timing ") else {
             continue;
@@ -128,16 +133,8 @@ fn forward_extract_timing(stderr: &str) {
             }
         }
         if let (Some(phase), Some(ms)) = (phase, ms) {
-            let stage = format!("extract.{phase}");
-            tracing::debug!(
-                target: "tidepool_harness::timing",
-                node = 0u64,
-                round = u64::MAX,
-                stage = stage.as_str(),
-                ms,
-                bytes = 0u64,
-                "turn stage"
-            );
+            let stage = format!("{prefix}.{phase}");
+            super::record_turn_stage(&stage, std::time::Duration::from_millis(ms), 0);
         }
     }
 }
@@ -159,8 +156,9 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
         .map_err(map_notfound)?;
     // A failed classification still cost a real subprocess spawn — attribute
     // its extract phases the same as a successful one, before the early return
-    // below.
-    forward_extract_timing(&String::from_utf8_lossy(&output.stderr));
+    // below. "classify", not "extract": this is the parse-only lane, a
+    // distinct tidepool-extract spawn from the full compile lane.
+    forward_extract_timing(&String::from_utf8_lossy(&output.stderr), "classify");
     if !output.status.success() {
         // A parsed report is a real GHC rejection of the turn text; this lane
         // never has a live GHC session distinguishing multiple diagnostics, so
@@ -260,11 +258,18 @@ pub fn compile_session_turn(
         }
     }
 
+    let spawn_start = std::time::Instant::now();
     let output = cmd.output().map_err(map_notfound)?;
+    super::record_turn_stage("extract_spawn", spawn_start.elapsed(), 0);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.is_empty() {
         eprintln!("[tidepool-extract stderr]\n{stderr}");
     }
+    // A failed compile is still a real answerer round — attribute its extract
+    // phases the same as a successful one, before the early return below.
+    // "extract", not "classify": this is a full-pipeline spawn, the same lane
+    // `compile.rs::compile_turn` instruments.
+    forward_extract_timing(&stderr, "extract");
     if !output.status.success() {
         return Err(
             match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
@@ -282,8 +287,16 @@ pub fn compile_session_turn(
     if !meta_path.exists() {
         return Err(CompileError::MissingOutput(meta_path));
     }
-    let expr = read_cbor(&std::fs::read(&expr_path)?)?;
-    let (table, warnings) = read_metadata(&std::fs::read(&meta_path)?)?;
+    let cbor_read_start = std::time::Instant::now();
+    let expr_bytes = std::fs::read(&expr_path)?;
+    let meta_bytes = std::fs::read(&meta_path)?;
+    let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
+    super::record_turn_stage("cbor_read", cbor_read_start.elapsed(), cbor_read_bytes);
+
+    let deserialize_start = std::time::Instant::now();
+    let expr = read_cbor(&expr_bytes)?;
+    let (table, warnings) = read_metadata(&meta_bytes)?;
+    super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
     // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
@@ -296,7 +309,9 @@ pub fn compile_session_turn(
         Vec::new()
     };
 
+    let asks_start = std::time::Instant::now();
     let asks = read_asks_sidecar(&temp.path().join("asks.json"))?;
+    super::record_turn_stage("asks_parse", asks_start.elapsed(), 0);
 
     Ok(SessionTurnResult {
         expr,

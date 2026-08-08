@@ -62,7 +62,7 @@ fn compile_against(
         &source,
         "result",
         &cfg.include,
-        0,
+        tidepool_harness::timing::NO_NODE,
         tidepool_harness::timing::NO_ROUND,
     )
 }

@@ -542,14 +542,15 @@ impl SelfHarnessDriver {
             None,
         );
         // The outer session has no answerer node id (it is the single loop
-        // driver, not a tree node) — node 0 / NO_ROUND, same convention as
-        // `Harness::new`'s own boot compile.
+        // driver, not a tree node) — NO_NODE/NO_ROUND, same convention as
+        // `Harness::new`'s own boot compile. `NodeId(0)` is a real, live node
+        // id, never a sentinel.
         let boot = compile::compile_turn(
             &outer_cfg.extract_bin,
             &boot_src,
             "result",
             &outer_cfg.include,
-            0,
+            timing::NO_NODE,
             timing::NO_ROUND,
         )
         .map_err(|e| DriverError::Session(format!("outer bootstrap compile: {e}")))?;
@@ -612,7 +613,7 @@ impl SelfHarnessDriver {
             &src,
             "result",
             &outer.cfg.include,
-            0,
+            timing::NO_NODE,
             timing::NO_ROUND,
         )
         .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))

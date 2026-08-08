@@ -23,9 +23,17 @@
 //! | `bytes` | `u64`         | size of the stage's payload, `0` when n/a       |
 //!
 //! Stages are FLAT and non-nesting: a collector sums by `stage` and never has
-//! to reason about containment. Where a coarse stage contains finer ones (the
-//! extract subprocess contains its GHC phases), the fine stages are prefixed
-//! (`extract.*`) so a collector can pick one granularity and not double-count.
+//! to reason about containment. Where a coarse stage contains finer ones, the
+//! fine stages are prefixed by WHICH `tidepool-extract` spawn they came from —
+//! a round makes TWO separate spawns (see `plans/self-iterating-harness/
+//! 11-turn-latency-contract.md`'s pipeline walk): `extract.*` is the inside of
+//! the compile lane's `extract_spawn`, and `classify.*` is the inside of the
+//! parse-only classify lane's `classify_extract`. Keeping them under distinct
+//! prefixes matters beyond bookkeeping: it is the only way to see whether the
+//! classify spawn is almost entirely GHC-session boot or does real work. A
+//! collector summing `extract.ghc_session` must never fold in
+//! `classify.ghc_session`'s numbers — that would silently merge two different
+//! subprocess spawns into one row and make the two lanes' costs unreadable.
 //!
 //! # The extract-side wire format
 //!
@@ -52,6 +60,13 @@ pub const TIMING_PREFIX: &str = "tidepool-timing ";
 
 /// `round` value meaning "this stage is not inside a numbered answerer round".
 pub const NO_ROUND: u64 = u64::MAX;
+
+/// `node` value meaning "this stage has no answerer node of its own" (a boot
+/// compile, an outer-session compile, a resident-session mirror). `NodeId(0)`
+/// is a REAL, LIVE node id (`forcing.rs`'s `next_node_id` starts at 0) — never
+/// reuse bare `0` as a stand-in for "no node" or its samples land on that
+/// node's numbers.
+pub const NO_NODE: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
 // Stage vocabulary — Rust side
@@ -122,9 +137,26 @@ pub const EXTRACT_PHASES: &[&str] = &[
     PHASE_TOTAL,
 ];
 
-/// The stage name a forwarded extract phase is emitted under (`extract.<phase>`).
+/// Prefix a forwarded COMPILE-lane phase is emitted under.
+pub const EXTRACT_STAGE_PREFIX: &str = "extract.";
+
+/// Prefix a forwarded CLASSIFY-lane phase is emitted under. Distinct from
+/// [`EXTRACT_STAGE_PREFIX`] — see the module doc's flat-stages section for why
+/// the two lanes must never share a prefix.
+pub const CLASSIFY_STAGE_PREFIX: &str = "classify.";
+
+/// The stage name a forwarded COMPILE-lane extract phase is emitted under
+/// (`extract.<phase>`) — the inside of `extract_spawn`.
 pub fn extract_stage_name(phase: &str) -> String {
-    format!("extract.{phase}")
+    format!("{EXTRACT_STAGE_PREFIX}{phase}")
+}
+
+/// The stage name a forwarded CLASSIFY-lane extract phase is emitted under
+/// (`classify.<phase>`) — the inside of `classify_extract`. Kept under its own
+/// prefix so the parse-only classify spawn's internal phases never merge with
+/// the full compile spawn's when a collector sums by stage name.
+pub fn classify_stage_name(phase: &str) -> String {
+    format!("{CLASSIFY_STAGE_PREFIX}{phase}")
 }
 
 // ---------------------------------------------------------------------------
@@ -237,5 +269,14 @@ tidepool-timing phase=total ms=2100\n";
     #[test]
     fn extract_stage_names_are_prefixed() {
         assert_eq!(extract_stage_name(PHASE_TYPECHECK), "extract.typecheck");
+    }
+
+    #[test]
+    fn classify_stage_names_use_a_distinct_prefix() {
+        assert_eq!(classify_stage_name(PHASE_TYPECHECK), "classify.typecheck");
+        assert_ne!(
+            classify_stage_name(PHASE_TYPECHECK),
+            extract_stage_name(PHASE_TYPECHECK)
+        );
     }
 }

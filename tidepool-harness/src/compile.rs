@@ -268,6 +268,6 @@ tidepool-timing phase=total ms=1500\n";
         assert!(timing::ExtractTiming::parse("plain ghc noise\n").is_empty());
         // The re-emit call site `compile_turn` uses on both the success and
         // failure paths — proves it accepts the parsed result without panicking.
-        timing::record_extract_phases(0, timing::NO_ROUND, &parsed);
+        timing::record_extract_phases(timing::NO_NODE, timing::NO_ROUND, &parsed);
     }
 }

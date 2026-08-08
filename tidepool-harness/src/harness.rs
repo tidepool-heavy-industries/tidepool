@@ -357,13 +357,13 @@ impl Harness {
         // A trivial effectful seed carrying the full effect-stack ConTags.
         let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "", None);
         // No real answerer node exists yet (this is the one-time boot compile) —
-        // node 0 / NO_ROUND, mirroring the resident-session "no node id" convention.
+        // NO_NODE/NO_ROUND. `NodeId(0)` is a real, live node id, never a sentinel.
         let boot = compile::compile_turn(
             &cfg.extract_bin,
             &boot_src,
             "result",
             &cfg.include,
-            0,
+            timing::NO_NODE,
             timing::NO_ROUND,
         )
         .map_err(|e| HarnessError::Compile(e.to_string()))?;

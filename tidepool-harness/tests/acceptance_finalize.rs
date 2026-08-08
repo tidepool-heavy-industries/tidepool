@@ -221,7 +221,7 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
         &src,
         "result",
         &cfg.include,
-        0,
+        tidepool_harness::timing::NO_NODE,
         tidepool_harness::timing::NO_ROUND,
     );
     assert!(
