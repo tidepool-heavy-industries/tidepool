@@ -174,18 +174,52 @@ honesty now (fix the "recursive"/"does not reopen" claims), hold (b) as the
 principled follow-on. **Awaiting your call on (b).**
 
 ## Post-recovery ROBUSTNESS WAVE (parked, with Codex's acceptance criteria)
-- **F3** lifecycle: unconditional `Idle` is the cosmetic half — needs
-  `Failed`/`Poisoned` or an error guard that restores/discards every mutable
-  resident component before publishing `Idle`.
-- **F4** state+compaction = ONE generation-tagged checkpoint. Acceptance: after
-  a crash at every write boundary, restart selects a state + summary from the
-  SAME committed generation + harness source.
-- **F6** `flush_effects` drains then discards write failures + advances
-  `effect_seq` — don't advance past a failed append; fail the turn or queue for
-  retry. (Note: the scoped self-harness stacks emit NO `Event::Effect` by
-  construction, so this bites general Agent nodes, not the dogfood path.)
-- **F7** per-node turn race: a turn LEASE must cover snapshot → provider await →
-  log append → resident run → outcome publish (broader than `SessionRegistry`).
+- **F3 [LANDED — verification in flight]** lifecycle: unconditional `Idle` is
+  the cosmetic half — needs `Failed`/`Poisoned` or an error guard that
+  restores/discards every mutable resident component before publishing `Idle`.
+  Landed `4a8c9b95`: `SelfHarnessState::Failed{reason}`/`Poisoned{reason}`; an
+  errored cycle discards the answerer, its framing, the cycle compaction, the
+  inference counter and `self.outer` (which may be parked mid-fragment on a
+  hole) before publishing `Failed`, so the next cycle re-bootstraps from source;
+  a bootstrap failure *while recovering* escalates to `Poisoned`, which
+  `run_one_cycle`/`run_loop`/`restore` refuse. `tests/selfharness_lifecycle.rs`
+  passes 2/2 — but a passing test is not yet evidence the guard is load-bearing;
+  a mutation check (revert the discard, confirm red) is outstanding before this
+  row is closed.
+- **F4 [RESOLVED]** state+compaction = ONE generation-tagged checkpoint.
+  Acceptance: after a crash at every write boundary, restart selects a state +
+  summary from the SAME committed generation + harness source. Resolved
+  `df4ab614`: one `Checkpoint{generation, state, compaction, harness_source}`
+  written atomically (`.tmp` + rename) at the end of `run_one_cycle`'s success
+  path — so the acceptance path is durable too, not just `run_loop`. A mid-loop
+  compaction updates memory only and never commits alone, so a crash mid-loop
+  restores generation N's state *and* generation N's summary. `HarnessSource`
+  gained a content fingerprint; a restore-time mismatch emits
+  `Event::HarnessSourceChanged` rather than blocking (an edited harness file is
+  the point of self-iteration). The `state.json`/`compaction.txt` pair and their
+  helpers are deleted, not left as a fallback. `selfharness_persistence` covers
+  the mixed-generation, same-generation, monotonicity and torn-file cases.
+- **F6 [RESOLVED]** `flush_effects` drains then discards write failures +
+  advances `effect_seq` — don't advance past a failed append; fail the turn or
+  queue for retry. (Note: the scoped self-harness stacks emit NO `Event::Effect`
+  by construction, so this bites general Agent nodes, not the dogfood path.)
+  Resolved `e999a2b7`: returns `Result`; on the first append error it stops,
+  restores the failed record and every record after it into the node's trace
+  (ahead of anything concurrently pushed), leaves `effect_seq` at
+  last-successful+1, and returns the error. All 7 call sites propagate — one
+  mechanism, fail-the-turn, not a silent retry alongside it.
+- **F7 [RESOLVED]** per-node turn race: a turn LEASE must cover snapshot →
+  provider await → log append → resident run → outcome publish (broader than
+  `SessionRegistry`). Resolved `e999a2b7`: RAII `TurnLease` on
+  `NodeConvo::turn_lease`, acquired at exactly one layer per turn —
+  `drive_turn`, `summarize_turn`, and each `answer_*`; `run_to_hole_or_done`
+  and `follow_up` loop `drive_turn` without acquiring, and `drive_answerer_to_value`
+  reaches `stream_turn` directly, so no call chain acquires twice on one node.
+  `tests/turn_lease.rs` asserts one success + one `TurnInFlight` on concurrent
+  turns, `turn_seq` advancing by exactly one, and lease release on the error
+  path. Known gap: `eval_in_binding` is `pub`, has no callers or tests in the
+  workspace, and takes no lease — routed to the quality sweep as a
+  delete-or-lease call rather than leased speculatively.
 - **F9** unknown/malformed suspension constructor → a classification ERROR
   naming the constructor, not a silent `Ask` wildcard (still open for general
   callers + the malformed-`AskUserWith` case).
