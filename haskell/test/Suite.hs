@@ -963,7 +963,7 @@ qq_fmt_multi = [fmt|hello {T.toUpper greeting}, score {score}|]
     score    = T.pack "42"   :: T.Text
 
 qq_fmt_escape :: T.Text
-qq_fmt_escape = [fmt|use \{braces} for holes and } is literal|]
+qq_fmt_escape = [fmt|use \{braces} for holes and }} is literal|]
 
 qq_fmt_multiline :: T.Text
 qq_fmt_multiline = [fmt|line one
