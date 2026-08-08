@@ -1294,6 +1294,11 @@ impl JitEffectMachine {
         // like the original entry; only the JITModule destination differs (it is
         // already finalized — we add a fresh round).
         let expr = tidepool_repr::normalize(expr, table);
+        // `normalize` is bracketed separately inside `shape`: it is a
+        // whole-tree rebuild whose cost tracks fragment size, while the rest of
+        // shaping tracks table size. One `shape_ms` bucket cannot tell those
+        // two apart.
+        let normalize_ms = shape_start.elapsed();
         let crate::datacon_env::WrappedExpr { expr, wraps } =
             crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
@@ -1339,10 +1344,12 @@ impl JitEffectMachine {
         log::debug!(
             target: "tidepool::codegen",
             "add_function name={name} table_cons={table_cons} wrapped_cons={wrapped_cons} \
-             nodes={nodes} shape_ms={shape_ms:.3} emit_ms={emit_ms:.3} finalize_ms={finalize_ms:.3} \
+             nodes={nodes} normalize_ms={normalize_ms:.3} shape_ms={shape_ms:.3} \
+             emit_ms={emit_ms:.3} finalize_ms={finalize_ms:.3} \
              funcs={funcs} dce_calls={dce_calls} dce_nodes={dce_nodes} dce_ms={dce_ms:.3}",
             table_cons = table.iter().count(),
             wrapped_cons = wraps.len(),
+            normalize_ms = normalize_ms.as_secs_f64() * 1000.0,
             shape_ms = shape_ms.as_secs_f64() * 1000.0,
             emit_ms = emit_ms.as_secs_f64() * 1000.0,
             finalize_ms = finalize_ms.as_secs_f64() * 1000.0,
