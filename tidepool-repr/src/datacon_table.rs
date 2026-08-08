@@ -2,7 +2,7 @@
 
 use crate::datacon::DataCon;
 use crate::types::{AltCon, DataConId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The module-qualified identity of a constructor, used to distinguish a true
 /// varId collision from a harmless re-encounter of the same constructor. Falls
@@ -115,8 +115,17 @@ impl DataConTable {
         Ok(())
     }
 
-    /// Insert a data constructor. Overwrites if id already exists.
-    pub fn insert(&mut self, dc: DataCon) {
+    /// Insert a data constructor's metadata into every index EXCEPT the final
+    /// `by_type_name` bucket sort, returning the type_name whose bucket was
+    /// touched (appended to on a new/type-changed entry, or simply left
+    /// containing `id` with a possibly-changed tag). Callers are responsible
+    /// for sorting that bucket afterward — [`Self::insert`] does so
+    /// immediately; [`Self::extend_checked`] batches it across many calls.
+    ///
+    /// This is the entire index-maintenance body `insert` used to run
+    /// inline; factored out so both callers share exactly one implementation
+    /// of the retain/re-push bookkeeping.
+    fn upsert_no_sort(&mut self, dc: DataCon) -> String {
         let id = dc.id;
         let name = dc.name.clone();
         let qualified_name = dc.qualified_name.clone();
@@ -163,29 +172,95 @@ impl DataConTable {
         if !name_unchanged {
             self.by_name.entry(name).or_default().push(id);
         }
-        // `by_type_name` orders by constructor TAG, not insertion order: the
-        // Haskell-side merge (`mergeMetaPreserving`) re-sorts entries by
-        // varId before they ever reach the wire, so insertion order at load
-        // time carries no declaration-order information. `dataConTag` is
-        // 1-based per-type declaration order by construction, so re-sorting
-        // the bucket on every insert keeps `constructors_of_type` correct
-        // regardless of what order entries arrive in (and keeps the table
-        // canonical/order-independent for equality comparisons). Always
-        // re-sort the current bucket, even when `id` was already in it — an
-        // overwrite (`insert` overwrites by id) may have changed its tag.
         if type_name_changed {
             self.by_type_name
                 .entry(type_name.clone())
                 .or_default()
                 .push(id);
         }
-        if let Some(bucket) = self.by_type_name.get_mut(&type_name) {
-            let by_id = &self.by_id;
-            bucket.sort_by_key(|i| (by_id.get(i).map(|d| d.tag).unwrap_or(0), i.0));
-        }
         if let Some(qn) = qualified_name {
             self.by_qualified_name.insert(qn, id);
         }
+        type_name
+    }
+
+    /// Sort one `by_type_name` bucket by (tag, id). `by_type_name` orders by
+    /// constructor TAG, not insertion order: the Haskell-side merge
+    /// (`mergeMetaPreserving`) re-sorts entries by varId before they ever
+    /// reach the wire, so insertion order at load time carries no
+    /// declaration-order information. `dataConTag` is 1-based per-type
+    /// declaration order by construction, so re-sorting the bucket keeps
+    /// `constructors_of_type` correct regardless of what order entries arrive
+    /// in (and keeps the table canonical/order-independent for equality
+    /// comparisons). Must be called for every bucket an upsert touched, even
+    /// when the id was already in it — an overwrite may have changed its tag.
+    fn sort_type_name_bucket(&mut self, type_name: &str) {
+        if let Some(bucket) = self.by_type_name.get_mut(type_name) {
+            let by_id = &self.by_id;
+            bucket.sort_by_key(|i| (by_id.get(i).map(|d| d.tag).unwrap_or(0), i.0));
+        }
+    }
+
+    /// Insert a data constructor. Overwrites if id already exists.
+    pub fn insert(&mut self, dc: DataCon) {
+        let type_name = self.upsert_no_sort(dc);
+        self.sort_type_name_bucket(&type_name);
+    }
+
+    /// Batch sibling of [`Self::insert_checked`]: performs the same
+    /// collision-checked insert for every constructor in `dcs`, but sorts
+    /// each AFFECTED `by_type_name` bucket exactly once at the end instead of
+    /// once per insert.
+    ///
+    /// Semantics match folding `insert_checked` over the same sequence
+    /// exactly, INCLUDING on error: processing stops at the first collision
+    /// (constructors after it are not applied), and every bucket touched by
+    /// the constructors that WERE applied before the failure is still sorted
+    /// before returning — so the table left behind by an error is byte-for-
+    /// byte the same table `for dc in dcs { insert_checked(dc)? }` would have
+    /// left at the same point, not a batch-deferred half state.
+    pub fn extend_checked<I>(&mut self, dcs: I) -> Result<(), DataConCollision>
+    where
+        I: IntoIterator<Item = DataCon>,
+    {
+        let mut affected: HashSet<String> = HashSet::new();
+        let mut result = Ok(());
+        for dc in dcs {
+            if let Some(existing) = self.by_id.get(&dc.id) {
+                if dc_identity(existing) != dc_identity(&dc) {
+                    result = Err(DataConCollision {
+                        id: dc.id,
+                        first: dc_identity(existing).to_string(),
+                        second: dc_identity(&dc).to_string(),
+                    });
+                    break;
+                }
+                if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
+                    result = Err(DataConCollision {
+                        id: dc.id,
+                        first: format!(
+                            "{} (tag={}, rep_arity={})",
+                            dc_identity(existing),
+                            existing.tag,
+                            existing.rep_arity
+                        ),
+                        second: format!(
+                            "{} (tag={}, rep_arity={})",
+                            dc_identity(&dc),
+                            dc.tag,
+                            dc.rep_arity
+                        ),
+                    });
+                    break;
+                }
+            }
+            let type_name = self.upsert_no_sort(dc);
+            affected.insert(type_name);
+        }
+        for type_name in &affected {
+            self.sort_type_name_bucket(type_name);
+        }
+        result
     }
 
     /// Look up by DataConId.

@@ -37,7 +37,7 @@ use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, ResumeInput, Suspe
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_repr::{CoreExpr, DataConTable, Generation, SessionModule};
+use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule};
 
 use super::engine::OutputSink;
 use super::{SessionError, SessionLib};
@@ -343,15 +343,33 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     }
 
     /// Union `table`'s constructors into the accumulated session table
-    /// (`insert_checked`; loud on a genuine `stableVarId` collision — gen-versioned
+    /// (`extend_checked`; loud on a genuine `stableVarId` collision — gen-versioned
     /// names make that a real bug, not churn).
+    ///
+    /// A turn's table is normally a SUBSET of what earlier turns already
+    /// accumulated, so entries already present with identical metadata are
+    /// filtered out before touching the table at all — no clone, no index
+    /// work, no sort for the steady-state no-new-constructors turn. What
+    /// remains is batched through [`DataConTable::extend_checked`], which
+    /// sorts each affected `by_type_name` bucket once instead of once per
+    /// insert.
     pub fn merge_table(&mut self, table: &DataConTable) -> Result<(), String> {
-        for dc in table.iter() {
-            self.session_table
-                .insert_checked(dc.clone())
-                .map_err(|e| format!("session DataConTable collision: {e}"))?;
-        }
-        Ok(())
+        let turn_cons = table.iter().count();
+        let incoming: Vec<DataCon> = table
+            .iter()
+            .filter(|&dc| self.session_table.get(dc.id) != Some(dc))
+            .cloned()
+            .collect();
+        log::debug!(
+            target: "tidepool::session",
+            "merge_table turn_cons={turn_cons} skipped={} applied={} session_cons_before={}",
+            turn_cons - incoming.len(),
+            incoming.len(),
+            self.session_table.len(),
+        );
+        self.session_table
+            .extend_checked(incoming)
+            .map_err(|e| format!("session DataConTable collision: {e}"))
     }
 
     // -- machine lifecycle -------------------------------------------------
