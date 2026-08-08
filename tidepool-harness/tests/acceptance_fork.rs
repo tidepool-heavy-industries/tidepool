@@ -139,7 +139,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         .expect("one full render->loop->runLLMTurn->forkAll(2 children)->finalize->render cycle");
 
     // The finalized Decision is the FIRST child's ("sub-brief A" / child 0),
-    // per `L.head ds` — proves declaration order is preserved through the
+    // per `L.head ds` — asserts declaration order is preserved through the
     // fanout and that the driver actually resumed the parent with a real
     // `[Decision]`, not a stub.
     let state = &outcome.state_json;
@@ -171,7 +171,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         "loopCount must increment across the loop boundary, got {state:?}"
     );
 
-    // The POST-loop render reflects the new state — proves the value that
+    // The POST-loop render reflects the new state — the value that
     // crossed the fork boundary reaches the very next render.
     assert!(
         outcome.prompt_after.contains("observe"),

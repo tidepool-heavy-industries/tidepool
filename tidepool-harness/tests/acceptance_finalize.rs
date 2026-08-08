@@ -1,4 +1,4 @@
-//! Acceptance coverage for `finalize` (self-iterating-harness WS-B): an
+//! Acceptance coverage for `finalize`: an
 //! Agent turn's `finalize @T x` hands a typed value UP and TERMINATES its
 //! own turn loop — it does NOT resume, unlike a `runLLMTurn`/`Fork` answer
 //! (see `acceptance_run_llm_turn.rs`). Needs `TIDEPOOL_EXTRACT` and the
@@ -11,7 +11,7 @@
 //! value straight out of the suspended request (never through JSON) and
 //! terminates the node -> the node's continuation is never resumed.
 //!
-//! CLOSURES THROUGH FINALIZE (self-iterating-harness W4, reference-passing):
+//! CLOSURES THROUGH FINALIZE (reference-passing):
 //! the "relaxed function-arrow rule" is wired at the EXTRACT level
 //! (`checkFinalizeType` in Translate.hs skips `typeHasFunctionArrow`, so
 //! `finalize @(Int -> Int) f` compiles where `runLLMTurn @(Int -> Int)` is
@@ -303,16 +303,14 @@ async fn finalize_a_closure() -> (std::sync::Arc<Harness>, NodeId) {
     (harness, root)
 }
 
-/// REFERENCE-PASSING keeps the finalized CLOSURE live (self-iterating-harness
-/// W4): the closure crosses BY REFERENCE, not deep-forced. Proven end-to-end:
-/// (1) the suspend no longer chokes on the closure — the TOLERANT bridge
+/// REFERENCE-PASSING keeps the finalized CLOSURE live: the closure crosses
+/// BY REFERENCE, not deep-forced. Asserted end-to-end:
+/// (1) the suspend does not choke on the closure — the TOLERANT bridge
 /// substitutes a `CLOSURE_SENTINEL` for field 1, which the harness detects via
-/// `finalize_is_closure` (the old deep-force path errored on `TAG_CLOSURE`
-/// here, so this test could not even reach a suspension before W4); (2) the
+/// `finalize_is_closure`; (2) the
 /// closure is tenured live in the suspended session's heap and
 /// `apply_finalized_closure` reaches it — control enters the closure BODY (a
-/// data value never could be "applied"), the round-trip the deep-force path
-/// could not start.
+/// data value could never be "applied").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_crosses_by_reference() {
     if !extract_available() {
@@ -321,9 +319,9 @@ async fn finalize_closure_crosses_by_reference() {
     }
     let (harness, root) = finalize_a_closure().await;
 
-    // W4's core claim: the finalized value is a LIVE CLOSURE kept in-heap, not
+    // The finalized value is a LIVE CLOSURE kept in-heap, not
     // data — the tolerant bridge marked field 1 as a sentinel and did NOT reject
-    // the closure (the pre-W4 deep-force path errored on TAG_CLOSURE at suspend).
+    // the closure (a deep-force path would error on TAG_CLOSURE at suspend).
     assert!(
         harness.finalize_is_closure(root),
         "the finalized value must be a live closure crossed by reference \
@@ -361,9 +359,9 @@ async fn finalize_closure_crosses_by_reference() {
     ));
 }
 
-/// FULL round-trip `\x -> x + 1` applied 1 -> 2 (self-iterating-harness W4).
+/// FULL round-trip `\x -> x + 1` applied 1 -> 2.
 /// IGNORED — reference-passing keeps the closure live and reaches its body
-/// (proven by `finalize_closure_crosses_by_reference`), but feeding it a boxed
+/// (asserted by `finalize_closure_crosses_by_reference`), but feeding it a boxed
 /// `Int` ARGUMENT synthesized on the Rust side does not yet match the closure's
 /// own `case x of I# n#` unboxing id: a hand-built (or codegen-boxed) `I#` uses
 /// the run table's `get_by_name_arity("I#", 1)` id, which is NOT the id the

@@ -269,8 +269,8 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
         "hole consumed exactly once, and only by the valid attempt"
     );
 
-    // The retry prompt fed back to the model is the error VERBATIM (F3: "GHC
-    // error text is the retry prompt, verbatim") — find the next User turn
+    // The retry prompt fed back to the model is the GHC error text,
+    // VERBATIM — find the next User turn
     // after the assistant's ill-typed attempt and assert it embeds the exact
     // rejected error text.
     let turns: Vec<&Event> = events
@@ -318,11 +318,11 @@ fn decision_lib_dir() -> tempfile::TempDir {
     dir
 }
 
-/// `runLLMTurn @Decision` (self-iterating-harness WS-B) — a NESTED typed
+/// `runLLMTurn @Decision` — a NESTED typed
 /// answer: `Decision` is a record whose `confidence` field is itself a sum
 /// type (`Confidence`), not a flat enum like the `Int`/`Bool` cases above.
-/// Proves the split-out `RunLLMTurn` effect (its own GADT/union-tag now,
-/// `runLLMTurn @T` no longer riding `Ask`'s `AskWith`) carries a whole nested
+/// Asserts the `RunLLMTurn` effect (its own GADT/union-tag,
+/// `runLLMTurn @T` does not ride `Ask`'s `AskWith`) carries a whole nested
 /// ADT through GHC-as-validator exactly like a flat type: an ill-typed
 /// answer (`42 :: Int` where a `Decision` is wanted) does NOT consume the
 /// continuation, and the corrected nested-record answer resumes it. Same
@@ -769,8 +769,8 @@ async fn follow_up_after_dialog_resume_to_done() {
 /// resumed continuation (`Session::resume`) hits another `AskWith` before the
 /// do-block completes. This is the re-suspend arm of `resume_parent`: it must
 /// classify + publish the second hole's REAL site + type (`HoleRouting::RunLLMTurn
-/// { ty: Some("Bool"), .. }`), not the `None`/`None` a stale re-suspend used to
-/// carry. Also proves the typed-answer path works on hole 2: the mechanical
+/// { ty: Some("Bool"), .. }`), not `None`/`None`. Also asserts the typed-answer
+/// path works on hole 2: the mechanical
 /// `Ui::Choice` form is derivable from the SAME `Bool` type via
 /// `pending_derived_ui`, and answering it (in-context, via
 /// `answer_run_llm_turn` again) resumes the continuation to completion.
@@ -887,7 +887,7 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
     );
     assert_eq!(site.map(|s| s.0), Some(second_site));
 
-    // Answer the SECOND hole and drive the program to completion — proves the
+    // Answer the SECOND hole and drive the program to completion — the
     // typed-answer path is not just classified correctly but actually usable.
     harness
         .answer_run_llm_turn(root)

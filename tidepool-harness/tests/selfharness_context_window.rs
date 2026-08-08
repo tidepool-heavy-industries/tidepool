@@ -1,9 +1,7 @@
-//! W1/C2 acceptance: a SECOND `runLLMTurn` hole in ONE loop sees the FIRST
+//! Acceptance: a SECOND `runLLMTurn` hole in ONE loop sees the FIRST
 //! hole's exchange (the accumulating context window).
 //!
-//! Before this wave, `service_runllm_hole` `create_root`'d a fresh,
-//! context-free node per hole — N holes were N isolated RPCs, and the hylo's
-//! fused intermediate did not exist. Now one render-seeded answerer session is
+//! One render-seeded answerer session is
 //! created per loop and every hole pushes onto it. This test drives a two-hole
 //! harness through `run_one_cycle` and, on the SECOND hole, asserts the
 //! answerer's transcript already carries the FIRST hole's prompt AND answer.
@@ -57,7 +55,7 @@ fn header() -> LogHeader {
 /// A provider that answers each hole with `finalize @Text ...`, but when it
 /// sees the SECOND hole (its latest user message contains "SECOND-HOLE") it
 /// records whether the FIRST hole's prompt AND answer are already present in
-/// the transcript it was handed — the C2 assertion.
+/// the transcript it was handed.
 struct ContextCapturingProvider {
     /// `Some(true/false)` once the second hole is serviced: did the transcript
     /// already carry the first hole's exchange?
@@ -151,8 +149,8 @@ async fn second_hole_sees_first_holes_exchange() {
         "both holes' answers must fold into State"
     );
 
-    // The C2 property: when the SECOND hole was serviced, the answerer's
-    // transcript ALREADY carried the FIRST hole's prompt + answer — proving one
+    // When the SECOND hole was serviced, the answerer's
+    // transcript ALREADY carried the FIRST hole's prompt + answer — one
     // accumulating session, not two isolated nodes.
     let saw = second_saw_first
         .lock()

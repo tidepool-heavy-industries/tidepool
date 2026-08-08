@@ -1,11 +1,10 @@
-//! W1/C1 acceptance: `render`'s output IS the answerer's SYSTEM message.
-//!
-//! The independent review found `render` was observational — its text landed
-//! in `CycleOutcome` but never in the agent's system prompt (`assemble_request`
-//! used only the hardcoded `SYSTEM_FRAMING`). This test drives one full cycle
-//! through the production entry point (`run_one_cycle`) with a provider that
-//! CAPTURES the exact request it is handed, and asserts the answerer turn's
-//! System-role message is derived from `render` (not the default framing).
+//! Acceptance: `render`'s output IS the answerer's SYSTEM message, not
+//! merely observational text that lands in `CycleOutcome` while the agent's
+//! actual system prompt stays the hardcoded `SYSTEM_FRAMING`. This test
+//! drives one full cycle through the production entry point
+//! (`run_one_cycle`) with a provider that CAPTURES the exact request it is
+//! handed, and asserts the answerer turn's System-role message is derived
+//! from `render` (not the default framing).
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).

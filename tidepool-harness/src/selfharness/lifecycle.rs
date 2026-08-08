@@ -44,4 +44,3 @@ pub enum SelfHarnessState {
     /// run until a new driver is constructed.
     Poisoned { reason: String },
 }
-

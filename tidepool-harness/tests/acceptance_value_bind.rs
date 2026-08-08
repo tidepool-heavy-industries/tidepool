@@ -1,14 +1,13 @@
-//! W1b-redux step 1 acceptance: an EFFECTFUL value bind persists across turns.
+//! Acceptance: an EFFECTFUL value bind persists across turns.
 //!
-//! The motivating case the decl plane could NOT express: turn 1 binds a value
+//! The motivating case the decl plane cannot express: turn 1 binds a value
 //! via a FORK (`steps <- runLLMTurnFork @[Int] …`) — an effectful bind that
 //! SUSPENDS at the fork — and turn 2 references `steps` as a live typed binding.
-//! `acceptance_cross_turn` only proves the weaker decl-plane property (a pure
-//! `steps = [1,2,3]` CAF); this proves the value plane end to end through the
+//! `acceptance_cross_turn` only covers the weaker decl-plane property (a pure
+//! `steps = [1,2,3]` CAF); this covers the value plane end to end through the
 //! real drive_turn → run_bind → answer_fork → resume_bind → materialize path.
-//!
-//! On pre-W1b-redux code the harness never materialized an `x <- e` bind, so
-//! turn 2's `sum steps` would fail to resolve — this test would fail.
+//! If the harness ever stopped materializing an `x <- e` bind, turn 2's
+//! `sum steps` would fail to resolve and this test would catch it.
 //!
 //! GHC-heavy tier: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).

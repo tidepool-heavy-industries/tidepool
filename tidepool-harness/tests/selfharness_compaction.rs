@@ -1,27 +1,25 @@
-//! W2 acceptance coverage for the self-iterating harness driver's
+//! Acceptance coverage for the self-iterating harness driver's
 //! runtime-owned MID-LOOP, IN-PLACE compaction (`plans/self-iterating-harness/
-//! 02-runtime.md` Compaction; `08-wave1-correctness.md` W2) — as SIMPLIFIED by
-//! the wave1-compaction-fixes review (operator directive):
+//! 02-runtime.md` Compaction):
 //!
-//! Compaction is now ONE ordinary turn on the EXISTING answerer session (which
+//! Compaction is ONE ordinary turn on the EXISTING answerer session (which
 //! already holds the full context): the driver pushes a "summarize everything
 //! above" User turn, captures the model's PLAIN-TEXT reply as the summary, then
 //! resets that session's context to `[system + summary]`. No separate node, no
-//! `finalize @Text`, no transcript serialized into a prompt. This dissolves H-1
-//! (no second drive-to-finalize loop) and J-1 (no hand-serialized transcript)
-//! by construction.
+//! `finalize @Text`, no transcript serialized into a prompt, and no second
+//! drive-to-finalize loop, by construction.
 //!
-//! These tests exercise the review's fixes on the simplified mechanism:
-//!   - C-1: the threshold measures the answerer's context as the LAST turn's
+//! These tests exercise:
+//!   - the threshold measures the answerer's context as the LAST turn's
 //!     `input_tokens` (a high-water mark), NOT a running SUM across rounds — a
 //!     multi-round hole whose SUMMED input crosses the budget but whose LATEST
 //!     input does not must NOT trip compaction.
-//!   - C-2: the summarize turn's model call counts against the per-loop 1024
+//!   - the summarize turn's model call counts against the per-loop 1024
 //!     inference-call cap.
 //!   - the in-place relief property: the second hole runs under the summary,
 //!     and the summary reaches the next render.
 //!
-//! (C-3 restart durability and C-4 jsonl payload have their own test files /
+//! (restart durability and jsonl payload have their own test files /
 //! unit tests; see `selfharness_compaction_fixes.rs` and `persistence.rs`.)
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
@@ -154,7 +152,7 @@ impl ModelProvider for InPlaceProbeProvider {
 
         let answer = if is_second { "blue" } else { "apple" };
         // Large single-turn input so the FIRST hole's LAST-turn input_tokens
-        // (the C-1 high-water measure) alone crosses the (low) threshold.
+        // (the high-water measure) alone crosses the (low) threshold.
         Ok(TurnResponse {
             text: format!("```haskell\n(finalize @Text (\"{answer}\" :: Text) :: M ())\n```"),
             usage: Usage {
@@ -261,7 +259,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
 }
 
 // ---------------------------------------------------------------------------
-// C-1: high-water measure, not a running sum, across a MULTI-ROUND hole.
+// High-water measure, not a running sum, across a MULTI-ROUND hole.
 // ---------------------------------------------------------------------------
 
 /// Provider that drives the FIRST hole across THREE rounds before finalizing,
@@ -341,10 +339,10 @@ impl ModelProvider for MultiRoundProvider {
     }
 }
 
-/// C-1: across a THREE-round first hole, each round's input is 300 tokens. The
-/// OLD summed-usage measure would see ~900 input and trip a 500-token
-/// threshold; the CORRECT high-water measure sees only the latest 300 and must
-/// NOT compact. Proves the threshold reads the last-turn input, not the sum.
+/// Across a THREE-round first hole, each round's input is 300 tokens. A
+/// summed-usage measure would see ~900 input and trip a 500-token
+/// threshold; the high-water measure sees only the latest 300 and must
+/// NOT compact — asserts the threshold reads the last-turn input, not the sum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_multiround_highwater_does_not_overcount() {
     if !extract_available() {
@@ -390,7 +388,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
     );
     assert!(
         outcome.compaction.is_none(),
-        "C-1: a multi-round hole whose SUMMED input crosses the budget but whose LATEST input \
+        "a multi-round hole whose SUMMED input crosses the budget but whose LATEST input \
          does not must NOT compact, got: {:?}",
         outcome.compaction
     );

@@ -1,4 +1,4 @@
-//! WS-A acceptance coverage for the self-iterating harness driver spine
+//! Acceptance coverage for the self-iterating harness driver spine
 //! (`plans/self-iterating-harness/07-impl-orchestration.md`): ONE full
 //! `render` -> `loop` -> `runLLMTurn @Decision` -> `finalize` -> `render`
 //! cycle, driven through the production entry point
@@ -79,7 +79,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
     }
 
     // The nested answerer: the SCOPED `answerer_decls()` stack (gui + finalize
-    // only, NO runLLMTurn — W1 effect-scoping), with `examples/harness` as its
+    // only, NO runLLMTurn — effect-scoping), with `examples/harness` as its
     // project_lib so an answerer's `finalize @Decision (...)` can `import
     // Harness (Decision(..), Confidence(..))` from the reference harness module
     // directly.
@@ -159,7 +159,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
         "the decision's action must be folded into notes, got {notes:?}"
     );
 
-    // The POST-loop render reflects the NEW state — proves it reaches the
+    // The POST-loop render reflects the NEW state — it reaches the
     // next render, not just the persisted JSON.
     assert!(
         outcome.prompt_after.contains("deciding what to do next"),

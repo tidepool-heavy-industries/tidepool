@@ -1,5 +1,5 @@
-//! GHC-tier: a `runLLMTurn @Verdict` hole answered MECHANICALLY (§6 D6,
-//! `uiof`) from its server-derived `Choice` form — zero model turns for the
+//! GHC-tier: a `runLLMTurn @Verdict` hole answered MECHANICALLY (`uiof`)
+//! from its server-derived `Choice` form — zero model turns for the
 //! answer. Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run; see `tests/golden_path.rs` for the env
 //! recipe).

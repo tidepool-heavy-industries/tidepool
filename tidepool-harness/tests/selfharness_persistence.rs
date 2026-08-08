@@ -128,7 +128,7 @@ fn source() -> HarnessSource {
 /// driver (simulating a restart) restores BOTH from the same generation —
 /// advancing loopCount/mode from where the killed process left off, rather
 /// than starting over from `initialState`. A third cycle (no restart in
-/// between) proves generation keeps increasing within one process too.
+/// between) asserts generation keeps increasing within one process too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     if !extract_available() {

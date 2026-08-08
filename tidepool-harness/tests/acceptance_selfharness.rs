@@ -1,11 +1,11 @@
-//! WS-G acceptance coverage for the self-iterating harness (Wave
-//! `plans/self-iterating-harness/07-impl-orchestration.md`): a MULTI-cycle
+//! Acceptance coverage for the self-iterating harness
+//! (`plans/self-iterating-harness/07-impl-orchestration.md`): a MULTI-cycle
 //! run of the reference generic-assistant harness
 //! (`examples/harness/Harness.hs`) through the production entry point
 //! (`SelfHarnessDriver::run_one_cycle`, called repeatedly — the same
 //! per-cycle building block [`run_loop`](tidepool_harness::SelfHarnessDriver::run_loop)
 //! uses forever), threading each cycle's `CycleOutcome::state_json` into the
-//! next as `prior_state` exactly like `run_loop` does. Proves `State`
+//! next as `prior_state` exactly like `run_loop` does. Asserts `State`
 //! (`loopCount`/`mode`/`notes`/`lastDecision`) accumulates ACROSS repeated
 //! loop boundaries, not just across one. Needs `TIDEPOOL_EXTRACT` and the
 //! with-packages GHC on PATH — run inside `nix develop` (see
@@ -180,7 +180,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
             "cycle {i}: notes must accumulate most-recent-first"
         );
 
-        // The post-loop render reflects the NEW state — proves the updated
+        // The post-loop render reflects the NEW state — the updated
         // State reaches the next render, every cycle, not just the first.
         assert!(
             outcome

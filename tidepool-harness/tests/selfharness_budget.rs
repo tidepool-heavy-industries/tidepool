@@ -1,4 +1,4 @@
-//! W1 runaway-cap acceptance: a `runLLMTurn` answerer that never finalizes is
+//! Runaway-cap acceptance: a `runLLMTurn` answerer that never finalizes is
 //! NUDGED at the soft cap and HARD-FAILS at the hard cap.
 //!
 //! 08-wave1-correctness.md LOCKED the per-hole budget: up to 16 tool-call

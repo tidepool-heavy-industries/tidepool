@@ -1,11 +1,11 @@
-//! Self-iterating-harness Wave 2 acceptance coverage: the answerer `askUser`
+//! Acceptance coverage: the answerer `askUser`
 //! operator-form round-trip (`plans/self-iterating-harness/09-askuser-form-gui.md`).
 //! ONE `render` -> `loop` -> `runLLMTurn @Decision` -> (answerer suspends on
 //! `askUser`, a scripted [`OperatorGate`] submits, the typed value resumes
 //! and flows into `finalize`) -> `render` cycle, driven through the
 //! production entry point (`SelfHarnessDriver::run_one_cycle`), against the
 //! reference harness module (`examples/harness/Harness.hs`). Also asserts
-//! WS4: the durable per-node log's `turn_start` record carries the EXTRACTED
+//! the durable per-node log's `turn_start` record carries the EXTRACTED
 //! executed Haskell (the `askUser`+`finalize` block), not a coarse
 //! "model" provenance tag. Needs `TIDEPOOL_EXTRACT` and the with-packages
 //! GHC on PATH — run inside `nix develop` (see `haskell/CLAUDE.md`).
@@ -97,10 +97,10 @@ fn askuser_reply() -> RecordedReply {
 }
 
 /// ONE render -> loop -> runLLMTurn @Decision -> (askUser form round-trip)
-/// -> finalize -> render cycle. Proves a typed enum+int flows from a
+/// -> finalize -> render cycle. Asserts a typed enum+int flows from a
 /// scripted operator submission through `Tidepool.Form`'s decode into a
 /// `finalize @Decision` reply, and that the durable per-node log records the
-/// EXTRACTED executed Haskell for that turn (WS4).
+/// EXTRACTED executed Haskell for that turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn askuser_operator_form_round_trip_and_ws4_log() {
     if !extract_available() {
@@ -158,7 +158,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         "askUser's enum field must flow through finalize into Decision.confidence, got {decision:?}"
     );
 
-    // The post-loop render reflects the NEW state — proves the loop reached
+    // The post-loop render reflects the NEW state — the loop reached
     // the next render with the form-derived decision folded in.
     assert!(
         !outcome.prompt_after.trim().is_empty(),
@@ -175,9 +175,9 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         outcome.prompt_after
     );
 
-    // WS4: the durable per-node log's `turn_start` record carries the
-    // EXTRACTED executed Haskell — proves `tail -f log.jsonl | jq -r
-    // 'select(.ev=="turn_start").source'` actually shows the askUser+
+    // The durable per-node log's `turn_start` record carries the
+    // EXTRACTED executed Haskell — `tail -f log.jsonl | jq -r
+    // 'select(.ev=="turn_start").source'` shows the askUser+
     // finalize block this turn ran, not a coarse "model" provenance tag.
     // (No `Event::Effect` assertion: the scoped `[AskUser, Finalize]`
     // answerer stack has no handled effects by construction — see

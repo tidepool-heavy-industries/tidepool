@@ -1,11 +1,11 @@
-//! Wave C leftovers: F2's `turn_spliced` operator verb, exercised end to end
+//! The `turn_spliced` operator verb, exercised end to end
 //! through the real Harness (GHC-tier, record-replay — zero live model
 //! calls). Splices an operator message into a FORK-ANSWERER CHILD's
 //! transcript between its two scripted turns and asserts the child's very
 //! NEXT prompt assembly carries it — "splice lands at the child's current
 //! turn position, visible in its next prompt assembly."
 //!
-//! The script mirrors `golden_path.rs`'s proven fork-answerer shape (root
+//! The script mirrors `golden_path.rs`'s fork-answerer shape (root
 //! forks for an Int, the answerer's first attempt is deliberately ill-typed,
 //! the second is valid) so the GHC-facing behavior is known-good; the only
 //! addition is a `Harness::splice` call injected as a side effect of the

@@ -76,7 +76,7 @@ fn all_events(log_path: &std::path::Path) -> Vec<Event> {
 
 /// A real `runLLMTurnFork @Int` REQUEST — compiled and run through the
 /// engine — suspends the parent on a Fork hole. Nothing else in the system
-/// reacts to that suspension automatically (`autoForce = never`, C1): no
+/// reacts to that suspension automatically (`autoForce = never`): no
 /// child node is materialized, so the log contains ZERO events referencing
 /// any node other than the parent, and in particular zero `TurnForked` /
 /// `TurnStart` / `Effect` events for a would-be child. Only the operator's

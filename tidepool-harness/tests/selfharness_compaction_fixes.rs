@@ -1,16 +1,16 @@
-//! Review fixes for the self-iterating harness's mid-loop compaction
-//! (branch `wave1-compaction-fixes`), on the SIMPLIFIED mechanism (compaction
-//! is ONE plain summarize turn on the existing answerer session):
+//! Mid-loop compaction coverage for the self-iterating harness, on the
+//! SIMPLIFIED mechanism (compaction is ONE plain summarize turn on the
+//! existing answerer session):
 //!
-//!   - C-2: the summarize turn's model call counts against the per-loop
+//!   - the summarize turn's model call counts against the per-loop
 //!     inference-call cap (it cannot escape the runaway guard).
 //!   - a cycle that fires a mid-loop compaction commits its own state AND its
 //!     own summary into the SAME checkpoint generation, so a fresh driver
 //!     restored from that checkpoint gets both back together.
-//!   - C-4: `Event::CompactionTrigger` carries a payload (summary + pre/post
+//!   - `Event::CompactionTrigger` carries a payload (summary + pre/post
 //!     context size + node), emitted after the summary exists.
 //!
-//! The in-place-relief + high-water (C-1) coverage lives in
+//! The in-place-relief + high-water coverage lives in
 //! `selfharness_compaction.rs`.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
@@ -66,8 +66,8 @@ fn scratch(name: &str) -> std::path::PathBuf {
         std::process::id(),
         name
     ));
-    // Fresh durable dir per test run (called once per test — for C-3 both the
-    // original and the "restart" driver share the returned dir).
+    // Fresh durable dir per test run (called once per test — a restart-
+    // durability test's original and "restart" driver share the returned dir).
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -187,11 +187,11 @@ fn make_driver(
     (driver, source)
 }
 
-/// C-2: the summarize turn is a model call subject to the per-loop
+/// The summarize turn is a model call subject to the per-loop
 /// inference-call cap. With the cap set to exactly the number of answerer
 /// rounds before the first compaction (1 finalize round), the compaction
-/// check's own increment trips the cap — proving the summarize turn is counted
-/// against it (it does not escape the runaway guard).
+/// check's own increment trips the cap — the summarize turn is counted
+/// against it and does not escape the runaway guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_summarize_turn_counts_against_inference_cap() {
     if !extract_available() {
@@ -273,7 +273,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
     );
 }
 
-/// C-4: `Event::CompactionTrigger` carries the summary + pre/post context size
+/// `Event::CompactionTrigger` carries the summary + pre/post context size
 /// + node, emitted after the summary exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c4_compaction_trigger_event_carries_payload() {
@@ -301,13 +301,13 @@ async fn c4_compaction_trigger_event_carries_payload() {
     let (_node, summary, pre, _post) = &captured[0];
     assert!(
         summary.contains(SUMMARY_SENTINEL),
-        "C-4: the event must carry the actual summary text, got: {summary:?}"
+        "the event must carry the actual summary text, got: {summary:?}"
     );
     assert!(
         *pre >= 500,
-        "C-4: pre_input_tokens must be the context size that crossed the 500 threshold, got {pre}"
+        "pre_input_tokens must be the context size that crossed the 500 threshold, got {pre}"
     );
     // The event names a node (the per-loop answerer) — the payload's node field
     // is populated (a valid NodeId, id 0 included). Summary + pre-size are the
-    // load-bearing distillation-substrate fields the review (C-4) required.
+    // fields the distillation substrate (the jsonl transcript) needs.
 }
