@@ -38,24 +38,26 @@ pub fn panel(view: &View) -> Markup {
     }
 }
 
-/// Idle placeholder — nothing needs the operator right now.
+/// Idle placeholder — nothing needs the operator right now. A large, quiet
+/// glyph and a hairline frame read as a composed sheet, not an empty state.
 fn idle() -> Markup {
     html! {
         div class="idle" {
             p class="eyebrow" { "Standby" }
-            p class="idle-note" { "Waiting for the harness." }
+            p class="idle-glyph" { "—" }
+            p class="idle-note" { "No operator input pending. The harness is thinking." }
         }
     }
 }
 
-/// The pending form: one row per field, then a Submit button. The whole thing
-/// is a `data-on-submit="@post('/submit')"` form so the vendored JS collects
-/// every `[data-bind]` into a flat object and POSTs it.
+/// The pending form: one numbered row per field, then a Submit button. The
+/// whole thing is a `data-on-submit="@post('/submit')"` form so the vendored
+/// JS collects every `[data-bind]` into a flat object and POSTs it.
 fn form(spec: &FormSpec) -> Markup {
     html! {
         form class="form" data-on-submit="@post('/submit')" {
-            @for field in &spec.fields {
-                (field_row(field))
+            @for (i, field) in spec.fields.iter().enumerate() {
+                (field_row(i + 1, field))
             }
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
@@ -64,12 +66,17 @@ fn form(spec: &FormSpec) -> Markup {
     }
 }
 
-/// One field: an eyebrow label over the input appropriate to its kind.
-fn field_row(field: &Field) -> Markup {
+/// One field: an index number + eyebrow label in a fixed left column, the
+/// input in the right column — a numbered-list poster grid, not a stacked
+/// form.
+fn field_row(index: usize, field: &Field) -> Markup {
     html! {
         div class="field" {
-            label class="eyebrow" for=(field.key) { (field.label) }
-            (field_input(field))
+            div class="field-meta" {
+                span class="field-index" { (format!("{index:02}")) }
+                label class="eyebrow" for=(field.key) { (field.label) }
+            }
+            div class="field-input" { (field_input(field)) }
         }
     }
 }
@@ -109,7 +116,7 @@ fn field_input(field: &Field) -> Markup {
 fn continue_prompt() -> Markup {
     html! {
         div class="continue" {
-            p class="eyebrow" { "Loop complete" }
+            p class="eyebrow" { "Loop complete — awaiting operator" }
             button class="btn btn-primary" data-on-click="@post('/continue')" {
                 "Continue"
             }

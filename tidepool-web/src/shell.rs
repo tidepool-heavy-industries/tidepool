@@ -28,7 +28,10 @@ pub fn page(panel: Markup) -> Markup {
             body {
                 main class="sheet" {
                     header class="masthead" {
-                        span class="mark" { "tidepool" }
+                        div class="mast-title" {
+                            span class="mark" { "tidepool" }
+                            span class="mast-sub" { "self-iterating harness — operator console" }
+                        }
                         span id="conn" class="conn ok" { "live" }
                     }
                     (panel)
@@ -38,62 +41,176 @@ pub fn page(panel: Markup) -> Markup {
     }
 }
 
-/// Baseline Swiss-minimal stylesheet. Off-white ground, single accent, hairline
-/// rules, one type family, a small deliberate scale. (Design deliverable — the
-/// aesthetic leaf elevates this to the award-grade bar.)
+/// Award-grade Swiss / International Typographic Style stylesheet. One
+/// spacing unit, a three-step type scale in a fixed ratio, hairlines as the
+/// only delimiters, a single scarce accent spent on exactly one thing (the
+/// primary action). Every native control is restyled — square, flat, no
+/// browser chrome — so the page reads as one composed sheet, not a form.
 pub const CSS: &str = r#"
 :root {
-  --paper: #f4f2ec;
+  --paper: #f5f3ec;
   --ink: #16150f;
-  --muted: #6f6b60;
-  --rule: #16150f;
+  --muted: #78725f;
+  --line: #16150f;
+  --line-faint: #d8d3c4;
   --accent: #c8341e;
-  --hair: 1px solid var(--rule);
+  --hair: 1px solid var(--line);
+  --hair-faint: 1px solid var(--line-faint);
   --unit: 8px;
+
+  --text-micro: 0.6875rem;  /* 11px — eyebrows, meta */
+  --text-body: 1rem;        /* 16px — field values, prose */
+  --text-display: 2.5rem;   /* 40px — masthead, standby glyph */
+  --tracking-wide: 0.14em;
 }
+
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--paper); color: var(--ink); }
+html, body { margin: 0; background: var(--paper); }
 body {
+  color: var(--ink);
   font-family: ui-sans-serif, "Helvetica Neue", Helvetica, Arial, sans-serif;
-  font-size: 16px; line-height: 1.5;
+  font-size: var(--text-body); line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-.sheet { max-width: 640px; margin: 0 auto; padding: calc(6 * var(--unit)) calc(3 * var(--unit)); }
+
+.sheet {
+  max-width: 720px; margin: 0 auto;
+  padding: calc(7 * var(--unit)) calc(4 * var(--unit)) calc(12 * var(--unit));
+}
+
+/* ---------------------------------------------------------------- masthead */
 .masthead {
-  display: flex; justify-content: space-between; align-items: baseline;
-  border-bottom: var(--hair); padding-bottom: var(--unit); margin-bottom: calc(4 * var(--unit));
+  display: grid; grid-template-columns: 1fr auto; align-items: end;
+  column-gap: calc(3 * var(--unit));
+  padding-bottom: calc(3 * var(--unit));
+  margin-bottom: calc(7 * var(--unit));
+  border-bottom: var(--hair);
 }
-.mark { font-weight: 700; letter-spacing: 0.02em; }
-.conn { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
-.conn.down { color: var(--accent); }
+.mast-title { display: flex; flex-direction: column; gap: var(--unit); }
+.mark {
+  font-size: var(--text-display); font-weight: 700;
+  letter-spacing: -0.02em; line-height: 1;
+}
+.mast-sub {
+  font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--muted);
+}
+.conn {
+  font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--muted);
+  padding-bottom: 0.2em;
+}
+.conn.down { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
+
+/* -------------------------------------------------------------- typography */
 .eyebrow {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em;
-  color: var(--muted); margin: 0 0 var(--unit) 0;
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--ink); margin: 0;
 }
-.field { border-top: var(--hair); padding: calc(2 * var(--unit)) 0; }
-.field:first-child { border-top: none; }
+
+/* ------------------------------------------------------------------ form */
+.field {
+  display: grid; grid-template-columns: calc(11 * var(--unit)) 1fr;
+  column-gap: calc(4 * var(--unit));
+  padding: calc(4 * var(--unit)) 0;
+  border-top: var(--hair-faint);
+}
+.field:first-child { border-top: none; padding-top: 0; }
+
+.field-meta { display: flex; flex-direction: column; gap: calc(1.5 * var(--unit)); }
+.field-index {
+  font-size: var(--text-micro); font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.field-input { display: flex; align-items: center; min-height: calc(4.5 * var(--unit)); }
+
 .input {
-  width: 100%; font: inherit; padding: var(--unit); background: transparent;
-  border: var(--hair); color: var(--ink);
+  width: 100%; font: inherit; font-size: var(--text-body); color: var(--ink);
+  background: transparent; border: none; border-bottom: var(--hair);
+  padding: calc(1 * var(--unit)) 0; border-radius: 0;
 }
-.enum { display: flex; flex-direction: column; gap: var(--unit); }
-.enum-opt, .bool { display: flex; align-items: center; gap: var(--unit); cursor: pointer; }
-.actions { border-top: var(--hair); padding-top: calc(2 * var(--unit)); margin-top: calc(2 * var(--unit)); }
+.input:focus {
+  outline: none; border-bottom: 2px solid var(--ink);
+  padding-bottom: calc(1 * var(--unit) - 1px);
+}
+input.input[data-kind="int"] { text-align: right; font-variant-numeric: tabular-nums; }
+
+.enum { display: flex; flex-direction: column; gap: calc(2 * var(--unit)); width: 100%; }
+.enum-opt, .bool {
+  display: flex; align-items: center; gap: calc(2 * var(--unit));
+  cursor: pointer; font-size: var(--text-body);
+}
+
+/* square, flat check controls — no native chrome, no border-radius anywhere */
+input[type="radio"], input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; margin: 0; flex: none;
+  width: calc(2 * var(--unit)); height: calc(2 * var(--unit));
+  border: var(--hair); border-radius: 0; background: var(--paper);
+  cursor: pointer; position: relative;
+}
+input[type="radio"]:checked, input[type="checkbox"]:checked { background: var(--ink); }
+input[type="radio"]:checked::after, input[type="checkbox"]:checked::after {
+  content: ""; position: absolute; inset: calc(0.5 * var(--unit));
+  background: var(--paper);
+}
+input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
+.input:focus-visible, .btn:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
+
+.actions {
+  display: flex; justify-content: flex-end;
+  border-top: var(--hair); margin-top: calc(3 * var(--unit)); padding-top: calc(4 * var(--unit));
+}
 .btn {
-  font: inherit; font-weight: 600; padding: var(--unit) calc(3 * var(--unit));
-  border: var(--hair); background: transparent; color: var(--ink); cursor: pointer;
-  letter-spacing: 0.02em;
+  font: inherit; font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  padding: calc(2 * var(--unit)) calc(4 * var(--unit));
+  border: var(--hair); border-radius: 0; background: transparent; color: var(--ink);
+  cursor: pointer;
 }
 .btn-primary { background: var(--accent); color: var(--paper); border-color: var(--accent); }
-.btn[disabled] { opacity: 0.5; cursor: default; }
-.idle-note, .continue { color: var(--muted); }
+.btn[disabled] { opacity: 0.4; cursor: default; }
+
+/* ------------------------------------------------------------------ continue */
+.continue {
+  display: flex; flex-direction: column; align-items: center; gap: calc(4 * var(--unit));
+  text-align: center;
+  padding: calc(10 * var(--unit)) 0;
+  border-top: var(--hair); border-bottom: var(--hair);
+}
+.continue .eyebrow { color: var(--muted); }
+.continue .btn-primary { padding: calc(2.5 * var(--unit)) calc(6 * var(--unit)); }
+
+/* ---------------------------------------------------------------------- idle */
+.idle {
+  display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--unit));
+  text-align: center;
+  padding: calc(11 * var(--unit)) 0;
+  border-top: var(--hair); border-bottom: var(--hair);
+}
+.idle .eyebrow { color: var(--muted); }
+.idle-glyph {
+  font-size: var(--text-display); font-weight: 300; line-height: 1; color: var(--line-faint);
+}
+.idle-note { margin: 0; color: var(--muted); font-size: var(--text-body); }
+
+/* ---------------------------------------------------------------------- toast */
 #toast {
-  position: fixed; right: calc(2 * var(--unit)); bottom: calc(2 * var(--unit));
-  max-width: 320px; padding: var(--unit) calc(2 * var(--unit)); border: var(--hair);
-  background: var(--paper); font-size: 13px; display: none;
+  position: fixed; right: calc(3 * var(--unit)); bottom: calc(3 * var(--unit));
+  max-width: 320px; padding: calc(2 * var(--unit)) calc(3 * var(--unit));
+  border: var(--hair); border-radius: 0;
+  background: var(--paper); font-size: var(--text-micro); letter-spacing: 0.02em;
+  display: none;
 }
 #toast.show { display: block; }
-#toast.err { border-color: var(--accent); color: var(--accent); }
+#toast.err { border-width: 2px; font-weight: 600; }
+
+@media (max-width: 520px) {
+  .field { grid-template-columns: 1fr; row-gap: calc(2 * var(--unit)); }
+}
 "#;
 
 /// The vendored Datastar client. Lifted from the observatory's patch-apply +
