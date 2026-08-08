@@ -1,5 +1,80 @@
 # One extract spawn per turn — protocol
 
+## State of the branch (Phase A complete; Phase B not started)
+
+Phase A landed the protocol, the Rust seam, the extract mode, and the corpus. The
+two sides are deliberately **not wired to each other**: every Rust caller still
+runs the old two-spawn path, and `--turn` has no Rust caller at all. Phase B
+connects them and deletes what it replaces.
+
+### What exists
+
+- `tidepool-runtime/src/session/turn.rs` — `TurnTemplate`, `TurnRequest`,
+  `TurnResult` (enum: `Decl`/`Bind`/`Expr`), `CompiledTurn`, `TemplateSelector`
+  (`Bind`/`BindDiscard`/`Expr`, derived from `(kind, binders.is_empty())`), and
+  `run_turn`. `run_turn`'s body is the interim two-spawn implementation:
+  `classify_turn` (skipped when a verdict is supplied) → template select+splice →
+  `compile_session_turn`, or `extract_binders` on a decl verdict. One code path,
+  no flag, no fallback.
+- `render_template` with two placement modes, `{{TURN}}` and `{{TURN_STMT}}`, plus
+  `{{BINDERS}}`. The `if`/`else` over which placement a template uses is
+  load-bearing — see *the turn splice must happen exactly once, and last*.
+- The extract's `--turn` mode (`haskell/app/Main.hs` `runTurnMode`,
+  `haskell/src/Tidepool/Binders.hs`, `CborEncode.hs`): classify or accept
+  `--turn-verdict`, select and splice a caller-supplied template, compile through
+  the SHARED `writeWholeModuleClosed`, emit the `TurnOut` variant as CBOR plus an
+  identical-shape `--json-output` rendering.
+- Corpus: `turn::tests::turn_classification_corpus_old_and_new_path_agree`, 19
+  cases, asserting old path and `run_turn` agree AND match values derived from
+  `classifyTurn`'s documented precedence. Includes the extension tripwires.
+- Byte-identity: `tidepool-repl/src/session.rs`'s
+  `turn_template_byte_identity_tests` (4 cases) against the real `wrap_*` builders.
+
+### What Phase B does
+
+1. Wire the Rust side to `--turn`: replace `run_turn`'s body with the single call.
+   The Rust caller must now author templates for all four selector shapes plus
+   `decl`, sourced from the repl's existing wrappers, choosing `{{TURN}}` vs
+   `{{TURN_STMT}}` per splice point.
+2. Migrate the callers that still use the old path: `tidepool-repl/src/session.rs`
+   `run_eval` and `decl_shaped_text`, `tidepool-harness/src/harness.rs`
+   `run_block` (keep edits there minimal and mechanical),
+   `session/mod.rs` `define_batch_with_vals` (the decl batch).
+3. Delete, not deprecate: `classify_turn` + `--emit-stmt-binders`,
+   `extract_binders` + `--emit-binders`, and `split_discard_bind` (a discarding
+   bind is a valid `do` statement — nothing to strip). Removing the flags makes
+   the new Rust side require a matching extract; that is correct under the
+   one-format wire policy, and the submit note must carry the redeploy requirement
+   so `scripts/redeploy.sh` ships both sides together.
+4. Emit the `classify` phase and stop `extractStmtBinders` self-timing. **Current
+   state:** `runTurnMode` passes `False` to `extractStmtBinders` so the classify
+   substep emits nothing — absent data over the phantom `ghc_session`/`typecheck`
+   rows that passing the live flag would produce. Phase B replaces that with the
+   real phase per the arbitrated vocabulary decision.
+5. Bench: before/after under `scripts/ghc-slots.sh exclusive` — the one sanctioned
+   exclusive-mode use, for the final acceptance measurement only. Expect no
+   regression, not a win.
+
+### Operational facts worth not rediscovering
+
+- Build the extract from this worktree, then point tests at it:
+  `cd haskell && cabal build tidepool-extract-bin && export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)`,
+  with the with-packages GHC on `PATH` (it supplies `lens`).
+- Every GHC-heavy run goes through `scripts/ghc-slots.sh run -- <cmd>` inside a
+  DETACHED runner (`setsid nohup … &`, script in `/tmp`, poll the log). A
+  foreground batch is killed at ~380s; the full repl suite takes ~128 minutes.
+- The regression gate is
+  `cargo nextest run --ignore-default-filter -p tidepool-repl -j1 --no-fail-fast`
+  (201 tests). `--no-fail-fast` matters: without it a single failure cancels the
+  run and leaves ~39 tests unexercised while the summary still looks like a result.
+- `cargo nextest run -p tidepool-runtime` runs **zero** tests and exits "no tests
+  to run", which reads as a pass. Always `--ignore-default-filter`, and check the
+  COUNT rather than the exit status.
+- Verify any JSON sidecar with a strict parser (`python3 json.loads`, never
+  `strict=False`). A raw newline inside a string renders as a line break, so
+  invalid JSON looks correct in a terminal — this is exactly how a live regression
+  survived 21 hand smokes.
+
 ## Problem
 
 A session-eval turn costs 2–3 `tidepool-extract` process spawns:
@@ -445,11 +520,15 @@ the wrapper, not for the syntax. Once the turn is placed inside a `do` block the
 workaround has nothing left to do, so Phase B **deletes** `split_discard_bind`
 rather than porting it or reimplementing it against the parse.
 
-## The extract lags the Rust side — three gaps to close before any caller is wired
+## Three gaps that were closed, and why they are recorded
 
-The `--turn` mode exists and works for the shapes it covers, but three things the
-Rust side already does are not yet in it. All three must land before the shim is
-swapped, because each one silently degrades rather than failing at the boundary.
+All three are CLOSED — the descriptions below are kept because each one is a
+failure mode worth recognizing again, and because gap 1 is now enforced by the
+corpus rather than by memory. Do not re-implement them; verify them if in doubt
+(`--turn` smokes in the *State of the branch* section).
+
+They shared a shape worth naming: each degraded silently rather than failing at
+the boundary, and none appeared in the submitting dev's own verification.
 
 **1. The decl path narrows the language surface.** `--turn`'s decl branch hands
 the RAW turn text to the whole-module parse. The path it replaces does not: Rust's
@@ -519,22 +598,25 @@ something currently accidental: `extractBinders` selects the module summary name
 `SessionDecls` and falls back to `head summaries` otherwise, so the raw-text path
 works by luck rather than by the name match the function was written around.
 
-**2. `{{TURN_STMT}}` is not implemented in the extract.** It recognizes `{{TURN}}`
-only, so a bind template using statement placement would leave the placeholder
-literal in the module it compiles. The Rust side depends on this placement for the
-`let`-at-column-1 case.
+**2. `{{TURN_STMT}}` was missing from the extract.** It recognized `{{TURN}}`
+only, so a bind template using statement placement would have left the
+placeholder literal in the module it compiles. The Rust side depends on this
+placement for the `let`-at-column-1 case. Now implemented as a third branch of
+the single-pass splice, byte-identical to `place_turn_stmt`/`push_braced_stmt`.
 
-**3. The discarding-bind template kind is missing.** The extract's template kinds
-are `bind` and `expr`; the Rust selector has `Bind`, `BindDiscard`, and `Expr`.
-A discarding bind currently has no kind to select.
+**3. The discarding-bind template kind was missing.** Template kinds were `bind`
+and `expr` while the Rust selector has `Bind`, `BindDiscard`, and `Expr`, so a
+discarding bind had no kind to select. Now `binddiscard`, routed around the
+session-bind artifacts entirely.
 
 Gaps 2 and 3 postdate the extract work's spec and were flagged by its author
 rather than quietly skipped. Gap 1 was found by probing the built binary.
 
-One smaller thing, worth fixing while in there: with `--turn-verdict decl` the
-`Decl` variant echoes the supplied (empty) binder list while `declItems` carries
-the real names, so `binders` is unreliable on the batch path. Derive `Decl`'s
-binders from the harvested items' head names when the verdict supplies none.
+A fourth, smaller one, also closed: with `--turn-verdict decl` the `Decl` variant
+echoed the supplied (empty) binder list while `declItems` carried the real names,
+making `binders` unreliable on the batch path. `Decl`'s binders now derive from the
+harvested items' head names when the verdict supplies none, so both the
+single-turn and batch paths agree.
 
 ## JSON escaping in the extract
 
