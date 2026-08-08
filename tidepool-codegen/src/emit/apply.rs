@@ -1,10 +1,11 @@
-//! Function-application protocol: `runtime_apply` (non-tail) — extracted from
-//! `emit/expr.rs`'s `EmitFrame::App` arm — plus the per-function
-//! [`FunctionImports`] cache it uses. `runtime_tail_apply` (tail, extracted
-//! from `emit_tail_app`) lands in a follow-up commit sharing this module and
-//! its `force_and_check_callee` prefix helper — see the characterization
-//! commit for the exact step-by-step protocol and the diff list between the
-//! tail and non-tail paths.
+//! Function-application protocol: `runtime_apply` (non-tail, extracted from
+//! `emit/expr.rs`'s `EmitFrame::App` arm) and `runtime_tail_apply` (tail,
+//! extracted from `emit_tail_app`), sharing the per-function
+//! [`FunctionImports`] cache and the `force_and_check_callee` prefix helper
+//! (force-thunk + `debug_app_check`, byte-for-byte identical between the two
+//! pre-refactor call sites) — see the characterization commits for the exact
+//! step-by-step protocol and the diff list between the tail and non-tail
+//! paths.
 //!
 //! This module is a behaviour-preserving refactor of a duplicated protocol
 //! (the same four host-fn imports and the same force-thunk +
@@ -12,7 +13,7 @@
 //! redesign.
 
 use crate::emit::{
-    heap_force_sig, EmitError, EmitSession, SsaVal, CLOSURE_CODE_PTR_OFFSET,
+    heap_force_sig, EmitError, EmitSession, SsaVal, CLOSURE_CODE_PTR_OFFSET, VMCTX_TAIL_ARG_OFFSET,
     VMCTX_TAIL_CALLEE_OFFSET,
 };
 use cranelift_codegen::ir::{
@@ -336,4 +337,64 @@ pub(crate) fn runtime_apply(
     builder.ins().call(return_ref, &[sess.vmctx]);
 
     Ok(SsaVal::HeapPtr(merged_val))
+}
+
+/// Tail function application: force the callee, validate it, then hand off to
+/// the trampoline — store callee+arg into `VMContext` and return null — rather
+/// than calling directly. See the characterization commit for the full diff
+/// against `runtime_apply`: no `call_indirect`, no TCO null-check/merge, and
+/// (asymmetry preserved verbatim, not fixed by this refactor) no
+/// `ctx.declare_env` call.
+pub(crate) fn runtime_tail_apply(
+    sess: &mut EmitSession,
+    builder: &mut FunctionBuilder,
+    raw_fun_ptr: Value,
+    arg_ptr: Value,
+) -> Result<SsaVal, EmitError> {
+    let (fun_ptr, check_result) = force_and_check_callee(sess, builder, raw_fun_ptr)?;
+
+    // If debug_app_check returned non-zero (poison/error), return it directly
+    let store_block = builder.create_block();
+    let poison_block = builder.create_block();
+
+    let is_zero = builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
+    builder
+        .ins()
+        .brif(is_zero, store_block, &[], poison_block, &[]);
+
+    // poison_block: return poison (error already set by debug_app_check)
+    builder.switch_to_block(poison_block);
+    builder.seal_block(poison_block);
+    builder.ins().return_(&[check_result]);
+
+    // store_block: store callee+arg to VMContext, return null
+    builder.switch_to_block(store_block);
+    builder.seal_block(store_block);
+
+    // Store fun_ptr (closure) to VMContext.tail_callee (offset 24)
+    builder.ins().store(
+        MemFlags::trusted(),
+        fun_ptr,
+        sess.vmctx,
+        VMCTX_TAIL_CALLEE_OFFSET,
+    );
+    // Store arg_ptr to VMContext.tail_arg (offset 32)
+    builder.ins().store(
+        MemFlags::trusted(),
+        arg_ptr,
+        sess.vmctx,
+        VMCTX_TAIL_ARG_OFFSET,
+    );
+
+    // Return null to signal tail call
+    let null_val = builder.ins().iconst(types::I64, 0);
+    builder.ins().return_(&[null_val]);
+
+    // Dead block for subsequent code
+    let dead_block = builder.create_block();
+    builder.switch_to_block(dead_block);
+    builder.seal_block(dead_block);
+
+    let dummy = builder.ins().iconst(types::I64, 0);
+    Ok(SsaVal::HeapPtr(dummy))
 }
