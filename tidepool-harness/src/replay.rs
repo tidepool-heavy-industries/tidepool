@@ -227,15 +227,11 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
             content,
             ..
         } => {
-            folded
-                .transcripts
-                .entry(node)
-                .or_default()
-                .push(Message {
-                    role,
-                    content,
-                    reasoning_items: Vec::new(), // the durable log never carries them
-                });
+            folded.transcripts.entry(node).or_default().push(Message {
+                role,
+                content,
+                reasoning_items: Vec::new(), // the durable log never carries them
+            });
         }
         Event::TurnForked {
             node,
@@ -253,15 +249,11 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
             // Folded exactly like a `TurnDelta`: a splice is transcript
             // content the child sees on its next prompt assembly, whatever
             // the audit trail calls it.
-            folded
-                .transcripts
-                .entry(node)
-                .or_default()
-                .push(Message {
-                    role,
-                    content,
-                    reasoning_items: Vec::new(), // the durable log never carries them
-                });
+            folded.transcripts.entry(node).or_default().push(Message {
+                role,
+                content,
+                reasoning_items: Vec::new(), // the durable log never carries them
+            });
         }
         // TurnStart / Effect / HoleAnswerAttempt do not change tree STATE (they
         // are within-turn detail the replayer substitutes against, not folded

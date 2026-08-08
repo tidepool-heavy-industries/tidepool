@@ -525,8 +525,7 @@ fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
         // Fall back to a user `input_text` rather than emit a rejected role.
         Role::System => ("user", "input_text"),
     };
-    let mut items: Vec<serde_json::Value> =
-        m.reasoning_items.iter().map(|r| r.0.clone()).collect();
+    let mut items: Vec<serde_json::Value> = m.reasoning_items.iter().map(|r| r.0.clone()).collect();
     items.push(serde_json::json!({
         "type": "message",
         "role": role,
