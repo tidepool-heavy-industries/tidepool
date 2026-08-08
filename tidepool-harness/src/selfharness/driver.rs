@@ -67,6 +67,11 @@ pub enum DriverError {
     /// well-formed JSON.
     #[error("self-harness persistence: {0}")]
     Persistence(#[from] PersistenceError),
+    /// The driver is [`SelfHarnessState::Poisoned`]: a prior cycle failed and
+    /// recovery could not rebuild a usable outer session. Every public entry
+    /// point returns this instead of running.
+    #[error("self-harness driver poisoned, recovery failed: {0}")]
+    Poisoned(String),
 }
 
 /// Map an outer-session run error string to a typed [`DriverError`]: a message
@@ -392,6 +397,30 @@ impl SelfHarnessDriver {
         &self.lifecycle
     }
 
+    /// Refuse to proceed while [`SelfHarnessState::Poisoned`] — the guard every
+    /// public entry point (`run_one_cycle`/`run_loop`/`restore`) calls first.
+    fn refuse_if_poisoned(&self) -> Result<(), DriverError> {
+        match &self.lifecycle {
+            SelfHarnessState::Poisoned { reason } => Err(DriverError::Poisoned(reason.clone())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Discard every mutable resident component a cycle may have left behind:
+    /// retire the per-loop answerer, clear its framing and this cycle's
+    /// compaction, reset the inference-call counter, and drop the outer
+    /// session — which may be parked mid-fragment on a hole. Dropping `outer`
+    /// IS the discard: [`Self::bootstrap`] rebuilds it from the harness
+    /// source the next time it is called, since it only no-ops while `outer`
+    /// is `Some`.
+    fn discard_resident_state(&mut self) {
+        self.retire_answerer();
+        self.answerer_framing = None;
+        self.cycle_compaction = None;
+        self.loop_inference_calls = 0;
+        self.outer = None;
+    }
+
     /// The author modules an answerer turn imports, once bootstrapped — what
     /// brings the hole's answer type into scope.
     fn answerer_imports(&self) -> &[String] {
@@ -629,7 +658,23 @@ impl SelfHarnessDriver {
         source: &HarnessSource,
         prior_state: Option<&Json>,
     ) -> Result<CycleOutcome, DriverError> {
-        self.bootstrap(source)?;
+        self.refuse_if_poisoned()?;
+
+        // A prior cycle's error guard (below) already discarded `self.outer`,
+        // so this bootstrap call is where recovery from a `Failed` state
+        // rebuilds it. If recovery itself cannot bootstrap, the driver has no
+        // path back to a usable outer session — escalate past `Failed`
+        // (recoverable) to `Poisoned` (not) rather than sit in a stale
+        // `Failed` that will never clear.
+        let recovering_from_failure = matches!(self.lifecycle, SelfHarnessState::Failed { .. });
+        if let Err(e) = self.bootstrap(source) {
+            if recovering_from_failure {
+                self.lifecycle = SelfHarnessState::Poisoned {
+                    reason: e.to_string(),
+                };
+            }
+            return Err(e);
+        }
         self.emit(Event::LoopBoundary);
 
         // D4: render the pre-loop prompt directly against `prior_state` — `None`
@@ -645,12 +690,14 @@ impl SelfHarnessDriver {
         self.answerer_framing = Some(format!("{prompt_before}\n\n{ANSWERER_FRAMING_SUFFIX}"));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
-        // F4 (external-review finding 4): the driver must return to `Idle` on ANY
-        // exit from the loop body — an error mid-loop (a runaway-cap hard-fail, a
-        // failed resume, a compaction error) must not strand the lifecycle in
-        // `RunningLoop`/`Compacting`. Run the fallible body, then reset the
-        // lifecycle unconditionally before propagating success or error.
-        let result = (|| {
+        // The driver must not strand the lifecycle in `RunningLoop`/`Compacting`
+        // on any exit from the loop body: a runaway-cap hard-fail, a failed
+        // resume, or a compaction error all leave a mutable resident session
+        // (the outer session, the per-loop answerer) that outlives this call.
+        // Run the fallible body, then publish `Idle` on success or `Failed`
+        // (after discarding that resident state) on error — never `Idle` on
+        // a path that didn't actually finish.
+        let result: Result<CycleOutcome, DriverError> = (|| {
             let (value, table) = self.run_loop_fragment(prior_state)?;
             let state_json = state_cross::state_out(&value, &table);
 
@@ -675,7 +722,15 @@ impl SelfHarnessDriver {
                 compaction,
             })
         })();
-        self.lifecycle = SelfHarnessState::Idle;
+        match &result {
+            Ok(_) => self.lifecycle = SelfHarnessState::Idle,
+            Err(err) => {
+                self.discard_resident_state();
+                self.lifecycle = SelfHarnessState::Failed {
+                    reason: err.to_string(),
+                };
+            }
+        }
         result
     }
 
@@ -704,6 +759,7 @@ impl SelfHarnessDriver {
     /// [`Self::run_loop`] at start; exposed so a restart-durability test can
     /// drive the same reload path without entering the forever-loop.
     pub fn restore(&mut self) -> Result<Option<Json>, DriverError> {
+        self.refuse_if_poisoned()?;
         let state_json = persistence::load_state(&self.state_path)?;
         if let Some(summary) = persistence::load_compaction(&self.compaction_path)? {
             self.last_compaction = Some(summary);
@@ -712,6 +768,7 @@ impl SelfHarnessDriver {
     }
 
     pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
+        self.refuse_if_poisoned()?;
         let mut state_json: Option<Json> = self.restore()?;
         let mut first = true;
         loop {
