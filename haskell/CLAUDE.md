@@ -52,6 +52,12 @@ cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
   --include lib --target-module-only --output-dir test/suite_cbor
 # --include lib + --target-module-only: Suite.hs imports Tidepool.QQ
 # --output-dir: default derives from module basename → test/Suite_cbor (wrong dir)
+find test/suite_cbor -name '*_u[0-9]*.cbor' -delete
+# GHC-lifted local binders (`go_u6341068275337658369.cbor`): unique-suffixed,
+# non-deterministic across runs, and unreferenced by any test (only meta.cbor
+# and explicitly-named fixtures are loaded by name — except
+# tidepool-repr/tests/proptest_varid_defense.rs, which directory-scans this
+# corpus and would otherwise accumulate fresh noise on every regen).
 ```
 
 > `*.cbor` fixtures are gitignored — new ones must be `git add -f`'d or a
