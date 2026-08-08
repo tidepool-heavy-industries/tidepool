@@ -34,8 +34,7 @@ module Tidepool.Aeson.Scientific
   , toRealFloat
   , toBoundedInteger
   , truncateScientific
-  , floorScientific
-  , floorBoundedInteger
+  , truncateBoundedInteger
   , floatingOrInteger
   , isFiniteDouble
   ) where
@@ -214,27 +213,6 @@ toBoundedInteger s
       in if i >= lo && i <= hi then Just (fromInteger i) else Nothing
   | otherwise = Nothing
 
--- | Floor to an 'Integer' — like 'truncateScientific' but rounds DOWN (toward
--- negative infinity) rather than toward zero, matching upstream lens-aeson's
--- @_Int@\/@_Integer@ prisms (@\"-3.7\"@ floors to @-4@; truncation would give
--- @-3@). Pure Integer 'div' (which floors), so it stays as JIT-safe as
--- 'truncateScientific'.
-floorScientific :: Scientific -> Integer
-floorScientific (Scientific c e)
-  | e >= 0    = c * pow10 e
-  | otherwise = c `div` pow10 (negate e)
-
--- | 'floorScientific', bounds-checked against a 'Bounded' 'Integral' type —
--- @Nothing@ if the floored value doesn't fit @[minBound, maxBound]@. Unlike
--- 'toBoundedInteger', this floors fractional inputs instead of requiring an
--- exact integer (matching the @_Int@ prism's lens-aeson semantics).
-floorBoundedInteger :: forall i. (Integral i, Bounded i) => Scientific -> Maybe i
-floorBoundedInteger s =
-  let i  = floorScientific s
-      lo = toInteger (minBound :: i)
-      hi = toInteger (maxBound :: i)
-  in if i >= lo && i <= hi then Just (fromInteger i) else Nothing
-
 -- | @Right@ an integral value when the number is integral, else @Left@ the
 -- floating value. (No 'Bounded' constraint here, mirroring upstream: an integral
 -- value is always returned on the @Right@; a bounded @i@ can overflow.)
@@ -277,3 +255,14 @@ pow10 = go 1
 -- fallback, so an integer decodes without ever compiling that fallback.
 truncateScientific :: Scientific -> Integer
 truncateScientific = integerValue
+
+-- | 'truncateScientific', bounds-checked against a 'Bounded' 'Integral' type —
+-- @Nothing@ if the truncated value doesn't fit @[minBound, maxBound]@. Unlike
+-- 'toBoundedInteger', this truncates fractional inputs instead of requiring an
+-- exact integer (the @_Int@ prism's lens-aeson semantics).
+truncateBoundedInteger :: forall i. (Integral i, Bounded i) => Scientific -> Maybe i
+truncateBoundedInteger s =
+  let i  = truncateScientific s
+      lo = toInteger (minBound :: i)
+      hi = toInteger (maxBound :: i)
+  in if i >= lo && i <= hi then Just (fromInteger i) else Nothing

@@ -3,8 +3,14 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{LitStr, Token};
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A resolved local `.hs` input: its canonicalized path and content.
+type HsDep = (PathBuf, Vec<u8>);
+/// A path that couldn't be read, paired with the underlying io error.
+type PathReadError = (PathBuf, std::io::Error);
 
 /// Expands the `haskell_eval!` macro.
 ///
@@ -47,12 +53,15 @@ fn expand_cbor(path_lit: &LitStr) -> TokenStream {
 /// Shared front-end for the `hs!`/`expr_hs!` macros: parse an optional
 /// `.hs::binding` suffix, resolve the `.hs` path against `CARGO_MANIFEST_DIR`,
 /// run the extractor, and locate the target `.cbor`. Returns
-/// `(abs_hs_path, cbor_path, output_dir)`, or a compile-error `TokenStream` to
-/// be returned verbatim from the caller.
+/// `(abs_hs_path, cbor_path, output_dir, transitive_deps)`, or a
+/// compile-error `TokenStream` to be returned verbatim from the caller.
+/// `transitive_deps` is the sorted set of local `.hs` files (beyond the entry
+/// file itself) that the entry file's `import`s resolve to — see
+/// `resolve_transitive_hs_deps`.
 fn resolve_hs_path(
     path_lit: &LitStr,
     raw_path: &str,
-) -> Result<(PathBuf, PathBuf, PathBuf), TokenStream> {
+) -> Result<(PathBuf, PathBuf, PathBuf, Vec<PathBuf>), TokenStream> {
     // Parse optional ::binding suffix
     let (hs_path_str, binding_name) = match raw_path.split_once(".hs::") {
         Some((prefix, binding)) => (format!("{}.hs", prefix), Some(binding.to_string())),
@@ -78,12 +87,6 @@ fn resolve_hs_path(
     }
 
     let basename = abs_hs_path.file_stem().unwrap().to_str().unwrap();
-    // Content-addressed cache dir: same (source bytes, target) → same dir.
-    // Parallel rustc targets expanding this macro converge on one result
-    // instead of clobbering a shared dir, and an existing dir is always
-    // complete and current (#F4) — `run_tidepool_extract` publishes it with
-    // an atomic rename. The target is part of the key because a targeted
-    // extract writes only that binding's `.cbor`.
     let src_bytes = match std::fs::read(&abs_hs_path) {
         Ok(b) => b,
         Err(e) => {
@@ -94,7 +97,66 @@ fn resolve_hs_path(
             .to_compile_error());
         }
     };
-    let key = content_key(&src_bytes, binding_name.as_deref());
+
+    // `resolve_hs_path` has no include feature today, so the extractor's GHC
+    // session resolves every non-entry import against `importPaths = ["."]`
+    // (the extractor subprocess's cwd, inherited unchanged from this process
+    // — see `extractionDynFlags` in haskell/src/Tidepool/GhcPipeline.hs). The
+    // cache key must walk the SAME search order or it can miss a real input.
+    //
+    // `extra_includes` is the ONE list that widens both: fed to
+    // `resolve_transitive_hs_deps` below (as `roots`, alongside `cwd`) AND to
+    // `run_tidepool_extract` (as `--include`). It's empty today; if this
+    // macro ever grows an `include = "…"` parameter for `.hs` paths, extend
+    // THIS binding, not two independently-maintained ones.
+    let extra_includes: Vec<PathBuf> = Vec::new();
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return Err(syn::Error::new(
+                path_lit.span(),
+                format!("failed to resolve current directory for Haskell import search: {e}"),
+            )
+            .to_compile_error());
+        }
+    };
+    let mut roots = vec![cwd];
+    roots.extend(extra_includes.iter().cloned());
+    let entry_imports = import_module_names(&String::from_utf8_lossy(&src_bytes));
+    let mut seen = BTreeSet::new();
+    seen.insert(
+        abs_hs_path
+            .canonicalize()
+            .unwrap_or_else(|_| abs_hs_path.clone()),
+    );
+    let mut deps = match resolve_transitive_hs_deps(&entry_imports, &roots, &mut seen) {
+        Ok(d) => d,
+        Err((path, e)) => {
+            return Err(syn::Error::new(
+                path_lit.span(),
+                format!(
+                    "failed to read imported Haskell module {}: {e}",
+                    path.display()
+                ),
+            )
+            .to_compile_error());
+        }
+    };
+    deps.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Content-addressed cache dir: same (source bytes, transitive deps,
+    // target, extractor identity) → same dir. Parallel rustc targets
+    // expanding this macro converge on one result instead of clobbering a
+    // shared dir. Reusing an existing dir is sound exactly to the extent this
+    // key covers what the extractor actually reads: the entry file, every
+    // local module transitively reachable from its `import`s (heuristic
+    // textual resolution, not GHC's own module graph — see
+    // `resolve_transitive_hs_deps`), the target binding, and the producer
+    // identity (see `extract_identity`). `run_tidepool_extract` publishes the
+    // dir with an atomic rename, so a partially-written dir is never visible
+    // under the final name.
+    let key = content_key(&src_bytes, binding_name.as_deref(), &deps);
+    let dep_paths: Vec<PathBuf> = deps.into_iter().map(|(p, _)| p).collect();
     let output_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-cbor")
@@ -105,6 +167,7 @@ fn resolve_hs_path(
         &output_dir,
         binding_name.as_deref(),
         Path::new(&manifest_dir),
+        &extra_includes,
     ) {
         return Err(syn::Error::new(path_lit.span(), msg).to_compile_error());
     }
@@ -131,21 +194,30 @@ fn resolve_hs_path(
         },
     };
 
-    Ok((abs_hs_path, cbor_path, output_dir))
+    Ok((abs_hs_path, cbor_path, output_dir, dep_paths))
 }
 
 fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
-    let (abs_hs_path, cbor_path, _output_dir) = match resolve_hs_path(path_lit, raw_path) {
+    let (abs_hs_path, cbor_path, _output_dir, dep_paths) = match resolve_hs_path(path_lit, raw_path)
+    {
         Ok(t) => t,
         Err(e) => return e,
     };
 
     let cbor_path_str = cbor_path.to_str().unwrap();
     let hs_abs_str = abs_hs_path.to_str().unwrap();
+    let dep_tracks: Vec<TokenStream> = dep_paths
+        .iter()
+        .map(|p| {
+            let s = p.to_str().unwrap().to_string();
+            quote! { const _: &[u8] = include_bytes!(#s); }
+        })
+        .collect();
 
     quote! {
         {
             const _: &[u8] = include_bytes!(#hs_abs_str);
+            #(#dep_tracks)*
             static __CBOR: &[u8] = include_bytes!(#cbor_path_str);
             let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction");
@@ -161,7 +233,9 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
 /// Parsed input for `haskell_inline! { target = "name", include = "dir", r#"..."# }`
 struct InlineInput {
     target: String,
-    includes: Vec<String>,
+    /// Kept as `LitStr` (not `.value()`-collapsed) so a bad include dir can
+    /// be reported at the span of the literal that named it.
+    includes: Vec<LitStr>,
     source: LitStr,
 }
 
@@ -191,14 +265,14 @@ impl Parse for InlineInput {
                     syn::bracketed!(content in input);
                     while !content.is_empty() {
                         let lit: LitStr = content.parse()?;
-                        includes.push(lit.value());
+                        includes.push(lit);
                         if !content.is_empty() {
                             content.parse::<Token![,]>()?;
                         }
                     }
                 } else {
                     let lit: LitStr = input.parse()?;
-                    includes.push(lit.value());
+                    includes.push(lit);
                 }
                 let _ = input.parse::<Token![,]>();
             }
@@ -243,27 +317,23 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     // Capitalize target -> module name (e.g. "game" -> "Game")
     let module_name = capitalize(&parsed.target);
 
-    // Resolve include dirs to absolute paths
-    let abs_includes: Vec<PathBuf> = parsed
-        .includes
-        .iter()
-        .map(|d| Path::new(&manifest_dir).join(d))
-        .collect();
+    // Validate every `include = "…"` dir up front and enumerate its `.hs`
+    // files exactly once — the resulting list feeds module-name collection,
+    // header splicing, AND the Cargo tracker generation below, so the three
+    // consumers can never disagree about what's in a dir the way two
+    // separate `read_dir` calls could.
+    let include_dirs = match collect_include_dirs(Path::new(&manifest_dir), &parsed.includes) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
 
     // Collect module names from included files so we can filter out inter-module imports
-    let mut included_module_names: Vec<String> = Vec::new();
-    for dir in &abs_includes {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().is_some_and(|ext| ext == "hs") {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        included_module_names.push(stem.to_string());
-                    }
-                }
-            }
-        }
-    }
+    let included_module_names: Vec<String> = include_dirs
+        .iter()
+        .flat_map(|d| &d.hs_files)
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
+        .map(str::to_string)
+        .collect();
 
     // Read include files, collecting their pragmas, imports, and body
     let mut all_extensions = vec![
@@ -274,33 +344,39 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     ];
     let mut all_imports = vec!["import Control.Monad.Freer".to_string()];
     let mut include_bodies = String::new();
-    for dir in &abs_includes {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().is_some_and(|ext| ext == "hs") {
-                    if let Ok(content) = std::fs::read_to_string(&p) {
-                        let header = strip_module_header(&content);
-                        for ext in header.extensions {
-                            if !all_extensions.contains(&ext) {
-                                all_extensions.push(ext);
-                            }
-                        }
-                        for imp in header.imports {
-                            // Skip imports for modules being inlined
-                            let is_internal = included_module_names.iter().any(|m| {
-                                imp.trim().starts_with(&format!("import {}", m))
-                                    || imp.trim().starts_with(&format!("import qualified {}", m))
-                            });
-                            if !is_internal && !all_imports.contains(&imp) {
-                                all_imports.push(imp);
-                            }
-                        }
-                        include_bodies.push_str(&header.body);
-                        include_bodies.push('\n');
-                    }
+    for dir in &include_dirs {
+        for p in &dir.hs_files {
+            let content = match std::fs::read_to_string(p) {
+                Ok(c) => c,
+                Err(e) => {
+                    return syn::Error::new(
+                        dir.span,
+                        format!(
+                            "failed to read included Haskell module {}: {e}",
+                            p.display()
+                        ),
+                    )
+                    .to_compile_error();
+                }
+            };
+            let header = strip_module_header(&content);
+            for ext in header.extensions {
+                if !all_extensions.contains(&ext) {
+                    all_extensions.push(ext);
                 }
             }
+            for imp in header.imports {
+                // Skip imports for modules being inlined
+                let is_internal = included_module_names.iter().any(|m| {
+                    imp.trim().starts_with(&format!("import {}", m))
+                        || imp.trim().starts_with(&format!("import qualified {}", m))
+                });
+                if !is_internal && !all_imports.contains(&imp) {
+                    all_imports.push(imp);
+                }
+            }
+            include_bodies.push_str(&header.body);
+            include_bodies.push('\n');
         }
     }
 
@@ -313,10 +389,60 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         extensions_str, module_name, imports_str, include_bodies, source_text
     );
 
+    // Same import-search mirroring as `resolve_hs_path`: `run_tidepool_extract`
+    // is called below with `extra_includes = &[]` for the inline path too, so
+    // any import left in `all_imports` after filtering out inlined siblings
+    // resolves only against the extractor subprocess's cwd. Splicing already
+    // folds every included file's own content into `full_source` (and thus
+    // into the hash below); this closes the remaining gap — an import that
+    // survives filtering and points at a local (non-package) module.
+    //
+    // NOTE: `include_dirs` (validated above) is a text-splicing input here,
+    // not a GHC search path — deliberately kept OUT of `extra_includes`.
+    // Passing `include_dirs`'s paths as `--include` too, for extra
+    // robustness, is a real behavior change (it would widen what GHC itself
+    // resolves, on top of what's already spliced verbatim), not just a
+    // plumbing one — if that's ever wanted, extend `extra_includes` (which
+    // feeds both `roots` below and `run_tidepool_extract`), not one or the
+    // other.
+    let extra_includes: Vec<PathBuf> = Vec::new();
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return syn::Error::new(
+                parsed.source.span(),
+                format!("failed to resolve current directory for Haskell import search: {e}"),
+            )
+            .to_compile_error();
+        }
+    };
+    let mut roots = vec![cwd];
+    roots.extend(extra_includes.iter().cloned());
+    let remaining_imports = import_module_names(&all_imports.join("\n"));
+    let mut seen = BTreeSet::new();
+    let mut extra_deps = match resolve_transitive_hs_deps(&remaining_imports, &roots, &mut seen) {
+        Ok(d) => d,
+        Err((path, e)) => {
+            return syn::Error::new(
+                parsed.source.span(),
+                format!(
+                    "failed to read imported Haskell module {}: {e}",
+                    path.display()
+                ),
+            )
+            .to_compile_error();
+        }
+    };
+    extra_deps.sort_by(|a, b| a.0.cmp(&b.0));
+
     // Content-addressed staging dir (same rationale as `resolve_hs_path`):
     // parallel targets expanding this macro write identical content, and the
-    // tmp+rename below keeps every path GHC reads complete at all times.
-    let key = content_key(full_source.as_bytes(), Some(&parsed.target));
+    // tmp+rename below keeps every path GHC reads complete at all times. The
+    // key covers `full_source` (which already embeds every spliced include
+    // file's bytes) plus any transitively-resolved import left outside the
+    // splice, the target, and the producer identity.
+    let key = content_key(full_source.as_bytes(), Some(&parsed.target), &extra_deps);
+    let extra_dep_paths: Vec<PathBuf> = extra_deps.into_iter().map(|(p, _)| p).collect();
     let inline_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-inline")
@@ -351,6 +477,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         &output_dir,
         Some(&parsed.target),
         Path::new(&manifest_dir),
+        &extra_includes,
     ) {
         return syn::Error::new(parsed.source.span(), msg).to_compile_error();
     }
@@ -374,23 +501,18 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     let meta_path_str = meta_path.to_str().unwrap();
     let hs_path_str = hs_file.to_str().unwrap();
 
-    // Track include dir .hs files for recompilation
-    let include_tracks: Vec<TokenStream> = abs_includes
+    // Track every spliced include-dir `.hs` file (the same validated list
+    // used to build `full_source` above — one enumeration, so this can never
+    // disagree with what was actually spliced) plus every transitively
+    // resolved import left outside the splice.
+    let include_tracks: Vec<TokenStream> = include_dirs
         .iter()
-        .filter_map(|dir| {
-            std::fs::read_dir(dir).ok().map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|ext| ext == "hs"))
-                    .map(|p| {
-                        let s = p.to_str().unwrap().to_string();
-                        quote! { const _: &[u8] = include_bytes!(#s); }
-                    })
-                    .collect::<Vec<_>>()
-            })
+        .flat_map(|d| &d.hs_files)
+        .chain(extra_dep_paths.iter())
+        .map(|p| {
+            let s = p.to_str().unwrap().to_string();
+            quote! { const _: &[u8] = include_bytes!(#s); }
         })
-        .flatten()
         .collect();
 
     quote! {
@@ -494,19 +616,35 @@ fn capitalize(s: &str) -> String {
 /// (a real GHC diagnostic) is reported directly, never masked behind a
 /// redundant (and slower) nix re-run that would only reproduce the same
 /// error (#F3).
+///
+/// `extra_includes` becomes `--include <dir>` for each entry, on both the
+/// direct-binary and nix-fallback invocations below. Every caller passes
+/// `&[]` today — neither `resolve_hs_path` nor `expand_inline` widens the
+/// extractor's search path yet — but the parameter exists so that WHEN one
+/// does, it is the exact same `Vec<PathBuf>` binding the caller already
+/// built its `roots` (for `resolve_transitive_hs_deps`) from, not a second,
+/// separately-maintained list. That does not make the coupling
+/// type-enforced — nothing stops a future caller from building two
+/// different lists — but it collapses "which function do I even touch" to
+/// one parameter, with the callers' comments pointing straight at it.
 fn run_tidepool_extract(
     hs_path: &Path,
     output_dir: &Path,
     target: Option<&str>,
     manifest_dir: &Path,
+    extra_includes: &[PathBuf],
 ) -> Result<(), String> {
-    // The output dir is content-addressed (its name encodes the
-    // source+target+extract-binary hash), so an existing dir is a complete,
-    // current result — staleness (#F4) is impossible by construction, and
-    // the publish rename below is atomic, so a partially-written dir is
-    // never visible under the final name. Concurrent expansions (e.g.
-    // `--all-targets` compiling a bin and its test harness in parallel)
-    // converge on one dir instead of clobbering a shared one.
+    // The output dir name already encodes the resolved input set (entry file
+    // plus every transitively resolved local import — see
+    // `resolve_transitive_hs_deps`), the target, and the producer identity
+    // (see `extract_identity`), so reusing an existing dir is sound to the
+    // extent that key covers what the extractor actually reads; any gap is
+    // a heuristic-resolution miss, not an unkeyed input (see the callers'
+    // comments for what is and isn't covered). The publish rename below is
+    // atomic, so a partially-written dir is never visible under the final
+    // name. Concurrent expansions (e.g. `--all-targets` compiling a bin and
+    // its test harness in parallel) converge on one dir instead of
+    // clobbering a shared one.
     if output_dir.exists() {
         return Ok(());
     }
@@ -547,6 +685,10 @@ fn run_tidepool_extract(
     if let Some(name) = target {
         cmd.arg("--target");
         cmd.arg(name);
+    }
+    for dir in extra_includes {
+        cmd.arg("--include");
+        cmd.arg(dir);
     }
 
     match cmd.output() {
@@ -592,6 +734,10 @@ fn run_tidepool_extract(
         cmd.arg("--target");
         cmd.arg(name);
     }
+    for dir in extra_includes {
+        cmd.arg("--include");
+        cmd.arg(dir);
+    }
 
     match cmd.output() {
         Ok(output) if output.status.success() => publish_extract_dir(&tmp_dir, output_dir),
@@ -607,20 +753,127 @@ fn run_tidepool_extract(
 /// Stable 64-bit key for the extract content cache. `DefaultHasher` is
 /// deterministic for a given toolchain, which is all a `target/`-local cache
 /// needs — every rustc process in one build converges on the same directory.
-fn content_key(bytes: &[u8], target: Option<&str>) -> u64 {
+/// `deps` must already be sorted by path (callers own the sort so the same
+/// input set always hashes to the same key regardless of resolution order).
+///
+/// `DefaultHasher`'s output is NOT guaranteed stable across Rust versions,
+/// so these keys — and the `target/tidepool-{cbor,inline}/` dir names built
+/// from them — are toolchain-local by construction: a toolchain bump changes
+/// every key, which is a full miss (safe — never a stale hit) but leaves the
+/// old dirs on disk and re-extracts everything once.
+fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
+    for (path, content) in deps {
+        path.hash(&mut h);
+        content.hash(&mut h);
+    }
     target.hash(&mut h);
     extract_identity().hash(&mut h);
     h.finish()
 }
 
-/// Identity of the `tidepool-extract` binary this process will invoke — its
-/// file bytes hashed once per process. Folded into every content key: the
-/// address must include the PRODUCER, not just the inputs, or an extract
-/// upgrade (e.g. a wire-format major bump) silently serves output in the
-/// old format from a "complete, current" cache dir.
+/// Extracts the dotted module name from a single `import` line, e.g.
+/// `"import qualified Data.Text as T"` -> `Some("Data.Text")`. Returns `None`
+/// for non-import lines. A purely textual heuristic — it does not handle
+/// CPP-generated imports, package-qualified import strings, or hs-boot
+/// files.
+fn import_module_name(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("import")?;
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix("qualified")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(')
+        .unwrap_or(rest.len());
+    let name = rest[..end].trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Extracts every imported module's dotted name from a Haskell source text.
+fn import_module_names(source: &str) -> Vec<String> {
+    source.lines().filter_map(import_module_name).collect()
+}
+
+/// Resolves a dotted module name (`Foo.Bar`) to a `.hs` file under one of
+/// `roots`, in order — the first root that has it wins, mirroring GHC's own
+/// `importPaths` search order.
+fn resolve_module_file(name: &str, roots: &[PathBuf]) -> Option<PathBuf> {
+    let rel = format!("{}.hs", name.replace('.', "/"));
+    roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file())
+}
+
+/// Resolves the transitive closure of LOCAL `.hs` modules reachable from
+/// `imports` by walking `roots` — the same search order the real extractor
+/// uses (see the callers' comments for what `roots` is in each case). A
+/// module not found under any root is a package/external import, resolved
+/// by the extractor's package database rather than a local file, and
+/// contributes no entry here — its identity is covered by
+/// `extract_identity`, not this hash. `already_seen` is both the entry
+/// point's own canonicalized path (pre-seeded by the caller so the entry
+/// file is never re-hashed as its own dependency) and the growing
+/// walked-set; passing it in lets independent calls within one expansion
+/// (there are none today, but future callers may need to) share dedup.
+///
+/// A resolved path that exists but can't be read is a hard error — that IS
+/// one of the extractor's real inputs, so silently dropping it would
+/// reintroduce the exact silent-gap failure mode this cache key exists to
+/// close.
+fn resolve_transitive_hs_deps(
+    imports: &[String],
+    roots: &[PathBuf],
+    already_seen: &mut BTreeSet<PathBuf>,
+) -> Result<Vec<HsDep>, PathReadError> {
+    let mut out = Vec::new();
+    let mut queue: Vec<String> = imports.to_vec();
+    while let Some(name) = queue.pop() {
+        let Some(path) = resolve_module_file(&name, roots) else {
+            continue;
+        };
+        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !already_seen.insert(canon.clone()) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| (path.clone(), e))?;
+        queue.extend(import_module_names(&String::from_utf8_lossy(&bytes)));
+        out.push((canon, bytes));
+    }
+    Ok(out)
+}
+
+/// Recursively collects every file under `dir` for which `pred` holds,
+/// sorted for determinism. An unreadable directory anywhere in the tree is a
+/// hard error naming the offending path — never a silent partial scan.
+fn collect_files_recursive(
+    dir: &Path,
+    pred: &dyn Fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, PathReadError> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).map_err(|e| (d.clone(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| (d.clone(), e))?;
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if pred(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Identity of the Haskell→Core extractor this process will invoke — hashed
+/// once per process. Folded into every content key: the address must
+/// include the PRODUCER, not just the inputs, or an extractor upgrade (e.g.
+/// a wire-format major bump) silently serves output in the old format from
+/// an existing cache dir.
 ///
 /// A SET-but-unreadable `$TIDEPOOL_EXTRACT` panics here rather than falling
 /// back to a PATH-resolved binary: this function runs FIRST (via
@@ -630,8 +883,21 @@ fn content_key(bytes: &[u8], target: Option<&str>) -> u64 {
 /// short-circuits on the existence check and never reaches its own
 /// fail-loud path — so silently keying against the wrong binary here would
 /// let a misconfigured `$TIDEPOOL_EXTRACT` silently serve a stale/foreign
-/// cache hit instead of erroring. Panicking inside a proc macro surfaces as
-/// a loud compile error, same as any other `expect`/`panic!` in this crate.
+/// cache hit instead of erroring.
+///
+/// When neither `$TIDEPOOL_EXTRACT` nor a PATH binary resolves,
+/// `run_tidepool_extract` falls back to `nix run <flake>#tidepool-extract`
+/// — that IS a different producer, so the key must track it too. Actually
+/// resolving the nix derivation would mean invoking nix from every macro
+/// expansion just to compute a cache key, so this hashes `flake.lock` +
+/// `flake.nix` + the extractor's own source inputs
+/// (`haskell/{app,src}/**/*.hs`, `haskell/*.cabal`, `haskell/cabal.project*`)
+/// instead — anything that changes what `nix run` would build. If even that
+/// can't be resolved (no flake.nix found, or a source file can't be read),
+/// this panics rather than returning a placeholder: an unresolved producer
+/// identity must never be able to select — or worse, silently reuse — a
+/// cache directory. Panicking inside a proc macro surfaces as a loud compile
+/// error, same as any other `expect`/`panic!` in this crate.
 fn extract_identity() -> u64 {
     use std::hash::{Hash, Hasher};
     use std::sync::OnceLock;
@@ -657,14 +923,139 @@ fn extract_identity() -> u64 {
                     .find(|p| p.is_file())
             }),
         };
-        match resolved.and_then(|p| std::fs::read(p).ok()) {
-            Some(bytes) => bytes.hash(&mut h),
-            // No binary found: extraction itself will fail loudly; an
-            // unkeyed 0 here never masks that.
-            None => 0u64.hash(&mut h),
+        match resolved {
+            Some(path) => {
+                let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+                    panic!("failed to read extractor binary {}: {e}", path.display())
+                });
+                bytes.hash(&mut h);
+            }
+            None => {
+                let manifest_dir =
+                    std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+                let flake_root = find_flake_root(Path::new(&manifest_dir)).unwrap_or_else(|| {
+                    panic!(
+                        "tidepool-extract not found on PATH/$TIDEPOOL_EXTRACT and no flake.nix \
+                         found in any parent of {manifest_dir} to resolve a nix producer identity \
+                         — refusing to key the cache on an unresolved producer"
+                    )
+                });
+                hash_nix_extractor_identity(&flake_root, &mut h);
+            }
         }
         h.finish()
     })
+}
+
+/// Hashes the nix-fallback producer's identity into `h`: `flake.lock` (pins
+/// nixpkgs/rust-overlay/flake-utils), `flake.nix` (the derivation
+/// definition), and the extractor's own source inputs under `haskell/`. See
+/// `extract_identity` for why this exists instead of resolving the actual
+/// derivation. Panics (naming the path) rather than silently hashing a
+/// partial or placeholder identity.
+fn hash_nix_extractor_identity(flake_root: &Path, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    for name in ["flake.lock", "flake.nix"] {
+        let p = flake_root.join(name);
+        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
+            panic!(
+                "failed to read {} to resolve the nix producer identity: {e}",
+                p.display()
+            )
+        });
+        bytes.hash(h);
+    }
+    let is_hs = |p: &Path| p.extension().is_some_and(|e| e == "hs");
+    let mut sources = Vec::new();
+    for sub in ["app", "src"] {
+        let dir = flake_root.join("haskell").join(sub);
+        if dir.is_dir() {
+            let files = collect_files_recursive(&dir, &is_hs).unwrap_or_else(|(p, e)| {
+                panic!(
+                    "failed to enumerate extractor sources under {}: {e} (at {})",
+                    dir.display(),
+                    p.display()
+                )
+            });
+            sources.extend(files);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(flake_root.join("haskell")) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let is_project_file = p.extension().is_some_and(|e| e == "cabal")
+                || p.file_name().and_then(|n| n.to_str()) == Some("cabal.project");
+            if is_project_file {
+                sources.push(p);
+            }
+        }
+    }
+    sources.sort();
+    for p in sources {
+        p.hash(h);
+        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
+            panic!(
+                "failed to read {} to resolve the nix producer identity: {e}",
+                p.display()
+            )
+        });
+        bytes.hash(h);
+    }
+}
+
+/// One validated `include = "…"` directory: its absolute path, the span of
+/// the literal that named it (for error attribution), and its `.hs` files
+/// (sorted for determinism). Built once by `collect_include_dirs` and reused
+/// by every consumer (module-name collection, header splicing, Cargo
+/// trackers) so they can't disagree about what's in the directory.
+#[derive(Debug)]
+struct IncludeDir {
+    span: proc_macro2::Span,
+    hs_files: Vec<PathBuf>,
+}
+
+/// Validates every `include = "…"` literal as a readable directory and
+/// enumerates its `.hs` files up front. A missing/unreadable directory, or a
+/// directory-entry read failure mid-enumeration, is a compile error naming
+/// the offending path — never a silent empty include.
+fn collect_include_dirs(
+    manifest_dir: &Path,
+    includes: &[LitStr],
+) -> Result<Vec<IncludeDir>, TokenStream> {
+    let mut out = Vec::new();
+    for lit in includes {
+        let path = manifest_dir.join(lit.value());
+        let entries = std::fs::read_dir(&path).map_err(|e| {
+            syn::Error::new(
+                lit.span(),
+                format!("include directory {} is not readable: {e}", path.display()),
+            )
+            .to_compile_error()
+        })?;
+        let mut hs_files = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                syn::Error::new(
+                    lit.span(),
+                    format!(
+                        "failed to read an entry in include directory {}: {e}",
+                        path.display()
+                    ),
+                )
+                .to_compile_error()
+            })?;
+            let p = entry.path();
+            if p.extension().is_some_and(|ext| ext == "hs") {
+                hs_files.push(p);
+            }
+        }
+        hs_files.sort();
+        out.push(IncludeDir {
+            span: lit.span(),
+            hs_files,
+        });
+    }
+    Ok(out)
 }
 
 /// Per-process scratch sibling of a content-addressed dir. Keyed by pid so
@@ -767,7 +1158,20 @@ fn find_single_binding(output_dir: &Path) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_module_header;
+    use super::*;
+
+    /// Per-test scratch dir under the OS temp dir, unique by test label +
+    /// pid + thread id (nextest gives each test its own process, but plain
+    /// `cargo test` runs unit tests as threads in one process).
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-macro-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn single_line_module_header_still_strips_cleanly() {
@@ -806,5 +1210,139 @@ mod tests {
         let src = "module Foo\n  ( x\n  ) where\n\nx = 1\n";
         let header = strip_module_header(src);
         assert_eq!(header.body.trim(), "x = 1");
+    }
+
+    #[test]
+    fn import_module_name_handles_qualified_hiding_and_selector_lists() {
+        assert_eq!(
+            import_module_name("import qualified Data.Text as T"),
+            Some("Data.Text".to_string())
+        );
+        assert_eq!(
+            import_module_name("import Tidepool.Prelude hiding (error)"),
+            Some("Tidepool.Prelude".to_string())
+        );
+        assert_eq!(
+            import_module_name("import Data.Map.Strict (Map)"),
+            Some("Data.Map.Strict".to_string())
+        );
+        assert_eq!(import_module_name("x = 1"), None);
+    }
+
+    /// Pins the headline silent-stale-cache bug (finding 1): a change to a
+    /// module the entry file transitively imports must change the cache
+    /// key, even though the entry file's own bytes never change.
+    #[test]
+    fn transitive_dependency_change_busts_the_cache_key() {
+        let dir = temp_dir("transitive-dep");
+        let entry_path = dir.join("Entry.hs");
+        let dep_path = dir.join("Dep.hs");
+        std::fs::write(&entry_path, "module Entry where\nimport Dep\nx = Dep.y\n").unwrap();
+        std::fs::write(&dep_path, "module Dep where\ny = 1\n").unwrap();
+
+        let entry_src = std::fs::read_to_string(&entry_path).unwrap();
+        let imports = import_module_names(&entry_src);
+        assert_eq!(imports, vec!["Dep".to_string()]);
+
+        let compute_key = || {
+            let mut seen = BTreeSet::new();
+            seen.insert(entry_path.canonicalize().unwrap());
+            let deps = resolve_transitive_hs_deps(&imports, std::slice::from_ref(&dir), &mut seen)
+                .unwrap();
+            assert_eq!(
+                deps.len(),
+                1,
+                "Dep.hs must resolve as a local transitive input"
+            );
+            content_key(entry_src.as_bytes(), None, &deps)
+        };
+
+        let key_before = compute_key();
+
+        // Change ONLY the transitively imported module — Entry.hs is untouched.
+        std::fs::write(&dep_path, "module Dep where\ny = 2\n").unwrap();
+        let key_after = compute_key();
+
+        assert_ne!(
+            key_before, key_after,
+            "changing Dep.hs must invalidate the cache key even though Entry.hs never changed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pins finding 2's core property: the nix-fallback producer identity
+    /// tracks the extractor's actual source inputs — it is never a constant
+    /// that two different producers could collide on.
+    #[test]
+    fn nix_identity_changes_with_extractor_source() {
+        let dir_a = temp_dir("nix-identity-a");
+        let dir_b = temp_dir("nix-identity-b");
+        for dir in [&dir_a, &dir_b] {
+            std::fs::write(dir.join("flake.lock"), "{}").unwrap();
+            std::fs::write(dir.join("flake.nix"), "{ }").unwrap();
+            std::fs::create_dir_all(dir.join("haskell/app")).unwrap();
+        }
+        std::fs::write(dir_a.join("haskell/app/Main.hs"), "main = putStrLn \"a\"\n").unwrap();
+        std::fs::write(dir_b.join("haskell/app/Main.hs"), "main = putStrLn \"b\"\n").unwrap();
+
+        let hash_of = |root: &Path| {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            hash_nix_extractor_identity(root, &mut h);
+            h.finish()
+        };
+
+        assert_ne!(
+            hash_of(&dir_a),
+            hash_of(&dir_b),
+            "the nix-fallback producer identity must change when the extractor's own \
+             source changes"
+        );
+
+        std::fs::remove_dir_all(&dir_a).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
+    }
+
+    /// The other half of finding 2: when identity genuinely can't be
+    /// resolved (no flake.lock here), that must panic — never fall back to
+    /// hashing a constant that a differently-configured producer could
+    /// silently share.
+    #[test]
+    fn nix_identity_panics_rather_than_hashing_a_placeholder_when_unresolved() {
+        let dir = temp_dir("nix-identity-missing");
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic's stderr noise
+        let result = std::panic::catch_unwind(|| {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            hash_nix_extractor_identity(&dir, &mut h);
+            h.finish()
+        });
+        std::panic::set_hook(prev_hook);
+        assert!(
+            result.is_err(),
+            "an unresolvable nix producer identity must panic rather than silently \
+             returning a placeholder hash"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pins finding 3: a misspelled/missing `include = "…"` directory is a
+    /// compile error naming the offending path — never a silent empty
+    /// include.
+    #[test]
+    fn misspelled_include_directory_is_a_compile_error_naming_the_path() {
+        let dir = temp_dir("bad-include");
+        let bad_include = LitStr::new("definitely_missing_dir", proc_macro2::Span::call_site());
+        let result = collect_include_dirs(&dir, std::slice::from_ref(&bad_include));
+        let err_tokens =
+            result.expect_err("a missing include directory must be reported as a compile error");
+        let rendered = err_tokens.to_string();
+        assert!(
+            rendered.contains("definitely_missing_dir"),
+            "the compile error must name the offending path, got: {rendered}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

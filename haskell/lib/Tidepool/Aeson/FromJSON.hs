@@ -40,11 +40,10 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
-import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific, toBoundedInteger)
+import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific, floatingOrInteger)
 import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
-import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
 -- | The result of a structural decode: a typed value or an error message.
 data Result a = Error String | Success a
@@ -127,11 +126,12 @@ instance (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R c)) where
 instance GFromRecord U1 where
   gParseRecord _ = Success U1
 
--- Sum types: no field-name-keyed object form, but a NULLARY sum (every
--- constructor has no fields — an enum) decodes from its constructor-name
--- string via 'GSumNullaryFromJSON'. 'IsNullarySum' decides which branch of
--- 'GFromJSONSum' applies; a sum with any non-nullary constructor still hits
--- the ''False' branch's TypeError below.
+-- Sum types: an ALL-nullary sum (every constructor has no fields — an enum)
+-- decodes from its bare constructor-name string via 'GSumNullaryFromJSON',
+-- matching aeson's default `allNullaryToStringTag = True`. A sum with any
+-- non-nullary constructor falls to 'GFromJSONTaggedSum', aeson's default
+-- `TaggedObject` shape. 'IsNullarySum' decides which branch of
+-- 'GFromJSONSum' applies.
 instance GFromJSONSum (IsNullarySum (a :+: b)) (a :+: b) => GFromJSON (a :+: b) where
   gParseJSON = gParseJSONSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
 
@@ -157,10 +157,54 @@ class GFromJSONSum (allNullary :: Bool) f where
 instance GSumNullaryFromJSON f => GFromJSONSum 'True f where
   gParseJSONSum _ = gSumNullaryFromJSON
 
-instance TypeError ('Text "deriving FromJSON via GHC.Generics supports single-constructor records only; "
-                    ':<>: 'Text "this type has multiple constructors. Write an explicit FromJSON instance.")
-    => GFromJSONSum 'False f where
-  gParseJSONSum _ _ = error "unreachable: non-nullary sum FromJSON is a compile-time TypeError"
+-- | aeson's default `TaggedObject` shape: a JSON object with a `"tag"` field
+-- naming the constructor. A nullary constructor needs nothing else; a
+-- constructor with fields must be a RECORD (named selectors), whose fields
+-- are decoded from the SAME object alongside `"tag"` — matching upstream's
+-- "records are unpacked in the tagged object" TaggedObject behavior (aeson
+-- `parseNonAllNullarySum`/`FromTaggedObject'`'s `True` (record) instance —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+-- A non-record (positional-field) constructor is not supported: this
+-- module's product decoder is selector-name-keyed throughout (see
+-- 'GFromRecord'), so a positional field (whose GHC.Generics selector name is
+-- empty) fails cleanly with a "key not present" 'Error' rather than upstream's
+-- `"contents"`-nested form.
+instance GFromJSONTaggedSum f => GFromJSONSum 'False f where
+  gParseJSONSum _ = withObject "tagged sum" $ \o -> case Map.lookup tagKey o of
+    Just (String tag) -> case gFromJSONTaggedSum tag o of
+      Just r  -> r
+      Nothing -> badTag tag
+    Just v  -> Error ("tag field: expected string, got " ++ kindOf v)
+    Nothing -> Error ("key " ++ show (T.unpack tagKey) ++ " not present")
+    where
+      tagKey = T.pack "tag"
+      badTag tag = Error ("expected tag field to be one of " ++ show (gTaggedSumConNames (Proxy :: Proxy f)) ++
+                           ", but found tag " ++ show (T.unpack tag))
+
+-- | Match a `"tag"` value against each constructor in a sum, decoding the
+-- matched one's fields (if any) from the shared 'Object'. 'Nothing' means
+-- this branch's constructor name(s) didn't match — try the sibling branch.
+class GFromJSONTaggedSum f where
+  gFromJSONTaggedSum :: Text -> Object -> Maybe (Result (f a))
+  gTaggedSumConNames :: Proxy f -> [String]
+
+instance (GFromJSONTaggedSum a, GFromJSONTaggedSum b) => GFromJSONTaggedSum (a :+: b) where
+  gFromJSONTaggedSum tag o = case gFromJSONTaggedSum tag o of
+    Just r  -> Just (L1 <$> r)
+    Nothing -> case gFromJSONTaggedSum tag o of
+      Just r  -> Just (R1 <$> r)
+      Nothing -> Nothing
+  gTaggedSumConNames _ = gTaggedSumConNames (Proxy :: Proxy a) ++ gTaggedSumConNames (Proxy :: Proxy b)
+
+-- | A single constructor leaf: decode its fields (via 'GFromRecord', so a
+-- nullary constructor succeeds trivially and a record's named fields are
+-- read out of the same tagged object) once its name matches `tag`.
+instance (Constructor c, GFromRecord f) => GFromJSONTaggedSum (M1 C c f) where
+  gFromJSONTaggedSum tag o
+    | tag == T.pack name = Just (M1 <$> gParseRecord o)
+    | otherwise           = Nothing
+    where name = conName (M1 Proxy :: M1 C c Proxy ())
+  gTaggedSumConNames _ = [conName (M1 Proxy :: M1 C c Proxy ())]
 
 -- | Decode a nullary-constructors-only sum leaf/branch by matching a JSON
 -- string against each constructor's name. Only reachable once
@@ -230,22 +274,74 @@ instance FromJSON Double where
   parseJSON (Number s) = Success (toRealFloat s)
   parseJSON v          = mismatch "number" v
 
--- Integral values decode exactly (bounds-checked via 'toBoundedInteger' — an
--- out-of-'Int'-range integer is an 'Error', not a silent wraparound);
--- non-integral ones still truncate toward zero (unaffected by the bounds
--- check, which only applies to exact integers).
+-- Every 'Number' goes through 'toBoundedInteger': an exact integer within
+-- 'Int' range succeeds, and everything else — a fractional 'Scientific' or an
+-- exact integer outside 'Int' range — is an 'Error', mirroring aeson's
+-- bounded-integral parse, which fails a value that is "either floating or
+-- will cause over or underflow" (aeson `FromJSON` source,
+-- `parseBoundedIntegralFromScientific` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
 instance FromJSON Int where
-  parseJSON (Number s)
-    | s == fromInteger (truncateScientific s) =
-        case toBoundedInteger s of
-          Just i  -> Success i
-          Nothing -> Error ("Int out of range: " ++ show s)
-    | otherwise = Success (fromInteger (truncateScientific s))
+  parseJSON (Number s) = case toBoundedInteger s of
+    Just i  -> Success i
+    Nothing
+      | s == fromInteger (truncateScientific s) ->
+          Error ("Int out of range: " ++ show s)
+      | otherwise -> Error ("Int: not an integral value: " ++ show s)
   parseJSON v = mismatch "number" v
 
-instance FromJSON a => FromJSON [a] where
+-- | A JSON string of EXACTLY one character; a longer or empty string is an
+-- 'Error' (aeson `FromJSON Char`'s @parseChar@ —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance FromJSON Char where
+  parseJSON (String s)
+    | T.length s == 1 = Success (T.head s)
+    | otherwise        = Error "expected a string of length 1"
+  parseJSON v = mismatch "string" v
+
+-- | Unbounded: an exact integral 'Scientific' of any magnitude succeeds; a
+-- fractional value is an 'Error', via the same 'floatingOrInteger' split
+-- aeson's @parseIntegralFromScientific@ uses (aeson `FromJSON Integer`
+-- routes through `parseIntegral` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance FromJSON Integer where
+  parseJSON (Number s) = case floatingOrInteger s :: Either Double Integer of
+    Right i -> Success i
+    Left _  -> Error ("Integer: not an integral value: " ++ show s)
+  parseJSON v = mismatch "number" v
+
+-- | Bounded non-negative integral, same 'toBoundedInteger' shape as 'Int'
+-- above: negative, fractional, or out-of-range is an 'Error' (aeson
+-- `FromJSON Word` routes through `parseBoundedIntegral` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance FromJSON Word where
+  parseJSON (Number s) = case toBoundedInteger s of
+    Just w  -> Success w
+    Nothing
+      | s == fromInteger (truncateScientific s) ->
+          Error ("Word out of range: " ++ show s)
+      | otherwise -> Error ("Word: not an integral value: " ++ show s)
+  parseJSON v = mismatch "number" v
+
+-- | Same shape as the 'Double' instance above, at 'Float' (aeson
+-- `FromJSON Float` routes through `parseRealFloat` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance FromJSON Float where
+  parseJSON (Number s) = Success (toRealFloat s)
+  parseJSON v          = mismatch "number" v
+
+instance {-# OVERLAPPABLE #-} FromJSON a => FromJSON [a] where
   parseJSON (Array xs) = traverse parseJSON xs
   parseJSON v          = mismatch "array" v
+
+-- | Upstream aeson's @String@ instance decodes a JSON string directly, not an
+-- array of one-character strings — overlapping the general list instance
+-- above the same way 'Tidepool.Aeson.Value.ToJSON' @[Char]@ overlaps
+-- 'Tidepool.Aeson.Value.ToJSON' @[a]@
+-- (https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance {-# OVERLAPPING #-} FromJSON [Char] where
+  parseJSON (String s) = Success (T.unpack s)
+  parseJSON v          = mismatch "string" v
 
 instance FromJSON a => FromJSON (Maybe a) where
   parseJSON Null = Success Nothing
@@ -255,6 +351,57 @@ instance FromJSON a => FromJSON (Map.Map Text a) where
   parseJSON (Object o) = Map.foldrWithKey step (Success Map.empty) o
     where step k v acc = Map.insert (toText k) <$> parseJSON v <*> acc
   parseJSON v          = mismatch "object" v
+
+-- | An EMPTY array, and nothing else — a non-empty array or any other shape
+-- is an 'Error'. This pins aeson\'s 1.5.x @FromJSON ()@
+-- (https://hackage.haskell.org/package/aeson-1.5.6.0/docs/src/Data.Aeson.Types.FromJSON.html,
+-- @parseJSON = withArray \"()\" $ \\v -> if V.null v then pure () else fail
+-- \"expected an empty array\"@); aeson 2.x relaxed this to @parseJSON _ = pure
+-- ()@ (accepting any value), which is NOT what this instance mirrors.
+instance FromJSON () where
+  parseJSON (Array []) = Success ()
+  parseJSON v          = Error ("expected an empty array, got " ++ kindOf v)
+
+-- | A JSON ARRAY with an EXACT arity check — a 2-tuple rejects any array
+-- whose length isn't 2 (aeson `FromJSON2 (,)` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html,
+-- \"cannot unpack array of length N into a tuple of length 2\"). Tuple
+-- coverage stops at 5, matching the 'Tidepool.Aeson.Value.ToJSON' tuple
+-- instances already vendored in this module's sibling (upstream aeson goes
+-- to 15-tuples; not replicated here).
+instance (FromJSON a, FromJSON b) => FromJSON (a, b) where
+  parseJSON (Array [x1, x2]) = (,) <$> parseJSON x1 <*> parseJSON x2
+  parseJSON (Array xs) = Error ("cannot unpack array of length " ++ show (length xs) ++ " into a tuple of length 2")
+  parseJSON v = mismatch "array" v
+
+instance (FromJSON a, FromJSON b, FromJSON c) => FromJSON (a, b, c) where
+  parseJSON (Array [x1, x2, x3]) = (,,) <$> parseJSON x1 <*> parseJSON x2 <*> parseJSON x3
+  parseJSON (Array xs) = Error ("cannot unpack array of length " ++ show (length xs) ++ " into a tuple of length 3")
+  parseJSON v = mismatch "array" v
+
+instance (FromJSON a, FromJSON b, FromJSON c, FromJSON d) => FromJSON (a, b, c, d) where
+  parseJSON (Array [x1, x2, x3, x4]) = (,,,) <$> parseJSON x1 <*> parseJSON x2 <*> parseJSON x3 <*> parseJSON x4
+  parseJSON (Array xs) = Error ("cannot unpack array of length " ++ show (length xs) ++ " into a tuple of length 4")
+  parseJSON v = mismatch "array" v
+
+instance (FromJSON a, FromJSON b, FromJSON c, FromJSON d, FromJSON e) => FromJSON (a, b, c, d, e) where
+  parseJSON (Array [x1, x2, x3, x4, x5]) = (,,,,) <$> parseJSON x1 <*> parseJSON x2 <*> parseJSON x3 <*> parseJSON x4 <*> parseJSON x5
+  parseJSON (Array xs) = Error ("cannot unpack array of length " ++ show (length xs) ++ " into a tuple of length 5")
+  parseJSON v = mismatch "array" v
+
+-- | Upstream's object form: @{\"Left\": x}@ decodes to @Left x@,
+-- @{\"Right\": y}@ to @Right y@; anything else is an 'Error' (aeson
+-- `FromJSON2 Either` —
+-- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
+instance (FromJSON a, FromJSON b) => FromJSON (Either a b) where
+  parseJSON (Object o) = case Map.toList o of
+    [(k, v)] | k == T.pack "Left"  -> Left <$> parseJSON v
+             | k == T.pack "Right" -> Right <$> parseJSON v
+    _ -> eitherShapeError
+  parseJSON _ = eitherShapeError
+
+eitherShapeError :: Result a
+eitherShapeError = Error "expected an object with a single property where the property key should be either \"Left\" or \"Right\""
 
 -- | Required-field accessor: @o .: "name"@ looks up the key in a decoded
 -- 'Object' and decodes it, erroring if the key is absent. Use under

@@ -83,7 +83,7 @@ module Tidepool.Prelude
   , intercalate
   , joinText
   , tReverse
-    -- * Text takeWhile/dropWhile (shadows T.takeWhile/T.dropWhile to avoid PAP bug)
+    -- * Text takeWhile/dropWhile (thin aliases for T.takeWhile/T.dropWhile)
   , takeWhileT
   , dropWhileT
     -- * Polymorphic typeclasses (work on both Text and [a])
@@ -140,7 +140,7 @@ module Tidepool.Prelude
     -- * Char predicates & conversions
   , ord, chr, fromEnum, succ, pred, toEnum
   , isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower
-  , digitToInt, toLowerChar, toUpperChar
+  , digitToInt, digitToIntMay, toLowerChar, toUpperChar
     -- * Indexed list operations (safe alternatives to [0..])
   , zipWithIndex, imap, enumFromTo
     -- * Kleisli profunctor squad (monadic Arrow-style plumbing)
@@ -245,7 +245,7 @@ import Prelude
   , id, const, flip, (.), ($), ($!)
   , not, (&&), (||), otherwise, seq
   , fst, snd, curry, uncurry
-  , error, undefined
+  , error, errorWithoutStackTrace, undefined
   , maybe, either
   , map, foldl, foldr, foldMap
   , take, drop, zip, zipWith, unzip
@@ -369,18 +369,13 @@ toLower = T.toLower
 strip :: Text -> Text
 strip = T.strip
 
--- Delegates to T.splitOn, which compiles and runs cleanly under today's JIT.
--- HISTORY (2026-06-11): this was a "pure reimplementation" that round-tripped
--- the ENTIRE text through T.unpack and char-matched over [Char] — measured
--- ~83x slower than T.splitOn at 2KB and super-linear beyond (333ms vs 4ms;
--- a 70KB file-surgery eval timed out at 120s). The String detour predates the
--- specialization/lazy-closure/GC fixes that made the real text-package path
--- viable. Empty separator keeps the singleton-explosion semantics (T.splitOn
--- errors on "").
+-- Delegates wholly to T.splitOn, which compiles and runs cleanly under
+-- today's JIT (perf note, 2026-06-11: a prior String-detour reimplementation
+-- measured ~83x slower at 2KB and super-linear beyond — do not reintroduce
+-- it). An empty separator raises T.splitOn's own "Data.Text.splitOn: empty
+-- input" error rather than returning data.
 splitOn :: Text -> Text -> [Text]
-splitOn sep t
-  | T.null sep = map (\c -> T.pack [c]) (T.unpack t)
-  | otherwise  = T.splitOn sep t
+splitOn = T.splitOn
 
 replace :: Text -> Text -> Text -> Text
 replace = T.replace
@@ -910,15 +905,27 @@ isLower :: Char -> Bool
 isLower = C.isLower
 {-# INLINE isLower #-}
 
--- | Convert a digit character to its numeric value.
--- Returns -1 for non-digit characters (avoids pulling in error dictionaries).
+-- | Convert a hex digit character (@0-9@, @a-f@, @A-F@) to its numeric value;
+-- throws on any other character, mirroring @Data.Char.digitToInt@
+-- (https://hackage.haskell.org/package/base/docs/Data-Char.html#v:digitToInt).
+-- 'digitToIntMay' is the total form.
 digitToInt :: Char -> Int
 digitToInt c
   | c >= '0' && c <= '9' = ord c - ord '0'
   | c >= 'a' && c <= 'f' = ord c - ord 'a' + 10
   | c >= 'A' && c <= 'F' = ord c - ord 'A' + 10
-  | otherwise             = -1
+  | otherwise = errorWithoutStackTrace ("Char.digitToInt: not a digit " ++ P.show c)
 {-# INLINE digitToInt #-}
+
+-- | Total form of 'digitToInt': @Nothing@ for a non-hex-digit character
+-- instead of throwing.
+digitToIntMay :: Char -> Maybe Int
+digitToIntMay c
+  | c >= '0' && c <= '9' = Just (ord c - ord '0')
+  | c >= 'a' && c <= 'f' = Just (ord c - ord 'a' + 10)
+  | c >= 'A' && c <= 'F' = Just (ord c - ord 'A' + 10)
+  | otherwise             = Nothing
+{-# INLINE digitToIntMay #-}
 
 -- | Convert an ASCII character to lowercase.
 toLowerChar :: Char -> Char
