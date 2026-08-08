@@ -110,6 +110,16 @@ call, fits harness-lifecycle's scope).
   skipped the cheap check. Also: the dead node stays alive/busy in the
   exo tree even after pane teardown — there is NO operator lever to
   tombstone a node whose pane is gone (third confirmed liveness gap).
+  NAMED PATTERN (4 instances in one day, harness-lifecycle's framing):
+  **self-reports about environment and filesystem state are the class
+  that keeps being wrong — and the cheapest class to verify.** The
+  phantom twin; the phantom coexisting mechanism; the TL's own
+  addendum's phantom helper; a dev's "isolation done" contradicted by
+  the filesystem (no .cache/ in its worktree, and the default-path
+  checkpoint rewritten with the fixture fingerprint AFTER the claim).
+  Standing rule: environment/filesystem claims get MEASUREMENTS (a dir
+  that exists, an mtime that didn't move), never accepted as prose —
+  from agents at every level, root included.
   WATCHDOG VERDICT (end-to-end, timed): agent killed ~21:00 → ledger
   alive/busy, watchdog SILENT for 30 min (the human caught it by
   looking); pane killed ~21:30 (deliberate reclaim) → watchdog fired
