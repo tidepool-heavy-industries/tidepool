@@ -1481,6 +1481,24 @@ fn qq_json_exponent_overflow_rejected_not_wrapped() {
     fails_loudly_with_imports(QQ_IMPORTS, "pure [j|1e9999999|]", "too many digits");
 }
 
+/// MUST-NOT-BREAK companion to the probe above: `maxExponentDigits` counts
+/// SIGNIFICANT digits (leading zeros stripped first), so a cosmetically
+/// zero-padded exponent — 10 digit characters, magnitude 1 — is valid JSON
+/// (upstream aeson parses it without complaint) and must still PARSE, not
+/// get caught by the same guard that rejects genuine magnitude. `1e0000000001`
+/// denotes `1 * 10^1 = 10`. NOTE: per the TL's fold-before-verify
+/// instruction, this probe has not executed — the expected value is
+/// hand-derived (coefficient 1, exponent 1, canonical decimal render "10"),
+/// not confirmed by a run.
+#[test]
+fn qq_json_exponent_leading_zeros_still_parses() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure (renderJson [j|1e0000000001|])",
+        serde_json::json!("10"),
+    );
+}
+
 /// A raw (unescaped) control character inside a `[j|…|]` string literal is a
 /// compile-time error naming the offending code point — the JSON grammar the
 /// quoter advertises never allowed a literal control byte inside a string.

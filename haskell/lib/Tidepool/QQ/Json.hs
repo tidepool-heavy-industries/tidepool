@@ -297,7 +297,9 @@ pNumber = do
                    Just '-' -> nextC >> pure True
                    _        -> pure False
           ds  <- takeWhile1P isDigit "expected a digit in the exponent"
-          if length ds > maxExponentDigits
+          -- Count significant digits (leading zeros stripped): `1e0000000001`
+          -- is valid JSON denoting exponent 1, not a 10-digit magnitude.
+          if length (dropWhile (== '0') ds) > maxExponentDigits
             then fail ("exponent has too many digits (" ++ show (length ds) ++ "); JSON permits "
                        ++ "an arbitrarily large exponent, but this parser rejects one over "
                        ++ show maxExponentDigits ++ " digits rather than silently wrapping the "
@@ -306,11 +308,12 @@ pNumber = do
                  in pure (Just (if es then negate n else n))
         _ -> pure Nothing
 
--- | Exponent digit-count cap: keeps the narrowing @'fromInteger' :: Integer ->
--- 'Int'@ in 'pNumber''s exponent path from silently wrapping on a
--- pathological literal (e.g. @[j|1e99999999999999999999|]@, valid JSON
--- grammar). 6 digits (magnitude up to 999999) is orders of magnitude beyond
--- any real exponent while leaving Int's ~19-digit range no chance of overflow.
+-- | Exponent SIGNIFICANT-digit-count cap (leading zeros don't count — see the
+-- call site): keeps the narrowing @'fromInteger' :: Integer -> 'Int'@ in
+-- 'pNumber''s exponent path from silently wrapping on a pathological literal
+-- (e.g. @[j|1e99999999999999999999|]@, valid JSON grammar). 6 digits
+-- (magnitude up to 999999) is orders of magnitude beyond any real exponent
+-- while leaving Int's ~19-digit range no chance of overflow.
 maxExponentDigits :: Int
 maxExponentDigits = 6
 
