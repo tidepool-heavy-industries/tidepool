@@ -143,24 +143,31 @@ pub(crate) use helper_text;
 /// verb renders the bare result. A separate macro so the optional per-verb
 /// `errors` tag selects the arm.
 macro_rules! ctor_sig {
-    // errors-tagged: `<Ctor> :: <args> -> <Eff> (Either <Err> <ret>)`.
-    ({ $eff:ident, $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal, errors $everr:ident }) => {
+    // errors-tagged: `<Ctor> :: <args> -> <Eff> <tyParams…> (Either <Err> <ret>)`.
+    ({ $eff:ident, [ $($tp:ident),* $(,)? ], $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal, errors $everr:ident }) => {
         concat!(
             stringify!($ctor), " :: ",
             $($ah, " -> ",)*
-            stringify!($eff), " (Either ", stringify!($everr), " ", $ret, ")"
+            stringify!($eff), $(" ", stringify!($tp),)* " (Either ", stringify!($everr), " ", $ret, ")"
         )
     };
-    // plain: `<Ctor> :: <args> -> <Eff> <ret>`.
-    ({ $eff:ident, $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal }) => {
+    // plain: `<Ctor> :: <args> -> <Eff> <tyParams…> <ret>`.
+    ({ $eff:ident, [ $($tp:ident),* $(,)? ], $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal }) => {
         concat!(
             stringify!($ctor), " :: ",
             $($ah, " -> ",)*
-            stringify!($eff), " ", $ret
+            stringify!($eff), $(" ", stringify!($tp),)* " ", $ret
         )
     };
 }
 pub(crate) use ctor_sig;
+
+/// Render a definition's `type_params [v]` group as the `&'static [&'static
+/// str]` [`crate::EffectDecl::type_params`] field.
+macro_rules! ty_param_names {
+    ([ $($tp:ident),* $(,)? ]) => { &[ $(stringify!($tp)),* ] };
+}
+pub(crate) use ty_param_names;
 
 /// Render one variant of an `errors` ADT to `<Ctor> <hsField> …` (Haskell
 /// field types come from each field's `"<hs>" as <rust>` pair).
@@ -220,11 +227,41 @@ pub(crate) use error_decl_text;
 /// [`helper_text!`]. The `handler`/`req`/`method` facts (and the reserved
 /// `errors` slot) are Rust-side and ignored here.
 macro_rules! effect_decl_projection {
+    // An unparameterized effect (all but `Finalize`): forward to the arm below
+    // with an empty type-parameter list. Two arms rather than one optional
+    // slot because the parameters are consumed INSIDE the per-constructor
+    // repetition (each constructor's result type is the applied head,
+    // `Finalize v a`), and macro_rules cannot nest an optional group there.
     (
         effect $eff:ident,
         handler $handler:ident,
         req $req:ident,
         decl_fn $decl_fn:ident,
+        description $desc:tt,
+        type_defs $td:tt,
+        $(errors $errname:ident $evariants:tt,)?
+        verbs $verbs:tt,
+        helpers $helpers:tt $(,)?
+    ) => {
+        crate::effect_defs::effect_decl_projection! {
+            effect $eff,
+            handler $handler,
+            req $req,
+            decl_fn $decl_fn,
+            type_params [] default_row_args [],
+            description $desc,
+            type_defs $td,
+            $(errors $errname $evariants,)?
+            verbs $verbs,
+            helpers $helpers,
+        }
+    };
+    (
+        effect $eff:ident,
+        handler $handler:ident,
+        req $req:ident,
+        decl_fn $decl_fn:ident,
+        type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
         $(errors $errname:ident [
@@ -247,7 +284,7 @@ macro_rules! effect_decl_projection {
                 description: concat!($($desc),*),
                 constructors: &[
                     $( crate::effect_defs::ctor_sig!(
-                        { $eff, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
+                        { $eff, $tps, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
                     ) ),*
                 ],
                 type_defs: &[
@@ -255,6 +292,8 @@ macro_rules! effect_decl_projection {
                     $( crate::effect_defs::error_decl_text!($errname $(, $evariant)*) )?
                 ],
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
+                type_params: crate::effect_defs::ty_param_names!($tps),
+                default_row_args: &[ $($dra),* ],
             }
         }
     };
@@ -814,6 +853,18 @@ macro_rules! finalize_effect_def {
             handler FinalizeHandler,
             req FinalizeReq,
             decl_fn finalize_decl,
+            // `Finalize` is TYPE-INDEXED by its answer type, exactly like
+            // `State s`: the row entry a turn compiles against is `Finalize T`
+            // for the hole's answer type `T`, so `Member (Finalize T) effs` —
+            // the row itself — is what admits `finalize @T x`. A wrong-typed
+            // answer is then a plain GHC error naming the row
+            // (`'Finalize Text' is not a member of '[…, Finalize Decision]'`),
+            // not a value that compiles and case-traps after crossing in-heap.
+            // The type argument is per-compile (an author type like `Decision`),
+            // supplied through `RowArgs`; `NoAnswer` is the default for a turn
+            // that is not answering a typed hole — uninhabited, so such a turn
+            // simply has no finalize capability, which is the true statement.
+            type_params [v] default_row_args ["NoAnswer"],
             description [
                 "Terminate the current Agent turn loop and hand a typed value UP to ",
                 "the parent `runLLMTurn` hole, in-heap (no JSON round-trip — the value ",
@@ -821,7 +872,8 @@ macro_rules! finalize_effect_def {
                 "resumes; the harness driver reads the value directly and resolves the ",
                 "parent hole via `run_child`.",
             ],
-            type_defs [],
+            // The uninhabited default answer type (see `type_params` above).
+            type_defs ["data NoAnswer"],
             verbs [
                 { ctor FinalizeWith, method finalize_with,
                   args { site: "Int" as i64, value: "v" as tidepool_eval::value::Value },
@@ -859,10 +911,10 @@ macro_rules! finalize_effect_def {
                 // (`splitTrailingArgs` + `stripNospecSpine`) that makes the
                 // `Member` dictionary argument transparent to the head-swap.
                 { raw ["{-# OPAQUE finalize #-}",
-                       "finalize :: forall v a effs. Member Finalize effs => v -> Eff effs a",
+                       "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a",
                        "finalize v = finalizeSited 0 v"] },
                 { raw ["{-# OPAQUE finalizeSited #-}",
-                       "finalizeSited :: forall v a effs. Member Finalize effs => Int -> v -> Eff effs a",
+                       "finalizeSited :: forall v a effs. Member (Finalize v) effs => Int -> v -> Eff effs a",
                        "finalizeSited sid v = send (FinalizeWith sid v)"] },
             ],
         }
@@ -1390,12 +1442,12 @@ mod tests {
     fn errors_grammar_ctor_sig_and_data_decl() {
         // errors-tagged verb wraps its result in `Either <Err>`.
         assert_eq!(
-            crate::effect_defs::ctor_sig!({ Fs, FsRead, ["Text"], "Text", errors FsError }),
+            crate::effect_defs::ctor_sig!({ Fs, [], FsRead, ["Text"], "Text", errors FsError }),
             "FsRead :: Text -> Fs (Either FsError Text)"
         );
         // plain verb is unchanged (the byte-identity path).
         assert_eq!(
-            crate::effect_defs::ctor_sig!({ Fs, FsExists, ["Text"], "Bool" }),
+            crate::effect_defs::ctor_sig!({ Fs, [], FsExists, ["Text"], "Bool" }),
             "FsExists :: Text -> Fs Bool"
         );
         // the error ADT renders `|`-separated with a Show/Eq deriving.
