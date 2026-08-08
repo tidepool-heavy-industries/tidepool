@@ -4,6 +4,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::debug::LambdaRegistry;
@@ -106,6 +107,17 @@ pub struct CodegenPipeline {
     /// Accumulated stats for the `LetNonRec` DCE probe in `emit_node_impl`.
     /// See [`DceScanStats`] for the snapshot-and-diff contract.
     pub dce_scan: DceScanStats,
+    /// String-intern arena for diagnostic strings (e.g. enclosing-function
+    /// names) that compiled code holds a raw pointer to.
+    ///
+    /// INVARIANT: this arena outlives all code compiled by this pipeline —
+    /// a pointer handed out by [`Self::intern_name`] is valid exactly as
+    /// long as `self` is alive. A `Box<str>`'s heap-allocated bytes don't
+    /// move when the `HashSet` rehashes (only the box handle does), so the
+    /// pointer stays stable across further `intern_name` calls. Deduped by
+    /// name, so N case sites in one function share one allocation, and
+    /// recompiling the same function doesn't grow the set.
+    name_arena: HashSet<Box<str>>,
 }
 
 impl CodegenPipeline {
@@ -163,7 +175,29 @@ impl CodegenPipeline {
             functions_defined: 0,
             blocks_emitted: 0,
             dce_scan: DceScanStats::default(),
+            name_arena: HashSet::new(),
         })
+    }
+
+    /// Intern `name` in the pipeline-owned arena, returning a raw pointer +
+    /// length valid for the pipeline's lifetime. Dedupes by name, so
+    /// repeated interning of the same name (e.g. multiple case sites in one
+    /// function, or recompiling the same function) returns the same
+    /// allocation instead of growing the arena.
+    pub fn intern_name(&mut self, name: &str) -> (*const u8, usize) {
+        if let Some(existing) = self.name_arena.get(name) {
+            return (existing.as_ptr(), existing.len());
+        }
+        let boxed: Box<str> = name.into();
+        let ptr = boxed.as_ptr();
+        let len = boxed.len();
+        self.name_arena.insert(boxed);
+        (ptr, len)
+    }
+
+    /// Number of distinct names currently interned. Test/diagnostic hook.
+    pub fn interned_name_count(&self) -> usize {
+        self.name_arena.len()
     }
 
     /// Session-lifetime count of Cranelift functions successfully compiled.
@@ -426,5 +460,35 @@ mod tests {
         let func: unsafe extern "C" fn(usize) -> i64 = unsafe { std::mem::transmute(ptr) };
         // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         assert_eq!(unsafe { func(0) }, 123);
+    }
+
+    #[test]
+    fn intern_name_dedupes_by_name_not_by_call_count() {
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+
+        // Simulate multiple case sites in the same function, across
+        // multiple "compiles" of that function (e.g. repeated calls in a
+        // long-lived server process): the arena must hold one entry per
+        // DISTINCT name, not one per call.
+        let (ptr_a1, len_a1) = pipeline.intern_name("foo");
+        let (ptr_a2, len_a2) = pipeline.intern_name("foo");
+        let (ptr_b, len_b) = pipeline.intern_name("bar");
+        let (ptr_a3, len_a3) = pipeline.intern_name("foo");
+
+        assert_eq!(pipeline.interned_name_count(), 2);
+        assert_eq!(ptr_a1, ptr_a2);
+        assert_eq!(ptr_a1, ptr_a3);
+        assert_eq!(len_a1, len_a2);
+        assert_eq!(len_a1, len_a3);
+        assert_ne!(ptr_a1, ptr_b);
+        assert_eq!(len_b, "bar".len());
+
+        // Interning ten more distinct names doesn't touch the existing two.
+        for i in 0..10 {
+            pipeline.intern_name(&format!("fn_{i}"));
+        }
+        assert_eq!(pipeline.interned_name_count(), 12);
+        let (ptr_a4, _) = pipeline.intern_name("foo");
+        assert_eq!(ptr_a1, ptr_a4, "rehashing must not move the interned bytes");
     }
 }

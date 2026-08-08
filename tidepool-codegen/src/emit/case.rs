@@ -420,13 +420,16 @@ fn emit_case_trap(
     data_alts: &[&Alt<usize>],
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
-    // Leak the enclosing-function name for the diagnostic (bounded by the
-    // number of case sites per compile; diagnostics-only).
-    let name_static: &'static str = Box::leak(fn_name.to_string().into_boxed_str());
-    let name_ptr = builder
-        .ins()
-        .iconst(types::I64, name_static.as_ptr() as i64);
-    let name_len = builder.ins().iconst(types::I64, name_static.len() as i64);
+    // Intern the enclosing-function name in the pipeline-owned arena
+    // (`CodegenPipeline::intern_name`) for the diagnostic: the pointer
+    // compiled code embeds must live exactly as long as the pipeline that
+    // owns the code referencing it, not `'static` — a long-lived server
+    // process compiles many machines, and a real `Box::leak` per case site
+    // would be unbounded over the process lifetime. Deduped by name, so N
+    // case sites in one function share one allocation.
+    let (name_ptr_raw, name_len_raw) = sess.pipeline.intern_name(fn_name);
+    let name_ptr = builder.ins().iconst(types::I64, name_ptr_raw as i64);
+    let name_len = builder.ins().iconst(types::I64, name_len_raw as i64);
     // Collect expected tags
     let tags: Vec<u64> = data_alts
         .iter()

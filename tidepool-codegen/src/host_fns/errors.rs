@@ -980,7 +980,10 @@ pub extern "C" fn runtime_shape_trap(
     let label = ShapeTrapKind::label(kind as u64);
     // Identify the enclosing compiled function (emit threads its name in).
     if fn_name_ptr != 0 && fn_name_len > 0 && fn_name_len < 4096 {
-        // SAFETY: emit leaks a 'static str and passes its exact ptr/len.
+        // SAFETY: emit interns the name in the pipeline-owned arena
+        // (`CodegenPipeline::intern_name`) and passes its exact ptr/len; the
+        // arena outlives all code compiled by that pipeline, so the pointer
+        // is valid for the lifetime of this call.
         let name = unsafe {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(
                 fn_name_ptr as *const u8,
