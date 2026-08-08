@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // The per-node durable log sits beside transcript.jsonl + state.json under
+    // The per-node durable log sits beside transcript.jsonl + checkpoint.json under
     // <cache>/selfharness/. LogWriter refuses to overwrite an existing run's
     // log, so each run gets a fresh timestamped file; tail the newest.
     let log_dir = persistence::default_log_path()
