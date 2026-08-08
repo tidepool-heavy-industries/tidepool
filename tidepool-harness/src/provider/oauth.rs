@@ -238,7 +238,9 @@ fn codex_http() -> Result<reqwest::Client, ProviderError> {
         reqwest::header::HeaderValue::from_static("codex_cli_rs"),
     );
     reqwest::Client::builder()
-        .user_agent(format!("codex_cli_rs/{CODEX_CLIENT_VERSION} (linux; x86_64)"))
+        .user_agent(format!(
+            "codex_cli_rs/{CODEX_CLIENT_VERSION} (linux; x86_64)"
+        ))
         .default_headers(headers)
         .build()
         .map_err(|e| ProviderError::Api(format!("http client build failed: {e}")))
@@ -278,7 +280,10 @@ pub async fn start_device_login(cfg: &OauthConfig) -> Result<DeviceCodeStart, Pr
     // `interval` may arrive as a number or a string; floor at 1s, default 5s.
     let interval_secs = v
         .get("interval")
-        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|x| {
+            x.as_u64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(5)
         .max(1);
     Ok(DeviceCodeStart {
@@ -389,7 +394,10 @@ pub async fn complete_device_login(
         + expires_in;
     let tokens = TokenSet {
         access_token,
-        id_token: v.get("id_token").and_then(|x| x.as_str()).map(str::to_string),
+        id_token: v
+            .get("id_token")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         refresh_token: v
             .get("refresh_token")
             .and_then(|x| x.as_str())
@@ -885,10 +893,7 @@ mod tests {
 
     #[test]
     fn parse_sse_empty_is_error() {
-        assert!(matches!(
-            parse_sse_response(""),
-            Err(ProviderError::Api(_))
-        ));
+        assert!(matches!(parse_sse_response(""), Err(ProviderError::Api(_))));
     }
 
     #[test]

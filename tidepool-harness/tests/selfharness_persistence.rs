@@ -136,15 +136,15 @@ async fn restart_resumes_from_persisted_state_not_initial_state() {
     let harness_source = source();
 
     // --- "Process 1": cycle 1, from initialState (no prior file). ---
-    let mut driver1 = fresh_driver(
-        vec![decision_reply("observe", "Medium")],
-        "process1",
-    );
+    let mut driver1 = fresh_driver(vec![decision_reply("observe", "Medium")], "process1");
     let outcome1 = driver1
         .run_one_cycle(&harness_source, None)
         .expect("cycle 1 (initialState)");
     assert_eq!(
-        outcome1.state_json.get("loopCount").and_then(|v| v.as_i64()),
+        outcome1
+            .state_json
+            .get("loopCount")
+            .and_then(|v| v.as_i64()),
         Some(1)
     );
     assert_eq!(
@@ -159,10 +159,7 @@ async fn restart_resumes_from_persisted_state_not_initial_state() {
 
     // --- "restart": brand-new driver, brand-new agent, nothing in-process
     // carried over except the file on disk. ---
-    let mut driver2 = fresh_driver(
-        vec![decision_reply("act", "High")],
-        "process2",
-    );
+    let mut driver2 = fresh_driver(vec![decision_reply("act", "High")], "process2");
     driver2.set_state_path(state_path.clone());
     assert_eq!(driver2.state_path(), state_path.as_path());
 
@@ -198,7 +195,10 @@ async fn restart_resumes_from_persisted_state_not_initial_state() {
     // loopCount/mode continue advancing from the RESTORED values (1/Deciding),
     // not reset to 0/Observing.
     assert_eq!(
-        outcome2.state_json.get("loopCount").and_then(|v| v.as_i64()),
+        outcome2
+            .state_json
+            .get("loopCount")
+            .and_then(|v| v.as_i64()),
         Some(2),
         "loopCount must continue from the persisted 1, not reset to 0 after 1, \
          got {:?}",

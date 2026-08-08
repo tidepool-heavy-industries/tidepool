@@ -81,7 +81,10 @@ impl SpliceProbeProvider {
     }
 
     fn set_harness(&self, harness: Arc<Harness>) {
-        self.harness.set(harness).ok().expect("set_harness called once");
+        self.harness
+            .set(harness)
+            .ok()
+            .expect("set_harness called once");
     }
 }
 
@@ -106,7 +109,7 @@ impl ModelProvider for SpliceProbeProvider {
                        \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
                        \x20 pure (toJSON n)\n\
                        ```"
-                    .to_string(),
+                .to_string(),
                 usage: usage(),
                 reasoning: None,
             }),
@@ -171,7 +174,9 @@ fn event_node(e: &Event) -> Option<NodeId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn splice_lands_in_childs_next_prompt_assembly() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -250,7 +255,11 @@ async fn splice_lands_in_childs_next_prompt_assembly() {
         .iter()
         .filter(|e| matches!(e, Event::TurnSpliced { .. }))
         .collect();
-    assert_eq!(spliced.len(), 1, "exactly one splice landed on the child, got {spliced:?}");
+    assert_eq!(
+        spliced.len(),
+        1,
+        "exactly one splice landed on the child, got {spliced:?}"
+    );
     let Event::TurnSpliced { content, role, .. } = spliced[0] else {
         unreachable!()
     };

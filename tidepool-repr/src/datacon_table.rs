@@ -174,7 +174,10 @@ impl DataConTable {
         // re-sort the current bucket, even when `id` was already in it — an
         // overwrite (`insert` overwrites by id) may have changed its tag.
         if type_name_changed {
-            self.by_type_name.entry(type_name.clone()).or_default().push(id);
+            self.by_type_name
+                .entry(type_name.clone())
+                .or_default()
+                .push(id);
         }
         if let Some(bucket) = self.by_type_name.get_mut(&type_name) {
             let by_id = &self.by_id;
@@ -249,7 +252,10 @@ impl DataConTable {
     /// constructor set, in declaration order. Empty when no constructor was
     /// recorded against that type name.
     pub fn constructors_of_type(&self, type_name: &str) -> Vec<DataConId> {
-        self.by_type_name.get(type_name).cloned().unwrap_or_default()
+        self.by_type_name
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Find a constructor by name+arity that is a type-sibling of `known_id`.
@@ -364,7 +370,13 @@ mod tests {
         }
     }
 
-    fn make_datacon_typed(id: u64, name: &str, tag: u32, rep_arity: u32, type_name: &str) -> DataCon {
+    fn make_datacon_typed(
+        id: u64,
+        name: &str,
+        tag: u32,
+        rep_arity: u32,
+        type_name: &str,
+    ) -> DataCon {
         DataCon {
             id: DataConId(id),
             name: name.to_string(),

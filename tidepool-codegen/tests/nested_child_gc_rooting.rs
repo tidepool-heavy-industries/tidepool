@@ -223,9 +223,14 @@ fn suspend_parent(
                 "the suspension request must carry the ask payload"
             );
         }
-        SuspendableOutcome::Completed(_) => panic!("parent should suspend at the ask, not complete"),
+        SuspendableOutcome::Completed(_) => {
+            panic!("parent should suspend at the ask, not complete")
+        }
     }
-    assert!(machine.is_suspended(), "machine must be suspended after the ask");
+    assert!(
+        machine.is_suspended(),
+        "machine must be suspended after the ask"
+    );
     assert_eq!(
         machine.stowed_roots_count(),
         0,
@@ -259,7 +264,12 @@ fn child_gc_then_parent_resumes_and_captured_survives() {
             // parent's continuation is GC-rooted for the child's duration.
             let gc_before = tidepool_codegen::host_fns::gc_trigger_call_count();
             let child = machine
-                .add_function("gc_child", &build_gc_forcing_fragment(150), &table, &ExternalEnv::new())
+                .add_function(
+                    "gc_child",
+                    &build_gc_forcing_fragment(150),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add child fragment");
             // While the child runs, the stowed root is registered.
             let _ = machine
@@ -278,13 +288,22 @@ fn child_gc_then_parent_resumes_and_captured_survives() {
                 0,
                 "stowed root must be deregistered after the child completes"
             );
-            assert!(machine.is_suspended(), "parent stays suspended across the child run");
+            assert!(
+                machine.is_suspended(),
+                "parent stays suspended across the child run"
+            );
 
             // Resume the parent with answer 5 and deep-verify: the continuation
             // must produce Pair(C1 777, C1 5) — captured=777 survived the child
             // GC (evacuated via the stowed root), answer=5 threaded through.
             let out = machine
-                .resume_suspended(&table, &mut NoDispatch, &(), ASK_TAG, ResumeInput::Answer(Value::Lit(Literal::LitInt(5))))
+                .resume_suspended(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ASK_TAG,
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(5))),
+                )
                 .expect("parent resumes after the child GC");
             match out {
                 SuspendableOutcome::Completed(v) => assert_pair_result(&v, 777, 5),
@@ -321,7 +340,12 @@ fn child_heap_doubling_then_parent_resumes() {
 
             let gc_before = tidepool_codegen::host_fns::gc_trigger_call_count();
             let child = machine
-                .add_function("doubling_child", &build_gc_forcing_fragment(200), &table, &ExternalEnv::new())
+                .add_function(
+                    "doubling_child",
+                    &build_gc_forcing_fragment(200),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add doubling child");
             let _ = machine
                 .run_child_fragment_pure(child)
@@ -334,7 +358,13 @@ fn child_heap_doubling_then_parent_resumes() {
             // Resume: captured=12345 survived doubling (each doubling pass
             // re-evacuates and re-updates every root, including the stowed one).
             let out = machine
-                .resume_suspended(&table, &mut NoDispatch, &(), ASK_TAG, ResumeInput::Answer(Value::Lit(Literal::LitInt(9))))
+                .resume_suspended(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ASK_TAG,
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(9))),
+                )
                 .expect("parent resumes after child heap doubling");
             match out {
                 SuspendableOutcome::Completed(v) => assert_pair_result(&v, 12345, 9),
@@ -377,14 +407,27 @@ fn child_decl_accretion_is_inert_for_parent() {
                 let r = machine
                     .run_child_fragment_pure(child)
                     .expect("accretion child runs");
-                assert_eq!(expect_int(&r), 1000 + i, "each child computes its own value");
-                assert!(machine.is_suspended(), "parent stays suspended across accretion");
+                assert_eq!(
+                    expect_int(&r),
+                    1000 + i,
+                    "each child computes its own value"
+                );
+                assert!(
+                    machine.is_suspended(),
+                    "parent stays suspended across accretion"
+                );
             }
 
             // The parent resumes: its continuation is untouched by the accreted
             // module functions (module accretion is inert for the parent).
             let out = machine
-                .resume_suspended(&table, &mut NoDispatch, &(), ASK_TAG, ResumeInput::Answer(Value::Lit(Literal::LitInt(8))))
+                .resume_suspended(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ASK_TAG,
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(8))),
+                )
                 .expect("parent resumes after child decl accretion");
             match out {
                 SuspendableOutcome::Completed(v) => assert_pair_result(&v, 4242, 8),
@@ -443,7 +486,13 @@ fn bottom_answer_does_not_consume_the_continuation() {
                 "a rejected bottom answer must leave the continuation stowed"
             );
             let out = machine
-                .resume_suspended(&table, &mut NoDispatch, &(), ASK_TAG, ResumeInput::Answer(Value::Lit(Literal::LitInt(3))))
+                .resume_suspended(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ASK_TAG,
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
+                )
                 .expect("a valid answer resumes after a rejected bottom");
             match out {
                 SuspendableOutcome::Completed(v) => assert_pair_result(&v, 555, 3),
@@ -475,7 +524,12 @@ fn plain_run_entry_while_suspended_still_panics() {
             // continuation is stowed and UNregistered; running a plain entry
             // would be the illegal state the L7 asserts reject.
             let frag = machine
-                .add_function("plain_while_suspended", &build_value_fragment(0), &table, &ExternalEnv::new())
+                .add_function(
+                    "plain_while_suspended",
+                    &build_value_fragment(0),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add plain fragment");
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = machine.run_fragment_pure(frag);
@@ -509,15 +563,22 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
             // 1. Bootstrap a session machine with the SUSPENDING entry (so its
             //    ConTags seed and its run is the suspendable one).
             let entry = build_suspending_parent(9090, 6);
-            let mut machine = JitEffectMachine::compile_session(&entry, &table, 2048)
-                .expect("compile_session");
+            let mut machine =
+                JitEffectMachine::compile_session(&entry, &table, 2048).expect("compile_session");
 
             // 2. BEFORE suspending, bind a value into old-space via the value
             //    plane (tenure → RootSlot → persistent root).
             let bind_frag = machine
-                .add_function("bind_v", &build_value_fragment(31337), &table, &ExternalEnv::new())
+                .add_function(
+                    "bind_v",
+                    &build_value_fragment(31337),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add bind fragment");
-            let slot = machine.run_pure_and_bind(bind_frag).expect("bind the value");
+            let slot = machine
+                .run_pure_and_bind(bind_frag)
+                .expect("bind the value");
             assert_eq!(machine.persistent_roots_count(), 1);
             let tenured_before = unsafe { slot.current() };
 
@@ -533,9 +594,16 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
             //    the stowed continuation (stowed root) must survive.
             let gc_before = tidepool_codegen::host_fns::gc_trigger_call_count();
             let child = machine
-                .add_function("v_gc_child", &build_gc_forcing_fragment(120), &table, &ExternalEnv::new())
+                .add_function(
+                    "v_gc_child",
+                    &build_gc_forcing_fragment(120),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add child");
-            let _ = machine.run_child_fragment_pure(child).expect("child GC run");
+            let _ = machine
+                .run_child_fragment_pure(child)
+                .expect("child GC run");
             assert!(
                 tidepool_codegen::host_fns::gc_trigger_call_count() > gc_before,
                 "child must force a real GC"
@@ -543,14 +611,28 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
 
             // Tenured value is in old-space (outside the minor-GC from-range), so
             // its slot address is unchanged; the persistent root survived.
-            assert_eq!(unsafe { slot.current() }, tenured_before, "tenured value not relocated by minor GC");
-            assert_eq!(machine.persistent_roots_count(), 1, "persistent root survives the child GC");
+            assert_eq!(
+                unsafe { slot.current() },
+                tenured_before,
+                "tenured value not relocated by minor GC"
+            );
+            assert_eq!(
+                machine.persistent_roots_count(),
+                1,
+                "persistent root survives the child GC"
+            );
 
             // 5. Resume the parent; then read the binding through an ExternalEnv
             //    fragment against the retained heap — proving the value plane
             //    survived the whole suspend/child-GC/resume round-trip.
             let out = machine
-                .resume_suspended(&table, &mut NoDispatch, &(), ASK_TAG, ResumeInput::Answer(Value::Lit(Literal::LitInt(6))))
+                .resume_suspended(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ASK_TAG,
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(6))),
+                )
                 .expect("parent resumes");
             match out {
                 SuspendableOutcome::Completed(v) => assert_pair_result(&v, 9090, 6),
@@ -564,7 +646,9 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
             let read_frag = machine
                 .add_function("read_v", &build_reference_fragment(x), &table, &env)
                 .expect("add read fragment");
-            let read = machine.run_fragment_pure(read_frag).expect("read the binding post-resume");
+            let read = machine
+                .run_fragment_pure(read_frag)
+                .expect("read the binding post-resume");
             assert_eq!(
                 expect_int(&read),
                 31337,

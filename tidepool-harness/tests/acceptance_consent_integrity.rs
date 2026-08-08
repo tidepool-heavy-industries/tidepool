@@ -69,7 +69,9 @@ fn event_node(e: &Event) -> Option<NodeId> {
 
 fn all_events(log_path: &std::path::Path) -> Vec<Event> {
     let (_h, events) = LogReader::open(log_path).expect("open log");
-    events.map(|r| r.expect("well-formed record").event).collect()
+    events
+        .map(|r| r.expect("well-formed record").event)
+        .collect()
 }
 
 /// A real `runLLMTurnFork @Int` REQUEST — compiled and run through the
@@ -169,8 +171,14 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
     assert_ne!(child, root);
 
     let events = all_events(&log_path);
-    let child_events: Vec<&Event> = events.iter().filter(|e| event_node(e) == Some(child)).collect();
-    assert!(!child_events.is_empty(), "the forced child must now have events");
+    let child_events: Vec<&Event> = events
+        .iter()
+        .filter(|e| event_node(e) == Some(child))
+        .collect();
+    assert!(
+        !child_events.is_empty(),
+        "the forced child must now have events"
+    );
     assert!(
         matches!(child_events[0], Event::NodeCreated { .. }),
         "the child's FIRST event is NodeCreated, got {:?}",
@@ -186,7 +194,10 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
         .expect("child must have a Forced event");
     for e in &child_events[..forced_idx] {
         assert!(
-            !matches!(e, Event::TurnStart { .. } | Event::Effect { .. } | Event::HolePublished { .. }),
+            !matches!(
+                e,
+                Event::TurnStart { .. } | Event::Effect { .. } | Event::HolePublished { .. }
+            ),
             "no turn/effect/hole event before the child's own Forced event: {e:?}"
         );
     }

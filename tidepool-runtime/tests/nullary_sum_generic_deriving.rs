@@ -49,7 +49,11 @@ fn generic_tojson_enum_emits_constructor_name() {
          result = toJSON Deciding\n"
     );
     if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!("Deciding"), "enum constructor encodes as its bare name string")
+        assert_eq!(
+            v,
+            json!("Deciding"),
+            "enum constructor encodes as its bare name string"
+        )
     }
 }
 
@@ -66,7 +70,11 @@ fn generic_fromjson_enum_decodes_from_name() {
          \x20 Error _ -> False\n"
     );
     if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "\"Acting\" decodes to the Acting constructor")
+        assert_eq!(
+            v,
+            json!(true),
+            "\"Acting\" decodes to the Acting constructor"
+        )
     }
 }
 
@@ -85,7 +93,11 @@ fn round_trip_enum_all_constructors() {
          result = roundTrips Observing && roundTrips Deciding && roundTrips Acting\n"
     );
     if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "every constructor round-trips through toJSON/fromJSON")
+        assert_eq!(
+            v,
+            json!(true),
+            "every constructor round-trips through toJSON/fromJSON"
+        )
     }
 }
 
@@ -102,7 +114,11 @@ fn unknown_string_returns_error() {
          \x20 Error _ -> 0\n"
     );
     if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(0), "unrecognized constructor name decodes to Error (0), not a crash")
+        assert_eq!(
+            v,
+            json!(0),
+            "unrecognized constructor name decodes to Error (0), not a crash"
+        )
     }
 }
 

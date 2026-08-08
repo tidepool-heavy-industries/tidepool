@@ -71,7 +71,9 @@ fn reply(content: &str) -> RecordedReply {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declaration_persists_into_the_next_turn() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 

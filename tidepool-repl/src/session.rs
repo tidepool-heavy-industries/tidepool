@@ -20,8 +20,8 @@ use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::SuspendableOutcome;
 use tidepool_codegen::old_space::RootSlot;
-use tidepool_eval::value::Value;
 use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_eval::value::Value;
 use tidepool_mcp::{
     first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
     CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL,
@@ -617,7 +617,10 @@ impl Session {
                 // Otherwise the decl failure is a real error (collision / type)
                 // — surface it rather than materialize a broken binding.
                 let err_str = e.to_string();
-                let refs_materialized_value = self.core.bindings().iter_current()
+                let refs_materialized_value = self
+                    .core
+                    .bindings()
+                    .iter_current()
                     .any(|(n, _)| mentions_word(expr_text, &n.0));
                 // Whole-word `input` (GHC: "Variable not in scope: input :: Value"),
                 // never `inputText`/`input'` — check the char after the match is not
@@ -671,7 +674,10 @@ impl Session {
     /// Shared by `run_def` and the whole-block decl-batch path. `text` is the
     /// decl item's source, used to gate the type probe to VALUE bindings.
     fn defined_outcome(&mut self, text: &str, head: String, gen: Generation) -> TurnOutcome {
-        let mut stale: Vec<String> = self.core.bindings().iter_current()
+        let mut stale: Vec<String> = self
+            .core
+            .bindings()
+            .iter_current()
             .filter(|(_, e)| {
                 e.defining_expr
                     .as_deref()
@@ -820,7 +826,10 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let mut imports = self.core.lib().current_module()
+        let mut imports = self
+            .core
+            .lib()
+            .current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
         // Same per-turn quasi-quoter gating as `turn_imports` (this path
@@ -1030,7 +1039,10 @@ impl Session {
         // bool; the tier is the source of truth — derive the flag here, expand
         // the same tier back to a `BoundValue` via `bound_value`.)
         let env = self.core.seed_external_env();
-        let fid = match self.core.add_fragment_session("repl_bind", &turn.expr, &env) {
+        let fid = match self
+            .core
+            .add_fragment_session("repl_bind", &turn.expr, &env)
+        {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT bind add_function error", e)),
         };
@@ -1636,7 +1648,12 @@ impl Session {
             }
             MetaCommand::Info(name) => {
                 // 1. Bound value lookup (highest priority — a session binding shadows types).
-                if let Some((_, entry)) = self.core.bindings().iter_current().find(|(n, _)| n.0 == *name) {
+                if let Some((_, entry)) = self
+                    .core
+                    .bindings()
+                    .iter_current()
+                    .find(|(n, _)| n.0 == *name)
+                {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
                         "type": entry.type_display.clone().unwrap_or_default(),
@@ -1850,9 +1867,26 @@ impl Session {
     /// way GHCi shadowing would. (BUG-7 + the verb/value-plane collision class.)
     fn patched_preamble(&self) -> String {
         let mut names: Vec<String> = Vec::new();
-        names.extend(self.core.lib().decl_value_names().into_iter().map(str::to_string));
-        names.extend(self.core.lib().decl_type_names().into_iter().map(str::to_string));
-        names.extend(self.core.bindings().iter_current().map(|(n, _)| n.0.clone()));
+        names.extend(
+            self.core
+                .lib()
+                .decl_value_names()
+                .into_iter()
+                .map(str::to_string),
+        );
+        names.extend(
+            self.core
+                .lib()
+                .decl_type_names()
+                .into_iter()
+                .map(str::to_string),
+        );
+        names.extend(
+            self.core
+                .bindings()
+                .iter_current()
+                .map(|(n, _)| n.0.clone()),
+        );
         names.sort();
         names.dedup();
         if names.is_empty() {
@@ -1935,7 +1969,11 @@ impl Session {
         };
         if let Ok(turn) = compiled {
             let _ = self.merge_table(&turn.table);
-            if self.core.bootstrap_if_needed(&turn.expr, &turn.table).is_ok() {
+            if self
+                .core
+                .bootstrap_if_needed(&turn.expr, &turn.table)
+                .is_ok()
+            {
                 self.publish_cancel();
             }
         }

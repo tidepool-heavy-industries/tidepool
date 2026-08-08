@@ -318,7 +318,10 @@ mod tests {
         let mut table = DataConTable::new();
         table.insert(nullary(1, "GO", 1, "Verdict"));
         table.insert(nullary(2, "NOGO", 2, "Verdict"));
-        assert_eq!(defining_module(&table, "Verdict"), Some("Verdict".to_string()));
+        assert_eq!(
+            defining_module(&table, "Verdict"),
+            Some("Verdict".to_string())
+        );
         assert_eq!(defining_module(&table, "NoSuchType"), None);
     }
 

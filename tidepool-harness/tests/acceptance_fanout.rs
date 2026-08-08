@@ -75,7 +75,9 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_of_three_preserves_order_across_a_retry() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -207,7 +209,9 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -284,7 +288,9 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -332,7 +338,8 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
 
     let child = NodeId(1);
     let fan_harness = harness.clone();
-    let fan_task = tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
+    let fan_task =
+        tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
 
     // Poll for the escalation to appear (rung 1 exhausted, parked on rung 2)
     // — bounded so a regression that never escalates fails the test instead
@@ -346,7 +353,9 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
         tokio::time::sleep(Duration::from_millis(5)).await;
         waited += Duration::from_millis(5);
     }
-    let escalation = harness.escalation_of(child).expect("just observed Some above");
+    let escalation = harness
+        .escalation_of(child)
+        .expect("just observed Some above");
     assert!(
         escalation.reason.contains("cap-exhausted"),
         "escalation reason should name cap exhaustion: {}",
@@ -372,7 +381,10 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
 
     // The failing child is CANCELLED, not leaked Running.
     assert!(
-        matches!(harness.tree().state(child), Some(NodeState::Cancelled { .. })),
+        matches!(
+            harness.tree().state(child),
+            Some(NodeState::Cancelled { .. })
+        ),
         "the aborted child must be Cancelled, got {:?}",
         harness.tree().state(child)
     );

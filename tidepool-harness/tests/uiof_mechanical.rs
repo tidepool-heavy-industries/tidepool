@@ -64,7 +64,9 @@ fn verdict_lib_dir() -> tempfile::TempDir {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mechanical_choice_answer_resumes_run_llm_turn_to_completion() {
     if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)");
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
         return;
     }
 
@@ -89,7 +91,7 @@ async fn mechanical_choice_answer_resumes_run_llm_turn_to_completion() {
                   \x20 v <- runLLMTurn @Verdict \"pick GO, PARTIAL, or NOGO\"\n\
                   \x20 pure (toJSON (show v))\n\
                   ```"
-            .to_string(),
+        .to_string(),
         usage: Usage {
             input_tokens: 50,
             output_tokens: 20,

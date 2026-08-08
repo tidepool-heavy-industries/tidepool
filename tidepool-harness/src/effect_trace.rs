@@ -56,7 +56,9 @@ impl<H: DispatchEffect<CapturedOutput>> DispatchEffect<CapturedOutput> for Traci
         let req = tidepool_runtime::value_to_json(request, cx.table(), TRACE_JSON_DEPTH);
         let result = self.inner.dispatch(tag, request, cx);
         let resp = match &result {
-            Ok(Response::Complete(v)) => tidepool_runtime::value_to_json(v, cx.table(), TRACE_JSON_DEPTH),
+            Ok(Response::Complete(v)) => {
+                tidepool_runtime::value_to_json(v, cx.table(), TRACE_JSON_DEPTH)
+            }
             Ok(Response::Stream(_)) => serde_json::json!("<stream>"),
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         };

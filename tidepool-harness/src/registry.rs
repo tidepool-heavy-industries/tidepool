@@ -502,10 +502,7 @@ mod tests {
         let reg = SessionRegistry::new();
         let id = SessionId(6);
         reg.insert_idle(id, FakeMachine { turns: 0 });
-        assert_eq!(
-            err(reg.checkout_child(id)),
-            CheckoutError::NotSuspended(id)
-        );
+        assert_eq!(err(reg.checkout_child(id)), CheckoutError::NotSuspended(id));
     }
 
     #[test]

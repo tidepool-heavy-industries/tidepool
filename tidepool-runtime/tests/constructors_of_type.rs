@@ -24,7 +24,11 @@ target = GO
     let ids = table.constructors_of_type("Verdict");
     let names: Vec<&str> = ids
         .iter()
-        .map(|&id| table.name_of(id).expect("id from constructors_of_type must resolve"))
+        .map(|&id| {
+            table
+                .name_of(id)
+                .expect("id from constructors_of_type must resolve")
+        })
         .collect();
 
     assert_eq!(

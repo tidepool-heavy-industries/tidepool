@@ -516,7 +516,14 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_with_table");
-        S::run_fragment(machine, func_id, run_table, handlers, captured, self.ask_tag)
+        S::run_fragment(
+            machine,
+            func_id,
+            run_table,
+            handlers,
+            captured,
+            self.ask_tag,
+        )
     }
 
     /// Drive a fragment (already added) to the first boundary against the
@@ -542,7 +549,14 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_session");
-        S::run_fragment(machine, func_id, session_table, handlers, captured, *ask_tag)
+        S::run_fragment(
+            machine,
+            func_id,
+            session_table,
+            handlers,
+            captured,
+            *ask_tag,
+        )
     }
 
     /// Run a PURE fragment (no effect tree) to a value against the accumulated
@@ -602,7 +616,13 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_projected");
-        machine.run_fragment_and_bind_projected(func_id, session_table, handlers, captured, n_fields)
+        machine.run_fragment_and_bind_projected(
+            func_id,
+            session_table,
+            handlers,
+            captured,
+            n_fields,
+        )
     }
 
     /// Bind-and-render sibling of [`Self::bind_funcid`]: run the fragment ONCE,
@@ -628,7 +648,13 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_render");
-        machine.run_fragment_and_bind_render(func_id, session_table, handlers, captured, field0_forced)
+        machine.run_fragment_and_bind_render(
+            func_id,
+            session_table,
+            handlers,
+            captured,
+            field0_forced,
+        )
     }
 
     // -- value-plane bookkeeping (delegating over the two planes) ----------
@@ -648,7 +674,11 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     /// so already-compiled fragments / closure captures keep resolving. Includes
     /// shadowed older gens.
     pub fn live_val_modules(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.bindings.live_modules().map(|m| m.module_name()).collect();
+        let mut v: Vec<String> = self
+            .bindings
+            .live_modules()
+            .map(|m| m.module_name())
+            .collect();
         v.sort();
         v.dedup();
         v

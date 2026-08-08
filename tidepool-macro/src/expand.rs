@@ -570,10 +570,7 @@ fn run_tidepool_extract(
             // (and passed the `is_file` check above, so this is a race —
             // e.g. removed between check and spawn). Either way: fail loud,
             // never silently fall back to a different binary.
-            return Err(format!(
-                "failed to spawn {}: {e}",
-                extract_bin.display()
-            ));
+            return Err(format!("failed to spawn {}: {e}", extract_bin.display()));
         }
     }
 

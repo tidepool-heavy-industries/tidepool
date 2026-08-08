@@ -213,7 +213,10 @@ fn corrupt_middle_line_is_a_read_error_not_silent_truncation() {
     );
     let target = 2; // header is lines[0]; corrupt an early event line.
     let corrupted = lines[target].replace('{', "#");
-    assert_ne!(corrupted, lines[target], "corruption must actually change the line");
+    assert_ne!(
+        corrupted, lines[target],
+        "corruption must actually change the line"
+    );
     lines[target] = corrupted;
     let mut rewritten = lines.join("\n");
     rewritten.push('\n');

@@ -108,7 +108,9 @@ pub enum TreeError {
     },
     #[error("node {0:?} is already terminal (state: {1:?})")]
     AlreadyTerminal(NodeId, NodeState),
-    #[error("node {0:?} cannot be reopened for a follow-up (state: {1:?}); only a Done node continues")]
+    #[error(
+        "node {0:?} cannot be reopened for a follow-up (state: {1:?}); only a Done node continues"
+    )]
     NotReopenable(NodeId, NodeState),
     #[error("event log write failed: {0}")]
     Log(#[from] WriteError),
@@ -559,7 +561,11 @@ impl<M> NodeTree<M> {
     /// probe. Returns up to `limit` ids strictly greater than `cursor`
     /// (`None` starts from the beginning), plus the next cursor to pass back
     /// for the following page (`None` once the page reaches the end).
-    pub fn node_ids_after(&self, cursor: Option<NodeId>, limit: usize) -> (Vec<NodeId>, Option<NodeId>) {
+    pub fn node_ids_after(
+        &self,
+        cursor: Option<NodeId>,
+        limit: usize,
+    ) -> (Vec<NodeId>, Option<NodeId>) {
         let inner = self.inner.lock();
         let start = cursor.map(|c| c.0.saturating_add(1)).unwrap_or(0);
         let end = inner.next_node_id;
@@ -845,13 +851,25 @@ mod tests {
             .unwrap();
 
         // Running: accepted.
-        tree.turn_spliced(node, 0, crate::provider::Role::User, "operator says hi".into())
-            .unwrap();
+        tree.turn_spliced(
+            node,
+            0,
+            crate::provider::Role::User,
+            "operator says hi".into(),
+        )
+        .unwrap();
 
         // Suspended: also accepted (an operator can interject while a node
         // waits on a hole, same as a turn delta can be logged then).
-        tree.hole_published(node, HoleId("scont_1".into()), None, None, "?".into(), false)
-            .unwrap();
+        tree.hole_published(
+            node,
+            HoleId("scont_1".into()),
+            None,
+            None,
+            "?".into(),
+            false,
+        )
+        .unwrap();
         tree.turn_spliced(node, 1, crate::provider::Role::User, "still here".into())
             .unwrap();
 
