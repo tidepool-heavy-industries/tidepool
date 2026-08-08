@@ -2194,7 +2194,8 @@ binderQualName v = case isDataConId_maybe v of
   Just dc -> qualifiedName (varName (dataConWorkId dc))
   Nothing
     | isExternalName (varName v) -> qualifiedName (varName v)
-    | otherwise -> T.pack (occNameString (nameOccName (varName v)) ++ " (local)")
+    | otherwise -> T.pack (occNameString (nameOccName (varName v))
+                           ++ "#" ++ show (getKey (varUnique v)) ++ " (local)")
 
 -- | Build a varId -> list-position map from ordered (varId, qualified-name)
 -- pairs. Errors loudly when two entries share a varId but carry DIFFERENT
@@ -2202,6 +2203,12 @@ binderQualName v = case isDataConId_maybe v of
 -- otherwise silently drop one binding from a reachability DFS keyed on this
 -- map. Repeated entries for the SAME qualified name (the same entity
 -- reached more than once) are not a collision.
+--
+-- The names compared here come from 'qualifiedName', which applies
+-- 'moduleAliasTable'. Two bindings the table deliberately aliases therefore
+-- compare EQUAL and pass — which is the point for a correct alias (one
+-- entity, two spellings), and is why a wrong entry in that table is the one
+-- collision class this guard cannot see. Keep the table minimal.
 checkedKeyToIdx :: [(Word64, Text)] -> Map.Map Word64 Int
 checkedKeyToIdx pairs = Map.map fst (foldl' step Map.empty (zip [0 :: Int ..] pairs))
   where

@@ -49,7 +49,7 @@ main = do
       pathFileRead  = mkNm 2 (mkRecFieldOccFS (fsLit "FileRead") (fsLit "path"))
       plain    = mkNm 3 (mkVarOccFS (fsLit "path"))
 
-      -- E1: module-scoping checks for 'normalizeMod' / 'stableVarId' / 'checkedKeyToIdx'.
+      -- Module-scoping checks for 'normalizeMod' / 'stableVarId' / 'checkedKeyToIdx'.
       nmIn m u o = mkExternalName (mkUniqueGrimily u)
                      (mkModule (stringToUnit "main") (mkModuleName m)) (mkVarOccFS (fsLit o)) noSrcSpan
 
