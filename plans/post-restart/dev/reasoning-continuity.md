@@ -64,6 +64,29 @@ this defect deserves.
 5. Providers that never produce them (`ApiKeyProvider`, `ReplayProvider`) carry
    `None`/empty and are unaffected. Confirm `ReplayProvider` still round-trips.
 
+## Also in scope — the empty first user turn_delta (small, same file)
+
+Every answerer node's transcript and durable log opens with an EMPTY user
+turn: `{"ev":"turn_delta", "turn":0, "role":"user", "content":""}`.
+
+Cause, already traced — do not re-investigate: `selfharness/driver.rs`
+(~887) creates the answerer with `create_root_framed("loop answerer", "", …)`.
+The empty prompt is deliberate: an answerer's context comes from the `render`
+framing (its system message), not from a user turn. `create_root_framed`
+stashes that prompt in `seeds`, and `Harness::force_inner` then logs it
+**unconditionally** as `turn_delta(node, 0, Role::User, seed)`.
+
+Fix: skip the seed `turn_delta` when the seed is empty. A node with no opening
+prompt has no opening user turn — logging one is a false record, and it is the
+first line a person reads when tailing a run.
+
+Do NOT change `create_root_framed`'s signature or make the empty prompt an
+error: an intentionally-framing-only node is a legitimate shape, and the
+self-iterating harness depends on it.
+
+Pin it with a test asserting the answerer's log has no empty user turn_delta at
+turn 0, and that a node created WITH a prompt still logs it.
+
 ## Verify
 
 The live backend is not unit-testable. **The fixture-server tests in
