@@ -530,7 +530,12 @@ runTurnMode args path = do
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
             warnTexts   = map T.pack (prWarnings result)
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts "__result" "result"
+        -- The Core binding to look up. Scaffold-reserved by default, but a
+        -- caller whose template names its own target says so with --target
+        -- (the same knob 'processSessionFile' honours). The output file base
+        -- stays "result" regardless — every Rust caller reads result.cbor.
+        let targetName = fromMaybe "__result" (argTarget args)
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
         let wrapped = T.pack spliced
         case selector of
           "bind" -> do

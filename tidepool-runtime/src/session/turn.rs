@@ -243,6 +243,15 @@ pub struct TurnRequest<'a> {
     /// ([`classify_block`]). Forwarded as `--turn-verdict`, skipping the
     /// extract's internal re-parse.
     pub verdict: Option<TurnClassification>,
+    /// The Core binding a compiling template names as its target. `None`
+    /// means the extract's scaffold-reserved default (`__result`), which is
+    /// what a template authored for this path should use. Supply it only when
+    /// a template's target binder is fixed by a builder shared with another
+    /// path — `tidepool-harness`'s expression wrapper comes from
+    /// `tidepool_mcp::template_haskell`, which the stateless eval server also
+    /// uses and which names its target `result`. Forwarded as `--target`; the
+    /// output file base is `result.cbor` either way.
+    pub target: Option<&'a str>,
 }
 
 /// What a compiled (BIND or EXPR) turn yields. Grouped separately from
@@ -472,6 +481,9 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
         cmd.arg("--inject-val").arg(m);
     }
     cmd.arg("--bind-gen").arg(req.gen.to_string());
+    if let Some(target) = req.target {
+        cmd.arg("--target").arg(target);
+    }
     if let Some(arg) = verdict_arg {
         cmd.arg("--turn-verdict").arg(arg);
     }
@@ -1291,6 +1303,7 @@ mod tests {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
             }),
+            target: None,
         };
         let err = run_turn(req).unwrap_err();
         assert!(
@@ -1335,6 +1348,7 @@ mod tests {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
             }),
+            target: None,
         };
         let _ = run_turn(req);
 
@@ -1798,6 +1812,7 @@ mod tests {
                 inject_modules: &[],
                 gen: 0,
                 verdict: Some(old.clone()),
+                target: None,
             };
 
             match case.name {

@@ -434,6 +434,7 @@ impl SessionLib {
                 kind: TurnKind::Decl,
                 binders: Vec::new(),
             }),
+            target: None,
         })
         .map_err(compile_error_to_session_error)?;
         let items = match turn_result {
