@@ -68,7 +68,14 @@ fn compile_turn(
 ) -> Result<compile::CompiledTurn, compile::CompileError> {
     let cfg = answerer_cfg();
     let src = template_turn_for(&cfg.decls, &cfg, code, imports, "", finalize_ty);
-    compile::compile_turn(&cfg.extract_bin, &src, "result", &cfg.include)
+    compile::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &cfg.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    )
 }
 
 const GOOD_DECISION: &str = "(finalize @Decision (Decision { action = \"observe\", \
