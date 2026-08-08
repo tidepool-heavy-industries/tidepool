@@ -1,5 +1,6 @@
 pub mod case;
 pub mod expr;
+pub mod free_vars_index;
 pub mod join;
 pub mod primop;
 
@@ -109,6 +110,15 @@ pub struct EmitSession<'a> {
     /// Boxed-literal wrapper constructor ids for runtime Lit-tolerance in
     /// data-case dispatch. Copied verbatim into every nested session.
     pub lit_wrappers: LitWrapperIds,
+    /// Free-variable sets for every node index of `tree`, computed once when
+    /// this session was constructed. MUST be rebuilt (never carried over)
+    /// whenever `tree` changes — a nested Lam/Thunk body compiles against a
+    /// freshly extracted, re-indexed `CoreExpr` (a distinct `tree` value with
+    /// its own index space), so an index built from a different tree's node
+    /// numbering would silently return answers for the wrong nodes. Each of
+    /// the four `EmitSession` construction sites in `emit/expr.rs` builds
+    /// this from its own `tree` right there, so the two can never drift.
+    pub free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex,
 }
 
 /// SSA value with boxed/unboxed tracking.

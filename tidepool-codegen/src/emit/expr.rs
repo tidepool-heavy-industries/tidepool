@@ -1154,61 +1154,126 @@ fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
 fn topo_sort_deferred_simple(
     deferred_simple: Vec<(VarId, usize)>,
     all_bindings: &[(VarId, usize)],
-    tree: &CoreExpr,
+    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
 ) -> Vec<(VarId, usize)> {
+    use petgraph::graph::{DiGraph, NodeIndex};
+    use petgraph::visit::Dfs;
+    use petgraph::Direction;
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
     let deferred_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
 
-    let mut direct_deps: FxHashMap<VarId, Vec<VarId>> =
+    // Full dependency graph over EVERY binding in the Rec group (Lam/Con
+    // siblings included — a deferred-simple binding can depend on one
+    // transitively, e.g. through an intermediate Lam), nodes inserted in
+    // `all_bindings` order so the structure is deterministic. Edge
+    // binder -> dep means "binder's rhs references dep"; a self-reference
+    // (dep == binder, a corecursive value knot) is deliberately never
+    // edged — the value-knot mechanism (promised captures) handles that
+    // case, not binding order, so it must never count as a blocking dep.
+    let mut node_of: FxHashMap<VarId, NodeIndex> =
         FxHashMap::with_capacity_and_hasher(all_bindings.len(), Default::default());
-    for (binder, rhs_idx) in all_bindings {
-        let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
-        direct_deps.insert(*binder, fvs.into_iter().collect());
+    let mut full_graph: DiGraph<VarId, ()> = DiGraph::with_capacity(all_bindings.len(), 0);
+    for (binder, _) in all_bindings {
+        node_of.insert(*binder, full_graph.add_node(*binder));
     }
-
-    let mut reachable_deferred: FxHashMap<VarId, FxHashSet<VarId>> =
-        FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
-    for &(start_node, _) in &deferred_simple {
-        let mut visited = FxHashSet::default();
-        let mut stack = vec![start_node];
-        let mut reached = FxHashSet::default();
-
-        while let Some(node) = stack.pop() {
-            if !visited.insert(node) {
+    for (binder, rhs_idx) in all_bindings {
+        let binder_node = node_of[binder];
+        for dep in free_vars_idx.free_vars_at(*rhs_idx) {
+            if dep == *binder {
                 continue;
             }
-            if node != start_node && deferred_set.contains(&node) {
-                reached.insert(node);
-            }
-            if let Some(neighbors) = direct_deps.get(&node) {
-                for &next in neighbors {
-                    stack.push(next);
-                }
+            if let Some(&dep_node) = node_of.get(&dep) {
+                full_graph.add_edge(binder_node, dep_node, ());
             }
         }
-        reachable_deferred.insert(start_node, reached);
     }
 
-    let mut sorted = Vec::with_capacity(deferred_simple.len());
-    let mut remaining: Vec<(VarId, usize)> = deferred_simple;
-    let mut progress = true;
-    while !remaining.is_empty() && progress {
-        progress = false;
-        let mut next_remaining = Vec::with_capacity(remaining.len());
-        for (binder, rhs_idx) in remaining {
-            let blocked = reachable_deferred[&binder]
-                .iter()
-                .any(|fv| !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv));
-            if blocked {
-                next_remaining.push((binder, rhs_idx));
-            } else {
-                sorted.push((binder, rhs_idx));
-                progress = true;
+    // For each deferred-simple binding, the set of OTHER deferred-simple
+    // bindings it transitively depends on (a DFS over `full_graph` following
+    // outgoing "depends on" edges, restricted to hits in `deferred_set`,
+    // excluding the start node itself even if a cycle routes back to it).
+    let mut reachable_deferred: FxHashMap<VarId, FxHashSet<VarId>> =
+        FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
+    for &(start, _) in &deferred_simple {
+        let start_node = node_of[&start];
+        let mut dfs = Dfs::new(&full_graph, start_node);
+        let mut reached = FxHashSet::default();
+        while let Some(nx) = dfs.next(&full_graph) {
+            if nx == start_node {
+                continue;
+            }
+            let v = full_graph[nx];
+            if deferred_set.contains(&v) {
+                reached.insert(v);
             }
         }
-        remaining = next_remaining;
+        reachable_deferred.insert(start, reached);
     }
-    sorted.extend(remaining);
-    sorted
+
+    // Ordering graph over ONLY the deferred-simple bindings, nodes inserted
+    // in `deferred_simple`'s original order (so `NodeIndex` order IS original
+    // input order — the tie-break the min-heap below relies on). Edge
+    // dep -> dependent: dep must be emitted before dependent.
+    let mut order_node_of: FxHashMap<VarId, NodeIndex> =
+        FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
+    let mut order_graph: DiGraph<usize, ()> = DiGraph::with_capacity(deferred_simple.len(), 0);
+    for (i, (binder, _)) in deferred_simple.iter().enumerate() {
+        order_node_of.insert(*binder, order_graph.add_node(i));
+    }
+    for (binder, _) in &deferred_simple {
+        let dependent_node = order_node_of[binder];
+        for dep in &reachable_deferred[binder] {
+            if let Some(&dep_node) = order_node_of.get(dep) {
+                order_graph.add_edge(dep_node, dependent_node, ());
+            }
+        }
+    }
+
+    // Kahn's algorithm: a min-heap over `NodeIndex` breaks ties among
+    // simultaneously-ready nodes by earliest original position (`NodeIndex`
+    // order == original `deferred_simple` order, by construction above) —
+    // reproducing the prior hand-rolled sort's left-to-right, resolve-as-
+    // soon-as-ready behavior exactly (see the golden tests pinning chain/
+    // diamond/independent/cycle/self-reference shapes).
+    let n = order_graph.node_count();
+    let mut in_degree = vec![0usize; n];
+    for nx in order_graph.node_indices() {
+        in_degree[nx.index()] = order_graph.edges_directed(nx, Direction::Incoming).count();
+    }
+    let mut ready: BinaryHeap<Reverse<NodeIndex>> = order_graph
+        .node_indices()
+        .filter(|nx| in_degree[nx.index()] == 0)
+        .map(Reverse)
+        .collect();
+    let mut resolved = vec![false; n];
+    let mut order: Vec<NodeIndex> = Vec::with_capacity(n);
+    while let Some(Reverse(nx)) = ready.pop() {
+        resolved[nx.index()] = true;
+        order.push(nx);
+        for edge in order_graph.edges_directed(nx, Direction::Outgoing) {
+            let target = edge.target();
+            in_degree[target.index()] -= 1;
+            if in_degree[target.index()] == 0 {
+                ready.push(Reverse(target));
+            }
+        }
+    }
+    // A true cycle leaves its members permanently at in-degree > 0; append
+    // them last, in original relative order (never resolved to `false`, and
+    // `node_indices()` walks in insertion == original order) — the `cycle`
+    // Known-Limit fallback, matching the old `sorted.extend(remaining)` tail.
+    for nx in order_graph.node_indices() {
+        if !resolved[nx.index()] {
+            order.push(nx);
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|nx| deferred_simple[order_graph[nx]])
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,11 +1285,12 @@ fn topo_sort_deferred_simple(
 fn compute_captures(
     ctx: &EmitContext,
     tree: &CoreExpr,
+    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
 ) -> (CoreExpr, Vec<VarId>) {
-    compute_captures_promised(ctx, tree, body_idx, exclude, label, None)
+    compute_captures_promised(ctx, tree, free_vars_idx, body_idx, exclude, label, None)
 }
 
 /// [`compute_captures`] with a `promised` set: free vars in it are KEPT in the
@@ -1234,13 +1300,20 @@ fn compute_captures(
 fn compute_captures_promised(
     ctx: &EmitContext,
     tree: &CoreExpr,
+    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
     promised: Option<&FxHashSet<VarId>>,
 ) -> (CoreExpr, Vec<VarId>) {
+    // `free_vars_idx` is built from `tree` (the caller's EmitSession
+    // invariant — see `EmitSession::free_vars_idx`'s doc), so querying it at
+    // `body_idx` BEFORE extracting is equivalent to the old
+    // `free_vars(&body_tree)` but skips the second walk over the copy.
+    // `extract_subtree` still runs: `body_tree` becomes the nested
+    // Lam/Thunk's own EmitSession tree, not just a free-vars scratch value.
     let body_tree = tree.extract_subtree(body_idx);
-    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+    let fvs = free_vars_idx.free_vars_at(body_idx);
     let keep = |v: &VarId| ctx.env.contains_key(v) || promised.is_some_and(|p| p.contains(v));
 
     let dropped: Vec<VarId> = fvs.iter().filter(|v| !keep(v)).copied().collect();
@@ -1264,7 +1337,14 @@ fn compute_captures_promised(
 
 fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
     let (body_tree, sorted_fvs) =
-        compute_captures(args.ctx, args.sess.tree, body_idx, Some(binder), "lam");
+        compute_captures(
+            args.ctx,
+            args.sess.tree,
+            &args.sess.free_vars_idx,
+            body_idx,
+            Some(binder),
+            "lam",
+        );
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
@@ -1366,6 +1446,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
         oom_func: inner_oom_func,
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
+        free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1490,7 +1571,15 @@ fn emit_thunk_promised(
 ) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
     // Extract the sub-expression and compute free variables
     let (body_tree, sorted_fvs) =
-        compute_captures_promised(args.ctx, args.sess.tree, body_idx, None, "thunk", promised);
+        compute_captures_promised(
+            args.ctx,
+            args.sess.tree,
+            &args.sess.free_vars_idx,
+            body_idx,
+            None,
+            "thunk",
+            promised,
+        );
 
     let captures: Vec<(VarId, Option<SsaVal>)> = sorted_fvs
         .iter()
@@ -1586,6 +1675,7 @@ fn emit_thunk_promised(
         oom_func: inner_oom_func,
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
+        free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1716,13 +1806,20 @@ pub fn compile_expr(
     name: &str,
     external_env: &ExternalEnv,
 ) -> Result<FuncId, EmitError> {
+    // Built once, up front, for the whole compilation: this compile_expr call
+    // is one `EmitSession::tree` scope end to end (nested Lam/Thunk bodies
+    // get their OWN fresh index over their own extracted tree — see
+    // `EmitSession::free_vars_idx`'s doc), so both the debug dump below and
+    // the top-level `EmitSession` constructed further down share this one
+    // analysis rather than each re-deriving it.
+    let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(tree);
     if std::env::var("TIDEPOOL_DUMP_TREE").is_ok() {
         eprintln!(
             "[tree] {} nodes:\n{}",
             tree.nodes.len(),
             tidepool_repr::pretty::pretty_print(tree)
         );
-        let fvs = tidepool_repr::free_vars::free_vars(tree);
+        let fvs = free_vars_idx.free_vars_at(tree.nodes.len() - 1);
         if !fvs.is_empty() {
             eprintln!(
                 "[tree] WARNING: {} free vars in input: {:?}",
@@ -1820,6 +1917,7 @@ pub fn compile_expr(
         oom_func,
         tree,
         lit_wrappers,
+        free_vars_idx,
     };
 
     let result = EmitContext::emit_node(
@@ -2489,11 +2587,10 @@ impl EmitContext {
             let deferred_simple: Vec<(VarId, usize)> =
                 simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
             let deferred_simple =
-                topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
+                topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
             let letrec_binders: FxHashSet<VarId> = bindings.iter().map(|(b, _)| *b).collect();
             for (binder, rhs_idx) in deferred_simple.iter() {
-                let fvs =
-                    tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
+                let fvs = args.sess.free_vars_idx.free_vars_at(*rhs_idx);
                 let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
                     && fvs.iter().all(|v| args.ctx.env.contains_key(v));
                 let sv = if resolvable_now {
@@ -2585,8 +2682,12 @@ impl EmitContext {
                     binder: lam_binder,
                     body: lam_body,
                 } => {
-                    let lam_body_tree = args.sess.tree.extract_subtree(*lam_body);
-                    let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
+                    // Only `fvs` is needed here (Phase 1 sizes the closure and
+                    // records the capture list); the extracted subtree itself
+                    // isn't kept — Phase 3a (below) re-extracts `lam_body` on
+                    // its own when it actually needs a standalone tree to
+                    // compile the lambda body against.
+                    let mut fvs = args.sess.free_vars_idx.free_vars_at(*lam_body);
                     if let Ok(idx) = fvs.binary_search(lam_binder) {
                         fvs.remove(idx);
                     }
@@ -2818,6 +2919,7 @@ impl EmitContext {
                 oom_func: inner_oom_func,
                 tree: &lam_body_tree,
                 lit_wrappers: args.sess.lit_wrappers,
+                free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&lam_body_tree),
             };
             let body_result = EmitContext::emit_node(
                 EmitArgs {
@@ -2894,13 +2996,24 @@ impl EmitContext {
         // only direct Var children (M1) let such a field fill eagerly in this
         // phase, before `k` is bound, silently dropping it from the thunk's
         // captures (`compute_captures`'s `keep` filter has no error path).
-        let tree_ref: &CoreExpr = args.sess.tree;
-        let field_deferred_deps = |f_idx: usize| -> FxHashSet<VarId> {
-            tidepool_repr::free_vars::free_vars(&tree_ref.extract_subtree(f_idx))
+        // A plain fn, not a capturing closure: `field_deferred_deps` is called
+        // both before and after the mutable `args.sess` reborrows in the loop
+        // below (`emit_subtree`/`emit_thunk`), so a closure holding
+        // `&args.sess.free_vars_idx` across that whole span would conflict
+        // with those reborrows. Taking the index by parameter instead means
+        // each call borrows `args.sess.free_vars_idx` only for its own
+        // expression.
+        fn field_deferred_deps(
+            free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
+            simple_binder_set: &FxHashSet<VarId>,
+            f_idx: usize,
+        ) -> FxHashSet<VarId> {
+            free_vars_idx
+                .free_vars_at(f_idx)
                 .into_iter()
                 .filter(|v| simple_binder_set.contains(v))
                 .collect()
-        };
+        }
         let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
             Vec::with_capacity(rec_bindings.len());
         for pa in &pre_allocs {
@@ -2910,9 +3023,10 @@ impl EmitContext {
                 field_indices,
             } = pa
             {
-                let needs_simple = field_indices
-                    .iter()
-                    .any(|&f_idx| !field_deferred_deps(f_idx).is_empty());
+                let needs_simple = field_indices.iter().any(|&f_idx| {
+                    !field_deferred_deps(&args.sess.free_vars_idx, &simple_binder_set, f_idx)
+                        .is_empty()
+                });
                 if needs_simple {
                     deferred_cons.push((*binder, *ptr, field_indices.clone()));
                 } else {
@@ -2959,14 +3073,16 @@ impl EmitContext {
 
         // Bind deferred simple bindings in topological order (deps first) so each
         // thunk captures its already-bound siblings (see Phase 3c below).
-        let deferred_simple = topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
+        let deferred_simple = topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
 
         // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
         for (_, ptr, field_indices) in &deferred_cons {
             let deps: FxHashSet<VarId> = field_indices
                 .iter()
-                .flat_map(|&f_idx| field_deferred_deps(f_idx))
+                .flat_map(|&f_idx| {
+                    field_deferred_deps(&args.sess.free_vars_idx, &simple_binder_set, f_idx)
+                })
                 .collect();
             deferred_con_deps.push(DeferredConDep {
                 ptr: *ptr,
@@ -3002,8 +3118,7 @@ impl EmitContext {
         // binder with its (thunk or eager) value. Errors were poisoned in 2.5.
         let letrec_binders: FxHashSet<VarId> = bindings.iter().map(|(b, _)| *b).collect();
         for (binder, rhs_idx) in deferred_simple.iter() {
-            let fvs =
-                tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
+            let fvs = args.sess.free_vars_idx.free_vars_at(*rhs_idx);
             let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
                 && fvs.iter().all(|v| args.ctx.env.contains_key(v));
             let sv = if resolvable_now {
@@ -3585,5 +3700,187 @@ pub(crate) fn ensure_heap_ptr(
             builder.declare_value_needs_stack_map(ptr);
             ptr
         }
+    }
+}
+
+#[cfg(test)]
+mod topo_sort_golden_tests {
+    //! Golden tests pinning `topo_sort_deferred_simple`'s exact output order —
+    //! including its tie-break among independent bindings and its behavior on
+    //! a genuine cycle — BEFORE it is replaced by a petgraph-backed
+    //! implementation. Each test's expected order was derived by hand-tracing
+    //! the current implementation (see the reasoning left in each test's
+    //! comment), not copied from a run, so a divergence here is a real
+    //! behavior change, not a stale golden value.
+    use super::*;
+
+    /// Build a tiny tree of `Var`/`Lit` "rhs" fragments, one per binder, in
+    /// the given order. `deps[i]` lists the binders binding `i`'s rhs
+    /// references (as `Var` nodes summed via a `PrimOp` so `free_vars` sees
+    /// all of them); an empty dep list gets a `Lit` rhs (no free vars).
+    /// Returns `(tree, bindings)` where `bindings[i] = (VarId(i as u64+1),
+    /// rhs_idx)` — usable as both `all_bindings` and (reordered/filtered) the
+    /// `deferred_simple` argument.
+    fn build_bindings(
+        deps: &[(&'static str, &'static [&'static str])],
+    ) -> (CoreExpr, FxHashMap<&'static str, VarId>) {
+        let mut name_to_var: FxHashMap<&'static str, VarId> = FxHashMap::default();
+        for (i, (name, _)) in deps.iter().enumerate() {
+            name_to_var.insert(name, VarId((i + 1) as u64));
+        }
+        let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
+        let mut rhs_idx_for: FxHashMap<&'static str, usize> = FxHashMap::default();
+        for (name, ds) in deps {
+            let idx = if ds.is_empty() {
+                nodes.push(CoreFrame::Lit(tidepool_repr::types::Literal::LitInt(0)));
+                nodes.len() - 1
+            } else {
+                let var_idxs: Vec<usize> = ds
+                    .iter()
+                    .map(|d| {
+                        nodes.push(CoreFrame::Var(name_to_var[d]));
+                        nodes.len() - 1
+                    })
+                    .collect();
+                nodes.push(CoreFrame::PrimOp {
+                    op: tidepool_repr::types::PrimOpKind::IntAdd,
+                    args: var_idxs,
+                });
+                nodes.len() - 1
+            };
+            rhs_idx_for.insert(name, idx);
+        }
+        // A tree needs a root; the last-pushed rhs already satisfies "root is
+        // the last node" for the LAST binding only, so make everything
+        // reachable via a final tuple-like Con root referencing every rhs —
+        // topo_sort_deferred_simple only ever indexes into `tree.nodes`
+        // directly by the rhs indices we recorded, so this root's shape
+        // doesn't matter beyond keeping every rhs index in-bounds.
+        let all_idxs: Vec<usize> = deps.iter().map(|(name, _)| rhs_idx_for[name]).collect();
+        nodes.push(CoreFrame::Con {
+            tag: tidepool_repr::types::DataConId(0),
+            fields: all_idxs,
+        });
+        (RecursiveTree { nodes }, name_to_var)
+    }
+
+    fn bindings_for(
+        deps: &[(&'static str, &'static [&'static str])],
+        tree: &CoreExpr,
+        vars: &FxHashMap<&'static str, VarId>,
+    ) -> Vec<(VarId, usize)> {
+        // Recover each name's rhs index the same way build_bindings assigned
+        // it: re-walk in the same order, since build_bindings pushed rhs
+        // nodes (and their Var/PrimOp dep nodes) in `deps` order before the
+        // trailing Con root.
+        let mut idx = 0usize;
+        let mut out = Vec::with_capacity(deps.len());
+        for (name, ds) in deps {
+            let rhs_idx = if ds.is_empty() {
+                let i = idx;
+                idx += 1;
+                i
+            } else {
+                idx += ds.len(); // skip the Var nodes
+                let i = idx;
+                idx += 1; // the PrimOp node itself
+                i
+            };
+            debug_assert!(matches!(
+                &tree.nodes[rhs_idx],
+                CoreFrame::Lit(_) | CoreFrame::PrimOp { .. }
+            ));
+            out.push((vars[name], rhs_idx));
+        }
+        out
+    }
+
+    fn names(sorted: &[(VarId, usize)], vars: &FxHashMap<&'static str, VarId>) -> Vec<&'static str> {
+        let rev: FxHashMap<VarId, &'static str> = vars.iter().map(|(k, v)| (*v, *k)).collect();
+        sorted.iter().map(|(v, _)| rev[v]).collect()
+    }
+
+    #[test]
+    fn independent_bindings_preserve_input_order() {
+        // No dependencies among a/b/c: every binding is unblocked in the
+        // first pass, so the output is exactly the input order.
+        let deps: &[(&'static str, &'static [&'static str])] = &[("c", &[]), ("a", &[]), ("b", &[])];
+        let (tree, vars) = build_bindings(deps);
+        let all_bindings = bindings_for(deps, &tree, &vars);
+        let deferred_simple = all_bindings.clone();
+        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
+        assert_eq!(names(&sorted, &vars), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn chain_resolves_regardless_of_input_order() {
+        // a <- b <- c (c depends on b depends on a). Fed in REVERSE
+        // dependency order [c, b, a]: round 1 resolves only `a` (the only
+        // binding with no unmet deps); round 2 resolves `b`; round 3
+        // resolves `c`. Final order is the true dependency order regardless
+        // of input order.
+        let deps: &[(&'static str, &'static [&'static str])] = &[("c", &["b"]), ("b", &["a"]), ("a", &[])];
+        let (tree, vars) = build_bindings(deps);
+        let all_bindings = bindings_for(deps, &tree, &vars);
+        let deferred_simple = all_bindings.clone();
+        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
+        assert_eq!(names(&sorted, &vars), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn diamond_ties_break_by_input_order_within_a_pass() {
+        // a -> {c, b} -> d (both b and c depend only on a; d depends on
+        // both). Fed as [a, c, b, d]: in a SINGLE pass, `a` resolves first
+        // (pushed into `sorted`), then `c` (dep {a} already in `sorted`),
+        // then `b` (dep {a} already in `sorted`) — note `c` is checked
+        // before `b` only because it appears first in `remaining`, not
+        // because of any dependency between them — then `d` (deps {b,c}
+        // BOTH already pushed earlier in this same pass) all resolve in one
+        // pass, in exactly the input order.
+        let deps: &[(&'static str, &'static [&'static str])] = &[
+            ("a", &[]),
+            ("c", &["a"]),
+            ("b", &["a"]),
+            ("d", &["b", "c"]),
+        ];
+        let (tree, vars) = build_bindings(deps);
+        let all_bindings = bindings_for(deps, &tree, &vars);
+        let deferred_simple = all_bindings.clone();
+        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
+        assert_eq!(names(&sorted, &vars), vec!["a", "c", "b", "d"]);
+    }
+
+    #[test]
+    fn genuine_cycle_falls_through_unordered_in_input_order() {
+        // x depends on y, y depends on x: neither ever becomes unblocked, so
+        // the fixed-point loop makes zero progress and both are appended
+        // (unresolved) in their original relative order — the documented
+        // `cycle` Known-Limit fallback.
+        let deps: &[(&'static str, &'static [&'static str])] = &[("x", &["y"]), ("y", &["x"])];
+        let (tree, vars) = build_bindings(deps);
+        let all_bindings = bindings_for(deps, &tree, &vars);
+        let deferred_simple = all_bindings.clone();
+        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
+        assert_eq!(names(&sorted, &vars), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn self_reference_is_never_blocked_by_itself() {
+        // z's rhs references z itself (a corecursive value knot). The DFS
+        // that builds `reachable_deferred` explicitly excludes the start
+        // node from its own reached set, so self-reference does not block —
+        // z resolves in the very first pass alongside an unrelated
+        // independent binding `w`, in input order.
+        let deps: &[(&'static str, &'static [&'static str])] = &[("z", &["z"]), ("w", &[])];
+        let (tree, vars) = build_bindings(deps);
+        let all_bindings = bindings_for(deps, &tree, &vars);
+        let deferred_simple = all_bindings.clone();
+        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
+        assert_eq!(names(&sorted, &vars), vec!["z", "w"]);
     }
 }
