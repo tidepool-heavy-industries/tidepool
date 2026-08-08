@@ -10,22 +10,38 @@
 //! is a strict superset of what that fragment mentions, and none of them RUNS
 //! one.
 //!
-//! Two things have to hold on that path and they fail differently:
-//!
-//! - EMISSION must resolve the second fragment's constructors against the
-//!   accumulated table, not the bootstrap one. A miss here surfaces at compile
-//!   time, or as a wrong value.
-//! - The RUN's result must classify at the yield boundary. `ConTags` (the
-//!   `Val`/`E` discrimination in `effect_machine`) is resolved once, in
-//!   `compile_inner`, from the bootstrap turn's table; `add_function` refreshes
-//!   `lit_wrappers`, `json_con_ids` and `time_con_ids` from each later turn's
-//!   table but never re-resolves `tags`. A mismatch here surfaces as
-//!   `YieldError::UnexpectedConTag` — a large-looking tag word, which reads as
-//!   heap garbage but is a classification failure.
-//!
 //! The compile entry on this path is `add_function` (it never calls
 //! `lower_jump_crosses_lam`); the run entry is `run_child_fragment`. Both are
 //! driven here.
+//!
+//! # What this constrains, established by mutation rather than assertion
+//!
+//! Two breaks were induced on the axes this file claims to cover, to find out
+//! which claims it can actually hold.
+//!
+//! **The RUN's yield-boundary classification: CONSTRAINED.** `ConTags` (the
+//! `Val`/`E` discrimination in `effect_machine`) is resolved once, in
+//! `compile_inner`, from the bootstrap turn's table. `add_function` refreshes
+//! `lit_wrappers`, `json_con_ids` and `time_con_ids` from each later turn's
+//! table but never re-resolves `tags`, so every later turn is classified by the
+//! bootstrap ids. Minting `Val` in the bootstrap table under a different id
+//! than the fragment emits turns all four tests in this file red, the child run
+//! failing as `Yield(UnexpectedConTag(10))` — the same error variant, and the
+//! same class of oversized-looking tag word, that this investigation started
+//! from.
+//!
+//! **Emission resolving constructors against the accumulated table: NOT
+//! constrained, and it cannot be.** Compiling the second fragment against the
+//! BOOTSTRAP table instead of the accumulated one — the mistake this file was
+//! written to catch — leaves all four tests green. Emission bakes each
+//! `DataConId` straight out of the `Con`/`Case` frame; it does not consult the
+//! table to resolve constructor references. `add_function`'s `table` argument
+//! feeds `normalize`, `wrap_with_datacon_env`, `lit_wrappers` and the
+//! primop constructor-id bundles, none of which these synthetic fragments
+//! exercise. So "the fragment is compiled against the accumulated table" is
+//! setup here, not an assertion — a wrong table on this path is invisible to
+//! this file, and catching it needs a fragment that reaches one of those four
+//! consumers.
 
 use tidepool_codegen::effect_machine::ConTags;
 use tidepool_codegen::emit::ExternalEnv;

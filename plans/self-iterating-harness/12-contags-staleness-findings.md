@@ -107,6 +107,28 @@ extract invocations, so findings 1 and 2 are latent rather than live. They are
 worth fixing because nothing states or enforces that extractor property, and
 both failures would be silent.
 
+## What the gate test constrains, by mutation
+
+`populated_session_second_fragment` was mutation-checked on both axes it
+claims, because a gate nobody has watched fail is not yet a gate.
+
+- Minting `Val` in the bootstrap table under a different id than the fragment
+  emits: all four tests RED, the child run failing as
+  `Yield(UnexpectedConTag(10))` — the incident's own error variant. The
+  run-and-classify half has teeth.
+- Compiling the second fragment against the BOOTSTRAP table instead of the
+  accumulated one — the mistake the file was written to catch: all four tests
+  GREEN. Emission bakes each `DataConId` out of the frame and never consults
+  the table to resolve a constructor reference. `add_function`'s `table`
+  argument reaches `normalize`, `wrap_with_datacon_env`, `lit_wrappers` and the
+  primop id bundles, none of which a synthetic `Con`/`Case` fragment exercises.
+
+So the accumulated table is SETUP in that file, not an assertion. Catching a
+wrong-table `add_function` needs a fragment that reaches one of those four
+consumers — real extracted Core would, these hand-built trees do not. Recorded
+in the file's own doc comment so the next reader does not mistake its green for
+coverage of that axis.
+
 One ambient hazard for whoever picks up the gate test: it drives
 `run_child_fragment` with the parent's continuation stowed, and that path has a
 known-incomplete `NurseryExhausted` guard (a one-shot gc_trigger-then-retry
