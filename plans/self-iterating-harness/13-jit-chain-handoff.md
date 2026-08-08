@@ -353,6 +353,34 @@ never the post-normalize tree, and never compiling or running anything. It was
 extended along both missing axes rather than given an extra case, since a case
 would have left the shape of the blindness intact.
 
+## Where to pick this up
+
+In wave order, with what each needs:
+
+1. **Cluster D** (`runtime_apply`/`runtime_tail_apply` + per-function
+   `FunctionImports`). Owns `emit/expr.rs` after B. This is the
+   correctness-sensitive one: its acceptance list is thunk-in-function-position,
+   normal and partial application, runtime-error poison, nested tail calls,
+   null-without-pending-tail, and cancellation/GC during application. It absorbs
+   a duplicated tail-position path, so it is a complexity *reduction* — but a
+   duplicated subtle path is exactly where a rewrite hides a behaviour change.
+   Run the full differential plus the fork/harness acceptance binaries for this
+   cluster specifically.
+2. **Cluster E** (D7/D8/D9). `jit_machine.rs` and `stack_map.rs` are clear.
+   Fold in the `ConTags` refresh from `12-contags-staleness-findings.md` here —
+   it lives in `add_function` alongside the three caches that already refresh.
+3. **Cluster F** (D6 `declare_env`). GC-critical. Verify Cranelift's
+   `declare_value_needs_stack_map` contract *first* — function-wide versus
+   block-sensitive decides between mark-once-at-creation and incremental
+   live-roots. Proof is targeted stack-map tests under `TIDEPOOL_GC_POISON` and
+   `TIDEPOOL_HEAP_VERIFY`, never inference. If the contract reading is
+   ambiguous, escalate rather than guess.
+4. **Cluster B's missing evidence** — before/after `emit_ms`, mutation checks on
+   both halves, GHC-heavy `resident_session`. Cheap, and it converts a
+   correctness-verified change into an evidenced one.
+5. **The three latent defects** in `12-contags-staleness-findings.md`, and the
+   `by_qualified_name` guard, which can now be a hard error.
+
 ## Test invocation notes
 
 - The differential gate is `#[ignore]`d. Selecting its binary without
