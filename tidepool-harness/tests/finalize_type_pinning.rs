@@ -16,9 +16,11 @@
 //! Both halves of the fix are covered here, because either alone leaves the
 //! answerer unable to answer:
 //!
-//! - PIN: with the hole's type known, the turn compiles against a `finalize`
-//!   whose `v` is pinned to it, so a wrong-typed answer is a GHC error the
-//!   corrective-retry loop feeds back ([`wrong_typed_finalize_is_a_compile_error`]).
+//! - PIN: `Finalize` is TYPE-INDEXED by its answer type (like `State s`), so
+//!   the turn compiles against a ROW instantiated at the hole's type —
+//!   `Member (Finalize T) effs` is the pin, not a shimmed/shadowed binding.
+//!   A wrong-typed answer is a GHC error naming the row, fed back by the
+//!   corrective-retry loop ([`wrong_typed_finalize_is_a_compile_error`]).
 //! - SCOPE: the answer type is an AUTHOR type, so the turn also imports the
 //!   module defining it — otherwise the model cannot name the type it is being
 //!   asked for ([`pinned_finalize_needs_the_type_in_scope`] pins the failure
@@ -60,19 +62,29 @@ fn answerer_cfg() -> EngineConfig {
 }
 
 /// Compile one answerer turn. `finalize_ty` is the hole's answer type when the
-/// turn is answering a typed hole (the pin); `None` is the unpinned turn.
+/// turn is answering a typed hole — the row is instantiated at it
+/// (`Finalize <ty>`, importing `imports`); `None` compiles at the config's
+/// default row (`Finalize NoAnswer`).
 fn compile_turn(
     code: &str,
     imports: &str,
     finalize_ty: Option<&str>,
 ) -> Result<compile::CompiledTurn, compile::CompileError> {
     let cfg = answerer_cfg();
-    let src = template_turn_for(&cfg.decls, &cfg, code, imports, "", finalize_ty);
+    let row_imports: Vec<String> = if imports.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![imports.to_string()]
+    };
+    let target = cfg
+        .turn_target(finalize_ty.map(|ty| (ty, row_imports.as_slice())))
+        .expect("turn target");
+    let src = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
     compile::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",
-        &cfg.include,
+        &target.include,
         tidepool_harness::timing::NO_NODE,
         tidepool_harness::timing::NO_ROUND,
     )
@@ -135,20 +147,31 @@ fn wrong_typed_finalize_is_a_compile_error() {
     }
 }
 
-/// The control: the SAME wrong-typed block compiles fine when the turn is not
-/// pinned. This is the hole as it stood — `v` unconstrained, so the value
-/// crosses and traps at the far side. Pinning is what closes it; without this
-/// case the test above could pass for an unrelated reason.
+/// The control. Under row-indexing, "unpinned" is no longer an expressible
+/// state — `Member (Finalize v)` is satisfiable by exactly the ONE type
+/// applied to `Finalize` in the row, never by an unconstrained `v` — so the
+/// control is not "no pin", it is a DIFFERENT pin: the same wrong-typed-for-
+/// `Decision` block compiles fine when the row instead names `Finalize Text`.
+/// This proves `wrong_typed_finalize_is_a_compile_error`'s rejections come
+/// from the row PARAMETER selecting which type is admitted, not from some
+/// unrelated compile breakage that would reject the block regardless of what
+/// the row names.
 #[test]
-fn wrong_typed_finalize_compiles_when_unpinned() {
+fn wrong_typed_finalize_compiles_when_the_row_names_text() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
-    let result = compile_turn("(finalize @Text (\"oops\" :: Text) :: M ())", "", None);
+    let result = compile_turn(
+        "(finalize @Text (\"oops\" :: Text) :: M ())",
+        "",
+        Some("Text"),
+    );
     assert!(
         result.is_ok(),
-        "unpinned finalize accepts any type (the hole this pins shut), got: {:?}",
+        "finalize @Text must compile when the row is instantiated at Finalize \
+         Text — the same block that is rejected above against a Decision-pinned \
+         row, got: {:?}",
         result.err().map(|e| e.to_string())
     );
 }
@@ -184,4 +207,75 @@ fn answer_contract_puts_the_type_in_scope() {
         .expect("reference harness resolves");
     assert_eq!(source.answerer_imports, vec!["HarnessTypes".to_string()]);
     assert!(!source.answerer_imports.contains(&source.module_name));
+}
+
+/// The effects staging dir is content-addressed on the GENERATED
+/// `Tidepool.Effects` source — which only ever says `import AuthorType`, never
+/// the type's actual constructors. Two compiles that pin the SAME row
+/// (`Finalize Foo`, importing `AuthorType`) therefore hash to the SAME staging
+/// dir and reuse it (`ensure_effects_module_at` writes SOURCE ONLY, no
+/// `.hi`/`.o`), so an edit to `AuthorType.hs` BETWEEN those two compiles must
+/// still be picked up by the second — there is no compiled artifact for the
+/// dir's content hash to have to cover, and this pins that the extract compile
+/// itself isn't caching stale bytecode for the author module either.
+#[test]
+fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir for the author module");
+    let module_path = dir.path().join("AuthorType.hs");
+
+    let mut cfg = answerer_cfg();
+    cfg.include.push(dir.path().to_path_buf());
+
+    let compile_at = |code: &str| -> Result<compile::CompiledTurn, compile::CompileError> {
+        let row_imports = vec!["AuthorType".to_string()];
+        let target = cfg
+            .turn_target(Some(("Foo", row_imports.as_slice())))
+            .expect("turn target");
+        let src = template_turn_for(&cfg.decls, &target.stack, code, "AuthorType", "");
+        compile::compile_turn(
+            &cfg.extract_bin,
+            &src,
+            "result",
+            &target.include,
+            tidepool_harness::timing::NO_NODE,
+            tidepool_harness::timing::NO_ROUND,
+        )
+    };
+
+    std::fs::write(
+        &module_path,
+        "module AuthorType where\ndata Foo = MkFooOld deriving (Show)\n",
+    )
+    .expect("write v1 author module");
+    let first = compile_at("(finalize @Foo MkFooOld :: M ())");
+    assert!(
+        first.is_ok(),
+        "first compile against the v1 author module must succeed, got: {:?}",
+        first.err().map(|e| e.to_string())
+    );
+
+    std::fs::write(
+        &module_path,
+        "module AuthorType where\ndata Foo = MkFooNew deriving (Show)\n",
+    )
+    .expect("rewrite the author module with a different constructor set");
+
+    let stale = compile_at("(finalize @Foo MkFooOld :: M ())");
+    assert!(
+        stale.is_err(),
+        "MkFooOld no longer exists in the rewritten author module — a second \
+         compile that still accepts it would mean the staging dir served a \
+         stale AuthorType"
+    );
+
+    let second = compile_at("(finalize @Foo MkFooNew :: M ())");
+    assert!(
+        second.is_ok(),
+        "the second compile must see the NEW definition (MkFooNew), got: {:?}",
+        second.err().map(|e| e.to_string())
+    );
 }

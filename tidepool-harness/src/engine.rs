@@ -485,8 +485,10 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
         String::new()
     } else {
         format!(
-            " `{ty}` is already in scope (this turn imports {}) — construct a \
-             real one, do not substitute a tuple or `Text`.",
+            " `{ty}` is already in scope (this turn imports {}) — and this turn's \
+             row only admits `finalize @{ty}`, so a wrong-typed value is a compile \
+             error naming the row, not a value that silently crosses. Construct a \
+             real `{ty}`, do not substitute a tuple or `Text`.",
             imports.join(", ")
         )
     };
@@ -606,6 +608,15 @@ pub struct EngineConfig {
     /// The project-lib dir this config was built from, if any (see
     /// `prelude_dir`'s doc).
     pub project_lib: Option<PathBuf>,
+    /// The config's own default effects-module dir (the entry
+    /// [`Self::from_decls`] pushed into [`Self::include`], at the config's
+    /// default row). Tracked separately — not just "the last entry of
+    /// `include`" — because callers routinely append MORE dirs to `include`
+    /// after construction (a project source dir, `examples/harness` in
+    /// tests): [`Self::turn_target`] finds and replaces THIS specific entry
+    /// for a pinned turn, so it stays correct regardless of what else got
+    /// appended later.
+    effects_dir: PathBuf,
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
@@ -701,7 +712,7 @@ impl EngineConfig {
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
         }
-        include.push(effects_dir);
+        include.push(effects_dir.clone());
         let extract_bin =
             std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
         Ok(EngineConfig {
@@ -712,6 +723,7 @@ impl EngineConfig {
             suspend_tag,
             prelude_dir,
             project_lib,
+            effects_dir,
             max_turns: 8,
             max_child_turns: 4,
             max_tokens: Some(2048),
@@ -719,109 +731,109 @@ impl EngineConfig {
         })
     }
 
-    /// The promoted-list effect-stack string (`'[Console, KV, …, Ask]`) for
-    /// `template_haskell` — every decl including Ask.
+    /// The promoted-list effect-stack string (`'[Console, KV, …, Finalize
+    /// NoAnswer]`) for `template_haskell` at the config's default row — every
+    /// decl including Ask, each parameterized effect applied to its
+    /// [`EffectDecl::default_row_args`]. Routes through
+    /// [`tidepool_mcp::build_effect_stack_type`] (not a bare join of
+    /// `effect_names`, which carries no type arguments and would emit a
+    /// bare `Finalize` — a kind error in the promoted list, since every
+    /// sibling entry has kind `* -> *`).
     fn effect_stack_type(&self) -> String {
-        let names: Vec<&str> = self.effect_names.iter().map(String::as_str).collect();
-        if names.is_empty() {
-            "'[]".to_string()
-        } else {
-            format!("'[{}]", names.join(", "))
-        }
+        tidepool_mcp::build_effect_stack_type(&self.decls)
     }
+
+    /// Resolve ONE turn's compile target: the include search path and the
+    /// promoted effect-row string it must be compiled against — both derived
+    /// from the SAME [`tidepool_mcp::RowArgs`], so they cannot name different
+    /// rows.
+    ///
+    /// `finalize`, when `Some((ty, imports))`, instantiates the row's
+    /// `Finalize` entry at `ty` (the hole's answer type) — importing
+    /// `imports` (the author modules that define it) — and materializes ITS
+    /// OWN effects-module dir via [`tidepool_mcp::ensure_effects_module_at`],
+    /// swapping it in for [`Self::effects_dir`] wherever it sits in
+    /// [`Self::include`] (found by VALUE, not by position — a caller may have
+    /// appended more dirs after construction, e.g. a project source dir).
+    /// The dir is content-addressed on the generated source, so repeats of
+    /// the same answer type are free and two answer types can never be
+    /// served each other's module.
+    ///
+    /// `None` keeps the config's own default row (`Finalize NoAnswer`) and
+    /// `include` unchanged — the shape every turn that isn't answering a
+    /// typed hole compiles against.
+    pub fn turn_target(
+        &self,
+        finalize: Option<(&str, &[String])>,
+    ) -> Result<TurnTarget, EngineError> {
+        let Some((ty, imports)) = finalize else {
+            return Ok(TurnTarget {
+                include: self.include.clone(),
+                stack: self.effect_stack_type(),
+            });
+        };
+        let row = tidepool_mcp::RowArgs::at("Finalize", [ty]).importing(imports.iter().cloned());
+        let effects_dir = tidepool_mcp::ensure_effects_module_at(&self.decls, &row)
+            .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let mut include = self.include.clone();
+        match include.iter().position(|p| p == &self.effects_dir) {
+            Some(pos) => include[pos] = effects_dir,
+            None => include.push(effects_dir),
+        }
+        Ok(TurnTarget {
+            include,
+            stack: tidepool_mcp::build_effect_stack_type_at(&self.decls, &row),
+        })
+    }
+}
+
+/// One turn's compile target — the include search path and the promoted
+/// effect-row string, resolved together by [`EngineConfig::turn_target`] so
+/// they can never disagree.
+#[derive(Debug, Clone)]
+pub struct TurnTarget {
+    pub include: Vec<PathBuf>,
+    pub stack: String,
 }
 
 // ---------------------------------------------------------------------------
 // Turn templating
 // ---------------------------------------------------------------------------
 
-/// The monomorphic `finalize` a turn compiles against when the hole it is
-/// answering has a known type `T` — the shim that makes "GHC validates the
-/// answer against T" TRUE for `finalize`.
-///
-/// `Tidepool.Effects`' own `finalize` is `forall v a effs. Member Finalize effs
-/// => v -> Eff effs a`: `v` is unconstrained, so `finalize someText` against a
-/// `T`-typed hole compiles and the `Text` crosses in-heap into a `T`-typed
-/// continuation — a constructor-tag trap at the far side, past every check.
-/// Pinning `v` turns that into a GHC error the corrective-retry loop feeds back.
-///
-/// The signature keeps `finalize`'s TYVAR SHAPE rather than collapsing to
-/// `T -> M a`, because both are load-bearing at the call sites models actually
-/// write:
-/// - `v` stays the FIRST tyvar, so a visible `finalize @T x` still binds `v`
-///   (collapsing to `forall a. T -> M a` would silently bind `a` instead).
-/// - `a` stays free, so the template's `toJSON _r` wrapper defaults it. Pinning
-///   `a` to `T` would demand a `ToJSON T` the hole's type need not have.
-/// - `Member Finalize effs` stays a real constraint, so the dictionary rides as
-///   a leading value argument at the shim's call site — the shape
-///   `Translate.hs`'s `splitTrailingArgs` re-applies verbatim when it head-swaps
-///   to `finalizeSited`.
-///
-/// The body applies `@T` explicitly so the intercepted call site is monomorphic
-/// in Core (`checkFinalizeType` rejects a leftover tyvar); the given `v ~ T`
-/// supplies the cast for the argument.
-pub fn finalize_shim(ty: &str) -> String {
-    let q = tidepool_mcp::EFFECTS_QUALIFIER;
-    format!(
-        "finalize :: forall v a effs. (v ~ ({ty}), Member Finalize effs) => v -> Eff effs a\n\
-         finalize __answer = {q}.finalize @({ty}) __answer"
-    )
-}
-
 /// Wrap a model-written `M a` block as a full templated module the extract can
 /// compile, with optional extra `helpers` (e.g. the answerer's `resume`) and
 /// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 ///
-/// `finalize_ty` pins `finalize` to the answer type of the hole this turn is
-/// answering (see [`finalize_shim`]); `None` leaves the polymorphic
-/// `Tidepool.Effects` verb in scope unchanged, which is what every turn that
-/// isn't answering a typed hole compiles against.
+/// `stack` is the promoted effect-row string this turn compiles against —
+/// callers answering a typed `finalize` hole resolve it (and the matching
+/// include dir) via [`EngineConfig::turn_target`], so `finalize`'s pin lives
+/// in the ROW (`Member (Finalize T) stack`), not in a shimmed/shadowed
+/// binding: the ordinary [`tidepool_mcp::build_preamble`] is used unconditionally.
 pub fn template_turn(
     cfg: &EngineConfig,
+    stack: &str,
     code: &str,
     imports: &str,
     helpers: &str,
-    finalize_ty: Option<&str>,
 ) -> String {
-    template_turn_for(&cfg.decls, cfg, code, imports, helpers, finalize_ty)
+    template_turn_for(&cfg.decls, stack, code, imports, helpers)
 }
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
 /// hardcoded Agent stack — the self-iterating harness driver's outer `Eff
 /// '[RunLLMTurn]` compile (WS-A) needs a preamble matching ITS OWN (narrower)
-/// decls, not the Agent's; `cfg` must be the [`EngineConfig`] built from the
-/// SAME `decls` (its `effect_stack_type` must match).
+/// decls, not the Agent's. `stack` must be rendered from the SAME `decls` —
+/// see [`EngineConfig::turn_target`].
 pub fn template_turn_for(
     decls: &[tidepool_mcp::EffectDecl],
-    cfg: &EngineConfig,
+    stack: &str,
     code: &str,
     imports: &str,
     helpers: &str,
-    finalize_ty: Option<&str>,
 ) -> String {
-    let stack = cfg.effect_stack_type();
-    let (preamble, helpers) = match finalize_ty {
-        Some(ty) => (
-            tidepool_mcp::build_preamble_shadowing_effects(decls, false, &["finalize"]),
-            merge_helpers(&finalize_shim(ty), helpers),
-        ),
-        None => (
-            tidepool_mcp::build_preamble(decls, false),
-            helpers.to_string(),
-        ),
-    };
-    tidepool_mcp::template_haskell(&preamble, &stack, code, imports, &helpers, None, None)
-}
-
-/// Join two `helpers` blocks into one, dropping an empty side (both land as
-/// top-level declarations, so a blank line between them is enough).
-fn merge_helpers(first: &str, rest: &str) -> String {
-    if rest.trim().is_empty() {
-        first.to_string()
-    } else {
-        format!("{first}\n\n{rest}")
-    }
+    let preamble = tidepool_mcp::build_preamble(decls, false);
+    tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
 }
 
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —

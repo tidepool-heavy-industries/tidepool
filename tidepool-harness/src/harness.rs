@@ -101,8 +101,10 @@ pub enum HarnessError {
 ///
 /// Both halves are required for the "GHC validates the answer against `T`"
 /// guarantee to hold for `finalize`. `ty` pins `finalize` to the hole's answer
-/// type ([`crate::engine::finalize_shim`]) so a wrong-typed answer is a compile
-/// error instead of a value that crosses in-heap into a `T`-typed continuation.
+/// type — [`Harness::run_block`] resolves it into a `Finalize T` ROW entry via
+/// [`crate::engine::EngineConfig::turn_target`] (`Member (Finalize T) effs` is
+/// the whole pin), so a wrong-typed answer is a compile error naming the row
+/// instead of a value that crosses in-heap into a `T`-typed continuation.
 /// `imports` puts `T` itself in scope: `T` is an author type (the wizard's
 /// `Contribution`, defined in the harness source module), and a turn that cannot
 /// NAME `T` cannot construct one — the model tries `@T`, gets "not in scope",
@@ -355,7 +357,8 @@ impl Harness {
         provider: Arc<dyn DynModelProvider>,
     ) -> Result<Self, HarnessError> {
         // A trivial effectful seed carrying the full effect-stack ConTags.
-        let boot_src = engine::template_turn(&cfg, "pure (toJSON (0 :: Int))", "", "", None);
+        let boot_stack = cfg.turn_target(None)?.stack;
+        let boot_src = engine::template_turn(&cfg, &boot_stack, "pure (toJSON (0 :: Int))", "", "");
         // No real answerer node exists yet (this is the one-time boot compile) —
         // NO_NODE/NO_ROUND. `NodeId(0)` is a real, live node id, never a sentinel.
         let boot = compile::compile_turn(
@@ -990,8 +993,11 @@ impl Harness {
         // once a compiled fragment is in hand — as the original path did).
         let (session_module, session_include) = self.session_decl_context(node);
         // The node's answer contract (when it is driving toward a `finalize`)
-        // contributes both halves: its `imports` put the answer type in scope,
-        // and its `ty` pins `finalize` to that type inside `template_turn`.
+        // contributes both halves: its `imports` put the answer type in scope
+        // for the turn's own module, and its `ty` instantiates the ROW
+        // (`Finalize <ty>`) this turn compiles against — ONE computation
+        // (`turn_target`) resolves both the include dir and the stack string
+        // from the SAME row, so they cannot disagree.
         let contract = self.answer_contract(node);
         let mut import_lines: Vec<String> = contract
             .iter()
@@ -1002,14 +1008,16 @@ impl Harness {
         }
         import_lines.extend(session_module);
         let merged_imports = import_lines.join("\n");
+        // Resolved BEFORE the STAGE_TEMPLATE window: for a new answer type this
+        // materializes an effects module (a filesystem write), which is not
+        // templating cost and would inflate that stage's attribution.
+        let target = self.cfg.turn_target(
+            contract
+                .as_ref()
+                .map(|c| (c.ty.as_str(), c.imports.as_slice())),
+        )?;
         let template_started = std::time::Instant::now();
-        let src = engine::template_turn(
-            &self.cfg,
-            block,
-            &merged_imports,
-            helpers,
-            contract.as_ref().map(|c| c.ty.as_str()),
-        );
+        let src = engine::template_turn(&self.cfg, &target.stack, block, &merged_imports, helpers);
         timing::record_stage(
             node.0,
             timing::NO_ROUND,
@@ -1017,7 +1025,7 @@ impl Harness {
             template_started.elapsed(),
             src.len() as u64,
         );
-        let mut include = self.cfg.include.clone();
+        let mut include = target.include;
         if let Some(dir) = session_include {
             include.push(dir);
         }

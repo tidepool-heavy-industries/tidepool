@@ -533,13 +533,16 @@ impl SelfHarnessDriver {
 
         // A trivial effectful seed carrying the RunLLMTurn-only stack's
         // ConTags (mirrors `Harness::new`'s own boot seed).
+        let outer_stack = outer_cfg
+            .turn_target(None)
+            .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
+            .stack;
         let boot_src = engine::template_turn_for(
             &outer_decls(),
-            &outer_cfg,
+            &outer_stack,
             "pure (toJSON (0 :: Int))",
             "",
             "",
-            None,
         );
         // The outer session has no answerer node id (it is the single loop
         // driver, not a tree node) — NO_NODE/NO_ROUND, same convention as
@@ -606,8 +609,12 @@ impl SelfHarnessDriver {
             outer.module_name,
             state_cross::LOADED_QUALIFIER
         );
-        let src =
-            engine::template_turn_for(&outer_decls(), &outer.cfg, code, &imports, helpers, None);
+        let stack = outer
+            .cfg
+            .turn_target(None)
+            .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
+            .stack;
+        let src = engine::template_turn_for(&outer_decls(), &stack, code, &imports, helpers);
         compile::compile_turn(
             &outer.cfg.extract_bin,
             &src,
