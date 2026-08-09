@@ -175,21 +175,26 @@ The deltas that change vertical-core design:
   development and drives headless agents directly through this adapter. No
   Exomonad machinery is ported.
 
-**Open contradiction, escalated to root, not resolved here.** PRD 19's poke
-paragraph on the same tip still reads "There is no runtime delivery queue and
-no auto-enqueue on idle agents; PRD 18's message semantics stand unmodified" —
-which the revision falsifies in three specifics, and it names both operations
-the revision deleted. It looks like an oversight (PRD 19's *cycle-shape*
-paragraph immediately below it was updated in tandem), and the likely
-resolution is that PRD 18 supersedes. Do not build against either reading until
-root rules: a durable queue with delivery-on-steerable is materially more
-runtime machinery than a typed error to the sender.
+**RULED (root, 2026-08-08, tip `930f326e`): PRD 18 supersedes.** PRD 19's poke
+paragraph had contradicted it — "no runtime delivery queue and no auto-enqueue
+on idle agents; PRD 18's message semantics stand unmodified" — while naming
+both operations the revision deleted. Rewritten on root's tip: pokes are
+`pokeAgent`'s durable per-agent queue, retained until deliverable, never
+silently discarded, and idle delivery starts or queues a follow-up.
+**Residents own reaction policy; the runtime owns delivery.**
+
+Worth keeping, because the failure mode recurs: the original "fire-and-forget"
+line was Inanna *describing the pre-revision system* as grounds for dropping a
+must-steer requirement. PRD 19 froze that description into a standing
+prohibition. A sentence that characterizes how things currently work is not the
+same as a decision that they must keep working that way, and the two are easy
+to confuse once the sentence is sitting in a locked-decisions section.
 
 Consequence for wave 2 already visible: spike 2 (steer/interrupt while parked)
-is promoted from "narrows `sendMessage`" to deciding whether an active poke is
-delivered *during* a parked tool call or deferred until it resolves — PRD 18's
-open decision 2. "Retain until deliverable" also becomes required adapter
-behavior rather than resident policy.
+is promoted from "does the API narrow" to "**when** is a queued poke delivered
+during a tool park" — PRD 18's open decision 2. The API no longer narrows
+either way, because retain-until-deliverable is adapter behavior; the spike
+decides delivery timing, not surface. Wave-2 scoped.
 
 ## HOLD lines (root announces each lift; all intact as of wave 1)
 
@@ -203,6 +208,15 @@ behavior rather than resident policy.
    is transitional data and every use site says so.
 3. **root's realm step-4 go-signal** — nothing in `resident.rs`
    pending/`ChildSuspended`.
+
+**Lifted (root, 2026-08-08):** the registry/lifecycle design, to the extent it
+was blocked on the poke contradiction above. Detached-but-running agents,
+`attachAgent` by `AgentReference` + protocol fingerprint, `AgentWentIdle` as an
+ordinary outcome distinct from `AgentFinalized`, Haskell-continuation
+quiescence at cycle boundaries, and `drainMailbox` are all green against the
+tip's semantics. Holds 1 and 2 above still stand and still bound this work:
+substrate consumption waits on generic-surface's fold, and the coupled-spawn
+seam waits on the joint announcement.
 
 The realm parking machinery is consumed ONLY through
 [`../realm-lanes/continuation-parking-contract.md`](../realm-lanes/continuation-parking-contract.md),
