@@ -36,7 +36,7 @@ fi
 # this is self-slotted rather than left to the caller. After the usage check,
 # so a misinvocation fails immediately instead of after a slot wait.
 if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
-  exec "$PWD/scripts/ghc-slots.sh" run -- "$PWD/scripts/battery-shard.sh" "$@"
+  exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/battery-shard.sh" "$@"
 fi
 crate="$1"
 shift
