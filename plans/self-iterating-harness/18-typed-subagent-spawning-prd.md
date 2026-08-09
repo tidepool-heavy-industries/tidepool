@@ -374,7 +374,7 @@ workspace observation.
    pokes, progress observation, follow-up turns, and recursive delegation.
 6. Reuse ChatGPT-authenticated Codex and its native coding harness rather than
    reproduce edit, command, session, and context machinery.
-7. Run each coding worker in a caller-selected workspace under an explicit
+7. Run each coding worker in its own PRD 19 managed worktree under an explicit
    sandbox policy.
 8. Return typed results alongside authoritative execution/activity receipts.
 9. Keep the public authored vocabulary small enough to teach in one compact
@@ -398,11 +398,11 @@ workspace observation.
 - Making `codex-codes` types part of Tidepool's public Rust or Haskell API.
 - Making recursive self-improvement safe or effective by assertion; that is an
   evaluation question after the substrate exists.
-- Creating git worktrees, managing branches, merging changes, or promoting a
-  canonical branch. The separate
+- Implementing Git worktree creation, branch mutation, merging, or promotion
+  inside the Agent effect. The separate
   [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
-  composes worktree allocation and repository events around Agent; spawning
-  itself accepts an assigned workspace.
+  couples managed-worktree allocation/binding with spawning and supplies
+  repository events; coding agents still perform Git workflow operations.
 
 ## Primary authored experience
 
@@ -535,6 +535,10 @@ observeWorker worker = waitAgent worker >>= \case
 
   AgentFailed failure ->
     recoverWorker failure
+
+  AgentInterrupted receipt -> do
+    recordReceipt receipt
+    observeWorker worker
 ```
 
 ## Public Haskell API
@@ -1012,17 +1016,12 @@ justify it.
 
 ## Workspace boundary
 
-Agent spawning consumes a workspace assignment; it does not create or manage
-one. The assignment supplies an absolute `cwd` plus the sandbox access Codex
-may exercise there:
-
-> **Revision (Inanna, 2026-08-08):** once
-> [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
-> lands, agent creation is tightly coupled to worktree allocation — a
-> managed worktree is the only workspace an agent can receive, one
-> worktree per agent, all agents isolated. `CurrentWorkspace` and
-> free-form workspace assignment are transitional, valid only for
-> pre-PRD-19 spikes and dogfood.
+The low-level Agent backend consumes an absolute `cwd` and sandbox assignment;
+it does not implement Git. The public surface after
+[`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+couples agent creation to managed-worktree allocation/binding: one worktree per
+agent, all coding agents isolated. `CurrentWorkspace` and free-form workspace
+assignment are transitional facilities only for pre-PRD-19 spikes.
 
 ```haskell
 data Workspace = Workspace
@@ -1033,15 +1032,10 @@ data Workspace = Workspace
 data WorkspaceAccess = ReadOnly | WorkspaceWrite
 ```
 
-The first dogfood points at its standalone repository. Exomonad may later
-allocate a worktree and pass its path as a `Workspace`, but that composition is
-outside this effect and PRD.
-
-That later effect should expose workspace activity as events in the same style
-as Agent events: commits created, checks completed, conflicts detected, and
-the tree becoming dirty or clean. A higher-level run may pair an `AgentHandle`
-with a `WorktreeHandle` and select across both event streams, treating them as
-one orchestration unit without making either effect own the other's lifecycle.
+PRD 19 exposes workspace activity as events in the same style as Agent events
+and returns a higher-level worker run containing both typed agent and worktree
+handles. Worktree and Agent remain separate internal effects even though public
+creation binds them atomically.
 
 The terminal receipt records what the agent runtime actually observed without
 claiming ownership of repository history:
@@ -1328,8 +1322,8 @@ increasing capability from unchanged workers.
    validation.
 7. Every terminal result is paired with authoritative activity/workspace
    receipts.
-8. Each worker runs in its caller-assigned workspace and sandbox; spawning
-   makes no claim about git lifecycle or repository integration.
+8. Each worker runs in its own managed worktree and sandbox; the Agent effect
+   itself makes no claim about Git workflow operations or branch promotion.
 9. Wave/cycle cleanup may preserve independent running or idle workers through
    checkpointed references, but requires Haskell-continuation quiescence and
    cancels abandoned pending handlers without relying on GC.
