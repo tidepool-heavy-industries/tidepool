@@ -1360,6 +1360,306 @@ macro_rules! fs_effect_def {
     };
 }
 
+/// Worktree effect — single definition (PRD 19, lane L4).
+///
+/// The authored surface is `haskell/lib/Tidepool/Worktree.hs`, which was
+/// written FIRST and re-exports every name below from the generated
+/// `Tidepool.Effects`. That module is frozen: this definition exists to satisfy
+/// its import list exactly, not to shape it.
+///
+/// **Identity types are `data`, not `newtype`, and not type synonyms.** PRD 19
+/// states that `EventId` is opaque runtime identity while `GitOid` is domain
+/// data, and that they are different kinds of thing. A synonym to `Text` would
+/// make them the same thing and let a git OID be passed where a worktree id is
+/// wanted; a `newtype` is erased in Core, so the Rust `ToCore` side would build
+/// a one-field `Con` the Haskell side no longer has. `data` is the spelling
+/// that survives both.
+///
+/// **`WorktreeReceipt`'s id field is `treeId`, not the PRD snippet's
+/// `worktreeId`.** The PRD's own public surface also requires
+/// `worktreeId :: WorktreeHandle -> WorktreeId` as a standalone function, and a
+/// record field selector and a top-level function of the same name are an
+/// ambiguous occurrence at the export. The function is the one the PRD pins by
+/// signature, so the field yielded. Access is `r.treeId` — record-dot, per the
+/// eval records rule.
+#[macro_export]
+macro_rules! worktree_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Worktree,
+            handler WorktreeHandler,
+            req WorktreeReq,
+            decl_fn worktree_decl,
+            description [
+                "Managed git worktrees: create an isolated worktree from a clean source ",
+                "(or, explicitly, from a dirty-source snapshot), look a retained one back ",
+                "up by durable id, and list what exists. Retain-first — there is no ",
+                "release or delete verb in v1, deliberately. Git WORKFLOW (rebase, merge, ",
+                "cherry-pick, conflict resolution) is absent by design: that work belongs ",
+                "to coding agents with their native tools, and Tidepool observes what the ",
+                "repository became through `Tidepool.Event`.",
+            ],
+            type_defs [
+                "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
+                "data GitOid = GitOid Text deriving (Show, Eq)",
+                "data GitRef = GitRef Text deriving (Show, Eq)",
+                "data BranchName = BranchName Text deriving (Show, Eq)",
+                "data WorktreeSource = SourceCurrentRepository | SourceRef GitRef | SourceWorktree WorktreeId deriving (Show, Eq)",
+                "data DirtyPolicy = RequireClean | AllowDirtySnapshot deriving (Show, Eq)",
+                "data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)",
+                "data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)",
+                "data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)",
+                "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
+                "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
+                "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
+                "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
+            ],
+            // Typed per-verb failure (#335): a dirty source, a lost tree, or a
+            // busy worktree is DATA an author cases on, not an eval abort.
+            // These are PRD 19's `WorktreeError` variants plus the two the
+            // PRD's prose requires but its illustrative ADT did not spell out
+            // (see `tidepool-worktree/src/error.rs` for the argument).
+            errors WorktreeError [
+                { ctor SourceDirty, fields { dirty: "DirtySummary" as tidepool_bridge_effects::WtDirtySummary },
+                  doc "source working tree has uncommitted state and the spec did not opt into a snapshot" },
+                { ctor NotARepository, fields { path: "Text" as String },
+                  doc "the path is not inside a git repository" },
+                { ctor WorktreeLost, fields { lostId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
+                  doc "registered but gone from disk; never silently recreated" },
+                { ctor DirtySubmoduleUnsupported, fields { submodule: "Text" as String },
+                  doc "a dirty submodule in the source; v1 refuses rather than capturing a gitlink it did not follow" },
+                { ctor SourceOperationInProgress, fields { inProgress: "InProgressKind" as tidepool_bridge_effects::WtInProgressKind },
+                  doc "source is mid-merge / mid-rebase / mid-cherry-pick" },
+                { ctor WorktreeBusy, fields { busyId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId, holder: "Text" as String },
+                  doc "one worktree, one agent — binding a second fails explicitly" },
+                { ctor GitFailure, fields { receipt: "GitFailureReceipt" as tidepool_bridge_effects::WtGitFailureReceipt },
+                  doc "git itself failed; the receipt carries the invocation and its output" },
+            ],
+            verbs [
+                { ctor WorktreeCreate, method worktree_create,
+                  args { spec: "WorktreeSpec" as tidepool_bridge_effects::WtWorktreeSpec },
+                  ret "WorktreeHandle", errors WorktreeError },
+                { ctor WorktreeLookup, method worktree_lookup,
+                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
+                  ret "WorktreeHandle", errors WorktreeError },
+                { ctor WorktreeList, method worktree_list,
+                  args { },
+                  ret "[WorktreeSummary]", errors WorktreeError },
+                { ctor WorktreeBranchOf, method worktree_branch_of,
+                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
+                  ret "BranchName", errors WorktreeError },
+            ],
+            helpers [
+                { raw ["-- | Seed a managed worktree from the repository Tidepool is running",
+                       "-- against. Clean-by-default: a dirty source is REFUSED unless the spec",
+                       "-- is passed through 'allowDirtySnapshot'.",
+                       "fromCurrentRepository :: Text -> WorktreeSpec",
+                       "fromCurrentRepository lbl = WorktreeSpec SourceCurrentRepository lbl RequireClean"] },
+                { raw ["-- | Seed from an explicit ref (branch, tag, remote ref, or raw OID).",
+                       "fromRef :: GitRef -> Text -> WorktreeSpec",
+                       "fromRef r lbl = WorktreeSpec (SourceRef r) lbl RequireClean"] },
+                { raw ["-- | Seed from another managed worktree's current HEAD. This is how a",
+                       "-- reviewer gets its own isolated tree off the branch it is reviewing.",
+                       "fromWorktree :: WorktreeHandle -> Text -> WorktreeSpec",
+                       "fromWorktree h lbl = WorktreeSpec (SourceWorktree (worktreeId h)) lbl RequireClean"] },
+                { raw ["-- | Opt IN to snapshotting a dirty source. Spelled at the call site so a",
+                       "-- reader of the resident can see that a synthetic commit was taken; it",
+                       "-- never alters the source branch, HEAD, index, or working-tree bytes.",
+                       "allowDirtySnapshot :: WorktreeSpec -> WorktreeSpec",
+                       "allowDirtySnapshot s = s { specDirtyPolicy = AllowDirtySnapshot }"] },
+                { raw ["-- | Create a managed worktree. `Left (SourceDirty summary)` when the",
+                       "-- source is dirty and the spec did not opt in; case-match the error",
+                       "-- rather than unwrapping if you mean to handle it.",
+                       "createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)",
+                       "createWorktree = send . WorktreeCreate"] },
+                { raw ["-- | Look a retained worktree up by durable id. Survives restart:",
+                       "-- resolution reads on-disk registry state, not process memory.",
+                       "-- `Left (WorktreeLost i)` when it is registered but gone from disk.",
+                       "lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)",
+                       "lookupWorktree = send . WorktreeLookup"] },
+                { raw ["-- | Every registered worktree, present or lost. A lost tree is listed",
+                       "-- with `present = False` rather than failing the whole listing.",
+                       "listWorktrees :: M [WorktreeSummary]",
+                       "listWorktrees = send WorktreeList >>= liftEither"] },
+                { raw ["-- | The managed branch this worktree is on, read fresh from git.",
+                       "worktreeBranch :: WorktreeHandle -> M BranchName",
+                       "worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither"] },
+                { raw ["-- | The durable identity of a managed worktree. Pure: the handle",
+                       "-- already carries its receipt, so this reads no git state.",
+                       "worktreeId :: WorktreeHandle -> WorktreeId",
+                       "worktreeId h = h.handleReceipt.treeId"] },
+                { raw ["renderWorktreeId :: WorktreeId -> Text",
+                       "renderWorktreeId (WorktreeId t) = t"] },
+                { raw ["renderGitOid :: GitOid -> Text",
+                       "renderGitOid (GitOid t) = t"] },
+                { raw ["renderBranchName :: BranchName -> Text",
+                       "renderBranchName (BranchName t) = t"] },
+                { raw ["-- | A one-line, operator-readable rendering of a worktree failure.",
+                       "-- Case-match the constructor when you mean to BRANCH on the failure;",
+                       "-- this is for receipts and logs.",
+                       "renderWorktreeError :: WorktreeError -> Text",
+                       "renderWorktreeError (SourceDirty d) = \"source repository is dirty: \" <> show (length d.staged) <> \" staged, \" <> show (length d.unstaged) <> \" unstaged, \" <> show (length d.untracked) <> \" untracked\"",
+                       "renderWorktreeError (NotARepository p) = \"not a git repository: \" <> p",
+                       "renderWorktreeError (WorktreeLost i) = \"managed worktree \" <> renderWorktreeId i <> \" is registered but missing on disk\"",
+                       "renderWorktreeError (DirtySubmoduleUnsupported p) = \"dirty submodule is unsupported in v1: \" <> p",
+                       "renderWorktreeError (SourceOperationInProgress k) = \"source repository has an operation in progress: \" <> show k",
+                       "renderWorktreeError (WorktreeBusy i holder) = \"worktree \" <> renderWorktreeId i <> \" is already bound to agent \" <> holder",
+                       "renderWorktreeError (GitFailure r) = \"git \" <> T.intercalate \" \" r.gitArgs <> \" failed: \" <> T.strip r.gitStderr"] },
+            ],
+        }
+    };
+}
+
+/// Repository-event effect — single definition (PRD 19, lane L4).
+///
+/// The authored surface is `haskell/lib/Tidepool/Event.hs`, frozen and written
+/// first. The GADT is named `RepoEvent` rather than `Event` because `Event a`
+/// is the authored DESCRIPTION type this definition also declares, and two
+/// types cannot share a name.
+///
+/// ## `withHandler` is an interposition, not a send-wrapper
+///
+/// The mechanism, its verification, and the alternatives rejected are written
+/// up in `plans/post-restart/worktree-lanes/L4-mechanism.md`. In short: `Eff` is
+/// freer-simple's free monad, so a scope can WALK the computation it encloses
+/// and interpose an action before every effect that computation performs. The
+/// author's handler closure is therefore applied by ordinary Haskell
+/// application, inside the resident's own continuation. It never crosses to
+/// Rust, is never rooted by Rust, and needs no closure-application entry point
+/// on the parked path — `tidepool-codegen` is untouched by this lane.
+///
+/// Every authored semantic falls out of that shape rather than being enforced:
+/// a subscription cannot re-enter its own handler because `pumpEff` recurses on
+/// the BODY only (the tick's own effects are not pumped by its own pump);
+/// ordering is Haskell's own sequencing over a FIFO drain; a handler that
+/// suspends is an ordinary suspension of the resident; a handler that fails
+/// fails the enclosing scope by ordinary means.
+#[macro_export]
+macro_rules! event_effect_def {
+    ($project:path) => {
+        $project! {
+            effect RepoEvent,
+            handler RepoEventHandler,
+            req RepoEventReq,
+            decl_fn event_decl,
+            description [
+                "Typed repository events. `commit tree` and `headChanged tree` are event ",
+                "DESCRIPTIONS — values you can build, `fmap`, and merge with `<|>` before ",
+                "anything is registered. `withHandler event handler body` makes one live ",
+                "for exactly the extent of its lexical body: it registers without ",
+                "blocking, never replays events older than the registration, invokes the ",
+                "handler in the SAME effect row as the surrounding code (so it may send a ",
+                "typed message, spawn a reviewer, or ask the operator — and may itself ",
+                "suspend), runs one handler at a time per subscription with later ",
+                "observations queued in observation order, and on exit closes intake, ",
+                "drains, then unregisters. Handler failure fails the enclosing scope. ",
+                "Queue overflow fails loudly — commits are never silently dropped.",
+            ],
+            type_defs [
+                "data EventId = EventId Int deriving (Show, Eq)",
+                "data SubscriptionId = SubscriptionId Int deriving (Show, Eq)",
+                // What the runtime watches. One entry per (worktree, kind) pair;
+                // `<|>` concatenates, so a merged Event is ONE subscription over
+                // several watches rather than several subscriptions.
+                "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId deriving (Show, Eq)",
+                "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)",
+                "data HeadChangeReceipt = HeadChangeReceipt { headWorktree :: WorktreeId, oldHead :: Maybe GitOid, newHead :: GitOid, kind :: HeadChangeKind, headBranch :: Maybe BranchName, observedAtMs :: Int } deriving (Show, Eq)",
+                "data CommitReceipt = CommitReceipt { commitWorktree :: WorktreeId, oid :: GitOid, parents :: [GitOid], subject :: Text, author :: Text, committedAtMs :: Int, files :: [Text] } deriving (Show, Eq)",
+                // The wire shape one reconciled fact crosses as. A normal commit
+                // produces one of each SHARING an EventId — that sharing is how a
+                // consumer tells "two views of one change" from "two changes", so
+                // the id rides on the wire rather than being minted per view.
+                "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt deriving (Show, Eq)",
+                "data Observed a = Observed { eventId :: EventId, value :: a } deriving (Show, Eq)",
+                // An Event is a DESCRIPTION: what to watch, plus how to project a
+                // raw observation into the author's type. Keeping the projection
+                // in the value is what makes Event a lawful Functor and lets `<|>`
+                // merge two sources into ONE subscription.
+                "data Event a = Event { eventWatches :: [Watch], eventProject :: RepositoryEvent -> Maybe a }",
+                "instance Functor Event where fmap f e = Event e.eventWatches (\\r -> fmap f (e.eventProject r))",
+            ],
+            errors EventError [
+                { ctor EventQueueOverflow, fields { overflowSub: "Int" as i64, dropped: "Int" as i64 },
+                  doc "the per-subscription queue bound was exceeded — the scope fails rather than dropping commits" },
+                { ctor EventUnknownSubscription, fields { unknownSub: "Int" as i64 },
+                  doc "no such live subscription (already unregistered)" },
+                { ctor EventSourceLost, fields { lostDetail: "Text" as String },
+                  doc "a watched worktree is no longer observable" },
+                { ctor EventSourceFailed, fields { failedDetail: "Text" as String },
+                  doc "reconciliation against git failed" },
+            ],
+            verbs [
+                { ctor RepoEventSubscribe, method repo_event_subscribe,
+                  args { watches: "[Watch]" as Vec<tidepool_bridge_effects::EvWatch> },
+                  ret "SubscriptionId", errors EventError },
+                { ctor RepoEventDrain, method repo_event_drain,
+                  args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId },
+                  ret "[RepositoryEvent]", errors EventError },
+                { ctor RepoEventUnsubscribe, method repo_event_unsubscribe,
+                  args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId },
+                  ret "()", errors EventError },
+            ],
+            helpers [
+                { raw ["-- | Commits observed in a managed worktree — the high-signal semantic",
+                       "-- checkpoint (normal commit, merge, cherry-pick, or amend). For review,",
+                       "-- test, and receipt reactions.",
+                       "commit :: WorktreeHandle -> Event (Observed CommitReceipt)",
+                       "commit h = Event [WatchCommit (worktreeId h)] (projectCommit (worktreeId h))"] },
+                { raw ["projectCommit :: WorktreeId -> RepositoryEvent -> Maybe (Observed CommitReceipt)",
+                       "projectCommit w (ObservedCommit eid r) = if r.commitWorktree == w then Just (Observed eid r) else Nothing",
+                       "projectCommit _ _ = Nothing"] },
+                { raw ["-- | Observed movement of a worktree's HEAD — advance, amend,",
+                       "-- rebase/rewrite, reset, or checkout. This is the dependency-propagation",
+                       "-- signal: children want a rebase poke even when their parent was itself",
+                       "-- rebased. Observations are COALESCED state deltas, not a movement log.",
+                       "headChanged :: WorktreeHandle -> Event (Observed HeadChangeReceipt)",
+                       "headChanged h = Event [WatchHead (worktreeId h)] (projectHead (worktreeId h))"] },
+                { raw ["projectHead :: WorktreeId -> RepositoryEvent -> Maybe (Observed HeadChangeReceipt)",
+                       "projectHead w (ObservedHeadChange eid r) = if r.headWorktree == w then Just (Observed eid r) else Nothing",
+                       "projectHead _ _ = Nothing"] },
+                { raw ["-- | Merge two same-typed sources into ONE subscription: observations",
+                       "-- from either. Subscriptions repeat for their lexical lifetime — this",
+                       "-- is not one-shot. Combine with 'fmap' to keep heterogeneous selection",
+                       "-- typed: `fmap Left (commit a) <|> fmap Right (headChanged b)`.",
+                       "infixl 3 <|>",
+                       "(<|>) :: Event a -> Event a -> Event a",
+                       "l <|> r = Event (l.eventWatches ++ r.eventWatches) (\\o -> case l.eventProject o of { Just a -> Just a; Nothing -> r.eventProject o })"] },
+                // The interposition. `pumpEff` recurses on the BODY only, never on
+                // the tick — that asymmetry IS the one-handler-at-a-time guarantee
+                // for a subscription, and it is structural rather than enforced.
+                { raw ["-- | Run `tick` before every effect `body` performs. The scoped",
+                       "-- interposition `withHandler` is built from; see",
+                       "-- plans/post-restart/worktree-lanes/L4-mechanism.md.",
+                       "pumpEff :: Eff effs () -> Eff effs a -> Eff effs a",
+                       "pumpEff _ (Val a) = Val a",
+                       "pumpEff tick (E u q) = tick >> E u (tsingleton (\\x -> pumpEff tick (qApp q x)))"] },
+                { raw ["-- | Drain everything this subscription has observed since the last",
+                       "-- drain, applying the handler to each match in OBSERVATION ORDER.",
+                       "-- A queue overflow aborts here rather than dropping a commit.",
+                       "drainSubscription :: Event a -> (a -> M ()) -> SubscriptionId -> M ()",
+                       "drainSubscription ev handler sub = do",
+                       "  batch <- send (RepoEventDrain sub) >>= liftEither",
+                       "  mapM_ (\\o -> case ev.eventProject o of { Just a -> handler a; Nothing -> pure () }) batch"] },
+                { raw ["-- | `withHandler event handler body` registers atomically, runs `body`",
+                       "-- with the handler live, and on exit closes intake, drains what was",
+                       "-- already observed, and unregisters. Registration does not block, and",
+                       "-- the subscription NEVER replays events older than itself.",
+                       "--",
+                       "-- The handler runs in the surrounding `M` row: it may send a typed",
+                       "-- message, spawn a reviewer, ask the operator, or record a receipt,",
+                       "-- and it may itself suspend. Its failure fails this scope.",
+                       "withHandler :: Event a -> (a -> M ()) -> M b -> M b",
+                       "withHandler ev handler body = do",
+                       "  sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither",
+                       "  r <- pumpEff (drainSubscription ev handler sub) body",
+                       "  drainSubscription ev handler sub",
+                       "  send (RepoEventUnsubscribe sub) >>= liftEither",
+                       "  pure r"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

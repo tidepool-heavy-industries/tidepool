@@ -132,6 +132,16 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     // diff via `Patch.genPatch`/`Patch.renderPatch`.
     out.push_str("import qualified Tidepool.Patch as Patch\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
+    // `Eff`'s own constructors, for scopes that INTERPOSE on the computation
+    // they enclose rather than merely sending into it. PRD 19's `withHandler`
+    // is the live consumer: it walks its body's freer structure to run a
+    // handler before every effect the body performs, which is what lets the
+    // author's closure be applied by ordinary Haskell application instead of
+    // by a runtime closure-apply entry point that does not exist. `Eff` is the
+    // SAME type re-exported by `Control.Monad.Freer`, so this import adds
+    // constructors and the queue operations, and shadows nothing.
+    // See plans/post-restart/worktree-lanes/L4-mechanism.md.
+    out.push_str("import Control.Monad.Freer.Internal (Eff(..), qApp, tsingleton)\n");
     // runLLMTurn/runLLMTurnFork's hidden *Sited siblings (#R0) coerce the
     // ask reply back to the caller's answer type after extract has statically
     // checked it's monomorphic and function-free — see ask_effect_def!'s helper
