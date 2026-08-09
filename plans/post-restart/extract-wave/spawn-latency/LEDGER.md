@@ -215,6 +215,59 @@ standing rule, not merely under-detailed. Concretely, per item:
   it turned RED identified.
 - **D2** — boot's ConTags guard by name AND the base commit it ran against.
 
+## Denominators, and "keep in sync" is not a guard
+
+**DENOMINATOR RULE (wave, `1b1f7c35`) — every receipt leg carries `N passed /
+M total`.** An inherited red in `tidepool-runtime`
+(`mock_stack_lockstep::mock_stack_matches_production` — `Fork` added to
+`standard_decls()` without updating the hand-maintained `EFFECT_NAMES` mirror,
+`tidepool-testing/src/eval_harness.rs:403`; not ours, routed to root) truncates
+nextest runs under default fail-fast, and **`--no-fail-fast` is in neither
+`battery.sh` nor `battery-shard.sh`**. A sibling lane banked 198 of 877 tests
+with real PASS lines, real names, real timings, and 679 never run.
+
+Why this is the sharpest of the three failure shapes:
+
+    never started     instant exit, clean log        ran nothing
+    queued, killed    only "all slots busy" in log   ran nothing
+    fail-fast trunc.  REAL pass lines and timings    198/877
+
+The first two are visible in the log. **The third answers YES to every adoption
+question** — it started, it ran, it passed what it ran. Only the denominator
+tells. Check log CONTENT, never exit status: an environment failure exits in
+milliseconds and reads as a fast pass. This strengthens the named-guard rule
+rather than replacing it — naming the test proves it ran, the denominator
+proves the suite around it did.
+
+**C1's folded receipt VERIFIED against this rule, by an independent route.**
+Counted `#[test]`/`#[tokio::test(...)]` declarations across the 11
+`acceptance_*` binaries: **24**, matching the run's `24 tests run: 24 passed, 0
+skipped`. Complete surface, not a truncated slice — no re-verification owed.
+Verified by counting declarations in source rather than trusting the run's own
+summary, which is the point of the rule.
+
+> Method note, third instance: three successive grep patterns returned a clean
+> `0` across all 11 files before one matched (`#[tokio::test(flavor = …)]` with
+> arguments defeated each). What caught it was not pattern discipline but
+> **implausibility** — zero tests across eleven acceptance binaries cannot be
+> true. A zero from a mistyped pattern reads exactly like a real zero, so the
+> defense that actually works is a prior expectation about the answer's rough
+> size, not more care with the regex.
+
+**"KEEP THIS IN SYNC WITH X" IS NOT A GUARD — binding on D2.** The `Fork` break
+above is the demonstration: `eval_harness.rs:387` documents that the list can
+drift AND cites the prior instance (`f1a480e6`) — then it drifted again. A
+comment saying a mechanism can fail silently is **a recorded decision to keep
+it**, and it reads as diligence while providing none; it is evidence that
+hand-maintenance was already tried and already failed.
+
+Applied to D2: anywhere the reachability work is tempted to leave "keep this in
+sync with X" as the guard, that comment IS the failure, not the fix. **Derive
+from the source.** Same shape as the freer-scaffolding mandatory roots — the
+five must be DERIVED as roots (from `freer_names`, the single source `ConTags`
+itself resolves against), never listed with a note asking future readers to
+remember why.
+
 ## Positive control: an INSTRUMENT needs the same proof as a test
 
 My own error, banked because it generalizes the anti-vacuity rule I had already
