@@ -5,9 +5,14 @@ machine hold multiple parked continuations with realm ownership and
 cycle-scoped lifetime?
 
 Prototype branch, preserved unmerged: **`root.realm-spike.proto`** (HEAD
-`55a9df5c`). Findings: `spike-notes/realm-{checklist,lifetime,leak-comparison,prototype}.md`.
-Verified at `root.realm-spike`, rebased onto `harness-interaction-surface`
-(cd0f4002, jit-chain-2 folded).
+`55a9df5c`). Verified at `root.realm-spike`, rebased onto
+`harness-interaction-surface` (cd0f4002, jit-chain-2 folded).
+
+Findings docs. Three are on this branch under `spike-notes/`:
+`realm-checklist.md`, `realm-lifetime.md`, `realm-leak-comparison.md`. The
+fourth, `realm-prototype.md`, exists only on the unmerged prototype branch
+along with the prototype code — read it with
+`git show root.realm-spike.proto:plans/post-restart/spike-notes/realm-prototype.md`.
 
 ---
 
