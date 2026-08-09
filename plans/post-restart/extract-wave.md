@@ -542,6 +542,34 @@ leaving the note visible rather than silently fixing the line.)
    Found by the dev while trying to satisfy the requirement. Check that the
    quantity you are asking for is bracketed by something before you require it.
 
+## Fold conflicts, logged (the no-pre-partitioning experiment's result)
+
+Two sub-TLs, ~90 commits, one shared-file collision — and it was the one the
+scaffold named on day one: `haskell/app/Main.hs`, boot's `--targets` split
+against spawn-latency's D1 defense.
+
+**It was NOT mechanical.** boot refactored `writeWholeModuleClosed` into
+`translateTargetClosed` + `writeClosedTargets`; spawn-latency's
+`assertMetaCoversEmitted` — the D1 CHECK A hard fail, this wave's headline
+safety item — lived in the ORIGINAL body boot replaced. A textual merge keeping
+both sides leaves the defense **defined and never called**: no compile error,
+and green on every test that does not specifically exercise it.
+
+Resolved by re-wiring the call into `writeClosedTargets`, now the single write
+path. Placement documented in-code and load-bearing twice: before the write
+step (CHECK A's contract is that not a byte is written on a metadata gap) and
+before the encode `timeSection` (forcing `allMeta` there keeps that cost out of
+`cbor_encode`, matching the pre-merge attribution). Per target against the
+MERGED metadata, since multi-target shares one `meta.cbor`.
+Verified: `cabal build tidepool-extract-bin` rc=0, links.
+
+**Verdict on the experiment:** not pre-partitioning cost one conflict across
+two sub-TLs, and the conflict was predicted, localized, and resolvable in one
+sitting. But it would have merged CLEAN and SILENTLY WRONG under a textual
+resolution — so the cost of the policy is not conflict volume, it is that
+someone must understand both diffs at the fold. Cheap here because the same TL
+had reviewed both.
+
 ## What the centralized verification pass must cover
 
 Ordered by what is least covered rather than by item:
@@ -556,5 +584,8 @@ Ordered by what is least covered rather than by item:
 4. **Item 0b and `--targets`' outstanding legs.**
 5. **The `tidepool-mcp` shard** — where the remaining `Fork` mirrors are red and
    invisible (ledger item 17).
+6a. **The re-wired D1 call in `writeClosedTargets`** — hand-authored at the
+   fold, compiles, otherwise unexercised. The mutation legs that prove CHECK A
+   fires were run against the pre-merge shape.
 6. **Wire status for D1-B** — MOVES, not proven inert. E6 moves it too and is
    already in the redeploy set.
