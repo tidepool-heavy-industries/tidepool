@@ -238,6 +238,98 @@ be defended as one.** Someone finds the registered-id check, assumes it guards
 something live, and builds on it. Belt-and-braces is not a safe default here;
 it is how a dead guard becomes load-bearing.
 
+## 3b. The predicate story, end to end — for whoever touches this next
+
+Written as reasoning rather than conclusion, because the next person to touch
+the `(<|>)` conditional will be reasoning from a relay exactly as two of us
+did, and **every failure mode in this story is silent** — no build error, no
+failing test, just a wrong preamble.
+
+**1. The collision.** `Tidepool.Prelude` re-exports `Control.Applicative`'s
+`(<|>)`. The frozen `Tidepool.Event` requires `Tidepool.Effects` to export its
+own `Event`-merge `(<|>)`. Both unqualified is an ambiguous occurrence, which
+GHC resolves at NAME RESOLUTION — before typechecking — so the operators'
+different types (`Event a -> Event a -> Event a` vs
+`Alternative f => f a -> f a -> f a`) can never disambiguate it. It fires on
+PRD 19's own worked example.
+
+**2. Why it is bigger than it first looked.** `Tidepool.Effects` has NO export
+list, so it re-exports its own generated `(<|>)`, and the eval preamble imports
+both it and `Tidepool.Prelude` BY DEFAULT. So the collision is in the DEFAULT
+EVAL VOCABULARY — an author need not `import Tidepool.Event` at all. The first
+reproduction imported it explicitly and therefore understated the radius.
+
+**3. Why the DSL was not changed.** The available in-lane fixes were renaming
+the operator or giving `Event` an `Applicative`/`Alternative` instance.
+`Tidepool.Event` is frozen; the PRD says the operator "need not fake a general
+`Applicative`"; and faking one would be dishonest in the type system, since
+`Event` has no sensible `pure`. So the runtime grew and the DSL did not — the
+design stance applied to its own question.
+
+**4. `vocab_effects` was the WRONG predicate, and the reversal is the lesson.**
+After boot-vocab split the generator into
+`effects_module_source_with_vocab(row_effects, vocab_effects, row)`, "the row
+contains RepoEvent" became two predicates. The first answer — key on
+`vocab_effects`, since `(<|>)` is a helper and helpers follow the vocabulary —
+was reasoned from the function's SIGNATURE, relayed. It was endorsed and
+recorded, and it was wrong.
+
+Reading the committed CODE shows helper emission is ROW-GATED:
+`if !(in_row || eff.helpers_row_polymorphic) { continue; }`. A row-CLOSED
+helper (`foo :: A -> M B`) only typechecks when its effect is in the row, so a
+vocabulary-only effect's helpers are emitted only if it declares itself
+row-polymorphic. `(<|>)` is a row-closed RepoEvent helper. **So the predicate
+is the helper-emission condition itself**, which for RepoEvent as declared
+reduces to the row.
+
+The PRINCIPLE was right throughout — *the hiding must track the operator's
+PRESENCE, not the program's capability*. The ANSWER was wrong because presence
+turned out to be row-gated. **A relay can be accurate about a function's shape
+and silent about the thing that decides the answer.** Read the committed
+function; do not read about it.
+
+Had `vocab_effects` shipped, a vocabulary-only RepoEvent would have hidden the
+Prelude's `(<|>)` while emitting no replacement — costing `Alternative` for
+nothing, silently.
+
+**5. Only ONE mismatched pair exists.** `vocab_effects` must be a SUPERSET of
+`row_effects`, enforced by an assert, so "row-with / vocab-without" panics and
+cannot be constructed. The single constructible mismatch is vocab-only, where
+the correct behaviour is NOT to hide. That is the discriminating gate; a gate
+built from the old single-list entry point passes under EITHER predicate and is
+therefore no evidence at all.
+
+**6. Why the fix had to move AUTHOR-SIDE.** The conditional first landed on the
+Prelude import inside the generated `Tidepool.Effects`. That governs name
+resolution within that module's body and NOTHING ELSE — an author's module
+issues its own `import Tidepool.Prelude`. The fix was correct-looking and
+mis-scoped, and it went to `eval_import_lines` (`preamble.rs:61`) and the
+Orchestrate module (`:252`) instead.
+
+**The tell was in hand and unread for hours.** The typecheck probe compiled
+only because `hiding ((<|>))` was written BY HAND, in the probe — author-side.
+That the workaround had to go author-side WAS the evidence that the fix
+belonged author-side. It was recorded as a caveat and stepped past.
+**A workaround you write is evidence about where the real fix belongs.**
+
+**7. Single-source discipline — derive, don't declare.** The conditional CALLS
+boot-vocab's `emits_helpers_for(eff, row_effects)`. Never a restatement, never
+a local copy, never a "keep in sync" comment. Two copies agree today and
+diverge the moment RepoEvent becomes `helpers_row_polymorphic` — which is
+exactly what the vocabulary-without-row story exists to enable — and the
+divergence produces a wrong preamble rather than a build error. One source of
+truth makes the disagreeing case unconstructible rather than a responsibility
+to discharge; the parking contract imposes the same discipline on handled
+prefixes for the same reason.
+
+Two lanes converged INDEPENDENTLY on extracting that shared predicate — this
+one from "the hiding must fire exactly when the loop emits", boot-vocab from
+"a shared predicate makes the mistake unavailable". Reaching one structure from
+two directions is the evidence the structure is right.
+
+`emits_helpers_for` is private/`pub(crate)`; both files are `tidepool-mcp`, so
+it reaches the call site without widening. Do not widen it.
+
 ## 4. Shared files touched, for the fold's conflict log
 
 | File | How |
