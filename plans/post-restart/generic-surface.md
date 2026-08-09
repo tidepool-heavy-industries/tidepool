@@ -253,6 +253,13 @@ children's merge-bases. Four things must happen at that boundary:
    18; alternatives record updated). Disjoint sections, no overlap in
    intent. Keep BOTH.
 
+5. **`tidepool-mcp/src/preamble.rs` may be dual-edited** — this lane
+   reconciles the pragma/extension block (~:27); worktree-wave's L4 adds a
+   conditional `hiding (error, (<|>))` term to `eval_import_lines` (~:61)
+   and the Orchestrate module (~:252), emitted only when the row carries
+   `RepoEvent`. Disjoint regions, so mechanical keep-both. L4 is sequenced
+   behind another fold, so this lane likely folds first and never sees it.
+
 Say in the rebase receipt which conflicts appeared and how they resolved —
 "kept both" is only checkable if it is stated.
 
