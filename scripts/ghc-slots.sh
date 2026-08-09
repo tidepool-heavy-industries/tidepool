@@ -34,15 +34,15 @@
 # protocol occupy slot 0 and total concurrency stays bounded during migration.
 #
 # Properties: single-slot waiters hold nothing while blocked (no deadlock).
-# When all slots are busy, a single-slot waiter POLLS ALL slots with jitter
-# rather than blocking untimed on one: committing to a single slot strands
-# waiters while another slot sits free (observed 2026-08-09 — three waiters
-# PID-hashed onto the same slot, two slots idle). With every waiter polling,
-# no protocol class holds kernel-queue priority over another, so the old
-# timed-retry starvation argument no longer applies; grant order among pollers
-# is random but capacity is never wasted. `exclusive` still blocks untimed per
-# slot in canonical order, so it out-queues pollers on each slot as it drains —
-# which is what a measurement wants.
+# When all slots are busy, a waiter ROTATES over the slots, kernel-blocking on
+# each with a jittered timeout (flock -w) rather than sleep-polling: blocked
+# waiters cost ~zero CPU (43 sleep-pollers were measured burning 1.2 cores,
+# 2026-08-08), and the rotation preserves the no-stranding property (a waiter
+# committed untimed to one slot can starve while another sits free — observed
+# 2026-08-09). Jittered timeouts keep waiters from cycling in lockstep;
+# capacity is never wasted for longer than one timeout. `exclusive` still
+# blocks untimed per slot in canonical order, so it out-queues rotating
+# waiters on each slot as it drains — which is what a measurement wants.
 set -euo pipefail
 
 # THE COPY IN FORCE is the parent repo's, invoked by absolute path
@@ -105,7 +105,9 @@ case "$mode" in
     while :; do
       for f in "${SLOTS[@]}"; do
         exec {fd}>"$f"
-        if flock -n "$fd"; then
+        # First pass: non-blocking sweep grabs any free slot immediately.
+        # Busy pass: kernel-block up to a jittered timeout, then rotate.
+        if flock -n "$fd" || { [ "$announced" = 1 ] && flock -w $((10 + RANDOM % 10)) "$fd"; }; then
           await_memory
           # Marker for scripts that self-slot (scripts/battery.sh,
           # scripts/battery-shard.sh): held here, so they must not acquire a
@@ -116,10 +118,9 @@ case "$mode" in
         exec {fd}>&-
       done
       if [ "$announced" = 0 ]; then
-        echo "ghc-slots: all slots busy — polling for any free slot" >&2
+        echo "ghc-slots: all slots busy — blocking for any free slot" >&2
         announced=1
       fi
-      sleep $((5 + RANDOM % 10))
     done
     ;;
   detach)
