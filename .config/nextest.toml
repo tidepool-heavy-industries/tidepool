@@ -147,17 +147,20 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # required before launching GHC-heavy work (scripts/battery.sh and
 # scripts/battery-shard.sh now take one for you).
 #
-# 3 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
-# moves with box capacity — it has been 3, 5, and 4 within a day; do not
-# copy whatever it says today into here). The two numbers answer different
-# questions:
-# slots bound how many GHC-heavy RUNS proceed at once, this bounds how many
-# extract compiles ONE run fans out to. Worst case is their product, so
-# raising this multiplies against every slot — the incident budget is "one
-# run under one slot stays at ~4 or below", which 3 satisfies with room. Raise
-# it only with a measurement, not to track a slot-count change.
+# 1 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
+# moves with box capacity; do not copy whatever it says today into here).
+# The two numbers answer different questions: slots bound how many GHC-heavy
+# RUNS proceed at once, this bounds how many extract compiles ONE run fans
+# out to. THE BOX-WIDE CEILING IS THEIR PRODUCT. The 2026-08-08 load-92
+# incident reached 7+ concurrent extracts with every lane compliant, because
+# 3 slots x per-run 3 = 9 — the "3-slot cap" bounded slot holders, not
+# compiles. At 1, the slot count means what everyone already believes it
+# means: N slots = at most N concurrent extracts box-wide, and lane-level
+# parallelism comes from MORE SLOTS (cheap to grant once the product is
+# honest) rather than intra-run fan-out. Raise this only with a measurement
+# AND a matching slot-count decision — the product is the budget.
 [test-groups.ghc-heavy]
-max-threads = 3
+max-threads = 1
 
 # The cap is DEFAULT-DENY: everything is GHC-heavy unless it appears in the
 # exemption list below. That direction is the whole point. The 2026-08-09
