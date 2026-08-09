@@ -48,8 +48,23 @@ in both lanes proceeds concurrently.
 recipe — unbootstrapped `ResidentSession` constructor over the
 already-lazy `PersistentSession`, first real run boots the machine
 (mirror the REPL), DELETE both boot seeds, render+loop in one extract
-invocation (needs Phase B's multi-binder — hence the gate above),
-answerer boots from the model's first block. Supersedes D7's
+invocation, answerer boots from the model's first block.
+
+> **PREMISE CORRECTED 2026-08-08** (codex review item 10; verified). This
+> entry previously said render+loop "needs Phase B's multi-binder". **No such
+> machinery exists** — Phase B deferred the `writeWholeModuleClosed` work to a
+> successor and the writer still takes ONE `targetName` (`Main.hs:333`; CLI has
+> `--target`/`--all-closed`, no `--targets`). Building a STRICT explicit-target
+> mode by adapting the `--all-closed` loop (`Main.hs:185`) is a PREREQUISITE
+> work item inside item 0. It must fail if EITHER target fails and must
+> preserve per-target asks/warnings. Full detail in
+> `one-compile-bootstrap.md`'s step 4.
+>
+> **Sequencing (extract-wave TL's call, reported to root):** the hard
+> dependency is step 4's, not steps 1–3's. Seed deletion does not consume
+> multi-target, so wave 2 (`boot-lazy`, in flight) continues; `--targets`
+> lands as its own item before wave 3 (`boot-onecompile`), which cannot start
+> without it. Supersedes D7's
 cache-interim (step 2 of the fix ladder below) if it lands first.
 Keep separate source-level capability rows regardless.
 
