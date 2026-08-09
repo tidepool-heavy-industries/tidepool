@@ -123,50 +123,7 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     // warning. This is the home every eval + repl session imports.
     out.push_str("{-# OPTIONS_GHC -Wno-orphans #-}\n");
     out.push_str("module Tidepool.Effects where\n");
-    // PRD 19: `Tidepool.Event`'s `(<|>)` merges two event sources into ONE
-    // subscription, and `Tidepool.Prelude` re-exports `Control.Applicative`'s
-    // `(<|>)`. Both unqualified is an ambiguous occurrence — resolved at NAME
-    // RESOLUTION, before typechecking, so the operators' differing types cannot
-    // disambiguate it — and it fires on PRD 19's own worked example. So a row
-    // carrying RepoEvent gets exactly ONE unqualified `(<|>)`, and it is
-    // Event's: that spelling dominates in a worktree-orchestrating resident and
-    // has no alternative, while Maybe/list fallbacks keep `fromMaybe`/`maybe`/
-    // pattern matching, and qualified `Control.Applicative` stays open. The
-    // check is conditional so rows without the effect are byte-identical to
-    // before. See plans/post-restart/worktree-lanes/L4-receipt.md.
-    //
-    // RETARGET OWED, and WHAT THE PREDICATE MUST BE. Extract-wave's boot-vocab
-    // lane (`d6fce023`) moves this region into
-    // `effects_module_source_with_vocab(row_effects, vocab_effects, row)`, at
-    // which point "the row contains RepoEvent" becomes two possible predicates.
-    //
-    // It must key on the HELPER-EMISSION CONDITION, by CALLING the predicate
-    // boot-vocab publishes for it — `emits_helpers_for(eff, row_effects)`,
-    // returning `in_row || eff.helpers_row_polymorphic` (private/`pub(crate)`;
-    // the hiding term lands in the same file, so nothing needs a wider
-    // surface). Never a restatement of that condition.
-    //
-    // `(<|>)` is a RepoEvent HELPER, and that function row-gates helpers: a
-    // row-CLOSED helper only typechecks when its effect is in the row, so a
-    // vocabulary-only effect's helpers are emitted only when it declares
-    // itself row-polymorphic. So Event's `(<|>)` is in scope exactly when its
-    // helpers are emitted — hide the Prelude's exactly then, by asking the
-    // same question the emission loop asks.
-    //
-    // NOT `vocab_effects`. That was tried and is wrong: a vocabulary-only
-    // RepoEvent would hide the Prelude's `(<|>)` while emitting no replacement,
-    // costing `Alternative` for nothing. And a restatement rather than the
-    // shared expression is a second source of truth that diverges the moment
-    // RepoEvent becomes row-polymorphic — which is exactly what the
-    // vocabulary-without-row story wants.
-    //
-    // Neither mistake is a compile error. Both surface only as a wrong
-    // preamble, which is why this note lives here, where the move happens.
-    if effects.iter().any(|e| e.type_name == "RepoEvent") {
-        out.push_str("import Tidepool.Prelude hiding (error, (<|>))\n");
-    } else {
-        out.push_str("import Tidepool.Prelude hiding (error)\n");
-    }
+    out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");

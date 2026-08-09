@@ -185,7 +185,29 @@ Two items outlive this receipt. Both are carried at their CODE SITES as well as
 here, because an obligation that lives only in a receipt is discharged only by
 someone who happens to re-read the receipt.
 
-**1. Land the `(<|>)` hiding term, keyed on `emits_helpers_for`.** Blocked on
+**1. ROUTED, not done — the `(<|>)` relocation.** boot-vocab never folded to
+this branch: `emits_helpers_for` and `effects_module_source_with_vocab` are both
+ABSENT here (checked). So the conditional cannot be written against the function
+it must call, and the collision is left **OPEN and DOCUMENTED** rather than
+half-fixed.
+
+The mis-scoped `eval_prep.rs` term was **DELETED** rather than shipped. Its
+licence (`generated_module_compiles_without_its_own_hiding`) is green, and
+shipping it would have landed a term that LOOKS like the fix and is not — the
+workaround-indistinguishable-from-an-invariant hazard, in a shared file, where
+the next reader would conclude the collision was handled and be wrong. An
+honest absence beats a misleading presence. `eval_prep.rs` is byte-identical to
+its pre-change state apart from the `Control.Monad.Freer.Internal` import, which
+the pump genuinely needs.
+
+What the successor inherits, complete: the verified patch
+(`verified/L4-hiding-term-retarget.patch`), its gate file
+(`verified/prd19_vocab_predicate.rs`), the GHC gate script
+(`scripts/prd19-alternative-gates.sh`), the full reasoning (§3b), and a
+fast-tier gate `the_alternative_collision_is_open_and_the_generated_module_is_unchanged`
+that FAILS when the routed fix lands, so whoever lands it is told to retire it.
+
+*(superseded framing:)* Blocked on
 extract-wave folding boot-vocab to the shared base. The term is already
 VERIFIED (four gates at `d6fce023`, patch and gate file in `verified/`), so
 what remains is landing, not deciding. It must CALL boot-vocab's
@@ -211,7 +233,47 @@ workaround), and each stated "no test pins this field's behaviour; nothing goes
 with it" — which removed a blind search for tests that would otherwise have had
 to come out too.
 
-**The seven `withHandler` gates were RE-RUN against the changed adapter.** A
+**The seven `withHandler` gates were RE-RUN against the changed adapter, and
+the first re-run was a FALSE GREEN.**
+
+That first attempt reported 23/23 PASS with started == run and no truncation —
+every structural check we have said clean. It was vacuous: the harness
+early-returned and PASSED when `TIDEPOOL_EXTRACT` was unset, and it was unset.
+A skip spelled as a pass is structurally IDENTICAL to a pass — it runs by name,
+emits a real PASS line, and counts toward started-vs-run — so no amount of
+layering on "did the gate run by name" can see it.
+
+**The only thing that exposed it was DURATION**: 0.006–0.011s per gate against
+a 9–16s baseline, for work that drives real GHC → extract → JIT → a temp git
+repository. That baseline existed only because the event lane had REPORTED ITS
+TIMINGS under the name-the-instrument rule. Duration-versus-work-claimed is now
+doctrine (`GATES.md`), and the corollary is: report your durations, because the
+next person's baseline is your reported timing.
+
+Fixed at the source rather than worked around: all seven sites now call
+`require_ghc()`, which FAILS LOUDLY naming `TIDEPOOL_EXTRACT`. The root
+`CLAUDE.md` already required exactly that, so those sites were NONCONFORMING
+rather than a competing convention — the expensive kind of defect, because
+everyone assumes the rule is being followed.
+
+Re-run properly, with `TIDEPOOL_EXTRACT` and the with-packages GHC set
+explicitly, `--no-fail-fast`, **started 7 == run 7**:
+
+```
+PASS [3.655s] (1/7) body_end_drains_before_it_unregisters
+PASS [3.917s] (2/7) bounded_queue_overflow_fails_loudly_rather_than_dropping_a_commit
+PASS [3.599s] (3/7) handler_failure_fails_the_enclosing_scope
+PASS [3.742s] (4/7) no_replay_of_events_observed_before_registration
+PASS [3.558s] (5/7) one_commit_broadcasts_to_both_registered_handlers
+PASS [3.964s] (6/7) queued_observations_invoke_in_order_across_a_handler_suspension
+PASS [6.257s] (7/7) rooting_receipt_holds_across_an_interleaved_park_and_resume
+Summary [28.698s] 7 tests run: 7 passed, 143 skipped
+```
+
+Durations are plausible for the work claimed (faster than the 9–16s originals
+on a warm extract cache; ~500x the vacuous 6ms). A prior green carries evidence
+about the code that produced it and nothing else, which is why this re-run
+happened at all. A
 prior green carries evidence about the code that produced it and nothing else;
 treating it as still valid after changing the thing under test is the
 receipt-that-looks-like-a-run hazard one level up. The change looked mechanical

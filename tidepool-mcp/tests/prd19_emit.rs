@@ -38,35 +38,43 @@ fn emit_for_gates() {
     std::fs::write(p, worktree_and_event_module()).expect("write generated module");
 }
 
-/// CONDITIONALITY, fast tier. `Tidepool.Event`'s `(<|>)` and the Prelude's
-/// `Alternative` `(<|>)` are an ambiguous occurrence when both are unqualified,
-/// so a row carrying RepoEvent hides the Prelude's. The GHC proof that this is
-/// the right behaviour lives in `scripts/prd19-alternative-gates.sh`; these two
-/// gates pin the CONDITION cheaply, and the second is the one that catches the
-/// hiding becoming unconditional and silently taking `Alternative` away from
-/// every other row.
+/// The `(<|>)` COLLISION IS OPEN — this gate pins the honest current state.
+///
+/// `Tidepool.Effects` has no export list, so it re-exports its own generated
+/// `(<|>)`, and the eval preamble imports both it and `Tidepool.Prelude` by
+/// default — so once RepoEvent is in a row, an author writing PRD 19's own
+/// `fmap Left e1 <|> fmap Right e2` hits an ambiguous occurrence. The fix is
+/// APPROVED and PRE-VERIFIED but ROUTED to another lane, because it must land
+/// on the AUTHOR-FACING imports (`preamble.rs`'s `eval_import_lines` and the
+/// Orchestrate module) keyed on boot-vocab's `emits_helpers_for`, and that
+/// function does not exist on this branch.
+///
+/// An earlier attempt put the hiding on the generated module's OWN Prelude
+/// import. That was mis-scoped — it governs name resolution inside
+/// `Tidepool.Effects` and nothing else — and it has been DELETED rather than
+/// shipped, because a term that looks like the fix and is not is worse than an
+/// honest absence: the next reader would find it, conclude the collision was
+/// handled, and be wrong.
+///
+/// This gate therefore asserts the module is UNCHANGED here, so that whoever
+/// lands the routed fix sees this test fail and knows to retire it. See
+/// `plans/post-restart/worktree-lanes/L4-receipt.md` §3b for the full reasoning
+/// and `verified/L4-hiding-term-retarget.patch` for the verified patch.
 #[test]
-fn repoevent_row_hides_the_prelude_alternative() {
+fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
     let src = worktree_and_event_module();
     assert!(
-        src.contains("import Tidepool.Prelude hiding (error, (<|>))"),
-        "a row containing RepoEvent must hide the Prelude's Alternative (<|>), or the PRD's \
-         own `fmap Left e1 <|> fmap Right e2` example is an ambiguous occurrence"
-    );
-}
-
-#[test]
-fn non_repoevent_row_leaves_the_prelude_import_untouched() {
-    let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::git_decl()];
-    let src = tidepool_mcp::effects_module_source(&decls);
-    assert!(
         src.contains("import Tidepool.Prelude hiding (error)\n"),
-        "a row WITHOUT RepoEvent must be byte-identical to before — hiding (<|>) there would \
-         take Alternative away from every existing eval for no reason"
+        "the generated module's Prelude import must be byte-identical to its pre-PRD-19 form"
     );
     assert!(
         !src.contains("hiding (error, (<|>))"),
-        "the (<|>) hiding must be conditional on RepoEvent, not unconditional"
+        "the mis-scoped hiding was deleted deliberately — the fix belongs on the \
+         AUTHOR-FACING imports and is routed, not landed here"
+    );
+    assert!(
+        src.contains("(<|>) ::"),
+        "the module still EXPORTS Event's (<|>), which is what makes the collision real"
     );
 }
 
