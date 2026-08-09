@@ -201,6 +201,64 @@ filtered way, not the raw grep count, so it is apples-to-apples.
     check here is now stated as pure defense-in-depth ("a second, redundant
     check … not a gap"), not a live gap description.
 
+- `tidepool-codegen/src/emit/` pass (commits `788876cb..05ab2e9a`, one per
+  file except `expr.rs` and `primop.rs` which each got several as the review
+  progressed through their sections; `jit_machine.rs`, `effect_machine.rs`,
+  and `host_fns/` are out of scope for this lane — already swept or owned by
+  a parallel refactor). Removed review-label/citation hits: `Wave 1, component
+  C` / `Wave 1.A` / `Wave 1.B` / `Wave-1 miscompile` (`mod.rs`, `expr.rs` —
+  session re-entry / `ExternalEnv` docs), `Gap A` (`expr.rs`'s LetRec Phase
+  2.5/3c docs — a Var-alias RHS taking the trivially-resolvable eager path),
+  `Finding 5` (`apply.rs`'s call-depth merge-block comment), a dangling
+  `plans/ghci-implementation-plan.md §2/§3` citation and a dangling
+  `plans/stack-safety.md` citation (both `expr.rs`; neither file exists in
+  this tree), two `codex-review-2026-08-08.md item 1` citations and one
+  `f137d34`-commit-hash citation (all three in `primop.rs`'s `unbox_addr`/
+  `unbox_bytearray` address/array-kind guards). Also condensed: `apply.rs`'s
+  "characterization commit" narration, `free_vars_index.rs`'s "used to
+  compute... copy-and-walk" module header, `primop.rs`'s "used to duplicate
+  independently" (`unwrap_boxing_chain`), and `expr.rs`'s stale pre-petgraph
+  narration in `topo_sort_deferred_simple`'s docs and its golden-test module
+  (the module doc said tests were pinning behavior "BEFORE it is replaced by
+  a petgraph-backed implementation" — the replacement had already happened;
+  a test comment and a nearby impl comment still described the old iterative
+  "sorted"/"remaining" hand-rolled-sort mechanics instead of the actual
+  min-heap Kahn's-algorithm implementation). Renamed one test,
+  `diamond_ties_break_by_input_order_within_a_pass` →
+  `diamond_ties_break_by_input_order`, since "a pass" is not a concept the
+  current heap-based algorithm has. Numbered play-by-play comments
+  (`// 1. ...`, `// 2. ...`) trimmed in `join.rs` (`emit_join`/`emit_jump`)
+  and `case.rs` (`emit_case`). Kept as-is (not archaeology): `#313`/`#313
+  t11`/`#325` GitHub-issue and regression-fixture citations (`t11` is a real,
+  still-exercised fixture name in `tidepool-runtime/tests/repro/repro313.rs`),
+  `M1`/`M2`/`M5` bare parenthetical citations in `case.rs`/`expr.rs` (each
+  names a real, still-existing regression test —
+  `tidepool-codegen/tests/case_trap_scrut_ptr.rs`,
+  `raise_lazy_trivial_guard.rs`, `letrec_field_freevar_deps.rs`, matching the
+  host_fns pass's `BUG-1`/`BUG-2` precedent), `proptest_jit_dispatch B2`
+  (`primop.rs` — a live classification tag in that suite's own `B1`-`B4`
+  verdict taxonomy, not a wave label), and `Phase 1`/`2`/`2.5`/`3a`-`3d`
+  (`expr.rs`'s LetRec emission — consistently used, current step-naming
+  vocabulary for that one function's algorithm, not a review-ID). One item is
+  load-bearing enough to call out explicitly (the invariant is preserved in
+  the comments left behind; only the citation/label framing was dropped):
+  - `tidepool-codegen/src/emit/primop.rs`'s `unbox_addr`/`unbox_bytearray`
+    (and the shared `unwrap_boxing_chain` they call): **prior bug — after
+    unwrapping a chain of 1-field boxing-wrapper Cons, the final heap value's
+    payload was read directly as an address (`unbox_addr`) or as a
+    length-prefixed buffer pointer (`unbox_bytearray`) with no check that the
+    value was actually a `TAG_LIT` of an address/array-carrying class. A
+    Thunk, Closure, or a Lit of an unrelated class (e.g. a bare `Int#`/`Word#`
+    tag word that escaped case dispatch, or a `Text` value where an `Addr#`
+    was expected) got its payload bytes reinterpreted as a pointer and
+    dereferenced — a real memory-safety escape, not a hypothetical.** Fixed by
+    requiring `TAG_LIT` + the correct address/array-carrying `lit_tag` before
+    the payload load, trapping cleanly via `runtime_shape_trap` (kind
+    `AddrKind`/`ArrayKind`) otherwise. The doc comments dropped only the
+    `codex-review-2026-08-08.md item 1` / `f137d34` commit-hash framing; the
+    guard mechanism and the hazard it closes are unchanged in the comments
+    left behind.
+
 ## Uncertain-keep list
 
 Populated during the per-module passes below as items are found where the
