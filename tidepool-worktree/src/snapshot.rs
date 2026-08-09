@@ -41,10 +41,11 @@
 //! half-merged tree is a reproducible base for the wrong program, so refusing
 //! is the correct outcome, not a limitation to work around.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::create::TIDEPOOL_SNAPSHOT_REF_PREFIX;
 use crate::error::{DirtySummary, WorktreeError};
-use crate::git::GitCli;
+use crate::git::{inspect, GitCli};
 use crate::id::{GitOid, GitRef, WorktreeId};
 
 /// What a snapshot captured, recorded alongside the worktree receipt.
@@ -65,12 +66,152 @@ pub struct SnapshotReceipt {
 
 /// Write the synthetic snapshot commit. Does not create a worktree; returns the
 /// base a managed branch is then rooted at.
+///
+/// Depends on [`inspect::dirty_summary`] (LANE L1) for `pre_status` and for the
+/// set of tracked-modified / untracked paths to capture. Until that lands this
+/// panics via its `todo!("L1")` on any source that is not clean — see the L2
+/// receipt for what is proven independently of it in the meantime.
 pub fn snapshot_source(
     git: &GitCli,
     source: &Path,
     worktree_id: &WorktreeId,
     temp_index_dir: &Path,
 ) -> Result<SnapshotReceipt, WorktreeError> {
-    let _ = (git, source, worktree_id, temp_index_dir);
-    todo!("L2")
+    // Refuse first — before a single write happens. A refusal that happens
+    // after a partial write is not a refusal.
+    if let Some(kind) = inspect::in_progress(git, source)? {
+        return Err(WorktreeError::SourceOperationInProgress(kind));
+    }
+    let changed_clean_submodules = refuse_dirty_submodules(git, source)?;
+
+    let pre_status = inspect::dirty_summary(git, source)?;
+    let source_head = GitOid::from_raw(
+        git.try_run(source, &["rev-parse", "HEAD"])?
+            .trimmed()
+            .to_string(),
+    );
+
+    let mut captured_paths: Vec<String> = pre_status
+        .staged
+        .iter()
+        .cloned()
+        .chain(pre_status.unstaged.iter().cloned())
+        .chain(pre_status.untracked.iter().cloned())
+        .chain(changed_clean_submodules)
+        .collect();
+    captured_paths.sort();
+    captured_paths.dedup();
+
+    let temp_index_path = temp_index_dir.join(format!("{}.index", worktree_id.as_str()));
+    let temp_git = git.with_env(
+        "GIT_INDEX_FILE",
+        temp_index_path.to_string_lossy().into_owned(),
+    );
+
+    temp_git.try_run(source, &["read-tree", "HEAD"])?;
+    if !captured_paths.is_empty() {
+        let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+        add_args.extend(captured_paths.iter().cloned());
+        temp_git.try_run(source, &add_args)?;
+    }
+    let tree = temp_git
+        .try_run(source, &["write-tree"])?
+        .trimmed()
+        .to_string();
+    let _ = std::fs::remove_file(&temp_index_path);
+
+    let message = format!(
+        "tidepool: dirty-source snapshot for worktree {worktree_id}\n\nSource HEAD: {source_head}\n{pre_status}"
+    );
+    let snapshot_commit = GitOid::from_raw(
+        git.try_run(
+            source,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                source_head.as_str(),
+                "-m",
+                &message,
+            ],
+        )?
+        .trimmed()
+        .to_string(),
+    );
+
+    let snapshot_ref = GitRef::from_raw(format!("{TIDEPOOL_SNAPSHOT_REF_PREFIX}/{worktree_id}"));
+    git.try_run(
+        source,
+        &[
+            "update-ref",
+            snapshot_ref.as_str(),
+            snapshot_commit.as_str(),
+        ],
+    )?;
+
+    Ok(SnapshotReceipt {
+        snapshot_ref,
+        snapshot_commit,
+        source_head,
+        captured_paths,
+        pre_status,
+    })
+}
+
+/// Refuse if any submodule has uncommitted changes of its own (staged,
+/// unstaged, or a merge conflict inside it) — a synthetic commit would then
+/// point at a gitlink whose content the snapshot never captured. Returns the
+/// paths of CLEAN submodules whose checked-out commit differs from the one
+/// recorded in `source`'s HEAD, so the caller can capture the gitlink bump
+/// explicitly (this is a legitimate tracked change, not dirtiness).
+///
+/// `git submodule status` exits 0 with empty output when there are no
+/// submodules at all, so this is a no-op on the common case.
+fn refuse_dirty_submodules(git: &GitCli, source: &Path) -> Result<Vec<String>, WorktreeError> {
+    let out = match git.run(source, &["submodule", "status"]) {
+        Ok(out) => out,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut changed_clean = Vec::new();
+    for line in out.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut chars = line.chars();
+        let status = chars.next().unwrap_or(' ');
+        let rest = &line[status.len_utf8()..];
+        let path = match rest.split_whitespace().nth(1) {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+
+        match status {
+            // Not initialized: no working tree to be dirty, and no gitlink
+            // change to capture either.
+            '-' => continue,
+            // Merge conflict inside the submodule itself.
+            'U' => {
+                return Err(WorktreeError::DirtySubmoduleUnsupported(PathBuf::from(
+                    path,
+                )))
+            }
+            '+' | ' ' => {
+                let sub_path = source.join(&path);
+                let sub_status = git
+                    .run(&sub_path, &["status", "--porcelain"])
+                    .map_err(WorktreeError::GitFailure)?;
+                if !sub_status.stdout.trim().is_empty() {
+                    return Err(WorktreeError::DirtySubmoduleUnsupported(PathBuf::from(
+                        path,
+                    )));
+                }
+                if status == '+' {
+                    changed_clean.push(path);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(changed_clean)
 }
