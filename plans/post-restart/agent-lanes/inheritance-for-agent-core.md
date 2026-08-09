@@ -132,6 +132,44 @@ earlier drafts, all confirmed:
 - **Observations out, policy in.** The runtime reports liveness/staleness; it
   never decides to poke, replace, escalate, or stop.
 
+### PRD 18 addendum — five decisions locked pre-flight (2026-08-09)
+
+Landed on root's tip AFTER the body of this doc was written. These are
+decisions, not suggestions:
+
+1. **Cross-cycle tool calls: reattach-supplies-tools, mailbox-bridged.**
+   `attachAgent` takes the checkpointed `AgentReference` **plus a freshly
+   built tools record**; the runtime validates the protocol fingerprint and
+   **atomically installs the handlers before delivery resumes**. A tool call
+   arriving while no handler generation is attached goes to a bounded durable
+   queue AND schedules a resident cycle — the same arrival-schedules-a-cycle
+   path `drainMailbox` uses, one mechanism with one more message kind. The
+   worker experiences a slow tool call. **Neither forbid-cross-cycle nor
+   queue-without-reattach is the design** — do not implement either.
+2. **Typed failure results everywhere, to start.** `spawnAgent`,
+   `attachAgent`, `pokeAgent` return case-matchable typed errors
+   (`SpawnError`/`AttachError`/`PokeError`; variant lists to be filled by the
+   first backend lane's contact with reality). `retainAgent` returns the
+   `AgentReference`. **No `()`-returning operation whose semantics promise a
+   failure it cannot express.**
+3. **Atomic coupled spawn is the transaction** — one authored call.
+4. **Coupled-only public surface** — `createWorktree` leaves the public
+   surface.
+5. **Symmetric lossless sum codec** — see §8, owned by Chain A.
+
+### Scope: agent-core is LANE 1 ONLY
+
+Chain B was split ("agent-core is doing a lot" — Inanna, agreed). Overnight
+spawns **only lane 1 of five**: the **one-cycle clean-spawn vertical** — one
+worker, one cycle, **no cross-cycle, no reattach**, and **provisional/internal
+API shapes are allowed**. Deferred, each gated on its own design: (2)
+coupled-spawn failure/saga matrix, (3) durable poke/interrupt ordering, (4)
+cross-cycle detach/reattach + tool-handler wakeup, (5) mailbox/staleness seam.
+
+So the registry semantics in this section are **design context, not lane-1
+scope**. Build lane 1; do not build the reattach machinery decision 1
+describes.
+
 Realm parking is consumed ONLY through
 `../realm-lanes/continuation-parking-contract.md`. Its binding consumer rule:
 **derive the declared handled prefix from the same value that constructed the
@@ -178,22 +216,26 @@ the lying-realm residual is unconstructible rather than merely unlikely.
   `WorkerResult` nor `Plan` could derive through them. That is why the codec is
   hand-rolled on base `GHC.Generics`.
 
-  **RE-VERIFY THIS BEFORE RELYING ON IT.** It was true when measured (see
-  `receipt-structural-codec.md`, which read
-  `haskell/lib/Tidepool/Aeson/Value.hs` and `FromJSON.hs` directly), but as of
-  2026-08-09 `generic_deriving_337::sum_type_rejected_at_compile_time` is a
-  sanctioned inherited red — and that test asserts precisely that
-  `data S = A Int | B Int deriving (Generic, FromJSON)` must NOT compile. Its
-  being red means either sum types now *do* derive through the vendored
-  default, or they still fail and only the diagnostic text moved. **Which of
-  those is true was not established here**, and the two have opposite
-  consequences: under the first, the hand-rolled codec's central rationale is
-  stale and the vendored path may be usable; under the second, nothing changes.
-  Read the current state of that machinery rather than either receipt.
+  **RESOLVED (Inanna + root, 2026-08-09 — ledger item 14 decision).** The
+  uncertainty this doc previously flagged is settled, and the answer is that
+  the two directions genuinely disagreed: **writing** a payload-carrying sum
+  is compile-banned (`Value.hs`), while **reading** one is quietly allowed
+  (`FromJSON.hs`) — "direction asymmetry nobody chose". That is why
+  `generic_deriving_337::sum_type_rejected_at_compile_time` (which pins the
+  *read* side, `deriving (Generic, FromJSON)`) became a sanctioned red.
 
-  Note this does NOT touch gate 1(b)'s result. That gate asked whether lists
-  and recursion survive the real JIT, and the answer transfers regardless of
-  which codec you build on.
+  Decision: support both directions **losslessly**, with round-trip tests, and
+  **retire the reject-at-compile-time pinning tests** as part of that change.
+  Owner: the **checkpoint-persistence** lane (Chain A) — not agent-core.
+
+  So structural-codec's rationale was sound for the direction that mattered:
+  it needed encode *and* decode, and encode was genuinely banned. Once Chain A
+  lands, re-evaluate whether the vendored path can serve — but do not block on
+  it, and do not "fix" it here.
+
+  Gate 1(b)'s result is unaffected either way: it asked whether lists and
+  recursion survive the real JIT, and that transfers regardless of which codec
+  anything is built on.
 - **Model skew in the fixtures.** `phase4-live-turn.jsonl` was recorded with
   **`gpt-5.6-terra`**. Overnight policy is **`gpt-5.4-mini` only** (see §9), so
   a fresh run will not reproduce that transcript turn-for-turn — a weaker model
@@ -205,11 +247,26 @@ the lying-realm residual is unconstructible rather than merely unlikely.
 Time-stamped, because some are incident responses that may be lifted — check
 with root rather than assuming they still bind.
 
-- **Codex model policy (Inanna, binding for overnight runs, 2026-08-09):**
-  **`gpt-5.4-mini` ONLY.** Cheap plumbing tier — no spend anxiety, but do not
-  waste it. **NEVER `gpt-5.6-terra` overnight.** Ephemeral threads, small
-  synthetic tasks, temp workspaces, and **stop-and-hold on anything anomalous**
+- **Codex model policy (Inanna, 2026-08-09; SUPERSEDED the earlier
+  hardcoded-slug form).** **Runtime-resolved cheap-plumbing tier: query
+  `model/list`, prefer `gpt-5.4-mini` if present, else `gpt-5.6-luna`.
+  No hardcoded slug.** **Record the EXACT resolved model in every receipt** —
+  a receipt naming a tier rather than the model it actually got is not
+  checkable. **NEVER `gpt-5.6-terra` overnight.** Ephemeral threads, small
+  synthetic tasks, temp workspaces, **stop-and-hold on anything anomalous**
   (auth prompts, config mutation, rate-limit walls).
+- **NO LIVE-MODEL TURNS IN TESTS OR AUTOMATED CODE (Inanna, 2026-08-09).**
+  Committed suites use replay/mock providers only (`ReplayProvider` exists for
+  this). Live-model legs — the dogfood smoke, agent-core lane 1's real-worker
+  demonstration — are **deliberate, manually-triggered runs with receipts**,
+  never wired into suites, battery tiers, or anything that runs on invocation.
+
+  *Status of this wave's live tests under that rule:* the three live-process
+  tests in `tidepool-agent` are `#[ignore]`d, so they do not run on invocation
+  and are triggered manually with receipts — compliant as written. Only one of
+  them (`phase4_live_vertical_ask_parent_round_trip`) spends model tokens.
+  **Do not remove those `#[ignore]` attributes**; doing so would wire a
+  token-spending turn into the suite and violate this rule.
 - **Broker every slot-taking run** through
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh detach -- <cmd>` — absolute
   path (the parent script sees 6 slots; a worktree copy sees 3), never
