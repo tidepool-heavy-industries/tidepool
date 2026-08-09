@@ -183,12 +183,38 @@ both operations the revision deleted. Rewritten on root's tip: pokes are
 silently discarded, and idle delivery starts or queues a follow-up.
 **Residents own reaction policy; the runtime owns delivery.**
 
-Worth keeping, because the failure mode recurs: the original "fire-and-forget"
-line was Inanna *describing the pre-revision system* as grounds for dropping a
-must-steer requirement. PRD 19 froze that description into a standing
-prohibition. A sentence that characterizes how things currently work is not the
-same as a decision that they must keep working that way, and the two are easy
-to confuse once the sentence is sitting in a locked-decisions section.
+**"Fire-and-forget" is still live — it describes the SENDER, not delivery.**
+(Inanna, via root, 2026-08-08.) The decided model is *fire-and-forget poke plus
+wait for response*, and both halves hold simultaneously:
+
+- **Sender's contract — fire-and-forget.** `pokeAgent` is non-blocking and
+  carries **no per-message response guarantee**. A poke is not a request/reply
+  pair.
+- **Delivery — durable.** Steer if active, start or queue a follow-up if idle,
+  retain if temporarily unsteerable, never silently drop.
+
+**Therefore: do not build per-poke reply correlation.** There is no poke id to
+match a response against. Responses flow through `waitAgent` outcomes and the
+typed resident inbox. A registry that grows a poke→reply map has misread this.
+
+What PRD 19 actually got wrong was narrower than "fire-and-forget": it asserted
+*no runtime delivery queue and no auto-enqueue on idle agents*, which is a
+delivery claim, and it froze a description of the pre-revision system into a
+standing prohibition. The failure mode is worth keeping because it recurs — a
+sentence characterizing how things currently work is not a decision that they
+must keep working that way, and the two are easy to confuse once the sentence
+sits in a locked-decisions section.
+
+Two further specifics for the registry API:
+
+- **`drainMailbox @ResidentMessage` arrival SCHEDULES A CYCLE.** The inbox is
+  durable and typed, and its arrival is a *driver* integration point: the
+  registry exposes "mail arrived" as a wakeup signal the driver consumes. The
+  resident never polls; it drains once per cycle.
+- **Observations out, no built-in escalation.** The runtime exposes liveness
+  and staleness observations. Poke-again, replace, escalate to the operator, or
+  stop is resident **policy**. Keep that boundary clean — the registry reports
+  that a worker is stale; it never decides what to do about it.
 
 Consequence for wave 2 already visible: spike 2 (steer/interrupt while parked)
 is promoted from "does the API narrow" to "**when** is a queued poke delivered
@@ -206,6 +232,12 @@ decides delivery timing, not surface. Wave-2 scoped.
 2. **worktree-wave's vertical core** — the coupled-spawn seam is designed
    JOINTLY, via root, when both sides are ready. Until then `seam::Workspace`
    is transitional data and every use site says so.
+
+   **Doubly load-bearing as of 2026-08-08:** PRD 19 is being fully rewritten by
+   the author of PRDs 14/15, and root has frozen its own edits to it. Do not
+   design the coupled-spawn seam against the *current* PRD 19 text either —
+   not just against an un-announced seam. Root announces when the rewrite
+   lands.
 3. **root's realm step-4 go-signal** — nothing in `resident.rs`
    pending/`ChildSuspended`.
 
