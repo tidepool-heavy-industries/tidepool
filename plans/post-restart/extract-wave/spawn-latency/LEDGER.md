@@ -462,13 +462,37 @@ require the dev to confirm the guard actually observes that, by name, before
 treating its pass as coverage. If it does not, that is the finding, and it is a
 finding only the person relying on it will ever see.
 
-The fourth instance (E6) is the sharpest: the id-stability trio pins constructor
-identity, VarId scoping isolation, and `stableVarId`'s disambiguator contract —
-and **none of them observes `localVarId` determinism**, which is what E6
-perturbs. Nobody wrote a bad test; `localVarId`'s own doc says it is
-allocation-order-sensitive. The over-claim was in the SHORTHAND — "extractor
-id-stability is a PINNED invariant", repeated in two specs including mine,
-citing three tests neither of us had read against the claim.
+The fourth instance (E6) went further than a guard covering less than its name.
+**"The three pinned id-stability tests" had NO AUTHORITATIVE REFERENT.** My
+spec cites the wave spec; the wave spec says "session_table_qualified_identity +
+two quick-tier assertions"; `codex-review-2026-08-08.md:99` says "the three
+pinned id-stability tests" and names none. **Three documents lean on the set,
+none enumerates it.** My mis-identification was not sloppiness against an
+available source — grepping was the only move available, and the defect is that
+a load-bearing citation was unresolvable.
+
+ENUMERATED at wave commit `f181eb33`, by exact path:
+
+    tidepool-repr::extend_checked_equivalence::distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order
+    tidepool-repr::extend_checked_equivalence::merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard
+    tidepool-runtime::session_table_qualified_identity
+
+**All three are DataConId qualified-name guards. None observes VarIds AT ALL** —
+not `localVarId`, not `stableVarId`. So "extractor id-stability" never covered
+the VarId space by any of these tests, which makes the E6 caution more warranted
+than either of us first stated. First thing this wave found with **no referent**,
+as distinct from a referent narrower than its name: a phrase cited by three
+documents, load-bearing in two specs, gating a design conversation with root, and
+resolving to nothing.
+
+**THE INVERSION THAT MATTERS FOR D2.** The trio is nearly useless for E6, which
+perturbs VarIds — but it is **directly on point for D2**, which narrows the
+DataConTable itself. A reachability-narrowed table is exactly the change that
+could drop or collide a qualified name, which is precisely what all three guards
+observe. So the instruction "if the pinned tests fire, STOP and escalate" is
+weak for E6 and **strong for D2** — the one item where those tests are a real
+guard rather than silence. D2's spec must say so, with the enumeration, rather
+than repeating the shorthand.
 
 Standing rule now in the wave spec: **if a change touches `localVarId`'s path,
 no pinned test is watching and a direct experiment is owed.** And: a PASS is
