@@ -142,6 +142,55 @@ Consequences to settle in the vertical core, not now:
 None of this reopens gate 1(b). The recursion/list result is what transfers;
 the wire shape was scoped to a proof and said so.
 
+## PRD 18 was revised on root's tip AFTER this wave forked
+
+Root's tip (`harness-interaction-surface` @ `4eb9283b`) carries a substantial
+PRD 18 revision. **Design against the tip's text, not this branch's copy**,
+for anything touching agent operations or lifecycle. Nothing wave 1 landed is
+invalidated — the Servant eDSL and diagnostics sections are byte-identical
+across the revision, and the adapter and codec results are untouched by it.
+
+The deltas that change vertical-core design:
+
+- **Agents may continue running between resident cycles.** The cycle boundary
+  now requires *Haskell-continuation* quiescence, not *agent* quiescence. A
+  `waitAgent` continuation must resolve before the cycle ends; an independently
+  running agent may outlive it. This supersedes the earlier "make every worker
+  quiescent and release it" framing.
+- **`AgentReference` + `attachAgent`.** A stable `AgentId` plus a protocol
+  fingerprint is checkpointable resident data; a later cycle recreates the
+  typed handle from it and fails loudly if the deployed protocol no longer
+  matches. The registry gains a first-class detached-but-running state.
+- **`sendMessage` and `followupTask` collapse into one `pokeAgent`** with a
+  durable per-agent queue: steers an active turn when possible, starts or
+  queues a follow-up when idle, retains the message when the target is
+  temporarily unsteerable, and never silently discards. Only a terminal or
+  released target produces a typed failure.
+- **`AgentFinished` splits into `AgentWentIdle` and `AgentFinalized`.** Idle is
+  an ordinary typed outcome the resident may poke, replace, or stop on — not an
+  exception.
+- **`drainMailbox`** — the resident's own typed inbox, drained atomically once
+  per cycle rather than polled.
+- **Endgame note:** dev-tree replaces the Exomonad swarm for Tidepool's own
+  development and drives headless agents directly through this adapter. No
+  Exomonad machinery is ported.
+
+**Open contradiction, escalated to root, not resolved here.** PRD 19's poke
+paragraph on the same tip still reads "There is no runtime delivery queue and
+no auto-enqueue on idle agents; PRD 18's message semantics stand unmodified" —
+which the revision falsifies in three specifics, and it names both operations
+the revision deleted. It looks like an oversight (PRD 19's *cycle-shape*
+paragraph immediately below it was updated in tandem), and the likely
+resolution is that PRD 18 supersedes. Do not build against either reading until
+root rules: a durable queue with delivery-on-steerable is materially more
+runtime machinery than a typed error to the sender.
+
+Consequence for wave 2 already visible: spike 2 (steer/interrupt while parked)
+is promoted from "narrows `sendMessage`" to deciding whether an active poke is
+delivered *during* a parked tool call or deferred until it resolves — PRD 18's
+open decision 2. "Retain until deliverable" also becomes required adapter
+behavior rather than resident policy.
+
 ## HOLD lines (root announces each lift; all intact as of wave 1)
 
 1. **generic-surface's fold** — no consumption of their Generic metadata
