@@ -8,6 +8,7 @@ pub mod llm;
 pub mod lsp;
 pub mod meta;
 pub mod time;
+pub mod worktree;
 
 pub use console::*;
 pub use exec::*;
@@ -19,3 +20,4 @@ pub use llm::*;
 pub use lsp::*;
 pub use meta::*;
 pub use time::*;
+pub use worktree::*;
