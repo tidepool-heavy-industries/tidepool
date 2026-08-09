@@ -12,24 +12,21 @@
 //! `generic_deriving_337.rs::sum_type_rejected_at_compile_time`).
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
-//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
-//! cleanly when the extractor is unreachable.
+//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Panics
+//! loudly (see `require_extract`) when the extractor is unreachable.
 
 use serde_json::json;
-use tidepool_testing::eval_harness::{extract_available, EvalHarness};
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 
-fn run(source: &str, target: &str) -> Option<serde_json::Value> {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
-    Some(
-        EvalHarness::new()
-            .with_stdlib()
-            .run_pure(source, target)
-            .expect("compile_and_run_pure failed")
-            .to_json(),
-    )
+/// Compile + run a full module PURE on the JIT, returning the target binding's
+/// JSON. Panics loudly when the extractor is unavailable.
+fn run(source: &str, target: &str) -> serde_json::Value {
+    require_extract();
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(source, target)
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 const HEADER: &str =
@@ -48,13 +45,12 @@ fn generic_tojson_enum_emits_constructor_name() {
          result :: Value\n\
          result = toJSON Deciding\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!("Deciding"),
-            "enum constructor encodes as its bare name string"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!("Deciding"),
+        "enum constructor encodes as its bare name string"
+    )
 }
 
 /// The generic `FromJSON` default decodes the constructor-name string back
@@ -69,13 +65,12 @@ fn generic_fromjson_enum_decodes_from_name() {
          \x20 Success m -> m == Acting\n\
          \x20 Error _ -> False\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "\"Acting\" decodes to the Acting constructor"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "\"Acting\" decodes to the Acting constructor"
+    )
 }
 
 /// Round trip: `fromJSON . toJSON` recovers every constructor of a
@@ -92,13 +87,12 @@ fn round_trip_enum_all_constructors() {
          result :: Bool\n\
          result = roundTrips Observing && roundTrips Deciding && roundTrips Acting\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "every constructor round-trips through toJSON/fromJSON"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "every constructor round-trips through toJSON/fromJSON"
+    )
 }
 
 /// An unknown string is a decode `Error`, not a crash — the enum decoder's
@@ -113,13 +107,12 @@ fn unknown_string_returns_error() {
          \x20 Success _ -> 1\n\
          \x20 Error _ -> 0\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(0),
-            "unrecognized constructor name decodes to Error (0), not a crash"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(0),
+        "unrecognized constructor name decodes to Error (0), not a crash"
+    )
 }
 
 /// A sum mixing a nullary and a non-nullary constructor is still rejected at
@@ -127,10 +120,7 @@ fn unknown_string_returns_error() {
 /// of scope, same as a fully non-nullary sum.
 #[test]
 fn mixed_nullary_sum_still_rejected_at_compile_time() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n\
          data M = A | B Int deriving (Generic, FromJSON)\n\n\

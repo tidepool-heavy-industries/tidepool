@@ -127,16 +127,13 @@ fn bootstrap(
     .expect("bootstrap the resident machine")
 }
 
-fn setup() -> Option<EvalHarness> {
-    if !eval_harness::extract_available() {
-        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
-        return None;
-    }
+fn setup() -> EvalHarness {
+    eval_harness::require_extract();
     // The mock preamble imports `Tidepool.Prelude`/`Tidepool.Aeson.KeyMap`,
     // so the stdlib `lib/` must be on the include path (`.with_stdlib()`); the
     // self-contained GADT preamble means NO `.tidepool/lib` verb-library
     // dependency.
-    Some(EvalHarness::new().with_stdlib())
+    EvalHarness::new().with_stdlib()
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +146,7 @@ fn setup() -> Option<EvalHarness> {
 /// subsequent turn sees state the suspend/resume turn wrote (resident KV).
 #[test]
 fn multi_turn_accumulates_across_suspend_resume() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     // Bootstrap from a trivial effectful turn (seeds the 10-effect ConTags).
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
@@ -260,7 +257,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
 /// yield hosts child fragment runs — including GC-forcing ones — and resumes.
 #[test]
 fn nested_child_runs_while_parent_suspended_then_resumes() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     // Small nursery so a child's allocation forces a real collection with the
     // parent's continuation stowed and GC-rooted.
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (0 :: Int)");
@@ -375,7 +372,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
 /// a nested child requires a suspended parent (segment 40).
 #[test]
 fn run_child_on_idle_session_is_not_suspended() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
     match session.run_child(
@@ -468,7 +465,7 @@ fn retryable_resume_failure_does_not_wedge_the_session() {
 /// ask involved.
 #[test]
 fn plain_turns_reuse_the_machine() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
     for expected in [11i64, 22, 33] {

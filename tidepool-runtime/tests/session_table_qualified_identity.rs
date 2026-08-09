@@ -67,10 +67,7 @@ fn compile_turn(harness: &EvalHarness, body: &str) -> DataConTable {
 /// bootstrap turn's `ConTags` must still classify the accumulated table.
 #[test]
 fn accumulated_session_table_keeps_one_id_per_qualified_name() {
-    if !eval_harness::extract_available() {
-        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
-        return;
-    }
+    eval_harness::require_extract();
     let harness = EvalHarness::new().with_stdlib();
 
     // Turn 1 is the bootstrap turn — its table is what `ConTags` freezes on.

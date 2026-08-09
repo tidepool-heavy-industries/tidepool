@@ -26,17 +26,13 @@ use tidepool_runtime::session::{ModuleEnv, SessionLib};
 use tidepool_runtime::{compile_and_run_pure_salted, paths};
 use tidepool_testing::eval_harness;
 
-/// Confirm the extract toolchain (and transitively GHC) is reachable. Returns
-/// the lib include dir on success, or `None` to skip (toolchain unavailable).
-fn setup() -> Option<PathBuf> {
-    if !eval_harness::extract_available() {
-        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
-        return None;
-    }
-
+/// Confirm the extract toolchain (and transitively GHC) is reachable (panics
+/// loudly otherwise — see `require_extract`) and return the lib include dir.
+fn setup() -> PathBuf {
+    eval_harness::require_extract();
     let lib = eval_harness::prelude_path();
     assert!(lib.exists(), "haskell/lib include dir must exist");
-    Some(lib)
+    lib
 }
 
 /// Build a probe module that imports the session library at generation `gen`
@@ -64,7 +60,7 @@ fn run_probe(lib_dir: &Path, session_dir: &Path, salt: &str, src: &str) -> serde
 
 #[test]
 fn declarations_accumulate_and_types_coexist() {
-    let Some(lib_dir) = setup() else { return };
+    let lib_dir = setup();
     // A guaranteed-fresh compile cache: the (src, salt) keys are stable across
     // runs (fixed SessionId + gens), so a stale entry could mask a compile bug.
     // Redirect this process's cache root instead of deleting the shared
