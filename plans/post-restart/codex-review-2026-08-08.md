@@ -337,3 +337,24 @@ GHC error. ConstraintKinds workaround committed and sound (agent-wave
 checkpoint); the BUG is unfixed and any zero-method class is exposed.
 Owner: extract-wave/spawn-latency territory (morning routing). Repro
 context in agent-lanes/receipt-agent-wave-checkpoint.md.
+
+## 16. Two of four standing extractor gates never invoke the extractor (extract-wave, 2026-08-09) — BOX-WIDE RULE
+
+haskell_suite_differential and corpus_report replay FROZEN CBOR (zero
+extractor invocations — verified); they are JIT-vs-eval differentials
+that pass identically with a catastrophically broken extractor, unless
+fixtures are regenerated. Empirically shown: injected extractor fault,
+extract-fidelity 30/30 clean, neither fixture gate had a path to it. The
+citation was wrong, not the instruments — same class as the pinned trio,
+one level up. Honest extractor coverage = extract-fidelity-test (real
+pipeline; KNOWN HOLE: fixtures never touch JSON/Aeson — morning fixture
+work) + harness acceptance (real extracts, ~1845s).
+
+BOX-WIDE RULE (root-adopted from extract-wave's wave rule): fixture
+regeneration under haskell/test/{suite_cbor,corpus_cbor} is a SEQUENCED
+ROOT/WAVE-LEVEL ACTION, never an individual lane's call — shared dirs,
+in-flight lanes, redeploy-class blast radius, and a booby trap:
+haskell/CLAUDE.md warns pruning *_u<n>.cbor drops `compared` below
+COMPARED_FLOOR, so naive regeneration breaks the floor it protects.
+All regeneration requests route through root (or the extract-wave TL
+within its subtree).
