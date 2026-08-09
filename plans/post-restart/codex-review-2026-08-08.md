@@ -322,3 +322,12 @@ Checkpoints need these types to round-trip, so: support both sides,
 losslessly, with round-trip tests; retire the reject-at-compile-time
 pinning tests as part of the same change. Owner: checkpoint-persistence
 lane (Chain A).
+
+## 15. Zero-method class dictionary culled — extract-pipeline bug (agent-wave, 2026-08-09)
+
+A zero-method class's dictionary-constructor binding is culled by the
+extractor while a reference survives — reported as a dangling NVar, not a
+GHC error. ConstraintKinds workaround committed and sound (agent-wave
+checkpoint); the BUG is unfixed and any zero-method class is exposed.
+Owner: extract-wave/spawn-latency territory (morning routing). Repro
+context in agent-lanes/receipt-agent-wave-checkpoint.md.
