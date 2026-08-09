@@ -1,8 +1,8 @@
 # L4 receipt — authored surface + the `withHandler` interpreter
 
-STATUS: IN PROGRESS. The mechanism decision and the scaffold are landed; the
-handler modules and the acceptance harness are in flight in two forked lanes.
-Sections marked TODO are filled at convergence.
+STATUS: COMPLETE, with ONE item ROUTED rather than done — the `(<|>)`
+relocation (§3a item 1), which could not land because boot-vocab never folded
+to this branch. Everything else is landed and proven by named gates.
 
 ## 1. The mechanism decision
 
@@ -66,7 +66,11 @@ Commit `0630b6bd` — scaffold:
 - `Control.Monad.Freer.Internal` in the generated module's imports
   (`tidepool-mcp/src/eval_prep.rs`)
 
-TODO: handler modules, acceptance harness, per-binary test counts.
+Then: the worktree handler module (folded, `a31e971a`, 19 named conversion
+gates), the RepoEvent registry + acceptance harness (folded, `2c0476de`, 7
+named `withHandler` gates + 16 registry units), `worktreeHead`, the
+storage-error wire variants, the `wt-seam` integration with all four
+`WORKAROUND(wt-seam)` sites removed, and the env-skip → fail-loud conversion.
 
 ## 3. Test name proving each `withHandler` semantic
 
