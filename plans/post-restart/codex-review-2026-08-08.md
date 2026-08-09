@@ -29,6 +29,17 @@ values; require `TAG_LIT` + expected literal representation before loading
 an address payload; negative test feeding nullary and one-field non-string
 constructors to `FfiStrlen`.
 
+**LANDED (strlen-hardening, 1d3543c6, folded 2026-08-08):** `unbox_addr`
+now rejects Raw SSA values without `LIT_TAG_ADDR` and requires the final
+payload (after 1-field wrapper unwrap) be `TAG_LIT` with an
+address-carrying class, routing failures through a new
+`ShapeTrapKind::AddrKind` poison+breadcrumb trap. Covers every
+Addr#-consuming primop via the shared helper. The one-field negative test
+SIGSEGV'd on pre-fix code (stash A/B) — real memory-safety hole, not
+hypothetical. Suite 687/687. **Follow-up spawned:** `unbox_bytearray` has
+a structurally analogous but separate gap (own duplicated con-unwrap
+loop, no final `TAG_LIT` check) — same fix pattern applies.
+
 ## 2. Compile cache cannot key GHC flags — CONFIRMED gap
 **Owner: generic-surface (design input to dev-1's Harness.Prelude profile)**
 
