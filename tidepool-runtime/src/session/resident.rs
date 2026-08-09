@@ -1,9 +1,9 @@
-//! `ResidentSession` — the `Retention::Persistent` end-state (segment 20).
+//! `ResidentSession` — the `Retention::Persistent` end-state.
 //!
-//! The E2 stow engine's oneshot path (`SessionEngine`) drives one turn and
-//! DROPS its machine when the turn completes (the `FnOnce` body owns the
-//! machine and consumes it). A RESIDENT session keeps the machine across turns:
-//! a completed turn returns the `JitEffectMachine` to its session slot so the
+//! The stow engine's oneshot path (`SessionEngine`) drives one turn and DROPS
+//! its machine when the turn completes (the `FnOnce` body owns the machine
+//! and consumes it). A RESIDENT session keeps the machine across turns: a
+//! completed turn returns the `JitEffectMachine` to its session slot so the
 //! next turn re-enters the SAME heap and sees prior effect-plane state.
 //!
 //! This is the "end-state registry" entry the engine docstring names —
@@ -12,15 +12,16 @@
 //! The oneshot `FnOnce` path in `engine.rs` is untouched; the stateless eval
 //! server keeps driving it.
 //!
-//! # Why turns can run on a fresh thread each time (E2's gift)
+//! # Why turns can run on a fresh thread each time
 //!
 //! `tidepool-repl` pins its machine to one parked worker thread because its
-//! ask-suspend mechanism parks a blocked thread. E2 removed that need at the
-//! ask boundary: [`JitEffectMachine::resume_suspended`] re-installs the
-//! machine's per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry,
-//! cancel flag) and re-points GC state at the RETAINED session heap on ANY
-//! thread. So a resident session drives each turn on a fresh eval thread and
-//! moves the machine back afterward — no parked worker, no pinning. The
+//! ask-suspend mechanism parks a blocked thread. The threadless suspend
+//! mechanism removes that need at the ask boundary:
+//! [`JitEffectMachine::resume_suspended`] re-installs the machine's
+//! per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry, cancel
+//! flag) and re-points GC state at the RETAINED session heap on ANY thread.
+//! So a resident session drives each turn on a fresh eval thread and moves
+//! the machine back afterward — no parked worker, no pinning. The
 //! stowed-XOR-running discipline (`unsafe impl Send for JitEffectMachine`)
 //! holds because the machine is in exactly one place at a time: owned by the
 //! session slot when idle/suspended, moved onto the eval thread for the
@@ -31,12 +32,12 @@
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
 //! [`JitEffectMachine::run_fragment_suspendable`] — the composition of the
-//! fragment plane (C2 session re-entry) with E2 threadless suspension. An `Ask`
+//! fragment plane's session re-entry with threadless suspension. An `Ask`
 //! mid-fragment stows the continuation on the machine and yields
 //! `Suspended`; [`ResidentSession::resume`] re-enters and drives the fragment
 //! to completion.
 //!
-//! # Nested child runs (segment 40)
+//! # Nested child runs
 //!
 //! A suspended session REJECTS a new TOP-LEVEL turn (see
 //! [`ResidentError::Suspended`]) but ACCEPTS a nested CHILD run
@@ -45,7 +46,7 @@
 //! parent's stowed continuation is registered as a GC root
 //! ([`JitEffectMachine::run_child_fragment`]). The child does not consume the
 //! parent's continuation; the session stays suspended on its hole across the
-//! child run. The L7 `suspended_continuation.is_none()` asserts in
+//! child run. The `suspended_continuation.is_none()` asserts in
 //! `jit_machine.rs` stay intact for the plain entries; the child entry moves the
 //! continuation into a registered stowed root for its duration (so those asserts
 //! still pass) — see the jit_machine module docstring for the full invariant.
@@ -108,12 +109,12 @@ pub enum ResidentError {
     #[error("session is suspended on continuation {0}; resume, abort, or run a child before a new top-level run")]
     Suspended(String),
     /// A `run_child` was attempted on an idle (not-suspended) session — a
-    /// nested child requires a suspended parent by construction (segment 40).
+    /// nested child requires a suspended parent by construction.
     #[error("session is not suspended; a nested child run requires a suspended parent")]
     NotSuspended,
-    /// A nested child fragment itself suspended at an `Ask`. R0 is single-level
-    /// sequential-isolated nesting — the machine holds exactly one stowed
-    /// continuation, so a child cannot suspend while the parent already is.
+    /// A nested child fragment itself suspended at an `Ask`. Nesting is
+    /// single-level and sequential-isolated — the machine holds exactly one
+    /// stowed continuation, so a child cannot suspend while the parent already is.
     #[error("nested child suspended at an ask; R0 supports single-level nesting only")]
     ChildSuspended,
     /// A `resume`/`abort` referenced a continuation id that is not the one this
@@ -156,7 +157,7 @@ pub struct ResidentSession<H, O> {
     /// The shared persistent-session core (machine + accumulated table + the two
     /// planes), driven through the threadless suspend mechanism. The harness does
     /// not (yet) accumulate on the decl/value planes — they sit empty here until
-    /// W1b turns them on — but the machine lifecycle + table merge + fragment-run
+    /// enabled — but the machine lifecycle + table merge + fragment-run
     /// primitives all live in the core, shared with the repl's parked-thread
     /// session.
     core: PersistentSession<Threadless>,
@@ -202,7 +203,7 @@ where
     // them into a struct would just move the arity, not remove it.
     ///
     /// `lib` is the decl plane: pass `Some` to accumulate declarations across
-    /// turns (the harness, once W1b turns it on), or `None` for a value-only
+    /// turns (once the harness enables it), or `None` for a value-only
     /// session. The boot table seeds the accumulated session table.
     #[allow(clippy::too_many_arguments)]
     pub fn bootstrap(
@@ -300,7 +301,7 @@ where
     }
 
     /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
-    /// session's live value bindings that `expr` actually references (D9), so
+    /// session's live value bindings that `expr` actually references, so
     /// the fragment can resolve an earlier `x <- e` at a Var-miss. Empty until
     /// the first bind materializes AND this fragment references one, so a
     /// value-plane-free session behaves exactly as before.
