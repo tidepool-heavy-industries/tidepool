@@ -104,6 +104,29 @@ localized diffs and log it at fold):
   before anyone checked the referent. A grep over process ARGS counts agents,
   not work. Reach for the kernel's own accounting.
 
+  **THE GENERALISATION (spawn-latency, and it is the transferable part):
+  verifying one instrument silently discharges the obligation for its
+  neighbours.** Three instances in one day, and the shape is identical every
+  time — the corrected instrument gets checked, the one on the adjacent line
+  does not. The sharpest case: a single message that carefully used the
+  anchored `^tidepool-extrac` pattern for extract count used a naive args grep
+  for waiter count *on the line above it*, written by the person who had
+  diagnosed that exact trap one message earlier. Not an inherited figure — an
+  independently generated instance of a failure being demonstrated as
+  understood in the same breath.
+  So: when you fix one measurement, **audit every other number in the same
+  report.** Fixing a number is not evidence about its neighbours, and the
+  feeling of having just been careful is actively misleading.
+
+  **NAME THE INSTRUMENT ALONGSIDE ANY NUMBER IN A RECEIPT** (boot). A reader
+  must be able to check what a figure counts rather than trust its label. Prefer
+  counting AT THE SOURCE, inside the code path, over pattern-matching process
+  lists from outside: `acceptance_boot_compile_count` is trustworthy precisely
+  because it counts extract spawns in-code, in a week when three separate
+  external-observation instruments were each wrong in a different direction. An
+  in-code counter establishes its referent structurally; an external pattern
+  match only asserts one. This is the named-guard rule one level down.
+
   The MemAvailable floor is a soft guard and is NOT binding at 18 GB. If you see
   a floor rejection, that is real memory pressure, not this.
 
