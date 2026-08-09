@@ -232,25 +232,23 @@ children's merge-bases. Four things must happen at that boundary:
    one-field constructor and loads an address payload without requiring a
    literal tag; `0x1` is consistent with an unboxed tag word). **ConTags
    does not touch that path.** Therefore:
-   Three outcomes, and the middle one is the trap:
-   - **Still segfaults** (`runtime_strlen`, bad pointer `0x1`) → real,
-     2-line repro straight to root, as agreed.
-   - **Traps cleanly** — a `ShapeTrapKind::AddrKind` poison+breadcrumb
-     trap naming the bad unbox, rather than a segfault → ALSO real, same
-     repro, same escalation. This IS the expected surviving-defect
-     signature now: `strlen-hardening` folded into root's tip
-     (`1d3543c6`), so this rebase inherits it. A changed signature here
-     means the hardening is WORKING — not a new or different bug. Do not
-     report it as one.
-     The hole it closed was real memory-unsafety, not hypothetical: that
-     dev stash-A/B'd its fix and the one-field negative test SIGSEGV'd on
-     old code.
-   - **PASSES** → proves the REPRO MOVED, not that the defect was fixed;
-     ConTags never touched this path. Record as informational. Do NOT
-     claim discharge, and do not remove the exact-rendering assertions on
-     the strength of it. A sibling `unbox_bytearray` gap of the SAME shape
-     is still open in a follow-up dev, so the defect CLASS is not closed
-     even once this particular repro stops reproducing.
+   Outcome, now settled:
+   - **Still fails** — CONFIRMED 2026-08-09, A/B'd cold-cache by dev-4 (red
+     with and without its diff). The `==` form is a real defect and the
+     repro is with root.
+   - **The trigger is NOT the comparison.** dev-2's original isolation
+     ("literal-vs-literal sums are fine") is REFUTED. A literal `SumShape`
+     carrying two or more `VariantShape`s dies on ENCODE alone — no `==`,
+     no derived value, no list result:
+     `encodeShape (SumShape "E" [VariantShape "A" UnitShape, VariantShape "B" UnitShape])`
+     → `[JIT] runtime_error kind=4 (TypeMetadata)` + `runtime_strlen: bad
+     pointer 0x0`. A ONE-variant literal sum is green, literal products with
+     two and six fields are green, and the same multi-variant sum DERIVED is
+     green. Building the multi-variant sum LITERAL is the trigger. Repro in
+     a comment in `tidepool-runtime/tests/generic_form_wire.rs`.
+   - Work around it by asserting from RUST on the returned `Value` (what
+     `generic_form_wire` does) rather than comparing against a Haskell
+     literal. Do not delete the failing test — it is the tracking pin.
    The hardening fix is not this lane's work — only its failure shape is.
 3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
    resolved-`render` decision; root updated the checkpoint bullet. Keep

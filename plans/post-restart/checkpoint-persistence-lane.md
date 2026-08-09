@@ -167,15 +167,20 @@ do not confuse the two.
    application. Do not re-attempt prescriptive "add `deriving (Generic)`"
    text; it needs a typechecker plugin.
 
-**Known trap — comparing a DERIVED value to a hand-written literal.** A
-tag-as-address escape, isolated to derived-SUM vs sum-literal (derived
-product vs product literal, literal vs literal, and `show` of a derived
-value are all fine). A golden matrix is almost entirely this comparison, so
-expect it. Signature after `strlen-hardening`: a `ShapeTrapKind::AddrKind`
-poison+breadcrumb trap; a sibling `unbox_bytearray` gap of the same shape may
-still be open. Workaround: assert exact RENDERINGS, which pin every key,
-constructor and order at no loss of coverage. Escalate a hit to root with a
-minimal repro — it is a real defect, not a thing to design around.
+**Known trap — BUILDING a multi-variant sum literal.** A literal
+`SumShape` with two or more `VariantShape`s dies on encode with
+`[JIT] runtime_error kind=4 (TypeMetadata)` + `runtime_strlen: bad pointer
+0x0` — no `==`, no derived value, no list result required. One-variant
+literal sums, literal products (two and six fields), and the same
+multi-variant sum DERIVED are all green, so building the literal is the
+trigger, not comparing against it. Confirmed 2026-08-09 and escalated to
+root; repro in a comment in `tidepool-runtime/tests/generic_form_wire.rs`.
+
+**This lane will hit it immediately.** A golden matrix does not merely
+compare against expected literals, it CONSTRUCTS them, and mixed-constructor
+sums are one of its required cases. Assert from RUST on the returned `Value`
+(see `generic_form_wire`) rather than comparing against a Haskell literal.
+Escalate a fresh signature to root; do not design around it silently.
 
 ## Form-builder deletion
 
