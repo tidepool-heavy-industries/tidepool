@@ -34,6 +34,10 @@
 — thesis, runtime, agent surface, compaction, siteid, finalize closures.
 Landed on `harness-interaction-surface`.
 
+**Proposed next substrate:** typed, async headless subagents described by a
+Servant-style Generic record and hosted as many threads in one Codex app-server:
+[`self-iterating-harness/18-typed-subagent-spawning-prd.md`](self-iterating-harness/18-typed-subagent-spawning-prd.md).
+
 **Superseded:** [`harness-r0/`](harness-r0/README.md) — typed yield
 (`returnControl @T`), session tree, 7-pane observatory (replaced by the
 focused operator GUI). The older Fork/Dialog interaction-surface plan is
