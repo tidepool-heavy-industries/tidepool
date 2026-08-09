@@ -41,9 +41,24 @@ the REPL already bootstraps from the first REAL compiled expression
 2. First real run compiles the machine entry directly (mirror the REPL).
 3. DELETE both seed compiles (driver.rs:562, harness.rs:430).
 4. Emit render + loop from ONE extract invocation. `compile_turn` is
-   single-target today (`{target}.cbor`, `tidepool-runtime/src/session/compile.rs`
-   ~95); multi-target is Phase B's multi-binder machinery, which is FOLDED and
-   available to you (gate open at a45fa843).
+   single-target today (`{target}.cbor`, `tidepool-harness/src/compile.rs`
+   ~104).
+
+   > **CORRECTED 2026-08-09** (wave TL, recorded at `a4642cba`; codex ledger
+   > item 10). This step originally read "multi-target is Phase B's
+   > multi-binder machinery, which is FOLDED and available to you (gate open
+   > at a45fa843)". **That machinery does not exist.** Phase B DEFERRED the
+   > `writeWholeModuleClosed` work to a successor
+   > (`one-spawn-turn-protocol-phase-b.md:99`); its actual multi-binder work
+   > is about tuple BINDERS on a session bind turn (`Main.hs` ~671–736), a
+   > different thing from emitting several compile targets from one GHC
+   > session. Verified in-tree: `writeWholeModuleClosed` takes a single
+   > `targetName` (`Main.hs:333`), and the CLI has only `--target` (136) and
+   > `--all-closed` (138).
+   >
+   > Multi-target emission is therefore a NEW prerequisite work item inside
+   > item 0, on the `Main.hs` writer side — see `03-targets-prereq.md`. It
+   > gates step 4 (wave 3) and nothing else.
 5. Outer machine boots from render; loop lands as the second JIT function in
    the same machine.
 6. Answerer session created lazily; its first model-written block boots its
@@ -139,7 +154,8 @@ item 0b are largely independent of step 4's multi-target emission.
 ## Gates
 
 Every item passes the wave gates in `../OPERATIONAL.md`: hardened differential
-(floors intact), `corpus_report`, `extract-fidelity-test` 26/26, harness
+(floors intact), `corpus_report`, `extract-fidelity-test` 26/26 [**STALE — see
+below**], harness
 acceptance. Item 0 additionally needs a live-shaped receipt that the pre-model
 compile count actually dropped — a test or an instrumented run showing the
 extract-spawn count from launch to first model call, not an argument that it
@@ -147,3 +163,36 @@ should have.
 
 Receipts are per-binary pass/fail counts. Copy `../OPERATIONAL.md`'s Block
 section verbatim into every dev spec.
+
+---
+
+## CORRECTION 2026-08-09 — the `26/26` figure above is STALE
+
+`extract-fidelity-test` is **not** 26 checks. D1-A added four `D1Defense`
+checks; the total is 30 and will move again. The figure is left visible
+rather than deleted, so anyone holding a copy of this spec recognises what
+changed.
+
+**State the property, never the figure:** *every pre-existing check passes,
+named guards appear by name, report the actual N/N.* Any number is context,
+never a target.
+
+Why this matters more than staleness — a hardcoded count converts the
+denominator rule from a CHECK into a LOOKUP. The dev stops asking *"did
+everything run?"* and starts asking *"does it match the spec?"* Those are
+the same question **until something silently stops running**, which is the
+only case either question exists for. So a stale count does not merely go
+out of date: it **disables the rule that would have caught it going out of
+date**, and fails in the direction that looks correct.
+
+Worst on items that ADD tests — every item in this lane does. `boot-lazy`
+adds ConTags pins, `boot-targets` adds two multi-target pins, `boot-vocab`
+adds the `Member` negative test. Each moves its own total *because of its
+own work*; and if a check silently stopped running while the total landed
+back on a spec'd number, the truncated run would match the doc exactly.
+
+Contrast with `boot-count`'s `PRE_MODEL_EXTRACT_COMPILES = 4`, which is
+sound: it asserts a **property in code** that must change by a known
+amount, with a failure message naming the win condition — not a figure in
+prose for a human to reconcile against. The same number is correct in one
+place and a trap in the other.

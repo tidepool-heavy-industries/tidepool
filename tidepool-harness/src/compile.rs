@@ -14,10 +14,19 @@
 //! one-shot `M a` expressions, the sidecar is small, and the extract call is
 //! the ~2s floor either way. Keeping it here means the harness owns the
 //! sidecar contract end-to-end.
+//!
+//! [`compile_turns`] is the multi-target entry point (extract's `--targets`
+//! mode, `haskell/app/Main.hs`'s `runMultiTargetClosed` — see
+//! `plans/post-restart/extract-wave/boot/03-targets-prereq.md`): ONE extract
+//! spawn compiles N named targets against a SHARED merged `meta.cbor` /
+//! `DataConTable`, returning one [`CompiledTurn`] per target. [`compile_turn`]
+//! is now a thin single-target wrapper over it, so every existing caller's
+//! signature and on-disk contract are unchanged.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -25,6 +34,35 @@ use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 use crate::timing;
+
+/// Process-global count of `tidepool-extract` spawns paid by
+/// [`compile_turn`] — the extract-wave `boot` item's done-criterion needs a
+/// live receipt that the self-iterating harness's pre-model-call compile
+/// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
+/// and this is the single spawn function every path the self-harness launch
+/// reaches funnels through (the outer session's boot seed and its
+/// `render`/`loop` compiles, and the answerer `Harness`'s own boot seed — see
+/// `tidepool-harness/tests/acceptance_boot_compile_count.rs` for the traced
+/// call chain). PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
+/// on it must run as its own test binary so no other test's compiles land on
+/// the same count (nextest already gives one process per test binary).
+static EXTRACT_SPAWNS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of `tidepool-extract` spawns [`compile_turn`] has paid in this
+/// process so far. `Ordering::SeqCst` so a reader on another thread (the
+/// acceptance test's snapshot, taken from inside a model-provider callback
+/// running on a different thread than the compiling turn) is guaranteed to
+/// see every increment a compiling thread has performed before this call.
+pub fn extract_spawn_count() -> u64 {
+    EXTRACT_SPAWNS.load(Ordering::SeqCst)
+}
+
+/// Reset the process-global spawn counter to zero. For test isolation within
+/// a single test binary that drives more than one `compile_turn`-reaching
+/// launch and wants each launch's count in isolation.
+pub fn reset_extract_spawn_count() {
+    EXTRACT_SPAWNS.store(0, Ordering::SeqCst);
+}
 
 /// One `asks.json` entry: a yield-site id and its rendered answer type.
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +139,13 @@ pub enum CompileError {
 /// `node`/`round` attribute this compile's [`timing`] stages — pass
 /// [`timing::NO_ROUND`] when the caller has no answerer-round context (only a
 /// node id).
+///
+/// A thin wrapper over [`compile_turns`] (a one-element target slice) — the
+/// multi-target `--targets` extract mode reduces to exactly this single-target
+/// shape for N=1 (one plain `asks.json`, no cross-target meta merge to
+/// perform), so every existing caller here gets byte-for-byte the same
+/// on-disk contract it always has, now exercised through the shared
+/// implementation instead of a separate one.
 pub fn compile_turn(
     extract_bin: &str,
     source: &str,
@@ -109,6 +154,59 @@ pub fn compile_turn(
     node: u64,
     round: u64,
 ) -> Result<CompiledTurn, CompileError> {
+    let mut turns = compile_turns(extract_bin, source, &[target], include, node, round)?;
+    turns
+        .remove(target)
+        .ok_or_else(|| CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor"))))
+}
+
+/// One target's raw (pre-deserialize) bytes, gathered by [`compile_turns`]
+/// before the deserialize/asks-parse passes below.
+struct RawTargetOutput {
+    target: String,
+    expr_bytes: Vec<u8>,
+    asks_bytes: Option<Vec<u8>>,
+}
+
+/// Compile `source` against MULTIPLE named targets in ONE `tidepool-extract`
+/// spawn: `targets.len()` `<target>.cbor` trees over a SINGLE shared merged
+/// `meta.cbor` / [`DataConTable`], returning one [`CompiledTurn`] per target.
+/// Mirrors [`compile_turn`]'s single-spawn contract but drives the extract's
+/// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`)
+/// instead of `--target` — see
+/// `plans/post-restart/extract-wave/boot/03-targets-prereq.md`.
+///
+/// A REQUESTED target is a contract: the extract mode this drives fails the
+/// WHOLE spawn (a nonzero exit, surfaced as [`CompileError::Extract`]) if
+/// ANY target can't translate, rather than silently emitting the targets that
+/// succeeded — this function adds no `try`/skip of its own on top of that,
+/// so it inherits the same all-or-nothing guarantee.
+///
+/// asks sidecar shape: for exactly one target, the extract writes the plain
+/// `asks.json` array — the single-target contract every extract build has
+/// always produced (see [`compile_turn`]'s doc above). For more than one
+/// target it additionally writes `<target>.asks.json` per target, so two
+/// targets' DIFFERENT runLLMTurn/runLLMTurnFork sites never collapse into one
+/// ambiguous file (`writeClosedTargets`'s doc comment, `Main.hs`) — this
+/// function reads whichever shape the spawn actually produced, keyed on the
+/// same `targets.len() > 1` test the Haskell side uses to decide which shape
+/// to write.
+///
+/// `node`/`round` attribute this compile's [`timing`] stages exactly as
+/// [`compile_turn`] does, now summed across every requested target instead of
+/// just one.
+pub fn compile_turns(
+    extract_bin: &str,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    assert!(
+        !targets.is_empty(),
+        "compile_turns: at least one target is required"
+    );
     let temp_dir = tempfile::TempDir::new()?;
     // GHC derives the module name from the filename (capitalize(basename)); the
     // templated preamble declares `module Expr`, so the file must be `Expr.hs`.
@@ -119,7 +217,7 @@ pub fn compile_turn(
     let mut cmd = Command::new(extract_bin);
     cmd.arg(&input_path);
     cmd.arg("--output-dir").arg(temp_dir.path());
-    cmd.arg("--target").arg(target);
+    cmd.arg("--targets").arg(targets.join(","));
     for path in include {
         cmd.arg("--include").arg(path);
     }
@@ -128,6 +226,10 @@ pub fn compile_turn(
         bin: extract_bin.to_string(),
         source,
     })?;
+    // Counted on a successful spawn (the process actually launched and ran to
+    // exit) — a `Spawn` error above (bad path, `Command::output` I/O failure)
+    // never paid a real `tidepool-extract` cost and must not count as one.
+    EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
     timing::record_stage(
         node,
         round,
@@ -141,7 +243,7 @@ pub fn compile_turn(
     timing::record_extract_phases(node, round, &extract_timing);
     if !output.status.success() {
         tracing::warn!(
-            target = %target,
+            targets = %targets.join(","),
             "extract failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -152,35 +254,56 @@ pub fn compile_turn(
         )));
     }
 
-    let expr_path = temp_dir.path().join(format!("{target}.cbor"));
     let meta_path = temp_dir.path().join("meta.cbor");
-    let asks_path = temp_dir.path().join("asks.json");
-
-    if !expr_path.exists() {
-        return Err(CompileError::MissingOutput(expr_path));
-    }
     if !meta_path.exists() {
         return Err(CompileError::MissingOutput(meta_path));
     }
 
+    // A single requested target reads the plain `asks.json`; more than one
+    // reads `<target>.asks.json` per target — see this fn's doc comment.
+    let multi = targets.len() > 1;
+
     let cbor_read_start = Instant::now();
-    let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
-    let asks_bytes = read_asks_bytes(&asks_path)?;
-    let cbor_read_bytes =
-        (expr_bytes.len() + meta_bytes.len() + asks_bytes.as_ref().map_or(0, Vec::len)) as u64;
+    let mut raw: Vec<RawTargetOutput> = Vec::with_capacity(targets.len());
+    for target in targets {
+        let expr_path = temp_dir.path().join(format!("{target}.cbor"));
+        if !expr_path.exists() {
+            return Err(CompileError::MissingOutput(expr_path));
+        }
+        let expr_bytes = std::fs::read(&expr_path)?;
+        let asks_path = if multi {
+            temp_dir.path().join(format!("{target}.asks.json"))
+        } else {
+            temp_dir.path().join("asks.json")
+        };
+        let asks_bytes = read_asks_bytes(&asks_path)?;
+        raw.push(RawTargetOutput {
+            target: (*target).to_string(),
+            expr_bytes,
+            asks_bytes,
+        });
+    }
+    let cbor_read_bytes = meta_bytes.len()
+        + raw
+            .iter()
+            .map(|r| r.expr_bytes.len() + r.asks_bytes.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
     timing::record_stage(
         node,
         round,
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        cbor_read_bytes,
+        cbor_read_bytes as u64,
     );
 
     let deserialize_start = Instant::now();
-    let expr = read_cbor(&expr_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
     let (table, warnings) =
         read_metadata(&meta_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
+    let exprs: Vec<CoreExpr> = raw
+        .iter()
+        .map(|r| read_cbor(&r.expr_bytes).map_err(|e| CompileError::Deserialize(e.to_string())))
+        .collect::<Result<Vec<_>, CompileError>>()?;
     timing::record_stage(
         node,
         round,
@@ -189,11 +312,36 @@ pub fn compile_turn(
         0,
     );
     // Register varId → name pairs so runtime unresolved-variable errors can name
-    // the symbol (mirrors compile_haskell).
+    // the symbol (mirrors compile_haskell) — once, over the shared merged table.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     let asks_start = Instant::now();
-    let asks = parse_asks(asks_bytes)?;
+    let mut turns = HashMap::with_capacity(targets.len());
+    for (r, expr) in raw.into_iter().zip(exprs.into_iter()) {
+        let RawTargetOutput {
+            target,
+            expr_bytes,
+            asks_bytes,
+        } = r;
+        let asks = parse_asks(asks_bytes)?;
+        let mut sites: Vec<_> = asks.by_site.iter().collect();
+        sites.sort_by_key(|(site, _)| **site);
+        tracing::info!(
+            target = %target,
+            module = %module,
+            expr_bytes = expr_bytes.len(),
+            sites = ?sites,
+            "compiled turn"
+        );
+        turns.insert(
+            target,
+            CompiledTurn {
+                expr,
+                table: table.clone(),
+                asks,
+            },
+        );
+    }
     timing::record_stage(
         node,
         round,
@@ -202,17 +350,7 @@ pub fn compile_turn(
         0,
     );
 
-    let mut sites: Vec<_> = asks.by_site.iter().collect();
-    sites.sort_by_key(|(site, _)| **site);
-    tracing::info!(
-        target = %target,
-        module = %module,
-        expr_bytes = expr_bytes.len(),
-        sites = ?sites,
-        "compiled turn"
-    );
-
-    Ok(CompiledTurn { expr, table, asks })
+    Ok(turns)
 }
 
 /// Read the `asks.json` sidecar's raw bytes. A missing file yields `None`

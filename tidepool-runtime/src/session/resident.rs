@@ -130,6 +130,10 @@ pub enum ResidentError {
     /// The turn's fragment failed to add to the live machine.
     #[error("fragment compile failed: {0}")]
     AddFunction(JitError),
+    /// The session machine failed to bootstrap from the first real turn's
+    /// expr/table (lazy boot — see [`ResidentSession::unbootstrapped`]).
+    #[error("session bootstrap failed: {0}")]
+    Bootstrap(JitError),
     /// The turn errored during the run (a runtime fault, a caught panic, or an
     /// ask-protocol error).
     #[error("turn run failed: {0}")]
@@ -197,6 +201,20 @@ where
     /// carrying the effect tag list the dispatch needs); turns are then added as
     /// fragments. Mirrors the repl's bootstrap (`session.rs`: compile_session on
     /// the first turn's table).
+    ///
+    /// No production caller left as of the extract-wave `boot` lane's lazy-boot
+    /// item (`tidepool-harness`'s `Harness::force`/`SelfHarnessDriver::bootstrap`
+    /// both moved to [`Self::unbootstrapped`], which pays no compile until the
+    /// first REAL turn). Kept as a public constructor because this crate's own
+    /// GHC-heavy test suite (`tidepool-runtime/tests/resident_session.rs`,
+    /// `realm_varid_pinning.rs`) still calls it directly for one-shot setup
+    /// convenience — a caller that already has an `expr`/`table` in hand and
+    /// wants a live machine immediately, which is a legitimate shape distinct
+    /// from the harness's since-deleted per-node fake-seed anti-pattern (that
+    /// compiled a THROWAWAY program solely to fit this constructor's slot; these
+    /// tests compile a real one and then drive real turns against the SAME
+    /// machine [`Self::unbootstrapped`] would also have booted from their first
+    /// `run`).
     // The arg list mirrors the engine's `StartTurn` field carrier (source,
     // handlers, ask_tag, effect_names, captured, include, nursery) — bundling
     // them into a struct would just move the arity, not remove it.
@@ -229,6 +247,37 @@ where
             pending: None,
             cont_prefix: "scont".to_string(),
         })
+    }
+
+    /// Build a resident session with NO live machine yet — the lazy
+    /// counterpart to [`Self::bootstrap`]. Same arguments MINUS `expr`/`table`:
+    /// there is no seed program to compile, so construction cannot fail and
+    /// pays no GHC extract compile. The machine comes up on the first REAL
+    /// turn ([`Self::run`]/[`Self::run_bind`]/[`Self::run_child`]/
+    /// [`Self::run_child_pure`], via `PersistentSession::bootstrap_if_needed`
+    /// immediately before that turn's fragment is added) — mirrors the repl's
+    /// bootstrap-from-first-real-compile (`tidepool-repl/src/session.rs`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn unbootstrapped(
+        handlers: H,
+        ask_tag: u64,
+        effect_names: Vec<String>,
+        captured: O,
+        include: Vec<PathBuf>,
+        nursery_size: usize,
+        lib: Option<SessionLib>,
+    ) -> Self {
+        let core = PersistentSession::<Threadless>::new(lib, ask_tag, nursery_size);
+        ResidentSession {
+            core,
+            handlers,
+            effect_names,
+            captured,
+            include,
+            next_id: AtomicU64::new(1),
+            pending: None,
+            cont_prefix: "scont".to_string(),
+        }
     }
 
     /// Accumulate `decls` on the decl plane (mirrors the repl's
@@ -286,6 +335,14 @@ where
         self.pending.is_none()
     }
 
+    /// Whether the resident machine has been bootstrapped yet. `false` from
+    /// [`Self::unbootstrapped`] until the session's first real turn brings the
+    /// machine up (`run`/`run_bind`/`run_child`/`run_child_pure`); always
+    /// `true` from [`Self::bootstrap`].
+    pub fn is_bootstrapped(&self) -> bool {
+        self.core.is_bootstrapped()
+    }
+
     /// Effect names by union tag (the roster the harness renders alongside an
     /// unhandled-effect error).
     pub fn effect_names(&self) -> &[String] {
@@ -293,8 +350,10 @@ where
     }
 
     /// Read-only heap/GC snapshot of this session's live machine (observatory
-    /// heap pane) — `None` only during the transient window a turn is running
-    /// on its own eval thread (the machine moved out; see [`Self::on_eval_thread`]).
+    /// heap pane) — `None` either before the machine is bootstrapped (see
+    /// [`Self::unbootstrapped`]/[`Self::is_bootstrapped`]) or during the
+    /// transient window a turn is running on its own eval thread (the machine
+    /// moved out; see [`Self::on_eval_thread`]).
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.machine().map(|m| m.heap_stats())
     }
@@ -347,6 +406,14 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
+        // Lazy boot: no-op once the machine is live. On the FIRST real run this
+        // is what brings the machine up (mirrors the repl's merge-then-bootstrap
+        // ordering, `tidepool-repl/src/session.rs`) — must run on the calling
+        // thread, same as `add_fragment_session` below (both touch the `!Send`
+        // env / pipeline).
+        self.core
+            .bootstrap_if_needed(expr, table)
+            .map_err(ResidentError::Bootstrap)?;
         let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
@@ -385,6 +452,11 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
+        // Lazy boot (see `run`'s comment): no-op once live, brings the machine
+        // up on the FIRST real turn otherwise (a bind may itself be it).
+        self.core
+            .bootstrap_if_needed(expr, table)
+            .map_err(ResidentError::Bootstrap)?;
         let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
@@ -495,6 +567,13 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
+        // Lazy boot (see `run`'s comment). A child run requires a suspended
+        // parent, so in practice the machine is always already live by the
+        // time this is reachable — kept for symmetry with `run`/`run_bind`
+        // and because `bootstrap_if_needed` is a no-op once live.
+        self.core
+            .bootstrap_if_needed(expr, table)
+            .map_err(ResidentError::Bootstrap)?;
         self.core
             .add_child_fragment_session(name_hint, expr, external_env)
             .map_err(ResidentError::AddFunction)

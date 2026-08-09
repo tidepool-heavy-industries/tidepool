@@ -169,6 +169,19 @@ macro_rules! ty_param_names {
 }
 pub(crate) use ty_param_names;
 
+/// Render an optional `helpers_row_polymorphic <bool>` grammar token to its
+/// `bool` value, defaulting to `false` when the definition omits the clause
+/// entirely (every effect except `RunLLMTurn`, today).
+macro_rules! opt_bool_or_false {
+    () => {
+        false
+    };
+    ($b:tt) => {
+        $b
+    };
+}
+pub(crate) use opt_bool_or_false;
+
 /// Render one variant of an `errors` ADT to `<Ctor> <hsField> …` (Haskell
 /// field types come from each field's `"<hs>" as <rust>` pair).
 macro_rules! error_variant_text {
@@ -237,6 +250,7 @@ macro_rules! effect_decl_projection {
         handler $handler:ident,
         req $req:ident,
         decl_fn $decl_fn:ident,
+        $(helpers_row_polymorphic $hrp:tt,)?
         description $desc:tt,
         type_defs $td:tt,
         $(errors $errname:ident $evariants:tt,)?
@@ -249,6 +263,7 @@ macro_rules! effect_decl_projection {
             req $req,
             decl_fn $decl_fn,
             type_params [] default_row_args [],
+            $(helpers_row_polymorphic $hrp,)?
             description $desc,
             type_defs $td,
             $(errors $errname $evariants,)?
@@ -262,6 +277,7 @@ macro_rules! effect_decl_projection {
         req $req:ident,
         decl_fn $decl_fn:ident,
         type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
+        $(helpers_row_polymorphic $hrp:tt,)?
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
         $(errors $errname:ident [
@@ -294,6 +310,7 @@ macro_rules! effect_decl_projection {
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],
+                helpers_row_polymorphic: crate::effect_defs::opt_bool_or_false!($($hrp)?),
             }
         }
     };
@@ -733,6 +750,15 @@ macro_rules! runllmturn_effect_def {
             handler RunLLMTurnHandler,
             req RunLLMTurnReq,
             decl_fn runllmturn_decl,
+            // Every helper below is already `Member RunLLMTurn effs =>`
+            // (siteid-plugin spike) rather than fixed to the closed `M`
+            // stack — see the helpers' own comment. That's what makes
+            // RunLLMTurn safe to include in a compile's VOCABULARY without
+            // being in its ROW (extract-wave item 0b): the GADT + these
+            // helpers typecheck at their DEFINITION site regardless of
+            // whether `RunLLMTurn` is in the current row; `Member` alone
+            // gates whether a call site can actually solve the constraint.
+            helpers_row_polymorphic true,
             description [
                 "Suspend for a TYPED answer. `runLLMTurn \\@T prompt` (same calling ",
                 "model answers in context) / `runLLMTurnFork \\@T prompt` (a forked ",
