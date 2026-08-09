@@ -125,6 +125,34 @@ Every size estimate in this ledger is taken from those figures.
 
 ---
 
+## Standing check: does the gate detect the mistake it is named for?
+
+Ratified method note (root, via wave TL): the C1 finding came from distrusting
+what a row's NAME claimed it bracketed, not from distrusting the number.
+Pointed at the rest of this chain, two items have the same shape — a plausible
+label sitting on top of a narrower measurement. Both get a mutation-shaped
+requirement in their dev spec, the same way D1 got one:
+
+- **E6.** The gate set is named "FULL, zero tolerance", but a green gate only
+  proves what the suites actually EXERCISE. Exposed unfoldings change what
+  extraction sees; if every gate path happens to be unfolding-invariant, green
+  proves less than its name claims. REQUIREMENT: the E6 dev must show that a
+  deliberate MIS-tiering (e.g. denying optimized Core to a module that needs
+  it) turns at least one named gate RED. An all-green run with no demonstrated
+  detection power is not acceptance — it is the E6 analogue of a vacuous
+  mutation test.
+- **D2.** "Fragment-reachable" is a label over a measurement taken pre-wrap on
+  real session Core. D1's hard fail guards constructors that are EMITTED but
+  absent from metadata — it does NOT guard a constructor the RUNTIME needs that
+  the fragment never emits (Rust-side rendering of a sibling set is the
+  plausible case; `dcmTypeName` /`constructors_of_type` exists precisely
+  because Rust resolves a rendered type name to its constructor set). A
+  narrowed table can therefore be green on the gate corpus and wrong on a path
+  the corpus does not walk. REQUIREMENT: the D2 dev must name which
+  runtime-observable roots cover that case and show the sibling-set rule is
+  driven by what Rust actually asks for, not by what the fragment happens to
+  build.
+
 ## Item rows
 
 *(measurement / decision / receipts filled in as each item folds)*
