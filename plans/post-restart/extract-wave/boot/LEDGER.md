@@ -142,6 +142,34 @@ write against code that does not survive.
    runs that fragment to completion, and a loop fragment carrying real
    effect sites then runs and suspends correctly on the same machine.
 
+### 2d. Strict-mode skip path: UNREACHABLE, not merely test-forbidden
+
+Structural requirement added to `boot-targets` (wave TL, accepted) beyond
+the fail-on-any-bad-target test.
+
+`--targets`' forbidden behaviour — silently skipping a failed binding — is
+**not a bug**. It is `--all-closed`'s CORRECT behaviour, in the very code
+the strict mode is adapted from. A test pin therefore defends that
+boundary from OUTSIDE: it does not stop a later refactor re-unifying the
+two modes onto a shared skip path, and it does not stop a reader seeing
+the skip as intentional, because in the other mode it is.
+
+So: strict mode must not be able to REACH the skip. The skip lives in a
+branch strict mode structurally never enters; if the traversal must be
+shared, the strict path's failure handling is a DIFFERENT FUNCTION, not a
+conditional. The test then guards something already impossible instead of
+being the only thing between us and `--all-closed`'s semantics.
+
+The specific regression designed against: someone later "simplifies" the
+two paths into one loop with `if strict then error else skip`. Every test
+still passes, the guarantee is gone, and nothing in the diff looks wrong.
+A boolean is hoistable; separate functions and a lexically-unreachable
+branch are not.
+
+**Record the landed shape here at fold**, so a later reader knows the
+unreachability was deliberate and does not tidy it into a flag.
+_Shape landed: pending._
+
 ### 2b. Named-guard receipt rule (wave-wide, `19b8dca9`) — pushed to all devs
 
 > If a gate exists to catch ONE specific failure mode, the receipt must
@@ -275,6 +303,34 @@ them.
 
 - **Decision:** _pending._
 - **Receipts:** _pending._
+
+---
+
+## Item 0 landing note — draft (goes into the fold message)
+
+**Why this item mattered beyond ~30s of launch latency.**
+
+The wave's characteristic failure is a name asserting more than what was
+established. It showed up four times while item 0 was merely being
+*specified*: timing rows named for a phase they did not measure; a guard
+named for a gate set it was not in; an aggregate offered as evidence for a
+specific test; and a plan claiming machinery ("Phase B's multi-binder")
+that did not exist. Twice more in the mechanism stories themselves — a
+ConTags model and then a ConTags *supplier* attribution, each a correct
+conclusion riding a wrong mechanism.
+
+The thing item 0 deletes is the same failure in the codebase rather than
+in the plans. A **boot seed** that seeds nothing: scaffolding whose name
+outlived its justification, manufactured to fit an API slot that demanded
+a program before one existed, and load-bearing for two full GHC compiles
+per launch precisely because the name made it look intentional.
+
+That the item which deletes this pattern kept generating fresh instances
+of it *while being written* is not a curiosity. It says this seam is one
+where names routinely outlive what licensed them — which is the argument
+for keeping receipt discipline HIGH through the folds rather than relaxing
+it once the interesting findings stop arriving. The findings stopping is
+not evidence that the seam changed.
 
 ---
 
