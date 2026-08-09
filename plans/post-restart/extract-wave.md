@@ -365,10 +365,22 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - The `classify` phase vocabulary decision is binding (see
   plans/one-spawn-turn-protocol.md): extract phase `classify` after
   ghc_session; classify_extract retired with a doc tombstone.
-- Extractor id-stability is now a PINNED invariant (three permanent tests
-  from the ConTags incident — session_table_qualified_identity + two
-  quick-tier assertions). Changing id-minting fires them; that's the
-  design conversation happening, not a test to silence.
+- Extractor id-stability is a PINNED invariant (three permanent tests from the
+  ConTags incident). Changing id-minting fires them; that's the design
+  conversation happening, not a test to silence.
+  **CORRECTED 2026-08-09 — the shorthand over-claims.** The three pin
+  `session_table_qualified_identity` (DataConId uniqueness by qualified name +
+  freer-five ConTags), `realm_varid_pinning` (VarId scoping ISOLATION, not
+  numeric determinism — it passes under any permutation), and
+  `VarIdMechanismTest` (the `stableVarId`/`fieldParentDisamb` contract, i.e.
+  the compile-order-INVARIANT branch of `varId`'s `isExternalName` split).
+  **None observes `localVarId` determinism** — internal/floated bindings bake
+  the raw GHC `Unique` and are allocation-order-sensitive by that function's
+  own doc comment. A green triple means those three properties are intact; it
+  does NOT mean ids did not move. **Their silence is not consent.** A change on
+  `localVarId`'s path has no pinned guard and owes a direct experiment.
+  (Fourth guard this wave found to cover less than its name — and the one both
+  the wave spec and the sub-TL specs leaned on hardest.)
 - One-format wire policy: extract changes that move the wire ship both
   sides via redeploy, fail loud on skew.
 - Correctness gates: hardened differential (floors), corpus_report,

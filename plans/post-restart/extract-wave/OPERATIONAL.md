@@ -358,10 +358,27 @@ rules below — each is this rule applied to one artifact.
   is downstream of those whether or not its file is in the diff. Note the cache
   confound explicitly — a fingerprint-invalidating change makes a naive
   comparison measure cold-vs-warm, not the diff.
-- Extractor id-stability is a PINNED invariant (three permanent tests from the
-  ConTags incident: `session_table_qualified_identity` plus two quick-tier
-  assertions). If your change fires them, STOP and escalate to your TL. That is
-  a design conversation with root, not a test to silence.
+- **The "extractor id-stability is a PINNED invariant" shorthand OVER-CLAIMS —
+  corrected 2026-08-09.** Three permanent tests exist and each pins a real
+  property well, but the phrase reads as blanket coverage of the id space and
+  is not. What they actually observe:
+
+  | test | what it pins |
+  |---|---|
+  | `session_table_qualified_identity` | DataConId uniqueness by qualified name + freer-five ConTags resolution |
+  | `realm_varid_pinning` | VarId **scoping isolation** — same-named binds mint distinct SessionVarIds and resolve correctly. Not numeric determinism; passes under any permutation. |
+  | `VarIdMechanismTest` | the `stableVarId` / `fieldParentDisamb` contract — the compile-order-INVARIANT branch of `varId`'s `isExternalName` split |
+
+  **NOT observed: `localVarId` determinism.** Internal and floated bindings bake
+  the raw GHC `Unique` and are allocation-order-sensitive *by that function's own
+  doc comment* — numeric determinism there was never claimed. So a green triple
+  means "constructor identity, VarId scoping, and the `stableVarId`
+  disambiguator contract are intact". **It does not mean ids did not move, and
+  their silence is not consent.**
+  Still true: if your change FIRES any of them, STOP and escalate to your TL —
+  that is a design conversation with root, not a test to silence. But do not
+  read a PASS as blanket id coverage; if your change touches `localVarId`'s
+  path, no pinned test is watching and you owe a direct experiment.
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
