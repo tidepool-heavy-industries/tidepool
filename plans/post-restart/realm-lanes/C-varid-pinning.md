@@ -68,7 +68,7 @@ path builds. The property must be pinned where callers actually compute
   `ExternalEnv` that fragment is compiled against, and assert the FIRST scope's
   `SessionVarId` is absent from it.
 - Model the existing runtime session tests for setup (look at
-  `tidepool-runtime/tests/session_seed_external_env_root_retention.rs` — it is
+  `tidepool-codegen/tests/session_seed_external_env_root_retention.rs` — it is
   D9's own test and shows how to reach the env; do not edit it).
 - If reaching the `ExternalEnv` from a test requires a new accessor, add a
   narrow, documented one rather than making a field `pub`. Say in the doc comment

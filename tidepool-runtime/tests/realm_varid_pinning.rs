@@ -5,10 +5,9 @@
 //! `tidepool-codegen/tests/binding_table_realm_isolation.rs` proves the
 //! property against a hand-wired `BindingTable` — useful, but not proof that
 //! any production caller computes the right `referenced` slice. This test
-//! drives a real session through `ResidentSession::run`/`run_bind`
-//! (`resident.rs:338-339`, `:377-378`) — the ONLY production callers of
-//! `tidepool_repr::free_vars::free_vars(expr)` followed by
-//! `seed_external_env(&referenced)` — so `referenced` is computed by
+//! drives a real session through `ResidentSession::run`/`run_bind` — the ONLY
+//! production callers of `tidepool_repr::free_vars::free_vars(expr)` followed
+//! by `seed_external_env(&referenced)` — so `referenced` is computed by
 //! production code, not chosen by the test.
 //!
 //! Setup: bind the SAME display name ("x") twice as two independent
@@ -18,10 +17,11 @@
 //! turn references "x" AFTER both binds — by construction (`current` is
 //! last-bind-wins) this resolves to scope B's binding — compiled and run
 //! through `ResidentSession::run`. The env that fragment would be compiled
-//! against is captured via `ResidentSession::seed_external_env_for` (a
-//! narrow, documented accessor added for this purpose — see its doc comment
-//! in `resident.rs`) and asserted to contain scope B's `SessionVarId` but NOT
-//! scope A's.
+//! against is captured via `ResidentSession::seed_external_env_for`, which
+//! `run`/`run_bind` themselves call on the way to `add_fragment_session` — so
+//! the asserted env IS the one a fragment compiles against, not a
+//! reconstruction that could drift from it. It must contain scope B's
+//! `SessionVarId` and NOT scope A's.
 //!
 //! GHC-heavy tier — needs `TIDEPOOL_EXTRACT` and `--ignore-default-filter`.
 

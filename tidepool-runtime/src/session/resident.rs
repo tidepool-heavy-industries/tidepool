@@ -299,16 +299,18 @@ where
         self.core.machine().map(|m| m.heap_stats())
     }
 
-    /// Recompute the `ExternalEnv` a fragment compiling `expr` would be
-    /// seeded with — the same `free_vars(expr)` then `seed_external_env`
-    /// computation [`Self::run`]/[`Self::run_bind`] perform internally
-    /// (resident.rs:338-339, :377-378), exposed as a read-only query rather
-    /// than a field. `run`/`run_bind` build this env and hand it straight to
-    /// `add_fragment_session`, so it's otherwise unobservable — this exists so
-    /// the VarId-keyed cross-realm isolation property (a fragment's env
-    /// contains only the SessionVarIds it actually references, never another
-    /// scope's) can be asserted directly against the exact env a fragment
-    /// would compile against.
+    /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
+    /// session's live value bindings that `expr` actually references (D9), so
+    /// the fragment can resolve an earlier `x <- e` at a Var-miss. Empty until
+    /// the first bind materializes AND this fragment references one, so a
+    /// value-plane-free session behaves exactly as before.
+    ///
+    /// [`Self::run`] and [`Self::run_bind`] call this on their way to
+    /// `add_fragment_session`, so it is the seeding path rather than a
+    /// reconstruction of it — a test asserting on the returned env is
+    /// asserting on the env a fragment really compiles against, and the
+    /// VarId-keyed isolation property (only referenced `SessionVarId`s, never
+    /// another scope's) cannot drift away from what this returns.
     pub fn seed_external_env_for(&self, expr: &CoreExpr) -> ExternalEnv {
         let referenced = tidepool_repr::free_vars::free_vars(expr);
         self.core.seed_external_env(&referenced)
@@ -345,13 +347,7 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        // Seed the env from the session's live value bindings this turn's
-        // fragment actually references (D9), so it can resolve an earlier
-        // `x <- e` (the value plane's Var-miss resolution). Empty until the
-        // first bind materializes AND this fragment references one, so a
-        // value-plane-free session behaves exactly as before.
-        let referenced = tidepool_repr::free_vars::free_vars(expr);
-        let env = self.core.seed_external_env(&referenced);
+        let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
@@ -389,8 +385,7 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        let referenced = tidepool_repr::free_vars::free_vars(expr);
-        let env = self.core.seed_external_env(&referenced);
+        let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core

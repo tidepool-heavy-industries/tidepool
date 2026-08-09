@@ -47,4 +47,40 @@ vacuous.
 
 Patch reverted; working tree clean.
 
-## Steps 2, 3, 5 — pending (lanes A, B, C)
+## Step 5 — the Item-2 VarId pinning test (verdict §7 step 5)
+
+Two tests, both new files, zero pre-existing tests edited:
+`tidepool-codegen/tests/binding_table_realm_isolation.rs` (hand-wired table, two
+colliding-name scopes, isolation asserted in BOTH directions) and
+`tidepool-runtime/tests/realm_varid_pinning.rs` (two real `run_bind` turns
+binding the same display name as independent scopes, then a referencing turn
+through `run`).
+
+| claim | receipt |
+|---|---|
+| Unit-level isolation | `-E 'binary(binding_table_realm_isolation)'` → **1 test run: 1 passed** |
+| Real-path isolation | `--ignore-default-filter -p tidepool-runtime -E 'binary(realm_varid_pinning)'` → **1 test run: 1 passed** |
+| Codegen crate still green | `cargo nextest run -p tidepool-codegen` → **695 tests run: 695 passed, 8 skipped** (694 + the new unit test) |
+
+**The falsification check is what makes these tests worth having.** Reverting
+`seed_external_env` to its pre-D9 unconditional `self.live.values()` sweep kills
+BOTH, and kills them by finding the foreign scope's `SessionVarId` in the env —
+not by some incidental failure:
+
+- C1: `A's env must NOT contain B's x — cross-scope isolation`
+- C2: `scope A's x is NOT referenced by this fragment — its SessionVarId must be
+  ABSENT from the env (the cross-realm isolation property)`
+
+Patch reverted, not committed. This is the whole point of the lane: D9's own
+tests would stay green under a change that reintroduced the leak, because D9 was
+motivated by compile-time cost, not realm isolation.
+
+**Integration change on fold.** As submitted, `seed_external_env_for` duplicated
+the two-line `free_vars` + `seed_external_env` computation that `run`/`run_bind`
+inlined, so the test asserted on a *reconstruction* of the env rather than the
+env itself — a later change to the `free_vars` side could drift and leave the
+test passing vacuously. Both call sites now go through the accessor, so it IS
+the seeding path and the asserted env is the one a fragment really compiles
+against.
+
+## Steps 2, 3 — pending (lanes A, B)
