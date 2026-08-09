@@ -140,3 +140,16 @@ folds.
   demonstration — are DELIBERATE, manually-triggered runs by root/a lane
   with receipts, never wired into suites, battery tiers, or anything that
   runs on invocation. Morning: fold this into CLAUDE.md/testing docs.
+
+## Chain E — terminal phase (Inanna, from the gate): 360 review of the NIGHT'S work
+
+When the chains complete and root is still running unattended: a 360
+review over everything landed TONIGHT (not the pre-existing core — that
+stays with codex), then iterate via small devs. Hunt list: cleanup and
+quality; epicycles; claudeisms — baroque invented terminology (new coinages
+that a domain word already covers), narrative smuggled in as docs/comments
+(history, review-story, self-justification in doc positions), duplicated
+mechanisms, workarounds that read as invariants, comments restating
+adjacent code. Standard: present-tense contracts, domain words, receipts
+in receipts files not in code. Findings ledgered; fixes as lean sonnet
+devs; anything taste-ambiguous parked for Inanna rather than decided.
