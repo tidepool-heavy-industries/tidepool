@@ -19,10 +19,16 @@ truth, and exposes typed events. An authored resident decides what to do with
 those facts:
 
 ```haskell
-withHandler (headChanged parentTree) (\change ->
-  for_ childAgents $ \child ->
-    pokeAgent child (whenSafe (RebaseWhenSafe (newHead change)))
-  ) $ do
+let pokeChildren oid =
+      for_ childAgents $ \child ->
+        pokeAgent child (whenSafe (RebaseWhenSafe
+          { upstreamNode = renderWorktreeId (worktreeId parentTree)
+          , upstreamHead = renderOid oid
+          }))
+in withHandler (headChanged parentTree)
+     (pokeChildren . newHead . value) $ do
+    current <- worktreeHead parentTree
+    when (current /= checkpointedParentHead st) (pokeChildren current)
     parent <- spawnAgent parentSpec parentTask
     observeUntilQuiescent parent
 ```
@@ -225,11 +231,13 @@ heterogeneous selection typed.
 
 Closures live only in the current realm. A later resident cycle re-registers
 reactions from explicit `State` and stable worktree IDs. Because registration
-does not replay, a resident spanning cycles also compares `worktreeHead tree`
-with the last head stored in its checkpoint before registering live reactions.
-This closes the gap in which `HEAD` moves after one cycle unregisters and
-before the next registers; the journal remains diagnostic rather than becoming
-an implicit callback replay mechanism.
+does not replay, the first action inside the newly registered `withHandler`
+body compares `worktreeHead tree` with the last head stored in its checkpoint.
+Registration is active before that read: a movement before registration is
+found by reconciliation, while a movement after registration is queued for the
+handler. The resident deduplicates by observed head/EventId if both paths see
+the same movement. This closes the between-cycle race without turning the
+journal into implicit callback replay.
 
 **Design stance (Inanna, 2026-08-08):** this surface is designed as an
 ideal DSL first — the vocabulary a fluent Haskell author would naturally
@@ -454,12 +462,12 @@ the resident's plan for them are ordinary checkpointed data. What still
 never crosses a cycle boundary: an attached Haskell handle, a parked
 Haskell continuation, or an event subscription. So the dev-tree unfold/
 fold can span cycles: each cycle re-registers its `withHandler` reactions
-from explicit `State` and stable worktree IDs, and re-attaches to running
-workers by checkpointed identity. Before registering, it compares each current
-`worktreeHead` with the head stored in `State`, so no-replay handler semantics
-cannot hide a between-cycle move. A crash loses only the orchestration decisions
-since the last checkpoint; worktrees, branches, receipts, queued pokes, and
-still-running agent threads all survive and are re-discoverable by ID.
+from explicit `State` and stable worktree IDs, re-attaches to running workers by
+checkpointed identity, then reconciles `worktreeHead` inside the registered
+scope before proceeding. No-replay handler semantics therefore cannot hide a
+between-cycle move. A crash loses only the orchestration decisions since the
+last checkpoint; worktrees, branches, receipts, queued pokes, and still-running
+agent threads all survive and are re-discoverable by ID.
 
 ## Implementation plan
 
