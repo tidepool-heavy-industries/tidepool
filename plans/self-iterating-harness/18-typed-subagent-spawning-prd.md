@@ -5,7 +5,9 @@
 **Depends on:** the Generic structural substrate described in
 [`14-generic-derived-askuser-prd.md`](14-generic-derived-askuser-prd.md) and
 the effect-polymorphic authored surface described in
-[`15-generic-surface-wave.md`](15-generic-surface-wave.md)  
+[`15-generic-surface-wave.md`](15-generic-surface-wave.md), plus the
+cycle-scoped multi-continuation realm landing governed by
+[`../post-restart/realm-verdict.md`](../post-restart/realm-verdict.md)
 **First backend:** Codex app-server, authenticated through the operator's
 existing ChatGPT login
 
@@ -16,12 +18,22 @@ compose headless coding agents through a small typed effect. Ordinary monadic
 Haskell remains the orchestration language:
 
 ```haskell
-loop :: State -> M Effs Done
+loop :: State -> M Effs State
 loop st = do
-  workers <- traverse (spawnAgent worker . renderTask st) (nextTasks st)
-  outcomes <- traverse waitUntilFinished workers
-  loop (integrate st outcomes)
+  observations <- observe st
+  orientation  <- orient st observations
+  decision     <- decide st orientation
+  act st decision
 ```
+
+`loop` performs one checkpointable resident cycle and returns its next
+semantic `State` to the driver. The driver checkpoints that value and invokes
+the next cycle. Between cycles Rust deliberately regains control to compose a
+fresh system prompt and runtime context, apply compaction and budgets, select
+the next deployed resident source, and restore the checkpointed value. Async
+handles and parked continuations may coexist within a cycle, but v1 reaches an
+agent-quiescent boundary before returning: raw handles and Haskell closures
+never become cross-cycle orchestration state.
 
 An agent's communication contract is described separately using a
 Servant-inspired Generic record. The record declares the tools the child may
@@ -77,12 +89,28 @@ result` identifies one of those threads; it does not own a subprocess. Codex
 provides the headless coding harness, ChatGPT authentication, native editing
 and command tools, thread steering, interruption, persistence, and streamed
 activity. Tidepool provides the typed agent contract, Haskell handlers,
-structured orchestration, worktree isolation, receipts, budgets, and policy.
+structured orchestration, workspace assignment, receipts, budgets, and policy.
 
 ## Product thesis
 
-The authored program should describe cognition and orchestration, not rebuild
-a coding-agent runtime.
+Tidepool's differentiator is where the harness lives and how quickly it can
+change. A frontier model guided by a human edits a small repo-local resident;
+Tidepool compiles and deploys that source from the repository. The resident can
+therefore change at conversation cadence rather than vendor-release cadence,
+while the Haskell type checker acts as the regression suite for integration
+logic that would otherwise be fragile stringly glue.
+
+Each layer uses the language and tools its author was optimized for. Frontier
+models author orchestration in terse typed Haskell. Coding workers retain the
+edit, shell, search, and test loops on which their harnesses were trained.
+Tidepool does not put Haskell between workers and the filesystem merely for
+purity: that experiment added little value. Haskell instead integrates models,
+workers, operator decisions, policy, and typed state at the layer where its
+compositional leverage is real.
+
+The near-term product is a working orchestrator for Tidepool's own software
+development. The held-out recursive-improvement evaluation follows once that
+orchestrator is useful and observable.
 
 Codex already has a maintained headless server with the primitives this design
 requires:
@@ -98,26 +126,34 @@ requires:
 - streamed command, diff, tool, usage, and lifecycle events.
 
 Tidepool's distinctive value is the layer above those mechanics: a small
-repo-local Haskell resident that can continuously unfold typed state into
-structured worker bursts, let workers call back into the resident's effect
-environment, and fold authoritative results and git receipts into its next
-state.
+repo-local Haskell resident that can continuously turn typed state into
+structured worker activity, let workers call back into the resident's effect
+environment, and fold authoritative results and activity receipts into its
+next state.
 
 ```text
 typed resident state
         │
-        ├── unfold ──> typed agent wave ──> isolated worktrees
+        ├── act ─────> typed agent handles ─> assigned workspaces
         │                                  │
         │                          generated tools call
         │                          back into parent Eff
         │                                  │
-        └── next state <── fold typed results + runtime receipts
+        └── next state <── typed results + runtime receipts
 ```
 
 The resident is analogous to a heavily customized xmonad configuration:
 small, ordinary Haskell, intensely repo-specific, and expected to change
 frequently. Tidepool is the stable runtime beneath it. Headless coding agents
 are interchangeable workers beneath that program.
+
+There is one deeper runtime story across the interaction surface. `askUser
+@T`, typed `runLLMTurn` answers, and typed agent results all suspend a Haskell
+continuation on a typed hole to be filled by an external answerer: operator,
+resident model, or headless worker. Their Generic interpreters and transport
+details differ, but they are instances of one suspension family. Typed
+subagents should extend the realm machinery rather than introduce an unrelated
+parking mechanism.
 
 ## Locked design decisions
 
@@ -174,6 +210,37 @@ flight.
 Handles strongly type authored messages and terminal results. Lifecycle state
 is runtime data, not a phantom-type state machine.
 
+### Realms and cycles define scheduling semantics
+
+The realm spike proved that one JIT machine can hold multiple independently
+parked, GC-safe continuations and resume them in driver-chosen order. Typed
+agents depend on that landing and obey its cycle-scoped lifetime constraint.
+
+Within one cycle:
+
+- continuations interleave only at explicit suspension points;
+- a handler runs until it returns or performs another suspending effect;
+- a handler that spawns and waits for a reviewer becomes another parked
+  continuation in the same realm;
+- the driver chooses which ready continuation resumes next; and
+- generated-tool dispatch shares the current resident realm rather than
+  forking Haskell state. `Fork` remains a separate effect.
+
+Semantic resident state is explicit immutable data. A resumed handler sees the
+lexical values it captured plus the results of effects performed after resume;
+shared runtime ledgers are consulted through effects, not hidden mutable
+closure state. The cycle folds results and receipts into the returned `State`.
+
+V1 requires quiescence before a cycle returns. Durable agent identities and
+cross-cycle reattachment may later be represented as checkpointed data, but a
+parked Haskell continuation is never the representation of pending work across
+cycles.
+
+Near-term resident revision occurs at a deployment boundary: a frontier model
+and human edit the repository, Tidepool waits for a quiescent cycle boundary,
+then Rust deploys the new source under the existing checkpoint-compatibility
+policy. Live self-rewriting inside a cycle is not a v1 behavior.
+
 ### The server owns workers
 
 Tidepool starts one app-server process per backend/authentication/configuration
@@ -182,20 +249,29 @@ threads. The Tidepool registry owns thread identities, subscriptions, pending
 tool handlers, workspaces, receipts, and policies.
 
 V1 does not need an elaborate LRU. Terminal and idle agents may accumulate
-within one resident iteration or delegation wave. The runtime releases them at
-an explicit wave/loop boundary; running and tool-parked agents remain live.
+within one resident iteration or delegation wave. An intermediate wave boundary
+may keep running and tool-parked agents live; the outer resident-cycle boundary
+must first make them quiescent and then release them.
 
 ### The Haskell surface is provider-neutral
 
 Authored code says `Agent`, `AgentSpec`, `spawnAgent`, and `AgentHandle`, never
 `Claude`, `Codex`, MCP, JSON-RPC, or subprocess. Codex app-server is the first
-backend because it is the strongest available headless harness and works with
-the operator's existing ChatGPT subscription.
+backend for pragmatic reasons: its harness behavior is strong, its headless
+server is unusually well integrated, and custom harnesses can reuse the
+operator's existing ChatGPT subscription. The choice is not a thesis that
+resident authors and workers must come from different providers.
 
 Backend and exact model selection are runtime policy. Agent specifications may
 express semantic requirements such as `Fast`, `Capable`, or `Deep`; a debug or
 benchmark configuration may pin an exact backend/model without making it part
 of the normal authored protocol.
+
+Codex uses its deeper app-server integration, but the abstract child-to-parent
+operation is the blocking host tool call standardized by MCP. An MCP-speaking
+headless harness can therefore implement the same Agent backend later without
+making MCP the authored Haskell interface or forcing Codex through its less
+capable transport.
 
 ### Children do not need Haskell
 
@@ -207,8 +283,9 @@ commands nor understands Tidepool's effect system.
 ### Runtime receipts are authoritative
 
 The model may summarize what it did, but Tidepool records actual commands,
-exit results, changed files, diffs, commits, tests, token usage, timings,
-interruptions, and tool-call outcomes from runtime events and git state.
+exit results, changed files, diffs, tests, token usage, timings,
+interruptions, and tool-call outcomes from app-server events and direct
+workspace observation.
 
 ## Goals
 
@@ -222,9 +299,9 @@ interruptions, and tool-call outcomes from runtime events and git state.
    progress observation, follow-up turns, and recursive delegation.
 6. Reuse ChatGPT-authenticated Codex and its native coding harness rather than
    reproduce edit, command, session, and context machinery.
-7. Give each coding worker an isolated Exomonad-style filesystem/git view.
-8. Return typed results alongside authoritative execution and workspace
-   receipts.
+7. Run each coding worker in a caller-selected workspace under an explicit
+   sandbox policy.
+8. Return typed results alongside authoritative execution/activity receipts.
 9. Keep the public authored vocabulary small enough to teach in one compact
    paragraph and one example.
 10. Make the resident program cheap for frontier models to rewrite on a
@@ -246,6 +323,9 @@ interruptions, and tool-call outcomes from runtime events and git state.
 - Making `codex-codes` types part of Tidepool's public Rust or Haskell API.
 - Making recursive self-improvement safe or effective by assertion; that is an
   evaluation question after the substrate exists.
+- Creating git worktrees, managing branches, merging changes, or promoting a
+  canonical branch. A separate workspace/git effect may compose those policies
+  around Agent; spawning itself accepts an assigned workspace.
 
 ## Primary authored experience
 
@@ -337,7 +417,7 @@ workerSpec st = agent
     |]
   , tools      = workerTools st
   , model      = Capable
-  , workspace  = FreshWorktree
+  , workspace  = CurrentWorkspace
   , retention  = Ephemeral
   }
 ```
@@ -532,8 +612,14 @@ visit. Descriptions and handlers cannot drift because they inhabit the same
 
 ### Additional interpretations
 
-Only `AsServerT` must be constructed in normal authored code. The library may
-derive other interpretations when they buy something concrete:
+Only `AsServerT` must be constructed in normal authored code. The first
+internal second interpretation is `AsMetadata`: a mechanically produced record
+whose leaves carry normalized name, input/output structural metadata, runtime
+description, and compatibility information rather than a handler. It feeds
+declarations, synopses, traces, and protocol fixtures without becoming another
+artifact the resident author must populate.
+
+The library may add other interpretations when they buy something concrete:
 
 - schema/declaration generation;
 - compact documentation;
@@ -543,6 +629,12 @@ derive other interpretations when they buy something concrete:
 
 Do not introduce an authored `AsDocs` record until real reuse requires docs
 and handlers to vary independently.
+
+Give the Servant-style mode encoding one real extract/JIT proof. If it makes
+dictionary elaboration or diagnostics materially worse, flattening to
+`data WorkerTools m = WorkerTools { askParent :: Tool m Question Decision,
+... }` preserves the selector/schema/handler invariant and is the explicit v1
+fallback.
 
 ### Diagnostics are part of the API
 
@@ -648,7 +740,7 @@ instructions: agent value-level instructions
 and starts the turn with:
 
 ```text
-cwd:           assigned worktree
+cwd:           caller-assigned workspace
 sandbox:       workspace-write policy
 input:         initial fmt prompt
 outputSchema:  Generic-derived terminal-result schema
@@ -679,6 +771,11 @@ This suspension is the essential parent/child control-transfer primitive.
 The parent resident remains runnable while the child waits. A handler may ask
 the operator, call `runLLMTurn`, spawn more subagents, inspect resident state,
 or wait for another typed result, subject to its effect row.
+
+A handler failure must resolve the outstanding server request with an explicit
+tool error; it must never strand a pending call. The runtime records the
+failure, cancels any abandoned nested work, and lets the child or resident's
+bounded recovery policy decide whether to retry, continue, or interrupt.
 
 ### Structured completion
 
@@ -768,7 +865,7 @@ The registry also owns:
 - pending Haskell tool-handler tasks;
 - event queues and subscribers;
 - typed-codec witnesses hidden behind the handle entry;
-- workspace/worktree identity;
+- assigned workspace identity;
 - retention and loop/wave ownership;
 - model, usage, and timing metadata; and
 - terminal result/receipt cache.
@@ -792,6 +889,12 @@ deletion is an administrative operation outside the initial authored surface.
 A loop/wave boundary is explicit (`withAgentWave`, or an equivalent driver
 boundary); the runtime never attempts to infer one from authored recursion.
 
+The v1 driver does not complete a cycle while an authored agent handle remains
+running or parked. The resident must wait for it or interrupt it, then release
+the resulting terminal/idle worker before returning its next `State`. This
+makes cycle teardown reclaim the realm and all handler closures without relying
+on GC finalizers.
+
 The server already has an idle unload policy after the last subscriber. A
 future bounded hot-thread LRU is an optimization if actual memory observations
 justify it.
@@ -800,52 +903,54 @@ justify it.
 
 - Durable Codex threads may be resumed after a backend process restart.
 - Ephemeral threads are disposable and need not be crash-recoverable.
-- The resident checkpoint stores stable agent/thread identities and its own
-  semantic state, never raw process handles or Haskell closures.
-- A checkpoint referring to a missing ephemeral worker records that worker as
+- V1 checkpoints only quiescent semantic state, never raw process handles or
+  Haskell closures.
+- A later durable-agent extension may checkpoint stable agent/thread identities
+  and reconstruct typed attachment from an agent role/specification.
+- A checkpoint referring to a missing durable worker records that worker as
   lost and follows authored recovery policy.
-- Tidepool owns wall-clock deadlines, backend restart, event-queue bounds, and
-  orphaned worktree recovery.
+- Tidepool owns wall-clock deadlines, backend restart, and event-queue bounds.
 
-## Workspace and git model
+## Workspace boundary
 
-Spawning a coding worker should atomically create the Exomonad triad:
-
-```text
-agent thread  <->  typed resident context  <->  isolated git worktree
-```
-
-The `workspace` value in `AgentSpec` selects policy, not an arbitrary path:
+Agent spawning consumes a workspace assignment; it does not create or manage
+one. The assignment supplies an absolute `cwd` plus the sandbox access Codex
+may exercise there:
 
 ```haskell
-data WorkspacePolicy
-  = CurrentWorkspace
-  | SharedReadOnly
-  | FreshWorktree
+data Workspace = Workspace
+  { cwd    :: FilePath
+  , access :: WorkspaceAccess
+  }
+
+data WorkspaceAccess = ReadOnly | WorkspaceWrite
 ```
 
-`FreshWorktree` is the default for parallel coding workers. Its runtime handler
-records the base revision and owns branch/worktree lifecycle. Codex receives
-the resulting directory as its turn `cwd` under workspace-write sandboxing.
+The first dogfood points at its standalone repository. Exomonad may later
+allocate a worktree and pass its path as a `Workspace`, but that composition is
+outside this effect and PRD.
 
-The terminal receipt includes enough truth for the resident to decide whether
-to accept, revise, merge, or abandon the branch:
+That later effect should expose workspace activity as events in the same style
+as Agent events: commits created, checks completed, conflicts detected, and
+the tree becoming dirty or clean. A higher-level run may pair an `AgentHandle`
+with a `WorktreeHandle` and select across both event streams, treating them as
+one orchestration unit without making either effect own the other's lifecycle.
+
+The terminal receipt records what the agent runtime actually observed without
+claiming ownership of repository history:
 
 ```haskell
 data AgentReceipt = AgentReceipt
   { agentId       :: AgentId
   , backendThread :: BackendThreadId
-  , workspace     :: WorkspaceReceipt
-  , changes       :: ChangeReceipt
-  , checks        :: [CheckReceipt]
+  , cwd            :: FilePath
+  , commands       :: [CommandReceipt]
+  , fileChanges    :: [FileChangeReceipt]
   , toolCalls     :: [ToolCallReceipt]
   , usage         :: UsageReceipt
   , timing        :: TimingReceipt
   }
 ```
-
-Merge is a separate effect/policy decision. `spawnAgent` does not imply merge,
-and a successful typed result does not imply that a branch is acceptable.
 
 ## Capability model
 
@@ -861,8 +966,8 @@ The effect row constrains the implementation behind that interface. They are
 related but not interchangeable security boundaries.
 
 An external coding backend with ambient edit/command tools can never offer the
-same capability guarantee as a fully Tidepool-native effect machine. Worktree,
-sandbox, and process policy remain the hard boundary for native coding tools.
+same capability guarantee as a fully Tidepool-native effect machine. Workspace
+sandboxing and process policy remain the hard boundary for native coding tools.
 
 ## Observability
 
@@ -870,11 +975,11 @@ The resident and operator should be able to inspect:
 
 - the hierarchical agent identity and parent;
 - current lifecycle state;
-- backend/model and worktree;
+- backend/model and assigned workspace;
 - active turn and pending generated tool call;
 - last meaningful activity;
 - token/time budget consumption;
-- changed files and git status;
+- observed commands and changed files;
 - terminal typed result and authoritative receipt; and
 - why an agent was interrupted, released, restarted, or lost.
 
@@ -884,8 +989,8 @@ Use canonical hierarchical identifiers such as:
 test_wave/parser_test_3/reviewer
 ```
 
-These names support traces, budget attribution, recursive cancellation, and
-worktree recovery. They are runtime identities, not Haskell type names.
+These names support traces, budget attribution, and recursive cancellation.
+They are runtime identities, not Haskell type names.
 
 ## Agent-facing documentation
 
@@ -912,13 +1017,15 @@ closest model returned by `model/list`).
 1. Start one app-server over stdio.
 2. Initialize with experimental APIs enabled.
 3. Create an ephemeral thread with one generated `ask_parent` tool.
-4. Start a turn in a temporary git worktree.
+4. Start a turn in a temporary test workspace.
 5. Wait for `item/tool/call`.
 6. Hold the response for increasing intervals, then reply.
 7. Prove the same turn resumes and reaches typed completion.
 
 Freeze the exact request/response/event ordering and all observed timeout or
-disconnect behavior as a compatibility fixture.
+disconnect behavior as a compatibility fixture. Re-run the longest accepted
+park interval on every pinned Codex upgrade; an upstream timeout requires a
+heartbeat/park-token design before that version is admitted.
 
 ### Spike 2 — steer and interrupt while parked
 
@@ -936,7 +1043,7 @@ adapter workaround before broader implementation.
 
 ### Spike 3 — concurrency and one-server ownership
 
-Start 5–10 ephemeral threads with distinct tools and worktrees. Prove:
+Start 5–10 ephemeral threads with distinct tools and temporary workspaces. Prove:
 
 - tool-call correlation cannot cross agents;
 - events route to the correct typed handle;
@@ -954,67 +1061,104 @@ protocol.
 
 ### Spike 5 — configuration isolation
 
-Prove the chosen thread/turn request shape and worktree cwd do not mutate the
+Prove the chosen thread/turn request shape and workspace cwd do not mutate the
 operator's Codex user configuration. If mutation is unavoidable, design a
 separate configuration domain that reuses supported authentication without
 copying credentials ad hoc.
 
-## Delivery plan
+## Implementation tree
 
-### Step 1 — backend compatibility spike
+Implementation itself follows Exomonad's scaffold/fork/converge model. The
+vertical core is an invariant every branch preserves, not a reason to serialize
+the work into broad horizontal phases:
 
-Run the five falsification spikes with a small Rust-only driver. Pin Codex CLI
-and `codex-codes`; check a generated app-server JSON-schema bundle into test
-fixtures or regenerate it in a version compatibility test. Produce a verdict
-before extending the public Haskell effect set.
+```text
+spawn one worker
+  -> generated tool call
+  -> parent Eff handler
+  -> same child resumes
+  -> Generic-decoded result
+  -> runtime receipt folded into State
+```
 
-### Step 2 — Haskell contract algebra
+### First fork — independent GO/NO-GO gates
 
-Implement `Call`, `Notify`, `Tool`, record-mode interpretation,
-selector-to-snake naming, Generic schema/codec reuse, `compileTools`, and
-source-level diagnostics. Prove one nested input/output ADT and one malformed
-record through the real extract/JIT path.
+Run these branches eagerly through Exomonad:
 
-### Step 3 — Agent effect and registry
+1. **Generic/JIT gate.** Prove one minimal tool record plus nested input/result
+   ADTs and one selector-aware `TypeError` through the real extract/JIT path.
+2. **Codex backend gate.** Run the five app-server falsification spikes with a
+   Rust-only driver. Pin Codex CLI and `codex-codes`; generate a version-matched
+   protocol-schema fixture.
+3. **Realm landing/integration.** Land the cycle-scoped multi-continuation
+   machine with the realm verdict's handled-prefix and suspension-path
+   constraints, then freeze the internal park/resume seam used by Agent.
 
-Add the public async Agent operations, internal transport effect, typed handle
-registry, event queues, tool-handler dispatch, result decoding, and coarse
-wave/loop cleanup. First use the current workspace; do not combine the initial
-control-plane proof with worktree merging.
+Any NO-GO stops convergence and routes to the named substrate repair. No
+agent-authored JSON schema, synchronous subprocess wrapper, or immortal realm
+is accepted as a shortcut around a failed gate.
 
-### Step 4 — worktree-backed workers and receipts
+### First convergence — the vertical core
 
-Reuse Exomonad's worktree lifecycle concepts as the `FreshWorktree` handler.
-Capture base/head state, diffs, commands, checks, usage, and timing. Add explicit
-accept/revise/merge/abandon operations above spawning.
+Converge the smallest end-to-end path: one worker in the current workspace, one
+generated tool, one Haskell handler, `outputSchema`-decoded terminal result,
+and a minimal authoritative receipt containing changed paths plus command exit
+status. The resident may be parked in `waitAgent`; no concurrency or workspace
+isolation claim is required yet.
 
-### Step 5 — dogfood resident
+This convergence freezes the narrow Haskell/internal/backend boundary around
+which later work can parallelize.
 
-Create a separate intentionally ambitious dogfood resident rather than
-expanding the minimal wizard. It should:
+### Second fork — useful orchestrator branches
 
-- maintain a structured proposal/task/decision ledger;
-- plan bounded worker waves;
-- spawn implementation and review agents;
-- allow nested review requests through generated tools;
-- fold typed results and receipts;
-- trim or revise its plan; and
-- ask the operator only at explicit policy gates.
+Once the core seam exists, fork at least these independently reviewable lanes:
 
-The canonical acceptance wave is ten independently specified tests, ten
-isolated workers, bottom-up review/merge, and one aggregate verification pass.
+- **Authored eDSL and diagnostics:** `Call`, `Notify`, `Tool`, record-mode
+  interpretation, selector naming, `compileTools`, and compile-fail UX.
+- **Registry and selection:** async handles, event queues, cancellation,
+  cleanup, and a typed wait/select operation that avoids polling multiple
+  workers.
+- **Recursive handler:** a worker parks in `requestReview`; its handler spawns
+  and awaits a reviewer in the same realm, then resumes the worker.
+- **Concurrency economics:** correlation and correctness under several
+  threads, plus measured effective parallelism and subscription-level
+  throttling rather than nominal fan-out.
+- **OODA dogfood:** the first useful checkpointed resident, initially limited
+  to one mutating worker at a time plus read-only research/review workers.
 
-### Step 6 — evaluation and recursive improvement
+The OODA resident is not a graph DSL:
 
-Evaluate the resident on a held-out corpus of genuinely difficult repository
-engineering tasks. Fix the worker models, budgets, task set, and backend; vary
-the resident Haskell program. Measure correctness first, then cost, latency,
-retries, merge failures, and orchestration overhead.
+```text
+Observe  -> consume agent/runtime evidence
+Orient   -> update typed beliefs, constraints, and uncertainty
+Decide   -> choose a bounded next delegation/action
+Act      -> spawn/wait or perform one controlled change
+          then return updated State to Rust
+```
 
-A stronger model may revise the resident on a development split. Score every
-revision blindly on held-out tasks. This tests the actual thesis: whether
-rewriting a small typed orchestration program can extract increasing capability
-from unchanged middling coding agents.
+These lanes need not all converge simultaneously. Each carries its own patch and
+evidence; the root integrates them bottom-up while keeping the vertical core
+green.
+
+### Follow-on composition — workspace event streams
+
+Specify worktree creation, git-event subscriptions, validation, and integration
+in a separate PRD. It can compose a `WorktreeHandle` with an `AgentHandle` into
+a higher-level worker run and later support hylo-shaped repository workflows.
+None of those git semantics belong to the Agent effect.
+
+### Evaluation and recursive improvement
+
+After the orchestrator is useful for Tidepool development, evaluate resident
+revisions on a held-out corpus of difficult repository tasks. Fix workers,
+budgets, tasks, and backend; vary the small resident program. Measure
+correctness first, then cost, latency, retries, failed actions, and orchestration
+overhead.
+
+A stronger model may revise the resident on a development split, with every
+revision deployed only at a quiescent boundary and scored blindly on held-out
+tasks. This tests whether program-level orchestration improvement extracts
+increasing capability from unchanged workers.
 
 ## Acceptance criteria
 
@@ -1023,8 +1167,9 @@ from unchanged middling coding agents.
 2. The record selector, declaration schema, decoder, and dispatcher are emitted
    by one Generic traversal and cannot silently disagree.
 3. Runtime descriptions may use `fmt` and resident state at agent creation.
-4. One ChatGPT-authenticated app-server hosts at least ten concurrent typed
-   handles without per-agent subprocesses.
+4. One ChatGPT-authenticated app-server hosts several concurrent typed handles
+   without per-agent subprocesses, and the compatibility probe reports actual
+   throughput and throttling rather than merely counting open threads.
 5. A generated tool call parks only its child while the parent executes an
    arbitrary permitted `M effs` handler and may recursively spawn another
    agent.
@@ -1032,15 +1177,18 @@ from unchanged middling coding agents.
    structural validation.
 7. Every terminal result is paired with authoritative activity/workspace
    receipts.
-8. Coding workers operate in isolated worktrees and no spawn implies an
-   automatic merge.
-9. Wave/loop cleanup releases terminal/idle workers, preserves running/parked
-   workers, and cancels abandoned pending handlers without relying on GC.
+8. Each worker runs in its caller-assigned workspace and sandbox; spawning
+   makes no claim about git lifecycle or repository integration.
+9. Wave cleanup may preserve running/parked workers; cycle cleanup requires
+   quiescence, releases terminal/idle workers, and cancels abandoned pending
+   handlers without relying on GC.
 10. The adapter passes pinned protocol fixtures and contains all
     `codex-codes`/app-server types behind a Tidepool-owned boundary.
 11. No normal worker run mutates the operator's global Codex configuration.
-12. The dogfood ten-test wave completes through typed spawning, nested tools,
-    isolated workspaces, and aggregate verification.
+12. The first dogfood resident completes repeated checkpointed OODA cycles
+    through typed spawning, tool callbacks, evidence integration, and bounded
+    recovery; no Haskell continuation or raw handle is required to survive a
+    cycle boundary.
 
 ## Open decisions after the backend spike
 
@@ -1055,13 +1203,9 @@ before the dogfood resident becomes a durable surface:
    lives for benchmarks.
 4. Whether durable named specialists are needed in the first dogfood or all
    workers may be ephemeral.
-5. The exact worktree accept/revise/merge algebra and conflict receipts.
-6. Budget representation: per-agent, per-wave, per-resident iteration, or a
+5. Budget representation: per-agent, per-wave, per-resident iteration, or a
    combination.
-7. Whether live resident-source replacement occurs only between benchmark
-   episodes, at loop boundaries, or not until after the first evaluation
-   baseline.
-8. Whether inbox/result types remain explicit `AgentSpec` parameters (the
+6. Whether inbox/result types remain explicit `AgentSpec` parameters (the
    current draft) or become associated pieces of the record-style agent
    contract. This is an authored-taste decision, not a runtime requirement.
 
@@ -1083,7 +1227,7 @@ Haskell surface around it.
 
 The runtime owns a concurrency semaphore and hierarchical budgets. A tool
 handler may recursively spawn, but it does not escape the resident's remaining
-slots, time, token, or worktree policy.
+slots, time, token, or workspace policy.
 
 ### Shared-server failures affect many workers
 
@@ -1101,7 +1245,7 @@ specific interpreter requires them.
 
 ### Resident and runtime congeal together
 
-Keep backend lifecycle, authentication, process control, worktrees, receipts,
-and persistence in stable handlers. Keep planning, delegation strategy,
+Keep backend lifecycle, authentication, process control, workspace binding,
+receipts, and persistence in stable handlers. Keep planning, delegation strategy,
 review topology, and stopping policy in the repo-local Haskell resident. The
 runtime is designed to host rapidly changing programs, not become one.
