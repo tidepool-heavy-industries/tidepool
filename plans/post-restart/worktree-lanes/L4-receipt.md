@@ -104,6 +104,27 @@ Every one drives real GHC → extract → JIT → the parked path, with every
 repository transition produced by `ScriptedWriter` against a real `TestRepo`.
 No mock of git, no LLM, anywhere.
 
+**COMPLETED vs SELECTED — checked, not assumed.** There is a live inherited red
+in `tidepool-runtime` (`mock_stack_matches_production`), and under nextest's
+DEFAULT fail-fast a run reaching that crate stops early while still emitting
+real pass lines for everything it did reach. Such a receipt looks exactly like
+a complete run; the only tell is completed-vs-total.
+
+This run was NOT truncated, and its own output proves it: nextest printed
+`Starting 7 tests`, numbered them `(1/7)`…`(7/7)`, and summarised
+`7 tests run: 7 passed, 124 skipped`. **Started = run = selected = 7.** The
+general check is started-vs-run — a fail-fast truncation makes run strictly
+less than started, and it is visible in output one already has. The handler
+lane's gates pass the same check: `Starting 19 tests` → `19 tests run: 19
+passed`.
+
+A targeted `-E` filter additionally cannot reach `tidepool-runtime` at all, so
+these gates were never exposed to the hazard. That makes the batched-`-E`
+technique robust under it: ONE invocation gives one slot (envelope rule), N
+named pass lines (named-gate rule), and an explicit N to compare completed
+against (this advisory) — three independent reasons, only one of which was
+known when the technique was adopted.
+
 **Instruments, per the name-the-instrument rule.** The rooting receipt uses the
 machine's own in-code counters `stowed_roots_count()` / `parked_count()`,
 asserted equal at every quiescent point plus `!is_suspended()`; gate 7 also
