@@ -372,3 +372,28 @@ result = case decodeForm @Dest (SumAnswer "Nope" UnitAnswer) of
         json!("unknown constructor Nope for Dest; expected one of LocalHost, Ssh, Raw")
     );
 }
+
+/// A DERIVED sum shape compared against its hand-written literal.
+///
+/// This exact comparison case-trapped while the interpreter was being built —
+/// a tag-as-address escape, isolated to derived-SUM vs sum-literal (derived
+/// product vs product literal, literal vs literal, and `show` of a derived sum
+/// were all fine). The shape tests above assert exact RENDERINGS instead,
+/// which pins every key, constructor and order without needing `==` over a
+/// derived sum, so coverage never depended on this.
+///
+/// It is asserted here because the `==` form is the natural thing to write and
+/// should either work or fail loudly. After `strlen-hardening`, a regression
+/// surfaces as a `ShapeTrapKind::AddrKind` poison+breadcrumb trap naming the
+/// bad unbox rather than a `runtime_strlen` segfault.
+#[test]
+fn derived_sum_shape_equals_its_literal() {
+    if let Some(v) = eval_result(
+        r#"result :: [Text]
+result =
+  check "Two" (formShape @Two == SumShape "Two" [VariantShape "TA" UnitShape, VariantShape "TB" UnitShape])
+"#,
+    ) {
+        assert_eq!(v, json!([]), "a derived sum shape did not equal its literal")
+    }
+}
