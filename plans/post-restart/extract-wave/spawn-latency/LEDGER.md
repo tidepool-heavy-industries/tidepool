@@ -442,6 +442,38 @@ remember why.
 > mechanism that just broke, reintroduced by the item whose whole purpose is
 > narrowing that table.*
 
+## Reliance finds gaps that audits do not — shapes how D2's spec is written
+
+Four guards this wave turned out to cover less than their names, and **all four
+were found by someone CHECKING A GUARD THEY WERE RELYING ON, not by anyone
+auditing guards.** That is not coincidence and it is worth building on.
+
+An audit asks "does this guard exist and pass?" — both answers are yes, so it
+moves on. Reliance asks a SPECIFIC question and notices the guard does not
+answer it. The gap is only visible from the angle of the thing you wanted it to
+prove. Which means: **guard coverage cannot be established by review; it is
+established at the moment of use, by whoever is about to lean on it.**
+
+Consequence for D2, which leans on a CROSS-LANE guard (boot's ConTags pins) it
+did not write: the spec must not say "run the harness-acceptance shard and check
+it is green". It must say what D2 needs that guard to PROVE — that a
+reachability-narrowed table still boots the machine on a pure entry term — and
+require the dev to confirm the guard actually observes that, by name, before
+treating its pass as coverage. If it does not, that is the finding, and it is a
+finding only the person relying on it will ever see.
+
+The fourth instance (E6) is the sharpest: the id-stability trio pins constructor
+identity, VarId scoping isolation, and `stableVarId`'s disambiguator contract —
+and **none of them observes `localVarId` determinism**, which is what E6
+perturbs. Nobody wrote a bad test; `localVarId`'s own doc says it is
+allocation-order-sensitive. The over-claim was in the SHORTHAND — "extractor
+id-stability is a PINNED invariant", repeated in two specs including mine,
+citing three tests neither of us had read against the claim.
+
+Standing rule now in the wave spec: **if a change touches `localVarId`'s path,
+no pinned test is watching and a direct experiment is owed.** And: a PASS is
+silence, not consent — but a FIRE still means STOP and escalate.
+
 ## Positive control: an INSTRUMENT needs the same proof as a test
 
 My own error, banked because it generalizes the anti-vacuity rule I had already
