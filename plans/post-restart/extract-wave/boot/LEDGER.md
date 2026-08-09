@@ -528,6 +528,36 @@ by convention, diverging silently the moment production changed. Routed
 out of this lane; `boot-lazy` correctly told not to fix it (out of spec,
 and the decision is not its to take).
 
+### All three of today's structural defects closed AT SOURCE
+
+All three were found from inside this subtree, by devs checking what a
+thing does rather than reporting what it is supposed to do:
+
+| defect | found by | fix |
+|---|---|---|
+| battery scripts self-acquire via `$PWD` → mandated tier runs a STALE broker | `boot-count`, corroborated independently by `boot-vocab` | parent broker at absolute path, 6 slots, markers |
+| a wrapped leg queued past the ~380s kill can NEVER complete | `boot-targets` (died twice, refused to bypass) | `detach` subcommand |
+| nextest fail-fast silently truncates a leg to a fraction of a crate | `boot-lazy` (198/877, refused to bank it) | `--no-fail-fast` in both battery tiers (`7d57cea5`) |
+
+**Interim, because `$PWD` means a dev runs its OWN copy:** pass
+`--no-fail-fast` EXPLICITLY as an extra battery arg rather than waiting for
+the fix to propagate or starting a cherry-pick treadmill. Explicit beats
+propagation; it works either way and stops being needed at the next tip.
+
+### The one-red count — a cheap inheritance test WITH AN EXPIRY
+
+Root's box-wide advisory: **exactly ONE** expected inherited red,
+`mock_stack_matches_production`. That converts "is this inherited?" from an
+argument into a **count** — see two reds, and the second is yours, no
+cache-consistent A/B required.
+
+**It expires** when the mock fix folds (two commits: `Fork` added as the
+immediate unblock, then `EFFECT_NAMES` DERIVED from `standard_decls()`,
+dependency direction left to engineering rather than assumed). Recorded
+with the expiry attached because a shortcut whose precondition has silently
+lapsed is this wave's characteristic failure in its purest form — someone
+citing "only one expected red" a week after the count changed.
+
 ### Doctrine does not exempt the doctrine's carrier
 
 Recorded verbatim at the wave TL's request, because it is the sharpest
