@@ -73,6 +73,15 @@ localized diffs and log it at fold):
 
       /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
 
+  **THE ABSOLUTE PATH IS LOAD-BEARING, and here is the mechanism (root,
+  2026-08-08).** Slots are now **6** (`4958ada6`), but **only PARENT-path
+  invocations see slot4 and slot5** — a stale worktree copy of the script has
+  the old `SLOTS` array and never even TRIES them. That stacks with the old
+  sleep-poll code, so a worktree-copy invocation is **doubly dead**: it competes
+  for a third of the available slots using a wait loop that burns CPU and dies
+  at ~380s. Never invoke `scripts/ghc-slots.sh` by a relative or worktree-local
+  path. Never copy it.
+
   That means anything spawning `tidepool-extract`, any `cabal test`, and any
   `--ignore-default-filter` run. With the small jobs gone, the queue belongs to
   these.
