@@ -200,6 +200,55 @@ touched.
 | 1 — position-compatible handled prefixes | `enter_parked_path` at entry, typed refusal, machine untouched | `refused_disagreeing_a_then_b`, `refused_disagreeing_b_then_a`, `refused_disagreeing_completing_run_never_executes` |
 | 2 — the two suspension paths must not mix | L7 assert on the run entries + its sibling on `resume_parked` | `parked_resume_while_the_slot_is_occupied_panics` |
 
+## External review response — the strict-extension hole (codex item 4)
+
+`plans/post-restart/codex-review-2026-08-08.md` item 4, audited read-only by a
+different model family, found a soundness hole in step 3 as first landed. It was
+a defect in this TL's lane spec, not in the implementation.
+
+**The hole.** The check accepted a strict EXTENSION (established `[FileIO,
+Proc]`, incoming `[FileIO, Proc, Memory]`), and the docs claimed the residual was
+a clean `EffectError::UnhandledEffect`. That reasoning assumed the established
+prefix tells you how long the concrete `H` is. It does not — a prefix is
+caller-supplied metadata, and a realm may simply have chosen a lower suspend
+threshold than `H` has handlers. The extending realm's `Memory` at tag 2 sits
+BELOW its own threshold of 3, so it is dispatched rather than suspended, and if
+`H` has a handler at position 2 the request reaches it. Silently. Exactly the
+misroute the check exists to prevent, and exactly what SEAM.md promised could not
+happen.
+
+**The fix: exact equality between non-empty prefixes** (empty stays compatible
+with anything — it dispatches nothing, so it cannot misroute). A length mismatch
+raises `PrefixMismatch::Length` rather than a misleading position index.
+
+Costs nothing real: §5 establishes every harness row's prefix is `base` or empty,
+and both pass. The extension acceptance came from over-generalizing the verdict's
+phrase "up to the shorter threshold", which describes the COMPARISON, not
+permission to differ in length.
+
+Soundness, written down rather than asserted: with all non-empty prefixes equal,
+every tag that is ever DISPATCHED is below the common prefix length, and all
+realms agree on what sits at those positions — no dispatched tag can reach a
+position realms disagree about.
+
+**The dynamic-dispatch option was declined.** Binding authenticated roster
+metadata to the handler stack with a per-frame `Box<dyn DispatchEffect<U>>` is
+the escape hatch §5 names for a row that needs a different handled prefix. No
+such row exists, so buying it to serve a hypothetical would be scar tissue.
+
+**The residual is stated instead of claimed away**, in both the code docs and
+SEAM.md: the check enforces agreement AMONG realms and cannot verify a
+declaration against an opaque type parameter — nothing at runtime can. Root's
+addition, aimed at the residual's one real consumer: *derive, don't declare* —
+an internal caller building realms from runtime code should derive the prefix
+from the same value that constructed `H`, so a lying realm is unconstructible
+rather than a responsibility to discharge.
+
+Also landed: the rooting receipt is now a PRODUCTION invariant, not only a test
+one — `assert_rooting_receipt` (`debug_assert_eq!`, so release callers pay no
+counting cost) at four registry mutation sites: park, re-park during a resume,
+rejected A5 resume, successful removal, and the Drop-time drain.
+
 ## Step 6 — DEFERRED, and why
 
 One-line reason, as the spec requires: **no caller can supply a `RealmId` until

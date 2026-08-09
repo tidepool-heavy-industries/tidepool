@@ -207,8 +207,14 @@ completion to overwrite it.
 **Refusal.**
 
 ```rust
-JitError::IncompatibleHandledPrefix { established: Vec<String>, incoming: Vec<String>, position: usize }
+JitError::IncompatibleHandledPrefix {
+    established: Vec<String>, incoming: Vec<String>, mismatch: PrefixMismatch,
+}
+pub enum PrefixMismatch { Length, Position(usize) }
 ```
+
+`Length` and `Position` are distinguished because a length mismatch has no
+meaningful disagreeing index — reporting one would be misleading.
 
 Raised before anything runs or mutates; the machine is left byte-for-byte
 unchanged, so a consumer may catch it, correct the row, and retry.
