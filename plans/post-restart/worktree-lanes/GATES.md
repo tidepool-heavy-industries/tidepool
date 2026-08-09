@@ -165,7 +165,52 @@ produces the wrong preamble in exactly the mismatched (row, vocab) pairs
 boot-vocab's tests construct. The no-regression gate therefore has to cover a
 MISMATCHED pair, not only a matched one.
 
-DECIDED (L4): the predicate keys on **`vocab_effects`**, not `row_effects`.
+~~DECIDED (L4): the predicate keys on `vocab_effects`~~ — **REVERSED, see the
+correction below. The `vocab_effects` answer is WRONG.** The superseded
+reasoning is kept because it was endorsed and recorded here, and a reader who
+reconstructs it should meet the refutation rather than the original.
+
+### CORRECTED: the predicate is the helper-emission condition itself
+
+Verified in `d6fce023` (`tidepool-mcp/src/eval_prep.rs:273`), not relayed:
+
+```rust
+let in_row = row_effects.iter().any(|r| r.type_name == eff.type_name);
+if !(in_row || eff.helpers_row_polymorphic) { continue; }
+```
+
+A row-CLOSED helper (`foo :: A -> M B`) only typechecks when its effect is in
+the row, so a vocabulary-only effect's helpers are emitted ONLY if it declares
+`helpers_row_polymorphic`. `(<|>)` is a RepoEvent HELPER and RepoEvent is not
+row-polymorphic — so `Event`'s `(<|>)` is emitted exactly when RepoEvent is in
+the ROW. Keying on `vocab_effects` would hide the Prelude's operator while
+emitting no replacement for a vocabulary-only RepoEvent: the "costs
+`Alternative` for nothing" failure, caused by the predicate meant to prevent it.
+
+The PRINCIPLE was right and the ANSWER was wrong, which is worth separating:
+hiding must track the operator's PRESENCE, not the program's capability.
+Presence simply turned out to be row-gated, and that is only visible in code —
+the relay was accurate about the SHAPE and silent about what decides the answer.
+
+Implement it as the SAME expression that gates helper emission, never a
+restatement. A restatement is a second source of truth that diverges the moment
+RepoEvent becomes row-polymorphic — plausible, since that is what the
+vocabulary-without-row story wants. Derive, don't declare: the same discipline
+the parking contract imposes on handled prefixes.
+
+Hazard space is also SMALLER than first recorded: `vocab_effects` must be a
+superset of `row_effects`, enforced by a loud assert (`eval_prep.rs:177`). So
+row-with/vocab-without is UNCONSTRUCTIBLE — it panics. Exactly ONE mismatched
+pair is constructible, vocab-with/row-without, where the correct behaviour is
+NOT to hide.
+
+Revised gates: matched → hides; mismatched vocab-only → does NOT hide and emits
+no `(<|>)` (the DISCRIMINATING one — it fails under the `vocab_effects`
+predicate); non-RepoEvent → unchanged; superset violation → panics.
+
+Superseded reasoning follows.
+
+DECIDED (L4, SUPERSEDED): the predicate keys on **`vocab_effects`**, not `row_effects`.
 The hiding exists so an author can write `Event`'s `(<|>)` unqualified; that
 operator is a GENERATED HELPER, so it is in scope exactly when RepoEvent is in
 the VOCABULARY, whether or not the effect is in the sendable row. The predicate
