@@ -83,15 +83,52 @@ Pass lines are produced with
 verbatim, together with the BASE COMMIT the run happened on — base proves the
 tree, name proves execution, and neither establishes anything alone.
 
+All seven PASS. Instrument: `cargo nextest run -p tidepool-handlers
+--ignore-default-filter -E 'test(=a) + test(=b) + …'` via
+`/home/inanna/dev/tidepool/scripts/ghc-slots.sh detach --`; nextest run id
+`f50c9eda-d005-4479-82d8-81f645d80385`; binary
+`tidepool-handlers::repo_event_with_handler`. **Base commit `2a5e592d`.**
+Timings and verdicts below are nextest's own lines, not a wall clock.
+
 | Semantic | Test | Status |
 |---|---|---|
-| A subscription never replays rows older than itself | TODO | TODO |
-| Events broadcast to all registered handlers | TODO | TODO |
-| One handler at a time; later matches queue in observation order | TODO | TODO |
-| Lexical drain, then unregister, at body end | TODO | TODO |
-| Handler failure fails the enclosing scope | TODO | TODO |
-| Bounded-queue overflow fails loudly | TODO | TODO |
-| Rooting receipt `stowed_roots_count() == parked_count()` | TODO | TODO |
+| A subscription never replays rows older than itself | `no_replay_of_events_observed_before_registration` | PASS 9.290s |
+| Events broadcast to all registered handlers | `one_commit_broadcasts_to_both_registered_handlers` | PASS 9.215s |
+| One handler at a time; later matches queue in observation order | `queued_observations_invoke_in_order_across_a_handler_suspension` | PASS 9.314s |
+| Lexical drain, then unregister, at body end | `body_end_drains_before_it_unregisters` | PASS 9.478s |
+| Handler failure fails the enclosing scope | `handler_failure_fails_the_enclosing_scope` | PASS 9.213s |
+| Bounded-queue overflow fails loudly | `bounded_queue_overflow_fails_loudly_rather_than_dropping_a_commit` | PASS 9.290s |
+| Rooting receipt `stowed_roots_count() == parked_count()` | `rooting_receipt_holds_across_an_interleaved_park_and_resume` | PASS 16.633s |
+
+Every one drives real GHC → extract → JIT → the parked path, with every
+repository transition produced by `ScriptedWriter` against a real `TestRepo`.
+No mock of git, no LLM, anywhere.
+
+**Instruments, per the name-the-instrument rule.** The rooting receipt uses the
+machine's own in-code counters `stowed_roots_count()` / `parked_count()`,
+asserted equal at every quiescent point plus `!is_suspended()`; gate 7 also
+asserts EXACT counts, because `1 == 1` and `0 == 0` are different facts and an
+equality that only ever sees zero proves nothing. Id non-reuse uses
+`Session::ids_seen`, an in-code record of every id `ParkedOutcome::Suspended`
+returned (3 before dedup, 3 after). Registry units:
+`cargo nextest run -p tidepool-handlers --ignore-default-filter --lib -E
+'test(event::tests)'` → 16 passed. No external process observation anywhere.
+
+**Wrong-reason guards, built in rather than assumed.** A no-replay gate passes
+both when replay is correctly suppressed AND when nothing was ever published;
+a broadcast gate passes both when both handlers fire AND when the assertion is
+too weak to notice one missing. Both are ruled out in-gate: a `Recording`
+decorator around the source asserts the emitted log equals
+`[gap, during_first, during_second]`, so the runtime demonstrably observed all
+three, and broadcast asserts the exact sorted vector `["A:<sha>", "B:<sha>"]`
+rather than a contains-check, so a dropped OR doubled handler fails.
+
+**The no-replay gate tests the CURRENT rule, not the superseded one.** It no
+longer commits-before-registering and asserts absence — under root's
+cycle-shape update that would test the wrong rule, since gap-window movement
+MUST be delivered. It uses two SEQUENTIAL `withHandler` scopes (the
+re-registration path) and pins both directions at once: no replay of rows older
+than a subscription, and no loss of movement that happened while none existed.
 
 The rooting receipt gets BOTH treatments deliberately: it is asserted at every
 quiescent point inside every acceptance test (cheap, and catches drift wherever
