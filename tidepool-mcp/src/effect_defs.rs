@@ -1449,6 +1449,22 @@ macro_rules! worktree_effect_def {
                   doc "one worktree, one agent — binding a second fails explicitly" },
                 { ctor GitFailure, fields { receipt: "GitFailureReceipt" as tidepool_bridge_effects::WtGitFailureReceipt },
                   doc "git itself failed; the receipt carries the invocation and its output" },
+                // The storage-error lane (L6) added three domain variants after
+                // this block was first written. They get wire variants of their
+                // own rather than being folded into an existing one, because
+                // each names a failure an author would act on DIFFERENTLY, and
+                // `tidepool-worktree/src/error.rs` makes the argument itself:
+                // collapsing a distinct failure into a neighbour "hides the
+                // second behind the first". `InvalidRegistryRoot` and
+                // `StorageFailure` in particular are not `GitFailure` — no git
+                // process runs in either — and spelling them as one would send
+                // an operator reading a git receipt that does not exist.
+                { ctor WorktreeNotRegistered, fields { notRegisteredId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
+                  doc "no worktree registered under this id — a typo or a stale id, DISTINCT from WorktreeLost's data loss" },
+                { ctor InvalidRegistryRoot, fields { root: "Text" as String, inside: "Text" as String },
+                  doc "the registry root resolves inside a git working tree; it must live outside every source repository" },
+                { ctor StorageFailure, fields { storagePath: "Text" as String, storageDetail: "Text" as String },
+                  doc "I/O failure against Tidepool's own registry / binding table / journal" },
             ],
             verbs [
                 { ctor WorktreeCreate, method worktree_create,
@@ -1550,7 +1566,10 @@ macro_rules! worktree_effect_def {
                        "renderWorktreeError (DirtySubmoduleUnsupported p) = \"dirty submodule is unsupported in v1: \" <> p",
                        "renderWorktreeError (SourceOperationInProgress k) = \"source repository has an operation in progress: \" <> show k",
                        "renderWorktreeError (WorktreeBusy i holder) = \"worktree \" <> renderWorktreeId i <> \" is already bound to agent \" <> holder",
-                       "renderWorktreeError (GitFailure r) = \"git \" <> T.intercalate \" \" r.gitArgs <> \" failed: \" <> T.strip r.gitStderr"] },
+                       "renderWorktreeError (GitFailure r) = \"git \" <> T.intercalate \" \" r.gitArgs <> \" failed: \" <> T.strip r.gitStderr",
+                       "renderWorktreeError (WorktreeNotRegistered i) = \"no managed worktree registered with id \" <> renderWorktreeId i",
+                       "renderWorktreeError (InvalidRegistryRoot root inside) = \"registry root \" <> root <> \" resolves inside the git working tree at \" <> inside <> \" — the registry must live outside every source repository\"",
+                       "renderWorktreeError (StorageFailure p d) = \"tidepool storage failure at \" <> p <> \": \" <> d"] },
             ],
         }
     };

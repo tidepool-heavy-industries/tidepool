@@ -121,17 +121,87 @@ positional union-tag slot was claimed.
 
 ## 5. HOLD lines, and one I came close to
 
-**Came close: the `(<|>)` collision — held the DSL, did not shrink it.**
-`Tidepool.Prelude` already exports `(<|>)` from `Control.Applicative`, and the
+**Came close: the `(<|>)` collision — held the DSL, escalated, applied nothing.**
+
+`Tidepool.Prelude` re-exports `Control.Applicative`'s `(<|>)`
+(`haskell/lib/Tidepool/Prelude.hs:118`, `:317`) and every eval auto-imports
+`Tidepool.Prelude hiding (error)` (`tidepool-mcp/src/eval_prep.rs:126`). The
 frozen `Tidepool.Event` requires `Tidepool.Effects` to export its own
-`Event`-merge `(<|>)`. Author code importing both hits an ambiguous occurrence,
-and GHC cannot disambiguate by type. The tempting fixes were all DSL edits —
-rename the operator, or fake an `Applicative`/`Alternative` instance for `Event`
-so the Prelude's operator covers it. I took neither: `Tidepool.Event` is frozen
-and the PRD says the operator "need not fake a general `Applicative` instance".
-So the operator is implemented as written and the collision is reported rather
-than papered over. **If this bites the dev-tree dogfood it is a root
-escalation**, not something for a lane to settle quietly.
+`Event`-merge `(<|>)`. So an author writing the PRD's own example
+(`fmap Left e1 <|> fmap Right e2`) hits an ambiguity.
+
+VERIFIED, not inferred — a negative control importing both unhidden:
+
+```
+Amb.hs:8:23: error: [GHC-87543]
+    Ambiguous occurrence '<|>'.
+    It could refer to
+       either 'Tidepool.Event.<|>' (originally defined in 'Tidepool.Effects'),
+           or 'Tidepool.Prelude.<|>' (originally defined in 'GHC.Internal.Base').
+```
+
+GHC cannot disambiguate by type: an ambiguous occurrence is resolved at NAME
+RESOLUTION, before typechecking, so the operators' differing types
+(`Event a -> Event a -> Event a` vs `Alternative f => f a -> f a -> f a`) never
+get a chance to help.
+
+Every fix available in-lane was a DSL edit — rename the operator, or fake an
+`Applicative`/`Alternative` for `Event`. I took neither. `Tidepool.Event` is
+frozen, the PRD says the operator "need not fake a general `Applicative`
+instance", and faking one would also be dishonest: `Event` has no sensible
+`pure`.
+
+ESCALATED to root (via worktree-wave), and **APPROVED**: `effects_module_source_at`
+now emits `hiding (error, (<|>))` when the row contains RepoEvent, and is
+byte-identical to before otherwise. What the decision rests on: an ambiguity
+error on the PRD's own example is the worst possible prompt, which is what
+"the API is the prompt" exists to prevent; conditionality confines the blast
+radius to rows that do not exist yet; and both in-lane alternatives were
+rightly rejected, since renaming shrinks the DSL and a fake `Alternative` with
+no honest `pure` is a lie in the type system.
+
+Gates, each named and run separately (`scripts/prd19-alternative-gates.sh`,
+run wrapped):
+
+| Gate | Name |
+|---|---|
+| RED baseline — the collision is real without the fix, and the diagnostic is specifically the ambiguity | `alternative_collision_is_real_without_the_fix` |
+| GREEN — the PRD's example compiles UNQUALIFIED with the fix | `prd_example_compiles_unqualified_with_the_fix` |
+| NO-REGRESSION — a non-RepoEvent row still resolves `Alternative`'s `(<|>)` | `alternative_still_resolves_in_a_non_repoevent_row` |
+
+The RED baseline is load-bearing and is why the script reconstructs the
+pre-fix source rather than just compiling the fixed one: a green compile is
+equally consistent with "the fix works" and "the collision was never
+reachable". Gate 1 removes that ambiguity by asserting the *specific*
+ambiguous-occurrence diagnostic, not merely that something failed.
+
+Conditionality is additionally pinned in the fast tier by
+`repoevent_row_hides_the_prelude_alternative` and
+`non_repoevent_row_leaves_the_prelude_import_untouched` — the second is the
+one that catches the hiding becoming unconditional and silently taking
+`Alternative` away from every existing eval.
+
+**The cost of that proposal, stated because a recommendation without its cost is
+not a real recommendation.** In a RepoEvent row authors lose the unqualified
+`Alternative` `(<|>)` for `Maybe`/lists, and cannot recover it with
+`import Control.Applicative ((<|>))` — that re-collides with `Event`'s. So the
+honest framing is not "hide a Prelude name nobody in this row wants"; it is
+"a RepoEvent row gets exactly ONE unqualified `<|>`, and this picks `Event`'s".
+That is defensible (a resident orchestrating worktrees writes the Event merge
+far more often than a `Maybe` fallback, and the `Maybe` case has
+`fromMaybe`/`maybe`/pattern-matching as alternatives where the Event merge has
+none) but it is a trade, not a free win.
+
+**The typecheck probe passes only because it says `hiding ((<|>))` by hand.
+That is a LANE-LOCAL WORKAROUND standing in for a decision that has not been
+made — it is not evidence the collision is resolved.** Nothing today is broken
+by it, because RepoEvent is deliberately not in the base server row; it breaks
+when the dogfood puts it there.
+
+**Not crossed:** `workspaceOf`, any `Workspace` type, and any coupling to an
+agent handle remain absent. `harness-dogfooding/dev-tree/Harness.hs` is
+unedited. The dev-tree dogfood compile (PRD acceptance 9) was not attempted.
+`readOnlyOf` was never built (it left the public surface in root's rewrite).
 
 **Not crossed:** `workspaceOf`, any `Workspace` type, and any coupling to an
 agent handle remain absent. `harness-dogfooding/dev-tree/Harness.hs` is

@@ -23,6 +23,53 @@ fn worktree_and_event_module() -> String {
     tidepool_mcp::effects_module_source(&decls)
 }
 
+/// Emit the generated module for `scripts/prd19-alternative-gates.sh`, which
+/// needs the real source to run its three GHC gates against. `#[ignore]`d so it
+/// never runs as part of an ordinary test pass — it is a fixture producer, not
+/// a gate, and it does nothing without `PRD19_EMIT` set.
+#[test]
+#[ignore = "fixture producer for scripts/prd19-alternative-gates.sh"]
+fn emit_for_gates() {
+    let path = std::env::var("PRD19_EMIT").expect("PRD19_EMIT must name the output path");
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("create output dir");
+    }
+    std::fs::write(p, worktree_and_event_module()).expect("write generated module");
+}
+
+/// CONDITIONALITY, fast tier. `Tidepool.Event`'s `(<|>)` and the Prelude's
+/// `Alternative` `(<|>)` are an ambiguous occurrence when both are unqualified,
+/// so a row carrying RepoEvent hides the Prelude's. The GHC proof that this is
+/// the right behaviour lives in `scripts/prd19-alternative-gates.sh`; these two
+/// gates pin the CONDITION cheaply, and the second is the one that catches the
+/// hiding becoming unconditional and silently taking `Alternative` away from
+/// every other row.
+#[test]
+fn repoevent_row_hides_the_prelude_alternative() {
+    let src = worktree_and_event_module();
+    assert!(
+        src.contains("import Tidepool.Prelude hiding (error, (<|>))"),
+        "a row containing RepoEvent must hide the Prelude's Alternative (<|>), or the PRD's \
+         own `fmap Left e1 <|> fmap Right e2` example is an ambiguous occurrence"
+    );
+}
+
+#[test]
+fn non_repoevent_row_leaves_the_prelude_import_untouched() {
+    let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::git_decl()];
+    let src = tidepool_mcp::effects_module_source(&decls);
+    assert!(
+        src.contains("import Tidepool.Prelude hiding (error)\n"),
+        "a row WITHOUT RepoEvent must be byte-identical to before — hiding (<|>) there would \
+         take Alternative away from every existing eval for no reason"
+    );
+    assert!(
+        !src.contains("hiding (error, (<|>))"),
+        "the (<|>) hiding must be conditional on RepoEvent, not unconditional"
+    );
+}
+
 /// The `errors WorktreeError` block templates a `ToJSON WorktreeError`
 /// instance whose arms serialize `DirtySummary`, `InProgressKind`,
 /// `GitFailureReceipt` and `WorktreeId`. If any of those four lacks its own

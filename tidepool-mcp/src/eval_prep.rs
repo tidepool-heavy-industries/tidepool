@@ -123,7 +123,22 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     // warning. This is the home every eval + repl session imports.
     out.push_str("{-# OPTIONS_GHC -Wno-orphans #-}\n");
     out.push_str("module Tidepool.Effects where\n");
-    out.push_str("import Tidepool.Prelude hiding (error)\n");
+    // PRD 19: `Tidepool.Event`'s `(<|>)` merges two event sources into ONE
+    // subscription, and `Tidepool.Prelude` re-exports `Control.Applicative`'s
+    // `(<|>)`. Both unqualified is an ambiguous occurrence — resolved at NAME
+    // RESOLUTION, before typechecking, so the operators' differing types cannot
+    // disambiguate it — and it fires on PRD 19's own worked example. So a row
+    // carrying RepoEvent gets exactly ONE unqualified `(<|>)`, and it is
+    // Event's: that spelling dominates in a worktree-orchestrating resident and
+    // has no alternative, while Maybe/list fallbacks keep `fromMaybe`/`maybe`/
+    // pattern matching, and qualified `Control.Applicative` stays open. The
+    // check is conditional so rows without the effect are byte-identical to
+    // before. See plans/post-restart/worktree-lanes/L4-receipt.md.
+    if effects.iter().any(|e| e.type_name == "RepoEvent") {
+        out.push_str("import Tidepool.Prelude hiding (error, (<|>))\n");
+    } else {
+        out.push_str("import Tidepool.Prelude hiding (error)\n");
+    }
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
