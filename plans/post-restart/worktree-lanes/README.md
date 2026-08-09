@@ -125,8 +125,11 @@ any other live lane. Log real conflicts at fold.
   lines — a receipt indistinguishable from a complete one, whose only tell is
   that RUN is strictly less than STARTED (root observed 198/877). Pass
   `--no-fail-fast` EXPLICITLY on any run reaching `tidepool-runtime` until the
-  worktree carries battery fix `7d57cea5`; expect exactly one red
-  (`mock_stack_matches_production`) until that fix folds, and A/B anything else
+  worktree carries battery fix `7d57cea5`; expect exactly THREE sanctioned inherited reds
+  (`mock_stack_matches_production`,
+  `generic_deriving_337::sum_type_rejected_at_compile_time`,
+  `qq_fmt_brace_inside_hole_non_string_expr_still_works`; codex-review ledger
+  item 14) until their fixes fold, and A/B anything else
   in your own worktree before calling it inherited.
 
   Prefer started-vs-run over completed-vs-crate-total (credit L4): it is
