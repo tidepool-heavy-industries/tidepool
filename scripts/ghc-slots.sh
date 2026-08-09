@@ -41,15 +41,19 @@ set -euo pipefail
 # marker and skips self-acquire. (The nextest cap below is the opposite:
 # per-worktree config, live in each checkout.)
 #
-# 4-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
+# 6-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
-# concurrent extracts with every lane compliant at 3x3. The per-run cap is
-# now 1 (fc3363dc) and the two heavy waves confirmed carrying it, so 4 slots
-# = box-wide extract ceiling of ~4, a net REDUCTION vs the old effective 9.
-# The cap config is PER-WORKTREE and propagates at rebase — a lane still on
-# per-run 3 can transiently fan one slot to 3; chase stragglers rather than
-# lowering this. Keep the product <= ~4-6 on this box.
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3)
+# concurrent extracts with every lane compliant at 3x3. Per-run cap is 1
+# (fc3363dc, fleet-verified), so slots = box-wide extract ceiling. 6x1=6,
+# still under the old effective 9. Six rather than four because cap-1's
+# second-order cost is HOLD TIME: an --ignore-default-filter crate run
+# serialises internally and holds one slot for its whole duration (observed
+# 1h43m) while extracting only part of the time — so at equal ceiling, more
+# slots means less head-of-line blocking behind long holds, not more load
+# (a held slot is not a running extract; observed 3-6 extracts across 4
+# held). Keep the product <= ~6 on this box; chase per-worktree cap
+# stragglers rather than lowering this.
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4 /tmp/tidepool-ghc.slot5)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,
