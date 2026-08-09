@@ -10,7 +10,7 @@ import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
-import Control.Monad (foldM, when, forM_, void)
+import Control.Monad (foldM, when, forM, forM_, void)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
@@ -61,7 +61,7 @@ main = do
   timing <- readTimingEnabled
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
       -- Block classify lane: every positional file is one item, classified
@@ -103,6 +103,13 @@ isSessionMode args = argSessionBind args || isJust (argSessionRoot args)
 data Args = Args
   { argOutDir :: Maybe FilePath
   , argTarget :: Maybe String
+  -- --targets mode (explicit multi-target emission,
+  -- plans/post-restart/extract-wave/boot/03-targets-prereq.md): several
+  -- explicitly-named targets, one merged meta.cbor. Deliberately a SEPARATE
+  -- field from 'argTarget' (never sharing its Maybe-String slot) so the
+  -- existing --target contract (single name, last flag wins) cannot be
+  -- perturbed by this mode's parsing.
+  , argTargets :: [String]
   , argDumpCore :: Bool
   , argAllClosed :: Bool
   , argTargetModuleOnly :: Bool
@@ -127,13 +134,14 @@ data Args = Args
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False False False [] []
+parseArgs = go (Args Nothing Nothing [] False False False [] []
                      False [] Nothing Nothing [] Nothing
                      False [] Nothing Nothing Nothing
                      False Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
+    go a ("--targets" : ts : rest) = go a { argTargets = argTargets a ++ splitComma ts } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
     go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
     go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
@@ -182,7 +190,13 @@ processFile timing args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
-    case (mTarget, argAllClosed args) of
+    if not (null (argTargets args))
+      -- Explicit multi-target mode (--targets a,b): takes priority over
+      -- --target/--all-closed, which stay untouched below for every other
+      -- caller. One runPipeline invocation (already run, above), several
+      -- named targets, one merged meta.cbor — see 'runMultiTargetClosed'.
+      then runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts (argTargets args)
+      else case (mTarget, argAllClosed args) of
       (_, True) -> do
         -- All-closed mode: translate each binding independently via translateModuleClosed
         -- Use original names (not deduped) since translateModuleClosed looks up by name.
@@ -317,6 +331,168 @@ processFile timing args path = do
       exitFailure
     Right () -> putStrLn (renderDiagsJson [])
 
+-- | Per-target translate step: run 'translateModuleClosed' for ONE target,
+-- timed as the "translate" phase, and fail LOUDLY (never skip) if it
+-- references an unresolved external. Shared by the single-target write path
+-- ('writeWholeModuleClosed') and the multi-target '--targets' mode
+-- ('runMultiTargetClosed').
+--
+-- __STRUCTURAL, not a policy flag.__ This function has NO catch/skip branch
+-- at all — it always lets the exception through. @--all-closed@'s
+-- skip-on-failure behaviour (@processFile@'s own @(_, True) -> do ...@ arm,
+-- above, which wraps its OWN per-binding call to 'translateModuleClosed' in
+-- a 'try' and discards a 'Left') is a COMPLETELY SEPARATE function, over a
+-- separate loop, that never calls this one. There is no shared traversal
+-- with an @if strict then error else skip@ switch for a later refactor to
+-- quietly re-unify — strict mode's callers ('runMultiTargetClosed',
+-- 'writeWholeModuleClosed') are structurally unable to reach a skip path
+-- because none exists on this call graph edge. If you are tempted to fold
+-- @--all-closed@'s try-and-skip into this function behind a 'Bool' argument:
+-- don't — that reintroduces exactly the failure mode explicit multi-target
+-- emission exists to prevent (a requested target silently missing, see
+-- plans/post-restart/extract-wave/boot/03-targets-prereq.md), and it would
+-- do so with every existing test still green, since the skip would only
+-- fire when a caller passes the wrong 'Bool'.
+translateTargetClosed :: Bool -> HscEnv -> [CoreBind] -> String -> IO ClosedModule
+translateTargetClosed timing hscEnv binds targetName = do
+  (closed, translateMs) <- timeSection (translateModuleClosed hscEnv binds targetName)
+  emitPhase timing "translate" translateMs
+  let ClosedModule { cmUnresolved = unresolved } = closed
+  if not (null unresolved) then do
+    let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
+    error $ "Unresolved external(s): " ++ unwords names
+      ++ "\nThese functions don't expose their implementation to the GHC API."
+      ++ "\nDefine them in your source or use equivalent inline definitions."
+  else return ()
+  return closed
+
+-- | One target's write-ready pieces, gathered by 'writeClosedTargets' before
+-- the cross-target metadata merge (the merge needs every target's pieces in
+-- scope at once, so they can't be written as each target is translated).
+data TargetWrite = TargetWrite
+  { twOutFileBase :: String
+  , twNodeCount   :: Int
+  , twCbor        :: BS.ByteString
+  , twUsedMeta    :: [DCMeta]
+  , twReachBinds  :: [CoreBind]
+  , twVarNames    :: [(Word64, Text)]
+  , twHasIO       :: Bool
+  , twAskSites    :: [(Word64, Text)]
+  }
+
+-- | Write step, shared by the single-target write path (a singleton input
+-- list — see 'writeWholeModuleClosed') and the multi-target '--targets' mode
+-- ('runMultiTargetClosed'): emit one @\<outFileBase\>.cbor@ per
+-- @(targetName, outFileBase, ClosedModule)@ triple, plus ONE @meta.cbor@
+-- merged across all of them. Returns each target's @outFileBase@ paired with
+-- the runLLMTurn/runLLMTurnFork sites it wrote, so a caller that also needs
+-- them (the turn mode's rich result) reads them off this one write rather
+-- than re-deriving them.
+--
+-- __meta.cbor multi-target scalar rule__ (decided HERE, the one place every
+-- target's metadata is in scope at once — see
+-- plans/post-restart/extract-wave/boot/03-targets-prereq.md): @has_io@ is
+-- the OR across targets (a turn compiled from ANY IO-carrying target counts
+-- as IO-carrying); @var_names@ is the concatenation (bag union) of every
+-- target's @cmVarNames@ — both are diagnostic-only (runtime "unresolved
+-- variable" error naming, friction #12), so an honest over-approximation is
+-- fine and a duplicate id is harmless (the Rust reader keys them in a
+-- last-write-wins map). For the single-target case (the singleton input
+-- list every existing caller passes) both reduce to exactly that one
+-- target's own value, with NO reordering — @or [x] == x@ and
+-- @concatMap f [x] == f x@ — so meta.cbor stays byte-for-byte unchanged for
+-- every pre-existing caller. DataCon entries merge through
+-- 'mergeMetaPreserving', which keeps a genuine (varId, qualified-name)
+-- COLLISION as two distinct entries so the loader rejects it loudly rather
+-- than one target's copy silently winning over another's — this function
+-- must never soften that.
+--
+-- __asks.json sidecar shape__: exactly ONE target writes the existing flat
+-- @\<outDir\>/asks.json@ array, UNCHANGED — the single-target contract every
+-- pre-existing caller depends on. MORE THAN ONE target additionally writes
+-- @\<outDir\>/\<outFileBase\>.asks.json@ per target (the same flat-array
+-- shape, one file each): two targets' runLLMTurn/runLLMTurnFork sites are
+-- DIFFERENT, and collapsing them into one file would misroute a hole, so
+-- multi-target mode keeps them apart all the way to the Rust reader
+-- (@tidepool_harness::compile::compile_turns@, which picks the right shape
+-- from the same @targets.len() > 1@ test).
+writeClosedTargets
+  :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text]
+  -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
+  -> IO [(String, [(Word64, Text)])]   -- ^ outFileBase -> runLLMTurn sites
+writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
+  let multi = length targets > 1
+
+  -- Encode step: every target's tree, timed together as one accumulated
+  -- "cbor_encode" phase alongside the merged meta.cbor encode below (mirrors
+  -- the single-target original, which encoded the target tree and meta.cbor
+  -- together in one timeSection).
+  (writes, encodeMsTotal) <- foldM (\(acc, msAcc) (targetName, outFileBase, closed) -> do
+      let ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmReachBinds = reachBinds
+                        , cmVarNames = varNames, cmRunLLMTurnSites = runLLMTurnSites
+                        } = closed
+      (cbor, ms) <- timeSection (evaluate (encodeTree nodes))
+      let w = TargetWrite
+            { twOutFileBase = outFileBase
+            , twNodeCount   = Seq.length nodes
+            , twCbor        = cbor
+            , twUsedMeta    = map dcToMeta (Map.elems usedDCs)
+            , twReachBinds  = reachBinds
+            , twVarNames    = varNames
+            , twHasIO       = targetBindingHasIO binds targetName
+            , twAskSites    = runLLMTurnSites
+            }
+      return (acc ++ [w], msAcc + ms)
+    ) ([], 0) targets
+
+  -- Merge metadata: TyCon-derived + translation-derived (all targets) +
+  -- raw-binding-scan + transitive + wired-in. See the multi-target scalar
+  -- rule in this function's doc comment above.
+  let allReachBinds  = concatMap twReachBinds writes
+      tyconMeta      = collectDataCons tycons
+      scanMeta       = collectUsedDataCons allReachBinds
+      transitiveMeta = collectTransitiveDCons allReachBinds
+      wiredInMeta    = wiredInDataCons
+      -- Highest priority first; mergeMetaPreserving keeps colliding
+      -- (same-varId, different-qualified-name) entries distinct so the
+      -- loader rejects them loudly instead of one silently winning.
+      allMeta = mergeMetaPreserving
+                  [ wiredInMeta, tyconMeta, concatMap twUsedMeta writes, scanMeta, transitiveMeta ]
+      hasIO       = or (map twHasIO writes)
+      allVarNames = concatMap twVarNames writes
+
+  (metaCbor, metaMs) <- timeSection (evaluate (encodeMetadata allMeta hasIO mCapturedTy allVarNames warnTexts))
+  emitPhase timing "cbor_encode" (encodeMsTotal + metaMs)
+
+  -- Write step: one <outFileBase>.cbor per target, ONE merged meta.cbor, and
+  -- the asks sidecar(s) per the shape rule above — all timed together as one
+  -- "write" phase (mirrors the single-target original).
+  ((), writeMs) <- timeSection $ do
+    forM_ writes $ \w -> do
+      let outFile = outDir </> twOutFileBase w ++ ".cbor"
+      BS.writeFile outFile (twCbor w)
+      hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (twNodeCount w) ++ " nodes, " ++ show (BS.length (twCbor w)) ++ " bytes)"
+      when multi $ do
+        let asksFile = outDir </> twOutFileBase w ++ ".asks.json"
+        writeFile asksFile (renderAsksJson (twAskSites w))
+        hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twAskSites w)) ++ " sites)"
+
+    let metaFile = outDir </> "meta.cbor"
+    BS.writeFile metaFile metaCbor
+    hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+    -- runLLMTurn (#R0) sidecar, single-target shape: ALWAYS written (empty
+    -- list when the module has no runLLMTurn/runLLMTurnFork sites) — loud
+    -- absence beats a silently-missing file for the Rust-side consumer
+    -- (segment 30) to distinguish "no sites" from "extract too old".
+    when (not multi) $ forM_ writes $ \w -> do
+      let asksFile = outDir </> "asks.json"
+      writeFile asksFile (renderAsksJson (twAskSites w))
+      hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twAskSites w)) ++ " sites)"
+  emitPhase timing "write" writeMs
+
+  return [ (twOutFileBase w, twAskSites w) | w <- writes ]
+
 -- | Whole-module closed emission: translate all bindings as nested lets around
 -- @targetName@ (the Core-level binding to look up), write its CBOR under
 -- @outFileBase@.cbor + the merged DataCon meta. @targetName@ and
@@ -330,63 +506,44 @@ processFile timing args path = do
 -- @{site, type}@ pairs it wrote to @asks.json@, so a caller that also needs
 -- them (the turn mode's rich result) reads them off this one translation
 -- rather than re-running 'translateModuleClosed'.
+--
+-- A thin wrapper over 'translateTargetClosed' + 'writeClosedTargets' (a
+-- singleton target list) since the multi-target '--targets' mode split this
+-- function's original body into those two reusable steps; every existing
+-- caller's signature and on-disk output are unchanged.
 writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text)]
 writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
-  (closed, translateMs) <- timeSection (translateModuleClosed hscEnv binds targetName)
-  emitPhase timing "translate" translateMs
-  let ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
-                    , cmReachBinds = reachBinds, cmVarNames = varNames
-                    , cmRunLLMTurnSites = runLLMTurnSites
-                    } = closed
-  if not (null unresolved) then do
-    let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
-    error $ "Unresolved external(s): " ++ unwords names
-      ++ "\nThese functions don't expose their implementation to the GHC API."
-      ++ "\nDefine them in your source or use equivalent inline definitions."
-  else return ()
+  closed <- translateTargetClosed timing hscEnv binds targetName
+  results <- writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts [(targetName, outFileBase, closed)]
+  case results of
+    [(_, sites)] -> return sites
+    _ -> error "writeWholeModuleClosed: writeClosedTargets returned an unexpected result shape"
 
-  -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
-  let tyconMeta = collectDataCons tycons
-      usedMeta = map dcToMeta (Map.elems usedDCs)
-      scanMeta = collectUsedDataCons reachBinds
-      transitiveMeta = collectTransitiveDCons reachBinds
-      wiredInMeta = wiredInDataCons
-      -- Highest priority first; mergeMetaPreserving keeps colliding
-      -- (same-varId, different-qualified-name) entries distinct so the
-      -- loader rejects them loudly instead of one silently winning.
-      allMeta = mergeMetaPreserving
-                  [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
-      hasIO = targetBindingHasIO binds targetName
-
-  -- 'cbor_encode' forces both ByteStrings here (rather than leaving them as
-  -- thunks BS.writeFile forces below) purely so the wire-format-inert timing
-  -- can attribute encode vs. write honestly — mirrors the existing
-  -- 'evaluate (BS.length cbor)' force in processFile's --all-closed branch,
-  -- which forces for the same reason (surfacing lazy-thunk errors early).
-  ((cbor, metaCbor), cborMs) <- timeSection $ do
-    c <- evaluate (encodeTree nodes)
-    m <- evaluate (encodeMetadata allMeta hasIO mCapturedTy varNames warnTexts)
-    pure (c, m)
-  emitPhase timing "cbor_encode" cborMs
-
-  ((), writeMs) <- timeSection $ do
-    let outFile = outDir </> outFileBase ++ ".cbor"
-    BS.writeFile outFile cbor
-    hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-
-    let metaFile = outDir </> "meta.cbor"
-    BS.writeFile metaFile metaCbor
-    hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
-
-    -- runLLMTurn (#R0) sidecar: {site, type} pairs next to meta.cbor, ALWAYS
-    -- written (empty list when the module has no runLLMTurn/runLLMTurnFork
-    -- sites) — loud absence beats a silently-missing file for the Rust-side
-    -- consumer (segment 30) to distinguish "no sites" from "extract too old".
-    let asksFile = outDir </> "asks.json"
-    writeFile asksFile (renderAsksJson runLLMTurnSites)
-    hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length runLLMTurnSites) ++ " sites)"
-  emitPhase timing "write" writeMs
-  return runLLMTurnSites
+-- | Explicit multi-target mode (@--targets a,b@,
+-- plans/post-restart/extract-wave/boot/03-targets-prereq.md): one GHC
+-- pipeline invocation (@binds@\/@tycons@\/@hscEnv@ come from the SAME
+-- 'runPipeline' call the caller already made — see 'processFile'), several
+-- explicitly-named targets translated independently via
+-- 'translateTargetClosed' and written together via 'writeClosedTargets' —
+-- one @\<name\>.cbor@ per target, outFileBase == targetName (mirroring
+-- @--target@'s existing @foo@ -> @foo.cbor@ contract, just for N names
+-- instead of one), plus ONE merged @meta.cbor@.
+--
+-- Unlike @--all-closed@ (a best-effort fixture sweep that catches a
+-- per-binding translate failure and skips it), a target named here is a
+-- CONTRACT: 'translateTargetClosed' is called directly inside this 'forM',
+-- with no per-target 'try', so ANY bad target's exception propagates out of
+-- this whole function uncaught. The caller's own top-level @try@ (in
+-- 'processFile', the same one that already turns any extraction failure
+-- into the stdout diagnostics report + non-zero exit) is what stops a
+-- silently-missing target .cbor from ever reaching a caller.
+runMultiTargetClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> [String] -> IO ()
+runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetNames = do
+  closedTargets <- forM targetNames $ \name -> do
+    closed <- translateTargetClosed timing hscEnv binds name
+    return (name, name, closed)
+  _ <- writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
+  return ()
 
 -- | A Wave-3b session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
