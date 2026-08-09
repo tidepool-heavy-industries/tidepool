@@ -32,6 +32,25 @@ show each failed for *its own reason* (the asserted message text), since a
 fixture passing on an unrelated error is exactly what this rule exists to
 catch.
 
+### Name the INSTRUMENT beside any number
+
+Extends the rule one level down: report not just the count but **what counted
+it**. Three separate external process-counting instruments were each wrong *in
+a different direction* on this box on 2026-08-08; an in-code counter was the
+only correct one. The reason generalizes — an in-code counter **establishes its
+referent structurally**, where an external pattern-match (a `ps` grep, a log
+scrape, a wrapper's own bookkeeping) merely *asserts* one.
+
+So: test counts name the cargo-nextest summary line, its run ID, and the commit
+it ran at. A sha256 claim names the checker that computed it. A timing or
+term-size figure offered as evidence names what produced it — and if two
+measurements are being compared, says whether they ran under the same
+conditions, since a compile-time comparison across different slot contention
+does not support a conclusion about elaboration cost.
+
+**If a number came from something you cannot name, name it or drop it.** An
+unattributed figure reads as established, which makes it worse than no figure.
+
 ## THROTTLE — active (root, 2026-08-08, until root lifts it)
 
 The box hit **load average 92** and the operator's SSH died. Until lifted,
@@ -77,10 +96,10 @@ This supersedes the `ghc-slots.sh run --` spelling in the operational block
 below and in every dev spec in this directory. The absolute path and the
 never-`exclusive` rule are unchanged.
 
-**Enqueue hold (root, 2026-08-08):** new slot-taking work is held ~45 minutes
-or until root announces release — extract-wave has a dev killed-while-queued
-twice with a complete implementation, and it gets the next free slot. In-flight
-runs finish naturally; pure-Rust work continues under the throttle.
+**Enqueue hold (root, 2026-08-08): RELEASED.** It was held so extract-wave's
+twice-killed-while-queued dev got the next free slot; that dev acquired and
+completed clean on its first post-fix attempt. Slot-taking work resumes — via
+`detach`.
 
 ## Wave 1 lanes
 
