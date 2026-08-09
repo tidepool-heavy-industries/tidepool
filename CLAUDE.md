@@ -32,6 +32,15 @@ The Key Decisions Reference section below is the source of truth for all archite
 > (`~/.exo/roles/devswarm/context/root.md`), loaded each session. This file is
 > codebase truth; that file is process truth.
 
+### Decision Archive
+
+Doc-history asides (why a note exists, superseded wording) that used to live
+inline in a `CLAUDE.md` file now live in `plans/decision-archive/`, one file
+per source doc, with a one-line pointer left at each extraction site. This
+does NOT apply to the Key Decisions Reference below — those stay here,
+verbatim, as the authoritative contracts layer; nothing load-bearing moves
+to the archive.
+
 ---
 
 ## Project Structure
@@ -54,9 +63,12 @@ tidepool/
 ├── tidepool-mcp/          ← MCP server library (generic over effect handlers)  [CLAUDE.md]
 ├── tidepool-handlers/     ← Central effect-request handler arms (`<Eff>Req` matches)  [CLAUDE.md]
 ├── tidepool-repl/         ← GHCi-style resident-session MCP server  [CLAUDE.md]
+├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
+├── tidepool-web/          ← Web operator GUI: AskUser form rendering + observatory shell  [CLAUDE.md]
 ├── tidepool-lsp/          ← LSP client + workspace daemon (call graph, hover, refs)  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
+├── harness-dogfooding/    ← Authored harnesses (wizard, dev-tree) run by the selfharness driver
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib  [CLAUDE.md]
 │   └── lib/Tidepool/      ← Haskell stdlib (auto-imported in MCP)
 ├── flake.nix              ← Dev shell (Rust + GHC 9.12 with fat interfaces)
@@ -82,6 +94,11 @@ in that directory):
 - `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
   mechanism, repl-specific usage notes.
+- `tidepool-harness/CLAUDE.md` — the resident harness: turn driving, session
+  ownership (`checkout_run`/`run_checked_out` over `SessionRegistry`), the
+  selfharness driver, hole cards.
+- `tidepool-web/CLAUDE.md` — operator GUI rendering and the AskUser form wire
+  shape.
 - `tidepool-lsp/CLAUDE.md` — the `tidepool-lsp-daemon` sidecar: socket
   resolution, name/path-only protocol design, op-surface boundaries.
 

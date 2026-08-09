@@ -88,13 +88,18 @@ use tidepool_heap::layout as heap_layout;
 
 use serial_test::serial;
 
-// The shared scaffold carries helpers this file does not need
-// (`build_reference_fragment`); `#[path]` inclusion makes them look dead here.
-#[allow(dead_code)]
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{build_gc_forcing_fragment, build_value_fragment};
-use session_scaffold::{expect_int, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+#[path = "support/session_scaffold_gc_forcing.rs"]
+mod session_scaffold_gc_forcing;
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
+use session_scaffold::C1;
+use session_scaffold_expect::expect_int;
+use session_scaffold_gc_forcing::build_gc_forcing_fragment;
+use session_scaffold_value::build_value_fragment;
 
 // ─── freer-simple constructor IDs (must match ConTags::from_table lookup) ────
 // Identical to nested_child_gc_rooting.rs's table — same synthetic effect stack.
@@ -1030,51 +1035,60 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
 //
 // This is what makes lifting the `ChildSuspended` wall a CONVERSION rather than
 // an addition: a caller one level up cannot park only the child and leave the
-// parent in the slot. The assert below is the mechanical form of that finding.
+// parent in the slot.
+//
+// codex-review-2026-08-08.md item 11: this used to be reachable — a caller
+// could park a realm, then call a legacy slot-path entry (`run_suspendable`)
+// successfully, reaching the mixed state, and only find out later when
+// `resume_parked` panicked. `run_suspendable_shared`'s entry guard (the
+// interim fix; the structural fix — registry-only suspension — is a separate
+// future lane) now rejects the slot-path entry itself, cleanly, the moment
+// the registry is non-empty, so the mixed state is unreachable through the
+// public API at all. The test below exercises exactly that: the
+// park-then-legacy-entry sequence is rejected AT ENTRY, not left to panic
+// downstream at `resume_parked`.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
 #[serial]
-fn parked_resume_while_the_slot_is_occupied_panics() {
+fn park_then_legacy_slot_suspend_is_rejected_cleanly_at_entry() {
     in_test_thread(|| {
         let table = adversarial_table();
         let mut machine =
             JitEffectMachine::compile_session(&build_suspending_parent(11, 2), &table, 1 << 14)
                 .expect("compile_session");
 
-        // Park one continuation in the REGISTRY, then — through the nested-child
-        // door — suspend a second into the SLOT, reaching the mixed state.
+        // Park one continuation in the REGISTRY first.
         let parked = park_fragment(&mut machine, &table, RealmId(0), "registry_park", 22, 3);
         assert_rooting_receipt(&machine, 1);
 
-        let entry_out = machine
-            .run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG)
-            .expect("slot-path suspend");
-        assert!(matches!(
-            entry_out,
-            tidepool_codegen::jit_machine::SuspendableOutcome::Suspended { .. }
-        ));
-        assert!(machine.is_suspended(), "the slot now holds a continuation");
-        assert_eq!(
-            machine.parked_count(),
-            1,
-            "the registry park is untouched by the slot suspension"
+        // A legacy slot-path entry, attempted while a realm is parked, must
+        // be rejected cleanly — not panic, and not succeed into the mixed
+        // state.
+        let err = match machine.run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG) {
+            Ok(_) => panic!(
+                "run_suspendable must not succeed while a continuation is parked in the registry"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").contains("parked") || format!("{err}").contains("registry"),
+            "rejection must name the parked-registry cause, got: {err}"
         );
 
-        // Resuming the PARKED one now must panic rather than silently run a
-        // collection with the slot-held continuation unrooted.
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = machine.resume_parked(
-                parked,
-                &mut NoDispatch,
-                &(),
-                ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
-            );
-        }));
+        // The machine is untouched by the rejected attempt: still not
+        // suspended in the slot, the park is still there and still rooted.
         assert!(
-            r.is_err(),
-            "a parked resume with the slot occupied must panic — mixing the two              suspension paths leaves the slot-held continuation unprotected"
+            !machine.is_suspended(),
+            "a rejected slot-path attempt must not have stowed a continuation"
         );
+        assert_rooting_receipt(&machine, 1);
+        assert_eq!(machine.parked_count(), 1, "the registry park is untouched");
+
+        // The parked continuation is still resumable normally — the
+        // rejection left the machine exactly as it was.
+        resume_and_verify(&mut machine, parked, 3, 22);
+        assert_rooting_receipt(&machine, 0);
     });
 }
 

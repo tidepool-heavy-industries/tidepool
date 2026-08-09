@@ -1,7 +1,7 @@
 module Main where
 
 import System.Environment (getArgs)
-import System.FilePath (takeBaseName, takeDirectory, (</>))
+import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
@@ -54,14 +54,22 @@ main :: IO ()
 main = do
   hSetEncoding stdout utf8
   rawArgs <- getArgs
-  let args = parseArgs rawArgs
+  let parsedArgs = parseArgs rawArgs
   -- Read once at process entry (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
   timing <- readTimingEnabled
+  -- Harness compilation profile (generic-surface wave item 4, PART 2):
+  -- rewrite the target to a pragma-prepended scratch copy BEFORE any mode
+  -- dispatch below, so every mode (one-shot, session, turn) sees a plain
+  -- file with no pragma-block requirement of its own. See
+  -- 'spliceHarnessProfilePragma'.
+  args <- if argHarnessProfile parsedArgs
+            then spliceHarnessProfilePragma parsedArgs
+            else pure parsedArgs
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
       -- Block classify lane: every positional file is one item, classified
@@ -79,6 +87,70 @@ main = do
       | isSessionMode args                  -> processSessionFile args file
       -- Normal one-shot extraction (byte-identical to historical behaviour).
       | otherwise                           -> timePhase timing "total" (processFile timing args file)
+
+-- | Rewrites the FIRST target file (`argFiles`'s head) to a scratch copy
+-- with 'harnessProfilePragmaLine' prepended — the harness compilation
+-- profile's PART 2 (generic-surface wave item 4). A no-op when 'argFiles'
+-- is empty (the usage-banner path handles that separately).
+--
+-- Splices SOURCE TEXT rather than toggling GHC extension FLAGS on the
+-- original file's DynFlags. A prior version of this mechanism did exactly
+-- that (per-module 'GHC.Driver.Session.DynFlags' patching inside
+-- @Tidepool.GhcPipeline@) and was reverted: a compilation-request cache
+-- (@tidepool_runtime::cache@, see @cache.rs@'s @cache_key_salted@) keys on
+-- rendered SOURCE BYTES, the target binder, include-directory content
+-- fingerprints, and the extract binary's own fingerprint — NOT on CLI
+-- flags. A flags-based profile is therefore invisible to any future cached
+-- caller: a with-profile and a without-profile compile of the byte-identical
+-- source hash to the SAME key and could serve each other's stale CBOR.
+-- Splicing the pragma into what actually gets compiled makes the profile a
+-- property of the rendered source, cache-safe by construction — the same
+-- reason the eval preamble's own LANGUAGE pragma block
+-- (@EVAL_PRAGMAS@, tidepool-mcp/src/preamble.rs) is prepended to source
+-- text rather than ever applied as a flag. It also collapses what used to
+-- be a two-part mechanism (a per-module 'ms_hspp_opts' patch PLUS a
+-- downsweep-level module-graph splice — 'depanal' bakes an implicit-Prelude
+-- import edge into a module's dependency list using whatever flags were
+-- ambient at DOWNSWEEP time, before any later per-module patch can affect
+-- it) into this one function: the pragma line is part of the source
+-- 'depanal' itself parses, so there is no "downswept under the wrong
+-- flags" case to work around.
+--
+-- The scratch file lands under the resolved output dir, named identically
+-- to the original (GHC derives the module name from the filename), so
+-- @import@s of it from elsewhere still resolve by the expected name.
+-- Diagnostics from a harness-profile compile report line numbers ONE
+-- greater than the author's own file (the single prepended pragma line) —
+-- a caller wiring this flag into a diagnostics-surfacing path (e.g.
+-- tidepool-harness) is responsible for that rebasing, the same way
+-- tidepool-mcp's own eval preamble rebases its (much larger) prepended
+-- header today.
+spliceHarnessProfilePragma :: Args -> IO Args
+spliceHarnessProfilePragma args = case argFiles args of
+  [] -> pure args
+  (file : rest) -> do
+    src <- readFile file
+    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (argOutDir args)
+        scratchPath = outDir </> takeFileName file
+    createDirectoryIfMissing True outDir
+    writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ src)
+    pure args { argFiles = scratchPath : rest }
+
+-- | The harness compilation profile's standard extension set, rendered as
+-- ONE @{-# LANGUAGE ... #-}@ line — what 'spliceHarnessProfilePragma'
+-- prepends to an authored harness module's source, so the author's own file
+-- on disk needs no pragma block of its own.
+--
+-- Mirrors @tidepool_mcp::preamble::EVAL_PRAGMAS@
+-- (@tidepool-mcp\/src\/preamble.rs@) — the canonical extension list for "one
+-- dialect everywhere" (repo CLAUDE.md). A Haskell string literal and a Rust
+-- string constant cannot literally share a source across the language
+-- boundary, so keep the two in sync BY HAND on any future change to either;
+-- this is deliberately not a third independent copy — see EVAL_PRAGMAS's own
+-- haddock for the two Rust-side copies already reconciled into one.
+harnessProfilePragmaLine :: String
+harnessProfilePragmaLine =
+  "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}"
 
 -- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
 -- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
@@ -124,13 +196,23 @@ data Args = Args
   -- --classify mode (block classify lane, plans/one-spawn-turn-protocol-phase-b.md):
   , argClassify :: Bool
   , argClassifyOut :: Maybe FilePath
+  -- Harness compilation profile (generic-surface wave item 4, PART 2): the
+  -- standard extension set applied to the target module by prepending one
+  -- LANGUAGE pragma line to a SCRATCH COPY of its source (see
+  -- 'spliceHarnessProfilePragma') — never the author's own file on disk,
+  -- and never a GHC FLAG (a compilation-request cache keys on rendered
+  -- source bytes, not CLI flags; splicing the extensions into what actually
+  -- gets compiled is cache-safe by construction, a flags-based toggle is
+  -- not). See Tidepool.Harness.Prelude.
+  , argHarnessProfile :: Bool
   }
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False [] []
                      False [] Nothing Nothing [] Nothing
                      False [] Nothing Nothing Nothing
-                     False Nothing)
+                     False Nothing
+                     False)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -151,6 +233,7 @@ parseArgs = go (Args Nothing Nothing False False False [] []
     go a ("--classify" : rest) = go a { argClassify = True } rest
     go a ("--classify-out" : out : rest) = go a { argClassifyOut = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
+    go a ("--harness-profile" : rest) = go a { argHarnessProfile = True } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 

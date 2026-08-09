@@ -139,6 +139,17 @@ surface here — it drifts. Module map:
 - `Data/Time` — `UTCTime` newtype (epoch-millisecond, opaque); `formatISO8601` (ISO-8601, pure civil_from_days); `diffUTCTime`/`addUTCTime` (seconds); `epochMillis` escape hatch. `getCurrentTime :: M UTCTime` lives in the generated `Tidepool.Effects` (via `time_decl()` helpers).
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters.
+- `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
+  (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
+  `choose`/`chooseMany` for alternatives that exist only as runtime VALUES.
+  Sub-modules: `Form.Shape` (the frozen `FormShape`/`FormAnswer` algebra),
+  `Form.GForm` (the generic interpreter — shape out, typed value back),
+  `Form.Check` (compile-time `TypeError` diagnostics), `Form.Wire` (the JSON
+  transport, matching `tidepool-harness`'s `selfharness::operator` module
+  docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
+  (it builds on `askUserRaw`), and auto-imported whenever it is.
+  `Form.Legacy` is the de-advertised applicative builder, kept only until the
+  successor lane deletes it — do not build on it or mention it to a model.
 - `Ui` — the `Ui` eDSL (card/prose/code/choice/textIn/badge smart constructors).
   `FormQQ` — `[form|]`, a line-based DSL compiling to `[Ui]` (one widget per
   line: `choice <prompt>: <key> ...` / `text <prompt>` / `multiline <prompt>` /
@@ -155,8 +166,8 @@ surface here — it drifts. Module map:
   one exception is `formqq-parser-test`, which unit-tests
   `Tidepool.FormQQ.Parse` directly host-side and so lists it under
   `other-modules` with `lib` on its own `hs-source-dirs` — that dependency is
-  real and expected to stay in sync, unlike the old blanket list this passage
-  used to describe.
+  real and expected to stay in sync. (Doc-history note on this passage's
+  prior wording: `plans/decision-archive/haskell.md`.)
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 
@@ -213,8 +224,6 @@ has the fix — `isLocal`/`localCallees`/`localCallers` (filtering on whether
 `.tidepool/lib/LspGraph.hs` has `transitiveLocalCallers`/`transitiveLocalCallees`
 composing that filter with the cycle-safe `walk` engine. **Default to the
 `transitiveLocal*` variants for any call-graph question** — the unscoped ones
-are for when external call sites are genuinely part of the question. (This
-scoping was already solved once, dated "2026-07-01, from the chart-noise
-finding" in `Lsp.hs`, and got silently re-derived from scratch in a later
-session purely because it wasn't written down anywhere a fresh session would
-see it before diving in — that's the reason this note exists.)
+are for when external call sites are genuinely part of the question. (Why
+this note exists — a prior fix silently re-derived from scratch because it
+wasn't written down: `plans/decision-archive/haskell.md`.)

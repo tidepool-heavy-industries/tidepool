@@ -10,7 +10,7 @@
 //! were never added to the import `hiding (…)` clause (only declaration binders
 //! were), so binding a Prelude name and then using it was ambiguous.
 //!
-//! Requires `TIDEPOOL_EXTRACT`; skips cleanly otherwise.
+//! Requires `TIDEPOOL_EXTRACT`; panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -25,10 +25,7 @@ use common::*;
 // can be intentionally shadowed by a pure bind exactly as an effectful one would.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn value_bind_shadows_prelude_name() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl.eval("let lookup = (42 :: Int)").await;

@@ -5,23 +5,9 @@ use crate::machine_state::machine_state;
 use crate::yield_type::{Yield, YieldError};
 use tidepool_heap::layout as heap_layout;
 
-// ---------------------------------------------------------------------------
-// GC-safe local roots (Finding 3 fix, repo-review-2026-07-06/01-gc-memory-safety.md)
-// ---------------------------------------------------------------------------
-//
-// `parse_result`'s E arm used to hold `result`/`continuation`/`union_ptr`/
-// `tag_ptr`/`request` as bare `*mut u8` locals across multiple `force_ptr`
-// calls (each a GC point via `heap_force`) with zero `register_rust_root`
-// calls — a GC landing between two of those forces could relocate an
-// already-resolved pointer this function was still holding, and the stale
-// value would later be dereferenced (or handed out in `Yield::Request` and
-// resumed against, live in the hot effect-dispatch path). `apply_cont_heap`
-// already had the right discipline (mark → register → force → truncate) but
-// as hand-rolled boilerplate at every call site. These two guards make that
-// discipline the default instead of a per-site ritual — used in both.
-
 /// A single heap pointer kept live across GC-capable operations (`force_ptr`,
-/// closure calls) for as long as this guard is alive.
+/// closure calls) for as long as this guard is alive: a stable root cell that
+/// GC updates in place, truncated from the root stack on drop.
 ///
 /// The registered root slot is a stable heap cell (`Box<*mut u8>`), NOT this
 /// guard's own stack address — the guard itself may be moved (e.g. returned
@@ -35,11 +21,11 @@ use tidepool_heap::layout as heap_layout;
 /// underlying root stack is LIFO, mirroring `register_rust_root`'s own
 /// scoping contract.
 ///
-/// `pub(crate)`: also used by `host_fns::force::deep_force` (M3) as a
-/// per-work-item root — a stack that continuously pushes/pops (unlike this
-/// module's fixed-for-its-lifetime continuation stack) needs registration
-/// scoped to EACH item's own lifetime rather than [`RootedStack`]'s
-/// whole-vec-at-once model.
+/// `pub(crate)`: also used by `host_fns::force::deep_force` as a per-work-item
+/// root — a stack that continuously pushes/pops (unlike this module's
+/// fixed-for-its-lifetime continuation stack) needs registration scoped to
+/// EACH item's own lifetime rather than [`RootedStack`]'s whole-vec-at-once
+/// model.
 pub(crate) struct RootedLocal {
     cell: Box<*mut u8>,
     vmctx: *mut VMContext,
@@ -91,11 +77,9 @@ impl Drop for RootedLocal {
 /// k2-continuation stack) as a GC root for this guard's lifetime.
 ///
 /// Holds `&mut Vec` for that lifetime: the borrow checker itself then forbids
-/// any push/pop on the stack while the guard is alive, which is exactly the
-/// "not pushed/popped while registered" invariant the manual mark/register/
-/// truncate blocks this replaces used to rely on hand-audited sequencing for
-/// — reallocating the Vec while its element addresses are registered as root
-/// slots would strand those roots.
+/// any push/pop on the stack while the guard is alive — reallocating the Vec
+/// while its element addresses are registered as root slots would strand
+/// those roots.
 struct RootedStack<'a> {
     vmctx: *mut VMContext,
     mark: usize,
@@ -550,8 +534,8 @@ impl CompiledEffectMachine {
             return std::ptr::null_mut();
         }
 
-        // GC-cluster reach (leaf 3): all rust-root register/mark/truncate
-        // calls in this function key on this machine's own vmctx.
+        // All rust-root register/mark/truncate calls in this function key on
+        // this machine's own vmctx.
         let vmctx = &mut self.vmctx as *mut VMContext;
 
         // `k`/`arg` are reassigned across loop iterations (Node descent,
@@ -872,9 +856,9 @@ impl CompiledEffectMachine {
         // The header stores size and num_fields as u16. Unbounded, `size as
         // u16` wraps at >= 8189 fields while num_fields stays correct — GC
         // evacuation then copies the wrapped size (fields LOST) and the
-        // cheney scan walks into garbage (proptest_heap_layout C2). Refuse at
-        // the bound the read side enforces; the null return routes through
-        // the caller's existing OOM/poison handling.
+        // Cheney scan walks into garbage. Refuse at the bound the read side
+        // enforces; the null return routes through the caller's existing
+        // OOM/poison handling.
         if fields.len() > heap_bridge::MAX_FIELDS {
             return std::ptr::null_mut();
         }

@@ -12,7 +12,7 @@
 //! nested/recursive ADTs (real con names, not `<unknown>`), Maybe/Either,
 //! structured JSON `Value` (Tier-0 + DataConTable), and lists.
 //!
-//! Each test skips cleanly when the session-aware extract is unavailable, and
+//! Each test panics loudly when the session-aware extract is unavailable, and
 //! The session auto-opens on the first `session_run`; teardown is implicit.
 //!
 //! Regression gate: these tests guard the now-fixed kind=4 TypeMetadata force bug
@@ -30,9 +30,7 @@ use serde_json::json;
 /// Text binds (Tier-0 deep_force of a Text heap object) + references back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_first_class_bind_and_reference() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("s <- pure (T.pack \"hi\")")
@@ -93,9 +91,7 @@ async fn text_first_class_bind_and_reference() {
 /// multi-module-inject context, not in the prior value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_with_prior_live_binding_diagnostic() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -124,9 +120,7 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
 /// The `m` bind action reads `k` through the seeded ExternalEnv.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bind_references_earlier_binding() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("k <- pure (5 :: Int)")
@@ -151,9 +145,7 @@ async fn bind_references_earlier_binding() {
 /// Proves the closure's captured session value (`base`) stays live across GC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closure_captures_binding_survives_gc() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("base <- pure (100 :: Int)")
@@ -190,9 +182,7 @@ async fn closure_captures_binding_survives_gc() {
 /// against the tenured heap value (not `<unknown>`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nested_recursive_adt_bind_and_sum() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("data Tree = Leaf Int | Node Tree Tree")
@@ -220,9 +210,7 @@ async fn nested_recursive_adt_bind_and_sum() {
 /// `mb <- pure (Just (7 :: Int))`; `case mb of { Just n -> n; Nothing -> 0 }` => 7.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maybe_bind_and_case() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("mb <- pure (Just (7 :: Int))")
@@ -242,9 +230,7 @@ async fn maybe_bind_and_case() {
 /// `case e of { Left a -> a; Right b -> b }` => 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn either_bind_and_case() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("e <- pure (Left (1 :: Int) :: Either Int Int)")
@@ -265,9 +251,7 @@ async fn either_bind_and_case() {
 /// Tier-0 structured value + DataConTable round-trip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn structured_json_value_bind_and_read() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("v <- pure (object [(\"a\", toJSON (1 :: Int)), (\"b\", toJSON (2 :: Int))])")
@@ -302,9 +286,7 @@ async fn structured_json_value_bind_and_read() {
 /// `pure (sum xs)` => 500500.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_bind_survives_gc() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("xs <- pure [1..1000 :: Int]")
@@ -344,9 +326,7 @@ async fn list_bind_survives_gc() {
 /// The closure is applied at bind time and its result rooted as a Tier-0 value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn function_applied_at_bind_time() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("g <- pure (\\n -> n * 2 :: Int)")
@@ -384,9 +364,7 @@ fn value_of(turn: &Turn) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn towire_list_of_int_renders_as_json_array() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     let out = repl.eval("pure ([1, 2, 3] :: [Int])").await;
     out.expect_ok("list of Int");
@@ -402,9 +380,7 @@ async fn towire_list_of_int_renders_as_json_array() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn towire_list_of_records_renders_as_array_of_show_leaves() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.def("data Pt = Pt { px :: Int, py :: Int } deriving Show")
         .await
@@ -429,9 +405,7 @@ async fn towire_list_of_records_renders_as_array_of_show_leaves() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn towire_string_and_text_stay_bare() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // A bare [Char]/String result stays a plain JSON string, not `["'h'",...]`.
@@ -450,9 +424,7 @@ async fn towire_string_and_text_stay_bare() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn towire_maybe_renders_as_null_or_payload() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // `Maybe` contributes the Just/Nothing -> payload/null structure; the Int
@@ -476,9 +448,7 @@ async fn towire_maybe_renders_as_null_or_payload() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn towire_bare_show_only_adt_still_hits_the_floor() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.def("data Color = Red | Green | Blue deriving Show")
         .await

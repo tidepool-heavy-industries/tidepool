@@ -11,16 +11,19 @@
 -- it references 'Harness'/'runLLMTurn' (the 'RunLLMTurn' effect WS-B adds).
 --
 -- Contract this freezes (see @plans/self-iterating-harness/02-runtime.md@,
--- @03-agent-surface.md@):
+-- @03-agent-surface.md@, and the runtime-context refactor recorded in
+-- @plans/self-iterating-harness/15-generic-surface-wave.md@):
 --
 --   * 'State' — any author-defined @(ToJSON s, FromJSON s) => s@. LOCKED.
 --     Small + typed ("bag of typed values": enums, levels, tag lists,
 --     per-loop notes, prior typed answers) — not an unbounded log; whether it
---     accumulates history is an author choice.
---   * 'render' @:: State -> Maybe Text -> Text@ — LOCKED signature. Invoked
---     by the runtime at loop boundaries ONLY, never per-turn (the 'Maybe
---     Text' is the prior loop's compaction summary, 'Nothing' only before
---     the first compaction).
+--     accumulates history is an author choice. Carries no loop-iteration
+--     counter — that is a runtime fact, tracked in the checkpoint envelope.
+--   * 'render' @:: State -> Text@ — LOCKED signature. Invoked by the runtime
+--     at loop boundaries ONLY, never per-turn. Domain policy only: the
+--     driver composes this output with the prior compaction summary, the
+--     loop-iteration count, and capability/finalization instructions into
+--     the full system message.
 --   * 'loop' @:: State -> Harness State@ — LOCKED signature. One context
 --     window's worth of orchestration, ending at a compaction boundary; the
 --     returned 'State' IS the durable memory carried into the next loop.
@@ -74,7 +77,6 @@ loop st = do
   pure
     st
       { mode = nextMode (mode st)
-      , loopCount = loopCount st + 1
       , notes = take 5 (action d : notes st)
       , lastDecision = Just d
       }

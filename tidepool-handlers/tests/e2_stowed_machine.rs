@@ -14,7 +14,8 @@
 //!      answer-channel abort did.
 //!
 //! Needs `TIDEPOOL_EXTRACT` (a built `tidepool-extract-bin`) + GHC on PATH;
-//! skips (passes) otherwise, like the other extract-dependent suites.
+//! panics loudly otherwise (see `require_ghc`) rather than skipping as a
+//! silent pass.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,20 @@ fn ghc_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Panic loudly instead of skipping (which nextest reports as PASS) when GHC
+/// / `TIDEPOOL_EXTRACT` aren't reachable. This GHC-tier suite is excluded
+/// from the default nextest filter, so this only fires on a direct
+/// `--ignore-default-filter` invocation missing the environment.
+fn require_ghc() {
+    if !ghc_available() {
+        panic!(
+            "GHC/TIDEPOOL_EXTRACT unavailable — this GHC-tier test cannot run vacuously. \
+             Set TIDEPOOL_EXTRACT and put GHC on PATH (or run inside `nix develop`), or run \
+             via scripts/battery.sh, which derives it."
+        );
+    }
 }
 
 fn prelude_include() -> PathBuf {
@@ -109,10 +124,7 @@ const DEFAULT_NURSERY: usize = 1 << 20; // 1 MiB
 /// on a fresh thread.
 #[tokio::test]
 async fn e2_suspend_resume_roundtrip() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     let engine = test_engine();
     let turn = start_turn_for("x <- ask SNum \"pick\"\npure x", DEFAULT_NURSERY);
     let cont_id = match engine.start_turn(turn).await {
@@ -155,10 +167,7 @@ async fn e2_suspend_resume_roundtrip() {
 /// would corrupt or collect it and the arithmetic would be wrong (or crash).
 #[tokio::test]
 async fn e2_stow_gc_resume_heap_intact() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     let engine = test_engine();
     // Small nursery so the post-resume `sum [1..5000]` forces GC.
     let code = "\
@@ -197,10 +206,7 @@ pure (n + filler + sum xs)";
 /// carries the "ask aborted by caller" message.
 #[tokio::test]
 async fn e2_abort_while_stowed() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     let engine = test_engine();
     let turn = start_turn_for("_ <- ask SNum \"cp\"\npure (0 :: Int)", DEFAULT_NURSERY);
     let cont_id = match engine.start_turn(turn).await {

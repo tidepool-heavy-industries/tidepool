@@ -13,7 +13,7 @@
 //! (e.g. type errors, non-tuple constructors) still loudly reject via a GHC
 //! compile error from the extract.
 //!
-//! Each test guards on `extract_available()` and skips cleanly otherwise.
+//! Each test guards on `require_extract()` and panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -23,9 +23,7 @@ use common::*;
 /// `let` path is healthy (multi-bind must NOT interfere with single binds).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_single_bind() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("let x = (5 :: Int)").await;
@@ -41,9 +39,7 @@ async fn let_single_bind() {
 /// Both are independently referenceable; `a + b == 3`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_both_components() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))").await;
@@ -82,9 +78,7 @@ async fn tuple_bind_both_components() {
 /// `x + y == 30`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_tuple_works() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl.eval("let (x, y) = ((10 :: Int), (20 :: Int))").await;
@@ -104,9 +98,7 @@ async fn let_tuple_works() {
 /// `p + q + r == 6`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_tuple_works() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl
@@ -127,9 +119,7 @@ async fn three_tuple_works() {
 /// `(a, b) <- pure (1, 2)` then `a + b == 3`. Kept as an independent guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_both_components_feature() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))")
@@ -151,9 +141,7 @@ async fn tuple_bind_both_components_feature() {
 /// collection, `a + b` would crash or produce garbage instead of 3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_components_survive_gc() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Bind the tuple.
@@ -195,9 +183,7 @@ async fn tuple_bind_components_survive_gc() {
 /// clean rejection. The session must remain usable after the error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mismatched_type_rejected_loudly() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl.eval("(a, b) <- pure (42 :: Int)").await;

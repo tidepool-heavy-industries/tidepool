@@ -69,18 +69,17 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         let result = f(vmctx, current);
                         truncate_rust_roots(vmctx, mark);
 
-                        // L1 (repo-review-2026-07-06/01-gc-memory-safety.md,
-                        // Low findings): a JIT call chain (App's
-                        // null_propagate_block / trampoline_resolve's
-                        // defensive "shouldn't happen" paths) can return null
-                        // WITHOUT setting has_runtime_error. Memoizing that
-                        // null as this thunk's indirection (the branch below
-                        // would otherwise do exactly that) leaves a null
-                        // pointer for a LATER force to dereference when it
-                        // follows THUNK_EVALUATED's indirection — segfault.
-                        // Guard it exactly like the code_ptr==0 case above:
-                        // record a real error and memoize the poison object
-                        // (never null) instead.
+                        // A JIT call chain (App's null_propagate_block /
+                        // trampoline_resolve's defensive "shouldn't happen"
+                        // paths) can return null WITHOUT setting
+                        // has_runtime_error. Memoizing that null as this
+                        // thunk's indirection (the branch below would
+                        // otherwise do exactly that) leaves a null pointer
+                        // for a LATER force to dereference when it follows
+                        // THUNK_EVALUATED's indirection — segfault. Guard it
+                        // exactly like the code_ptr==0 case above: record a
+                        // real error and memoize the poison object (never
+                        // null) instead.
                         if result.is_null() {
                             overwrite_runtime_error(RuntimeError::BadPointer);
                             *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
@@ -173,17 +172,17 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 const CON_FIELD_PTR_STRIDE: usize = 8;
 
 /// How many work items `deep_force` processes between external-cancellation
-/// checks (M3). A fully-evaluated structure (every field already a Con/Lit,
-/// nothing left to actually force) never triggers a GC and so never crosses
-/// `heap_force`'s own cancel-adjacent safepoints — for a large such structure
-/// (e.g. an already-forced million-element list handed back to `deep_force`
-/// again) the old loop had NO cancel check anywhere in it and was, in
-/// practice, unkillable until it walked the whole graph. This is a plain
-/// counter check (no GC point), so the interval can be small without being
-/// a meaningful cost center.
+/// checks. A fully-evaluated structure (every field already a Con/Lit,
+/// nothing left to force) never triggers a GC and so never crosses
+/// `heap_force`'s own cancel-adjacent safepoints — without this explicit
+/// counter check, a large such structure (e.g. an already-forced
+/// million-element list handed back to `deep_force` again) would be
+/// unkillable until it walked the whole graph. This is a plain counter check
+/// (no GC point), so the interval can stay small without being a meaningful
+/// cost center.
 const CANCEL_CHECK_INTERVAL: u32 = 4096;
 
-/// Force a heap value to **normal form** (NF), iteratively (Wave 1.B, component K).
+/// Force a heap value to **normal form** (NF), iteratively.
 ///
 /// Unlike [`heap_force`] (WHNF — stops at the outermost constructor), this drives
 /// the *entire* first-order (Tier-0) data spine to NF: it forces each node to
@@ -200,44 +199,31 @@ const CANCEL_CHECK_INTERVAL: u32 = 4096;
 ///
 /// GC-safety: forcing a thunk runs JIT code that can allocate and trigger a
 /// collection, relocating live objects. Each work item roots its own parent
-/// pointer via a [`RootedLocal`] (registered once when pushed, truncated once
-/// when popped — see the M3 doc block below for why this replaced a
-/// per-iteration full-stack re-registration), so the copying GC rewrites it
-/// in place and no pending pointer dangles. A field slot is recomputed from
-/// its (possibly relocated) parent *after* the force, never cached across it.
+/// pointer via a [`RootedLocal`] (a heap-stable `Box` cell, immune to the
+/// outer `Vec` reallocating), registered exactly once when pushed and
+/// truncated exactly once when popped, so the copying GC rewrites it in
+/// place and no pending pointer dangles. A field slot is recomputed from its
+/// (possibly relocated) parent *after* the force, never cached across it.
+/// This relies on `work` behaving as a strict LIFO stack (push child items
+/// only after popping+finishing their parent item), which keeps the
+/// per-item registrations perfectly nested with the global rust_roots stack;
+/// do not reorder pops/pushes without re-checking that invariant — breaking
+/// it lets a root dangle into a `Vec` slot that has since been reused.
 ///
-/// ## M3 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings)
+/// Dedup: a value like `iterate (\v -> (v,v)) x !! 40` shares the SAME
+/// sub-object from both fields of every level, so an unforced traversal
+/// would re-descend into it at every level — 2^40 for a depth-40 tower.
+/// `visited` (keyed by object ADDRESS) skips re-pushing a `Con`'s fields
+/// once already queued. Because the GC can relocate objects (and later
+/// reuse a vacated address for something unrelated), a raw address-keyed
+/// set is only trustworthy between two points with no collection in
+/// between: `gc_generation()` is snapshotted around every [`heap_force`]
+/// call, and any change clears `visited` entirely rather than risk a false
+/// "already visited" hit on a coincidentally-reused address. This only ever
+/// costs a redundant (but bounded, non-exponential) re-descent right after a
+/// collection, never a correctness bug.
 ///
-/// Three fixes over the original version, all in this one function:
-///
-/// - **O(n²) root re-registration**: the old loop re-registered EVERY still-
-///   pending work item as a root on EVERY iteration (a fresh
-///   register-then-immediately-truncate scan over the whole remaining
-///   stack), because a work item was a bare `*mut u8` inside a `Vec` that
-///   reallocates as it grows — any root registered at a raw address into
-///   that `Vec`'s backing buffer would dangle across a later `push`. Each
-///   item now carries its OWN [`RootedLocal`] (a heap-stable `Box` cell,
-///   immune to the outer `Vec` reallocating) registered exactly once at push
-///   time and dropped (truncating exactly that one registration) exactly
-///   once at pop time — O(1) amortized per item instead of O(n) per pop.
-///   This relies on `work` behaving as a strict LIFO stack (push child items
-///   only after popping+finishing their parent item), which keeps the
-///   per-item registrations perfectly nested with the global rust_roots
-///   stack; do not reorder pops/pushes without re-checking that invariant.
-/// - **No visited set (exponential blowup on shared DAGs)**: a value like
-///   `iterate (\v -> (v,v)) x !! 40` shares the SAME sub-object from both
-///   fields of every level, so an unforced traversal re-descends into it at
-///   every level — 2^40 for a depth-40 tower. `visited` (keyed by object
-///   ADDRESS) skips re-pushing a `Con`'s fields once already queued. Because
-///   the GC can relocate objects (and later reuse a vacated address for
-///   something unrelated), a raw address-keyed set is only trustworthy
-///   between two points with no collection in between: `gc_generation()` is
-///   snapshotted around every [`heap_force`] call, and any change clears
-///   `visited` entirely rather than risk a false "already visited" hit on a
-///   coincidentally-reused address. This only ever costs a redundant (but
-///   bounded, non-exponential) re-descent right after a collection, never a
-///   correctness bug.
-/// - **No cancel safepoint**: see [`CANCEL_CHECK_INTERVAL`].
+/// Cancel safepoint: see [`CANCEL_CHECK_INTERVAL`].
 ///
 /// Returns the (possibly relocated) NF root pointer, or the error poison pointer
 /// if forcing raised a runtime error.
@@ -263,7 +249,7 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
         let base_mark = rust_roots_mark(vmctx);
         register_rust_root(vmctx, &mut nf_root as *mut *mut u8);
 
-        // Address-keyed dedup for shared sub-graphs (M3); see the doc block.
+        // Address-keyed dedup for shared sub-graphs; see the doc block.
         let mut visited: FxHashSet<usize> = FxHashSet::default();
 
         // Work items are (rooted parent pointer, field index). The field index
@@ -325,7 +311,7 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
 /// Push `(rooted parent, i)` for each field index of a `Con` object onto
 /// `work`, registering each as its own GC root. No-op for non-`Con` objects
 /// (`Lit` leaves; `Closure`/PAP = Tier-1, not descended) OR an `obj` already
-/// present in `visited` (M3: a shared sub-graph is only ever queued once).
+/// present in `visited` (a shared sub-graph is only ever queued once).
 ///
 /// # Safety
 /// `obj` must be a valid heap-object pointer; `vmctx` must be a valid, live
@@ -567,7 +553,7 @@ mod tests {
         });
     }
 
-    /// L1: a thunk entry can return null (App's `null_propagate_block` /
+    /// A thunk entry can return null (App's `null_propagate_block` /
     /// `trampoline_resolve`'s defensive "shouldn't happen" paths) without
     /// `has_runtime_error()` being set. Memoizing that null as the thunk's
     /// indirection would leave a null pointer for a LATER force to
@@ -643,12 +629,13 @@ mod tests {
         });
     }
 
-    /// M3: a large, ALREADY-EVALUATED (thunk-free) linear Con chain gives
+    /// A large, ALREADY-EVALUATED (thunk-free) linear Con chain gives
     /// `heap_force` nothing to allocate for, so it never reaches a GC point —
     /// the only way `deep_force` can observe an external cancellation is the
-    /// EXPLICIT periodic check added in this fix. Pre-set the cancel flag,
-    /// then confirm a chain several `CANCEL_CHECK_INTERVAL`s long bails with
-    /// `RuntimeError::Cancelled` instead of walking to the end.
+    /// explicit periodic check ([`CANCEL_CHECK_INTERVAL`]). Pre-set the
+    /// cancel flag, then confirm a chain several `CANCEL_CHECK_INTERVAL`s
+    /// long bails with `RuntimeError::Cancelled` instead of walking to the
+    /// end.
     #[test]
     fn test_deep_force_observes_cancel_with_no_gc_points() {
         use crate::machine_state::{

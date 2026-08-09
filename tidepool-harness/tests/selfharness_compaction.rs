@@ -27,6 +27,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -36,14 +38,6 @@ use tidepool_harness::provider::{
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -132,6 +126,7 @@ impl ModelProvider for InPlaceProbeProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -160,6 +155,7 @@ impl ModelProvider for InPlaceProbeProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -170,10 +166,8 @@ impl ModelProvider for InPlaceProbeProvider {
 /// and the SECOND hole runs under it. The summary reaches the next render.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let second_hole = Arc::new(Mutex::new(None));
     let provider: Arc<dyn DynModelProvider> = Arc::new(InPlaceProbeProvider {
@@ -200,6 +194,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one two-hole cycle with a mid-loop compaction");
 
     // (1) The mid-loop compaction produced its Text.
@@ -227,7 +222,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         "both holes' answers must fold into State — the loop continued past compaction"
     );
 
-    // (2) The compaction Text reaches the NEXT render's `Maybe Text`.
+    // (2) The compaction Text reaches the NEXT render_framing composition.
     assert!(
         outcome
             .prompt_after
@@ -295,6 +290,7 @@ impl ModelProvider for MultiRoundProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -309,6 +305,7 @@ impl ModelProvider for MultiRoundProvider {
                 text: "```haskell\n(finalize @Text (\"blue\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -328,12 +325,14 @@ impl ModelProvider for MultiRoundProvider {
                 text: "thinking about fruit...".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         } else {
             Ok(TurnResponse {
                 text: "```haskell\n(finalize @Text (\"apple\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         }
     }
@@ -345,10 +344,8 @@ impl ModelProvider for MultiRoundProvider {
 /// NOT compact — asserts the threshold reads the last-turn input, not the sum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_multiround_highwater_does_not_overcount() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let saw_summarize = Arc::new(Mutex::new(false));
     let provider: Arc<dyn DynModelProvider> = Arc::new(MultiRoundProvider {
@@ -379,6 +376,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("two-hole cycle, multi-round first hole, NO compaction");
 
     assert!(

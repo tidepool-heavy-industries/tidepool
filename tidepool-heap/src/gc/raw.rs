@@ -16,15 +16,9 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
 /// Process-global test override for `checked_scanning_enabled`: 0 = unset
 /// (defer to `TIDEPOOL_HEAP_VERIFY`), 1 = force on, 2 = force off.
 /// `env::set_var` is racy against the `OnceLock`-cached env read below (it
-/// latches the FIRST read); this atomic gives tests a reliable, safe way to
-/// force checked scanning on/off without touching the environment — in
-/// EITHER direction, unlike the OR-only `AtomicBool` shape this otherwise
-/// mirrors from `tidepool-codegen/src/host_fns/gc.rs`'s
-/// `heap_verify_enabled`/`gc_poison_enabled`: those can only add force-on on
-/// top of the env var, never retract it, which is fine for codegen's own
-/// gates but would leave a test with no way to reach normal mode once
-/// `TIDEPOOL_HEAP_VERIFY=1` is set in the environment — exactly the
-/// condition this crate's own test suite needs to exercise.
+/// latches the FIRST read), so tests need a way to force checked scanning
+/// on or off in EITHER direction without touching the environment —
+/// including forcing it off when `TIDEPOOL_HEAP_VERIFY=1` is already set.
 static CHECKED_SCANNING_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Test-only: force diagnostic checked scanning on (`true`) or off (`false`),
@@ -226,9 +220,8 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                 // BLACKHOLE = mid-evaluation: the thunk's code may still read
                 // its capture slots AFTER a GC its own allocations triggered,
                 // so captures must be evacuated and the slots updated exactly
-                // like an unevaluated thunk's. Skipping them (the old `_ => {}`)
-                // left blackhole captures invisible to GC — stale from-space
-                // pointers on resume (proptest_heap_layout C6).
+                // like an unevaluated thunk's — otherwise a resumed blackhole
+                // holds stale from-space pointers.
                 THUNK_UNEVALUATED | THUNK_BLACKHOLE => {
                     // SAFETY: Thunk captures are pointer slots from
                     // THUNK_CAPTURED_OFFSET to end of object (determined by
@@ -720,9 +713,9 @@ mod tests {
             });
             assert_eq!(count, 0, "header-only blackhole has no capture region");
 
-            // C6 FIX (2026-06-11): a blackhole WITH captures must have them
-            // visited exactly like an unevaluated thunk — its code may still
-            // read the slots after a GC it triggered itself.
+            // A blackhole WITH captures must have them visited exactly like
+            // an unevaluated thunk — its code may still read the slots after
+            // a GC it triggered itself.
             let ptr2 = buf.as_mut_ptr().add(64);
             write_header(ptr2, TAG_THUNK, 24 + 8 * 3);
             *ptr2.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;

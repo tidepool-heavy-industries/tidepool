@@ -23,11 +23,9 @@ impl<'a> EffectMachine<'a> {
     /// Resolves each freer continuation constructor qualified-name-first
     /// (mirroring the JIT sibling, `tidepool-codegen`'s
     /// `effect_machine::ConTags::try_from`): a bare `get_by_name` returns
-    /// `None` on ambiguity, so any effectful program defining/importing a
-    /// colliding `Node`/`Leaf`/`Val`/`E`/`Union` (e.g. `data Tree = Node Tree
-    /// Tree | Leaf Int`) previously made the oracle misreport
-    /// `MissingConstructor` for a constructor that was merely AMBIGUOUS, not
-    /// absent (#F5).
+    /// `None` on ambiguity, so this must not treat an ambiguous bare name
+    /// (e.g. a user's own `data Tree = Node Tree Tree | Leaf Int` colliding
+    /// with the freer `Node`/`Leaf`/`Val`/`E`/`Union`) as `MissingConstructor`.
     pub fn new(table: &'a DataConTable, heap: &'a mut dyn Heap) -> Result<Self, EffectError> {
         use crate::freer_names as names;
         let val_id = names::resolve(table, names::VAL_QUALIFIED, names::VAL)
@@ -76,8 +74,8 @@ impl<'a> EffectMachine<'a> {
             match forced {
                 Value::Con(id, ref fields) if id == self.val_id => {
                     // Val x — pure result, done. Deep force to eliminate any ThunkRefs.
-                    // Strict arity (S2-F1): a zero-field Val previously became a
-                    // fabricated LitInt(0) — silent garbage instead of an error.
+                    // Arity is checked, not assumed: a malformed zero-field Val
+                    // must be a hard error, not a fabricated placeholder value.
                     if fields.len() != 1 {
                         return Err(EffectError::FieldCountMismatch {
                             constructor: "Val",
@@ -171,15 +169,14 @@ impl<'a> EffectMachine<'a> {
 
     /// Apply a continuation tree to a value.
     ///
-    /// ITERATIVE (S2-B3): the old version recursed both down `Node`'s left
-    /// spine and through the `Val` tail call, so a ~800-deep queue overflowed
-    /// the host stack (and the eval ORACLE with it). This is the same
-    /// computation as a zipper: descend the left spine pushing each pending
-    /// `k2` onto an explicit stack; on `Val(y)` pop the next `k2` and loop;
-    /// on `E(union, k')` fold ALL pending continuations into the
-    /// right-nested composition the recursive version built one frame at a
-    /// time. Heap depth is the only remaining recursion (inside
-    /// `eval::force`, bounded by indirection chains, not queue length).
+    /// Must stay iterative: a long effect chain builds a deep `Node`
+    /// left-spine, and recursing down it (plus the `Val` tail call) can
+    /// overflow the host stack. Instead this walks like a zipper — descend
+    /// the left spine pushing each pending `k2` onto an explicit stack; on
+    /// `Val(y)` pop the next `k2` and loop; on `E(union, k')` fold ALL
+    /// pending continuations into one right-nested composition. Heap depth
+    /// (inside `eval::force`, bounded by indirection chains) is the only
+    /// remaining recursion — queue length no longer bounds it.
     fn apply_cont(&mut self, k: Value, arg: Value) -> Result<Value, EffectError> {
         // Pending right-continuations, outermost first (pop order = innermost).
         let mut pending: Vec<Value> = Vec::new();
@@ -237,8 +234,8 @@ impl<'a> EffectMachine<'a> {
             match forced {
                 Value::Con(vid, ref vfields) if vid == self.val_id => {
                     // Val(y) — feed y to the innermost pending continuation.
-                    // Strict arity (S2-F1): no fabricated LitInt(0) for a
-                    // malformed zero-field Val.
+                    // Arity is checked: a malformed zero-field Val is a hard
+                    // error, not a fabricated placeholder value.
                     if vfields.len() != 1 {
                         return Err(EffectError::FieldCountMismatch {
                             constructor: "Val",
@@ -369,7 +366,7 @@ mod tests {
         table
     }
 
-    /// #F5: a user program defining/importing its own `Node`/`Leaf` (e.g.
+    /// A user program defining/importing its own `Node`/`Leaf` (e.g.
     /// `data Tree = Node Tree Tree | Leaf Int`, colliding on the bare name
     /// with the freer continuation constructors) must not make the oracle
     /// misreport `MissingConstructor` — `EffectMachine::new` must resolve the

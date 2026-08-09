@@ -676,8 +676,8 @@ macro_rules! ask_effect_def {
 /// [`effect_decl_projection!`] consumes this definition, so the
 /// `handler`/`req`/`method` slots name types that are never generated.
 ///
-/// The typed surface a caller writes is `askUser :: Form a -> M a`
-/// (`Tidepool.Form`, built by a parallel Haskell workstream); `askUserRaw ::
+/// The typed surface a caller writes is `askUser @T` (`Tidepool.Form`, which
+/// derives the form from `T`'s own `Generic` representation); `askUserRaw ::
 /// Value -> M Value` here is the raw escape hatch it is built on — the ONE
 /// frozen cross-agent contract name this definition exists to provide.
 #[macro_export]
@@ -690,10 +690,14 @@ macro_rules! askuser_effect_def {
             decl_fn askuser_decl,
             description [
                 "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
-                "The typed surface is `askUser :: Form a -> M a` (`import Tidepool.Form`), ",
-                "built applicatively from `enumField`/`intField`/`textField`/`boolField` and ",
-                "decoding the submission into your type (re-prompting internally on a bad ",
-                "submission). `askUserRaw :: Value -> M Value` is the raw escape hatch it is ",
+                "`askUser @T` presents a human form and returns `T`. Define `T` using ordinary ",
+                "records and constructors, derive `Generic` for it and any nested custom types, ",
+                "and end fields in `Text`, `Int`, `Double`, or `Bool`. Constructors are choices, ",
+                "record fields are named inputs, and `Maybe a` is optional; a bad submission ",
+                "re-prompts internally, so there is no `Either` to unwrap. For alternatives that ",
+                "exist only as runtime values, `choose :: [(Text, a)] -> M a` and ",
+                "`chooseMany :: [(Text, a)] -> M [a]` take (label, value) pairs. ",
+                "`askUserRaw :: Value -> M Value` is the raw escape hatch these are ",
                 "built on, carrying the form spec as JSON directly.",
             ],
             type_defs [],

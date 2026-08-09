@@ -4,6 +4,21 @@ Measurement only. Nothing in this document proposes a fix; the attribution
 report (`11-turn-latency-report.md`) ranks candidates, and a later wave picks
 one.
 
+> **CORRECTION (extract-wave audit, 2026-08-08) — read before citing any
+> number from this contract:** (1) The phase rows do not bracket what their
+> names say: `load'` — which parses, typechecks, AND core2cores every home
+> module — runs INSIDE the row labelled `ghc_session`, so "26–32% session
+> boot" includes a full first compile, and the `typecheck`/`core` rows sum
+> only the SECOND loop. "Under 6% typecheck" therefore does NOT refute the
+> home-module typecheck suspicion (it measures one of two typechecks); the
+> suspicion is OPEN, and C1 (double compile) is CONFIRMED in code with
+> unknown size. (2) Every number here is TURN-1-ONLY: `runSessionPipeline`
+> emits zero `emitPhase` calls and all session-scope turns (turn 2+ of any
+> real dogfood run — the ones carrying E2's compounding chain) route
+> there, unmeasured. Read the 60/26/6 split as "turn 1", never "a turn".
+> Anchors and the corrected re-aiming live in
+> `plans/post-restart/extract-wave.md` (extract-wave branch, ecfc4eb1).
+
 ## The pipeline one answerer round walks
 
 `SelfHarnessDriver::drive_answerer_to_finalize` loops over

@@ -127,16 +127,13 @@ fn bootstrap(
     .expect("bootstrap the resident machine")
 }
 
-fn setup() -> Option<EvalHarness> {
-    if !eval_harness::extract_available() {
-        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
-        return None;
-    }
+fn setup() -> EvalHarness {
+    eval_harness::require_extract();
     // The mock preamble imports `Tidepool.Prelude`/`Tidepool.Aeson.KeyMap`,
     // so the stdlib `lib/` must be on the include path (`.with_stdlib()`); the
     // self-contained GADT preamble means NO `.tidepool/lib` verb-library
     // dependency.
-    Some(EvalHarness::new().with_stdlib())
+    EvalHarness::new().with_stdlib()
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +146,7 @@ fn setup() -> Option<EvalHarness> {
 /// subsequent turn sees state the suspend/resume turn wrote (resident KV).
 #[test]
 fn multi_turn_accumulates_across_suspend_resume() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     // Bootstrap from a trivial effectful turn (seeds the 10-effect ConTags).
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
@@ -260,7 +257,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
 /// yield hosts child fragment runs — including GC-forcing ones — and resumes.
 #[test]
 fn nested_child_runs_while_parent_suspended_then_resumes() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     // Small nursery so a child's allocation forces a real collection with the
     // parent's continuation stowed and GC-rooted.
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (0 :: Int)");
@@ -375,7 +372,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
 /// a nested child requires a suspended parent (segment 40).
 #[test]
 fn run_child_on_idle_session_is_not_suspended() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
     match session.run_child(
@@ -389,12 +386,86 @@ fn run_child_on_idle_session_is_not_suspended() {
     }
 }
 
+/// Codex review item 9 (HIGH, `codex-review-2026-08-08.md`): a resume answer
+/// that fails the JIT's A5 NF-force (a bottom/unforced-thunk answer,
+/// `jit_machine.rs`'s `resume_suspended_inner` around :1328) must NOT wedge
+/// the session. The machine deliberately leaves the continuation stowed on
+/// that rejection so the caller can retry with a corrected answer —
+/// `ResidentSession` must track that, not blindly clear `pending` before the
+/// machine is even called. Before the fix this wedged: `pending` cleared
+/// unconditionally in `reenter`, `is_idle()` lied `true`, a corrected resume
+/// was rejected as `WrongContinuation` (pending already gone), and a
+/// subsequent top-level turn would panic on the machine's stowed-
+/// continuation `assert!` (caught by `catch_unwind` and surfaced as a run
+/// error here, not a raw panic — see `on_eval_thread`).
+#[test]
+fn retryable_resume_failure_does_not_wedge_the_session() {
+    let harness = setup();
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
+
+    let (t1_expr, t1_table) = compile_turn(
+        &harness,
+        "result :: M Value\nresult = do\n  \
+           n <- send (Ask \"pick a number\")\n  \
+           pure n",
+    );
+    let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at `ask`"),
+    };
+
+    // A bottom-bearing answer (an unforced thunk reference): the JIT's A5
+    // NF-force rejects it WITHOUT consuming the stowed continuation.
+    let bottom = Value::ThunkRef(tidepool_eval::value::ThunkId(999));
+    match session.resume(&hole, bottom) {
+        Err(_) => {}
+        Ok(outcome) => panic!("a bottom-bearing answer must be rejected; got {outcome:?}"),
+    }
+
+    // (a) The session must still report suspended, not idle — the machine
+    // did not consume the continuation on a retryable rejection.
+    assert!(
+        !session.is_idle(),
+        "a retryable resume failure must leave the session suspended, not idle"
+    );
+    assert_eq!(
+        session.pending_continuation(),
+        Some(hole.as_str()),
+        "the same hole stays pending after a retryable rejection"
+    );
+
+    // (b) A corrected resume on the SAME hole must succeed.
+    match session
+        .resume(&hole, int(42))
+        .expect("corrected resume on the same hole succeeds")
+    {
+        ResidentOutcome::Completed { result, .. } => {
+            assert_eq!(result.to_json(), serde_json::json!(42));
+        }
+        ResidentOutcome::Suspended { .. } => panic!("corrected resume should complete"),
+    }
+    assert!(
+        session.is_idle(),
+        "the session is idle after the corrected resume completes"
+    );
+
+    // (c) A subsequent top-level turn must run cleanly to completion — no
+    // stowed-continuation assertion failure from the earlier rejection.
+    let (t2_expr, t2_table) = compile_turn(&harness, "result :: M Int\nresult = pure (7 :: Int)");
+    match session.run("t2", &t2_expr, &t2_table) {
+        Ok(ResidentOutcome::Completed { result, .. }) => {
+            assert_eq!(result.to_json(), serde_json::json!(7));
+        }
+        other => panic!("post-recovery turn must complete cleanly; got {other:?}"),
+    }
+}
+
 /// A plain (non-suspending) resident turn completes and returns its value, and
 /// a following turn reuses the same machine — the base residency path with no
 /// ask involved.
 #[test]
 fn plain_turns_reuse_the_machine() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
     for expected in [11i64, 22, 33] {

@@ -1,4 +1,4 @@
-//! Session registry — the resident-machine lifecycle guardian (segment 20).
+//! Session registry — the resident-machine lifecycle guardian.
 //!
 //! A `HashMap<SessionId, Slot<M>>` where `Slot` (defined in [`crate::tree`]) is
 //! `Idle(M) | Running | Suspended { machine, hole }`. Every machine access goes
@@ -8,8 +8,8 @@
 //! side-channel access while running).
 //!
 //! Generic over the machine handle `M` so this crate stays free of the JIT
-//! dependency — segment 20's `tidepool-runtime::session::ResidentSession` is the
-//! `M` the harness instantiates.
+//! dependency — `tidepool-runtime::session::ResidentSession` is the `M` the
+//! harness instantiates.
 //!
 //! # Lifecycle transitions are atomic at the dispatch boundary
 //!
@@ -28,7 +28,8 @@
 //! # Segment boundary
 //!
 //! A `Suspended` session REJECTS a new-turn checkout ([`CheckoutError::Suspended`])
-//! — nested child runs on a stowed continuation are segment 40's job. Here a
+//! — nested child runs on a stowed continuation are handled elsewhere
+//! ([`SessionRegistry::checkout_child`]). Here a
 //! suspended session accepts only a resume/abort checkout keyed by its hole.
 
 use std::collections::HashMap;
@@ -61,7 +62,8 @@ pub enum CheckoutError {
     /// A new TOP-LEVEL turn was attempted on a suspended session. A suspended
     /// session accepts only a resume/abort of its pending hole
     /// (`checkout_resume`) or a nested child run against it (`checkout_child`,
-    /// segment 40) — never a fresh top-level turn while suspended.
+    /// [`SessionRegistry::checkout_child`]) — never a fresh top-level turn while
+    /// suspended.
     #[error("session {session} is suspended on {hole:?}; resume or abort it first")]
     Suspended { session: SessionId, hole: HoleId },
     /// A resume/abort referenced a hole that is not the one this session is
@@ -117,6 +119,21 @@ impl<M> SessionRegistry<M> {
         matches!(self.slots.lock().get(&id), Some(Slot::Idle(_)))
     }
 
+    /// Read-only access to the machine WITHOUT checking it out — only
+    /// succeeds when the machine is actually present in its slot (`Idle` or
+    /// `Suspended`; a `Running`/`RunningChild` machine is out on a turn, so
+    /// there is nothing here to borrow). Used for cheap metadata reads (decl-
+    /// plane context, heap stats) that must not disturb the checkout
+    /// discipline or race a real checkout — the lock is held only for the
+    /// duration of `f`.
+    pub fn peek<R>(&self, id: SessionId, f: impl FnOnce(&M) -> R) -> Option<R> {
+        match self.slots.lock().get(&id) {
+            Some(Slot::Idle(m)) => Some(f(m)),
+            Some(Slot::Suspended { machine, .. }) => Some(f(machine)),
+            _ => None,
+        }
+    }
+
     /// The hole a session is suspended on, if any. A session with a nested
     /// child mid-run (`RunningChild`) is still suspended on its hole.
     pub fn pending_hole(&self, id: SessionId) -> Option<HoleId> {
@@ -129,7 +146,8 @@ impl<M> SessionRegistry<M> {
 
     /// Check a machine OUT for a new turn: `Idle → Running`, moving the machine
     /// onto the returned [`Checkout`]. Refuses a running or suspended session
-    /// (the latter is segment 40's boundary). The lock is released with the slot
+    /// (the latter is [`SessionRegistry::checkout_child`]'s job). The lock is
+    /// released with the slot
     /// left `Running`; the caller runs the turn, then restores via the
     /// `Checkout`.
     pub fn checkout_run(&self, id: SessionId) -> Result<Checkout<'_, M>, CheckoutError> {
@@ -202,7 +220,7 @@ impl<M> SessionRegistry<M> {
     }
 
     /// Check a machine OUT for a NESTED CHILD run against its suspended parent
-    /// (segment 40): `Suspended{hole} → RunningChild{hole}`, keeping the hole so
+    /// `Suspended{hole} → RunningChild{hole}`, keeping the hole so
     /// the parent stays suspended. The child restores via
     /// [`Checkout::restore_suspended`] with the SAME hole. Refuses a session
     /// that is not suspended, already running, or running another child.
@@ -322,6 +340,26 @@ impl<M> Checkout<'_, M> {
     }
 }
 
+/// Panic safety net: if a `Checkout` is dropped while it still owns the
+/// machine (an explicit `restore_idle`/`restore_suspended`/`abandon` never
+/// ran — e.g. a panic unwound through the turn between checkout and
+/// restore), restore it as `Idle` rather than leaving the slot `Running`
+/// forever. `restore_idle`/`restore_suspended`/`abandon` all `take()` the
+/// machine first, so `Drop` sees `None` and does nothing on every explicit
+/// exit path — this only fires on the unwound case.
+///
+/// This does NOT cover [`Checkout::take`]: once the machine has been moved
+/// off the checkout (e.g. onto a blocking thread), `Drop` has nothing to
+/// restore — a caller that loses the machine that way (a `JoinError`) must
+/// retire the session explicitly instead (the harness's `terminate_node`).
+impl<M> Drop for Checkout<'_, M> {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            self.registry.restore_idle(self.id, machine);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,7 +417,7 @@ mod tests {
         co.restore_suspended(hole("scont_1"));
         assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
 
-        // A NEW run is rejected while suspended (segment-20 boundary).
+        // A NEW run is rejected while suspended.
         assert_eq!(
             err(reg.checkout_run(id)),
             CheckoutError::Suspended {
@@ -431,7 +469,7 @@ mod tests {
         );
     }
 
-    /// Segment 40: a suspended session hosts a nested child run
+    /// A suspended session hosts a nested child run
     /// (`Suspended → RunningChild → Suspended`), and while the child is mid-run
     /// the parent's resume/abort and a new top-level run are all rejected
     /// cleanly (sequential-isolated). After the child restores, the parent is
@@ -503,6 +541,61 @@ mod tests {
         let id = SessionId(6);
         reg.insert_idle(id, FakeMachine { turns: 0 });
         assert_eq!(err(reg.checkout_child(id)), CheckoutError::NotSuspended(id));
+    }
+
+    #[test]
+    fn peek_reads_idle_and_suspended_but_not_running() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(10);
+        reg.insert_idle(id, FakeMachine { turns: 3 });
+        assert_eq!(reg.peek(id, |m| m.turns), Some(3));
+
+        let co = reg.checkout_run(id).expect("idle -> run");
+        assert_eq!(
+            reg.peek(id, |m| m.turns),
+            None,
+            "a checked-out (Running) machine has nothing to peek"
+        );
+        co.restore_suspended(hole("scont_peek"));
+        assert_eq!(
+            reg.peek(id, |m| m.turns),
+            Some(3),
+            "a suspended machine is still present in its slot"
+        );
+
+        assert_eq!(reg.peek(SessionId(999), |m: &FakeMachine| m.turns), None);
+    }
+
+    /// Closes step 5: a `Checkout` dropped WITHOUT an explicit restore (a
+    /// panic unwinding between checkout and restore) must not leave the slot
+    /// `Running` forever — `Drop` restores it `Idle`, with the machine's
+    /// mutations from before the panic intact.
+    #[test]
+    fn dropping_a_checkout_without_restoring_recovers_idle() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(11);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut co = reg.checkout_run(id).expect("idle -> run");
+            co.machine().turns += 1;
+            panic!("simulated turn panic between checkout and restore");
+        }));
+        assert!(result.is_err(), "the closure must have panicked");
+
+        assert!(
+            reg.is_idle(id),
+            "a Checkout dropped by an unwinding panic must restore Idle, not leave the slot wedged"
+        );
+        let mut co = reg
+            .checkout_run(id)
+            .expect("the session must be usable again after the panic");
+        assert_eq!(
+            co.machine().turns,
+            1,
+            "the machine's pre-panic mutation survived the Drop-recovery round trip"
+        );
+        co.restore_idle();
     }
 
     #[test]

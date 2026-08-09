@@ -337,22 +337,18 @@ fn entry_is_scaffold(entry_text: &str, opts: &RenderOpts<'_>) -> bool {
 /// Drop scaffold entries from a `Relevant bindings include` list INSIDE one
 /// diagnostic's own message text, by comparing each entry's own `(bound at
 /// file:line:col)` span against `opts.user_lines` — never by matching a
-/// binder-name list against GHC's rendered wording (the whole point of the
-/// structured-diagnostics migration). This is narrower than the whole-
-/// diagnostic span partition `render_diagnostics` does above: a diagnostic can
-/// legitimately survive that partition (its span IS on the user's own line)
-/// while GHC's own explanation for it still cites a scaffold binder — e.g. an
-/// ambiguous type variable arising from `pure` inside the `__b = pure (...)`
-/// wrapper binding, whose "Relevant bindings include __b :: ..." entry is
-/// GHC's own text, not a separate droppable diagnostic. `GhcPipeline`'s
-/// `maxRelevantBinds = Just 0` suppresses most of these at the source but GHC
-/// can still print a residual single entry alongside a "(Some bindings
-/// suppressed …)" footer — this mops that up. If dropping scaffold entries
-/// empties the region, the header and footer go too (an empty list is worse
-/// noise than no list). A wrapped/multi-line entry's continuation lines are
-/// collected together with its own `" :: "` line before classifying (GHC puts
-/// `(bound at ...)` on the LAST physical line of a wrapped entry), so they're
-/// dropped or kept as one group — never orphaned as leftover garbled text.
+/// binder-name list against GHC's rendered wording. A diagnostic can
+/// legitimately survive the whole-diagnostic span partition (its own span IS
+/// on the user's own line) while GHC's own explanation for it still cites a
+/// scaffold binder — e.g. an ambiguous type variable arising from `pure`
+/// inside the `__b = pure (...)` wrapper binding, whose "Relevant bindings
+/// include __b :: ..." entry is GHC's own text, not a separate droppable
+/// diagnostic. If dropping scaffold entries empties the region, the header
+/// and footer go too (an empty list is worse noise than no list). A
+/// wrapped/multi-line entry's continuation lines are collected together with
+/// its own `" :: "` line before classifying (GHC puts `(bound at ...)` on the
+/// LAST physical line of a wrapped entry), so they're dropped or kept as one
+/// group — never orphaned as leftover garbled text.
 #[must_use]
 fn drop_scaffold_relevant_binds(message: &str, opts: &RenderOpts<'_>) -> String {
     let lines: Vec<&str> = message.lines().collect();
@@ -691,16 +687,15 @@ mod tests {
         assert!(got.starts_with("SomeExpr.hs:3:1: error:"), "{got}");
     }
 
-    /// Found live 2026-07-08 through the real repl bind path: an ambiguous
-    /// `pure` diagnostic that legitimately survives the span partition (it's
-    /// on the user's own line) still carries GHC's own "Relevant bindings
-    /// include __b :: ..." text, since `maxRelevantBinds = Just 0` only
-    /// minimizes (not eliminates) the list — this is INSIDE a kept
-    /// diagnostic's message, not a separate droppable diagnostic. `__b`'s OWN
-    /// `(bound at ...)` here is on the scaffold-preamble line (1), distinct
-    /// from the diagnostic's own span (line 2, the user's line) — span-based
-    /// classification drops it because ITS span, not the diagnostic's, falls
-    /// outside `user_lines`.
+    /// An ambiguous `pure` diagnostic that legitimately survives the span
+    /// partition (it's on the user's own line) can still carry GHC's own
+    /// "Relevant bindings include __b :: ..." text, since `maxRelevantBinds =
+    /// Just 0` only minimizes (not eliminates) the list — this is INSIDE a
+    /// kept diagnostic's message, not a separate droppable diagnostic. `__b`'s
+    /// OWN `(bound at ...)` here is on the scaffold-preamble line (1),
+    /// distinct from the diagnostic's own span (line 2, the user's line) —
+    /// span-based classification drops it because ITS span, not the
+    /// diagnostic's, falls outside `user_lines`.
     #[test]
     fn scaffold_relevant_binds_scrubbed_from_a_surviving_diagnostic() {
         let source = "line1\n__b = pure (toWire x, x.files)\n";
@@ -756,10 +751,10 @@ mod tests {
         assert!(got.contains("Relevant bindings include"), "{got}");
     }
 
-    /// The exact bug the span-based redo fixes: a user's OWN binding named
-    /// `result` (a name the old `SCAFFOLD_BINDERS` list would have wrongly
-    /// dropped) must survive when its own `(bound at ...)` span is inside
-    /// `user_lines`.
+    /// A user's OWN binding named `result` must survive when its own
+    /// `(bound at ...)` span is inside `user_lines` — classification is by
+    /// span only, never by binder name, since a legitimate user name can
+    /// collide with scaffold-sounding names.
     #[test]
     fn user_named_result_binding_with_own_span_in_range_is_kept() {
         let msg =

@@ -8,7 +8,7 @@
 //! the suspension holds the thread rather than tearing it down.
 //!
 //! This is a DIFFERENT mechanism from the `tidepool` eval server's. That server
-//! (`tidepool_runtime::session::engine`, since `ed9588ec`) suspends threadlessly:
+//! (`tidepool_runtime::session::engine`) suspends threadlessly:
 //! the JIT codegen effect loop catches the ask tag, the machine is stowed as
 //! DATA, the eval thread exits, and resume re-enters the stowed machine on any
 //! fresh thread. It has no `DispatchEffect`-level ask dispatcher to share — its
@@ -115,11 +115,10 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>> ReplAskDispat
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
         // Threshold, not exact match: `ask_tag` is the FIRST interposed tag
-        // (from `base_decls_with_ask`) — self-iterating-harness WS-B split
-        // `runLLMTurn` out of `Ask` into its own tag, appended right after,
-        // so every tag from `ask_tag` on is interposed and parks the same
-        // way (mirrors the JIT's own suspend-tag threshold,
-        // `jit_machine::drive_effect_loop`).
+        // (from `base_decls_with_ask`). `RunLLMTurn` is a separate effect from
+        // `Ask`, appended right after it, so every tag from `ask_tag` on is
+        // interposed and parks the same way (mirrors the JIT's own
+        // suspend-tag threshold, `jit_machine::drive_effect_loop`).
         if tag >= self.ask_tag {
             let (prompt, meta) =
                 extract_ask_request(request, cx.table()).map_err(EffectError::Handler)?;
@@ -156,9 +155,9 @@ pub fn extract_ask_request(
         ));
     };
     let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
-    // `runLLMTurn` suspends via the sibling RunLLMTurnWith (its own
-    // effect/tag now, self-iterating-harness WS-B — same field shape as
-    // AskWith), caught by the same threshold `dispatch_inner` now uses.
+    // `runLLMTurn` suspends via the sibling RunLLMTurnWith (its own effect/tag,
+    // same field shape as AskWith), caught by the same threshold `dispatch_inner`
+    // uses.
     if con_name != "AskWith" && con_name != "RunLLMTurnWith" {
         return Err(format!(
             "ask received unexpected constructor {con_name:?} (expected AskWith or RunLLMTurnWith)"
@@ -178,6 +177,6 @@ pub fn extract_ask_request(
     Ok((prompt, meta))
 }
 
-// The gate unit tests (in_effect lifecycle, abort consumption — #324) now live
-// with the shared gate in `tidepool_effect::pause`. The ask/suspend integration
-// suites in `tests/` exercise this crate's dispatcher wiring around it.
+// The gate unit tests (in_effect lifecycle, abort consumption) live with the
+// shared gate in `tidepool_effect::pause`. The ask/suspend integration suites
+// in `tests/` exercise this crate's dispatcher wiring around it.

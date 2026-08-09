@@ -23,7 +23,10 @@ use serial_test::serial;
 
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{build_value_fragment, C1};
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
+use session_scaffold::C1;
+use session_scaffold_value::build_value_fragment;
 
 fn table_with_c1() -> DataConTable {
     let mut table = DataConTable::new();

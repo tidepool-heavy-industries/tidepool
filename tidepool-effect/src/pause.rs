@@ -6,8 +6,7 @@
 //! thread parks itself at its NEXT effect dispatch — we own every dispatch, so
 //! every effect is a yield point. Between MCP calls: no compute, no LLM spend,
 //! nothing unobserved. Pure JIT stretches can't be interrupted — a thread that
-//! reaches no effect within a grace period is treated as a runaway and detached
-//! (the old timeout behavior, reserved for exactly that case).
+//! reaches no effect within a grace period is treated as a runaway and detached.
 //!
 //! Two dispatchers share this ONE gate:
 //!

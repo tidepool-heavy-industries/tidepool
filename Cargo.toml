@@ -19,6 +19,7 @@ members = [
     "tidepool-lsp",
     "tidepool-harness",
     "tidepool-worktree",
+    "tidepool-agent",
     "tidepool-web",
     "tidepool",
     "examples/guess",

@@ -387,6 +387,35 @@ dictionary loop.
 Compile errors are part of the API. Golden tests match the useful lines while
 allowing surrounding GHC wording to vary.
 
+> **Amendment (2026-08-08, accepted at root; verified against the real
+> extractor.)** Two of the messages below are not buildable as written, and
+> the reason is a property of GHC rather than of our implementation.
+>
+> Whether a type HAS an instance is not observable from inside the type
+> language. With `Generic` missing, `Rep a` is STUCK — indistinguishable
+> from any other unreduced family application, and not apart from
+> `M1 D d f` — so no fall-through equation fires and no `TypeError` can be
+> raised. Branching on constraint satisfiability would require a
+> typechecker plugin, out of scope by any reading.
+>
+> This affects **missing `Generic`** and **unsupported leaf** (whose
+> rejection runs through the same mechanism, and so cannot list the
+> supported leaves either). What ships instead carries the FIELD name inside
+> the unsolved constraint, where it appears verbatim beside GHC's own
+> `No instance for (Generic Environment)`. Field and nested type are both
+> named — the property this section actually exists to guarantee.
+>
+> Deferring the rest to GHC is the CORRECT outcome here, not a shortfall we
+> tolerate. The alternative is a second type checker living in our type
+> families, deciding what is and is not a supported type — worse than the
+> one GHC already ships, and permanently out of date with it. We add a
+> custom error where we genuinely know something GHC does not (a list needs
+> a repeat editor; `String` should be `Text`). Where the thing to say is
+> "this type has no instance", GHC says it better.
+>
+> Every other message below is achievable and shipped, because those cases
+> dispatch on a type that DOES reduce.
+
 ### Missing `Generic`
 
 ```text
@@ -510,8 +539,11 @@ Migration requirements:
 
 - Compile-fail fixtures cover missing `Generic`, `String`, lists, maps,
   functions, recursive ADTs, and nested `Maybe`.
-- Every failure names the nearest source-level field/constructor/type and
-  offers a supported correction.
+- Every failure names the nearest source-level field/constructor/type.
+  Prescriptive correction text accompanies it wherever the offending type is
+  observable — `String`, lists, maps, functions, nested `Maybe`, recursion.
+  It is NOT achievable for missing `Generic` or an unsupported leaf; see the
+  amendment under "Compile-time error UX".
 - No useful error requires understanding a generic representation type.
 - Malformed wire answers, unknown keys, duplicate keys, unknown constructor
   tags, missing product fields, and extra product fields are rejected without
@@ -585,3 +617,13 @@ construction beside the type.
   unnecessary authoring surfaces here.
 - **Chosen sibling surface:** `choose`/`chooseMany` for `[(Text, a)]` runtime
   choices; they remain outside the zero-argument Generic form derivation.
+- **Amended (2026-08-08):** prescriptive correction text for missing
+  `Generic` and for an unsupported leaf is unbuildable without observing
+  constraint satisfiability, which the type language cannot do — a stuck
+  `Rep a` is indistinguishable from any other unreduced family application.
+  Verified against the real extractor. The acceptance criterion is now that
+  a failure NAMES the nearest field/constructor/type; the correction text
+  stands wherever the offending type reduces. Reversing this needs a
+  typechecker plugin, not a cleverer type family — do not re-attempt it as
+  written.
+

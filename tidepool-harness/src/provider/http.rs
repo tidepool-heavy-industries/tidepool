@@ -1,8 +1,9 @@
-//! Shared `genai`-client plumbing for both provider impls. 60-auth's crate
-//! survey ruled out hand-rolling chat request/response JSON: `genai` is
-//! already a workspace dependency (it drives `LlmHandler` for the
-//! in-program `Llm` effect — a DIFFERENT consumer of the same library, per
-//! the SPEC's anti-pattern about not conflating the two). Both providers
+//! Shared `genai`-client plumbing for both provider impls, rather than
+//! hand-rolling chat request/response JSON: `genai` is already a workspace
+//! dependency (it drives `LlmHandler` for the in-program `Llm` effect — a
+//! DIFFERENT consumer of the same library; this module and that one must
+//! stay independent so a calling-model turn and an in-program `Llm` call
+//! never share configuration). Both providers
 //! resolve a bearer token themselves (env/file for API-key, load-refresh
 //! for OAuth) and hand it here as a plain string — this module turns that
 //! into a `genai::Client` and maps its errors/responses to our types.
@@ -70,14 +71,14 @@ pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, Provi
         text,
         usage,
         reasoning: None,
+        reasoning_items: Vec::new(),
     })
 }
 
 /// A 401/403 from the provider — regardless of which adapter surfaced it —
-/// is always an auth failure (both auth modes bill the same upstream, per
-/// the SPEC); genai's own missing-credentials errors (no resolver ran, or
-/// it returned nothing) are auth failures too. Anything else is a generic
-/// API error.
+/// is always an auth failure (both auth modes bill the same upstream);
+/// genai's own missing-credentials errors (no resolver ran, or it returned
+/// nothing) are auth failures too. Anything else is a generic API error.
 pub(crate) fn map_genai_err(e: genai::Error) -> ProviderError {
     use genai::Error as E;
     let is_auth = match &e {
@@ -107,10 +108,12 @@ mod tests {
                 Message {
                     role: Role::System,
                     content: "be terse".into(),
+                    reasoning_items: Vec::new(),
                 },
                 Message {
                     role: Role::User,
                     content: "hi".into(),
+                    reasoning_items: Vec::new(),
                 },
             ],
             max_tokens: None,

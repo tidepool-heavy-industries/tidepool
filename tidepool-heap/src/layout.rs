@@ -205,7 +205,7 @@ pub const CON_FIELDS_OFFSET: usize = 24;
 pub const THUNK_STATE_OFFSET: usize = 8;
 /// Offset of code_ptr in an Unevaluated Thunk.
 pub const THUNK_CODE_PTR_OFFSET: usize = 16;
-/// Offset of indirection pointer in an Evaluated Thunk (D7).
+/// Offset of indirection pointer in an Evaluated Thunk.
 pub const THUNK_INDIRECTION_OFFSET: usize = 16;
 /// Offset of first captured variable in a Thunk.
 pub const THUNK_CAPTURED_OFFSET: usize = 24;
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn test_alignment_roundtrip() {
         // Only header is written, so 8-byte buffer is enough for the header.
-        // We test various logical sizes to ensure the size u32 can store them,
-        // including values above the old u16 ceiling (65535).
+        // Exercise sizes past the 16-bit range (this field is u32, unlike the
+        // u16 num_fields/num_captured fields elsewhere in the layout).
         let sizes: [u32; 7] = [8, 16, 64, 256, 1024, 65535, 1_000_000];
         for &size in &sizes {
             let mut buffer = [0u8; 8];

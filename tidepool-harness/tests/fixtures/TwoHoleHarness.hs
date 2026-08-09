@@ -36,8 +36,8 @@ data State = State
 initialState :: State
 initialState = State {loopCount = 0, answers = []}
 
-render :: State -> Maybe Text -> Text
-render st _ =
+render :: State -> Text
+render st =
   [fmt|Two-hole harness. Loop count: {loopCount st}.|]
 
 -- | TWO holes in one loop. The first asks for a fruit; the second embeds a

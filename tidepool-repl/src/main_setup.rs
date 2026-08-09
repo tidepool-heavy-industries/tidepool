@@ -77,8 +77,8 @@ pub fn build(
     // first, then user-global, AFTER the stdlib so `Tidepool.*` still resolves
     // from the bundle and a project `Library` shadows the global one. With these
     // on the include path, the preamble auto-imports `Library` (see
-    // `has_user_library`) so `.tidepool/lib` verbs (vocab/gitS/census/…) are in
-    // scope — previously the REPL listed them in `:vocab` but couldn't call them.
+    // `has_user_library`) so `.tidepool/lib` verbs (vocab/gitS/census/…) are
+    // both listed by `:vocab` AND callable, not just discoverable.
     let lib_dirs = tidepool_mcp::server_common::resolve_lib_dirs(project_root.as_deref());
     base_include.extend(lib_dirs.iter().cloned());
 

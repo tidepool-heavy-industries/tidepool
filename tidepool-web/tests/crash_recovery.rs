@@ -12,12 +12,15 @@
 //! override, set once at the top of the test.
 //!
 //! The scripted replay content is content-agnostic by design: `Harness.hs`'s
-//! `loop` transitions `Mode`/`loopCount` on every call to `runLLMTurn`
-//! regardless of the `Decision`'s field values, so the SAME two recorded
-//! replies serve any cycle — what distinguishes "resumed from checkpoint"
-//! from "restarted at `initialState`" is the loop COUNT reached before the
-//! replay queue (rebuilt fresh from the log file on every process start)
-//! runs out, not the reply content.
+//! `loop` transitions `Mode` on every call to `runLLMTurn` regardless of the
+//! `Decision`'s field values, so the SAME two recorded replies serve any
+//! cycle — what distinguishes "resumed from checkpoint" from "restarted at
+//! `initialState`" is the loop COUNT reached before the replay queue
+//! (rebuilt fresh from the log file on every process start) runs out, not
+//! the reply content. The loop count itself is a runtime fact — carried in
+//! the checkpoint ENVELOPE's `iteration` field, not in `State`
+//! (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+//! context is the runtime's job").
 //!
 //! Assertions read the persisted checkpoint only through
 //! `SelfHarnessDriver::checkpoint_path`'s public accessor (never a
@@ -62,6 +65,20 @@ fn extract_available() -> bool {
             .arg("--help")
             .output()
             .is_ok()
+}
+
+/// Panic loudly instead of skipping (which nextest reports as PASS) when
+/// `TIDEPOOL_EXTRACT` isn't reachable. This GHC-tier suite is excluded from
+/// the default nextest filter, so this only fires on a direct
+/// `--ignore-default-filter` invocation missing the environment.
+fn require_extract() {
+    if !extract_available() {
+        panic!(
+            "TIDEPOOL_EXTRACT not set — this GHC-tier test cannot run vacuously. Set \
+             TIDEPOOL_EXTRACT (or run inside `nix develop`), or run via scripts/battery.sh, \
+             which derives it."
+        );
+    }
 }
 
 fn repo_root() -> PathBuf {
@@ -363,12 +380,7 @@ impl Drop for ChildGuard {
 /// finishing."
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    require_extract();
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
     let cache_home = scratch.path().join("xdg-cache");
@@ -429,12 +441,8 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
          {checkpoint_after_crash:?}"
     );
     assert_eq!(
-        checkpoint_after_crash
-            .state
-            .get("loopCount")
-            .and_then(|v| v.as_i64()),
-        Some(1),
-        "generation 1's state must carry cycle 1's committed loopCount (1); got \
+        checkpoint_after_crash.iteration, 1,
+        "generation 1's envelope must carry cycle 1's committed iteration count (1); got \
          {checkpoint_after_crash:?}"
     );
 
@@ -459,7 +467,7 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
 
     // The replay queue is rebuilt fresh (2 replies) on every process start,
     // so process 2 — if it resumes from the persisted checkpoint — runs 2
-    // more committed cycles (loopCount 1 -> 2 -> 3) before a 3rd attempt
+    // more committed cycles (iteration 1 -> 2 -> 3) before a 3rd attempt
     // finds the queue empty and the loop exits. This is the test's own
     // designed termination signal, not a claim about the harness's normal
     // shutdown behavior.
@@ -495,13 +503,9 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
         tail(&stderr2_path)
     );
     assert_eq!(
-        checkpoint_after_restart
-            .state
-            .get("loopCount")
-            .and_then(|v| v.as_i64()),
-        Some(3),
-        "generation 3's state must carry loopCount 3, continuing from cycle 1's \
-         persisted loopCount (1) through 2 more committed cycles; got \
+        checkpoint_after_restart.iteration, 3,
+        "generation 3's envelope must carry iteration 3, continuing from cycle 1's \
+         persisted iteration (1) through 2 more committed cycles; got \
          {checkpoint_after_restart:?}"
     );
     assert_eq!(

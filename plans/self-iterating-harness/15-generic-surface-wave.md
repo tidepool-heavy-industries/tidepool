@@ -19,6 +19,19 @@ from the PRD-dev window (file anchors verified against tree by root), and
   `GFormDecode` (UI optional/sum semantics). Supported sets differ BY
   DESIGN; no single codec class whose supported-type set is the
   intersection. All invisible behind `deriving (Generic)`.
+
+  **Bound on this decision.** Sharing a traversal substrate does not mean
+  sharing constraints. Before importing a rule from the forms interpreter
+  into another consumer, ask what the rule protects: the forms rules serve
+  a UI rendered to a human and a compile error read by an author. A
+  consumer with neither inherits neither.
+
+  `GCheckpoint` is SUPERSEDED under that bound — persistence needs no new
+  interpreter. `genericToJSON`/`genericParseJSON` already work off
+  `Generic` alone, so the author contract is a wiring change; what is
+  broken is round-trip correctness in the existing path. Scope:
+  [`../post-restart/checkpoint-persistence-lane.md`](../post-restart/checkpoint-persistence-lane.md).
+
 - **Runtime options are a first-wave primitive, not a future edge case.**
   `askUser @T` covers type-defined structure only; choices that exist as
   runtime values (the wizard's converging phase selects among accumulated
@@ -34,20 +47,24 @@ from the PRD-dev window (file anchors verified against tree by root), and
   Fingerprint note: the checkpoint fingerprint is source-derived, so this is
   hygiene, not churn reduction — and the driver must persist the iteration
   count in the checkpoint ENVELOPE so restart behavior stays continuous.
-- **Checkpoint codec replacement is separately gated; wire-compat is the
-  DEFAULT, not a requirement** (Inanna, 2026-08-08: "json is fine as a
-  default but we can just break compat if it's cleaner/easier"). Target the
-  current encoding (records→objects, lists→arrays, `Maybe`→value/null,
-  nullary constructors→strings, tagged sums) where it falls out naturally;
-  where matching aeson's shape costs real complexity, break instead — the
-  cost of a break is old checkpoints unreadable → fresh session start,
-  which is cheap while dogfood is paused. A break must be LOUD (typed
-  decode error naming the codec change, discard-and-restart path), never a
-  silent misparse. Residual churn either way is source-fingerprint churn
-  from editing deriving clauses. Sequenced AFTER forms (forms are
-  additive; persistence is a replacement in the subsystem that produced
-  both dogfood crashes). Routed: extends the generic-surface lane's queue
-  post-swap (they hold the interpreter context).
+- **Checkpoint persistence is separately gated; wire-compat is the DEFAULT,
+  not a requirement** (Inanna: "json is fine as a default but we can just
+  break compat if it's cleaner/easier"). Scope is bug-fix plus wiring, NOT a
+  new codec: fix the confirmed round-trip defects in the existing
+  serialization path, and move persistence onto
+  `genericToJSON`/`genericParseJSON` so authored types need only
+  `deriving (Generic)`. Target the current encoding (records→objects,
+  lists→arrays, `Maybe`→value/null, nullary constructors→strings, tagged
+  sums) where it falls out naturally; where matching that shape costs real
+  complexity, break instead — the cost of a break is old checkpoints
+  unreadable → fresh session start, cheap while dogfood is paused. A break
+  must be LOUD (typed decode error naming the change, discard-and-restart),
+  never a silent misparse. Residual churn either way is source-fingerprint
+  churn from editing deriving clauses. Sequenced AFTER forms: forms are
+  additive, persistence is a repair in the subsystem that produced both
+  dogfood crashes. Routed to its OWN successor lane
+  ([`../post-restart/checkpoint-persistence-lane.md`](../post-restart/checkpoint-persistence-lane.md)),
+  not the generic-surface queue.
 - **One-file harness prerequisite is explicit:** effect vocabulary available
   in scope ≠ effects present in M's row. Today the answerer compile omits
   the `RunLLMTurn` GADT/helpers entirely (see `haskell/lib/Tidepool/
@@ -92,12 +109,39 @@ from the PRD-dev window (file anchors verified against tree by root), and
 4. Parallel early devs: runtime-context refactor (`render :: State ->
    Text`); `Tidepool.Harness.Prelude` — which has TWO parts: the curated
    re-export module AND a harness compilation profile supplying the
-   standard extension set via GHC flags. Open decision for the wave:
-   remove the conflicting generic `render` from the unqualified Tidepool
-   prelude instead of hiding it forever (a special prelude must not become
-   a compatibility bucket).
+   standard extension set via GHC flags. The wave's open decision on the
+   conflicting `render` is now RESOLVED — see below.
 5. After: prompt-coaching collapse (the 30-line answerer framing shrinks to
    the three-verb paragraph) — gated on generic forms landing.
+
+## Resolved: `render` leaves the unqualified prelude
+
+**Decision (root, 2026-08-08): remove `Render(render)` from
+`Tidepool.Prelude`'s unqualified export list.** `Tidepool.Render` and its
+direct-import path are untouched.
+
+Blast radius, surveyed before the call: bare unqualified `render` has two
+real call sites and both already import from `Tidepool.Render` directly —
+`haskell/lib/Tidepool/QQ/Fmt.hs` (the `[fmt|]` quasiquoter's TH desugaring,
+which emits an already-resolved `VarE 'render` and so does not depend on
+import scope at all) and `haskell/test/Suite.hs`. Nothing in `.tidepool/lib`,
+the rest of the stdlib, or the fixtures calls it through the prelude. Four
+harness author modules carry `import Tidepool.Prelude hiding (render)` purely
+to make room for their own `render`; those clauses become dead weight, not
+errors, so they are swept when those files are next touched rather than in a
+dedicated pass.
+
+The model-facing risk — an external caller that learned bare `render` from a
+prior prelude scan — is real but acceptable, and the reasoning generalizes:
+the dialect rule protects CANONICAL Haskell surface, and bare `render` is not
+canonical. It is our own non-advertised export; the tool description
+advertises only `renderJson`/`renderDiag`, and the canonical instinct for
+coercion is `show`, which the prelude serves. Removal yields a clean
+not-in-scope error naming candidates, which teaches, rather than a silent
+behavior change. If dogfood telemetry ever shows models reaching for bare
+`render`, the response is to add it back deliberately as an ADVERTISED verb —
+not to restore a tacit export. No deprecation shim, alias, or `TypeError`
+stub stands in its place.
 
 ## Out of this wave
 

@@ -16,7 +16,7 @@
 //!     re-export / `hiding` shadow / latest-wins)
 //!   - tidepool-repl/src/session.rs (run_def, session_imports)
 //!
-//! Each test skips cleanly when the session-aware extract is unavailable.
+//! Each test panics loudly when the session-aware extract is unavailable.
 
 mod common;
 use common::*;
@@ -27,9 +27,7 @@ use common::*;
 /// The regenerated `Lib.G2` re-exports `Lib.G1`, so `twice`'s body sees `inc`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defs_accumulate_and_interact() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("inc x = x + (1 :: Int)")
@@ -55,9 +53,7 @@ async fn defs_accumulate_and_interact() {
 /// `f` can be defined and evaluated successfully — no poison.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_reference_across_turns_poisons() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // def f before g exists — define-time validation catches the forward ref.
@@ -93,9 +89,7 @@ async fn forward_reference_across_turns_poisons() {
 /// supported way to express forward/mutual references (contrast case 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutual_reference_single_turn_works() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // f references g; both defined in one turn → one gen module → both in scope.
@@ -117,9 +111,7 @@ async fn mutual_reference_single_turn_works() {
 /// wins at the reference.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_function_latest_wins() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("k x = x + (1 :: Int)").await.expect_ok("def k v1");
@@ -143,9 +135,7 @@ async fn redefine_function_latest_wins() {
 /// REDEFINITION — that's dim-B's orphan case; here the type is stable.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multicon_adt_value_and_case() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("data Shape = Circle Int | Rect Int Int")
@@ -178,9 +168,7 @@ async fn multicon_adt_value_and_case() {
 /// (no `(..)`), the newtype as `Age(..)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn type_alias_and_newtype() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("type Name = T.Text")
@@ -211,9 +199,7 @@ async fn type_alias_and_newtype() {
 /// test now ASSERTS correct values on every path it previously only logged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_syntax_selectors_localized() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("data P = P { px :: Int, py :: Int }")
@@ -271,9 +257,7 @@ async fn record_syntax_selectors_localized() {
 /// return correct values). Un-ignored the same day.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_selector_on_bound_value_via_eff_path() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("data P = P { px :: Int, py :: Int }")
@@ -293,9 +277,7 @@ async fn record_selector_on_bound_value_via_eff_path() {
 /// class methods visible when the instance gen module compiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_describe() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("class Describe a where { describe :: a -> T.Text }")
@@ -319,9 +301,7 @@ async fn class_instance_describe() {
 /// an unrelated eval after the instance is NOT poisoned (BUG-C fixed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_poisons_until_reset() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let c = repl
@@ -373,9 +353,7 @@ async fn class_instance_poisons_until_reset() {
 /// resolves `over` unambiguously to the session-defined version. Expected: 6.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decl_prelude_collision_is_graceful() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // The gen module uses the lens-free standalone surface, so the def succeeds.
@@ -413,9 +391,7 @@ async fn decl_prelude_collision_is_graceful() {
 /// both and a following good def + eval works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_and_garbage_decls_survive() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Capture gen before the empty def so we can assert it is unchanged after.
@@ -480,9 +456,7 @@ async fn empty_and_garbage_decls_survive() {
 /// `good2` def + use works and is not contaminated by the bad text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bad_decl_does_not_poison_log() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bad = repl.def("data = oops").await;
@@ -507,9 +481,7 @@ async fn bad_decl_does_not_poison_log() {
 /// generation) — previously "the type signature lacks an accompanying binding".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sig_and_binding_split_across_items() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // Two items: a bare signature, then the binding. Batched → one module.
     let out = repl.run(&["sig1 :: Int -> Int", "sig1 x = x + 1"]).await;
@@ -524,9 +496,7 @@ async fn sig_and_binding_split_across_items() {
 /// "Variable not in scope: isOdd".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutual_recursion_across_items() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     let out = repl
         .run(&[
@@ -551,9 +521,7 @@ async fn mutual_recursion_across_items() {
 /// the decl run must batch [sig, binding] and evaluate the call as a stmt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn define_then_call_in_one_block() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // sig + binding (batched decls) + a trailing call (a stmt, NOT batched).
     let out = repl
@@ -568,9 +536,7 @@ async fn define_then_call_in_one_block() {
 /// round-trip. `def` merges the decl item's inline `type` into `Turn.text`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decl_paints_inferred_type() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Single item: signature + binding together (the one-decl-per-item idiom).
@@ -595,9 +561,7 @@ async fn decl_paints_inferred_type() {
 /// off (never fails the decl). Same graceful degradation as a probe miss.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_value_decl_omits_type() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let d = repl.def("data Widget317 = Widget317 Int").await;
@@ -616,9 +580,7 @@ async fn non_value_decl_omits_type() {
 /// poison the mutual-recursion decl batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutual_recursion_and_call_in_one_block() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     let out = repl
         .run(&[
@@ -641,9 +603,7 @@ async fn mutual_recursion_and_call_in_one_block() {
 /// one block AND across calls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_numeric_bind_generalizes() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // Within one block:
     let out = repl.run(&["n <- pure 5", "pure (n + 1.5)"]).await;
@@ -662,9 +622,7 @@ async fn pure_numeric_bind_generalizes() {
 /// freezing/failing it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_numeric_bind_type_generalizes_in_display() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     let out = repl.run(&["n <- pure 5"]).await;
     let text = out.expect_ok("numeric bind type display");
@@ -685,9 +643,7 @@ async fn pure_numeric_bind_type_generalizes_in_display() {
 /// `mentions_word("input")` guard would have had.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_input_param_not_confused_with_payload_lane() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // `input` here is a LAMBDA PARAM, not the payload lane — must decl-plane it.
     repl.eval("let localInput = \\input -> input")
@@ -708,9 +664,7 @@ async fn local_input_param_not_confused_with_payload_lane() {
 /// the NMR probe — show its constrained-polymorphic type, not empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_dot_helper_binds_and_shows_type() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // Result type pinned by usage (`T.toUpper` → Text); the type stays
     // constrained on the record (`HasField "path" r Text`).
@@ -730,9 +684,7 @@ async fn record_dot_helper_binds_and_shows_type() {
 /// wins and is usable immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn colliding_pure_bind_shadows_gracefully() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.def("data Tree a = Leaf | Node (Tree a) a (Tree a)")
         .await
@@ -760,9 +712,7 @@ async fn colliding_pure_bind_shadows_gracefully() {
 /// instantiates per use — the case that used to throw an interface error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_polymorphic_bind_instantiates_per_use() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.eval("xs <- pure []").await.expect_ok("bind xs = []");
     // Use at [Int]:

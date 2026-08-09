@@ -1,6 +1,6 @@
 //! The self-iterating harness (`plans/self-iterating-harness/`): the outer
-//! `render`/`loop` driver over the `Harness`/`Agent` monad split (01/02/03),
-//! layered on top of this crate's existing turn engine + node tree rather
+//! `render`/`loop` driver over the `Harness`/`Agent` monad split, layered
+//! on top of this crate's existing turn engine + node tree rather
 //! than replacing them — the nested Agent session that answers a
 //! `runLLMTurn` hole IS a [`crate::harness::Harness`] node, driven by the
 //! same `run_to_hole_or_done` turn loop the fork/return-control path already
@@ -26,9 +26,9 @@
 //!   source fingerprint, one generation-tagged record) persist/restore +
 //!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
 //!
-//! `crate::engine::HoleRouting::Finalize` is the other half of the S3 freeze
-//! (routing for the `finalize` effect); it lives in `engine.rs`
-//! alongside the rest of `HoleRouting`, not here.
+//! `crate::engine::HoleRouting::Finalize` is the other half of the
+//! synchronous hole-routing contract (routing for the `finalize` effect);
+//! it lives in `engine.rs` alongside the rest of `HoleRouting`, not here.
 
 pub mod driver;
 pub mod harness_source;

@@ -1,5 +1,5 @@
-//! The `tidepool-repl` session surface — the `SessionCommand` sum (domain §5)
-//! and the per-turn outcome it produces.
+//! The `tidepool-repl` session surface — the `SessionCommand` sum and the
+//! per-turn outcome it produces.
 //!
 //! `session_run` classifies each item in a block into a [`BlockItem`] (decl /
 //! stmt / meta) and runs them via the existing `run_def`/`run_eval`/`run_meta`
@@ -185,7 +185,7 @@ impl MetaCommand {
     }
 }
 
-/// The internal session command sum (domain model §5). The production tool is
+/// The internal session command sum. The production tool is
 /// `session_run` → [`SessionCommand::Block`]; `Def`/`Eval`/`Cmd` are the
 /// per-item handler targets a block dispatches to (and the standalone paths the
 /// `Repl::{def,eval,cmd}` test helpers exercise via a 1-item block).
@@ -210,7 +210,7 @@ pub enum SessionCommand {
     Close,
 }
 
-/// The result of running a non-`Close` turn (domain §5). An in-turn `ask`
+/// The result of running a non-`Close` turn. An in-turn `ask`
 /// suspends through the channel layer (see [`crate::ask`]), not here.
 #[derive(Clone, Debug)]
 pub enum TurnOutcome {

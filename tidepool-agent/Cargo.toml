@@ -1,0 +1,23 @@
+[package]
+name = "tidepool-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabulary is contained here."
+
+[dependencies]
+codex-codes = "=0.146.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time", "process", "rt", "rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

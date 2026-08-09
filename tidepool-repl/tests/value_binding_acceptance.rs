@@ -9,17 +9,14 @@
 //! AFTER a real collection forced by a small session nursery + heavy allocation.
 //!
 //! Requires the Wave-3b `tidepool-extract` (set `TIDEPOOL_EXTRACT`, with the
-//! with-packages GHC on `PATH` + `TIDEPOOL_GHC_LIBDIR`); skips cleanly otherwise.
+//! with-packages GHC on `PATH` + `TIDEPOOL_GHC_LIBDIR`); panics loudly otherwise.
 
 mod common;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn value_binding_int_json_function_survive_gc() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // 0. define a custom ADT (auto-opens the session; Lane A → Tidepool.Session.Lib.G1). A value of this

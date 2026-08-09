@@ -65,10 +65,12 @@ use serial_test::serial;
 
 // Shared scaffold: C1 (DataConId(1)) and expect_int, same discipline as
 // realm_multi_continuation.rs/realm_per_realm_fields.rs.
-#[allow(dead_code)]
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{expect_int, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+use session_scaffold::C1;
+use session_scaffold_expect::expect_int;
 
 const PAIR_ID: DataConId = DataConId(2);
 const CONS_ID: DataConId = DataConId(3);

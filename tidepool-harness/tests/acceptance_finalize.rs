@@ -33,6 +33,8 @@
 //! An ordinary DATA value still finalizes + terminates correctly
 //! (`finalize_hands_up_a_plain_data_value`).
 
+mod support;
+
 use std::sync::Arc;
 
 use tidepool_eval::value::Value;
@@ -43,14 +45,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::{Harness, HoleRouting, TurnOutcome};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -99,26 +93,23 @@ fn outcome_tag(o: &TurnOutcome) -> &'static str {
 /// unlike answering a `runLLMTurn`/`Fork` hole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_hands_up_a_plain_data_value() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("finalize-data.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
 
-    // The `:: M ()` annotation is NOT part of finalize's own contract — it's
-    // needed because `finalize`'s result type is fully free (it never
-    // actually returns; the send diverges via suspension), and the
-    // template's own `toJSON _r` wrapper around the WHOLE turn otherwise
-    // leaves `_r`'s type ambiguous (GHC has no `ToJSON` instance to pick
-    // without a hint) — this never actually matters at runtime since the
-    // block suspends before reaching that wrapper.
-    let replies = vec![reply("```haskell\n(finalize @Int (41 + 1) :: M ())\n```")];
+    // Bare, no annotation of any kind — the shape the answerer prompt
+    // prescribes. `finalize`'s result type is fully free (it never actually
+    // returns; the send diverges via suspension), which used to leave the
+    // shared template's `toJSON _r` wrapper ambiguous (GHC's defaulting
+    // never resolves a solitary `ToJSON a0`). `template_turn_for`
+    // (`tidepool-harness/src/engine.rs`) routes a turn compiled against a
+    // real `Finalize T` row through `tidepool_mcp::template_haskell_anchored`
+    // instead, which adds a redundant `Show` constraint alongside — additive,
+    // not an annotation this block needs to write itself.
+    let replies = vec![reply("```haskell\nfinalize @Int (41 + 1)\n```")];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
@@ -213,12 +204,7 @@ async fn finalize_hands_up_a_plain_data_value() {
 /// separate, deeper gap this suite does not attempt to close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
     let target = cfg
@@ -313,10 +299,7 @@ async fn finalize_a_closure() -> (std::sync::Arc<Harness>, NodeId) {
 /// data value could never be "applied").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_crosses_by_reference() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let (harness, root) = finalize_a_closure().await;
 
     // The finalized value is a LIVE CLOSURE kept in-heap, not
@@ -373,10 +356,7 @@ async fn finalize_closure_crosses_by_reference() {
 /// that lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_full_round_trip() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let (harness, root) = finalize_a_closure().await;
 
     let result = harness

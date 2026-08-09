@@ -122,6 +122,79 @@ fn write_sample_log(path: &std::path::Path) -> LogHeader {
     header
 }
 
+/// Reasoning-continuity's wire-format guard: `Harness::drive_turn` builds a
+/// turn's `Event::TurnDelta` from `driven.reply`/`usage`/`reasoning` only —
+/// `driven.reasoning_items` is never read at that call site. Two turns whose
+/// `DrivenTurn`s differ ONLY in `reasoning_items` must produce a
+/// byte-identical durable-log line.
+#[test]
+fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
+    use crate::engine::DrivenTurn;
+    use crate::provider::{ReasoningItem, Usage};
+
+    // Mirrors Harness::drive_turn's actual call:
+    //   self.tree.turn_delta_reasoned(node, turn_seq, Role::Assistant,
+    //       driven.reply.clone(), Some(driven.usage), driven.reasoning.clone())
+    let to_event = |driven: &DrivenTurn| Event::TurnDelta {
+        node: NodeId(1),
+        turn: 1,
+        role: crate::provider::Role::Assistant,
+        content: driven.reply.clone(),
+        usage: Some(driven.usage),
+        reasoning: driven.reasoning.clone(),
+    };
+
+    let without = DrivenTurn {
+        reply: "```haskell\nresume Approve\n```".to_string(),
+        usage: Usage {
+            input_tokens: 120,
+            output_tokens: 8,
+        },
+        reasoning: Some("checking both verdicts agree".to_string()),
+        reasoning_items: Vec::new(),
+        block: None,
+    };
+    let with_reasoning = DrivenTurn {
+        reply: "```haskell\nresume Approve\n```".to_string(),
+        usage: Usage {
+            input_tokens: 120,
+            output_tokens: 8,
+        },
+        reasoning: Some("checking both verdicts agree".to_string()),
+        reasoning_items: vec![ReasoningItem(json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-blob",
+        }))],
+        block: None,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let header = sample_header();
+
+    let path_without = dir.path().join("without.jsonl");
+    LogWriter::create(&path_without, &header)
+        .unwrap()
+        .append(to_event(&without))
+        .unwrap();
+
+    let path_with = dir.path().join("with.jsonl");
+    LogWriter::create(&path_with, &header)
+        .unwrap()
+        .append(to_event(&with_reasoning))
+        .unwrap();
+
+    let bytes_without = std::fs::read(&path_without).unwrap();
+    let bytes_with = std::fs::read(&path_with).unwrap();
+    assert_eq!(
+        bytes_without, bytes_with,
+        "a turn's durable log line must not depend on its reasoning_items"
+    );
+    let text = String::from_utf8(bytes_without).unwrap();
+    assert!(!text.contains("encrypted_content"));
+    assert!(!text.contains("reasoning_items"));
+}
+
 #[test]
 fn roundtrips_every_event_variant() {
     let dir = tempfile::tempdir().unwrap();

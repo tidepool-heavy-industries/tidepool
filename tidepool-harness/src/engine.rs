@@ -42,7 +42,8 @@ use tidepool_repr::DataConTable;
 
 use crate::compile::AsksSidecar;
 use crate::provider::{
-    DynModelProvider, Message, ProviderError, Role, StreamSink, TurnRequest, TurnResponse, Usage,
+    DynModelProvider, Message, ProviderError, ReasoningItem, Role, StreamSink, TurnRequest,
+    TurnResponse, Usage,
 };
 use crate::tree::FanBadge;
 
@@ -134,9 +135,9 @@ pub struct ClassifiedHole {
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
-///   `ask schema prompt`). The old `payload.get("ui")` → `Dialog` probe is
-///   gone (dead once `dialogAsk` was deleted) — a Dialog hole is no longer
-///   PRODUCED, though the variant and its consumers still exist.
+///   `ask schema prompt`). A Dialog hole is never PRODUCED here — no
+///   `payload` probe routes to it — though the `HoleRouting::Dialog` variant
+///   and its consumers still exist.
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -209,22 +210,40 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
 /// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
 /// mismatch — the caller falls back to the plain-Ask routing.
+///
+/// TWO Haskell surfaces ride this one constructor, and they are told apart
+/// by decode rather than by a second routing arm: `askUser @T`
+/// (`Tidepool.Form`) sends a bare
+/// [`crate::selfharness::operator::FormShape`] — exactly the JSON
+/// `selfharness::operator`'s module docs specify — and the de-advertised
+/// applicative builder sends a flat `{"fields": [...]}` spec. A bare shape
+/// cannot decode as a `FormSpec` (`fields` is required there), so trying the
+/// flat wire first is unambiguous; a shape is lifted into
+/// [`crate::selfharness::operator::FormSpec::shape`] for the gate to render.
 fn decode_askuser_spec(
     request: &Value,
     table: &DataConTable,
 ) -> Option<crate::selfharness::operator::FormSpec> {
+    use crate::selfharness::operator::{FormShape, FormSpec};
+
     let Value::Con(_, fields) = request else {
         return None;
     };
     let field = fields.first()?;
     let json = tidepool_runtime::value_to_json(field, table, 0);
-    serde_json::from_value(json).ok()
+    if let Ok(spec) = serde_json::from_value::<FormSpec>(json.clone()) {
+        return Some(spec);
+    }
+    let shape: FormShape = serde_json::from_value(json).ok()?;
+    Some(FormSpec {
+        fields: Vec::new(),
+        shape: Some(shape),
+    })
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
 /// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
-/// its shape (identical to what `AskWith` used to carry for this family) is
-/// documented once.
+/// this shape is documented once rather than at every call site.
 fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
     let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
     let ty = asks.type_of(site).map(str::to_string);
@@ -442,6 +461,7 @@ pub fn assemble_request(
     messages.push(Message {
         role: Role::System,
         content: framing.unwrap_or(SYSTEM_FRAMING).to_string(),
+        reasoning_items: Vec::new(), // the synthetic system message never carries any
     });
     messages.extend_from_slice(transcript);
     TurnRequest {
@@ -498,8 +518,8 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
          Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
          WHOLE expression with `:: M {ty}` — in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
-         bind its result, then `finalize`.)"
+         loop.{scope} (To gather operator input first, evaluate `askUser @T` for \
+         a type in scope; bind its result, then `finalize`.)"
     )
 }
 
@@ -547,12 +567,11 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
 /// and routed to `template_haskell`'s `imports` field.
 ///
-/// No implicit import is added here anymore (the old always-on `Tidepool.Ui
-/// hiding (prose, code)` was for `dialogAsk`, now deleted): `Tidepool.Form`
-/// is already auto-imported by the turn preamble when `AskUser` is in the
-/// compiling stack (`preamble::pragmas_and_imports`), and an Agent-stack turn
-/// (which has no `AskUser`) must NOT get it force-imported — Tidepool.Form
-/// would fail to resolve there (it depends on `askUserRaw`).
+/// No implicit import is added here: `Tidepool.Form` is already
+/// auto-imported by the turn preamble when `AskUser` is in the compiling
+/// stack (`preamble::pragmas_and_imports`), and an Agent-stack turn (which
+/// has no `AskUser`) must NOT get it force-imported — `Tidepool.Form` would
+/// fail to resolve there (it depends on `askUserRaw`).
 pub fn split_imports(block: &str) -> (String, String) {
     let mut imports: Vec<String> = Vec::new();
     let mut body = Vec::new();
@@ -621,8 +640,8 @@ pub struct EngineConfig {
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
-    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer (B1 widen):
-    /// each of the N children gets this budget independently, so one
+    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
+    /// children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
     /// way a single shared cap would. Plain fork/return-control answerers
     /// still use `max_turns`.
@@ -630,8 +649,8 @@ pub struct EngineConfig {
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
     /// The context-window budget (in tokens) the runtime watches for MID-LOOP
-    /// emergency compaction (self-iterating-harness, 02-runtime.md
-    /// Compaction). DISTINCT from [`Self::max_tokens`], which is the ~2048
+    /// emergency compaction (self-iterating-harness). DISTINCT from
+    /// [`Self::max_tokens`], which is the ~2048
     /// per-turn *output* cap — this is the whole answerer session's
     /// accumulated *context* size, summed across its turns. At ~80% of this,
     /// the driver forces a compact-to-text summary of the answerer transcript
@@ -705,8 +724,7 @@ impl EngineConfig {
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
     /// driver uses this for its `Eff '[RunLLMTurn]`-only compile
     /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
-    /// to the literal single-effect row 02-runtime.md locks in, rather than
-    /// the full Agent stack.
+    /// to that literal single-effect row rather than the full Agent stack.
     pub fn from_decls(
         decls: Vec<tidepool_mcp::EffectDecl>,
         prelude_dir: PathBuf,
@@ -848,6 +866,13 @@ pub fn template_turn(
 /// '[RunLLMTurn]` compile needs a preamble matching ITS OWN (narrower)
 /// decls, not the Agent's. `stack` must be rendered from the SAME `decls` —
 /// see [`EngineConfig::turn_target`].
+///
+/// `stack` pinned to a real (non-`NoAnswer`) `Finalize T` entry routes
+/// through [`tidepool_mcp::template_haskell_anchored`] instead of the plain
+/// [`tidepool_mcp::template_haskell`] — see [`finalize_pin_active`]'s doc for
+/// why, and `template_haskell_anchored`'s doc (`eval_prep.rs`) for the
+/// mechanism. Every other row (no `Finalize` entry, or the `NoAnswer`
+/// default) compiles exactly as before.
 pub fn template_turn_for(
     decls: &[tidepool_mcp::EffectDecl],
     stack: &str,
@@ -856,7 +881,29 @@ pub fn template_turn_for(
     helpers: &str,
 ) -> String {
     let preamble = tidepool_mcp::build_preamble(decls, false);
-    tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+    if finalize_pin_active(stack) {
+        tidepool_mcp::template_haskell_anchored(
+            &preamble, stack, code, imports, helpers, None, None,
+        )
+    } else {
+        tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+    }
+}
+
+/// Whether `stack` (the promoted row string a turn compiles against, e.g.
+/// `'[AskUser, Finalize Decision]`) pins `Finalize` to a REAL author type —
+/// `false` for the uninhabited default `Finalize NoAnswer` (a turn not
+/// currently answering a typed hole — every non-answerer turn, and an
+/// answerer turn before its first `AnswerContract` is set) or a row with no
+/// `Finalize` entry at all (the general Agent stack never carries one).
+///
+/// A presence check, not a type extraction: `template_turn_for` only needs a
+/// boolean (route this turn's `_r` through the anchor, or don't), never the
+/// concrete `T` itself — `EngineConfig::turn_target`'s caller already has `T`
+/// in hand were it needed for anything else, so there is nothing to recover
+/// from this string, only whether to flip the anchor on.
+fn finalize_pin_active(stack: &str) -> bool {
+    stack.contains("Finalize ") && !stack.contains("Finalize NoAnswer")
 }
 
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —
@@ -1210,6 +1257,9 @@ pub struct DrivenTurn {
     pub usage: Usage,
     /// The turn's reasoning-summary ("thinking"), when the provider surfaced one.
     pub reasoning: Option<String>,
+    /// The encrypted reasoning items the provider surfaced for this turn (see
+    /// [`ReasoningItem`]) — distinct from `reasoning` above.
+    pub reasoning_items: Vec<ReasoningItem>,
     pub block: Option<String>,
 }
 
@@ -1228,6 +1278,7 @@ pub async fn drive_model_turn(
         text,
         usage,
         reasoning,
+        reasoning_items,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
     if let Some(r) = reasoning.as_deref().filter(|r| !r.is_empty()) {
@@ -1237,6 +1288,7 @@ pub async fn drive_model_turn(
         reply: text,
         usage,
         reasoning,
+        reasoning_items,
         block,
     })
 }
@@ -1251,9 +1303,9 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
 }
 
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
-/// `Value` (F3's RAW-value rule for a `runLLMTurnFanout` resume — the
-/// same "hand back the native representation, not an Aeson wrapper"
-/// discipline a single fork's `unsafeCoerce` relies on). `items` must
+/// `Value` for a `runLLMTurnFanout` resume — the same "hand back the native
+/// representation, not an Aeson wrapper" discipline a single fork's
+/// `unsafeCoerce` relies on. `items` must
 /// already be in declaration order; `table` only needs to know the
 /// always-wired-in `:`/`[]` constructors (any `DataConTable` from the same
 /// compiled program qualifies — `DataConId`s are stable hashes, not
@@ -1287,6 +1339,7 @@ mod tests {
         Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         }
     }
 
@@ -1319,6 +1372,22 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    #[test]
+    fn finalize_pin_active_true_for_a_real_answer_type() {
+        assert!(finalize_pin_active("'[AskUser, Finalize Decision]"));
+        assert!(finalize_pin_active("'[Finalize (Int -> Int)]"));
+    }
+
+    #[test]
+    fn finalize_pin_active_false_for_the_noanswer_sentinel() {
+        assert!(!finalize_pin_active("'[AskUser, Finalize NoAnswer]"));
+    }
+
+    #[test]
+    fn finalize_pin_active_false_with_no_finalize_entry() {
+        assert!(!finalize_pin_active("'[Console, KV]"));
     }
 
     // -- run_turn template byte-identity ------------------------------------

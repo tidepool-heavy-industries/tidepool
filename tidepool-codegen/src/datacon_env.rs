@@ -286,12 +286,9 @@ mod tests {
     /// filter binds no wrapper for it.
     ///
     /// That is the right answer, not a dropped reference. Emission resolves
-    /// `Var(VarId(dc.id.0))` in the body against the INNER binder either way —
-    /// the shadowing is in the fragment, not introduced by the prune. Pre-prune,
-    /// an outer wrapper was still emitted here, but nothing in the fragment
-    /// could ever reach it: it was immediately shadowed into dead code by the
-    /// inner let. So the set of wrappers actually consulted was empty both
-    /// before and after the prune; only the population of dead ones changed.
+    /// `Var(VarId(dc.id.0))` in the body against the INNER binder either way,
+    /// so an outer wrapper for it would be dead code nothing in the fragment
+    /// could ever reach.
     #[test]
     fn shadowed_binder_is_not_wrapped() {
         let dc_id = 7u64;
@@ -330,16 +327,15 @@ mod tests {
     /// directly against a scrutinee's tag. Both are baked into the frame at
     /// emission time, not resolved through `VarId(dc.id.0)`.
     ///
-    /// This pins the semantic heart of the prune against a specific, plausible
-    /// regression: someone later widening the filter to also union in `Con`
-    /// tags and `DataAlt` ids — which reads as a safety improvement ("what if
-    /// we missed a reference") but would silently restore most of the
-    /// quadratic behaviour the prune removes, since nearly every constructor
-    /// in a real fragment appears as a `Con` tag or a `DataAlt` somewhere.
+    /// Guards against widening the filter to also union in `Con` tags and
+    /// `DataAlt` ids: that looks like a safety improvement but silently
+    /// restores the quadratic behavior this prune exists to avoid, since
+    /// nearly every constructor in a real fragment appears as a `Con` tag or
+    /// `DataAlt` somewhere.
     ///
-    /// The pre-wrap diagnostic walk at `jit_machine.rs` ~1313 counts exactly
-    /// this Con/DataAlt set — a DIFFERENT set from the wrapper set, by design.
-    /// The two are not meant to agree, and this test does not compare them.
+    /// The pre-wrap diagnostic walk in `jit_machine.rs` counts a DIFFERENT
+    /// Con/DataAlt set by design — the two sets are not meant to agree, and
+    /// this test does not compare them.
     #[test]
     fn constructor_used_only_as_con_tag_or_data_alt_is_not_wrapped() {
         let con_tag_id = 30u64;

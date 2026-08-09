@@ -8,20 +8,15 @@
 //! bindings) → `slug` is gone.
 //!
 //! Requires `tidepool-extract` (the GHC→Core extractor) on `$PATH` or via
-//! `TIDEPOOL_EXTRACT`; skips cleanly otherwise.
+//! `TIDEPOOL_EXTRACT`; panics loudly otherwise.
 
 mod common;
 
-use common::{build_server_with_nursery, extract_available, text_of};
+use common::{build_server_with_nursery, require_extract, text_of};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_multi_turn_real_path() {
-    if !extract_available() {
-        eprintln!(
-            "skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT / run in nix develop)"
-        );
-        return;
-    }
+    require_extract();
     let repl = common::Repl {
         server: build_server_with_nursery(None, None, None),
     };
@@ -66,9 +61,7 @@ async fn session_multi_turn_real_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_from_cold_start_then_run() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = common::Repl {
         server: build_server_with_nursery(None, None, None),
     };

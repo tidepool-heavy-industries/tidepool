@@ -58,6 +58,7 @@ use crate::engine::{
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
+use crate::registry::{Checkout, CheckoutError};
 use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
@@ -98,6 +99,37 @@ pub enum HarnessError {
     NoPendingEscalation(NodeId),
     #[error("node {0:?} already has a turn in flight")]
     TurnInFlight(NodeId),
+    /// A registry checkout landed on a state mismatch that is neither "no
+    /// session" nor "busy" — a resume/child checkout aimed at the wrong hole,
+    /// or a new top-level turn attempted on an already-suspended session (see
+    /// [`CheckoutError::Suspended`]/[`CheckoutError::NotSuspended`]/
+    /// [`CheckoutError::WrongHole`]). Kept distinct from both so a caller
+    /// never mistakes a hole/state mismatch for "never forced" or "busy,
+    /// retry".
+    #[error("node {node:?}: {detail}")]
+    SessionMismatch { node: NodeId, detail: String },
+}
+
+impl HarnessError {
+    /// The ONE place a registry [`CheckoutError`] becomes a node-scoped
+    /// [`HarnessError`] — every checkout call site routes through this
+    /// rather than choosing its own collapse. `CheckoutError` only knows the
+    /// `SessionId`, not the `NodeId`, so the node comes from the call site
+    /// (which always has it in hand at the point it checks a session out).
+    fn from_checkout(node: NodeId, err: CheckoutError) -> Self {
+        match err {
+            CheckoutError::Unknown(_) => HarnessError::NoSession(node),
+            CheckoutError::Running(_) | CheckoutError::RunningChild { .. } => {
+                HarnessError::TurnInFlight(node)
+            }
+            other @ (CheckoutError::Suspended { .. }
+            | CheckoutError::NotSuspended(_)
+            | CheckoutError::WrongHole { .. }) => HarnessError::SessionMismatch {
+                node,
+                detail: other.to_string(),
+            },
+        }
+    }
 }
 
 /// What a node must produce to resolve the hole it is answering, and what its
@@ -129,11 +161,6 @@ pub struct AnswerContract {
 /// prompts from; `turn_seq` is the monotonic per-node turn index logged with
 /// each `TurnDelta`. `pending` is the classified hole when suspended.
 struct NodeConvo {
-    /// `None` only transiently while a turn runs on the blocking pool (the
-    /// session is moved out to be `run` off-reactor, then moved back). Every
-    /// public method that could observe the gap holds the convos lock across
-    /// the take, so an external caller never sees `None` for a live node.
-    session: Option<Session>,
     transcript: Vec<Message>,
     turn_seq: u64,
     /// Shared buffer the session's [`TracingDispatcher`] appends each effect to;
@@ -212,35 +239,6 @@ struct PendingHole {
     /// non-serializable, e.g. a closure). `Harness::take_finalized_value`
     /// reads the finalize payload straight out of this, never through JSON.
     raw_request: Value,
-}
-
-/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
-/// its resident `JitEffectMachine`, straight from
-/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
-/// instrumentation, this is a read-only view of counters that already exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeapSummary {
-    pub nursery_bytes: usize,
-    pub live_bytes: usize,
-    pub gc_count: u64,
-}
-
-/// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
-/// suspended) whether the pending hole is a fork and its prompt.
-#[derive(Debug, Clone)]
-pub struct NodeSummary {
-    pub node: NodeId,
-    pub parent: Option<NodeId>,
-    pub state: crate::tree::NodeState,
-    pub is_fork_hole: bool,
-    pub hole_prompt: Option<String>,
-    /// Set when this node is mid-`drive_answerer_to_value`, PARKED on the
-    /// operator-decision channel after exhausting its rung-1 auto-retry
-    /// (the escalation ladder's rung 2) — the node's [`crate::tree::NodeState`]
-    /// itself is unchanged (still `Running`: no hole was published, no event
-    /// was logged), so this is the harness's own in-memory signal the
-    /// observatory badges/pops up on. `None` otherwise.
-    pub awaiting_operator: bool,
 }
 
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
@@ -341,22 +339,12 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
     out
 }
 
-/// A node's in-progress turn as it streams — the answer text and reasoning
-/// ("thinking") accumulated so far, before the turn completes and is logged.
-/// The observatory renders this so tokens appear live; it's cleared when the
-/// turn lands in the durable log.
-#[derive(Debug, Clone, Default)]
-pub struct LiveTurn {
-    pub text: String,
-    pub reasoning: String,
-}
-
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
 pub struct Harness {
-    tree: NodeTree<()>,
+    tree: NodeTree<Session>,
     cfg: EngineConfig,
-    /// Unique per-construction run identity (F3 fix), scoping this
+    /// Unique per-construction run identity, scoping this
     /// instance's node decl-plane directories to
     /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
     /// sharing the same cache root (a different process, or a second
@@ -375,15 +363,6 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Per-node streaming turn buffer (see [`LiveTurn`]). Present only while a
-    /// node's turn is actively streaming; the entry is removed when the turn
-    /// completes (its content is then in the log).
-    live_turns: Mutex<HashMap<NodeId, LiveTurn>>,
-    /// A "something changed" callback the web layer installs
-    /// ([`Self::set_notifier`]) so streaming deltas nudge the SSE stream to
-    /// re-render. `None` (unset) in tests / headless runs — the harness works
-    /// the same, just without live push.
-    notifier: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
     /// Compiled once, reused for every node's bootstrap.
     boot: Arc<compile::CompiledTurn>,
@@ -454,8 +433,6 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(boot),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
@@ -464,45 +441,13 @@ impl Harness {
         })
     }
 
-    /// Install the "changed" callback the web layer uses to nudge its SSE
-    /// stream when a streaming delta lands. Set once, at startup.
-    pub fn set_notifier(&self, f: impl Fn() + Send + Sync + 'static) {
-        let _ = self.notifier.set(Box::new(f));
-    }
-
-    /// Fire the installed notifier, if any (no-op otherwise).
-    fn notify(&self) {
-        if let Some(f) = self.notifier.get() {
-            f();
-        }
-    }
-
-    /// The node's in-progress streaming turn, if one is active — the
-    /// observatory renders this to show tokens/thinking as they arrive.
-    pub fn live_turn(&self, node: NodeId) -> Option<LiveTurn> {
-        self.live_turns.lock().get(&node).cloned()
-    }
-
-    /// Fold one streaming delta into the node's live-turn buffer.
-    fn apply_delta(&self, node: NodeId, delta: StreamDelta) {
-        let mut live = self.live_turns.lock();
-        let entry = live.entry(node).or_default();
-        match delta {
-            StreamDelta::Text(t) => entry.text.push_str(&t),
-            StreamDelta::Reasoning(r) => entry.reasoning.push_str(&r),
-        }
-    }
-
-    /// Drive one model turn on `node` with live streaming: deltas land in the
-    /// node's live-turn buffer (rendered token-by-token in the observatory)
-    /// while the complete turn is assembled, with a throttled `notify()`
-    /// nudging the SSE stream. On failure the partial buffer is dropped; on
-    /// success it's left intact for the caller to swap for the logged turn via
-    /// [`Self::finish_live_turn`], so the transcript never flickers empty.
-    /// Shared by the root turn loop and the fork/fanout answerer loops.
+    /// Drive one model turn via the provider over its `StreamSink` (see
+    /// `provider::StreamDelta`/`StreamSink`) — the sink is still wired so the
+    /// provider's own streaming path runs; nothing currently reads the
+    /// deltas past draining the channel. Shared by the root turn loop and the
+    /// fork/fanout answerer loops.
     async fn stream_turn(
         &self,
-        node: NodeId,
         transcript: &[Message],
         framing: Option<&str>,
     ) -> Result<engine::DrivenTurn, HarnessError> {
@@ -511,40 +456,13 @@ impl Harness {
         let drive_fut =
             engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, framing, Some(tx));
         tokio::pin!(drive_fut);
-        let mut last_notify: Option<std::time::Instant> = None;
         let result = loop {
             tokio::select! {
-                res = &mut drive_fut => {
-                    while let Ok(d) = rx.try_recv() {
-                        self.apply_delta(node, d);
-                    }
-                    break res;
-                }
-                Some(delta) = rx.recv() => {
-                    self.apply_delta(node, delta);
-                    if last_notify.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(120)) {
-                        self.notify();
-                        last_notify = Some(std::time::Instant::now());
-                    }
-                }
+                res = &mut drive_fut => break res,
+                Some(_delta) = rx.recv() => {}
             }
         };
-        match result {
-            Ok(d) => Ok(d),
-            Err(e) => {
-                self.live_turns.lock().remove(&node);
-                self.notify();
-                Err(e.into())
-            }
-        }
-    }
-
-    /// Clear the node's live-turn buffer and re-render — called right after the
-    /// turn is logged, so the transcript swaps the streaming buffer for the
-    /// durable turn in a single frame.
-    fn finish_live_turn(&self, node: NodeId) {
-        self.live_turns.lock().remove(&node);
-        self.notify();
+        result.map_err(Into::into)
     }
 
     /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
@@ -639,7 +557,7 @@ impl Harness {
 
     /// Read-only handle to the node tree (state/children/parent queries for the
     /// protocol server's tree pane).
-    pub fn tree(&self) -> &NodeTree<()> {
+    pub fn tree(&self) -> &NodeTree<Session> {
         &self.tree
     }
 
@@ -651,93 +569,6 @@ impl Harness {
     /// module — required for a value to cross between them via `resume`.
     pub fn cfg(&self) -> &EngineConfig {
         &self.cfg
-    }
-
-    /// A flat snapshot of the tree for the observatory tree pane, in DFS
-    /// (parent-before-child, creation order) order. Each entry carries enough
-    /// to render a node row: id, parent, state, and — when suspended —
-    /// whether the pending hole is a fork (so the pane can badge it).
-    ///
-    /// Unpaginated — reads the whole tree via [`NodeTree::node_ids_after`]
-    /// with no limit. Fine at R0 scale; [`Self::tree_snapshot_page`] is the
-    /// cursor-paged alternative for the protocol endpoint, usable at
-    /// 10³–10⁴ nodes.
-    pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
-        let (all_ids, _) = self.tree.node_ids_after(None, usize::MAX);
-        let mut stack: Vec<NodeId> = all_ids
-            .into_iter()
-            .filter(|n| self.tree.parent(*n) == Some(None))
-            .collect();
-        // DFS from roots, preserving child order.
-        stack.reverse();
-        let mut visit = stack;
-        let mut order = Vec::new();
-        while let Some(n) = visit.pop() {
-            order.push(n);
-            if let Some(children) = self.tree.children(n) {
-                for c in children.into_iter().rev() {
-                    visit.push(c);
-                }
-            }
-        }
-        order
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect()
-    }
-
-    /// Cursor-paged tree snapshot — no small-tree assumption; flat id order
-    /// (not the DFS parent/child order
-    /// `tree_snapshot` uses; a page is a slice of the id space, not a subtree).
-    /// Returns up to `limit` rows after `cursor`, plus the next cursor to page
-    /// with (`None` once exhausted). Built on [`NodeTree::node_ids_after`], the
-    /// one additive pagination primitive this leaf adds to `NodeTree`.
-    pub fn tree_snapshot_page(
-        &self,
-        cursor: Option<NodeId>,
-        limit: usize,
-    ) -> (Vec<NodeSummary>, Option<NodeId>) {
-        let (ids, next) = self.tree.node_ids_after(cursor, limit);
-        let nodes = ids
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect();
-        (nodes, next)
-    }
-
-    /// Build one node's summary row, or `None` if `n` doesn't exist (a benign
-    /// race with a concurrent tree mutation — callers filter these out).
-    fn node_summary(&self, n: NodeId) -> Option<NodeSummary> {
-        let state = self.tree.state(n)?;
-        let pending = self.pending_hole(n);
-        let is_fork = matches!(
-            pending.as_ref().map(|c| &c.routing),
-            Some(HoleRouting::Fork { .. })
-        );
-        let prompt = pending.as_ref().map(|c| c.prompt.clone());
-        Some(NodeSummary {
-            node: n,
-            parent: self.tree.parent(n).flatten(),
-            state,
-            is_fork_hole: is_fork,
-            hole_prompt: prompt,
-            awaiting_operator: self.escalations.lock().contains_key(&n),
-        })
-    }
-
-    /// `node`'s live heap/GC snapshot, straight off its resident
-    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
-    /// when `node` has no live session (never forced, terminal) or during the
-    /// transient mid-turn gap while its session runs on the blocking pool
-    /// (the same benign race [`Self::node_summary`] tolerates).
-    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
-        let convos = self.convos.lock();
-        let stats = convos.get(&node)?.session.as_ref()?.heap_stats()?;
-        Some(HeapSummary {
-            nursery_bytes: stats.nursery_bytes,
-            live_bytes: stats.live_bytes,
-            gc_count: stats.gc_count,
-        })
     }
 
     /// Create a ROOT node as a thunk with the DEFAULT system framing
@@ -800,10 +631,10 @@ impl Harness {
         )
         .map_err(|e| HarnessError::Resident(e.to_string()))?;
 
-        // Register with the tree (emits Forced BEFORE the session is visible;
-        // the tree's `M = ()` machine handle is unused — the Harness owns the
-        // real session).
-        self.tree.force(node, actor, ())?;
+        // Register with the tree AND the session registry it owns (emits
+        // Forced before the session is visible, then mints the SessionId and
+        // inserts the machine as Idle — `NodeTree::force`'s one job).
+        self.tree.force(node, actor, session)?;
 
         // Seed the transcript: a fork/fanout answerer inherits its parent's
         // transcript (set by `register_fork_child`); a plain root gets its
@@ -825,21 +656,28 @@ impl Harness {
                     .lock()
                     .remove(&node)
                     .unwrap_or_else(|| ("Begin.".to_string(), None));
-                self.tree
-                    .turn_delta(node, 0, Role::User, seed.clone(), None)?;
-                (
+                // An empty seed (the self-iterating harness's framing-only
+                // answerer, `create_root_framed(_, "", _)`) has no opening
+                // user turn to log or carry — its context comes from
+                // `framing` alone. Logging/transcribing an empty turn would
+                // be a false record.
+                let transcript = if seed.is_empty() {
+                    Vec::new()
+                } else {
+                    self.tree
+                        .turn_delta(node, 0, Role::User, seed.clone(), None)?;
                     vec![Message {
                         role: Role::User,
                         content: seed,
-                    }],
-                    framing,
-                )
+                        reasoning_items: Vec::new(),
+                    }]
+                };
+                (transcript, framing)
             }
         };
         convos.insert(
             node,
             NodeConvo {
-                session: Some(session),
                 transcript,
                 turn_seq: 0,
                 effect_trace,
@@ -998,13 +836,8 @@ impl Harness {
             )
         };
 
-        // Stream the provider call into `node`'s live-turn buffer (rendered
-        // token-by-token), then log the completed turn with its thinking and
-        // swap the buffer for the durable turn in one frame.
         let provider_started = std::time::Instant::now();
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         timing::record_stage(
             node.0,
             timing::NO_ROUND,
@@ -1020,13 +853,13 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
             convo.transcript.push(Message {
                 role: Role::Assistant,
                 content: driven.reply.clone(),
+                reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
@@ -1057,7 +890,11 @@ impl Harness {
         // block runs, so it precedes this turn's Effect / HolePublished
         // events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
-        tracing::debug!(node = node.0, %block, "executed Haskell");
+        // INFO, not DEBUG: a person watching the console must see the exact
+        // source every compile ran (dogfood-observability deliverable 1) —
+        // full text, never truncated (a pathologically large source is
+        // itself signal worth seeing).
+        tracing::info!(node = node.0, source = %block, "compiled turn source");
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -1099,9 +936,7 @@ impl Harness {
         };
 
         self.tree.turn_start(node, "model".to_string(), None)?;
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -1110,13 +945,13 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
             convo.transcript.push(Message {
                 role: Role::Assistant,
                 content: driven.reply.clone(),
+                reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
             convo.usage.input_tokens += driven.usage.input_tokens;
@@ -1169,8 +1004,8 @@ impl Harness {
         )?;
 
         // The BIND/BINDDISCARD templates' imports: user imports + the decl
-        // module + current Val modules (mirrors what `run_bind_turn` used to
-        // merge) — just the user imports when the node has no decl plane.
+        // module + current Val modules — just the user imports when the node
+        // has no decl plane.
         let bind_imports = match &bind_ctx {
             Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
                 (_, true) => imports.to_string(),
@@ -1267,14 +1102,13 @@ impl Harness {
 
         match outcome {
             TurnResult::Decl { .. } => {
-                let mut session = self.take_session(node)?;
-                let (session, res) = tokio::task::spawn_blocking(move || {
-                    let r = session.define_scoped(&[&block_owned]);
-                    (session, r)
-                })
-                .await
-                .map_err(|e| HarnessError::Resident(format!("declare task join: {e}")))?;
-                self.put_session(node, session, None, AsksSidecar::default());
+                let checkout = self.checkout_run(node)?;
+                let res = self
+                    .run_checked_out(node, checkout, move |mut session| {
+                        let r = session.define_scoped(&[&block_owned]);
+                        (session, r)
+                    })
+                    .await?;
                 self.flush_effects(node)?;
                 match res {
                     Ok(gen) => {
@@ -1329,20 +1163,23 @@ impl Harness {
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                self.log_turn_extracted(node, &compiled.asks, None)?;
                 let asks = AsksSidecar::from_pairs(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
 
-                let mut session = self.take_session(node)?;
+                // Run the compiled fragment against the session (move it onto
+                // the blocking pool and back — the resident session is `Send`).
+                let checkout = self.checkout_run(node)?;
                 let run_table = table.clone();
-                let (session, run_outcome) = tokio::task::spawn_blocking(move || {
-                    let out = session.run("turn", &expr, &run_table);
-                    (session, out)
-                })
-                .await
-                .map_err(|e| HarnessError::Resident(format!("run task join: {e}")))?;
+                let run_outcome = self
+                    .run_checked_out(node, checkout, move |mut session| {
+                        let out = session.run("turn", &expr, &run_table);
+                        (session, out)
+                    })
+                    .await?;
 
-                self.finish_run(node, session, run_outcome, table, asks, None)
+                self.finish_run(node, run_outcome, table, asks, None)
             }
         }
     }
@@ -1357,13 +1194,18 @@ impl Harness {
     fn finish_run(
         &self,
         node: NodeId,
-        session: Session,
         outcome: Result<ResidentOutcome, ResidentError>,
         table: DataConTable,
         asks: AsksSidecar,
         pending_bind: Option<(BoundBinder, Generation)>,
     ) -> Result<engine::TurnOutcome, HarnessError> {
-        self.put_session(node, session, Some(table.clone()), asks.clone());
+        {
+            let mut convos = self.convos.lock();
+            if let Some(convo) = convos.get_mut(&node) {
+                convo.suspend_table = Some(table.clone());
+                convo.suspend_asks = asks.clone();
+            }
+        }
         self.flush_effects(node)?;
 
         match outcome {
@@ -1433,24 +1275,25 @@ impl Harness {
         &self,
         node: NodeId,
     ) -> Option<(String, Vec<String>, PathBuf, Generation)> {
-        let convos = self.convos.lock();
-        let s = convos.get(&node).and_then(|c| c.session.as_ref())?;
-        let root = s.lib_include_dir()?;
-        // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module of
-        // each live name (newest gen only — shadowed gens are injected, not
-        // imported, to avoid an ambiguous occurrence). Injection (`--inject-val`)
-        // uses ALL live gens.
-        let mut import_lines: Vec<String> = Vec::new();
-        if let Some(m) = s.session_import_module() {
-            import_lines.push(m);
-        }
-        import_lines.extend(s.current_val_modules());
-        Some((
-            import_lines.join("\n"),
-            s.inject_val_modules(),
-            root,
-            s.val_gen().next(),
-        ))
+        let sid = self.tree.session_of(node)?;
+        self.tree.registry().peek(sid, |s| {
+            let root = s.lib_include_dir()?;
+            // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module
+            // of each live name (newest gen only — shadowed gens are injected,
+            // not imported, to avoid an ambiguous occurrence). Injection
+            // (`--inject-val`) uses ALL live gens.
+            let mut import_lines: Vec<String> = Vec::new();
+            if let Some(m) = s.session_import_module() {
+                import_lines.push(m);
+            }
+            import_lines.extend(s.current_val_modules());
+            Some((
+                import_lines.join("\n"),
+                s.inject_val_modules(),
+                root,
+                s.val_gen().next(),
+            ))
+        })?
     }
 
     /// Materialize an ALREADY-COMPILED value-plane BIND turn (`x <- e`): run it
@@ -1468,21 +1311,26 @@ impl Harness {
         compiled: CompiledTurn,
         gen: Generation,
     ) -> Result<engine::TurnOutcome, HarnessError> {
+        self.log_turn_extracted(
+            node,
+            &compiled.asks,
+            Some((&binder.name, &binder.type_display)),
+        )?;
         let asks = AsksSidecar::from_pairs(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
 
-        let mut session = self.take_session(node)?;
+        let checkout = self.checkout_run(node)?;
         let binder_for_run = binder.clone();
         let run_table = table.clone();
-        let (session, outcome) = tokio::task::spawn_blocking(move || {
-            let out = session.run_bind("bind", &expr, &run_table, &binder_for_run, gen);
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("bind run join: {e}")))?;
+        let outcome = self
+            .run_checked_out(node, checkout, move |mut session| {
+                let out = session.run_bind("bind", &expr, &run_table, &binder_for_run, gen);
+                (session, out)
+            })
+            .await?;
 
-        self.finish_run(node, session, outcome, table, asks, Some((binder, gen)))
+        self.finish_run(node, outcome, table, asks, Some((binder, gen)))
     }
 
     /// Loop [`Self::drive_turn`] until the node SUSPENDS at a hole, COMPLETES,
@@ -1516,8 +1364,16 @@ impl Harness {
                 }
                 // The model's Haskell didn't compile — feed the GHC error back
                 // verbatim (capped) as a corrective user turn and retry, rather
-                // than cancelling the node.
+                // than cancelling the node. `turns` is this hole's corrective-
+                // retry round index — a burned round must be visible while it
+                // is happening, not just reconstructable afterwards.
                 Err(HarnessError::Compile(msg)) => {
+                    tracing::warn!(
+                        node = node.0,
+                        round = turns,
+                        "compile attempt failed (round {turns} of {}, corrective retry)",
+                        self.cfg.max_turns
+                    );
                     let ghc = truncate_ghc_error(&msg);
                     self.push_user_turn(
                         node,
@@ -1560,7 +1416,6 @@ impl Harness {
                 // than stranded `Running`. The failure is recorded as the turn's
                 // result so it shows in the transcript.
                 let _ = self.tree.node_done(node, format!("follow-up failed: {e}"));
-                self.finish_live_turn(node);
                 Err(e)
             }
         }
@@ -1615,20 +1470,6 @@ impl Harness {
         })
     }
 
-    /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
-    /// from the routing payload — what the observatory form pane renders. `None`
-    /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
-    pub fn pending_dialog_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
-        match self.pending_hole(node)?.routing {
-            // `dialogAsk :: Ui -> M Value` (typed at the Haskell surface): the
-            // payload is a well-formed `Ui` by construction, so a parse failure
-            // here means a genuine wire mismatch, not a model mistake. No
-            // boundary coercion — the type system guards the shape upstream.
-            HoleRouting::Dialog { ui } => serde_json::from_value(ui).ok(),
-            _ => None,
-        }
-    }
-
     /// The SERVER-DERIVED `Ui` form (`uiof::ui_of`) for a
     /// `runLLMTurn`/`runLLMTurnFork` hole on `node`, when the answer
     /// type maps mechanically — what the hole card renders IN ADDITION TO
@@ -1659,17 +1500,14 @@ impl Harness {
     ///
     /// `finalize` does NOT resume the Agent (unlike answering a
     /// `RunLLMTurn`/`Fork` hole via [`Self::drive_answerer_to_value`]) — it
-    /// TERMINATES the node's turn loop and hands the value UP, so this uses
-    /// [`NodeTree::node_cancelled`] (a `Suspended` node has no `node_done`
-    /// transition — that one is reserved for a turn that ran to completion
-    /// from `Running`; `Cancelled` is the tree's only terminal-from-Suspended
-    /// move) with a `"finalized"` reason — a SUCCESSFUL termination, not a
-    /// failure, even though the tree's own state name reads that way; the
-    /// node's session is kept alive past this call, same as any other
-    /// terminal node, so the observatory can still show it. The caller is
-    /// expected to `run_child` the returned `Value` into the OUTER
-    /// (Harness-monad) session to resolve the parent `runLLMTurn` hole,
-    /// zero-copy.
+    /// TERMINATES the node's turn loop and hands the value UP, so this
+    /// retires the node via [`Self::terminate_node`] with a `"finalized"`
+    /// reason — a SUCCESSFUL termination, not a failure, even though the
+    /// tree's own state name (`Cancelled`; a `Suspended` node has no
+    /// `node_done` transition — that one is reserved for a turn that ran to
+    /// completion from `Running`) reads that way. The caller is expected to
+    /// `run_child` the returned `Value` into the OUTER (Harness-monad)
+    /// session to resolve the parent `runLLMTurn` hole, zero-copy.
     ///
     /// Errors if `node` has no live session, isn't suspended, or its pending
     /// hole isn't `Finalize`-routed.
@@ -1729,14 +1567,15 @@ impl Harness {
     /// (the self-iterating harness's forced compaction turn finalizes a
     /// `Text`, then reads it out via [`tidepool_runtime::value_to_json`],
     /// which needs the SAME table the value was compiled with) rather than
-    /// just feeding it opaquely into another suspended continuation. TERMINATES
-    /// the node (`Cancelled`) — the finalized node is done.
+    /// just feeding it opaquely into another suspended continuation.
+    /// TERMINATES the node via [`Self::terminate_node`] (`Cancelled`,
+    /// session + convo retired) — the finalized node is done.
     pub fn take_finalized_value_with_table(
         &self,
         node: NodeId,
     ) -> Result<(Value, DataConTable), HarnessError> {
         let (value, table) = self.take_finalized_value_core(node)?;
-        self.tree.node_cancelled(node, "finalized".to_string())?;
+        self.terminate_node(node, "finalized")?;
         Ok((value, table))
     }
 
@@ -1755,11 +1594,13 @@ impl Harness {
     /// Without (2) the next hole's `drive_turn` cannot run a fresh block on the
     /// same session. Returns the finalized value (already read out of the
     /// suspended request by `take_finalized_value_core`, so aborting the
-    /// continuation does not lose it).
+    /// continuation does not lose it) alongside its rendered JSON text — what
+    /// the answer actually WAS, for the driver's `Finalize` narration event
+    /// (dogfood-observability deliverable 4).
     pub(crate) fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<Value, HarnessError> {
+    ) -> Result<(Value, String), HarnessError> {
         // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
         let hole = {
             let convos = self.convos.lock();
@@ -1771,7 +1612,8 @@ impl Harness {
                 .hole
                 .clone()
         };
-        let (value, _table) = self.take_finalized_value_core(node)?;
+        let (value, table) = self.take_finalized_value_core(node)?;
+        let rendered = tidepool_runtime::value_to_json(&value, &table, 0).to_string();
 
         // Abort the resident session's parked finalize continuation so the
         // session returns to idle and can run the NEXT hole's turn. `abort`
@@ -1779,17 +1621,19 @@ impl Harness {
         // then surfaces the abort as a terminal error outcome — that Err IS the
         // expected "continuation discarded" signal, not a failure, so it is
         // deliberately ignored. What matters is the session is now idle.
-        let mut session = self.take_session(node)?;
-        let _ = session.abort(&hole.0, "finalize consumed (answerer reused)".to_string());
+        let mut co = self.checkout_resume(node, &hole)?;
+        let _ = co
+            .machine()
+            .abort(&hole.0, "finalize consumed (answerer reused)".to_string());
         debug_assert!(
-            session.is_idle(),
+            co.machine().is_idle(),
             "session must be idle after aborting the finalize continuation"
         );
-        self.put_session(node, session, None, AsksSidecar::default());
+        co.restore_idle();
 
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
-        Ok(value)
+        Ok((value, rendered))
     }
 
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
@@ -1855,14 +1699,13 @@ impl Harness {
             .lock()
             .get(&node)
             .and_then(|c| c.suspend_table.clone());
-        let mut session = self.take_session(node)?;
-        let (session, out) = tokio::task::spawn_blocking(move || {
-            let out = session.apply_finalized(arg, suspend_table.as_ref());
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("apply_finalized join: {e}")))?;
-        self.put_session(node, session, None, AsksSidecar::default());
+        let checkout = self.checkout_child(node)?;
+        let out = self
+            .run_checked_out(node, checkout, move |mut session| {
+                let out = session.apply_finalized(arg, suspend_table.as_ref());
+                (session, out)
+            })
+            .await?;
         self.flush_effects(node)?;
         out.map(|r| r.into_value())
             .map_err(|e| HarnessError::Resident(e.to_string()))
@@ -1948,23 +1791,20 @@ impl Harness {
         })
     }
 
-    /// Cancel + drop a fork/fanout CHILD that failed mid-drive, so no error
-    /// path leaves it `Running` with a live resident session (the leak external
-    /// review flagged: only the success path used to `node_done` + `drop_session`
-    /// the child; a provider/join/log fault inside `drive_answerer_to_value`, or
-    /// a `resume_parent` failure after, propagated via `?` and orphaned the
-    /// child). Scoped to the fork/fanout callers deliberately — NOT baked into
-    /// `drive_answerer_to_value` itself, which is also called in-context with
-    /// `answerer == the main node`, where cancelling "the child" would kill the
-    /// live agent. Idempotent w.r.t. the internal abort paths that already
-    /// cancelled the child (cap-exhaustion / `ChildSuspended`): the tree
-    /// transition is best-effort (`let _`), the session drop is the load-bearing
-    /// half and is safe to repeat.
+    /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
+    /// path leaves it `Running` with a live resident session: every fallible
+    /// step after forcing the child (a provider/join/log fault inside
+    /// `drive_answerer_to_value`, or a `resume_parent` failure after) must
+    /// route through this explicit cleanup instead of propagating via `?`
+    /// and orphaning the child. Scoped to the fork/fanout callers
+    /// deliberately — NOT baked into `drive_answerer_to_value` itself, which
+    /// is also called in-context with `answerer == the main node`, where
+    /// cancelling "the child" would kill the live agent. `terminate_node` is
+    /// idempotent, so this is safe to repeat even against the internal abort
+    /// paths that already retired the child (cap-exhaustion /
+    /// `ChildSuspended`).
     fn cleanup_failed_child(&self, child: NodeId) {
-        let _ = self
-            .tree
-            .node_cancelled(child, "fork child failed".to_string());
-        self.drop_session(child);
+        let _ = self.terminate_node(child, "fork child failed");
     }
 
     /// Force + drive a FORK answerer for `node`'s pending single-fork hole
@@ -2036,7 +1876,7 @@ impl Harness {
         }
         // The child answerer node is done once it has produced the answer.
         let _ = self.tree.node_done(child, "answer delivered".to_string());
-        self.drop_session(child);
+        let _ = self.terminate_node(child, "answer delivered");
         Ok(child)
     }
 
@@ -2150,7 +1990,7 @@ impl Harness {
                 }
             };
             let _ = self.tree.node_done(child, "answer delivered".to_string());
-            self.drop_session(child);
+            let _ = self.terminate_node(child, "answer delivered");
             children.push(child);
             answers.push(value);
         }
@@ -2292,21 +2132,20 @@ impl Harness {
         .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
         .map_err(|e| HarnessError::Compile(e.to_string()))?;
 
-        let mut session = self.take_session(node)?;
+        let checkout = self.checkout_child(node)?;
         let cexpr = compiled.expr;
         let ctable = compiled.table.clone();
-        let (session, out) = tokio::task::spawn_blocking(move || {
-            let out = session.run_child(
-                "mechanical",
-                &cexpr,
-                &ctable,
-                &tidepool_codegen::emit::ExternalEnv::new(),
-            );
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
-        self.put_session(node, session, None, AsksSidecar::default());
+        let out = self
+            .run_checked_out(node, checkout, move |mut session| {
+                let out = session.run_child(
+                    "mechanical",
+                    &cexpr,
+                    &ctable,
+                    &tidepool_codegen::emit::ExternalEnv::new(),
+                );
+                (session, out)
+            })
+            .await?;
         self.flush_effects(node)?;
 
         let value = out
@@ -2352,10 +2191,9 @@ impl Harness {
             .and_then(|c| c.suspend_table.clone())
             .unwrap_or_default();
         let value = engine::json_answer_to_value(&submission, &table)?;
-        // `resume_parent` logs the Consumed attempt itself, once, only after
-        // the resume actually succeeds — logging it here too used to
-        // double-log every mechanical dialog answer (fixed: single source of
-        // truth for the Consumed record).
+        // `resume_parent` logs the Consumed attempt itself, exactly once,
+        // only after the resume actually succeeds — the single source of
+        // truth for the Consumed record; this call site must not log again.
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -2369,9 +2207,9 @@ impl Harness {
     /// no single child of a fan can consume the whole node's turn budget).
     /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
     ///
-    /// CAP EXHAUSTION does NOT return straight out anymore (the old
-    /// mid-fan hard-failure that leaked a `Running` answerer and wedged the
-    /// parent) — it runs the escalation ladder via
+    /// CAP EXHAUSTION never returns straight out: a hard-failure here would
+    /// leak a `Running` answerer and wedge the parent, so it instead runs
+    /// the escalation ladder via
     /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
     /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
     /// an unrelated resident/routing error) unwinds out of this loop; on
@@ -2406,8 +2244,7 @@ impl Harness {
                         continue;
                     }
                     CapDecision::Abort { reason } => {
-                        self.tree.node_cancelled(answerer, reason.clone())?;
-                        self.drop_session(answerer);
+                        self.terminate_node(answerer, &reason)?;
                         return Err(HarnessError::Aborted {
                             node: answerer,
                             reason,
@@ -2429,9 +2266,7 @@ impl Harness {
                     convo.framing.clone(),
                 )
             };
-            let driven = self
-                .stream_turn(answerer, &transcript, framing.as_deref())
-                .await?;
+            let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
             self.tree.turn_delta_reasoned(
                 answerer,
                 turn_seq,
@@ -2440,7 +2275,6 @@ impl Harness {
                 Some(driven.usage),
                 driven.reasoning.clone(),
             )?;
-            self.finish_live_turn(answerer);
             {
                 let mut convos = self.convos.lock();
                 let convo = convos
@@ -2449,6 +2283,7 @@ impl Harness {
                 convo.transcript.push(Message {
                     role: Role::Assistant,
                     content: driven.reply.clone(),
+                    reasoning_items: driven.reasoning_items.clone(),
                 });
                 convo.turn_seq += 1;
             }
@@ -2520,21 +2355,20 @@ impl Harness {
 
             // Run the answering block via run_child against the TARGET's
             // suspended session (same heap → the Value can feed resume).
-            let mut session = self.take_session(target)?;
+            let checkout = self.checkout_child(target)?;
             let expr = compiled.expr;
             let ctable = compiled.table.clone();
-            let (session, child_out) = tokio::task::spawn_blocking(move || {
-                let out = session.run_child(
-                    "answerer",
-                    &expr,
-                    &ctable,
-                    &tidepool_codegen::emit::ExternalEnv::new(),
-                );
-                (session, out)
-            })
-            .await
-            .map_err(|e| HarnessError::Resident(format!("run_child join: {e}")))?;
-            self.put_session(target, session, None, AsksSidecar::default());
+            let child_out = self
+                .run_checked_out(target, checkout, move |mut session| {
+                    let out = session.run_child(
+                        "answerer",
+                        &expr,
+                        &ctable,
+                        &tidepool_codegen::emit::ExternalEnv::new(),
+                    );
+                    (session, out)
+                })
+                .await?;
             self.flush_effects(target)?;
 
             match child_out {
@@ -2556,11 +2390,10 @@ impl Harness {
                 // would blind-retry forever: the child's own suspend is not a
                 // transient compile/runtime fault it can self-correct from).
                 Err(ResidentError::ChildSuspended) => {
-                    self.tree.node_cancelled(
+                    self.terminate_node(
                         answerer,
-                        "nested fork/askUser in a fork child unsupported (v1)".to_string(),
+                        "nested fork/askUser in a fork child unsupported (v1)",
                     )?;
-                    self.drop_session(answerer);
                     return Err(HarnessError::Aborted {
                         node: answerer,
                         reason: "a forked child answerer suspended on its own effect — nested \
@@ -2738,25 +2571,31 @@ impl Harness {
             )
         };
 
-        let mut session = self.take_session(node)?;
+        let checkout = self.checkout_resume(node, hole)?;
         let hole_str = hole.0.clone();
         // A suspended value-plane bind resumes via `resume_bind` (which
         // materializes the binding on completion); a plain hole via `resume`.
-        let (session, outcome) = tokio::task::spawn_blocking(move || {
-            let out = match &pending_bind {
-                Some((binder, gen)) => session.resume_bind(&hole_str, answer, binder, *gen),
-                None => session.resume(&hole_str, answer),
-            };
-            (session, out)
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("resume join: {e}")))?;
+        let outcome = self
+            .run_checked_out(node, checkout, move |mut session| {
+                let out = match &pending_bind {
+                    Some((binder, gen)) => session.resume_bind(&hole_str, answer, binder, *gen),
+                    None => session.resume(&hole_str, answer),
+                };
+                (session, out)
+            })
+            .await?;
         // Refresh suspend_table/suspend_asks explicitly on every restore, not
         // just the first suspend — downstream lookups (`pending_derived_ui`,
         // mechanical/dialog answers) must read the table the resident session
         // is actually compiled against, not silently-preserved first-suspend
         // state.
-        self.put_session(node, session, Some(table.clone()), asks.clone());
+        {
+            let mut convos = self.convos.lock();
+            if let Some(convo) = convos.get_mut(&node) {
+                convo.suspend_table = Some(table.clone());
+                convo.suspend_asks = asks.clone();
+            }
+        }
         self.flush_effects(node)?;
 
         // Only log the hole as Consumed (and clear it from `pending`) once the
@@ -2786,7 +2625,7 @@ impl Harness {
                         convo.pending_bind = None;
                     }
                 }
-                // Keep the session ALIVE past completion (don't `drop_session`),
+                // Keep the session ALIVE past completion (don't `terminate_node`),
                 // same as `run_block`: a node that suspended on a hole and then
                 // resumed to Done is still a followable conversation — its
                 // persisted session lets `follow_up` reopen it with heap intact.
@@ -2872,6 +2711,7 @@ impl Harness {
         transcript.push(Message {
             role: Role::User,
             content: engine::hole_card(prompt, ty),
+            reasoning_items: Vec::new(),
         });
         self.forked_transcripts
             .lock()
@@ -2891,11 +2731,38 @@ impl Harness {
         Ok(())
     }
 
-    /// Cancel a node (operator stop / teardown).
-    pub fn cancel(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
-        self.tree.node_cancelled(node, reason.to_string())?;
-        self.drop_session(node);
+    /// Log what extract said the just-compiled turn's holes and binds ARE —
+    /// the `asks.json` site → type table plus a value-plane bind's bound
+    /// name/type, if either is non-empty — to console INFO and `log.jsonl`
+    /// (dogfood-observability deliverable 2). A no-op (no console line, no
+    /// event) when the turn has neither: most turns don't.
+    fn log_turn_extracted(
+        &self,
+        node: NodeId,
+        asks: &[(u32, String)],
+        bound: Option<(&str, &str)>,
+    ) -> Result<(), HarnessError> {
+        if asks.is_empty() && bound.is_none() {
+            return Ok(());
+        }
+        tracing::info!(
+            node = node.0,
+            asks = ?asks,
+            bound = ?bound,
+            "turn extracted types"
+        );
+        self.tree.turn_extracted(
+            node,
+            asks.to_vec(),
+            bound.map(|(name, ty)| (name.to_string(), ty.to_string())),
+        )?;
         Ok(())
+    }
+
+    /// Cancel a node (operator stop / teardown) — retires it via
+    /// [`Self::terminate_node`].
+    pub fn cancel(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
+        self.terminate_node(node, reason)
     }
 
     /// The `turn_spliced` verb: interject `content` into `node`'s
@@ -2916,6 +2783,7 @@ impl Harness {
         convo.transcript.push(Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         });
         convo.turn_seq += 1;
         drop(convos);
@@ -2933,11 +2801,13 @@ impl Harness {
     /// can build a session-aware compile before taking the session for the run.
     /// `(None, None)` when the node has no session or no accumulated decl plane.
     fn session_decl_context(&self, node: NodeId) -> (Option<String>, Option<PathBuf>) {
-        let convos = self.convos.lock();
-        match convos.get(&node).and_then(|c| c.session.as_ref()) {
-            Some(s) => (s.session_import_module(), s.lib_include_dir()),
-            None => (None, None),
-        }
+        let Some(sid) = self.tree.session_of(node) else {
+            return (None, None);
+        };
+        self.tree
+            .registry()
+            .peek(sid, |s| (s.session_import_module(), s.lib_include_dir()))
+            .unwrap_or((None, None))
     }
 
     /// Declare what `node` must produce to resolve the hole it is now
@@ -2961,35 +2831,120 @@ impl Harness {
         convos.get(&node).and_then(|c| c.answer_contract.clone())
     }
 
-    fn take_session(&self, node: NodeId) -> Result<Session, HarnessError> {
-        let mut convos = self.convos.lock();
-        let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
-        convo.session.take().ok_or(HarnessError::NoSession(node))
+    /// Check `node`'s machine out for a NEW TOP-LEVEL turn (`Idle ->
+    /// Running`). Maps a registry refusal through [`HarnessError::from_checkout`]
+    /// (the one place a `CheckoutError` becomes a node-scoped `HarnessError`).
+    fn checkout_run(&self, node: NodeId) -> Result<Checkout<'_, Session>, HarnessError> {
+        let sid = self
+            .tree
+            .session_of(node)
+            .ok_or(HarnessError::NoSession(node))?;
+        self.tree
+            .registry()
+            .checkout_run(sid)
+            .map_err(|e| HarnessError::from_checkout(node, e))
     }
 
-    fn put_session(
+    /// Check `node`'s machine out to resume/abort its pending `hole`
+    /// (`Suspended{hole} -> Running`), validating the hole matches.
+    fn checkout_resume(
         &self,
         node: NodeId,
-        session: Session,
-        table: Option<DataConTable>,
-        asks: AsksSidecar,
-    ) {
-        let mut convos = self.convos.lock();
-        if let Some(convo) = convos.get_mut(&node) {
-            convo.session = Some(session);
-            if table.is_some() {
-                convo.suspend_table = table;
-                convo.suspend_asks = asks;
+        hole: &HoleId,
+    ) -> Result<Checkout<'_, Session>, HarnessError> {
+        let sid = self
+            .tree
+            .session_of(node)
+            .ok_or(HarnessError::NoSession(node))?;
+        self.tree
+            .registry()
+            .checkout_resume(sid, hole)
+            .map_err(|e| HarnessError::from_checkout(node, e))
+    }
+
+    /// Check `node`'s machine out for a NESTED CHILD run against its
+    /// suspended continuation (`Suspended{hole} -> RunningChild{hole}`) — the
+    /// `run_child` discipline: an answer value crosses via a child run
+    /// against the suspended TARGET's own session, never consuming its
+    /// continuation.
+    fn checkout_child(&self, node: NodeId) -> Result<Checkout<'_, Session>, HarnessError> {
+        let sid = self
+            .tree
+            .session_of(node)
+            .ok_or(HarnessError::NoSession(node))?;
+        self.tree
+            .registry()
+            .checkout_child(sid)
+            .map_err(|e| HarnessError::from_checkout(node, e))
+    }
+
+    /// Run `f` against `checkout`'s machine on the blocking pool, then
+    /// restore it based on the machine's OWN post-call state
+    /// (`is_idle`/`pending_continuation`) rather than guessing from `f`'s
+    /// domain result — correct whether the resident call completed,
+    /// suspended, or errored (an errored `run`/`resume` still leaves the
+    /// session in a well-defined idle/suspended state; `run_child` never
+    /// changes the target's pending hole either way).
+    ///
+    /// On a `JoinError` (the blocking task panicked — the machine went with
+    /// it), the checkout has nothing left to restore: retire the node via
+    /// [`Self::terminate_node`] instead of leaving the registry slot wedged
+    /// `Running` forever.
+    async fn run_checked_out<'a, F, T>(
+        &'a self,
+        node: NodeId,
+        mut checkout: Checkout<'a, Session>,
+        f: F,
+    ) -> Result<T, HarnessError>
+    where
+        F: FnOnce(Session) -> (Session, T) + Send + 'static,
+        T: Send + 'static,
+    {
+        let machine = checkout.take();
+        match tokio::task::spawn_blocking(move || f(machine)).await {
+            Ok((session, result)) => {
+                let hole = session
+                    .pending_continuation()
+                    .map(|h| HoleId(h.to_string()));
+                checkout.put(session);
+                match hole {
+                    Some(h) => checkout.restore_suspended(h),
+                    None => checkout.restore_idle(),
+                }
+                Ok(result)
+            }
+            Err(join_err) => {
+                let _ = self
+                    .terminate_node(node, &format!("resident session task panicked: {join_err}"));
+                Err(HarnessError::Resident(format!(
+                    "session task panicked: {join_err}"
+                )))
             }
         }
     }
 
-    /// Drop `node`'s live convo (transcript + session). The self-iterating
-    /// harness driver calls this at loop end to retire the per-loop answerer
-    /// session, so the next loop gets a fresh render-seeded one.
-    pub(crate) fn drop_session(&self, node: NodeId) {
-        let mut convos = self.convos.lock();
-        convos.remove(&node);
+    /// The ONE retirement path: terminalize the tree entry (a node already
+    /// `Done`/`Cancelled` is left as-is — idempotent), remove its session
+    /// from the registry (dropping the machine), and remove its `convos`
+    /// entry. `Ok(())` even for an already-terminated or unknown node —
+    /// every caller (cancellation, a failed fork/fanout child, a panicked-
+    /// turn `JoinError`, the self-iterating harness's `retire_answerer`)
+    /// wants "this node is retired" as its postcondition, not "this node was
+    /// still live when I asked".
+    pub fn terminate_node(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
+        if let Some(state) = self.tree.state(node) {
+            if !matches!(
+                state,
+                crate::tree::NodeState::Done | crate::tree::NodeState::Cancelled { .. }
+            ) {
+                self.tree.node_cancelled(node, reason.to_string())?;
+            }
+        }
+        if let Some(sid) = self.tree.session_of(node) {
+            self.tree.registry().remove(sid);
+        }
+        self.convos.lock().remove(&node);
+        Ok(())
     }
 
     fn set_pending(&self, node: NodeId, pending: PendingHole) {
@@ -3002,8 +2957,8 @@ impl Harness {
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
-    /// in-place compaction relief (02-runtime.md LOCKED: "replace its
-    /// context with the summary so the loop CONTINUES", NO loop-abort). The
+    /// in-place compaction relief: replace the context with the summary so
+    /// the loop CONTINUES, never a loop-abort. The
     /// accumulated exchange is collapsed to one User-role message carrying
     /// `summary` as prior-window context; the node's running [`Usage`] is reset
     /// (`node_usage` now reflects only the small compacted window, so the
@@ -3026,6 +2981,7 @@ impl Harness {
         convo.transcript = vec![Message {
             role: Role::User,
             content: content.clone(),
+            reasoning_items: Vec::new(),
         }];
         convo.turn_seq += 1;
         // Reset the running context-size meter: the live context is now just
@@ -3054,6 +3010,7 @@ impl Harness {
         convo.transcript.push(Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_items: Vec::new(),
         });
         convo.turn_seq += 1;
         drop(convos);
@@ -3067,9 +3024,9 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log::LogHeader;
+    use crate::log::{Event, LogHeader, LogReader};
     use crate::provider::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
-    use tidepool_repr::CoreExpr;
+    use tidepool_repr::{CoreExpr, CoreFrame, Literal, TreeBuilder};
 
     /// Never actually called: `flush_effects` touches `self.tree`,
     /// `self.convos`, and `self.cfg.effect_names` only, so a `Harness` built
@@ -3114,8 +3071,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(compile::CompiledTurn {
                 expr: CoreExpr { nodes: Vec::new() },
                 table: DataConTable::default(),
@@ -3128,11 +3083,79 @@ mod tests {
         }
     }
 
+    /// Like [`test_harness`] but keeps the log's tempdir alive and returns its
+    /// path, for a test that reads the durable log back after driving the
+    /// harness — `test_harness`'s own tempdir is dropped (and the file
+    /// unlinked) before it returns. Uses the same trivial single-`Lit` boot
+    /// expr [`fake_session`] does, so `Harness::force` (which bootstraps
+    /// from `self.boot`, unlike `fake_session`) succeeds without GHC/extract.
+    fn test_harness_with_log() -> (Harness, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let writer = LogWriter::create(
+            &path,
+            &LogHeader {
+                prelude_hash: "test".into(),
+                extract_fingerprint: "test".into(),
+                harness_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let provider: Arc<dyn DynModelProvider> = Arc::new(UnusedProvider);
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let boot_expr = b.build();
+        let harness = Harness {
+            run_id: generate_run_id(),
+            tree: NodeTree::new(writer),
+            cfg: test_engine_cfg(),
+            child_cfg: test_engine_cfg(),
+            provider,
+            convos: Mutex::new(HashMap::new()),
+            boot: Arc::new(compile::CompiledTurn {
+                expr: boot_expr,
+                table: DataConTable::default(),
+                asks: AsksSidecar::default(),
+            }),
+            seeds: Mutex::new(HashMap::new()),
+            forked_transcripts: Mutex::new(HashMap::new()),
+            escalations: Mutex::new(HashMap::new()),
+            operator_decisions: Mutex::new(HashMap::new()),
+        };
+        (harness, path, dir)
+    }
+
+    /// A trivially-bootstrapped `Session` for tests that only need
+    /// `NodeTree::force` to have SOME machine to register — never actually
+    /// run. A single `Lit` node is a valid (if useless) boot expr for
+    /// `JitEffectMachine::compile_session`, so this needs no GHC/extract, only
+    /// the pure-Rust codegen path — keeping these tests in the fast tier.
+    /// `Harness::build_stack`'s LLM handler captures `Handle::current()`, so
+    /// the CALLER must run inside a tokio runtime (`#[tokio::test]`) even
+    /// though nothing here is actually awaited.
+    fn fake_session(harness: &Harness) -> Session {
+        let (stack, _trace) = harness.build_stack();
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let expr = b.build();
+        ResidentSession::bootstrap(
+            &expr,
+            DataConTable::default(),
+            stack,
+            0,
+            vec![],
+            CapturedOutput::new(),
+            vec![],
+            DEFAULT_NURSERY_SIZE,
+            None,
+        )
+        .expect("trivial single-literal boot expr bootstraps")
+    }
+
     fn insert_convo(harness: &Harness, node: NodeId, effect_trace: EffectTrace) {
         harness.convos.lock().insert(
             node,
             NodeConvo {
-                session: None,
                 transcript: Vec::new(),
                 turn_seq: 0,
                 effect_trace,
@@ -3155,8 +3178,8 @@ mod tests {
     /// append before ever touching the log file. `flush_effects` must not
     /// advance `effect_seq` past that failure, and must restore both
     /// unwritten records into the node's trace, in their original order.
-    #[test]
-    fn flush_effects_does_not_advance_seq_or_lose_records_on_append_failure() {
+    #[tokio::test]
+    async fn flush_effects_does_not_advance_seq_or_lose_records_on_append_failure() {
         let harness = test_harness();
         let node = harness
             .tree()
@@ -3168,7 +3191,10 @@ mod tests {
                 false,
             )
             .unwrap();
-        harness.tree().force(node, Actor::Operator, ()).unwrap();
+        harness
+            .tree()
+            .force(node, Actor::Operator, fake_session(&harness))
+            .unwrap();
 
         let rec_a = EffectRecord {
             tag: 0,
@@ -3222,17 +3248,80 @@ mod tests {
 
     /// A flush with nothing traced is a no-op success, not an error — the
     /// common case (an answerer/outer stack that declares no base effects).
-    #[test]
-    fn flush_effects_is_a_noop_when_the_trace_is_empty() {
+    #[tokio::test]
+    async fn flush_effects_is_a_noop_when_the_trace_is_empty() {
         let harness = test_harness();
         let node = harness
             .tree()
             .create_node(None, "test", Vec::new(), ForkShape::Exact(0), false)
             .unwrap();
-        harness.tree().force(node, Actor::Operator, ()).unwrap();
+        harness
+            .tree()
+            .force(node, Actor::Operator, fake_session(&harness))
+            .unwrap();
         insert_convo(&harness, node, Arc::new(std::sync::Mutex::new(Vec::new())));
 
         assert!(harness.flush_effects(node).is_ok());
         assert_eq!(harness.convos.lock().get(&node).unwrap().effect_seq, 0);
+    }
+
+    /// The empty-`turn_delta` fix: a node created with an EMPTY seed (the
+    /// self-iterating harness's framing-only answerer,
+    /// `create_root_framed(_, "", _)`) must have no opening user turn — not
+    /// in its live transcript, not in the durable log. A node created WITH a
+    /// prompt must still have both.
+    #[tokio::test]
+    async fn force_skips_the_seed_turn_delta_only_when_the_seed_is_empty() {
+        let (harness, log_path, _dir) = test_harness_with_log();
+
+        let answerer = harness
+            .create_root_framed("loop answerer", "", None)
+            .unwrap();
+        harness.force(answerer, Actor::Operator).unwrap();
+
+        let prompted = harness.create_root_framed("agent", "hello", None).unwrap();
+        harness.force(prompted, Actor::Operator).unwrap();
+
+        {
+            let convos = harness.convos.lock();
+            assert!(
+                convos.get(&answerer).unwrap().transcript.is_empty(),
+                "an empty-seed node must have no opening user turn in its transcript"
+            );
+            assert_eq!(
+                convos.get(&prompted).unwrap().transcript.len(),
+                1,
+                "a node created with a prompt must have one opening user turn"
+            );
+        }
+
+        let (_header, events) = LogReader::open(&log_path).unwrap();
+        let mut answerer_has_turn_delta = false;
+        let mut prompted_turn0_content = None;
+        for record in events {
+            if let Event::TurnDelta {
+                node,
+                turn,
+                content,
+                ..
+            } = record.unwrap().event
+            {
+                if node == answerer {
+                    answerer_has_turn_delta = true;
+                }
+                if node == prompted && turn == 0 {
+                    prompted_turn0_content = Some(content);
+                }
+            }
+        }
+        assert!(
+            !answerer_has_turn_delta,
+            "an empty-seed answerer must have NO turn_delta at all, let alone an empty one"
+        );
+        assert_eq!(
+            prompted_turn0_content,
+            Some("hello".to_string()),
+            "a node created with a prompt must still log its opening user turn_delta"
+        );
     }
 }

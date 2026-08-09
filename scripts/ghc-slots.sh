@@ -1,8 +1,53 @@
 #!/usr/bin/env bash
-# Counted-semaphore lock for GHC-heavy work (extract builds, --ignore-default-filter
-# nextest runs). Replaces bare `flock /tmp/tidepool-ghc.lock <cmd>`.
+# Counted-semaphore lock for GHC-heavy TEST work (--ignore-default-filter
+# nextest runs and anything that FANS OUT extract compiles). Replaces bare
+# `flock /tmp/tidepool-ghc.lock <cmd>`.
+#
+# TOOLCHAIN BUILDS ARE OUT OF SCOPE (reclassified 2026-08-09): a
+# `cabal build tidepool-extract-bin` is ONE bounded GHC chain — run it
+# UNBROKERED as `nice -n 15 cabal build -j4 ...` (the same envelope as
+# pure-Rust cargo work), at most one per lane. The queue exists to cap
+# extract FAN-OUT; a 3-minute build queuing behind an 88-minute suite was
+# the V2 priority inversion surviving one category over. Long suite runs
+# should SHARD their acquisitions (-E per binary/group, battery-shard
+# discipline) so no single hold runs to an hour where receipts allow.
 #
 #   scripts/ghc-slots.sh run -- <cmd...>        acquire ONE of N slots, run, release
+#   scripts/ghc-slots.sh detach -- <cmd...>     same, but in its OWN SESSION via
+#                                               setsid: the queue wait is not charged
+#                                               against the caller's process lifetime
+#                                               (the environment kills processes at
+#                                               ~380s — a queued `run` under contention
+#                                               dies WHILE WAITING; detach survives,
+#                                               acquires, runs, and releases even if
+#                                               the calling pane dies). Prints pid +
+#                                               log path and returns immediately;
+#                                               poll the log across turns.
+#                                               GUARANTEE BOUND: detach survives
+#                                               the CALLING PANE dying (setsid).
+#                                               It does NOT survive box-level
+#                                               kill events (observed 2026-08-09:
+#                                               an overnight event took every
+#                                               detached waiter and job with it).
+#                                               A detached job is not durable —
+#                                               on any long gap, verify the job
+#                                               actually ran (log start/exit
+#                                               markers) before trusting a
+#                                               conclusion built on it.
+#                                               ENVELOPE: detach is about surviving
+#                                               the WAIT, not running legs in
+#                                               PARALLEL — at most ONE brokered leg
+#                                               per dev at a time. Detach without
+#                                               that bound is WORSE than no detach:
+#                                               it converts the death-and-relaunch
+#                                               that capped a non-adopter's
+#                                               footprint into durable simultaneous
+#                                               holds (observed: one dev holding
+#                                               2 of 4 slots). Drain, don't kill:
+#                                               a killed GHC leg wastes the slot
+#                                               time already spent and frees the
+#                                               slot no sooner; kill only work
+#                                               that is known-void.
 #   scripts/ghc-slots.sh exclusive -- <cmd...>  acquire ALL slots (whole-box quiet:
 #                                               latency measurement, benchmarks)
 #
@@ -10,25 +55,40 @@
 # protocol occupy slot 0 and total concurrency stays bounded during migration.
 #
 # Properties: single-slot waiters hold nothing while blocked (no deadlock).
-# When all slots are busy, a single-slot waiter POLLS ALL slots with jitter
-# rather than blocking untimed on one: committing to a single slot strands
-# waiters while another slot sits free (observed 2026-08-09 — three waiters
-# PID-hashed onto the same slot, two slots idle). With every waiter polling,
-# no protocol class holds kernel-queue priority over another, so the old
-# timed-retry starvation argument no longer applies; grant order among pollers
-# is random but capacity is never wasted. `exclusive` still blocks untimed per
-# slot in canonical order, so it out-queues pollers on each slot as it drains —
-# which is what a measurement wants.
+# When all slots are busy, a waiter ROTATES over the slots, kernel-blocking on
+# each with a jittered timeout (flock -w) rather than sleep-polling: blocked
+# waiters cost ~zero CPU (43 sleep-pollers were measured burning 1.2 cores,
+# 2026-08-08), and the rotation preserves the no-stranding property (a waiter
+# committed untimed to one slot can starve while another sits free — observed
+# 2026-08-09). Jittered timeouts keep waiters from cycling in lockstep;
+# capacity is never wasted for longer than one timeout. `exclusive` still
+# blocks untimed per slot in canonical order, so it out-queues rotating
+# waiters on each slot as it drains — which is what a measurement wants.
 set -euo pipefail
 
-# 3-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
+# THE COPY IN FORCE is the parent repo's, invoked by absolute path
+# (/home/inanna/dev/tidepool/scripts/ghc-slots.sh) — a worktree's own copy of
+# this file is INERT and its SLOTS= line may be stale; never audit slot count
+# from a worktree checkout, and NEVER INVOKE a worktree copy: a stale copy
+# that still sleep-polls is structurally STARVED against kernel-queued
+# flock -w waiters (observed: 26 min queued, zero acquisitions). Outer-wrap
+# with this absolute path; a worktree battery.sh inside inherits the slot
+# marker and skips self-acquire. (The nextest cap below is the opposite:
+# per-worktree config, live in each checkout.)
+#
+# 6-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
-# concurrent extracts with every lane compliant at 3x3. The per-run cap is
-# now 1, so slots = box-wide extract ceiling, but that config is PER-WORKTREE
-# and propagates at rebase: do NOT raise the slot count until the live heavy
-# lanes confirm carrying per-run cap 1, then 4 slots is a net REDUCTION vs
-# the old effective 9. Keep the product <= ~4 on this box.
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2)
+# concurrent extracts with every lane compliant at 3x3. Per-run cap is 1
+# (fc3363dc, fleet-verified), so slots = box-wide extract ceiling. 6x1=6,
+# still under the old effective 9. Six rather than four because cap-1's
+# second-order cost is HOLD TIME: an --ignore-default-filter crate run
+# serialises internally and holds one slot for its whole duration (observed
+# 1h43m) while extracting only part of the time — so at equal ceiling, more
+# slots means less head-of-line blocking behind long holds, not more load
+# (a held slot is not a running extract; observed 3-6 extracts across 4
+# held). Keep the product <= ~6 on this box; chase per-worktree cap
+# stragglers rather than lowering this.
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4 /tmp/tidepool-ghc.slot5)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,
@@ -55,7 +115,7 @@ mode="${1:-}"
 shift || true
 [ "${1:-}" = "--" ] && shift
 if [ -z "$mode" ] || [ $# -eq 0 ]; then
-  echo "usage: ghc-slots.sh run|exclusive -- <cmd...>" >&2
+  echo "usage: ghc-slots.sh run|detach|exclusive -- <cmd...>" >&2
   exit 2
 fi
 
@@ -66,22 +126,44 @@ case "$mode" in
     while :; do
       for f in "${SLOTS[@]}"; do
         exec {fd}>"$f"
-        if flock -n "$fd"; then
+        # First pass: non-blocking sweep grabs any free slot immediately.
+        # Busy pass: kernel-block up to a jittered timeout, then rotate.
+        if flock -n "$fd" || { [ "$announced" = 1 ] && flock -w $((10 + RANDOM % 10)) "$fd"; }; then
           await_memory
           # Marker for scripts that self-slot (scripts/battery.sh,
           # scripts/battery-shard.sh): held here, so they must not acquire a
           # second one. Set only after the slot is actually taken.
           export TIDEPOOL_GHC_SLOT="$f"
-          exec "$@"
+          # Start/exit markers instead of bare exec: an environment failure
+          # (e.g. ghc missing from the CALLER's PATH — hits run and detach
+          # alike) dies in milliseconds, and without markers that log is
+          # indistinguishable from a leg that ran. rc + duration make
+          # "never started" / "died instantly" / "ran" mechanically
+          # distinguishable in every log. The wrapper shell holds the flock
+          # fd until the command finishes, so slot discipline is unchanged.
+          echo "ghc-slots: acquired ${f##*.}, starting: $*" >&2
+          start_s=$SECONDS
+          "$@"
+          rc=$?
+          echo "ghc-slots: command exited rc=$rc after $((SECONDS - start_s))s" >&2
+          exit "$rc"
         fi
         exec {fd}>&-
       done
       if [ "$announced" = 0 ]; then
-        echo "ghc-slots: all slots busy — polling for any free slot" >&2
+        echo "ghc-slots: all slots busy — blocking for any free slot" >&2
         announced=1
       fi
-      sleep $((5 + RANDOM % 10))
     done
+    ;;
+  detach)
+    # New session so a process-group-scoped kill of the caller cannot reach the
+    # queued waiter. The detached child is `run` itself: it holds the flock fd
+    # once acquired and releases on exit, so slot discipline is fully honored.
+    log="${TIDEPOOL_GHC_DETACH_LOG:-$(mktemp /tmp/tidepool-ghc-detach.XXXXXX.log)}"
+    setsid nohup "$0" run -- "$@" >"$log" 2>&1 </dev/null &
+    echo "ghc-slots: detached pid=$! log=$log"
+    echo "$!"
     ;;
   exclusive)
     await_memory

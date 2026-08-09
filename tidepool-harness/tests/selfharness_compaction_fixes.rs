@@ -18,6 +18,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -28,14 +30,6 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Event, Harness, HarnessSource, LogObserver, NodeId,
     Observer, SelfHarnessDriver,
 };
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -108,6 +102,7 @@ impl ModelProvider for CompactingProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -123,6 +118,7 @@ impl ModelProvider for CompactingProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -194,10 +190,8 @@ fn make_driver(
 /// against it and does not escape the runaway guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_summarize_turn_counts_against_inference_cap() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let (mut driver, source) = make_driver(&scratch("c2"), 600, Arc::new(LogObserver));
     // The first hole finalizes in ONE answerer round (call #1). Cap = 1: after
@@ -209,6 +203,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
 
     let err = driver
         .run_one_cycle(&source, None)
+        .await
         .expect_err("cap=1 must hard-stop when compaction tries its own inference call");
     let msg = format!("{err}");
     assert!(
@@ -225,16 +220,15 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
 /// would otherwise never have been committed by `run_one_cycle` at all).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     // Both drivers share the SAME checkpoint path — that IS the restart.
     let durable = scratch("c3");
     let (mut driver1, source) = make_driver(&durable, 600, Arc::new(LogObserver));
     let outcome = driver1
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle with a mid-loop compaction");
     assert!(
         outcome
@@ -258,6 +252,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
 
     let restored_state = driver2
         .restore(&source2)
+        .await
         .expect("restore reloads the committed checkpoint")
         .expect("driver 1's completed cycle committed a checkpoint");
     assert_eq!(
@@ -277,10 +272,8 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
 /// + node, emitted after the summary exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c4_compaction_trigger_event_carries_payload() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let observer = Arc::new(CaptureObserver::default());
     let triggers = observer.triggers.clone();
@@ -288,6 +281,7 @@ async fn c4_compaction_trigger_event_carries_payload() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle with a mid-loop compaction");
 
     let captured = triggers.lock().unwrap();

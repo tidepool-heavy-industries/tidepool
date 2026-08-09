@@ -1,0 +1,461 @@
+# agent-wave lanes — PRD 18 (typed headless subagents)
+
+TL spec: [`../agent-wave.md`](../agent-wave.md). Design authority:
+[`../../self-iterating-harness/18-typed-subagent-spawning-prd.md`](../../self-iterating-harness/18-typed-subagent-spawning-prd.md).
+This directory is the wave's plan/receipt namespace. Worktree-wave owns
+`../worktree-lanes/`; do not write there.
+
+## Receipt rule (swarm-wide, effective 2026-08-08 — binds every spec in this directory)
+
+**A gate that exists to catch ONE specific failure mode passes BY NAME, with
+its own pass line.** Never report only the aggregate that contains it.
+
+A rename, an `#[ignore]`, a `cfg`, or an env-gated early return each leave a
+green aggregate with the guard never executed — so "N/N passed" is compatible
+with the one test you actually cared about not having run. A label never
+establishes what its name implies.
+
+Two companions:
+
+- **Cross-lane guards also name the base commit they ran on.** Base proves the
+  tree, name proves execution; both, or neither is established.
+- **A cross-lane guard must sit INSIDE the guarded lane's gate set.** A guard
+  that only runs in the guarding lane's suite does not protect the lane it
+  names.
+
+Applied to this wave's own gates, the tests that need named pass lines are the
+ones asserting a *specific* failure is caught: the codec's loud-rejection pair,
+the isolation checker's new-database-sidecar case, `compileTools`' single-
+traversal invariant, and every diagnostics compile-fail fixture. For compile-
+fail fixtures, "it failed to compile" is the weakest possible evidence —
+show each failed for *its own reason* (the asserted message text), since a
+fixture passing on an unrelated error is exactly what this rule exists to
+catch.
+
+### Fail-fast truncation — pass `--no-fail-fast`, report completed-vs-selected
+
+**ADVISORY (root, 2026-08-08), active until the fix folds.** A live inherited
+red — `mock_stack_matches_production`
+(`tidepool-runtime/tests/effect_stack/mock_stack_lockstep.rs`; `Fork` added to
+`standard_decls`, hand-written mock not updated; fix dev in flight) — combined
+with **nextest's default fail-fast** makes a crate-wide run stop at ~23%
+coverage *while emitting real pass lines*. The receipt is indistinguishable
+from a complete run. The only tell is completed-vs-total (observed 198/877).
+
+`scripts/battery.sh` does NOT pass the flag (line 100:
+`cargo nextest run --workspace --ignore-default-filter "$@"`), and this
+worktree does not carry the battery fix `7d57cea5`. So until a rebase brings
+it: **pass `--no-fail-fast` explicitly.**
+
+**Sanctioned inherited reds are THREE** (2026-08-09, ledgered as
+codex-review item 14, corrected form). Anything else red gets the standard
+cache-consistent A/B:
+
+1. `mock_stack_matches_production`
+2. `generic_deriving_337::sum_type_rejected_at_compile_time`
+3. `qq_fmt_brace_inside_hole_non_string_expr_still_works`
+
+#2 is adjacent to this wave's own claims — see
+`inheritance-for-agent-core.md` §8 on the vendored `FromJSON` sum rejection,
+which that test pins and which may therefore have moved.
+
+Two notes specific to this wave's runs:
+
+- A targeted `-E 'binary(<name>)'` run selects a single binary, so it excludes
+  the inherited red. Seeing that red under such a filter means the filter is
+  not scoped as intended — investigate the scoping, do not explain the failure
+  away.
+- **Fail-fast truncates within your own selection too.** One failing
+  diagnostics fixture stops the run, and the receipt then shows genuine pass
+  lines for whichever fixtures ran first. That is the exact failure the
+  named-pass-line rule exists to catch, arriving through the runner rather than
+  through a test name.
+
+Report **completed vs selected** — for a targeted run the honest denominator is
+what the filter selected, not the crate total, and the filter is stated
+alongside it so the number is checkable.
+
+### Name the INSTRUMENT beside any number
+
+Extends the rule one level down: report not just the count but **what counted
+it**. Three separate external process-counting instruments were each wrong *in
+a different direction* on this box on 2026-08-08; an in-code counter was the
+only correct one. The reason generalizes — an in-code counter **establishes its
+referent structurally**, where an external pattern-match (a `ps` grep, a log
+scrape, a wrapper's own bookkeeping) merely *asserts* one.
+
+So: test counts name the cargo-nextest summary line, its run ID, and the commit
+it ran at. A sha256 claim names the checker that computed it. A timing or
+term-size figure offered as evidence names what produced it — and if two
+measurements are being compared, says whether they ran under the same
+conditions, since a compile-time comparison across different slot contention
+does not support a conclusion about elaboration cost.
+
+**If a number came from something you cannot name, name it or drop it.** An
+unattributed figure reads as established, which makes it worse than no figure.
+
+## THROTTLE — active (root, 2026-08-08, until root lifts it)
+
+The box hit **load average 92** and the operator's SSH died. Until lifted,
+wrap EVERY heavy invocation in:
+
+```
+/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
+```
+
+Absolute path, **never `exclusive`**. This is broader than the standing
+GHC-heavy rule — it now covers `cargo check`/`build --workspace`,
+`cargo nextest run` at **any** tier including the quick default,
+`cargo clippy --workspace`, and extract-spawning spikes run outside the
+battery scripts.
+
+Do NOT wrap `scripts/battery.sh` — it already takes a slot and re-execs
+itself under one, and an outer wrapper is respected rather than
+double-acquired. It is the bare `cargo` invocations that need wrapping.
+
+Still exempt: single-crate `cargo check -p <crate>`, edits, greps, reads.
+Wrapping cheap commands just burns slots another lane is waiting on.
+
+Slot wait over 15 minutes is **starvation — report it, do not bypass** and do
+not reach for `exclusive` to jump the queue.
+
+### Use `detach`, not `run` — a correctness fix, not a preference
+
+```
+/home/inanna/dev/tidepool/scripts/ghc-slots.sh detach -- <cmd>
+```
+
+Runs the wrapped command in its own session (`setsid`), prints a pid and a log
+path, returns immediately; poll the log across turns.
+
+**A plain `run` that is QUEUED gets killed by this environment's ~380s process
+kill before it ever acquires a slot.** You wait, you get killed, nothing ran —
+and there is no obvious signal separating that from a failed test. With three
+box-wide slots contended across three waves, that is the likely outcome, not a
+corner case. `detach` queues durably and releases its slot even if the pane
+dies.
+
+This supersedes the `ghc-slots.sh run --` spelling in the operational block
+below and in every dev spec in this directory. The absolute path and the
+never-`exclusive` rule are unchanged.
+
+**At most ONE brokered (slot-taking) leg per agent at a time.** `detach` exists
+to survive the queue wait, NOT to enable parallelism. The trap is
+counterintuitive and worth stating: a dev that adopts `detach` and launches
+several legs concurrently is *worse for the queue than one that never adopted
+it*. Under plain `run` the ~380s kill destroyed a queued leg and forced a
+relaunch — ugly, but it capped that dev's footprint as a side effect. `detach`
+removes the death, converting self-limiting churn into durable simultaneous
+holds. Observed on this box: one dev holding two of four slots.
+
+**Corollary: drain, don't kill.** A killed GHC leg wastes the slot time already
+spent and frees the slot no sooner — you pay and get nothing. Kill only known-
+void work (wrong commit, superseded by a fix, testing something since deleted).
+
+**Why the absolute path is a correctness rule, not tidiness.** Slots are 6 as
+of `4958ada6`, but only parent-path invocations see slot4/slot5. Measured on
+this box: `/home/inanna/dev/tidepool/scripts/ghc-slots.sh` lists 6 slots; a
+worktree's own `scripts/ghc-slots.sh` lists 3. Invoking the worktree copy
+queues you behind a wall that does not exist — contending for 3 while 6 are
+live. Same reason the slot count must never be read from a worktree copy (the
+per-worktree number is the nextest `ghc-heavy` cap; they are different numbers
+answering different questions).
+
+**Enqueue hold (root, 2026-08-08): RELEASED.** It was held so extract-wave's
+twice-killed-while-queued dev got the next free slot; that dev acquired and
+completed clean on its first post-fix attempt. Slot-taking work resumes — via
+`detach`.
+
+## Wave 1 lanes
+
+| Lane | Owns | Deliverable |
+|---|---|---|
+| `dev-adapter-bringup` | `tidepool-agent/` (Rust) | Config isolation proven, app-server handshake, protocol fixtures pinned |
+| `dev-mode-encoding` | `haskell/lib/Tidepool/Agent/Contract.hs`, `tidepool-runtime/tests/agent_mode_encoding.rs` | Gate 1(a) verdict + the eDSL contract algebra |
+| `dev-structural-codec` | `haskell/lib/Tidepool/Agent/CodecSpike.hs`, `tidepool-runtime/tests/agent_structural_codec.rs` | Gate 1(b) verdict: list + recursive ADT round-trip on the real JIT |
+
+Wave 2 (after wave 1 folds) carries the adapter's live vertical:
+task → `item/tool/call` → typed reply → resume → structured completion.
+
+## Scaffold already committed
+
+`tidepool-agent/` is the containment crate. Its `src/seam.rs` is the
+Tidepool-owned vocabulary; `src/backend/codex/` is the ONLY place
+`codex-codes`, app-server JSON-RPC, or the word "Codex" may appear. That
+boundary is PRD 18's non-goal "making `codex-codes` types part of Tidepool's
+public Rust or Haskell API", made structural.
+
+## Pinned backend versions
+
+- Codex CLI: **0.146.0** (`codex --version` → `codex-cli 0.146.0`), from the
+  operator's nix profile.
+- `codex-codes`: **0.146.4** (latest on crates.io; the crate tracks CLI
+  versions, and 0.146.x is the matching family — the patch-level skew against
+  the CLI is recorded deliberately, not assumed harmless, and any protocol
+  mismatch found during bring-up is attributed here first).
+
+Pinning is CLI-and-crate together. Dynamic tools are an experimental
+app-server surface; a version bump re-runs the fixtures rather than refreshing
+a lockfile.
+
+## Protocol reconnaissance already done (TL, offline, zero token spend)
+
+`codex app-server generate-json-schema --out <dir>` emits the complete
+version-matched protocol schema from the pinned CLI. Verified: it does not
+touch `~/.codex` (top-level file size/mtime snapshot identical before and
+after). This is the cheap way to answer protocol-shape questions — read the
+schema before spending a ChatGPT turn on the same question.
+
+Established from the 0.146.0 schema:
+
+- `item/tool/call` **is** a `ServerRequest` — a server→host request that awaits
+  a host response. That is the park/reply primitive the whole design rests on,
+  present and not merely documented.
+- `DynamicToolCallParams` carries `{threadId, turnId, callId, tool, arguments,
+  namespace?}`. `callId` is the correlation token; `threadId`+`turnId` are what
+  make cross-agent misrouting detectable.
+- `DynamicToolCallResponse` is `{success: bool, contentItems: [...]}` where a
+  content item is `inputText`/`inputImage`/`inputAudio`. **A tool *error* is
+  `success: false` with content, not a JSON-RPC error** — that is the shape a
+  failing Haskell handler must produce so it never strands a pending call.
+- `TurnStartParams` requires `{threadId, input}` and accepts `cwd`, `model`,
+  `effort`, `outputSchema`, `sandboxPolicy`. `outputSchema` at turn start is
+  therefore available for structured completion.
+- `ThreadStartParams` has no required fields and accepts `cwd`, `ephemeral`,
+  `model`, `sandbox`, `developerInstructions`, `baseInstructions`, `config`.
+  Supplying `cwd` only at turn start is expressible — which is the shape PRD 18
+  wants for avoiding the project-trust write.
+- **RESOLVED by bring-up — and the generated schema was misleading here.**
+  `dynamicTools` is a top-level field of `ThreadStartParams`, sibling to
+  `cwd`/`config`/`model`, NOT nested in `config`. It is thread-scoped (frozen
+  at creation, as PRD 18 assumed), gated by
+  `#[experimental("thread/start.dynamicTools")]`, and unlocked by
+  `InitializeParams.capabilities.experimentalApi = true`.
+
+  The reason it looked absent: **schema generation silently drops
+  `#[experimental(...)]`-gated fields**, so `DynamicToolSpec` and
+  `DynamicToolNamespaceTool` appear as definitions that nothing references.
+  Treat the generated schema as a lower bound on the protocol, never as a
+  complete picture — reading it as complete leads to "dynamic tools do not
+  exist". Answers about experimental surface come from `openai/codex` at the
+  matching git tag (`rust-v0.146.0`). Full sourcing in
+  `tidepool-agent/fixtures/app-server-0.146.0/PROTOCOL-NOTES.md`.
+
+  Same cause, second consequence: `codex-codes` 0.146.4 exposes none of the
+  dynamic-tool types either. They are hand-rolled under
+  `backend::codex::dynamic_tools` and sent through the crate's raw `request()`
+  escape hatch — which PRD 18 anticipated, and which keeps containment intact.
+
+- `outputSchema` constrains the **text of the final `agentMessage` item**.
+  There is no separate structured-output field on the turn or the thread item:
+  the model's final message text *is* the schema-conforming JSON, and the
+  driver decodes it. This matters more than it looks — see the encoding
+  polarity note below.
+
+Schema regenerate command (idempotent, offline, safe):
+
+```bash
+codex app-server generate-json-schema --out tidepool-agent/fixtures/app-server-0.146.0/
+```
+
+## Encoding polarity — the seam between the two wave-1 gates (WAVE-2 DESIGN ITEM)
+
+Wave 1's two Haskell/Rust results are each correct and together they expose a
+constraint neither lane could see alone. Naming it here so the vertical core
+does not discover it by writing the wrong encoder first.
+
+**What gate 1(b) proved** (`receipt-structural-codec.md`): lists and genuine
+recursion survive the real extract/JIT. The self-referential dictionary
+(`Structural Plan` → `Structural [Plan]` → `Structural Plan`) elaborates and
+runs. That is the gate's actual question and the answer is GO, independent of
+wire shape. It uses one uniform `{"tag": …, "fields": [positional…]}` shape for
+every constructor form — a deliberate, well-argued response to the three-shapes
+mistake in `../codex-review-2026-08-08.md` item 8.
+
+**What the backend requires** (`receipt-adapter-bringup.md`): the model is the
+encoder on the other side of two boundaries, and it knows only a JSON Schema.
+Observed live, the child emitted tool arguments as a **named-field object**
+(`{"question": "What is the secret passphrase?"}`), and `outputSchema`
+constrains the final message text the model itself writes.
+
+So the structural interpreter has two boundaries with genuinely different
+requirements, and one encoding cannot serve both:
+
+| Boundary | Who encodes / decodes | Requirement |
+|---|---|---|
+| Tidepool ↔ Tidepool (authored messages, internal state) | Tidepool both ends | Uniformity is a virtue. `{"tag","fields"}` is fine, and inverse-by-construction is the property that matters. |
+| Tidepool ↔ model (tool inputs, tool outputs the child reads, terminal results) | the **model** on the far side | Must be named-field JSON **describable by a JSON Schema**. Positional `fields` arrays are not something a model can be asked to produce reliably, and field order is not a contract the model ever sees. |
+
+Consequences to settle in the vertical core, not now:
+
+1. A sum type crossing the model boundary needs a JSON-Schema-expressible
+   discriminated shape (`oneOf` + a `const` tag, or a tag field), not a
+   positional array. Whether every authored result type may be a sum, or only
+   records, is a real authored-surface decision.
+2. Schema emission and encoder must come from the SAME traversal for the
+   model-facing direction too — the drift argument PRD 18 makes for
+   `compileTools` applies with more force here, because a schema/encoder
+   disagreement shows up as a model producing well-formed JSON we then reject.
+3. Field names become load-bearing on the model-facing side, so
+   selector→wire-name normalization applies to record fields, not just tool
+   names.
+
+None of this reopens gate 1(b). The recursion/list result is what transfers;
+the wire shape was scoped to a proof and said so.
+
+## PRD 18 was revised on root's tip AFTER this wave forked
+
+Root's tip (`harness-interaction-surface` @ `4eb9283b`) carries a substantial
+PRD 18 revision. **Design against the tip's text, not this branch's copy**,
+for anything touching agent operations or lifecycle. Nothing wave 1 landed is
+invalidated — the Servant eDSL and diagnostics sections are byte-identical
+across the revision, and the adapter and codec results are untouched by it.
+
+The deltas that change vertical-core design:
+
+- **Agents may continue running between resident cycles.** The cycle boundary
+  now requires *Haskell-continuation* quiescence, not *agent* quiescence. A
+  `waitAgent` continuation must resolve before the cycle ends; an independently
+  running agent may outlive it. This supersedes the earlier "make every worker
+  quiescent and release it" framing.
+- **`AgentReference` + `attachAgent`.** A stable `AgentId` plus a protocol
+  fingerprint is checkpointable resident data; a later cycle recreates the
+  typed handle from it and fails loudly if the deployed protocol no longer
+  matches. The registry gains a first-class detached-but-running state.
+- **Every control operation collapses into one `pokeAgent` with a TAGGED
+  message.** `sendMessage`, `followupTask` and `interruptAgent` are all gone as
+  authored operations. The entire authored control surface is `spawnAgent`,
+  `pokeAgent`, `waitAgent`, **plus the tag choice**:
+
+  ```haskell
+  whenSafe     :: input -> Poke input
+  interrupting :: input -> Poke input
+  ```
+
+  `whenSafe` steers an active turn when possible, starts or queues a follow-up
+  when idle, and — open decision — either reaches or waits out a parked tool
+  call. `interrupting` cancels any active turn and delivers its message as the
+  next turn. Delivery is durable in both cases; only a terminal or released
+  target produces a typed failure.
+- **`AgentFinished` splits into `AgentWentIdle` and `AgentFinalized`.** Idle is
+  an ordinary typed outcome, not an exception, and it is what makes the
+  escalation ladder authorable: `whenSafe (PleaseFinalize …)` first,
+  `interrupting` later, resident policy choosing when to climb. The runtime
+  supplies liveness and staleness; it never escalates on its own.
+- **`drainMailbox`** — the resident's own typed inbox, drained atomically once
+  per cycle rather than polled.
+- **Endgame note:** dev-tree replaces the Exomonad swarm for Tidepool's own
+  development and drives headless agents directly through this adapter. No
+  Exomonad machinery is ported.
+
+**RULED (root, 2026-08-08, tip `930f326e`): PRD 18 supersedes.** PRD 19's poke
+paragraph had contradicted it — "no runtime delivery queue and no auto-enqueue
+on idle agents; PRD 18's message semantics stand unmodified" — while naming
+both operations the revision deleted. Rewritten on root's tip: pokes are
+`pokeAgent`'s durable per-agent queue, retained until deliverable, never
+silently discarded, and idle delivery starts or queues a follow-up.
+**Residents own reaction policy; the runtime owns delivery.**
+
+**"Fire-and-forget" is still live — it describes the SENDER, not delivery.**
+(Inanna, via root, 2026-08-08.) The decided model is *fire-and-forget poke plus
+wait for response*, and both halves hold simultaneously:
+
+- **Sender's contract — fire-and-forget.** `pokeAgent` is non-blocking and
+  carries **no per-message response guarantee**. A poke is not a request/reply
+  pair.
+- **Delivery — durable.** Steer if active, start or queue a follow-up if idle,
+  retain if temporarily unsteerable, never silently drop.
+
+**Therefore: do not build per-poke reply correlation.** There is no poke id to
+match a response against. Responses flow through `waitAgent` outcomes and the
+typed resident inbox. A registry that grows a poke→reply map has misread this.
+
+What PRD 19 actually got wrong was narrower than "fire-and-forget": it asserted
+*no runtime delivery queue and no auto-enqueue on idle agents*, which is a
+delivery claim, and it froze a description of the pre-revision system into a
+standing prohibition. The failure mode is worth keeping because it recurs — a
+sentence characterizing how things currently work is not a decision that they
+must keep working that way, and the two are easy to confuse once the sentence
+sits in a locked-decisions section.
+
+Two further specifics for the registry API:
+
+- **`drainMailbox @ResidentMessage` arrival SCHEDULES A CYCLE.** The inbox is
+  durable and typed, and its arrival is a *driver* integration point: the
+  registry exposes "mail arrived" as a wakeup signal the driver consumes. The
+  resident never polls; it drains once per cycle.
+- **Observations out, no built-in escalation.** The runtime exposes liveness
+  and staleness observations. Poke-again, replace, escalate to the operator, or
+  stop is resident **policy**. Keep that boundary clean — the registry reports
+  that a worker is stale; it never decides what to do about it.
+
+### Spike 2, now precisely scoped — the wave-2 adapter work item
+
+The tagged-poke surface splits the old "steer/interrupt while parked" question
+into two, with **different stakes**. Wave 2 must answer them separately; a
+combined verdict hides the one that matters.
+
+| Question | If the answer is no |
+|---|---|
+| Does a `whenSafe` poke reach a turn parked on a dynamic tool call, or wait it out? | **Acceptable degradation.** Delayed delivery is fine — the queue retains it and delivers after the tool call resolves. Record which happens; the API does not narrow either way. |
+| Does a parked request **block** an `interrupting` poke? | **Needs an adapter workaround**, which PRD 18 names as required before broader implementation. An `interrupting` poke that cannot land while a child is parked breaks the escalation ladder at exactly the point a resident reaches for it — a stuck worker is usually stuck *in* a tool call. |
+
+The second is the one to design the run around. The first is a measurement.
+
+Both are wave-2 scoped; neither was probed during wave 1's single gated turn,
+by the go's own condition against park-duration probing.
+
+## HOLD lines (root announces each lift; all intact as of wave 1)
+
+1. **generic-surface's fold** — no consumption of their Generic metadata
+   utilities, no `16-generic-spike-receipts.md`, no `Harness.Prelude`
+   integration, and no edit to `haskell/lib/Tidepool/Form.hs`, their Generic
+   substrate, or `tidepool-mcp/src/preamble.rs`. All agent-wave Haskell is NEW
+   files until then.
+2. **worktree-wave's vertical core** — the coupled-spawn seam is designed
+   JOINTLY, via root, when both sides are ready. Until then `seam::Workspace`
+   is transitional data and every use site says so.
+
+   **Text-stability part LIFTED (root, tip `d766b9cb`):** the PRD 19 rewrite
+   has landed and both PRDs are final. Design *inputs* are now stable and
+   confirmed: `WorkerRun` as the coupled-spawn result shape, one worktree per
+   agent with explicit second-binding failure, `worktreeHead` in the public
+   surface, `readOnlyOf` gone.
+
+   **The hold itself still stands.** Stable text is not the announcement —
+   this hold was always on worktree-wave's vertical core existing and the seam
+   being designed JOINTLY via root, and neither has happened. `seam::Workspace`
+   stays transitional.
+
+   Worth noting for whoever designs it: `worktreeHead` exists so a resident can
+   compare against a checkpointed head before re-registering handlers, which is
+   what closes the between-cycle no-replay gap. That is a direct consequence of
+   agents outliving cycles — subscriptions do not survive, so a resident
+   re-registering in a later cycle would otherwise silently miss everything
+   that moved while it was away.
+3. **root's realm step-4 go-signal** — nothing in `resident.rs`
+   pending/`ChildSuspended`.
+
+**Lifted (root, 2026-08-08):** the registry/lifecycle design, to the extent it
+was blocked on the poke contradiction above. Detached-but-running agents,
+`attachAgent` by `AgentReference` + protocol fingerprint, `AgentWentIdle` as an
+ordinary outcome distinct from `AgentFinalized`, Haskell-continuation
+quiescence at cycle boundaries, and `drainMailbox` are all green against the
+tip's semantics. Holds 1 and 2 above still stand and still bound this work:
+substrate consumption waits on generic-surface's fold, and the coupled-spawn
+seam waits on the joint announcement.
+
+The realm parking machinery is consumed ONLY through
+[`../realm-lanes/continuation-parking-contract.md`](../realm-lanes/continuation-parking-contract.md),
+never by reading `jit_machine.rs`. Its consumer guidance is binding: derive the
+declared handled prefix from the same value that constructed the handler stack,
+never re-declare it at a dispatch site.
+
+## Naming collision to resolve before the vertical core
+
+`Tidepool.Agent` is already taken — `haskell/lib/Tidepool/Agent.hs` is the
+harness answerer's capability row (`Eff '[AskUser, Fork, Finalize]`), unrelated
+to PRD 18. PRD 18 asks for the public surface at `Tidepool.Agent`. Wave 1 sits
+under `Tidepool.Agent.*` (legal alongside the existing module) and does not
+rename anything. The rename-or-relocate decision is root's, taken with the
+harness owner, not a lane's to make unilaterally.

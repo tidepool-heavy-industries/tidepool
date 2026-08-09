@@ -51,9 +51,17 @@ use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
 #[path = "support/session_scaffold.rs"]
-#[allow(dead_code)]
 mod session_scaffold;
-use session_scaffold::{build_gc_forcing_fragment, build_value_fragment, expect_int, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+#[path = "support/session_scaffold_gc_forcing.rs"]
+mod session_scaffold_gc_forcing;
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
+use session_scaffold::C1;
+use session_scaffold_expect::expect_int;
+use session_scaffold_gc_forcing::build_gc_forcing_fragment;
+use session_scaffold_value::build_value_fragment;
 
 /// `I# :: Int -> T`, the payload constructor fragments build and case-match.
 const I_HASH: DataConId = DataConId(7);

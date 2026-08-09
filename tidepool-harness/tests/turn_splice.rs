@@ -12,6 +12,8 @@
 //! scripted provider's FIRST reply to the child, timed so it lands after
 //! that reply's own (already-sent) prompt but before the child's next one.
 
+mod support;
+
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tidepool_harness::engine::EngineConfig;
@@ -21,14 +23,6 @@ use tidepool_harness::provider::{
 };
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::{ClassifiedHole, Harness, HoleRouting, TurnOutcome};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -112,6 +106,7 @@ impl ModelProvider for SpliceProbeProvider {
                 .to_string(),
                 usage: usage(),
                 reasoning: None,
+                reasoning_items: Vec::new(),
             }),
             // 1. Child's FIRST turn: splice an operator note into the CHILD's
             //    own transcript, then answer ill-typed (forcing a GHC-verbatim
@@ -126,6 +121,7 @@ impl ModelProvider for SpliceProbeProvider {
                     text: "```haskell\nresume \"forty-two\"\n```".to_string(),
                     usage: usage(),
                     reasoning: None,
+                    reasoning_items: Vec::new(),
                 })
             }
             // 2. Child's SECOND turn: capture the outbound prompt (the
@@ -137,6 +133,7 @@ impl ModelProvider for SpliceProbeProvider {
                     text: "Right, an Int.\n\n```haskell\nresume (42 :: Int)\n```".to_string(),
                     usage: usage(),
                     reasoning: None,
+                    reasoning_items: Vec::new(),
                 })
             }
             other => Err(ProviderError::Api(format!(
@@ -159,6 +156,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
         Event::NodeCreated { node, .. }
         | Event::Forced { node, .. }
         | Event::TurnStart { node, .. }
+        | Event::TurnExtracted { node, .. }
         | Event::Effect { node, .. }
         | Event::HolePublished { node, .. }
         | Event::HoleAnswerAttempt { node, .. }
@@ -173,12 +171,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn splice_lands_in_childs_next_prompt_assembly() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("splice.jsonl");

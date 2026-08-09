@@ -15,13 +15,17 @@
 //! interleaving would key replies by `(node, turn)` — the log already carries
 //! both, so the queue can become a map without a schema change.
 //!
-//! # Crash-replay
+//! # Offline log inspection (crash-replay tree reconstruction)
 //!
 //! [`fold_tree_state`] folds a log's events into the terminal per-node
-//! [`NodeState`] + tree structure, so a restart reconstructs the tree from the
-//! durable log alone. Combined with the [`ReplayProvider`] re-driving the
-//! recorded assistant turns, a `kill -9`'d run restores to the same terminal
-//! state.
+//! [`NodeState`] + tree structure, so a finished or crashed run's browsable
+//! history tree can be reconstructed from the durable log alone — an
+//! inspection tool over the log, in the same family as the `tail -f
+//! log.jsonl` workflow. It is explicitly NOT the startup recovery path: a
+//! `SelfHarnessDriver` restores its live state from the generation-tagged
+//! `persistence::Checkpoint` at boot, not by folding the log — folding it
+//! there too would install a second recovery source that can disagree with
+//! the checkpoint about what a run's state was.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -116,6 +120,7 @@ impl ModelProvider for ReplayProvider {
             text: reply.content,
             usage: reply.usage,
             reasoning: None,
+            reasoning_items: Vec::new(), // replay never has live reasoning data
         })
     }
 }
@@ -156,7 +161,10 @@ impl<P: ModelProvider> ModelProvider for RecordingProvider<P> {
     }
 }
 
-/// Reconstructed per-node state after folding a log (crash-replay).
+/// Reconstructed per-node state after folding a log — an OFFLINE read over a
+/// durable log for inspecting a finished or crashed run's tree, not the
+/// startup recovery path (that is `persistence::Checkpoint`; see the module
+/// doc).
 #[derive(Debug, Clone, Default)]
 pub struct FoldedTree {
     /// Terminal state per node.
@@ -171,10 +179,11 @@ pub struct FoldedTree {
     pub forks: HashMap<NodeId, (NodeId, u64)>,
 }
 
-/// Fold a log file's events into the terminal tree state (crash-replay
-/// reconstruction). Divergence-tolerant: unknown-ordering is impossible (the
-/// log is total-ordered by `seq`), and a torn tail is already dropped by the
-/// reader. The result is the state the harness restores on boot.
+/// Fold a log file's events into the terminal tree state — an OFFLINE read
+/// for inspecting a finished or crashed run's tree, NOT the path a driver
+/// restores from on boot (that is `persistence::Checkpoint`; see the module
+/// doc). Divergence-tolerant: unknown-ordering is impossible (the log is
+/// total-ordered by `seq`), and a torn tail is already dropped by the reader.
 pub fn fold_tree_state(path: impl AsRef<Path>) -> Result<FoldedTree, ReadError> {
     let (_header, events) = LogReader::open(path)?;
     let mut folded = FoldedTree::default();
@@ -218,11 +227,11 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
             content,
             ..
         } => {
-            folded
-                .transcripts
-                .entry(node)
-                .or_default()
-                .push(Message { role, content });
+            folded.transcripts.entry(node).or_default().push(Message {
+                role,
+                content,
+                reasoning_items: Vec::new(), // the durable log never carries them
+            });
         }
         Event::TurnForked {
             node,
@@ -240,16 +249,19 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
             // Folded exactly like a `TurnDelta`: a splice is transcript
             // content the child sees on its next prompt assembly, whatever
             // the audit trail calls it.
-            folded
-                .transcripts
-                .entry(node)
-                .or_default()
-                .push(Message { role, content });
+            folded.transcripts.entry(node).or_default().push(Message {
+                role,
+                content,
+                reasoning_items: Vec::new(), // the durable log never carries them
+            });
         }
-        // TurnStart / Effect / HoleAnswerAttempt do not change tree STATE (they
-        // are within-turn detail the replayer substitutes against, not folded
-        // into node lifecycle here).
-        Event::TurnStart { .. } | Event::Effect { .. } | Event::HoleAnswerAttempt { .. } => {}
+        // TurnStart / Effect / HoleAnswerAttempt / TurnExtracted do not change
+        // tree STATE (they are within-turn detail the replayer substitutes
+        // against, not folded into node lifecycle here).
+        Event::TurnStart { .. }
+        | Event::Effect { .. }
+        | Event::HoleAnswerAttempt { .. }
+        | Event::TurnExtracted { .. } => {}
     }
 }
 

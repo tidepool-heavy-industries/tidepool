@@ -36,7 +36,7 @@ fi
 # this is self-slotted rather than left to the caller. After the usage check,
 # so a misinvocation fails immediately instead of after a slot wait.
 if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
-  exec "$PWD/scripts/ghc-slots.sh" run -- "$PWD/scripts/battery-shard.sh" "$@"
+  exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/battery-shard.sh" "$@"
 fi
 crate="$1"
 shift
@@ -89,7 +89,7 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --ignore-default-filter -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
+cargo nextest run --ignore-default-filter --no-fail-fast -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
 run_status=$?
 set -e
 

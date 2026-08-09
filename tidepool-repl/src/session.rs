@@ -4,7 +4,7 @@
 //! for the first turn, then `add_function` + `run_fragment` for each later turn
 //! on the SAME machine).
 //!
-//! The `Session<Open>` / `Session<Closed>` type-state (domain §5) is applied
+//! The `Session<Open>` / `Session<Closed>` type-state is applied
 //! through [`SessionHandle`]: `close` consumes the open handle and returns a
 //! `Closed` one with no `run` method, so post-close turns don't typecheck.
 //!
@@ -68,7 +68,7 @@ pub struct SessionConfig {
     pub root: PathBuf,
     /// Base GHC include dirs (generated `Tidepool.Effects` dir + prelude/stdlib).
     pub base_include: Vec<PathBuf>,
-    /// Effect decls for this server (`[Console, Ask]` for the Wave-2 MVP).
+    /// Effect decls for this server (e.g. `[Console, Ask]`).
     pub decls: Vec<EffectDecl>,
     /// The assembled eval preamble (from `tidepool_mcp::build_preamble`).
     pub preamble: String,
@@ -126,8 +126,8 @@ struct PureBind {
 }
 
 /// One run item's outcome inside `run_block`: its position, classified kind, and
-/// the [`TurnOutcome`] it produced. Replaces the positional
-/// `(usize, &'static str, TurnOutcome)` tuple the block-runner used to carry.
+/// the [`TurnOutcome`] it produced. Named fields, not a positional tuple, so
+/// index/kind/outcome can't be misread by position.
 struct ItemRun {
     index: usize,
     kind: ItemKind,
@@ -135,8 +135,7 @@ struct ItemRun {
 }
 
 /// Map a binder's [`ValueTier`] to the [`BoundValue`] wrapping its root slot —
-/// the single source of truth for the tier → bound-value expansion (was a bool
-/// round-trip at each bind site).
+/// the single source of truth for the tier → bound-value expansion.
 fn bound_value(tier: ValueTier, slot: RootSlot) -> BoundValue {
     match tier {
         ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
@@ -349,10 +348,14 @@ impl Session {
     /// `Auto` item just works: the worker thread blocks inside `run_eval`
     /// (same stack), `session_resume` unblocks it, and the loop continues.
     ///
-    /// `Auto` items use the try-cascade: `run_def` is attempted first; on a
-    /// GHC parse error (not a type/scope error) the item falls back to
-    /// `run_eval`. Non-parse errors from `run_def` surface as-is — the item
-    /// is a declaration, just a broken one.
+    /// `Auto` items dispatch straight from this batch's classify verdict when
+    /// one is present (`Decl` → `run_def`, `Bind`/`Expr` → `run_eval`), never
+    /// paying for a doomed `run_def` probe GHC's own parser already ruled
+    /// out. Only when no verdict is available (the batch classify itself
+    /// failed) do they fall back to the try-cascade: `run_def` attempted
+    /// first, falling back to `run_eval` on a GHC parse error (not a
+    /// type/scope error — that means the item IS a declaration, just a
+    /// broken one, and surfaces as-is).
     fn run_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         items: &[BlockItem],
@@ -790,7 +793,8 @@ impl Session {
     /// for stmt/meta items and as the fallback when a decl batch fails. `verdict`
     /// is this item's precomputed classify verdict from `run_block`'s batch
     /// spawn (`None` for `Decl`/`Meta`, or when the batch classify failed);
-    /// only `run_eval` (on the `Stmt`/`Auto` paths) consumes it.
+    /// `run_eval` (on the `Stmt`/`Auto` paths) and `Auto`'s own dispatch below
+    /// both consume it.
     fn run_one_item<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         item: &BlockItem,
@@ -805,20 +809,32 @@ impl Session {
                 self.run_eval(&expr.0, verdict, handlers, captured),
             ),
             BlockItem::Meta(meta) => (ItemKind::Meta, self.run_meta(meta)),
-            BlockItem::Auto(expr) => {
-                // Try-cascade: attempt as declaration first. On a GHC parse
-                // error the item is not a decl → fall back to run_eval (bind
-                // vs expr internally). A non-parse failure (type/scope error)
-                // means it IS a declaration, just broken — surface the error.
-                let def_result = self.run_def(&expr.0);
-                match def_result {
-                    TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
-                        ItemKind::Stmt,
-                        self.run_eval(&expr.0, verdict, handlers, captured),
-                    ),
-                    other => (ItemKind::Decl, other),
+            // GHC's parser already classified this item (the block's batch
+            // `classify_block` spawn) — when that verdict is present, dispatch
+            // straight from it instead of paying for a doomed `run_def` probe
+            // first: a `Decl` verdict runs as a declaration directly, a
+            // `Bind`/`Expr` verdict runs `run_eval` directly. The try-cascade
+            // (attempt `run_def`, fall back to `run_eval` on a GHC parse
+            // error) is a degradation path for when NO verdict is available
+            // (the batch classify itself failed) — there, GHC's parser is the
+            // only way left to tell decl from stmt.
+            BlockItem::Auto(expr) => match verdict {
+                Some(v) if v.kind == TurnKind::Decl => (ItemKind::Decl, self.run_def(&expr.0)),
+                Some(_) => (
+                    ItemKind::Stmt,
+                    self.run_eval(&expr.0, verdict, handlers, captured),
+                ),
+                None => {
+                    let def_result = self.run_def(&expr.0);
+                    match def_result {
+                        TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
+                            ItemKind::Stmt,
+                            self.run_eval(&expr.0, verdict, handlers, captured),
+                        ),
+                        other => (ItemKind::Decl, other),
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -827,7 +843,8 @@ impl Session {
     /// from `run_block`'s one batch [`classify_block`] spawn for the whole
     /// block; a BIND (`x <- e` / `let x = e`) roots a value on the live heap, a
     /// reference-with-live-bindings injects the session ifaces, and a plain
-    /// expression (no bindings) stays on the proven Wave-2 path.
+    /// expression (no bindings) stays on the plain-eval path
+    /// ([`Self::run_plain_eval`]).
     fn run_eval<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
@@ -892,9 +909,9 @@ impl Session {
         }
     }
 
-    /// The proven Wave-2 expression path: compile an `M a` expression against the
-    /// session include and run it on the resident machine. Unchanged — used when
-    /// the turn neither binds nor references a session binding.
+    /// The plain expression path: compile an `M a` expression against the
+    /// session include and run it on the resident machine. Used when the turn
+    /// neither binds nor references a session binding.
     fn run_plain_eval<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
@@ -941,8 +958,7 @@ impl Session {
         } = match compile_result {
             Ok(r) => r,
             // No `user_lines` computed here (this is the plain-eval path, not a
-            // session-turn compile) — same default the removed `--user-code-lines`
-            // flag would have been skipped with for this site.
+            // session-turn compile) — `None` is the correct default for this site.
             Err(e) => return TurnOutcome::Error(compile_fail(&e, &source, None)),
         };
         if warnings.has_io {
@@ -1892,7 +1908,7 @@ impl Session {
     /// colliding import is regenerated each turn) — a hard-to-debug footgun hit
     /// in practice by `let glob = …` (vs the `Fs` `glob` verb) and `data Hit`
     /// (vs the `Library` `Hit`). Hiding makes the session definition win, the
-    /// way GHCi shadowing would. (BUG-7 + the verb/value-plane collision class.)
+    /// way GHCi shadowing would.
     fn patched_preamble(&self) -> String {
         let mut names: Vec<String> = Vec::new();
         names.extend(
@@ -2025,7 +2041,7 @@ impl Session {
 }
 
 // ---------------------------------------------------------------------------
-// Type-state: Open vs Closed (domain §5)
+// Type-state: Open vs Closed
 // ---------------------------------------------------------------------------
 
 /// Phantom marker: the session is open and accepts turns.
@@ -2125,7 +2141,7 @@ fn insert_imports(preamble: &str, imports: &str) -> String {
 /// Rewrite `import Tidepool.Prelude hiding (…)` in the preamble to also hide
 /// the given names. Applied per-turn so that user-defined functions named after
 /// Prelude/lens re-exports (e.g. `over`, `view`, `key`) resolve unambiguously
-/// to the session decl rather than the Prelude export (BUG-7).
+/// to the session decl rather than the Prelude export.
 ///
 /// Names already present in the hiding list are not duplicated. Names that do
 /// not exist in Tidepool.Prelude produce no error (GHC silently ignores
@@ -2418,8 +2434,9 @@ fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::V
 /// Append `name = <text>` with the user text embedded VERBATIM — no
 /// indentation transform. Explicit `let { }` brackets suspend the layout
 /// algorithm (Report rule L, explicit context), so unindented user lines are
-/// legal and quasiquote payloads keep byte-exact fidelity (per-line indenting
-/// was the "+2 corrupts multi-line QQ" bug class). `__b` is local to each RHS.
+/// legal and quasiquote payloads keep byte-exact fidelity: per-line indenting
+/// would corrupt a multi-line quasiquote payload's byte offsets. `__b` is
+/// local to each RHS.
 fn push_verbatim_binding(out: &mut String, name: &str, text: &str) {
     out.push_str(name);
     out.push_str(" = let {\n __b =\n");
@@ -3366,9 +3383,9 @@ mod reset_tests {
         }
     }
 
-    /// F4(a): a failed `SessionLib::open` inside `:reset` must leave the
-    /// session's state COMPLETELY untouched — not a half-reset where the value
-    /// plane / turn counter were already cleared before the reopen was even
+    /// A failed `SessionLib::open` inside `:reset` must leave the session's
+    /// state COMPLETELY untouched — not a half-reset where the value plane /
+    /// turn counter were already cleared before the reopen was even
     /// attempted. `SessionLib::open` only does `fs::create_dir_all`, so this
     /// forces a real IO failure with no GHC/extract dependency.
     #[test]
@@ -3377,8 +3394,7 @@ mod reset_tests {
         let mut session = Session::open(minimal_config(dir.path().to_path_buf()))
             .expect("session opens on a fresh dir");
 
-        // Poke markers into state the pre-fix "clear before open" code path
-        // wiped unconditionally, even on a failed reopen.
+        // Poke markers into state that a failed reopen must NOT clear.
         session.core.set_val_gen(Generation(3));
         session.pure_binds.insert(
             "marker".to_string(),
@@ -3411,7 +3427,7 @@ mod reset_tests {
         );
     }
 
-    /// F4(b): an in-block `:reset` drops the resident machine WITHOUT a
+    /// An in-block `:reset` drops the resident machine WITHOUT a
     /// bootstrap (which is what pairs machine creation with `publish_cancel`),
     /// so the shared `CancelSlot` must be cleared explicitly — otherwise it keeps the
     /// dropped machine's stale `CancelHandle` until the next bootstrap, and a
@@ -3421,10 +3437,7 @@ mod reset_tests {
     /// `Session` level.
     #[test]
     fn reset_clears_stale_cancel_handle_from_slot() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let stack = tidepool_handlers::build_minimal_stack();
         let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
         let effects_dir =

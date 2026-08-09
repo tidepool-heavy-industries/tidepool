@@ -44,13 +44,12 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 use serial_test::serial;
 
-// The shared scaffold carries helpers this file does not need; `#[path]`
-// inclusion makes them look dead here (same disclaimer as
-// `realm_multi_continuation.rs`).
-#[allow(dead_code)]
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{expect_int, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+use session_scaffold::C1;
+use session_scaffold_expect::expect_int;
 
 // ─── freer-simple constructor IDs — identical to realm_multi_continuation.rs's
 // table (same synthetic effect stack), plus FINALIZE_ID for A2. ─────────────

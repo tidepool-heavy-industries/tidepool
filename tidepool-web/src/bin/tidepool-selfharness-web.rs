@@ -93,6 +93,7 @@ fn sample_form() -> FormSpec {
                 kind: FieldKind::Bool,
             },
         ],
+        shape: None,
     }
 }
 

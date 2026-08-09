@@ -58,11 +58,9 @@ pub enum RuntimeError {
 /// emitted as `iconst` args by the JIT (derived from the Haskell error-sentinel
 /// `VarId`, `extract_error_kind`), so the discriminants must stay byte-identical.
 ///
-/// Centralising them here kills the previously hand-parallel `match kind` arms
-/// (one for the diagnostic name, one for the `RuntimeError`) that could — and
-/// did — disagree: the old `_` name was `"Unknown"` while the old `_` error
-/// variant was `UserError`. Now both derive from one decode, so an unknown
-/// discriminant is `UserError` consistently.
+/// Centralising them here guarantees the diagnostic name and the
+/// `RuntimeError` agree for every discriminant: both derive from this one
+/// decode, so an unknown discriminant is always `UserError` on both sides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum RuntimeErrorKind {
@@ -75,7 +73,7 @@ pub enum RuntimeErrorKind {
 
 impl RuntimeErrorKind {
     /// Decode the raw ABI discriminant. Unknown values map to `UserError`
-    /// (matching the historical `_ =>` fallback).
+    /// (matching the `_ =>` fallback below).
     pub fn from_u64(kind: u64) -> Self {
         match kind {
             0 => Self::DivisionByZero,
@@ -140,14 +138,14 @@ pub enum ShapeTrapKind {
     /// wrapper — a heap payload that isn't a `TAG_LIT` of an array-carrying
     /// class (`String#`/`ByteArray#`/`SmallArray#`/`Array#`). Guards against a
     /// stray tag/int word being read as a length-prefixed buffer pointer —
-    /// the `unbox_addr`/`AddrKind` fix's sibling for the analogous escape in
-    /// `unbox_bytearray` (codex-review-2026-08-08.md item 1 follow-up).
+    /// `unbox_bytearray`'s analogue of the escape `AddrKind` guards against
+    /// in `unbox_addr`.
     ArrayKind = 4,
 }
 
 impl ShapeTrapKind {
     /// The stderr breadcrumb label for a raw discriminant. Unknown values fall
-    /// back to the case-miss label (the historical, primary caller).
+    /// back to the case-miss label (by far the most common caller).
     pub(crate) fn label(kind: u64) -> &'static str {
         match kind {
             1 => "SHAPE TRAP: boxing-wrapper arity",
@@ -384,35 +382,31 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
 /// then unconditionally writes the full header + payload into it (tag byte,
 /// size halfword, Con/Closure/Thunk fields, capture slots, …). If the poison
 /// is smaller than the attempted allocation, those post-OOM stores spill past
-/// the poison into adjacent heap — we've observed glibc "corrupted size vs.
-/// prev_size" aborts as a direct consequence.
+/// the poison into adjacent heap, corrupting it (glibc "corrupted size vs.
+/// prev_size" aborts are a direct symptom).
 ///
 /// The JIT never clamps allocation size at emit time. For a Con, the
 /// effective upper bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (the
 /// largest Con the read-side `heap_bridge` is willing to decode; see
 /// `MAX_FIELDS = 1024` there). Closures and thunks have NO equivalent
-/// emit-time or read-side cap (L4, repo-review-2026-07-06/01-gc-memory-
-/// safety.md) — `num_captured` is a bare `u16` field, so the true worst
-/// case is `u16::MAX` captures, not "the same … count in practice"; past
-/// 2045 captures the old 16 KiB sizing (tuned only for `MAX_FIELDS`) was
-/// already smaller than the write, silently reopening the PR-#272 class
-/// this buffer exists to close. Sized here to the actual structural
-/// maximum (a `u16` capture count) rather than an emit-time cap, so no
-/// otherwise-valid program can ever exceed it — a static, one-time
-/// (`OnceLock`) allocation, so the larger size costs nothing per OOM event.
+/// emit-time or read-side cap — `num_captured` is a bare `u16` field, so the
+/// true worst case is `u16::MAX` captures. Sized here to that structural
+/// maximum rather than any "typical" capture count, so no otherwise-valid
+/// program can ever exceed it — a static, one-time (`OnceLock`) allocation,
+/// so the larger size costs nothing per OOM event (see PR #272 for the
+/// original heap-corruption class this buffer closes).
 pub(crate) const POISON_BUF_SIZE: usize =
     layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
 
 /// Compile-time guard: the poison buffer must be large enough to absorb a
 /// post-OOM write of a worst-case Con at the read-side decoder's
-/// `MAX_FIELDS` ceiling, AND a worst-case Closure/Thunk capture write (L4:
-/// `u16::MAX` captures — nothing else bounds it). If either ceiling is
+/// `MAX_FIELDS` ceiling, AND a worst-case Closure/Thunk capture write
+/// (`u16::MAX` captures — nothing else bounds it). If either ceiling is
 /// bumped without updating `POISON_BUF_SIZE`, this assertion fails to
-/// compile rather than regressing into the runtime heap-corruption symptom
-/// that PR #272 originally diagnosed (glibc "corrupted size vs. prev_size"
-/// aborts on OOM paths writing past an undersized poison). The matching
-/// runtime regression tests live in the module's `tests` block under
-/// `poison_buf_absorbs_max_con_write` and `poison_buf_absorbs_max_capture_write`.
+/// compile rather than regressing into the heap-corruption symptom PR #272
+/// diagnosed (glibc "corrupted size vs. prev_size" aborts on OOM paths
+/// writing past an undersized poison). Matching runtime regression tests:
+/// `poison_buf_absorbs_max_con_write`, `poison_buf_absorbs_max_capture_write`.
 const _: () = {
     let worst_case_con = layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
     assert!(
@@ -653,9 +647,9 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
             // Re-read offset/len AFTER the force above (cur may have moved).
             let f1 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
             let f2 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 16) as *const *mut u8);
-            // L2: every sibling field access in this function guards null
-            // (nulls are legal transients per the GC verifier) — these two
-            // didn't, so a null offset/len field segfaulted inside
+            // Guard null here like every other field access in this function
+            // (nulls are legal transients per the GC verifier) — an
+            // unguarded null offset/len field segfaults inside
             // read_small_int's read_tag.
             if f1.is_null() || f2.is_null() {
                 return None;
@@ -874,16 +868,14 @@ pub(crate) fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
     }
 }
 
-/// Ceiling on live call NESTING depth, not total calls made (finding 5,
-/// repo-review-2026-07-06/01-gc-memory-safety.md, fixed the counter to
-/// actually decrement on return — see `debug_app_return`/
-/// `MachineState::decr_call_depth` — so this bounds concurrently-active,
-/// unreturned calls, matching what the name always implied but the old
-/// never-decrementing counter did not). Catches genuine unbounded/very deep
-/// non-tail recursion (e.g. `[0..]` in a non-fusing context) with a clean
-/// `RuntimeError::StackOverflow` instead of a SIGSEGV from stack overflow. A
-/// long list processed via a strict, TAIL-recursive fold is NOT bounded by
-/// this at all (tail calls reset the counter per bounce; see
+/// Ceiling on live call NESTING depth, not total calls made: the counter is
+/// decremented on return (`debug_app_return`/`MachineState::decr_call_depth`),
+/// so it bounds concurrently-active, unreturned calls — never every call ever
+/// made, no matter how many run sequentially. Catches genuine unbounded/very
+/// deep non-tail recursion (e.g. `[0..]` in a non-fusing context) with a
+/// clean `RuntimeError::StackOverflow` instead of a SIGSEGV from stack
+/// overflow. A long list processed via a strict, TAIL-recursive fold is NOT
+/// bounded by this at all (tail calls reset the counter per bounce; see
 /// `resolve_tail_calls`/`trampoline_resolve`).
 const MAX_CALL_DEPTH: u32 = 20_000;
 
@@ -962,9 +954,9 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
 /// returned (every path out of that emission — the poison short-circuit and
 /// the post-call/post-TCO-resolution merge both converge here), so
 /// `call_depth` tracks actual live-call nesting instead of a running total of
-/// every call ever made (Finding 5: ~20k purely-sequential, non-nested
-/// applications used to trip the same `MAX_CALL_DEPTH` a genuinely
-/// 20k-deep recursion would, because nothing ever decremented).
+/// every call ever made. Without this decrement, `MAX_CALL_DEPTH` sequential,
+/// non-nested applications would trip the same ceiling that a genuinely
+/// `MAX_CALL_DEPTH`-deep recursion trips.
 ///
 /// # Safety
 /// `vmctx` must be non-null with `machine_state` installed.
@@ -975,10 +967,10 @@ pub unsafe extern "C" fn debug_app_return(vmctx: *mut VMContext) -> i64 {
     0
 }
 
-/// The shared shape/tag-mismatch trap. The JIT calls this (unconditionally, on
-/// the production path — it replaced the bare `trap user2` → `ud2` → SIGILL)
-/// whenever a value's constructor tag or heap shape doesn't match what was
-/// compiled: a case scrutinee matching no alternative ([`ShapeTrapKind::CaseMiss`]),
+/// The shared shape/tag-mismatch trap. The JIT calls this, unconditionally on
+/// the production path, whenever a value's constructor tag or heap shape
+/// doesn't match what was compiled: a case scrutinee matching no alternative
+/// ([`ShapeTrapKind::CaseMiss`]),
 /// or a numeric unbox hitting a Con of the wrong arity / a literal of the wrong
 /// class ([`ShapeTrapKind::BoxingArity`] / [`ShapeTrapKind::LitClass`]). All
 /// surface `RuntimeError::CaseTrap`; `kind` only selects the stderr breadcrumb
@@ -1071,15 +1063,13 @@ pub extern "C" fn runtime_shape_trap(
 
     // Dump raw bytes for any object type.
     //
-    // L3 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings): every
-    // heap object is AT LEAST `MIN_OBJECT_DUMP_SIZE` (24) bytes — Lit's total
-    // size, and Con/Closure/Thunk's fixed header before any variable-length
-    // payload — but this used to unconditionally read 32, 8 bytes past a
-    // bare (0-field/0-capture) 24-byte object. A Lit sitting at the very end
-    // of the nursery made that an out-of-bounds read past the allocation.
-    // Clamped to the guaranteed-safe minimum instead of the shape-specific
-    // (and here unknown, since decoding it further isn't worth the risk in a
-    // fault-diagnostic path) total size.
+    // Every heap object is AT LEAST `MIN_OBJECT_DUMP_SIZE` (24) bytes — Lit's
+    // total size, and Con/Closure/Thunk's fixed header before any
+    // variable-length payload. A Lit sitting at the very end of the nursery
+    // has nothing valid beyond its own 24 bytes, so reading any
+    // shape-specific (and here unknown — decoding it further isn't worth the
+    // risk in a fault-diagnostic path) total size risks an out-of-bounds
+    // read past the allocation. Clamp to the guaranteed-safe minimum instead.
     // SAFETY: ptr points to a heap object at least MIN_OBJECT_DUMP_SIZE bytes.
     const MIN_OBJECT_DUMP_SIZE: usize = 24;
     let raw_bytes: Vec<u8> = (0..MIN_OBJECT_DUMP_SIZE)
@@ -1219,12 +1209,11 @@ mod tests {
         });
     }
 
-    /// L4 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
-    /// unlike Con (`MAX_FIELDS = 1024`, read-side-decoder-bounded), a
+    /// Unlike Con (`MAX_FIELDS = 1024`, read-side-decoder-bounded), a
     /// Closure/Thunk's `num_captured` has NO cap other than its `u16`
-    /// width — past 2045 captures the old 16 KiB `POISON_BUF_SIZE` (tuned
-    /// only for `MAX_FIELDS`) was already smaller than the write, reopening
-    /// the PR-#272 heap-corruption class for large closures. Simulates the
+    /// width — past 2045 captures a `POISON_BUF_SIZE` tuned only for
+    /// `MAX_FIELDS` would already be smaller than the write, reopening the
+    /// PR #272 heap-corruption class for large closures. Simulates the
     /// JIT's post-OOM write sequence for a worst-case (`u16::MAX`-capture)
     /// Closure into the poison buffer and verifies no OOB writes occur.
     #[test]
@@ -1277,12 +1266,12 @@ mod tests {
 
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
 
-    /// L2: `materialize_message`'s Text branch (`nf == 3`) reads the
-    /// offset/len fields directly from the Con with no null guard, unlike
-    /// every sibling field access in this function — nulls are legal
-    /// transients per the GC verifier. A `Text` Con whose offset field is
-    /// null must return `None` (message-less error), not segfault inside
-    /// `read_small_int`'s `read_tag`.
+    /// `materialize_message`'s Text branch (`nf == 3`) reads the offset/len
+    /// fields directly from the Con — like every other field access in this
+    /// function, it must guard null, since nulls are legal transients per
+    /// the GC verifier. A `Text` Con whose offset field is null must return
+    /// `None` (message-less error), not segfault inside `read_small_int`'s
+    /// `read_tag`.
     #[test]
     fn materialize_message_text_null_offset_field_does_not_segfault() {
         crate::machine_state::test_support::with_test_machine(|| unsafe {

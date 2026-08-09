@@ -9,10 +9,9 @@
 -- | Test fixture for W2 (mid-loop, in-place compaction): a harness whose
 -- 'loop' opens TWO @runLLMTurn \@Text@ holes in the SAME loop, so the runtime
 -- can trip its emergency compaction BETWEEN the two holes and the second hole
--- observes the COMPACTED context. Unlike @TwoHoleHarness@, this 'render'
--- SURFACES the @Maybe Text@ compaction argument (prints a "Summary of the
--- prior window:" block when it is @Just@), so a test can assert the mid-loop
--- summary reaches the NEXT render's @lastCompaction@.
+-- observes the COMPACTED context. The driver composes the compaction summary
+-- into the system message on top of this module's plain 'render' output, so
+-- a test can assert the mid-loop summary reaches the NEXT render.
 module CompactionHarness
   ( State (..)
   , initialState
@@ -36,12 +35,9 @@ data State = State
 initialState :: State
 initialState = State {loopCount = 0, answers = []}
 
-render :: State -> Maybe Text -> Text
-render st mcomp =
-  case mcomp of
-    Nothing -> [fmt|Compaction harness. Loop count: {loopCount st}.|]
-    Just s  -> [fmt|Compaction harness. Loop count: {loopCount st}.
-Summary of the prior window: {s}|]
+render :: State -> Text
+render st =
+  [fmt|Compaction harness. Loop count: {loopCount st}.|]
 
 -- | TWO holes in one loop. The runtime's mid-loop compaction check runs
 -- BETWEEN them; when it trips, the second hole's answerer drives under the

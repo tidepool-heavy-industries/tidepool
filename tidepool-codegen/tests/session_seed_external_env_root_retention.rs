@@ -25,8 +25,19 @@ use tidepool_repr::{BindingName, DataConTable, Generation, SessionModule, Sessio
 
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{build_gc_forcing_fragment, build_reference_fragment, build_value_fragment};
-use session_scaffold::{expect_int, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+#[path = "support/session_scaffold_gc_forcing.rs"]
+mod session_scaffold_gc_forcing;
+#[path = "support/session_scaffold_reference.rs"]
+mod session_scaffold_reference;
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
+use session_scaffold::C1;
+use session_scaffold_expect::expect_int;
+use session_scaffold_gc_forcing::build_gc_forcing_fragment;
+use session_scaffold_reference::build_reference_fragment;
+use session_scaffold_value::build_value_fragment;
 
 /// High-byte tag a real Option-C session binder carries (`stableVarId`,
 /// 0xFE-tagged external) — mirrors `converge_proof.rs`'s fixture helper.

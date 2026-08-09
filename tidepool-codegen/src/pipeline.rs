@@ -88,7 +88,7 @@ pub struct CodegenPipeline {
     lambda_names: Vec<(FuncId, String)>,
     /// Accumulated code-ptr -> name registry, shared via `Rc` with whatever
     /// thread-local slot last installed it (`debug::set_lambda_registry`).
-    /// `build_lambda_registry` extends this in place (D7): once the previous
+    /// `build_lambda_registry` extends this in place: once the previous
     /// run's thread-local handle is dropped (refcount back to 1), extending
     /// is `Rc::make_mut` + insert of only the NEW entries, not a rebuild of
     /// the whole session's lambda history.
@@ -318,7 +318,7 @@ impl CodegenPipeline {
     }
 
     /// Return the accumulated `LambdaRegistry`, incrementally extended with
-    /// any lambdas registered since the last call (D7).
+    /// any lambdas registered since the last call.
     ///
     /// Must be called after `finalize()` so code pointers are available for
     /// the newly-registered entries. Once resolved, a JIT function's code
@@ -528,7 +528,7 @@ mod tests {
     }
 
     /// Declares, defines and registers a trivial constant-returning function
-    /// named `name` in `pipeline`, without finalizing. Shared by the D7
+    /// named `name` in `pipeline`, without finalizing. Shared by the
     /// incremental-registry tests below, which need to control exactly when
     /// `finalize`/`build_lambda_registry` runs relative to registration.
     fn define_trivial_lambda(pipeline: &mut CodegenPipeline, name: &str, ret: i64) -> FuncId {
@@ -549,17 +549,17 @@ mod tests {
         func_id
     }
 
-    /// D7: across several "turns" (declare/define/register a few lambdas,
+    /// Across several "turns" (declare/define/register a few lambdas,
     /// finalize, then read the registry — the same shape `add_function` +
     /// `install_registries` drive per session turn), the incremental
     /// `build_lambda_registry` must contain exactly what a from-scratch
-    /// rebuild over the FULL lambda history so far would contain. This is the
-    /// observable-equivalence proof D7 requires: the incremental path must
-    /// never diverge from the old full-rebuild semantics, only its cost.
+    /// rebuild over the FULL lambda history so far would contain: the
+    /// incremental path may only change the cost, never the observable
+    /// contents, of a full rebuild.
     #[test]
     fn build_lambda_registry_incremental_matches_full_rebuild() {
         let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        // Independent shadow of the old `lambda_names: Vec<(FuncId, String)>`
+        // Independent shadow of `lambda_names: Vec<(FuncId, String)>`'s
         // accumulation, used only to compute the reference full rebuild — it
         // does not touch `pipeline`'s own bookkeeping.
         let mut lambda_names_shadow: Vec<(FuncId, String)> = Vec::new();
@@ -572,8 +572,8 @@ mod tests {
             }
             pipeline.finalize().unwrap();
 
-            // Reference: the OLD algorithm, walking the ENTIRE history every
-            // turn, computed independently of the incremental path's state.
+            // Reference: a full-rebuild algorithm walking the ENTIRE history
+            // every turn, computed independently of the incremental path's state.
             let mut full_rebuild: HashMap<usize, String> = HashMap::new();
             for (func_id, name) in &lambda_names_shadow {
                 let ptr = pipeline.module.get_finalized_function(*func_id) as usize;
@@ -602,7 +602,7 @@ mod tests {
         }
     }
 
-    /// D7: a call to `build_lambda_registry` with no new lambdas registered
+    /// A call to `build_lambda_registry` with no new lambdas registered
     /// since the last call (i.e. a run that compiles nothing new — the common
     /// case once a session has already declared everything the fragment
     /// needs) must return the SAME accumulated contents, not an empty or

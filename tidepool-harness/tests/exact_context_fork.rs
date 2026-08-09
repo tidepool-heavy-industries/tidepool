@@ -16,6 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::{EngineConfig, SYSTEM_FRAMING};
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -27,14 +29,6 @@ use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,10 +77,8 @@ impl ModelProvider for CapturingProvider {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
@@ -147,6 +139,7 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one render->loop->forkAll(2 children)->finalize->render cycle");
 
     let reqs = requests.lock().unwrap();

@@ -70,10 +70,7 @@ async fn resume_with_no_session_errors() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_when_not_suspended_errors() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // A good turn auto-opens the session and leaves it Idle.
     repl.eval("pure (1 :: Int)").await.expect_ok("good eval");
@@ -94,10 +91,7 @@ async fn resume_when_not_suspended_errors() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_wrong_continuation_while_suspended_errors() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     let t = repl.eval(r#"ask SNum "pick a number""#).await;
     assert!(!t.is_error, "ask should suspend: {}", t.text);

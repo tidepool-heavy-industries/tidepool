@@ -6,12 +6,16 @@
 //! per-cycle building block [`run_loop`](tidepool_harness::SelfHarnessDriver::run_loop)
 //! uses forever), threading each cycle's `CycleOutcome::state_json` into the
 //! next as `prior_state` exactly like `run_loop` does. Asserts `State`
-//! (`loopCount`/`mode`/`notes`/`lastDecision`) accumulates ACROSS repeated
-//! loop boundaries, not just across one. Needs `TIDEPOOL_EXTRACT` and the
+//! (`mode`/`notes`/`lastDecision`) accumulates ACROSS repeated loop
+//! boundaries, not just across one, and that the driver's own iteration
+//! count (a runtime fact, not part of `State`) advances alongside it.
+//! Needs `TIDEPOOL_EXTRACT` and the
 //! with-packages GHC on PATH — run inside `nix develop` (see
 //! `haskell/CLAUDE.md`).
 
 use std::sync::Arc;
+
+mod support;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -21,14 +25,6 @@ use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -85,12 +81,8 @@ fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedRe
 /// and each cycle's post-loop `render` reflects the new `State`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
@@ -130,6 +122,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     {
         let outcome = driver
             .run_one_cycle(&source, prior_state.as_ref())
+            .await
             .unwrap_or_else(|e| panic!("cycle {i} failed: {e}"));
 
         let state = &outcome.state_json;
@@ -139,9 +132,9 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
             "cycle {i}: mode mismatch, got {state:?}"
         );
         assert_eq!(
-            state.get("loopCount").and_then(|v| v.as_i64()),
-            Some(*expected_loop_count),
-            "cycle {i}: loopCount must increment every cycle, got {state:?}"
+            driver.iteration(),
+            *expected_loop_count as u64,
+            "cycle {i}: the driver's iteration count must increment every cycle"
         );
 
         let decision = state

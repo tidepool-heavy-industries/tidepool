@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -17,14 +19,6 @@ use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -67,16 +61,13 @@ fn reply(content: &str) -> RecordedReply {
 /// `finalize`-ing a `Decision` value (its `confidence` field a NESTED
 /// `Confidence` sum, proving a whole author-defined ADT — not just a flat
 /// type — crosses the outer/nested-Agent boundary); the outer `State`
-/// (author-typed `loopCount`/`mode`/`lastDecision`) must survive the loop
-/// boundary and be visible to the NEXT `render` call.
+/// (author-typed `mode`/`lastDecision`) must survive the loop boundary and
+/// be visible to the NEXT `render` call, and the driver's own
+/// loop-iteration count must advance alongside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
 
     // The nested answerer: the SCOPED `answerer_decls()` stack (gui + finalize
     // only, NO runLLMTurn — effect-scoping), with `examples/harness` as its
@@ -108,6 +99,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
     // The PRE-loop render reflects `initialState`: Observing mode, no prior
@@ -124,8 +116,9 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
     );
 
     // The typed `Decision` survived the loop boundary into the serialized
-    // `State` — `loop`'s `nextMode`/`loopCount`/`notes`/`lastDecision` fold,
-    // round-tripped through `state_out`.
+    // `State` — `loop`'s `nextMode`/`notes`/`lastDecision` fold, round-tripped
+    // through `state_out`. The loop-iteration count is a runtime fact, not
+    // part of `State` — asserted against the driver directly.
     let state = &outcome.state_json;
     assert_eq!(
         state.get("mode").and_then(|v| v.as_str()),
@@ -133,9 +126,9 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
         "loop must advance Observing -> Deciding, got {state:?}"
     );
     assert_eq!(
-        state.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "loopCount must increment across the loop boundary, got {state:?}"
+        driver.iteration(),
+        1,
+        "the driver's iteration count must increment across the loop boundary"
     );
     let decision = state
         .get("lastDecision")

@@ -1,10 +1,9 @@
 //! Bootstrap-load for the authored harness source — `render`,
 //! `loop`, and the concrete `State` declaration (`examples/harness/Harness.hs`
 //! is the reference contract this loads). Loaded ONCE at driver bootstrap,
-//! NEVER per-turn (02-runtime.md: "Runtime-invoked at loop boundaries
-//! only... The harness author cannot call `render` mid-loop" — the
-//! anti-pattern this seam exists to make unrepresentable is a per-turn
-//! reload that would blow the cache prefix).
+//! NEVER per-turn: `render`/`loop` are runtime-invoked only at loop
+//! boundaries, never mid-loop by the harness author, so a per-turn reload
+//! (which would blow the compile cache prefix) is never needed.
 //!
 //! # A plain importable module, not decl-plane content
 //!
@@ -27,8 +26,8 @@
 //! `import Harness (...)` from the same file — and since a `Value`'s
 //! constructor id is a stable hash of (defining module, name, arity), those
 //! two compiles would then produce INCOMPATIBLE values for the "same"
-//! author-defined type (confirmed empirically: a decl-plane-spliced attempt
-//! case-trapped on `resume` for exactly this reason). Importing the SAME
+//! author-defined type: a value built under one home module case-traps on
+//! `resume` when the other side expects its own. Importing the SAME
 //! static module from both sides keeps every compile resolving the same
 //! defining module, so constructor ids agree. `driver::SelfHarnessDriver`
 //! imports it QUALIFIED (see `state_cross`'s module doc) purely to dodge

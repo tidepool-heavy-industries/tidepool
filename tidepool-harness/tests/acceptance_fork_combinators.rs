@@ -40,6 +40,8 @@
 //!   `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` arm's own
 //!   fall-through convention.
 
+mod support;
+
 use std::sync::Arc;
 
 use tidepool_harness::engine::EngineConfig;
@@ -48,14 +50,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
 use tidepool_harness::{Harness, HoleRouting};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -110,12 +104,7 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
 /// `[Int]` keeps only 1 and 3, in original order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("fork_combinators.jsonl");
@@ -235,12 +224,7 @@ async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
 /// site, not some new mechanism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("forkcata.jsonl");
@@ -418,12 +402,7 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
 /// ordinary recursive function.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_defined_forkmap_does_not_abort_extract() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let lib_dir = tempfile::tempdir().unwrap();
     std::fs::write(
