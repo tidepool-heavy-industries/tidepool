@@ -140,15 +140,18 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     // `effects_module_source_with_vocab(row_effects, vocab_effects, row)`, at
     // which point "the row contains RepoEvent" becomes two possible predicates.
     //
-    // It must key on the HELPER-EMISSION CONDITION —
-    // `in_row(RepoEvent) || RepoEvent.helpers_row_polymorphic` — and it must be
-    // written as the SAME EXPRESSION that gates helper emission there, never a
-    // restatement of it. `(<|>)` is a RepoEvent HELPER, and that function
-    // row-gates helpers (`if !(in_row || eff.helpers_row_polymorphic)
-    // { continue; }`): a row-CLOSED helper only typechecks when its effect is
-    // in the row, so a vocabulary-only effect's helpers are emitted only when
-    // it declares itself row-polymorphic. So Event's `(<|>)` is in scope
-    // exactly when its helpers are emitted — hide the Prelude's exactly then.
+    // It must key on the HELPER-EMISSION CONDITION, by CALLING the predicate
+    // boot-vocab publishes for it — `emits_helpers_for(eff, row_effects)`,
+    // returning `in_row || eff.helpers_row_polymorphic` (private/`pub(crate)`;
+    // the hiding term lands in the same file, so nothing needs a wider
+    // surface). Never a restatement of that condition.
+    //
+    // `(<|>)` is a RepoEvent HELPER, and that function row-gates helpers: a
+    // row-CLOSED helper only typechecks when its effect is in the row, so a
+    // vocabulary-only effect's helpers are emitted only when it declares
+    // itself row-polymorphic. So Event's `(<|>)` is in scope exactly when its
+    // helpers are emitted — hide the Prelude's exactly then, by asking the
+    // same question the emission loop asks.
     //
     // NOT `vocab_effects`. That was tried and is wrong: a vocabulary-only
     // RepoEvent would hide the Prelude's `(<|>)` while emitting no replacement,
