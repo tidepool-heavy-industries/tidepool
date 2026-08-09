@@ -11,6 +11,45 @@ silently stopped existing".
 Cross-lane guards additionally name the base commit: **base proves the tree,
 name proves execution — both, or neither is established.**
 
+## Writing gates: a green result cannot distinguish right-reason from wrong-reason
+
+The named-guard rule says a one-failure-mode gate must pass BY NAME. That is
+about receipts. This is the same idea one level down, about gate DESIGN, and it
+is the thing to internalize before writing a gate set:
+
+**A passing gate tells you the assertion held. It does not tell you the
+assertion held FOR THE REASON YOU INTENDED.** A green result cannot distinguish
+those two, so the gate SET has to.
+
+Three habits, each earned from a real case in this wave:
+
+**1. Add a wrong-reason guard.** L4's discriminating gate asserts that a
+vocabulary-only RepoEvent does NOT hide the Prelude's `(<|>)`. But that gate
+would ALSO pass if the vocabulary split were broken outright and RepoEvent
+simply never appeared. So a second gate,
+`vocab_only_repoevent_still_emits_its_gadt`, pins that the effect really is
+present and only its HELPERS are withheld — establishing that the first gate
+tests the helper-emission condition rather than mere absence. Ask of every gate:
+what ELSE would make this pass? If the answer is "the feature being broken in a
+different way", you need the guard.
+
+**2. Label a non-discriminating gate in-source.** The matched-pair gate passes
+under either candidate predicate, so it is no evidence for choosing between
+them. L4 marked it as such in the source, not only in a receipt. A gate that
+looks like evidence and is not will be cited as evidence by someone who did not
+write it.
+
+**3. Say when your gates cannot settle the question at all.** Earlier in the
+same lane, the conditionality gates were built on an entry point that passes one
+list for both parameters, making them non-discriminating rather than merely
+incomplete — and the receipt said so. That distinction is the difference between
+a receipt that overstates its evidence and one that can be trusted.
+
+The failure this guards against is specific and quiet: a wrong predicate here
+produces a wrong generated preamble, not a build error and not a failing test.
+Nothing fails loudly, so the gate set is the only thing standing between the
+mistake and shipping it.
+
 ## Base commit
 
 `20086b2eaa5175accc8cb85be8e3e48c78c25a35`
