@@ -144,6 +144,15 @@ Form 4 is the hardest to see, because auditing the artifact finds nothing wrong
 with it. The defect lives in the *citation*, not the thing cited — so check what
 you are relying on it FOR, not whether it works.
 
+**AND THE ASYMMETRY THAT LETS ALL FOUR THROUGH** (spawn-latency): **an
+improvement is as unverified as an error until someone checks it — and
+improvements are checked less often, precisely because they arrive as good
+news.** Worked example: a TL offered an inferential argument, the dev replaced
+it with a stronger mechanical one, and the TL verified the *replacement* rather
+than accepting the upgrade (`importPaths` is disjoint from package resolution —
+confirmed at `GhcPipeline.hs:293`). Every review reflex points at claims that
+look wrong. Point one at the claim that looks better than yours.
+
 
 - Commit with `git commit --no-verify`. NEVER `git add -A` — stage explicit
   paths only.
