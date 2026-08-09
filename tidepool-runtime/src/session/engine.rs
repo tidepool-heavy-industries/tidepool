@@ -21,9 +21,9 @@
 //! Keeping every wire string on the server side is also what makes the cutover
 //! behavior-preserving: the formatters (and their tests) are untouched.
 //!
-//! # E2 — threadless ask suspension (stowed machine)
+//! # Threadless ask suspension (stowed machine)
 //!
-//! An `Ask` suspension no longer parks a blocked OS thread on an answer
+//! An `Ask` suspension does not park a blocked OS thread on an answer
 //! channel. Instead the eval thread drives the turn through
 //! [`crate::compile_and_run_suspendable`] to the ask boundary, where the JIT
 //! effect machine — already a reified coroutine (its continuation is a heap
@@ -45,7 +45,7 @@
 //!
 //! # Oneshot vs. the end-state registry
 //!
-//! E1 drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
+//! This engine drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
 //! an empty `ModuleEnv` (no declaration accumulation), one pool slot per turn.
 //! Only the stateless MCP eval server drives the engine today; the resident
 //! REPL server stays a direct consumer of the lower session substrate
@@ -186,7 +186,7 @@ enum ContinuationState<O: OutputSink> {
     /// abort wakes it with an error. `cancel_slot` is the SAME slot the running
     /// thread's `on_ready` callback installed its `CancelHandle` into — it MUST
     /// be threaded back into the re-drive (not a fresh empty slot), or a
-    /// runaway resumed into pure compute can never be cancelled (F1).
+    /// runaway resumed into pure compute can never be cancelled.
     /// `timeout_secs` is the turn's original caller-clamped window, carried so
     /// a resume/abort re-drives with it instead of silently falling back to
     /// `config.default_timeout_secs`.
@@ -197,7 +197,7 @@ enum ContinuationState<O: OutputSink> {
         cancel_slot: Arc<Mutex<Option<CancelHandle>>>,
         timeout_secs: u64,
     },
-    /// Suspended at an `Ask`: STOWED as data (E2). No thread. `resume` re-enters
+    /// Suspended at an `Ask`: STOWED as data. No thread. `resume` re-enters
     /// on a fresh thread; `permit` is the session's held pool slot, handed to
     /// that thread. Resume validates the reply against `expected_schema` first.
     AwaitingAnswer {
@@ -395,8 +395,8 @@ impl<O: OutputSink> SessionEngine<O> {
     }
 
     /// Evict the oldest continuation, freeing its pool slot. Paused: the thread
-    /// is parked on the gate — wake it with an abort and reap. AwaitingAnswer
-    /// (E2): no thread — dropping the entry drops the stowed machine + releases
+    /// is parked on the gate — wake it with an abort and reap. AwaitingAnswer:
+    /// no thread — dropping the entry drops the stowed machine + releases
     /// the held `permit`, freeing the slot directly.
     fn evict_oldest_continuation(&self) {
         let mut conts = self.continuations.lock();
@@ -438,7 +438,7 @@ impl<O: OutputSink> SessionEngine<O> {
     }
 
     /// Acquire a pool slot; under pressure, evict the oldest suspended turn and
-    /// retry once. Mirrors the E1 admission dance.
+    /// retry once.
     async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit, StartError> {
         match self.semaphore.clone().try_acquire_owned() {
             Ok(p) => Ok(p),
@@ -754,9 +754,9 @@ impl<O: OutputSink> SessionEngine<O> {
     }
 
     /// Abort a parked continuation: Paused wakes its parked thread with a gate
-    /// abort and re-drives it to its terminal error; AwaitingAnswer (E2)
-    /// re-enters the stowed machine with an abort input on a fresh thread,
-    /// producing the same terminal error a pre-E2 answer-channel abort did.
+    /// abort and re-drives it to its terminal error; AwaitingAnswer re-enters
+    /// the stowed machine with an abort input on a fresh thread, producing the
+    /// same terminal error shape either way.
     pub async fn abort(&self, cont_id: &str, reason: String) -> AbortOutcome {
         let session = {
             let mut conts = self.continuations.lock();
@@ -1125,8 +1125,7 @@ where
 /// element) is `Some` only for a real compile failure
 /// (`RuntimeError::Compile(CompileError::Diagnostics(_))`) — the structured
 /// GHC diagnostics, cloned out before `env.message` (a flattened string)
-/// is all that survives past this point. Byte-identical detail text to the E1
-/// eval-thread error arm.
+/// is all that survives past this point.
 fn describe_run_error(
     e: &RuntimeError,
     effect_names: &[String],
@@ -1144,11 +1143,11 @@ fn describe_run_error(
     let jit_diagnostics = crate::drain_diagnostics();
     let mut detail = env.message;
     // Annotate UnhandledEffect with the effect name + roster. Classified
-    // STRUCTURALLY from the typed error (in hand here), not by string-matching
-    // `env.message` — `JitError::Effect`'s `Display` renders as "effect
-    // dispatch error: Unhandled effect at tag N", so a bare
-    // `strip_prefix("Unhandled effect at tag ")` never matched and this
-    // annotation was dead code (#F2).
+    // STRUCTURALLY from the typed error (in hand here), never by
+    // string-matching `env.message` — `JitError::Effect`'s `Display` renders
+    // as "effect dispatch error: Unhandled effect at tag N", which does not
+    // start with "Unhandled effect at tag ", so a `strip_prefix` match on
+    // that text would silently never fire.
     if let RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag })) = e {
         let tag = *tag as usize;
         if tag < effect_names.len() {
@@ -1173,8 +1172,7 @@ fn describe_run_error(
 }
 
 /// Classify a caught panic (a signal that still took the eval frame down) as a
-/// run-phase runtime crash, appending any JIT diagnostics. Byte-identical to
-/// the E1 eval-thread panic arm.
+/// run-phase runtime crash, appending any JIT diagnostics.
 fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureClass, Phase) {
     let diagnostics = crate::drain_diagnostics();
     let mut detail = format_panic_payload(payload);
@@ -1193,10 +1191,10 @@ fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureCla
 // ---------------------------------------------------------------------------
 
 /// Wraps a handler stack with the shared [`PauseGate`] timeout-yield checkpoint.
-/// Unlike E1's `AskDispatcher`, it does NOT intercept the ask tag — that is now
-/// handled by the codegen suspend driver (`ask_tag` → threadless suspension), so
-/// the ask never reaches this dispatcher. Every non-ask dispatch entry is a
-/// timeout-yield checkpoint: park while paused, error out on abort.
+/// It does NOT intercept the ask tag — that is handled by the codegen suspend
+/// driver (`ask_tag` → threadless suspension), so the ask never reaches this
+/// dispatcher. Every non-ask dispatch entry is a timeout-yield checkpoint:
+/// park while paused, error out on abort.
 struct GateDispatcher<H> {
     inner: H,
     gate: Arc<PauseGate>,
@@ -1227,10 +1225,9 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
 
 /// Extract the prompt (+ optional metadata) from an `Ask`/`RunLLMTurn`
 /// request. The request is `Con(AskWith|RunLLMTurnWith, [prompt_val,
-/// meta_val])` — both constructors share this exact field shape (self-
-/// iterating-harness WS-B split `runLLMTurn` out of `Ask` into its own
-/// effect/tag, but its wire shape is unchanged), dispatched by constructor
-/// name.
+/// meta_val])` — both constructors share this exact field shape (`runLLMTurn`
+/// has its own effect/tag, separate from `Ask`, but the same wire shape),
+/// dispatched by constructor name.
 fn extract_ask_request(
     request: &tidepool_eval::value::Value,
     table: &tidepool_repr::DataConTable,
@@ -1243,11 +1240,11 @@ fn extract_ask_request(
         ));
     };
     let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
-    // `ask` always suspends via AskWith (carrying the schema); the bare `Ask`
-    // constructor was reaped with the structured-Ask collapse. `runLLMTurn`
-    // suspends via the sibling RunLLMTurnWith (its own effect/tag now, same
-    // field shape) — the JIT's suspend-tag threshold (`jit_machine::
-    // drive_effect_loop`) already catches both, so this parser accepts both.
+    // `ask` always suspends via AskWith (carrying the schema); there is no
+    // bare `Ask` constructor. `runLLMTurn` suspends via the sibling
+    // RunLLMTurnWith (its own effect/tag, same field shape) — the JIT's
+    // suspend-tag threshold (`jit_machine::drive_effect_loop`) already
+    // catches both, so this parser accepts both.
     match con_name {
         "AskWith" | "RunLLMTurnWith" => {}
         other => {
@@ -1289,12 +1286,11 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
 
-    /// F2: an `UnhandledEffect` over an N-handler stack must name the
+    /// An `UnhandledEffect` over an N-handler stack must name the
     /// out-of-range tag's effect and append the full registered-effects
-    /// roster — previously dead code, since `JitError::Effect`'s `Display`
-    /// ("effect dispatch error: Unhandled effect at tag N") never matched the
-    /// bare `strip_prefix("Unhandled effect at tag ")` this now replaces with
-    /// a structural match on the typed error.
+    /// roster. This depends on matching the typed error structurally, not on
+    /// string-matching `JitError::Effect`'s `Display` text — see the
+    /// structural-match note on [`describe_run_error`].
     #[test]
     fn describe_run_error_annotates_unhandled_effect_with_name_and_roster() {
         let effect_names = vec!["Console".to_string(), "Kv".to_string(), "Fs".to_string()];
@@ -1358,7 +1354,7 @@ mod tests {
 
     /// A driver harness: feed one `EngineMessage`, then drive with no live
     /// thread (handle `None`). Asserts the STRUCTURED outcome the server maps to
-    /// wire. Mirrors the retired mcp `handle_session_result` unit tests.
+    /// wire.
     async fn drive_one(
         engine: &SessionEngine<TestSink>,
         captured: TestSink,
@@ -1506,8 +1502,7 @@ mod tests {
 
     /// A failing validator leaves the continuation in place (retryable); a valid
     /// one consumes it and drives the stowed closure to its outcome; a third
-    /// resume finds nothing. Mirrors the retired mcp
-    /// `test_resume_validation_fail_then_retry` wire lifecycle.
+    /// resume finds nothing.
     #[tokio::test]
     async fn resume_validation_fail_then_retry_then_gone() {
         let engine = test_engine();
