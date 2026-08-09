@@ -124,11 +124,17 @@ the summary:
   Treat "how much of a turn is typechecking" as OPEN, not settled by the
   under-6% `typecheck` row alone.
 - **Session path** (`runSessionPipeline`, reached via a real `Val`-injecting
-  turn): `inject` costs ~0ms at every generation depth sampled (1–4 live
-  `Val.G<g>` modules injected) — cheap regardless of depth. `ghc_setup`/
-  `ghc_load`/`typecheck`/`core` show no visible growth trend across that same
-  depth range (noise-dominated at n=5). This axis is `Val.G<n>` (session
-  VALUE generation), not `Lib.G<n>` (session DECL generation) — the vehicle
-  used never grew past one decl module, so the decl-generation-depth
-  question (the one E2's O(n²) home-module-chain concern is actually about)
-  is UNANSWERED here.
+  turn): `inject` costs ~0ms at every sampled point in a 5-turn sequence.
+  `ghc_setup`/`ghc_load`/`typecheck`/`core` show no visible growth trend
+  across that same sequence (noise-dominated at n=5). **Caveat, found by a
+  post-hoc self-audit and load-bearing:** no in-process instrument counts how
+  many `Val.G<g>` modules a given compile actually injects — the "depth"
+  label an earlier draft of the C1 report attached to this data was
+  reconstructed from `Wrote session iface: …` output lines in PRIOR spawns,
+  which turn out to track only the count of prior BARE-EXPRESSION evals (the
+  auto-bound `it` alias), not a verified live-Val count, and are certainly
+  not `Lib.G<n>` (session-DECL generation) — the vehicle used never grew past
+  one decl module. The decl-generation-depth question (the one E2's O(n²)
+  home-module-chain concern is actually about) is UNANSWERED here, and the
+  session-VALUE axis is answered less precisely than first reported. See
+  `01-c1-measurement.md`'s "Session path" section for the full correction.

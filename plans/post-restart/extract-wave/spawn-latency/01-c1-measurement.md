@@ -21,6 +21,34 @@ three revisions are reflected below, not just noted:
    count immediately before/after, per root's throttle directive, and the
    headline ratio is demonstrated stable across two materially different load
    levels rather than assumed stable.
+4. **A late self-audit ("when you fix one measurement, audit every other
+   number in the same report") found the session-path generation-depth
+   column was reconstructed from output text, not counted in-process, and
+   its accompanying causal story was WRONG.** Both are corrected below (see
+   "Session path" and "Instrument provenance").
+
+## Instrument provenance — every number in this report, by source
+
+Per wave policy: having one instrument corrected does not vet the rest of a
+report. Walked deliberately:
+
+| number | source | category |
+|---|---|---|
+| `ghc_setup`/`ghc_load`/`typecheck`/`core`/`inject`/`startup`/`translate`/`cbor_encode`/`write`/`total` | `emitPhase`/`monotonicTime`/`timeSection`, called INSIDE `GhcPipeline.hs`, printed by the process being measured | **trustworthy by construction** — in-process, at the source |
+| `extract.total` etc. as read from the bench's JSON (`median_ms`) | `tidepool-harness`'s `ExtractTiming::parse` reading the extract's own `tidepool-timing phase=… ms=…` stderr — a DESIGNED wire format, not free-form log grepping; parser is unit-tested (`timing.rs`'s `#[cfg(test)]` module, extended this item with `parses_the_flat_ghc_setup_and_ghc_load_rows`) | trustworthy — structured wire, not pattern-matched prose |
+| `Top-level bindings: N` | `hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)`, `Main.hs` — an in-process `length` over the actual compiled binding list | trustworthy by construction |
+| `meta.cbor`/`result.cbor` byte/entry counts | `BS.length`/`length allMeta` printed in-process by `Main.hs` | trustworthy by construction |
+| `extract-fidelity-test`: 26/26 | the test framework's own summary line (`26/26 checks passed`, `PASS`) | trustworthy — the suite's own accounting |
+| acceptance shard: 24/24, 0 failed | nextest's own summary line (`24 tests run: 24 passed …, 0 skipped`) | trustworthy — the runner's own accounting |
+| `parMakeCount`/`-j` absence | direct grep of the SOURCE (`GhcPipeline.hs`), a known-field-name absence check, re-verified by reading the file | trustworthy — static, verifiable, not an inference over noisy runtime output |
+| `cat /proc/loadavg` | direct kernel interface | trustworthy as a NUMBER; the caveat is attribution (read immediately before/after a capture, not necessarily exactly DURING the measured work — noted at each table) |
+| `ps -eo comm= \| grep -c '^tidepool-extrac'` | the corrected, anchored instrument (root's fix, verified against a known-positive case) | trustworthy, used only where captured (low-load arm; the high-load arm predates the correction and is marked absent, not guessed) |
+| **session-path "live Val count" per row** | **reconstructed by counting `Wrote session iface: … Val.G<n>` lines in PRIOR, already-completed spawns' stderr** — no in-process count of "modules injected for THIS compile" exists anywhere in the codebase (`injectSessionScope`/`injectSessionIface` print nothing); this is genuinely external pattern-matching over output that was not designed to be counted | **SUSPECT — see the "Session path" section below for the full correction; the causal story attached to this number was WRONG in an earlier draft of this report and is fixed there** |
+
+The session-path generation count is the one number in this report that
+matters most for the persistent-extractor decision (per the wave's own
+framing) and is also the one that turned out least trustworthy. Read that
+section's caveats as load-bearing, not decorative.
 
 ## Step 2 — anchors confirmed against the code, before any change
 
@@ -270,42 +298,78 @@ report treats as a headline; see
 `plans/self-iterating-harness/11-extract-timing-contract.md` for the same
 caveat stated once more, for readers who land there directly.
 
-## Session path — reached, at 5 samples along ONE generation axis
+## Session path — reached, at 5 samples, axis and trigger CORRECTED after a self-audit
 
 **Vehicle:** `tidepool-repl::decl_plane::record_syntax_selectors_localized`
 (`cargo test -p tidepool-repl --test decl_plane
 record_syntax_selectors_localized -- --nocapture --test-threads=1`, via
-`ghc-slots.sh run`, `TIDEPOOL_TIMING=1`). A user-defined ADT (`data P = P
-{px, py :: Int}`) bound to a session value and referenced across several
-turns is what actually triggers `isSessionScopeActive` — plain `Int`/`Text`
-binds and bare references do NOT (their type round-trips as a spliced source
-string; the tested-and-rejected alternative vehicles are listed below).
+`ghc-slots.sh run`, `TIDEPOOL_TIMING=1`).
 
-Vehicles tried and their outcome, for the record:
+**This section's earlier draft mis-stated what triggers `isSessionScopeActive`
+in this test, and mis-labeled its own generation-count column as an
+in-process count when it is not. Both are corrected here** (caught by the
+"audit every number, not just the corrected instrument" self-check — see
+"Instrument provenance" above).
+
+**What actually triggers the session path, re-derived from raw stderr, not
+assumed:** `Main.hs`'s `mkBoundBinders` is the ONLY call site that prints
+`Wrote session iface: …` (`app/Main.hs` ~701), and in EVERY spawn across
+BOTH session-path attempts in this item, the only names ever written are
+`it`/`__it_render` — the auto-bound alias GHCi-style repls give a BARE
+expression eval's result. `p` (the actual named, user-chosen bind in `p <-
+pure (P 1 2)`) is **never** written via this mechanism in either captured
+run. Cross-checking the two vehicles confirms the real trigger:
+
+- `record_syntax_selectors_localized` opens with `repl.eval_ok("pure (px (P
+  3 4))")` — a BARE expression (no `<-`) — as its SECOND operation. That
+  turn writes `it`'s Val.G1. **Every subsequent turn in the test** (6 more)
+  then has a live `it` to inject, and 6 of those 8 remaining spawns show
+  `inject` lines (2 are compile-error retries the driver auto-recovers, both
+  of which ALSO carry `inject`).
 - `value_fidelity::bind_references_earlier_binding` (`k <- pure 5; m <- pure
-  (k+1); m`) — reached ONLY the normal path on all 4 spawns (`live_val_modules`
-  came back empty at every compile; the comment on that test itself says the
-  bind action resolves via a "seeded ExternalEnv", i.e. a JIT-side mechanism,
-  not a GHC-level import). Zero `inject` lines. Ruled out as a session-path
-  vehicle.
-- `decl_plane::record_syntax_selectors_localized` — reached
-  `runSessionPipeline` on 6 of 8 spawns (2 were compile-error retries the
-  driver recovers from automatically; both retries also carry `inject`).
-  **Used below.**
+  (k+1); m`) has its own bare-expression eval — the FINAL `repl.eval("m")` —
+  but nothing AFTER it. It writes `it`'s Val.G1 too (visible in that run's
+  raw log), but the test ends immediately, so no subsequent turn ever exists
+  to inject it. **Zero `inject` lines across all 4 of that vehicle's
+  spawns** — consistent with the corrected theory, not with the earlier
+  draft's "ADT vs primitive type" story, which this run also falsifies (`k`/
+  `m` are plain `Int`s and still produced a written, injectable `it`).
 
-Load at capture: `18.41`→`15.05`→`17.19`→(job completed) — this run
+**Conclusion: the trigger is "does a PRIOR bare-expression eval exist in
+this session," not "is the bound value a user-defined ADT."** The earlier
+draft's causal claim was wrong. Whether `p` (the ADT-typed value) is EVER
+actually injected via this mechanism, as opposed to resolving through
+whatever non-Val-injection path plain `Int`/`Text` binds apparently use
+(see `bind_references_earlier_binding`'s "seeded ExternalEnv" comment), is
+**not established by this report** — no in-process instrument distinguishes
+"turn injected `it` only" from "turn injected `it` and `p`."
+
+**The generation-count column itself is SUSPECT, not trustworthy-by-
+construction.** No code anywhere prints how many `Val.G<g>` modules a given
+compile actually injects (`injectSessionScope`/`injectSessionIface` are
+silent on this). The counts below were reconstructed by counting `Wrote
+session iface: … Val.G<n>` lines in EARLIER, already-completed spawns —
+which, per the finding above, tracks the number of PRIOR bare-eval turns
+that wrote a growing `it`/`__it_render` pair, not a verified count of what
+was injected into any specific later compile. Relabeled accordingly: the
+row order below is TURN SEQUENCE order (verified — spawns are strictly
+ordered in one process's stderr), and the "prior it-writes" count is
+reported as exactly that, not as "live Val count."
+
+Load at capture: `18.41`→`15.05`→`17.19` (1-min loadavg, `cat /proc/loadavg`
+— trustworthy reads, but only bracketing the run loosely; this run
 overlapped the tail of the monitor described in the throttle-directive
-section above; treat it as taken in the ~15–24 (1-min) band, not quiet.
+section above). Treat as taken in the ~15–24 (1-min) band, not quiet.
 
-| live `Val.G<g>` count | ghc_setup ms | ghc_load ms | inject ms | typecheck ms | core ms | translate ms | top-level bindings |
-|---|---|---|---|---|---|---|---|
-| 1 (bind `p`) | 287 | 5985 | — (no prior live Val; normal path) | 414 | 6266 | 333 | 1706 |
-| 1 (`case p …`, retry-success) | 68 | 3678 | 0 | 346 | 5268 | 403 | 1708 |
-| 2 | 110 | 4419 | 0 | 557 | 8426 | 628 | 1708 |
-| 3 | 132 | 6804 | 0 | 717 | 10682 | 450 | 1709 |
-| 4 (`123::Int`, retry-success) | 117 | 5064 | 0 | 576 | 8583 | 407 | 1708 |
+| turn (sequence order) | prior `it`-writes seen | ghc_setup ms | ghc_load ms | inject ms | typecheck ms | core ms | translate ms | top-level bindings |
+|---|---|---|---|---|---|---|---|---|
+| bind `p <- pure (P 1 2)` | 0 (normal path — no prior bare-eval yet) | 287 | 5985 | — | 414 | 6266 | 333 | 1706 |
+| `case p of {…}` (retry-success) | 1 | 68 | 3678 | 0 | 346 | 5268 | 403 | 1708 |
+| `pure (case p of {…})` | 2 | 110 | 4419 | 0 | 557 | 8426 | 628 | 1708 |
+| `pure (py p)` | 3 | 132 | 6804 | 0 | 717 | 10682 | 450 | 1709 |
+| `123::Int` (retry-success) | 4 | 117 | 5064 | 0 | 576 | 8583 | 407 | 1708 |
 
-Raw lines for the 3-injected-Val sample:
+Raw lines for the "3 prior it-writes" turn:
 ```
 Processing (session): /tmp/.tmpWy7iqZ/Expr.hs
 tidepool-timing phase=startup ms=76
@@ -323,32 +387,39 @@ tidepool-timing phase=write ms=0
 names since the underlying spans are byte-for-byte identical, confirmed by
 the wire-inertness check's second pass on the same code)
 
-**Two things this settles, and one it does not:**
+**What this settles, what it doesn't, and what an earlier draft got wrong:**
 
-- **`inject` is cheap regardless of depth** — exactly `0ms` at every sampled
-  depth (1 through 4 live Vals). Injecting a thin, type-only iface per live
-  binding is not where session-path cost lives, at least at this shallow
-  depth.
+- **`inject` is cheap at every sampled point** — exactly `0ms` across all 4
+  sampled turns with a nonzero prior-write count. This part of the earlier
+  draft's reading survives: injecting whatever thin ifaces ARE live is not
+  where session-path cost visibly lives, at this shallow depth. Trustworthy
+  (in-process phase timing) as far as it goes — it does not, on its own,
+  tell us the injected SET's size, only that whatever it is, injecting it
+  cost ~0ms.
 - **No visible growth trend in `ghc_setup`/`ghc_load`/`typecheck`/`core`
-  across live-Val count 1→4** — the samples fluctuate (e.g. `ghc_load` from
-  3678 to 6804 non-monotonically) consistent with contention noise dominating
-  at `n=5`, not with a clear scaling signal in either direction.
-  Top-level-bindings-compiled stays essentially flat (1706–1709) across every
-  sample, which is the mechanical reason nothing scales here: the compiled
-  home-module SET never grew.
-- **This is the WRONG axis for the wave's actual question, and that must be
-  said plainly.** The live-Val count above is `Val.G<n>` — the SESSION-VALUE
-  generation, incremented once per successful bind/reference turn. It is NOT
-  `Lib.G<n>` — the SESSION-DECL generation, the one E2's O(n²)
-  home-module-chain concern is actually about. This vehicle's `data P = …`
-  decl compiled ONCE (`Lib.G1`) and never grew; every subsequent turn
-  compiled against that same single decl module. **The
-  compile-time-vs-`Lib.G<n>`-generations question is UNANSWERED by this
-  report.** No existing test in `tidepool-repl/tests/` drives 5+ sequential
+  across the sequence** — fluctuates (e.g. `ghc_load` 3678→6804
+  non-monotonically), consistent with contention noise at `n=5`, not a clear
+  scaling signal. `Top-level bindings` stays flat (1706–1709) throughout,
+  which is the mechanical reason nothing would be expected to scale here
+  regardless of the injected-Val question: the compiled home-module SET
+  (`Lib.G1` plus preamble/stdlib) never grew.
+- **This is the WRONG axis for the wave's actual question, doubly so now.**
+  Even under the CORRECTED reading, what's varying here is, at best, the
+  number of live `it`-aliases from prior bare evals — not `Lib.G<n>`, the
+  session-DECL generation E2's O(n²) home-module-chain concern is actually
+  about. This vehicle's `data P = …` decl compiled ONCE (`Lib.G1`) and never
+  grew. **The compile-time-vs-`Lib.G<n>`-generations question is UNANSWERED
+  by this report**, and separately, **exactly what generation axis WAS
+  exercised here is less certain than an earlier draft claimed** — it is
+  "count of prior bare-eval writes," not a verified "live Val.G<n> count."
+  No existing test in `tidepool-repl/tests/` drives 5+ sequential
   `repl.def(...)` calls in one session (the deepest found, in `decl_plane.rs`
-  and `shadow_rebind.rs`, is 2–3); reaching that axis needs either a new
-  vehicle or a longer existing one not currently in the suite, and neither
-  was in this item's budget. An honest gap, not an extrapolation.
+  and `shadow_rebind.rs`, is 2–3); reaching the `Lib.G<n>` axis needs either
+  a new vehicle or in-process instrumentation of `injectSessionScope`'s
+  actual injected-module count (neither was attempted — the latter would
+  have been a cheap, LEGITIMATE way to make this number trustworthy, and is
+  the right follow-up for whoever picks up the session-path question next).
+  An honest gap, not an extrapolation — doubly honest after the correction.
 
 ## Structural inputs (item 10) — what was and wasn't captured
 
@@ -430,15 +501,19 @@ server (evidence, not a recommendation)?**
   is where the single largest win on these numbers would land — larger than
   what session-boot avoidance alone would deliver.
 - **Session-path depth data does not (yet) distinguish the two candidates**,
-  because it varies the wrong generation axis (`Val.G<n>`, not `Lib.G<n>`;
-  see above). What it DOES show — `inject` staying at 0ms and no visible
-  scaling in `ghc_setup`/`ghc_load`/`typecheck`/`core` across 1–4 live
-  Vals — is at least consistent with "the session-value plane is cheap to
-  carry forward," which is a mild point in favor of a persistent-server
-  design being able to retain live values cheaply, but it says nothing about
-  the `Lib.G<n>` decl-chain cost either candidate would actually need to
-  solve. That is the open question a follow-up vehicle would need to close
-  before the pivotal decision can lean on the session path at all.
+  because it varies the wrong generation axis, and (per the self-audit
+  correction above) which axis it even varies is less certain than an
+  earlier draft claimed — a reconstructed "prior bare-eval count", not a
+  verified `Val.G<n>` live-count, and certainly not `Lib.G<n>` (see above).
+  What it DOES show — `inject` staying at 0ms and no visible scaling in
+  `ghc_setup`/`ghc_load`/`typecheck`/`core` across the sampled sequence — is
+  at least consistent with "whatever gets injected here is cheap to carry
+  forward," a mild point in favor of a persistent-server design being able
+  to retain SOME session state cheaply, but it says nothing trustworthy
+  about the `Lib.G<n>` decl-chain cost either candidate would actually need
+  to solve. That is the open question a follow-up vehicle would need to
+  close — with in-process instrumentation of what gets injected, not output
+  parsing — before the pivotal decision can lean on the session path at all.
 
 The decision itself is the wave TL's to record in `LEDGER.md`, per the
 sub-TL spec's binding constraints — this report supplies evidence, not a

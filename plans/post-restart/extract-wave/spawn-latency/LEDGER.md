@@ -366,13 +366,25 @@ anyone reading this ledger before the report:
   contended upper bounds. `parMakeCount`/`-j` confirmed ABSENT (sequential
   `load'` and sequential second loop) — the mechanistic reason the ratio held.
 - **Session path reached** (`runSessionPipeline`, 5 samples via
-  `tidepool-repl::decl_plane::record_syntax_selectors_localized`, a
-  user-ADT-value vehicle — plain `Int`/`Text` binds do NOT trigger it, see
-  the report's vehicle notes) but the depth axis reached is `Val.G<n>`
-  (session-value generation), NOT `Lib.G<n>` (session-decl generation, the
-  one E2's O(n²) concern is about). **The `Lib.G<n>` scaling question is an
-  explicit, reported UNANSWERED gap** — no existing `tidepool-repl` test
-  drives 5+ sequential decls in one session.
+  `tidepool-repl::decl_plane::record_syntax_selectors_localized`). **A
+  post-hoc self-audit ("audit every number, not just the corrected
+  instrument") found the item's own first draft mis-stated the trigger** —
+  it is a PRIOR BARE-EXPRESSION eval (any type; the auto-bound `it` alias),
+  not "a user-defined ADT bind", falsified by cross-checking against
+  `value_fidelity::bind_references_earlier_binding`'s plain-`Int` run, which
+  also writes an `it` iface and would enter the session path too given a
+  turn after it. The audit also found the "generation depth" column was
+  reconstructed from `Wrote session iface:` output text (counting prior
+  writes), not counted in-process — no code anywhere counts what a compile
+  actually injects — so it is SUSPECT, not the trustworthy `Val.G<n>`
+  live-count an earlier draft claimed. Both corrected in the report. Net
+  effect unchanged: the depth axis reached is NOT `Lib.G<n>` (session-decl
+  generation, the one E2's O(n²) concern is about). **The `Lib.G<n>` scaling
+  question is an explicit, reported UNANSWERED gap** — no existing
+  `tidepool-repl` test drives 5+ sequential decls in one session, and
+  reaching the session-VALUE axis reliably would need in-process
+  instrumentation of `injectSessionScope`'s injected-module count, which
+  this item did not add.
 
 ---
 
@@ -382,7 +394,7 @@ anyone reading this ledger before the report:
 
 | Item | Status | Measurement | Decision | Receipts |
 |---|---|---|---|---|
-| C1 measurement | **done** (`c1-timing`) | `01-c1-measurement.md`. `ghc_load` (=`load'` alone) is 28–32% of `extract.total`, second loop (`typecheck`+`core`) 62–69%, combined ~96–97% — demonstrated stable across a 1-min-loadavg swing of ~11→~34 (two arms, 6 samples each, ratio moved <2pp). `ghc_load` is 97–98% of `ghc_setup+ghc_load` in both arms — almost none of the historical "session boot 26–32%" was boot. Typecheck-suspicion REFUTED framing withdrawn mid-item (measures one of two typechecks); treated as OPEN. Session path reached (5 samples, `Val.G1`–`G4`) but on the wrong generation axis — `Lib.G<n>` decl-chain scaling UNANSWERED. | Evidence only, no decision recorded here (that's the wave TL's per spec) — see report §"Answers (3)" | wire-inertness ×2 (stdout+files byte-identical); `extract-fidelity-test` 26/26; `tidepool-harness` acceptance shard 24/24, 0 failed; `cargo check --workspace` clean |
+| C1 measurement | **done** (`c1-timing`) | `01-c1-measurement.md`. `ghc_load` (=`load'` alone) is 28–32% of `extract.total`, second loop (`typecheck`+`core`) 62–69%, combined ~96–97% — demonstrated stable across a 1-min-loadavg swing of ~11→~34 (two arms, 6 samples each, ratio moved <2pp). `ghc_load` is 97–98% of `ghc_setup+ghc_load` in both arms — almost none of the historical "session boot 26–32%" was boot. Typecheck-suspicion REFUTED framing withdrawn mid-item (measures one of two typechecks); treated as OPEN. Session path reached (5 samples, sequence order) but the generation-count label is reconstructed from output text (SUSPECT, see report), not `Lib.G<n>` decl-chain scaling (UNANSWERED). | Evidence only, no decision recorded here (that's the wave TL's per spec) — see report §"Answers (3)" | wire-inertness ×2 (stdout+files byte-identical); `extract-fidelity-test` 26/26; `tidepool-harness` acceptance shard 24/24, 0 failed; `cargo check --workspace` clean |
 | D1-A defense | in flight (`d1-defense`) | — | — | — |
 | D1-B removal | queued | — | — | — |
 | E6 tiered `-O2` | queued | — | — | — |
