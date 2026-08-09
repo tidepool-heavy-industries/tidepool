@@ -78,6 +78,31 @@ localized diffs and log it at fold):
 ```
 ### OPERATIONAL RULES (verbatim, non-negotiable)
 
+**THE ONE RULE, from which most of the rest follow (boot, 2026-08-09):**
+
+> **Verify the thing your claim is about, not a thing adjacent to it.**
+> In the moment, ask: *what exactly is my evidence about, and is that the same
+> object as my claim?*
+
+Every verification failure in this wave — two TLs' and four devs' — was evidence
+about a NEIGHBOUR of the claim:
+
+| the claim was about | the evidence was about |
+|---|---|
+| a `TypeError` constraint | a token inside an error string |
+| whether a commit was relevant | whether it was recent |
+| an environment | a session (`setsid`) |
+| queue pressure | waiters, not the holders |
+| whether a leg ran | its exit code, not its log |
+| whether a suite ran | a count, with no denominator |
+| what the code does | a comment above it |
+| the canonical rules | a worktree copy frozen at fork |
+
+"Verify more" is unactionable. This is checkable in the moment, and it subsumes
+the named-guard rule, the denominator rule, the holder rule, and the instrument
+rules below — each is this rule applied to one artifact.
+
+
 - Commit with `git commit --no-verify`. NEVER `git add -A` — stage explicit
   paths only.
 - The repo-root `tmp/` directory is PROTECTED: never delete or overwrite
