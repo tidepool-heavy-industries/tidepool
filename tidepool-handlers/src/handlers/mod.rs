@@ -1,4 +1,5 @@
 pub mod console;
+pub mod event;
 pub mod exec;
 pub mod fs;
 pub mod git;
@@ -11,6 +12,7 @@ pub mod time;
 pub mod worktree;
 
 pub use console::*;
+pub use event::*;
 pub use exec::*;
 pub use fs::*;
 pub use git::*;

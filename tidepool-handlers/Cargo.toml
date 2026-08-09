@@ -17,6 +17,8 @@ tidepool-repr.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
+# PRD 19 lane L4: the RepoEvent handler's production observation source adapts
+# `WorktreeMonitor` — the git reasoning lives THERE, not here.
 tidepool-worktree.workspace = true
 inventory.workspace = true
 frunk.workspace = true
@@ -43,3 +45,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 [dev-dependencies]
 tidepool-testing.workspace = true
 tempfile.workspace = true
+# The standalone acceptance driver enters the parked path directly
+# (`run_suspendable_parked`/`resume_parked`) rather than through the resident
+# session or the harness engine.
+tidepool-codegen.workspace = true

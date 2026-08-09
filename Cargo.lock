@@ -3856,6 +3856,7 @@ dependencies = [
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
+ "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-mcp",
