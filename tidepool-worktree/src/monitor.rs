@@ -90,9 +90,22 @@ use crate::journal::{now_ms, EventJournal};
 ///   milliseconds of process-spawn overhead each, independent of repository
 ///   size. This number does not need to be conservative for cost reasons.
 /// - **Fleet behavior.** Cost scales linearly with the number of watched
-///   worktrees, not with how tight the interval is. At dozens of worktrees,
-///   even this interval keeps total poll overhead well under a percent of a
-///   core.
+///   worktrees, not with how tight the interval is. MEASURED, instrument
+///   named: a `rev-parse HEAD` + `symbolic-ref --short HEAD` pair against a
+///   real temporary repository, timed over 200 iterations with `date +%s%N`
+///   deltas around the loop, on this box at load ~35-55, cost 6.85 ms per
+///   pair. At that figure a 5 s round is 1.6% of one core at 12 worktrees,
+///   3.3% at 24, and 6.6% at 48.
+///
+///   An earlier revision of this comment claimed "well under a percent of a
+///   core at dozens of worktrees". That was an unmeasured estimate stated as
+///   a measurement, and it is wrong by roughly 3x at 24 worktrees. The
+///   CONCLUSION is unchanged — single-digit percent of one core is still
+///   cheap, and cost is not a reason to widen the interval — but the claim
+///   was overstated and is corrected rather than quietly dropped. Note the
+///   figure is process-spawn dominated, so it reflects a loaded box; an idle
+///   one is faster. It is a measurement of this machine, not a property of
+///   the operation.
 ///
 /// 5 seconds reads as "near-immediate" against agent work cadence, and fleet
 /// size is not a reason to widen it. Revisit against real dev-tree telemetry
