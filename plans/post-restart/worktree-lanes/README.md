@@ -113,6 +113,16 @@ any other live lane. Log real conflicts at fold.
   runs under `setsid`, prints a pid + log path, returns immediately, queues
   durably, and releases its slot even if the pane dies. Poll the log across
   turns.
+- ENVELOPE: at most ONE brokered (slot-taking) leg per dev at a time. `detach`
+  survives the QUEUE WAIT; it is NOT a parallelism primitive. A dev that
+  adopts detach and launches several legs concurrently is worse for the queue
+  than one that never adopted it, because detach converts the
+  death-and-relaunch that used to cap a non-adopter's footprint into durable
+  SIMULTANEOUS HOLDS (observed: one dev holding two of four slots). Serialize:
+  one leg, wait, then the next.
+- DRAIN, DON'T KILL: a killed GHC leg wastes the slot time already spent and
+  frees the slot no sooner. Kill only known-void work — e.g. a run whose
+  premise a later decision invalidated.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness
   test shard (persistent per-worktree, not mktemp).
 - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs);
