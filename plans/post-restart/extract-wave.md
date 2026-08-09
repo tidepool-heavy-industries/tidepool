@@ -208,6 +208,25 @@ must not be taken on the normal-path numbers alone.
   reachable Core; sibling sets where rendering needs them; target/result +
   boundary + session-bound types). THE chain root — shrinks the table,
   wrapper chain, and CBOR for free.
+  **CROSS-LANE HAZARD (extract-wave TL, 2026-08-08 — D2 MUST handle this or it
+  breaks boot).** `ConTags::try_from(&DataConTable)`
+  (`tidepool-codegen/src/effect_machine.rs` ~203) requires ALL FIVE freer
+  scaffolding constructors — `Control.Monad.Freer.Val`, `.E`,
+  `Data.OpenUnion.Union`, `Data.FTCQueue.Leaf`, `.Node`
+  (`tidepool-repr/src/freer_names.rs` ~23–43) — and `?`s out if any is
+  missing. They are NOT in `wiredInDataCons` (`Translate.hs` ~2737, verified:
+  list/bool/char/unit/numeric/tuple/ordering only). For a PURE machine-entry
+  term — `pure (…)`, which is what BOTH the seed being deleted and item 0's
+  render entry are — only `Val` is reachable; `E`/`Union`/`Leaf`/`Node` are
+  not. They are present today only because `tyconMeta = collectDataCons
+  tycons` sweeps every home-module TyCon without reachability — **precisely
+  the sweep D2 replaces.**
+  So a reachability-derived `RuntimeTypeClosure` that does not special-case
+  these five will produce a table that boots nothing, surfacing as a
+  `MissingConTags` failure far from the change. **D2 must carry the five as
+  mandatory roots, unconditionally, with a test asserting they survive
+  narrowing on a pure entry term.** Verify the claim before relying on this
+  note; it is reasoned from the anchors above, not measured.
 - **C1** GHC compiles every home module twice per extract (load'
   LoadAllTargets + unconditional second parse/typecheck/core2core loop —
   GhcPipeline.hs ~165/~184; session path ~366/~387). Leading suspect for
