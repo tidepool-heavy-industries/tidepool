@@ -34,8 +34,12 @@ set -euo pipefail
 # THE COPY IN FORCE is the parent repo's, invoked by absolute path
 # (/home/inanna/dev/tidepool/scripts/ghc-slots.sh) — a worktree's own copy of
 # this file is INERT and its SLOTS= line may be stale; never audit slot count
-# from a worktree checkout. (The nextest cap below is the opposite: per-
-# worktree config, live in each checkout.)
+# from a worktree checkout, and NEVER INVOKE a worktree copy: a stale copy
+# that still sleep-polls is structurally STARVED against kernel-queued
+# flock -w waiters (observed: 26 min queued, zero acquisitions). Outer-wrap
+# with this absolute path; a worktree battery.sh inside inherits the slot
+# marker and skips self-acquire. (The nextest cap below is the opposite:
+# per-worktree config, live in each checkout.)
 #
 # 4-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
