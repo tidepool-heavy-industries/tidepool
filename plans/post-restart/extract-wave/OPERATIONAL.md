@@ -144,6 +144,19 @@ Form 4 is the hardest to see, because auditing the artifact finds nothing wrong
 with it. The defect lives in the *citation*, not the thing cited — so check what
 you are relying on it FOR, not whether it works.
 
+**A SYMPTOM IS NOT A CAUSE — `kind=4 TypeMetadata` has at least TWO.** E6's
+receipt records it as the signature the PHASE 3 comment predicts (unfolding-less
+iface resolution baking `ErrorSentinel`s). Root's sum-literal dev then
+root-caused a *different* bug to the same signature plus bad-pointer-`0x0`:
+`isTypeMetadataVar` (`Translate.hs:2868`) matches on occurrence-name PREFIX
+only — `["$trModule","$krep","$tc","krep$","tr$Module"]`, no RHS inspection —
+and GHC's float-out/CSE gives Generic-deriving's `KnownSymbol` backing strings
+(plain `Addr#` literals) those same prefixes, so a LOAD-BEARING literal gets
+poisoned. **Do not diagnose from the signature alone**, and do not read E6's
+receipt as establishing that a `kind=4` sighting is a tiering fault.
+Itself a taxonomy instance — a name-shape convention trusted to establish what
+the RHS actually is, and downstream, a symptom trusted to establish its cause.
+
 **AND THE ASYMMETRY THAT LETS ALL FOUR THROUGH** (spawn-latency): **an
 improvement is as unverified as an error until someone checks it — and
 improvements are checked less often, precisely because they arrive as good
