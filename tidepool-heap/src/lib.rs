@@ -1,9 +1,8 @@
 //! Heap object layout and the copying-GC core (Cheney scan, pointer-field
-//! walking) for Tidepool's JIT runtime. The interpreter-plane arena/mark-
-//! compact GC (`ArenaHeap`, `gc::trace`, `gc::compact`) was retired as
-//! production-dead — the JIT's own nursery + frame walker (in
-//! `tidepool-codegen`) drive collection; this crate now only provides the
-//! shared object layout and `gc::raw`'s Cheney-copy primitives it's built on.
+//! walking) for Tidepool's JIT runtime. This crate provides the shared
+//! HeapObject layout and `gc::raw`'s Cheney-copy primitives; the JIT's own
+//! nursery and frame walker (in `tidepool-codegen`) drive collection on top
+//! of them.
 
 pub mod gc;
 pub mod layout;
