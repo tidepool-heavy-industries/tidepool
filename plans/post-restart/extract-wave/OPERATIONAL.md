@@ -4,11 +4,28 @@
 The original instruction here was to copy it verbatim into every spec. That is
 now the wrong practice, and this session is the proof.
 
-Make it a mandatory **STEP 0** in every dev spec instead: *"`cat
-plans/post-restart/extract-wave/OPERATIONAL.md` in your own worktree and follow
-its Block verbatim before doing anything else."* Devs fork from their TL's HEAD,
-so the canonical file is already in their tree — they receive the literal text,
-from the single source.
+Make it a mandatory **STEP 0** in every dev spec instead — and read it **BY
+REF**, never from the worktree copy:
+
+```
+git show root.extract-wave:plans/post-restart/extract-wave/OPERATIONAL.md
+```
+
+**CORRECTED 2026-08-09 (boot): `cat`-ing the worktree copy has the SAME defect
+it fixes.** A dev's copy is frozen at FORK time, not spawn time — which is
+earlier. Boot measured it: `diff <(git show root.extract-wave:…) plans/…` DIFFERED
+even in boot's own tree, one hop closer than any dev. So a dev following a
+`cat`-based step 0 literally would read *a stale copy of the fix for staleness*,
+invisible in exactly the same way.
+
+`git show <ref>:<path>` reads the branch tip by ref — read-only, no checkout, no
+worktree contact, canonical regardless of when the dev forked or last merged.
+**This is the `ghc-slots.sh` lesson in a different artifact**: `$PWD/scripts/
+ghc-slots.sh` silently gave 3 slots when the real broker had 6; a local
+`OPERATIONAL.md` silently gives yesterday's rules. `git show <ref>:<path>` is
+the absolute-parent-path equivalent.
+Secondary benefit: it puts the text in the dev's own transcript, so "did you
+read it" is answerable from the record rather than taken on trust.
 
 Why the change (spawn-latency proposed it; the decisive argument is empirical):
 a pasted Block **freezes at spawn time**, and this Block was amended roughly ten
@@ -19,7 +36,12 @@ hypothetical: it is exactly what happened with "tier 1 is safe unattended" and
 with "wrap every invocation including the quick tier". A reference resolves at
 read time; a paste is a snapshot nobody re-takes.
 It is also N copies that drift, which is the derive-don't-restate antipattern
-this very file bans two sections down. The failure mode the paste guarded
+this very file bans two sections down.
+
+**A TL's own messages are frozen at send time too.** Tell every dev: *if the
+canonical Block contradicts something I told you directly, the Block wins — and
+tell me, so I reconcile.* Without that, consolidating onto one source just adds
+a competing authority instead of replacing them (boot). The failure mode the paste guarded
 against — a dev skipping a linked file — is covered by making the read STEP 0
 with an explicit read-in-full instruction, not a passing citation.
 
