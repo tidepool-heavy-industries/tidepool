@@ -411,6 +411,52 @@ for it both times, and reported anyway. Bypassing would have unstuck one
 worktree and left the mechanism broken for every lane, with nobody knowing
 why the box kept falling over.
 
+### Two rules this lane generated (wave-wide, `a5f06b85`)
+
+**1. Report the HOLDERS, not just the waiters.** A queue-depth number
+names a symptom; the holder list names a cause. Method: read both
+`lslocks` columns, and check holder AGES and COMMANDS — a slot held an
+hour by an internally-serialised `--ignore-default-filter` run is a
+different problem from four slots doing work.
+
+Earned the hard way: this TL escalated a ~20-waiter starvation without
+checking holders, and **two of the four box-wide slots were held by its
+own child** (`boot-targets`), starving its sibling `boot-vocab` — whose
+fold is another wave's critical path. The escalation would not have
+survived the holder list. Seventh instance of the wave's characteristic
+failure (a measurement establishing less than its name implies), and the
+first one that was this TL's own.
+
+**2. A mechanism adopted is not a mechanism bounded.** State the envelope
+in the same breath as the capability. Concretely: at most ONE brokered leg
+per dev at a time.
+
+`detach` was handed down as the fix for dying while queued, without saying
+it bounds *waiting*, not *parallelism*. A dev given a capability and no
+envelope will reasonably infer the wrong one. This is the companion to
+"a new mechanism announced is not a mechanism adopted" — and it changes
+what a box-wide adoption sweep must ask, because **a lane that adopted
+`detach` and then ran five legs concurrently is WORSE for the queue than
+one that never adopted it.** The sweep needs both questions.
+
+**Attribution, recorded precisely because that is this wave's discipline:**
+the omission was SHARED. This TL under-specified (branch and timing, never
+concurrency); the wave TL reviewed and ratified it, writing that
+own-branch gating was worth "the extra run" — singular, as though one leg
+— and did not say serialise either. A gap that survives review is a
+different and more dangerous class than a gap one person made: the usual
+defence already ran and missed it. Both facts were given to `boot-targets`
+so it calibrates on the system's fallibility, not only its sub-TL's, and
+was told explicitly to push back on a reviewed instruction that looks
+costly from where it stands — it was the one positioned to see the holder
+list.
+
+**Corollary, from `boot-targets`' own judgment:** a running holder and a
+queued waiter are DIFFERENT OBJECTS. A killed GHC leg wastes the slot time
+already spent and returns the slot no sooner than draining does — so
+drain, then hold. Kill only work that is known-void, never to free
+capacity. Cancelling a queued waiter is free and does relieve pressure.
+
 ### Instruments: count at the SOURCE, not by external pattern match
 
 Three external-observation instruments were wrong in three different
