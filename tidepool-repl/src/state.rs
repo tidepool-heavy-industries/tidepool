@@ -1,18 +1,13 @@
 //! The per-session lifecycle state machine.
 //!
-//! Session lifecycle was previously smeared across three disjoint
-//! representations — the `SessionManager` map (present ⇒ open), the server's
-//! `continuations` map (present ⇒ parked on an `ask`), and the worker-local
-//! `Option<SessionHandle<Open>>` — plus an implicit fourth: which channel the
-//! worker thread is blocked on. Composite states like "Suspended ∧ Closing" had
-//! no representation, so they went unhandled (deadlock on close-while-suspended,
-//! leak on abandon, wedge on timeout, stale mutation on a concurrent run).
-//!
-//! This module makes the lifecycle a SINGLE owned value, transitioned
-//! atomically by the server at the dispatch boundary. The suspension payload is
-//! folded INTO [`SessionState::Suspended`] (it was a separate `continuations`
-//! map) so a suspension cannot exist untracked by state — teardown is forced to
-//! decide its fate.
+//! The session lifecycle is a SINGLE owned value ([`SessionState`]),
+//! transitioned atomically by the server at the dispatch boundary. The
+//! suspension payload lives INSIDE [`SessionState::Suspended`] rather than a
+//! side map, so a suspension cannot exist untracked by state — teardown is
+//! always forced to decide its fate. This is what rules out composite states
+//! like "Suspended ∧ Closing" going unhandled (deadlock on
+//! close-while-suspended, leak on abandon, wedge on timeout, stale mutation
+//! on a concurrent run).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -71,9 +66,8 @@ pub enum SessionState {
     Closing,
 }
 
-/// Everything needed to resume (or reclaim) a parked `ask`. Folded into
-/// [`SessionState::Suspended`]; this is exactly the payload the retired
-/// `ReplContinuation` carried.
+/// Everything needed to resume (or reclaim) a parked `ask`. Lives inside
+/// [`SessionState::Suspended`] so a suspension can't exist untracked by state.
 pub struct Suspension {
     pub cont_id: ContinuationId,
     pub response_tx: std::sync::mpsc::Sender<ResumeMsg>,
@@ -93,7 +87,7 @@ impl SessionState {
         matches!(self, SessionState::Idle)
     }
 
-    /// Short label for the "session busy" rejection message (M5 guard).
+    /// Short label used in the "session busy" rejection message.
     pub fn busy_label(&self) -> String {
         match self {
             SessionState::Idle => "idle".into(),
