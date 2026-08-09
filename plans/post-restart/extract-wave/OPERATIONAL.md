@@ -83,9 +83,26 @@ localized diffs and log it at fold):
 
   **The spin is fixed at the mechanism level** (root's `2d72434e`, live at the
   absolute path above — verified): waiters kernel-block with jittered `flock -w`
-  rotation instead of sleep-polling, so a blocked waiter costs ~zero CPU
-  (43 sleep-pollers were measured burning 1.2 cores). No action needed; new
-  invocations get it automatically.
+  rotation instead of sleep-polling, so a blocked waiter costs ~zero CPU. No
+  action needed; new invocations get it automatically. (The "43 sleep-pollers
+  burning 1.2 cores" figure originally cited for this fix was MINE and was
+  WRONG — see the queue-depth instrument below. Blocking still beats polling,
+  so the fix stands on its own merits; only its stated magnitude was fiction.)
+
+  **QUEUE DEPTH: use `lslocks`, never a process grep.**
+
+      lslocks | grep tidepool-ghc      # WRITE = holder, WRITE* = blocked waiter
+
+  Kernel truth, immune to the args-grep trap. `pgrep -f ghc-slots.sh` matches
+  every `.claude-unwrapp` AGENT SESSION whose command line mentions the script —
+  measured here as 22 agent sessions + 8 bash + 5 zsh, against **4 real holders
+  and 4 real waiters**. The wave's "50-deep queue with 60-minute waiters" was
+  that misclassification, and it was mine.
+  Note what this is: **the identical trap this file already documents for
+  `pgrep -fc tidepool-extract`, committed one level up by the person who
+  documented it**, and then propagated upward and cited in a commit message
+  before anyone checked the referent. A grep over process ARGS counts agents,
+  not work. Reach for the kernel's own accounting.
 
   The MemAvailable floor is a soft guard and is NOT binding at 18 GB. If you see
   a floor rejection, that is real memory pressure, not this.
@@ -104,8 +121,8 @@ localized diffs and log it at fold):
   with the environment's ~380s process kill and 3 slots shared across three
   waves, "wrap every GHC-heavy invocation" was an **unsatisfiable triple**: a
   fully compliant dev's attempt is not refused a slot, it is KILLED WHILE
-  QUEUED, making zero progress indefinitely. Measured queue ages reached 60
-  minutes — two orders of magnitude past the kill budget. `detach` decouples
+  QUEUED, making zero progress indefinitely. Demonstrated, not inferred:
+  `boot-targets` died twice at ~340s without ever acquiring. `detach` decouples
   the queue wait from the agent's process lifetime. It is also strictly better
   than the old behaviour absent any kill: a dead pane no longer drops a queued
   waiter.
