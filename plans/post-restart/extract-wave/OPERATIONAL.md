@@ -113,6 +113,17 @@ localized diffs and log it at fold):
   If you launch a detached job and then abandon it, **reap it** — an orphaned
   waiter holds a queue position nobody is waiting on, and relaunches stack.
 
+  **MEASURE FROM INSIDE THE DETACHED COMMAND, NEVER FROM THE QUEUEING SHELL**
+  (spawn-latency, 2026-08-08). `detach` decouples QUEUE time from EXECUTION
+  time, so the box conditions visible where you enqueue a job are NOT the
+  conditions it runs under — and with queue ages reaching 60 minutes the gap is
+  enormous. Any sample labelled with the queueing shell's loadavg, extract
+  count, or cap state is MISLABELLED. Emit those readings from inside the
+  detached command, to its own log, immediately before the measured work
+  starts. This is the same failure as the phase rows that opened this wave — a
+  label asserting more than it establishes — arriving through a new door that
+  the fix for the previous one opened.
+
   If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
   rather than bypassing the broker.
   **MEASURING actual load — the obvious commands are both wrong.**
