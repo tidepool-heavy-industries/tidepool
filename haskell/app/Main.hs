@@ -6,6 +6,8 @@ import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
+import Numeric (showHex)
 import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
@@ -41,7 +43,7 @@ import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -330,6 +332,51 @@ processFile timing args path = do
 -- @{site, type}@ pairs it wrote to @asks.json@, so a caller that also needs
 -- them (the turn mode's rich result) reads them off this one translation
 -- rather than re-running 'translateModuleClosed'.
+-- | D1 hard-fail defense (plans/post-restart/extract-wave/spawn-latency/00-spec.md,
+-- codex-review-2026-08-08.md item 7): asserts BEFORE a single byte of this
+-- binder's output is written that the emitted metadata covers every
+-- constructor id the emitted program can reference. Neither check is a
+-- warning or a silent merge — either failure 'error's, caught by the
+-- caller's 'try' exactly like any other extraction failure (nonzero exit,
+-- JSON diagnostics on stdout, no result.cbor \/ meta.cbor written).
+--
+-- CHECK A (primary): every id in @'emittedConIds' nodes@ — what actually
+-- reaches the wire — must appear as some @allMeta@ entry's 'dcmId'. A
+-- constructor emitted into the IR but missing from the metadata is exactly
+-- the shape of the still-owed garbage-con_tag intermittent: the runtime
+-- would receive a constructor it cannot describe.
+--
+-- CHECK B (independence): every DataCon 'collectReachableConDCs' finds —
+-- an INDEPENDENT syntactic Core visitor that never calls the translator —
+-- must also have its id in @allMeta@. Because the visitor is independent,
+-- this check is not self-confirming: a failure means the authoritative
+-- translation and the independent collector genuinely disagree about what's
+-- reachable. Per the D1 spec, a CHECK B failure is a REAL FINDING to
+-- escalate, never a check to weaken or relax.
+assertMetaCoversEmitted :: String -> Seq.Seq FlatNode -> [CoreBind] -> [DCMeta] -> IO ()
+assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
+  let allMetaIds = Set.fromList (map dcmId allMeta)
+      reachableMeta = map dcToMeta (collectReachableConDCs reachBinds)
+      nameById = Map.fromList [ (dcmId m, dcmQualName m) | m <- reachableMeta ]
+      nameOf vid = maybe "<name unresolvable>" T.unpack (Map.lookup vid nameById)
+      missingEmitted = Set.toList (emittedConIds nodes `Set.difference` allMetaIds)
+  when (not (null missingEmitted)) $ error $
+       "D1 CHECK A (emitted-metadata subset) FAILED for binder " ++ targetName ++ ": "
+    ++ show (length missingEmitted)
+    ++ " constructor id(s) reach the wire (FlatNode NCon/FDataAlt) but are "
+    ++ "missing from meta.cbor -- the runtime would receive a constructor it "
+    ++ "cannot describe:\n"
+    ++ unlines [ "  0x" ++ showHex vid "" ++ " " ++ nameOf vid | vid <- missingEmitted ]
+  let missingReachable = filter (\m -> not (dcmId m `Set.member` allMetaIds)) reachableMeta
+  when (not (null missingReachable)) $ error $
+       "D1 CHECK B (independent reachable-Core subset) FAILED for binder " ++ targetName ++ ": "
+    ++ show (length missingReachable)
+    ++ " DataCon(s) found by the independent syntactic Core visitor are "
+    ++ "missing from meta.cbor -- the authoritative translation and the "
+    ++ "independent collector disagree on reachability:\n"
+    ++ unlines [ "  0x" ++ showHex (dcmId m) "" ++ " " ++ T.unpack (dcmQualName m)
+               | m <- missingReachable ]
+
 writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text)]
 writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   (closed, translateMs) <- timeSection (translateModuleClosed hscEnv binds targetName)
@@ -357,6 +404,8 @@ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts t
       allMeta = mergeMetaPreserving
                   [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
       hasIO = targetBindingHasIO binds targetName
+
+  assertMetaCoversEmitted targetName nodes reachBinds allMeta
 
   -- 'cbor_encode' forces both ByteStrings here (rather than leaving them as
   -- thunks BS.writeFile forces below) purely so the wire-format-inert timing

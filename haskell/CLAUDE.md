@@ -109,6 +109,7 @@ Env-gated, OFF by default. For the JIT-runtime / effect-machine / cache knobs se
 | `TIDEPOOL_VARID_AUDIT=<hex>,<hex>` | Resolves specific VarIds to source names + enclosing top-level binder | Naming the function a JIT trace implicates |
 | `TIDEPOOL_JOINREC_DEBUG=1` | joinrec-translation forensics (`[313-joinrec]` spew) | Join-point conversion bugs (jumps compiled as calls, wrong continuation) |
 | `TIDEPOOL_IFACE_DEBUG=1` | `[fat-iface]` interface-loading trace | Missing unfoldings / "unresolved external" mysteries |
+| `TIDEPOOL_TEST_DROP_DC=<module-qualified-name>` | D1 mutation-test fault injection: `recordDC` silently skips recording exactly the one constructor whose qualified name matches | Proving the D1 hard-fail metadata-subset defense (`Main.assertMetaCoversEmitted`) actually fires — never set outside `extract-fidelity-test` |
 
 ## Eval stdlib (`lib/Tidepool/`)
 
