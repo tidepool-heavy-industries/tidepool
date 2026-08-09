@@ -79,6 +79,20 @@ localized diffs and log it at fold):
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
+- NAMED-GUARD RULE (wave-wide, from spawn-latency, 2026-08-08): **if a gate
+  exists to catch ONE specific failure mode, the receipt must show that
+  specific test passing by name, with its own pass line — not the aggregate
+  that contains it.** An aggregate count proves a suite ran; it does not prove
+  the guard executed. The residual hole it closes: the test is present in the
+  tree but the shard's filter does not select it — a renamed binary, an
+  `#[ignore]`, a cfg, an env-gated early return. Then the base commit is
+  correct, the count is green, and the guard never ran.
+  Where a guard is CROSS-LANE (it lives in one lane's branch and protects
+  another's change), the receipt must ALSO name the base commit it ran
+  against. Base proves which tree ran; the test name proves execution. Both,
+  or neither is established.
+  This is the same instrument that produced the C1 finding: do not trust that
+  a label ("harness acceptance, N passed") covers what its name implies.
 - Never touch another agent's worktree. Never checkout another branch. You are
   your worktree.
 - `TIDEPOOL_EXTRACT` must point at a freshly built `tidepool-extract-bin` for
