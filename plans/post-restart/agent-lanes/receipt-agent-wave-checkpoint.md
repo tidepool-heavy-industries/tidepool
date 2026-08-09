@@ -7,6 +7,33 @@ post-fold tip. This directory is that lane's inheritance —
 
 Branch rebased onto root's tip (`harness-interaction-surface`) before submit.
 
+## Verification of the SUBMITTED tree
+
+Each lane verified its own branch, but the submitted state is root's tip merged
+with all three lanes plus a rebase that skipped a now-redundant cherry-pick
+(`fc3363dc`, already an ancestor of root's tip). That combination had never
+been compiled before, so it was verified as its own thing rather than inferred
+from three green branches.
+
+**Instrument:** `cargo` at HEAD of `root.agent-wave` after rebase onto
+`harness-interaction-surface`; the two workspace-scoped runs went through
+`/home/inanna/dev/tidepool/scripts/ghc-slots.sh detach` (one brokered leg at a
+time, never concurrent).
+
+| Check | Result | Log |
+|---|---|---|
+| `cargo check --workspace` | **rc=0**, clean | `/tmp/tidepool-ghc-detach.bOAuNT.log` |
+| `cargo clippy --workspace` | **rc=0** | `/tmp/tidepool-ghc-detach.1xl6Md.log` |
+| `cargo fmt --all -- --check` | **rc=0** (cheap, run directly — not slot-taking) | — |
+
+Clippy emitted exactly two warnings, both `large size difference between
+variants`, in `tidepool-codegen` (lib) and `tidepool-harness` (lib). **Zero
+warnings point at any file in this wave's diff.** They are inherited, on two
+independent grounds: neither crate appears in this branch's diff, and both
+`receipt-adapter-bringup.md` and `receipt-mode-encoding.md` independently
+recorded the same two warnings on separate branches *before* this merge — so
+they pre-date the fold rather than being an artifact of it.
+
 ## Verdicts
 
 | Gate | Verdict |
