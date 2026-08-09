@@ -32,6 +32,31 @@ show each failed for *its own reason* (the asserted message text), since a
 fixture passing on an unrelated error is exactly what this rule exists to
 catch.
 
+## THROTTLE — active (root, 2026-08-08, until root lifts it)
+
+The box hit **load average 92** and the operator's SSH died. Until lifted,
+wrap EVERY heavy invocation in:
+
+```
+/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
+```
+
+Absolute path, **never `exclusive`**. This is broader than the standing
+GHC-heavy rule — it now covers `cargo check`/`build --workspace`,
+`cargo nextest run` at **any** tier including the quick default,
+`cargo clippy --workspace`, and extract-spawning spikes run outside the
+battery scripts.
+
+Do NOT wrap `scripts/battery.sh` — it already takes a slot and re-execs
+itself under one, and an outer wrapper is respected rather than
+double-acquired. It is the bare `cargo` invocations that need wrapping.
+
+Still exempt: single-crate `cargo check -p <crate>`, edits, greps, reads.
+Wrapping cheap commands just burns slots another lane is waiting on.
+
+Slot wait over 15 minutes is **starvation — report it, do not bypass** and do
+not reach for `exclusive` to jump the queue.
+
 ## Wave 1 lanes
 
 | Lane | Owns | Deliverable |
