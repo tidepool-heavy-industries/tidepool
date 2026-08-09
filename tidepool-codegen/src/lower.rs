@@ -114,15 +114,14 @@ fn postorder(tree: &CoreExpr, root: usize) -> Vec<usize> {
 /// that itself converts is treated as a `Lam` boundary without a fresh
 /// recursive re-scan of its body.
 ///
-/// Explicit-stack DFS (L5, repo-review-2026-07-06/01-gc-memory-safety.md):
-/// every sibling traversal in this file (`postorder`, `rewrite`) already uses
-/// an explicit stack for deep-tower safety; this one was still host-
-/// recursive — a deep tower with any `Join` in it could overflow the
-/// COMPILER's own stack, outside any signal protection. A pure "does any
-/// reachable `Jump{label==vid}` occur with `under_lam` true" search doesn't
-/// depend on traversal order, so pushing every child (with its own computed
-/// `under_lam`) and returning as soon as one matches is exactly equivalent
-/// to the original short-circuiting recursion.
+/// Explicit-stack DFS: every sibling traversal in this file (`postorder`,
+/// `rewrite`) uses an explicit stack for deep-tower safety, and this search
+/// must too — host recursion here risks overflowing the COMPILER's own
+/// stack on a deep tower with a `Join` in it, outside any signal protection.
+/// A pure "does any reachable `Jump{label==vid}` occur with `under_lam`
+/// true" search doesn't depend on traversal order, so pushing every child
+/// (with its own computed `under_lam`) and returning as soon as one matches
+/// is equivalent to a short-circuiting recursive search.
 fn reaches_under_lam(
     tree: &CoreExpr,
     under_lam: bool,
@@ -205,7 +204,7 @@ fn max_var_id(tree: &CoreExpr) -> u64 {
             }
             CoreFrame::Case { binder, alts, .. } => {
                 max = max.max(binder.0);
-                // Alt pattern binders are VarIds too (M6) — omitting them let a
+                // Alt pattern binders are VarIds too — omitting them would let a
                 // converted Jump's fresh binder silently capture one.
                 for alt in alts {
                     for b in &alt.binders {
@@ -495,7 +494,7 @@ mod tests {
         assert_eq!(lower_jump_crosses_lam(&tree), tree);
     }
 
-    /// M6: `max_var_id` must scan `Case` ALT pattern binders, not just the
+    /// `max_var_id` must scan `Case` ALT pattern binders, not just the
     /// case's own top-level `binder`. A `Case` alt binder holding the
     /// LARGEST `VarId` in the tree, with everything else (join label,
     /// params, lambda binder) small, reproduces the exact undercount: if alt
@@ -521,10 +520,9 @@ mod tests {
         });
         // The alt binder `big` is bound but UNUSED in the body — it must
         // still count toward `max_var_id` via `Alt::binders`, not just via a
-        // `Var(big)` reference (which would mask the M6 bug: `max_var_id`
-        // already scans every `Var` reference node, so an unused binder is
-        // the only shape that isolates "scans Alt::binders" from "scans Var
-        // references").
+        // `Var(big)` reference. `max_var_id` already scans every `Var`
+        // reference node, so an unused binder is the only shape that
+        // isolates "scans Alt::binders" from "scans Var references".
         let unused_body = b.push(CoreFrame::Lit(Literal::LitInt(0)));
         let case = b.push(CoreFrame::Case {
             scrutinee,
@@ -579,17 +577,16 @@ mod tests {
         );
     }
 
-    /// L5: `reaches_under_lam` was host-recursive while its siblings
-    /// (`postorder`, `rewrite`) already use an explicit stack — a deep tower
-    /// with a `Join` in it could overflow the COMPILER's own stack, outside
-    /// any signal protection. A `Join` whose `body` is a very deep `App`
-    /// chain (`App{fun: <deeper App>, arg: ...}`) exercises this: `fun` sits
-    /// on the LEFT of the `reaches_under_lam(fun) || reaches_under_lam(arg)`
-    /// short-circuit, so — unlike a chain built through a position that's
-    /// effectively in tail position (e.g. `LetNonRec::body`, which rustc/LLVM
-    /// can and does turn into a loop even in a dev build) — each level's
-    /// stack frame must stay live while the `fun` side resolves, forcing
-    /// genuine non-tail recursion in the old implementation.
+    /// `reaches_under_lam` must handle a very deep tower without overflowing
+    /// the COMPILER's own host stack. A `Join` whose `body` is a very deep
+    /// `App` chain (`App{fun: <deeper App>, arg: ...}`) is the shape that
+    /// would catch a regression to host recursion: `fun` sits on the LEFT of
+    /// the `reaches_under_lam(fun) || reaches_under_lam(arg)` short-circuit,
+    /// so — unlike a chain built through a position that's effectively in
+    /// tail position (e.g. `LetNonRec::body`, which rustc/LLVM can and does
+    /// turn into a loop even in a dev build) — a recursive implementation
+    /// would need every level's stack frame to stay live while the `fun`
+    /// side resolves.
     #[test]
     fn reaches_under_lam_handles_a_deep_tower_without_host_stack_overflow() {
         const DEPTH: usize = 500_000;
