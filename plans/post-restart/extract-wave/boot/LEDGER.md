@@ -64,6 +64,97 @@ nothing but conflict.
 `boot-count` deliberately lands FIRST so item 0's done-criterion is an A/B
 against a committed red-line rather than an after-the-fact assertion.
 
+Full dev specs: `01-wave2-lazy-boot.md`, `02-wave3-one-compile.md`.
+
+### Wave status
+
+| Wave | State | Gate |
+|---|---|---|
+| 1 (`boot-count`, `boot-vocab`) | RUNNING (GO'd 2026-08-08) | — |
+| 2 (`boot-lazy`) | HELD | `root.harness-lifecycle` fold into `root.extract-wave`, then merge that base into this branch |
+| 3 (`boot-onecompile`) | HELD | wave 2's fold |
+
+**The hold is for the ELIMINATE rung.** Root ruled the D7 rung-2 cache
+interim explicitly OFF for this lane: the blocker (a half-folded
+`harness-lifecycle` chain, so our base lacks the async driver rewrite) has
+an imminent resolution, so downgrading would be improvising around a
+short wait. No downgrade taken; none contemplated.
+
+Verified rather than assumed, on the wave TL's check: the spec's
+sequencing clause says "after driver-async's fold", and driver-async HAD
+folded — into `root.harness-lifecycle`, which had not folded to root.
+Our base does not contain it. `harness-lifecycle` is +3827/-367 across 43
+files, including `harness.rs` and `driver.rs`, i.e. both seed sites and
+all three of wave 3's target functions. A dev editing them today would
+write against code that does not survive.
+
+---
+
+## Recipe amendments (against `00-spec.md`'s six steps)
+
+1. **Step 6 is not a separate step.** `self.boot` has exactly ONE
+   production consumer, `force()` (post-async `harness.rs` 817). Once
+   `force()` builds an unbootstrapped session, the answerer's machine
+   boots on its first real compile — which IS the model's first block.
+   Step 6 falls out of steps 1–3 and is discharged as an ASSERTION in
+   `boot-lazy`'s acceptance (pin: no machine after `force()`, machine
+   after the first turn), not as work. Recorded here so the spec's "six
+   steps" never later reads as an unfinished item.
+
+2. **The ConTags self-heal must be a NAMED event, not silent recovery**
+   (wave TL's addition, accepted). `add_function` re-resolving ConTags
+   per fragment table means a pure-`render` boot self-heals when the loop
+   fragment lands. Silent self-healing is the same shape as the boot seed
+   itself — scaffolding that goes load-bearing because nothing names it.
+   `boot-lazy` pins both legs by test AND emits a breadcrumb / one-time
+   assertion at the heal site, so a future regression that stops the heal
+   surfaces here rather than three files away as a confusing dispatch
+   failure.
+
+3. **Item 0b's landing is scoped to the mechanism + RunLLMTurn.** The
+   vocabulary/row split is the mechanism; the policy for this landing is
+   `row ∪ {RunLLMTurn}` at every call site. Deliberate, not a shortcut:
+   `Tidepool.Effects` compiles as a home module whose every TyCon feeds
+   the extractor's metadata collection, so dumping ~14 unused GADTs into
+   a narrow-row compile would be a direct latency regression against this
+   wave's own target — and the narrow-row compiles are precisely the
+   pre-model ones. Helpers still spelled `-> M x` stay row-gated;
+   `boot-vocab` reports which converted and which held out, and the list
+   lands below at fold.
+
+---
+
+## Post-async anchor verification (done during the wave-2 hold)
+
+Read-only, via `git show root.harness-lifecycle:<path>` — no checkout, no
+worktree contact. Anchors in `00-spec.md` (driver.rs ~552, harness.rs
+~430) HAVE moved; `01-wave2-lazy-boot.md` and `02-wave3-one-compile.md`
+carry the re-derived ones.
+
+**What the async conversion did NOT change** — checked because the wave
+TL asked whether the first REAL compile moves on either path, since that
+is the exact hook `bootstrap_if_needed` hangs off:
+
+- `force()` still bootstraps from `self.boot` at the same point in the
+  same sync function (817).
+- `run_one_cycle` (now `async`, 674) still calls `bootstrap()` and then
+  `render_framing`, so the outer session's first real compile is still
+  the pre-loop render.
+- `compile_outer` (631), `render_framing` (1551) and
+  `run_loop_fragment_inner` (981) are byte-identical to pre-async apart
+  from `async` on their callers.
+
+**The hook does not move.** The recipe stands as written; only line
+numbers change. Wave 3's fusion also survives: post-async `run_one_cycle`
+still renders and loops against the SAME `prior_state`, which is what
+makes one module with two targets correct.
+
+One new obligation the async rewrite adds: `harness.rs` 3251/3294
+fabricate the `boot` field in test fixtures and 3320 `fake_session`
+bootstraps eagerly so `NodeTree::force` has a machine to register.
+Deleting the field lands on those three sites; `boot-lazy`'s spec names
+them.
+
 ---
 
 ## Item rows
@@ -83,7 +174,20 @@ against a committed red-line rather than an after-the-fact assertion.
 
 ## Fold conflicts
 
-_None yet._ Expected overlap with sub-TL `spawn-latency`:
+**Known fold points, flagged before the fact:**
+
+1. `tidepool-mcp/src/eval_prep.rs` — `harness-lifecycle` adds
+   `template_haskell_anchored` and edits `template_haskell_impl` (+87);
+   `boot-vocab` targets `effects_module_source_at`. Different functions,
+   same file. Expect a MECHANICAL conflict when the new base merges in,
+   not a semantic one. `boot-vocab` is instructed to keep its diff
+   localized and not reformat surrounding code.
+2. `tidepool-harness/src/harness.rs`, `selfharness/driver.rs` — replaced
+   wholesale by the async rewrite. This is why waves 2+3 are held rather
+   than conflict-resolved.
+3. `haskell/app/Main.hs` — see below.
+
+_No conflicts resolved yet._ Expected overlap with sub-TL `spawn-latency`:
 `haskell/app/Main.hs` (its D1 reworks `writeWholeModuleClosed`'s metadata
 merge ~line 348; our step 4 splits the same function's per-target emission)
 and `tidepool-runtime/src/session/compile.rs` / `turn.rs`. Per the
