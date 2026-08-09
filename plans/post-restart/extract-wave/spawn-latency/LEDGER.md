@@ -290,6 +290,16 @@ five must be DERIVED as roots (from `freer_names`, the single source `ConTags`
 itself resolves against), never listed with a note asking future readers to
 remember why.
 
+> **VERBATIM into D2's dev spec** (wave TL: "it will do more work than the
+> requirement itself"). The requirement as originally raised — "carry the five
+> as mandatory roots" — is satisfiable by exactly the hand-maintained list plus
+> an explanatory note, i.e. by the mechanism that had just failed one file over.
+> So the spec carries this sentence, not just the requirement:
+>
+> *A hand-listed set with an explanatory comment would be the identical
+> mechanism that just broke, reintroduced by the item whose whole purpose is
+> narrowing that table.*
+
 ## Positive control: an INSTRUMENT needs the same proof as a test
 
 My own error, banked because it generalizes the anti-vacuity rule I had already
