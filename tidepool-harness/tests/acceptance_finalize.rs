@@ -111,14 +111,16 @@ async fn finalize_hands_up_a_plain_data_value() {
     let writer = LogWriter::create(&log_path, &header()).unwrap();
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
 
-    // The `:: M ()` annotation is NOT part of finalize's own contract — it's
-    // needed because `finalize`'s result type is fully free (it never
-    // actually returns; the send diverges via suspension), and the
-    // template's own `toJSON _r` wrapper around the WHOLE turn otherwise
-    // leaves `_r`'s type ambiguous (GHC has no `ToJSON` instance to pick
-    // without a hint) — this never actually matters at runtime since the
-    // block suspends before reaching that wrapper.
-    let replies = vec![reply("```haskell\n(finalize @Int (41 + 1) :: M ())\n```")];
+    // Bare, no annotation of any kind — the shape the answerer prompt
+    // prescribes. `finalize`'s result type is fully free (it never actually
+    // returns; the send diverges via suspension), which used to leave the
+    // shared template's `toJSON _r` wrapper ambiguous (GHC's defaulting
+    // never resolves a solitary `ToJSON a0`). `template_turn_for`
+    // (`tidepool-harness/src/engine.rs`) routes a turn compiled against a
+    // real `Finalize T` row through `tidepool_mcp::template_haskell_anchored`
+    // instead, which adds a redundant `Show` constraint alongside — additive,
+    // not an annotation this block needs to write itself.
+    let replies = vec![reply("```haskell\nfinalize @Int (41 + 1)\n```")];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 

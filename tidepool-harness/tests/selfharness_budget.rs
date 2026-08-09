@@ -16,6 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -97,6 +99,7 @@ impl ModelProvider for NeverFinalizeProvider {
                 output_tokens: 2,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -107,6 +110,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let calls = Arc::new(Mutex::new(0u32));
     let nudge_seen_at = Arc::new(Mutex::new(None));
@@ -137,7 +141,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
-    let result = driver.run_one_cycle(&source, None);
+    let result = driver.run_one_cycle(&source, None).await;
 
     // The hole hard-fails the runLLMTurn effect at the configured hard cap (6).
     let err = result.expect_err("a never-finalizing answerer must hard-fail the cycle");

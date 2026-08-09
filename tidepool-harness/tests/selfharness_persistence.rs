@@ -14,7 +14,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+mod support;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -26,7 +28,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, HarnessSource, LogObserver, SelfHarnessDriver,
+    answerer_decls, load_harness_source, DriverError, Event, Harness, HarnessSource, LogObserver,
+    Observer, SelfHarnessDriver,
 };
 
 fn extract_available() -> bool {
@@ -100,6 +103,17 @@ fn decision_reply(action: &str, confidence: &str) -> RecordedReply {
 /// construct (a brand-new agent orchestrator with no memory of the prior
 /// run's nodes), distinct from just reusing the same driver across cycles.
 fn fresh_driver(replies: Vec<RecordedReply>, log_tag: &str) -> SelfHarnessDriver {
+    fresh_driver_with_observer(replies, log_tag, Arc::new(LogObserver))
+}
+
+/// Same construction as [`fresh_driver`], but with a caller-supplied
+/// [`Observer`] — the addendum's fingerprint-mismatch test needs to capture
+/// [`Event::HarnessSourceChanged`], which the fixed [`LogObserver`] only logs.
+fn fresh_driver_with_observer(
+    replies: Vec<RecordedReply>,
+    log_tag: &str,
+    observer: Arc<dyn Observer>,
+) -> SelfHarnessDriver {
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
         prelude_dir(),
@@ -116,7 +130,7 @@ fn fresh_driver(replies: Vec<RecordedReply>, log_tag: &str) -> SelfHarnessDriver
     )
     .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
-    SelfHarnessDriver::new(agent, Arc::new(LogObserver))
+    SelfHarnessDriver::new(agent, observer)
 }
 
 fn source() -> HarnessSource {
@@ -137,6 +151,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("restart").join("checkpoint.json");
 
@@ -155,6 +170,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     driver1.set_checkpoint_path(checkpoint_path.clone());
     let outcome1 = driver1
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("cycle 1 (initialState)");
     assert_eq!(
         outcome1
@@ -184,6 +200,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
 
     let restored = driver2
         .restore(&harness_source)
+        .await
         .expect("restore after restart")
         .expect("cycle 1's checkpoint was committed to disk");
     assert_eq!(
@@ -195,6 +212,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // restored state instead of `None`.
     let outcome2 = driver2
         .run_one_cycle(&harness_source, Some(&restored))
+        .await
         .expect("cycle 2 (from restored state)");
 
     // The PRE-loop render for cycle 2 must reflect the RESTORED mode
@@ -240,6 +258,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // A third cycle, same process, no restart — generation keeps climbing.
     let _ = driver2
         .run_one_cycle(&harness_source, Some(&outcome2.state_json))
+        .await
         .expect_err("no more scripted replies for a third cycle");
     // The failed third cycle must NOT have overwritten generation 2's
     // checkpoint (only a SUCCESSFUL cycle commits).
@@ -287,6 +306,7 @@ impl ModelProvider for CompactingProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -302,6 +322,7 @@ impl ModelProvider for CompactingProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -349,6 +370,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("crash").join("checkpoint.json");
     let (mut driver, source) = compaction_driver(checkpoint_path.clone());
@@ -358,6 +380,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     // generation 1 with ITS OWN final compaction summary.
     let outcome1 = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("cycle 1 completes and commits");
     assert!(
         outcome1
@@ -381,6 +404,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     driver.set_loop_inference_call_cap(2);
     let err = driver
         .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
         .expect_err("cycle 2 must hard-fail before finishing its second hole");
     assert!(
         format!("{err}").contains("inference-call cap"),
@@ -406,6 +430,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     let (mut restart_driver, restart_source) = compaction_driver(checkpoint_path.clone());
     let restored_state = restart_driver
         .restore(&restart_source)
+        .await
         .expect("restore after the crash")
         .expect("generation 1's checkpoint is still on disk");
     assert_eq!(
@@ -463,6 +488,7 @@ fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
 /// sanity check independent of `TIDEPOOL_EXTRACT`.
 #[test]
 fn default_checkpoint_path_is_under_the_cache_dir() {
+    let _cache_guard = support::isolate_cache();
     let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![]));
@@ -479,4 +505,193 @@ fn default_checkpoint_path_is_under_the_cache_dir() {
     assert!(driver
         .checkpoint_path()
         .ends_with("selfharness/checkpoint.json"));
+}
+
+/// Captures every [`Event::HarnessSourceChanged`] the driver emits — the
+/// stale-checkpoint tests below need to assert the event still fires even
+/// though the mismatched checkpoint's state is now discarded rather than
+/// restored.
+#[derive(Default)]
+struct FingerprintChangeObserver {
+    changes: Mutex<Vec<(String, String)>>,
+}
+
+impl Observer for FingerprintChangeObserver {
+    fn on_event(&self, event: &Event) {
+        if let Event::HarnessSourceChanged {
+            restored_fingerprint,
+            current_fingerprint,
+        } = event
+        {
+            self.changes
+                .lock()
+                .unwrap()
+                .push((restored_fingerprint.clone(), current_fingerprint.clone()));
+        }
+    }
+}
+
+/// Addendum (stale-checkpoint boot crash): a checkpoint committed by a
+/// DIFFERENT harness source is DISCARDED on `restore`, never decoded — this
+/// is the live-dogfood defect. The old behavior detected the mismatch
+/// (`Event::HarnessSourceChanged` fired) and restored the stale state
+/// anyway; decoding it against the new `State` type crashed the process on
+/// boot. `restore` must return `Ok(None)`, drop any carried-forward
+/// compaction summary (it describes the discarded harness's loop), still
+/// emit the event as the durable record, and still adopt the checkpoint's
+/// generation so the sequence stays monotonic across the restart — proven
+/// here by driving one real cycle afterward and checking what it commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
+        return;
+    }
+    let _cache_guard = support::isolate_cache();
+
+    let checkpoint_path = scratch("stale-fp").join("checkpoint.json");
+    std::fs::copy(
+        fixtures_dir().join("checkpoint-stale-fingerprint.json"),
+        &checkpoint_path,
+    )
+    .expect("plant the real crashed-run fixture (from the live dogfood incident)");
+
+    let observer = Arc::new(FingerprintChangeObserver::default());
+    let mut driver = fresh_driver_with_observer(
+        vec![decision_reply("observe", "Medium")],
+        "stale-fp",
+        observer.clone(),
+    );
+    driver.set_checkpoint_path(checkpoint_path.clone());
+
+    // Override the fingerprint on a clone rather than trust the reference
+    // harness's real content-hash to differ from the fixture's stale one —
+    // `restore` only ever compares `HarnessSource::fingerprint` against the
+    // checkpoint's `harness_source`, nothing else about the source, so this
+    // is a safe substitution and it pins the mismatch by construction
+    // instead of gambling on file-content divergence (the reference
+    // harness's fingerprint is content-derived and can coincide with any
+    // other file's, including this fixture's, with no warning).
+    let mut current_source = source();
+    current_source.fingerprint = "00000000deadbeef".to_string();
+    assert_ne!(current_source.fingerprint, "fcbd20d2594c4426");
+
+    let restored = driver
+        .restore(&current_source)
+        .await
+        .expect("restore must not error on a mismatched fingerprint");
+    assert_eq!(
+        restored, None,
+        "a fingerprint-mismatched checkpoint's state must be discarded, not returned for decode"
+    );
+    assert_eq!(
+        driver.last_compaction(),
+        None,
+        "a discarded checkpoint's compaction summary must not carry over — it \
+         describes a different harness's loop"
+    );
+    assert_eq!(
+        observer.changes.lock().unwrap().as_slice(),
+        &[(
+            "fcbd20d2594c4426".to_string(),
+            current_source.fingerprint.clone()
+        )],
+        "HarnessSourceChanged must still fire, carrying both fingerprints, as the \
+         durable record of the discard"
+    );
+
+    // The generation counter must still have adopted the fixture's `1`: the
+    // next successful cycle (starting fresh, since `restored` is `None`)
+    // commits generation 2, not 1.
+    let outcome = driver
+        .run_one_cycle(&current_source, restored.as_ref())
+        .await
+        .expect("a cycle from fresh initialState after a discarded checkpoint must succeed");
+    assert_eq!(
+        outcome.state_json.get("loopCount").and_then(|v| v.as_i64()),
+        Some(1),
+        "starting fresh from initialState, loopCount must be 1, not continuing the \
+         discarded checkpoint's loopCount"
+    );
+    let committed = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after the fresh cycle")
+        .expect("the fresh cycle committed its own checkpoint");
+    assert_eq!(
+        committed.generation, 2,
+        "generation must continue from the discarded checkpoint's generation (1), not \
+         reset to 1"
+    );
+}
+
+/// Addendum (stale-checkpoint boot crash), defect 2: defense in depth for
+/// whatever the fingerprint check in the test above misses (a hash
+/// collision, a hand-edited checkpoint, a same-source edit that changes the
+/// `State` type without changing the file's fingerprint). A restored `State`
+/// that fails the author's `FromJSON State` decode must not take the whole
+/// process down via `run_loop` — it retries the cycle exactly once from
+/// fresh `initialState` instead. Proven by planting a checkpoint whose
+/// `harness_source` MATCHES the current source (so defect 1's discard does
+/// NOT fire) but whose `state` cannot possibly decode against the reference
+/// harness's real `State` type, then observing that `run_loop` still
+/// produces a real committed cycle from fresh state before it eventually
+/// runs out of scripted replies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_run_loop() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
+        return;
+    }
+    let _cache_guard = support::isolate_cache();
+
+    let checkpoint_path = scratch("decode-retry").join("checkpoint.json");
+    let current_source = source();
+    persistence::save_checkpoint(
+        &checkpoint_path,
+        &persistence::Checkpoint {
+            generation: 1,
+            // Cannot decode against the reference harness's real `State`
+            // (which requires `lastDecision`/`loopCount`/`mode`/`notes`) —
+            // same shape of failure as a hand-edited or cross-version
+            // checkpoint that slips past the fingerprint check.
+            state: serde_json::json!({"totally": "not a State"}),
+            compaction: None,
+            harness_source: current_source.fingerprint.clone(),
+        },
+    )
+    .expect("plant a same-fingerprint, undecodable checkpoint");
+
+    // Exactly one scripted reply: enough for the RETRIED cycle (fresh
+    // initialState) to finalize; the loop's second cycle then finds the
+    // replay queue empty and run_loop returns a non-StateDecode error,
+    // ending the test deterministically without an artificial cap.
+    let mut driver = fresh_driver(vec![decision_reply("observe", "Medium")], "decode-retry");
+    driver.set_checkpoint_path(checkpoint_path.clone());
+
+    let err = driver
+        .run_loop(&current_source, true)
+        .await
+        .expect_err("the replay queue runs out on the second cycle");
+    assert!(
+        !matches!(err, DriverError::StateDecode(_)),
+        "the decode failure on cycle 1's restored state must have been retried away, \
+         not have propagated out of run_loop as StateDecode, got: {err:?}"
+    );
+
+    // The retried cycle (fresh initialState, loopCount 1) must have actually
+    // run and committed — proving `run_loop` recovered rather than dying
+    // silently on the first cycle.
+    let committed = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after the retried cycle")
+        .expect("the retried cycle committed its own checkpoint");
+    assert_eq!(
+        committed.generation, 2,
+        "the retried cycle must commit generation 2, continuing from the planted \
+         checkpoint's generation 1"
+    );
+    assert_eq!(
+        committed.state.get("loopCount").and_then(|v| v.as_i64()),
+        Some(1),
+        "the retried cycle must have started from fresh initialState (loopCount 1), \
+         not the undecodable planted state"
+    );
 }

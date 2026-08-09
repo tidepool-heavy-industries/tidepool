@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -77,6 +79,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     // The nested answerer: the SCOPED `answerer_decls()` stack (gui + finalize
     // only, NO runLLMTurn — effect-scoping), with `examples/harness` as its
@@ -108,6 +111,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
     // The PRE-loop render reflects `initialState`: Observing mode, no prior

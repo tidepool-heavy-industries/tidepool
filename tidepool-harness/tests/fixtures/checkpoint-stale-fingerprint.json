@@ -1,0 +1,17 @@
+{
+  "generation": 1,
+  "state": {
+    "lastDecision": {
+      "action": "observe",
+      "confidence": "Medium",
+      "rationale": "first loop"
+    },
+    "loopCount": 1,
+    "mode": "Deciding",
+    "notes": [
+      "observe"
+    ]
+  },
+  "compaction": null,
+  "harness_source": "fcbd20d2594c4426"
+}
