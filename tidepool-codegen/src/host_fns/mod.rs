@@ -20,17 +20,17 @@
 //! cancellation), [`gc`] (roots + the copying collector), [`errors`]
 //! (`RuntimeError` + poison machinery), [`force`] (WHNF/NF forcing + the tail
 //! trampoline), [`primops`] (byte/boxed-array, Double, JSON primops), and
-//! [`streaming`] (lazy effect-result materialization). Every item previously
-//! reachable at the top level of this module is re-exported here so no
-//! caller outside this module needs to change.
+//! [`streaming`] (lazy effect-result materialization). Every item is
+//! re-exported here so callers outside this module see one flat surface
+//! regardless of the internal module split.
 //!
 //! ## The per-machine-state boundary (multi-machine / parMapM seam)
 //!
-//! Per-machine state now lives entirely on [`crate::machine_state::MachineState`],
+//! Per-machine state lives entirely on [`crate::machine_state::MachineState`],
 //! owned by `JitEffectMachine`: the cancel flag, JSON con ids, stack-map
-//! registry, and call depth (T6 leaf 1); the first-cause runtime error,
-//! diagnostics, and parked-stream registry (T6 leaf 2); and the GC state plus
-//! the run-scoped/session-scoped GC root registries (T6 leaf 3). Two reach
+//! registry, and call depth (leaf 1); the first-cause runtime error,
+//! diagnostics, and parked-stream registry (leaf 2); and the GC state plus
+//! the run-scoped/session-scoped GC root registries (leaf 3). Two reach
 //! paths exist, and the GC cluster uses only the first:
 //!
 //! - **vmctx reach** (`(*vmctx).machine_state`) — the GC cluster
