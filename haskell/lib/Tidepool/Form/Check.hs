@@ -22,9 +22,9 @@
 --   author reads about a class they never wrote.
 -- * Recursive types COMPILE and then diverge at run time. GHC does not stop
 --   them: the instance is found and the recursion is at the value level.
---   'VisitedCheck' is therefore a correctness mechanism, not a
---   diagnostics-quality nicety — without it a self-referential type builds
---   an infinite shape when forced.
+--   'Occurs' is therefore a correctness mechanism, not a diagnostics-quality
+--   nicety — without it a self-referential type builds an infinite shape when
+--   forced.
 --
 -- These families must be used in a position where GHC has to SOLVE the
 -- constraint — an instance context, discharged when the instance is
@@ -36,12 +36,16 @@
 module Tidepool.Form.Check
   ( SelKey
   , FieldCheck
-  , VisitedCheck
+  , NeedsDerivingGeneric
+  , Occurs
+  , RecursiveFieldError
   , Visited
   ) where
 
+import Prelude (Bool (..), Char, Maybe (..))
 import Data.Kind (Constraint, Type)
-import GHC.Generics (Meta (..))
+import Data.Map.Strict (Map)
+import GHC.Generics (D, M1, Meta (..))
 import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 
 -- | The source-level key for a field, recovered from @M1 S@ metadata: a
@@ -54,11 +58,17 @@ type family SelKey (s :: Meta) :: Symbol where
   SelKey ('MetaSel 'Nothing su ss ds) = "<positional field>"
 
 -- | Reject a field whose type cannot become a form, naming the field and
--- offering a correction. The fall-through case is empty, so a supported
--- field costs nothing.
+-- offering a correction.
 --
 -- Order matters: @[Char]@ must precede @[a]@ so a @String@ field gets the
--- Text advice rather than the generic list advice.
+-- @Text@ advice rather than the generic list advice.
+--
+-- The fall-through case is empty. That is deliberate: this family answers
+-- "is this shape known-unpresentable", not "is this shape supported". A type
+-- it says nothing about is handed to the interpreter, which either finds a
+-- leaf, a blessed container, or a @Generic@ instance for it — and if none of
+-- those exist, GHC reports the missing @Generic@ instance for that exact
+-- type.
 type family FieldCheck (n :: Symbol) (a :: Type) :: Constraint where
   FieldCheck n [Char] =
     TypeError
@@ -69,6 +79,17 @@ type family FieldCheck (n :: Symbol) (a :: Type) :: Constraint where
       ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` is a list."
           ':$$: 'Text "Lists need a repeated-field editor and are not supported in v1."
       )
+  FieldCheck n (Map k v) =
+    TypeError
+      ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` is a Map."
+          ':$$: 'Text "Maps need a repeated-field editor and are not supported in v1."
+          ':$$: 'Text "Use a record with one field per key you actually need."
+      )
+  FieldCheck n (a -> b) =
+    TypeError
+      ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` is a function."
+          ':$$: 'Text "A human cannot fill in a function; ask for the data it would be applied to."
+      )
   FieldCheck n (Maybe (Maybe a)) =
     TypeError
       ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` has nested optionality."
@@ -76,11 +97,26 @@ type family FieldCheck (n :: Symbol) (a :: Type) :: Constraint where
       )
   FieldCheck n a = ()
 
+-- | Name the FIELD whose type has no @Generic@ instance.
+--
+-- GHC's own @No instance for (Generic Environment)@ is correct and appears
+-- alongside this; what it cannot say is which field led there, and for a
+-- nested type that is the part the author needs.
+--
+-- The single equation is the whole mechanism. When @a@ derives @Generic@,
+-- @Rep a@ reduces to a @M1 D@ and this discharges to nothing. When it does
+-- not, @Rep a@ is STUCK — not apart from @M1 D@, since it might still reduce —
+-- so no fall-through equation can fire and no 'TypeError' can be raised.
+-- Whether a type has an instance is not observable from a type family. What is
+-- left is to carry the field name inside the constraint that fails, which is
+-- what the @n@ parameter is for: it appears verbatim in GHC's report.
+type family NeedsDerivingGeneric (n :: Symbol) (a :: Type) (r :: Type -> Type) :: Constraint where
+  NeedsDerivingGeneric n a (M1 D d f) = ()
+
 -- | The set of datatypes already entered on the current derivation path.
 type Visited = [Type]
 
--- | Reject a type that contains itself, naming the field that closes the
--- cycle.
+-- | Is @a@ already on the derivation path?
 --
 -- This is load-bearing for CORRECTNESS, not just for message quality. A
 -- recursive type such as
@@ -89,14 +125,27 @@ type Visited = [Type]
 --
 -- satisfies every instance GHC looks for — the recursion lives in the values,
 -- not the dictionaries — so it compiles cleanly and then builds an infinite
--- shape the moment anything forces it. The interpreter threads a 'Visited'
--- list down each field and each sum branch, and this family fires when a type
--- reappears on its own path.
-type family VisitedCheck (n :: Symbol) (a :: Type) (seen :: Visited) :: Constraint where
-  VisitedCheck n a '[] = ()
-  VisitedCheck n a (a ': rest) =
-    TypeError
-      ( 'Text "Cannot derive a finite form for recursive field `" ':<>: 'Text n ':<>: 'Text "`."
-          ':$$: 'Text "Recursive and repeated forms are not supported in v1."
-      )
-  VisitedCheck n a (b ': rest) = VisitedCheck n a rest
+-- shape the moment anything forces it.
+--
+-- 'Occurs' answers with a plain 'Bool' and never errors, so an interpreter can
+-- DISPATCH on it. That is the whole point. Rejecting the cycle by making the
+-- extended path itself a 'TypeError' does not work: instance heads match on
+-- the generic representation, not on the path, so the erroring path is carried
+-- along as an opaque type and the next level down is demanded anyway — GHC
+-- unrolls the type forever instead of reporting anything. A 'Bool' the
+-- interpreter must reduce to pick an instance is what actually stops the
+-- descent, because the instance it picks asks for nothing further.
+type family Occurs (a :: Type) (seen :: Visited) :: Bool where
+  Occurs a '[] = 'False
+  Occurs a (a ': rest) = 'True
+  Occurs a (b ': rest) = Occurs a rest
+
+-- | The message for a field that closes a cycle. A 'Constraint' rather than a
+-- family so it can sit in the context of the instance chosen when 'Occurs'
+-- says 'True' — the position where GHC has to solve it, and so the position
+-- where it fires at the author's use site.
+type RecursiveFieldError (n :: Symbol) =
+  TypeError
+    ( 'Text "Cannot derive a finite form for recursive field `" ':<>: 'Text n ':<>: 'Text "`."
+        ':$$: 'Text "Recursive and repeated forms are not supported in v1."
+    )
