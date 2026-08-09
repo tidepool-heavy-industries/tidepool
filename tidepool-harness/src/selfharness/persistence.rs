@@ -257,6 +257,59 @@ mod tests {
         assert_eq!(loaded, cp);
     }
 
+    /// Pure-Rust smoke proof of the restart-continuity requirement
+    /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+    /// context is the runtime's job": the driver "MUST persist the
+    /// iteration count in the checkpoint ENVELOPE so restart behavior stays
+    /// continuous"), independent of the JIT/GHC-extract-backed acceptance
+    /// path ([`crate::selfharness::driver`]'s `SelfHarnessDriver` needs a
+    /// compiled harness to run a cycle at all, so this exercises the
+    /// envelope logic — [`save_checkpoint`]/[`load_checkpoint`] plus the
+    /// `Checkpoint.iteration` field — directly). Mirrors the three points
+    /// `selfharness_persistence::committed_cycles_restore_state_and_summary_from_the_same_generation`
+    /// asserts against a real driver: iteration 1 after "cycle 1" commits,
+    /// a bare reload (no cycle run) yields that SAME persisted iteration
+    /// rather than resetting to 0, and iteration 2 after "cycle 2" commits
+    /// CONTINUING from what was reloaded, not from a fresh 0.
+    #[test]
+    fn iteration_round_trips_through_save_and_load() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+
+        // "Cycle 1" commits generation 1 with iteration advanced to 1.
+        let cp1 = checkpoint(1);
+        assert_eq!(cp1.iteration, 1);
+        save_checkpoint(&path, &cp1).expect("save cycle 1");
+
+        // THE point: a bare reload — no cycle run in between, exactly what
+        // `SelfHarnessDriver::restore` does before threading anything into
+        // `render`/`loop` — must yield the PERSISTED iteration, not 0.
+        let restored = load_checkpoint(&path)
+            .expect("load after cycle 1")
+            .expect("cycle 1's checkpoint is on disk");
+        assert_eq!(
+            restored.iteration, 1,
+            "a restore with no cycle run must resume at the persisted iteration, not reset to 0"
+        );
+
+        // "Cycle 2" commits generation 2, continuing the iteration from what
+        // was just restored (mirrors `run_one_cycle`'s `self.iteration += 1`
+        // after a successful loop, then `commit_checkpoint` persisting it).
+        let cp2 = Checkpoint {
+            generation: 2,
+            iteration: restored.iteration + 1,
+            ..checkpoint(2)
+        };
+        save_checkpoint(&path, &cp2).expect("save cycle 2");
+        let restored2 = load_checkpoint(&path)
+            .expect("load after cycle 2")
+            .expect("cycle 2's checkpoint is on disk");
+        assert_eq!(
+            restored2.iteration, 2,
+            "iteration must continue from the restored value across a second commit, not reset"
+        );
+    }
+
     #[test]
     fn save_checkpoint_leaves_no_tmp_file_behind() {
         let dir = tempfile_dir();
