@@ -4,11 +4,28 @@
 The original instruction here was to copy it verbatim into every spec. That is
 now the wrong practice, and this session is the proof.
 
-Make it a mandatory **STEP 0** in every dev spec instead: *"`cat
-plans/post-restart/extract-wave/OPERATIONAL.md` in your own worktree and follow
-its Block verbatim before doing anything else."* Devs fork from their TL's HEAD,
-so the canonical file is already in their tree — they receive the literal text,
-from the single source.
+Make it a mandatory **STEP 0** in every dev spec instead — and read it **BY
+REF**, never from the worktree copy:
+
+```
+git show root.extract-wave:plans/post-restart/extract-wave/OPERATIONAL.md
+```
+
+**CORRECTED 2026-08-09 (boot): `cat`-ing the worktree copy has the SAME defect
+it fixes.** A dev's copy is frozen at FORK time, not spawn time — which is
+earlier. Boot measured it: `diff <(git show root.extract-wave:…) plans/…` DIFFERED
+even in boot's own tree, one hop closer than any dev. So a dev following a
+`cat`-based step 0 literally would read *a stale copy of the fix for staleness*,
+invisible in exactly the same way.
+
+`git show <ref>:<path>` reads the branch tip by ref — read-only, no checkout, no
+worktree contact, canonical regardless of when the dev forked or last merged.
+**This is the `ghc-slots.sh` lesson in a different artifact**: `$PWD/scripts/
+ghc-slots.sh` silently gave 3 slots when the real broker had 6; a local
+`OPERATIONAL.md` silently gives yesterday's rules. `git show <ref>:<path>` is
+the absolute-parent-path equivalent.
+Secondary benefit: it puts the text in the dev's own transcript, so "did you
+read it" is answerable from the record rather than taken on trust.
 
 Why the change (spawn-latency proposed it; the decisive argument is empirical):
 a pasted Block **freezes at spawn time**, and this Block was amended roughly ten
@@ -19,7 +36,12 @@ hypothetical: it is exactly what happened with "tier 1 is safe unattended" and
 with "wrap every invocation including the quick tier". A reference resolves at
 read time; a paste is a snapshot nobody re-takes.
 It is also N copies that drift, which is the derive-don't-restate antipattern
-this very file bans two sections down. The failure mode the paste guarded
+this very file bans two sections down.
+
+**A TL's own messages are frozen at send time too.** Tell every dev: *if the
+canonical Block contradicts something I told you directly, the Block wins — and
+tell me, so I reconcile.* Without that, consolidating onto one source just adds
+a competing authority instead of replacing them (boot). The failure mode the paste guarded
 against — a dev skipping a linked file — is covered by making the read STEP 0
 with an explicit read-in-full instruction, not a passing citation.
 
@@ -56,6 +78,95 @@ localized diffs and log it at fold):
 ```
 ### OPERATIONAL RULES (verbatim, non-negotiable)
 
+**THE ONE RULE, from which most of the rest follow (boot, 2026-08-09):**
+
+> **Verify the thing your claim is about, not a thing adjacent to it.**
+> In the moment, ask: *what exactly is my evidence about, and is that the same
+> object as my claim?*
+
+Every verification failure in this wave — two TLs' and four devs' — was evidence
+about a NEIGHBOUR of the claim:
+
+| the claim was about | the evidence was about |
+|---|---|
+| a `TypeError` constraint | a token inside an error string |
+| whether a commit was relevant | whether it was recent |
+| an environment | a session (`setsid`) |
+| queue pressure | waiters, not the holders |
+| whether a leg ran | its exit code, not its log |
+| whether a suite ran | a count, with no denominator |
+| what the code does | a comment above it |
+| the canonical rules | a worktree copy frozen at fork |
+| what a tool is FOR | what it was observed doing |
+
+**THE EVIDENCE HIERARCHY** (spawn-latency): **"I ran it" beats "I found it",
+and both beat "it is cited."** With the addendum that is the whole reason the
+`pinned trio` survived unresolvable for so long: **three documents citing a set
+is not stronger evidence than one — it is the SAME evidence, repeated, and the
+repetition reads as corroboration.** A phrase gains apparent authority from
+being quoted, and quoting is not checking. Same trap as two agents converging
+on a wrong conclusion from the same misleading token: convergence is evidence
+only when the paths are independent.
+Corollary now standing (root): **every "pinned by X" / "guarded by X" claim
+resolves to enumerated test paths, or it carries the label UNVERIFIED.** Add
+"citable but unresolvable" to the hunt list for any audit.
+
+**A distinct sub-case worth naming** (spawn-latency), because it is not an
+instrument returning a plausible wrong answer — it is consulting the wrong KIND
+of source: **when a claim is about PURPOSE, the source of truth is the
+documented contract, not observed behaviour.** Behaviour tells you what
+something does; only the contract tells you what it is for, and *"it does not
+currently do X"* is not evidence that X is out of scope. Worked example: the
+claim "the broker exists to cap extract spawns, so a `cabal build` is out of
+scope" was refuted by `ghc-slots.sh:2`, which names "extract builds" as its
+FIRST in-scope category — one `sed` from being checked, never consulted.
+Corollary for arguing scope changes: argue the reclassification on its merits,
+never on a claim about original intent you have not read.
+
+"Verify more" is unactionable. This is checkable in the moment, and it subsumes
+the named-guard rule, the denominator rule, the holder rule, and the instrument
+rules below — each is this rule applied to one artifact.
+
+**THE FOUR FORMS A TRUSTED ARTIFACT FAILS IN** (root's taxonomy, complete as of
+2026-08-09 — every one found in this wave, most in our own scaffolding):
+
+1. **A guard can under-cover its name.** The "pinned id-stability" trio: three
+   DataConId guards, zero VarId coverage.
+2. **A number can mis-name its instrument.** "50 waiters" that were agent
+   sessions; "43 pollers burning 1.2 cores" that were not pollers.
+3. **A citation can lack a referent entirely.** "The three pinned tests",
+   load-bearing in three documents, enumerated in none.
+4. **A correct artifact can be cited for a property it never had.**
+   `haskell_suite_differential` / `corpus_report` — sound JIT-vs-eval
+   differentials, cited as extractor coverage, never invoking the extractor.
+
+Form 4 is the hardest to see, because auditing the artifact finds nothing wrong
+with it. The defect lives in the *citation*, not the thing cited — so check what
+you are relying on it FOR, not whether it works.
+
+**A SYMPTOM IS NOT A CAUSE — `kind=4 TypeMetadata` has at least TWO.** E6's
+receipt records it as the signature the PHASE 3 comment predicts (unfolding-less
+iface resolution baking `ErrorSentinel`s). Root's sum-literal dev then
+root-caused a *different* bug to the same signature plus bad-pointer-`0x0`:
+`isTypeMetadataVar` (`Translate.hs:2868`) matches on occurrence-name PREFIX
+only — `["$trModule","$krep","$tc","krep$","tr$Module"]`, no RHS inspection —
+and GHC's float-out/CSE gives Generic-deriving's `KnownSymbol` backing strings
+(plain `Addr#` literals) those same prefixes, so a LOAD-BEARING literal gets
+poisoned. **Do not diagnose from the signature alone**, and do not read E6's
+receipt as establishing that a `kind=4` sighting is a tiering fault.
+Itself a taxonomy instance — a name-shape convention trusted to establish what
+the RHS actually is, and downstream, a symptom trusted to establish its cause.
+
+**AND THE ASYMMETRY THAT LETS ALL FOUR THROUGH** (spawn-latency): **an
+improvement is as unverified as an error until someone checks it — and
+improvements are checked less often, precisely because they arrive as good
+news.** Worked example: a TL offered an inferential argument, the dev replaced
+it with a stronger mechanical one, and the TL verified the *replacement* rather
+than accepting the upgrade (`importPaths` is disjoint from package resolution —
+confirmed at `GhcPipeline.hs:293`). Every review reflex points at claims that
+look wrong. Point one at the claim that looks better than yours.
+
+
 - Commit with `git commit --no-verify`. NEVER `git add -A` — stage explicit
   paths only.
 - The repo-root `tmp/` directory is PROTECTED: never delete or overwrite
@@ -89,7 +200,29 @@ localized diffs and log it at fold):
   scheduler can. Unbrokered `rustc` was measured at 564% across 4 procs — the
   box's largest consumer — so it is handled by deprioritisation, not queueing.
 
-  **(b) GHC-heavy work STAYS slot-brokered**, absolute path, NEVER exclusive:
+  **(a2) TOOLCHAIN BUILDS ARE ALSO OUT OF THE QUEUE** (root, `efd1630a`,
+  2026-08-09). `cabal build tidepool-extract-bin` and kin run **unbrokered**
+  under the same envelope pure-Rust got:
+
+      nice -n 15 cabal build -j4        # at most ONE per lane
+
+  Why: a build is one GHC chain with cappable internal parallelism and a
+  footprint knowable in advance — bounded and deprioritizable, unlike a test
+  fan-out. Leaving it in the queue reproduced the exact short-behind-long
+  inversion V2 was created to remove: a 2–5 minute build stuck behind an
+  88-minute 877-test suite, both holding one undifferentiated slot.
+  Note this is a **reclassification**, not a correction: `ghc-slots.sh:2` names
+  "extract builds" as an in-scope category, and it was.
+
+  **SHARD YOUR ACQUISITIONS.** A long suite run must scope with `-E` (per
+  binary or group) so no single hold runs toward an hour where the receipts
+  allow it. The measured argument: of six holders sampled, the 18-minute one was
+  `battery-shard … -E 'binary(…)'` and the 89-minute one was a bare
+  `--ignore-default-filter -p <crate>`. Six slots held for an hour behave like
+  zero, and raising the slot count does not fix hold time.
+
+  **(b) EXTRACT-FANNING work STAYS slot-brokered**, absolute path, NEVER
+  exclusive:
 
       /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
 
@@ -248,10 +381,27 @@ localized diffs and log it at fold):
   Anchor and stop at `extrac`; do not generalise past userspace.
   The correct instruments:
 
-      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (note: 15-char truncation)
+      lslocks | grep tidepool-ghc                  # slot contention (WRITE / WRITE*)
+      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (15-char truncation)
       cat /proc/loadavg                            # actual load
 
-  Use both. A zero from a mistyped pattern reads exactly like a quiet box.
+  **BOTH `lslocks` AND `/proc/loadavg` ARE REQUIRED, AND HERE IS WHY — a reader
+  who learns only "there are two instruments" drops one under time pressure,
+  and the one they drop is the one that still works.** `lslocks` measures SLOT
+  CONTENTION. It **stopped being a proxy for box health** the moment we exempted
+  pure-Rust work and toolchain builds from the broker: that load is now
+  invisible to it *by construction*. Measured 23:34:54Z — **0 waiters at loadavg
+  50.33**, with 583% of rustc across 13 processes. The queue is healthy because
+  the work left the queue, not because the work stopped. Reading "0 waiters" as
+  a green light means launching into loadavg 50.
+  Form 4, caused by our own fix, one day later.
+
+  **QUOTE BOX NUMBERS WITH A TIMESTAMP.** They have a shelf life of MINUTES:
+  loadavg went 2 → 17 → 35 → 50 inside half an hour, and a "box is idle" passed
+  to two lanes was stale before it arrived. A number without a time is a state
+  claim that was only ever an observation.
+
+  A zero from a mistyped pattern reads exactly like a quiet box.
   **Bias toward fewer, better-batched runs.** This wave is the heaviest GHC
   consumer on the box, so the throttle bites hardest here.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
@@ -276,13 +426,53 @@ localized diffs and log it at fold):
   is downstream of those whether or not its file is in the diff. Note the cache
   confound explicitly — a fingerprint-invalidating change makes a naive
   comparison measure cold-vs-warm, not the diff.
-- Extractor id-stability is a PINNED invariant (three permanent tests from the
-  ConTags incident: `session_table_qualified_identity` plus two quick-tier
-  assertions). If your change fires them, STOP and escalate to your TL. That is
-  a design conversation with root, not a test to silence.
+- **The "extractor id-stability is a PINNED invariant" shorthand OVER-CLAIMS —
+  corrected 2026-08-09.** Three permanent tests exist and each pins a real
+  property well, but the phrase reads as blanket coverage of the id space and
+  is not. What they actually observe:
+
+  The trio, **enumerated by exact path because it was never written down
+  anywhere** (see the meta-note below) and each one read to confirm:
+
+  | test | what it pins |
+  |---|---|
+  | `tidepool-repr::extend_checked_equivalence::distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order` | two distinct **DataConId**s sharing a qualified name is a hard error in `insert_checked`/`extend_checked`, in either arrival order |
+  | `tidepool-repr::extend_checked_equivalence::merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard` | `merge_table`'s skip-identical pre-filter cannot elide a colliding **DataConId** before the guard sees it |
+  | `tidepool-runtime::session_table_qualified_identity` | no qualified constructor name maps to >1 **DataConId** in the accumulated table; freer-five ConTags still resolve to what bootstrap froze |
+
+  **ALL THREE ARE DataConId GUARDS. None observes VarIds at all** — not
+  `localVarId`, not `stableVarId`. So the label "extractor id-stability" never
+  covered the VarId space by any of these tests. `localVarId` bakes the raw GHC
+  `Unique` for internal/floated bindings and is allocation-order-sensitive *by
+  its own doc comment*; determinism there was never claimed and is not watched.
+  A green triple means **constructor-identity guarding is intact**. **It does
+  not mean ids did not move, and their silence is not consent.**
+  Still true: if your change FIRES any of them, STOP and escalate to your TL —
+  that is a design conversation with root, not a test to silence. But do not
+  read a PASS as blanket id coverage; if your change touches `localVarId`'s
+  path, no pinned test is watching and you owe a direct experiment.
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
+- **NEVER PUT A HARDCODED EXPECTED COUNT IN A SPEC** (spawn-latency; on the
+  audit hunt list beside "citable but unresolvable"). State the PROPERTY —
+  *every pre-existing check passes, named guards appear by name, report actual
+  N/N* — and treat any number given as context, never a target.
+  The mechanism, which is why this is not mere staleness: **a hardcoded count
+  converts the denominator rule from a CHECK into a LOOKUP.** The dev stops
+  asking *"did everything run?"* and starts asking *"does it match the spec?"*
+  Those are the same question until something silently stops running — which is
+  the only case either question exists for. So the stale count **disables the
+  rule that would have caught it going stale**, and fails in the direction that
+  looks correct. Same signature as the unresolvable citation: the artifact reads
+  as more rigorous for containing the number.
+  **Worst on items that ADD tests — i.e. items adding guards.** E6 adds a
+  detection-power demo and a fault-injection knob, so its fidelity total moves
+  by its own work; a spec saying "expect 30/30" would have it reconciling
+  against a number wrong because of its own change, and if a check silently
+  stopped running while the total landed back on 30, the truncated run would
+  match the doc exactly.
+
 - **EVERY RECEIPT CARRIES A DENOMINATOR: `N passed / M total` per leg.** A
   count without a denominator cannot distinguish a completed run from a
   truncated one. Three ways a leg looks done without being done, all found in
@@ -365,13 +555,53 @@ localized diffs and log it at fold):
 
 ## Correctness gates (this wave's standard; sub-TLs enforce per item)
 
+> ## ⚠ CORRECTED 2026-08-09 — TWO OF THESE FOUR CANNOT SEE EXTRACTOR CHANGES
+>
+> **`haskell_suite_differential` and `corpus_report` NEVER INVOKE THE
+> EXTRACTOR.** Verified: zero references to `Command::new` / `compile_haskell`
+> / `TIDEPOOL_EXTRACT` in either; they replay **frozen CBOR** from
+> `haskell/test/suite_cbor/` (350 fixtures) and `haskell/test/corpus_cbor/`
+> (128). They are **JIT-vs-eval differentials**, and they pass identically
+> whether the extractor is correct or catastrophically broken.
+>
+> So for any item changing what the extractor EMITS — E6 (tiering shifts ids
+> and Core), D1-B (removes a metadata source), D2 (narrows the table) — **these
+> two prove nothing.** Demonstrated empirically: with a real fault injected,
+> both had no path to it.
+>
+> The instruments are correct; **the citation of them was wrong.**
+> `haskell/CLAUDE.md` documents that fixtures must be REGENERATED after
+> changing the serializer, and this gate list omitted that step — so we ran a
+> JIT differential and read it as extractor coverage. Same shape as the pinned
+> trio, one level up.
+>
+> **The honest extractor-coverage set is thinner than we were treating it:**
+> `extract-fidelity-test` (drives the real pipeline — but its fixtures never
+> touch JSON/Aeson, a real hole) and **harness acceptance** (spawns real
+> extracts end to end; that is why it costs ~1845s). Size extractor changes
+> against those two, and say so in the receipt.
+>
+> **FIXTURE REGENERATION IS A SEQUENCED WAVE-LEVEL ACTION, NOT A LANE'S CALL.**
+> `suite_cbor`/`corpus_cbor` are shared directories with other lanes in flight;
+> regenerating them is a shared-artifact mutation with the same blast radius as
+> a wire change. Ask your TL, who sequences it. Do NOT regenerate to make a
+> differential see your fault. (`haskell/CLAUDE.md` also warns that pruning
+> `*_u<n>.cbor` from `suite_cbor` drops `compared` below `COMPARED_FLOOR` — a
+> naive regeneration breaks the floor it was meant to protect.)
+
 - **hardened differential** with its floors — `haskell_suite_differential`
   (`#[ignore]`d + expensive: `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
   tidepool-codegen --run-ignored all -E 'test(haskell_suite_differential)'`).
   `COMPARED_FLOOR` must not drop.
 - **corpus_report** — same shape,
   `-E 'test(corpus_report)'`.
-- **extract-fidelity-test 26/26** —
+- **extract-fidelity-test — ALL tests, report the actual N/N.** Do NOT match a
+  hardcoded number: this line said `26/26` and D1-A added four `D1Defense`
+  checks, making it `30/30`. A dev reporting `26/26` against a stale spec would
+  be reporting a **truncated run that matches the doc** — the denominator rule
+  defeated by the gate list itself. The count is whatever the suite currently
+  holds; report it and require zero failures.
+  (Historical: 26 pre-D1-A, 30 after.) Invocation —
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- bash -c 'cd haskell && cabal test extract-fidelity-test'`.
   26 of 26, no fewer.
 - **harness acceptance** — `scripts/battery-shard.sh tidepool-harness
