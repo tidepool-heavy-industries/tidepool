@@ -439,12 +439,12 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
-    /// Log an OPERATOR-SPLICED message on `node` (F2's `turn_spliced` kind,
-    /// now built) — distinct from [`Self::turn_delta`] so a genuine operator
-    /// interjection is never mistaken for a modeled turn when auditing
-    /// history. Same non-terminal, forced-state guard as `turn_delta`
-    /// (`Running` or `Suspended`): a splice needs a live transcript to land
-    /// in, exactly like a turn delta does.
+    /// Log an OPERATOR-SPLICED message on `node` (the `turn_spliced` kind) —
+    /// distinct from [`Self::turn_delta`] so a genuine operator interjection
+    /// is never mistaken for a modeled turn when auditing history. Same
+    /// non-terminal, forced-state guard as `turn_delta` (`Running` or
+    /// `Suspended`): a splice needs a live transcript to land in, exactly
+    /// like a turn delta does.
     pub fn turn_spliced(
         &self,
         node: NodeId,
