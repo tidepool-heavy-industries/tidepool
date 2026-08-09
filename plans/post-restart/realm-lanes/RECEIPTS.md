@@ -83,4 +83,62 @@ test passing vacuously. Both call sites now go through the accessor, so it IS
 the seeding path and the asserted env is the one a fragment really compiles
 against.
 
-## Steps 2, 3 — pending (lanes A, B)
+## Step 2 — per-realm fields onto the frame (verdict §7 step 2)
+
+`last_bound_root`, `suspended_finalized_root`, `cancel_flag` and the
+`DataConTable` no longer live as machine-level singletons on the parked path.
+
+| hazard | fix | receipt |
+|---|---|---|
+| A1 `last_bound_root` | returned INLINE via `ParkedOutcome::Completed { value, bound_root }`; `finish_suspendable` writes the machine field only under `ParkTarget::Slot` | red-then-green, below |
+| A2 `suspended_finalized_root` | onto `ContinuationFrame::finalized_root`, taken by `take_parked_finalized_root` (frame stays parked and rooted) | `a2_finalized_root_is_per_frame_not_per_machine` |
+| A3 `cancel_flag` | per-realm `HashMap<RealmId, Arc<AtomicBool>>`; `install_registries` becomes a wrapper so every non-parked entry is unchanged | `a3_cancel_is_realm_scoped_resuming_a_sibling_realm_is_unaffected` |
+| A4 `DataConTable` | `Arc<DataConTable>` on the frame; `resume_parked` DROPS its `table` parameter, so resuming against a foreign row is unrepresentable | `a4_resume_parked_uses_the_frames_own_table` |
+
+**The red run, quoted from the production commit** (`707dfdd3`) — run against the
+machine-level API before any production code changed, reaching the
+silent-wrong-value shape rather than a panic or a `None`:
+
+```
+assertion `left == right` failed: materialize_binder must bind realm A's value under realm A's name
+  left: 222
+ right: 111
+```
+
+A1's fix is stronger than the verdict's literal "move it onto the frame": a
+completion leaves NO frame in the registry, so there is nowhere for a per-frame
+slot to live. Returning the root inline removes the write→read window entirely
+rather than narrowing it.
+
+## Negative control, RE-PROVEN after the falsifier was edited
+
+Lane A's mandated API changes (`ParkedOutcome::Completed` becoming a struct
+variant, `resume_parked` losing its `table` parameter) forced syntax-only
+adaptations in `realm_multi_continuation.rs` — the falsifier itself. A green
+falsifier that has been edited proves nothing until it is shown to still fail, so
+the control was re-run on the edited suite:
+
+`cargo nextest run -p tidepool-codegen -E 'binary(realm_multi_continuation) or
+binary(realm_per_realm_fields)'` under the control → **11 tests run: 5 passed, 6
+failed**
+
+| case | outcome under the control |
+|---|---|
+| F3 | dies on `resume_parked(ContinuationId(1))`, tag 221 |
+| F4 | dies on `resume_parked(ContinuationId(3))`, tag 221 |
+| A5-parked | dies on `resume_parked(ContinuationId(0))`, tag 221 |
+| A2, A3, A4 | also die — lane A's new heap-touching tests are live too, not vacuous |
+| F1, F2, A1 | stay green |
+
+Identical continuation ids and tag to the pre-edit run: the adaptations left the
+falsifier's teeth intact. Diff reviewed line by line — dropped `table` args,
+`Completed(_)` → `Completed { .. }`, rustfmt reflows; every
+`assert_rooting_receipt` count, every `expect_captured` value, both guard tests,
+and the VSZ finding-gate assertion unchanged.
+
+**A1 staying green under the control is a stated limitation, same class as
+F1/F2.** A1 exercises the completion path, where no continuation is parked and
+nothing is rooted, so it carries no memory-safety claim — it pins the
+bound_root plumbing. F3 and F4 remain the cases carrying the safety claim.
+
+## Step 3 — pending (lane B)
