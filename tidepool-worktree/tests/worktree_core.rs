@@ -293,6 +293,53 @@ fn hand_deleted_worktree_is_lost_not_recreated() {
     assert!(!summary.present);
 }
 
+/// An unknown id and a LOST id are different failures and must stay
+/// distinguishable. Collapsing them would tell an operator investigating a
+/// vanished worktree that it never existed — hiding data loss behind a typo.
+#[test]
+fn an_unregistered_id_is_not_reported_as_a_lost_worktree() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+    let base = tempfile::TempDir::new().expect("registry base");
+    let manager = manager_over(&repo, base.path());
+
+    // Never registered anywhere: lookup says "no such record", and seeding a
+    // worktree from it names it as unregistered rather than lost.
+    let unknown = WorktreeId::from_raw("wt-never-existed");
+    assert!(
+        manager
+            .lookup(&unknown)
+            .expect("lookup is not an error")
+            .is_none(),
+        "an unregistered id is Ok(None), not an error"
+    );
+
+    let err = manager
+        .create(&WorktreeSpec::from_worktree(unknown.clone(), "child"))
+        .expect_err("seeding from an unregistered id must fail");
+    assert!(
+        matches!(&err, WorktreeError::WorktreeNotRegistered(id) if id == &unknown),
+        "expected WorktreeNotRegistered, got {err:?}"
+    );
+
+    // Registered then removed by hand: the OTHER failure, still reported as loss.
+    let handle = manager
+        .create(&WorktreeSpec::from_current_repository("real"))
+        .expect("create");
+    let lost_id = handle.id().clone();
+    std::fs::remove_dir_all(handle.cwd()).expect("remove worktree dir by hand");
+
+    let lost = manager
+        .lookup(&lost_id)
+        .expect_err("lost worktree must error");
+    assert!(
+        matches!(&lost, WorktreeError::WorktreeLost(id) if id == &lost_id),
+        "a removed worktree is lost, not unregistered: {lost:?}"
+    );
+}
+
 #[test]
 fn list_never_fails_when_one_of_several_worktrees_is_lost() {
     let repo = TestRepo::init().expect("init");
@@ -430,9 +477,27 @@ fn settling_a_released_binding_also_permits_rebind() {
     assert_eq!(table.current(&worktree).expect("current").agent, agent_b);
 }
 
+/// The never-dirty-the-source invariant, caught at the one moment it can still
+/// be prevented. Typed rather than a panic so a resident can catch it and fall
+/// back to a correct root instead of dying on a misconfiguration.
 #[test]
-#[should_panic(expected = "resolves inside a git working tree")]
 fn registry_open_refuses_a_root_inside_a_working_tree() {
     let repo = TestRepo::init().expect("init");
-    let _ = WorktreeRegistry::open(repo.path().join("nested-registry"));
+    let nested = repo.path().join("nested-registry");
+
+    match WorktreeRegistry::open(&nested) {
+        Err(WorktreeError::InvalidRegistryRoot { root, inside }) => {
+            assert!(
+                root.ends_with("nested-registry"),
+                "the refusal names the offending root, not some ancestor: {}",
+                root.display()
+            );
+            assert!(
+                nested.starts_with(&inside),
+                "the refusal names the working tree it is inside: {}",
+                inside.display()
+            );
+        }
+        other => panic!("expected InvalidRegistryRoot, got {other:?}"),
+    }
 }

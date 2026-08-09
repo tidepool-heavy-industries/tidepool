@@ -285,7 +285,7 @@ impl WorktreeManager {
             WorktreeSource::Worktree(wid) => {
                 let handle = self
                     .lookup(wid)?
-                    .ok_or_else(|| WorktreeError::WorktreeLost(wid.clone()))?;
+                    .ok_or_else(|| WorktreeError::WorktreeNotRegistered(wid.clone()))?;
                 let cwd = handle.cwd().to_path_buf();
                 let (seed, snapshot_ref) =
                     self.resolve_dirty_or_clean(&cwd, spec.dirty_policy, id)?;

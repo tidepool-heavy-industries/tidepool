@@ -154,20 +154,12 @@ impl WorktreeRegistry {
     /// no implicit global default here on purpose: a hardcoded `$HOME` path
     /// would make every test either share state or need an env override.
     ///
-    /// Refuses (by panic — see the note below) a root that resolves inside
-    /// ANY git working tree. `open` takes only `root`, not a specific source
-    /// repository, so the check cannot be "is this the tree we were told not
-    /// to dirty" — it is necessarily the broader "is this inside a working
-    /// tree at all", which is a strictly safer reading of the never-dirty-
-    /// the-source invariant.
-    ///
-    /// NOTE: this refusal is a `panic!`, not a typed `WorktreeError`, because
-    /// `error.rs` is frozen scaffold shared by four lanes and has no variant
-    /// for "invalid registry root" — see `L1-receipt.md` for the flag to add
-    /// one (e.g. `WorktreeError::InvalidRegistryRoot`) in a later pass. This
-    /// is a deployment misconfiguration (the caller chose a bad root), not a
-    /// per-call domain outcome like a dirty source, so failing loudly at
-    /// startup is the correct shape even without a dedicated variant.
+    /// Refuses a root that resolves inside ANY git working tree with
+    /// [`WorktreeError::InvalidRegistryRoot`]. `open` takes only `root`, not a
+    /// specific source repository, so the check cannot be "is this the tree we
+    /// were told not to dirty" — it is necessarily the broader "is this inside
+    /// a working tree at all", which is a strictly safer reading of the
+    /// never-dirty-the-source invariant.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)
@@ -180,12 +172,10 @@ impl WorktreeRegistry {
         if let Ok(toplevel) = inspect::work_tree(&git, &canonical_root) {
             if let Ok(canonical_toplevel) = toplevel.canonicalize() {
                 if canonical_root.starts_with(&canonical_toplevel) {
-                    panic!(
-                        "registry root {} resolves inside a git working tree at {} — \
-                         the registry must live outside every source repository",
-                        canonical_root.display(),
-                        canonical_toplevel.display()
-                    );
+                    return Err(WorktreeError::InvalidRegistryRoot {
+                        root: canonical_root,
+                        inside: canonical_toplevel,
+                    });
                 }
             }
         }
