@@ -76,9 +76,17 @@ should boot.** Recorded because the wave TL asked specifically.
    the `compile_turn` call, and the `boot` field (416, 486). Point `force()`
    (817) at `unbootstrapped`. Then fix the test fixtures at 3251/3294 (they
    fabricate the field) and re-check `fake_session` (3320) — it exists so
-   `NodeTree::force` has SOME machine to register. If any test genuinely needs
-   a live machine before a run, keep a clearly test-only path and NAME it;
-   do not leave the production eager constructor alive as cover.
+   `NodeTree::force` has SOME machine to register.
+
+   **Do not leave the production eager constructor alive as cover for a test.**
+   That is the same defect one layer down: item 0 would report success while
+   the mechanism it exists to delete stays reachable from production.
+
+   If a test genuinely needs a live machine before any run, whatever path
+   survives must be `#[cfg(test)]` — **gated at the compiler, not by
+   convention**. A `pub` constructor that is merely named test-ish is reachable
+   from production and therefore IS the eager constructor, whatever it is
+   called. Naming is not a boundary.
 
 4. **Delete seed #1** (`driver.rs` 566–588): drop `boot_src` + `compile_turn`;
    `Session::bootstrap` at 600 becomes `Session::unbootstrapped`.
