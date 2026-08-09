@@ -11,6 +11,14 @@ cycle-scoped multi-continuation realm landing governed by
 **First backend:** Codex app-server, authenticated through the operator's
 existing ChatGPT login
 
+> **Dependency status (root, 2026-08-08):** the Generic-elaboration GO/NO-GO
+> gate (PRD 14 migration step 1) is DISCHARGED — the generic-surface spike
+> proved Symbol-metadata reflection elaborates on the real extract/JIT.
+> Consume the spike via `16-generic-spike-receipts.md` (corrections applied
+> in place: `Occurs`-family visited check, real `Proxy` metadata), NOT the
+> original spike report — the pre-correction version is wrong in two
+> specifics. The realm landing is in flight (`../post-restart/realm-build.md`).
+
 ## Summary
 
 Tidepool should let an authored Haskell resident create, steer, observe, and
