@@ -72,6 +72,25 @@ and stable worktree IDs. What still never crosses a cycle boundary is
 unchanged and reinforced: an attached Haskell handle, a parked continuation, or
 an event subscription.
 
+## Fold obligations (TL checks these before folding, not from memory)
+
+1. **`WORKAROUND(wt-seam)` sites must be gone.** L4's adapter hardened around
+   two seam defects in the landed monitor (`reconcile` panicking on an
+   unregistered worktree; the journalled `EventId` unreachable to callers).
+   `wt-seam` fixes both in `tidepool-worktree`. Before folding L4,
+   `grep -rn 'WORKAROUND(wt-seam)'` must return NOTHING — four sites were
+   marked with delete-when conditions. A workaround that outlives its defect is
+   indistinguishable from a real invariant to the next reader, and will be
+   defended as one.
+2. **Gate 2 (`prd_example_compiles_unqualified_with_the_fix`) must be GREEN by
+   the relocation landing**, not skipped. It is correctly RED until then — a red
+   gate pinning an unlanded fix is evidence, not debt, and it is what fails
+   loudly if the relocation lands wrongly. An `#[ignore]` here is the exact
+   mechanism the named-gate rule exists against.
+3. **`UnwiredWorktreeRow` must be test-only.** A panicking stub that reaches a
+   production row is the workaround-as-invariant hazard in its most literal
+   form.
+
 ## Territory
 
 Rust work is overwhelmingly NEW modules. Do NOT touch `resident.rs` pending /
@@ -92,12 +111,69 @@ any other live lane. Log real conflicts at fold.
 - Git-behaviour acceptance against REAL temporary repositories driven by a
   scripted writer. Never a mock of git.
 - Receipts carry per-binary counts, never exit codes.
+- Receipts state STARTED vs RUN, not only the pass count. nextest's DEFAULT
+  FAIL-FAST plus an inherited red stops a run early while emitting REAL pass
+  lines — a receipt indistinguishable from a complete one, whose only tell is
+  that RUN is strictly less than STARTED (root observed 198/877). Pass
+  `--no-fail-fast` EXPLICITLY on any run reaching `tidepool-runtime` until the
+  worktree carries battery fix `7d57cea5`; expect exactly one red
+  (`mock_stack_matches_production`) until that fix folds, and A/B anything else
+  in your own worktree before calling it inherited.
+
+  Prefer started-vs-run over completed-vs-crate-total (credit L4): it is
+  visible in output you ALREADY HAVE — `Starting 7 tests`, `(1/7)`…`(7/7)`,
+  `7 tests run` — needing no extra flag and no advance knowledge of a crate
+  total, so the evidence and its own completeness check arrive together.
+
+  This is the third member of one family: a gate passes BY NAME because an
+  aggregate cannot tell you the guard ran; a number NAMES ITS INSTRUMENT
+  because a count cannot tell you what counted it; a receipt states COMPLETION
+  because a pass list cannot tell you the run finished. All three exist because
+  a green result is not self-describing.
+
+  `tidepool-worktree` is GHC-free and does not depend on `tidepool-runtime`, so
+  `-p tidepool-worktree` runs are outside this hazard, and a targeted `-E`
+  filter is outside it by construction (fail-fast can only stop at a test in
+  the selected set). State the figure anyway; it costs nothing and survives a
+  scope change.
+- A GATE THAT CANNOT BUILD ITS OWN PRECONDITION MUST FAIL, never pass. A
+  red-baseline gate that fails to reconstruct the pre-fix state has not
+  established a red baseline, so passing would assert something never
+  demonstrated. Corollary: a RED result is no more self-describing than a green
+  one. Make a gate assert on the ARTIFACT it tests — capture the generated
+  source and check it before invoking the compiler — so a stale input and a
+  genuine failure produce different diagnoses instead of one mystery.
 
 ## Operational rules (verbatim in every dev spec)
 
 - Every GHC-heavy run goes through
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
   (absolute path). NEVER `exclusive` mode.
+- THROTTLE (root, 2026-08-08, active until root lifts it — the box hit load
+  average 92 and took the operator's SSH down): the wrapper now covers MORE
+  than GHC. Wrap `cargo check`/`build --workspace`, `cargo nextest run` at ANY
+  tier including the quick pure-Rust one, and `cargo clippy --workspace`.
+  Exempt: single-crate `cargo check -p <crate>`, edits, greps, and temp-repo
+  git operations. A slot wait over 15 minutes is starvation — report it, never
+  bypass the wrapper. A bypassed run on an overloaded box is the exact failure
+  this exists to prevent.
+- Use `ghc-slots.sh detach -- <cmd>` (NOT `run`) for any slot-taking work.
+  This is a correctness fix, not a convenience: a QUEUED plain `run` dies at
+  this environment's ~380s kill without ever acquiring its slot, so under a
+  busy queue it can never complete and takes its slot down with it. `detach`
+  runs under `setsid`, prints a pid + log path, returns immediately, queues
+  durably, and releases its slot even if the pane dies. Poll the log across
+  turns.
+- ENVELOPE: at most ONE brokered (slot-taking) leg per dev at a time. `detach`
+  survives the QUEUE WAIT; it is NOT a parallelism primitive. A dev that
+  adopts detach and launches several legs concurrently is worse for the queue
+  than one that never adopted it, because detach converts the
+  death-and-relaunch that used to cap a non-adopter's footprint into durable
+  SIMULTANEOUS HOLDS (observed: one dev holding two of four slots). Serialize:
+  one leg, wait, then the next.
+- DRAIN, DON'T KILL: a killed GHC leg wastes the slot time already spent and
+  frees the slot no sooner. Kill only known-void work — e.g. a run whose
+  premise a later decision invalidated.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness
   test shard (persistent per-worktree, not mktemp).
 - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs);

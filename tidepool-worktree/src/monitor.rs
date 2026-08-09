@@ -90,9 +90,22 @@ use crate::journal::{now_ms, EventJournal};
 ///   milliseconds of process-spawn overhead each, independent of repository
 ///   size. This number does not need to be conservative for cost reasons.
 /// - **Fleet behavior.** Cost scales linearly with the number of watched
-///   worktrees, not with how tight the interval is. At dozens of worktrees,
-///   even this interval keeps total poll overhead well under a percent of a
-///   core.
+///   worktrees, not with how tight the interval is. MEASURED, instrument
+///   named: a `rev-parse HEAD` + `symbolic-ref --short HEAD` pair against a
+///   real temporary repository, timed over 200 iterations with `date +%s%N`
+///   deltas around the loop, on this box at load ~35-55, cost 6.85 ms per
+///   pair. At that figure a 5 s round is 1.6% of one core at 12 worktrees,
+///   3.3% at 24, and 6.6% at 48.
+///
+///   An earlier revision of this comment claimed "well under a percent of a
+///   core at dozens of worktrees". That was an unmeasured estimate stated as
+///   a measurement, and it is wrong by roughly 3x at 24 worktrees. The
+///   CONCLUSION is unchanged — single-digit percent of one core is still
+///   cheap, and cost is not a reason to widen the interval — but the claim
+///   was overstated and is corrected rather than quietly dropped. Note the
+///   figure is process-spawn dominated, so it reflects a loaded box; an idle
+///   one is faster. It is a measurement of this machine, not a property of
+///   the operation.
 ///
 /// 5 seconds reads as "near-immediate" against agent work cadence, and fleet
 /// size is not a reason to widen it. Revisit against real dev-tree telemetry
@@ -222,6 +235,9 @@ impl WorktreeMonitor {
     pub fn register(&mut self, worktree: WorktreeId, path: PathBuf) -> Result<(), WorktreeError> {
         let (mut head, mut branch) = self.last_observed(&worktree);
         if head.is_none() {
+            if !crate::registry::worktree_present(&path) {
+                return Err(WorktreeError::WorktreeLost(worktree));
+            }
             head = Some(read_head(&self.git, &path)?);
             branch = read_branch(&self.git, &path);
         }
@@ -248,21 +264,35 @@ impl WorktreeMonitor {
     }
 
     /// Reconcile one worktree against its last observed state and return the
-    /// facts that follow, in observation order, sharing one [`EventId`] when
-    /// they describe one underlying change. Returns empty when nothing moved.
+    /// facts that follow, in observation order, each carrying the
+    /// [`EventId`] the pass minted and journalled — so the id a caller holds
+    /// is provably the id a restart diagnosis finds in the journal, sharing
+    /// one id when they describe one underlying change. Returns empty when
+    /// nothing moved.
     ///
     /// Idempotent: reconciling twice with no writer in between yields nothing
     /// the second time.
+    ///
+    /// `Err(WorktreeError::WorktreeNotRegistered)` when `register` never ran
+    /// for `worktree` — a typed failure an author can match on, not a panic,
+    /// since worktree ids reach this call from author-supplied values at the
+    /// effect surface. `Err(WorktreeError::WorktreeLost)` when `worktree` WAS
+    /// registered but its path is gone from disk (a human removed it,
+    /// retain-first's "never silently recreated" case) — the same typed
+    /// failure [`crate::create::WorktreeManager::worktree_head`] and
+    /// `lookup` already use for this condition, rather than letting the
+    /// subsequent `git` invocation fail opaquely against a missing directory.
     pub fn reconcile(
         &mut self,
         worktree: &WorktreeId,
-    ) -> Result<Vec<RepositoryEvent>, WorktreeError> {
-        let baseline = self.baselines.get(worktree).unwrap_or_else(|| {
-            panic!(
-                "tidepool-worktree: reconcile called for unregistered worktree {worktree} \
-                 — register() must run first"
-            )
-        });
+    ) -> Result<Vec<Observed<RepositoryEvent>>, WorktreeError> {
+        let baseline = self
+            .baselines
+            .get(worktree)
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(worktree.clone()))?;
+        if !crate::registry::worktree_present(&baseline.path) {
+            return Err(WorktreeError::WorktreeLost(worktree.clone()));
+        }
         let path = baseline.path.clone();
         let old_head = baseline
             .head
@@ -294,14 +324,20 @@ impl WorktreeMonitor {
                     let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), oid)?;
                     let ev = RepositoryEvent::Commit(receipt);
                     self.journal.append(&ev, event_id)?;
-                    events.push(ev);
+                    events.push(Observed {
+                        event_id,
+                        value: ev,
+                    });
                 }
             }
             HeadChangeKind::Amended(_, new) => {
                 let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), new)?;
                 let ev = RepositoryEvent::Commit(receipt);
                 self.journal.append(&ev, event_id)?;
-                events.push(ev);
+                events.push(Observed {
+                    event_id,
+                    value: ev,
+                });
             }
             HeadChangeKind::Rewritten(_)
             | HeadChangeKind::Rewound
@@ -318,7 +354,10 @@ impl WorktreeMonitor {
             observed_at_ms,
         });
         self.journal.append(&head_changed, event_id)?;
-        events.push(head_changed);
+        events.push(Observed {
+            event_id,
+            value: head_changed,
+        });
 
         self.baselines.insert(
             worktree.clone(),

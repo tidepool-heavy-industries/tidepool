@@ -113,6 +113,22 @@ reasons even across dozens of watched worktrees. 5s reads as near-immediate
 against agent cadence without fleet size ever being a reason to widen it —
 revisit against real dev-tree telemetry if that changes.
 
+CORRECTION (TL, applying root's name-the-instrument rule). The paragraph above
+carried two unmeasured numbers stated as measurements. Measured: the
+`rev-parse HEAD` + `symbolic-ref --short HEAD` pair against a real temporary
+repository, timed over 200 iterations with `date +%s%N` deltas around the
+loop, on this box at load ~35-55 → **6.85 ms per pair**. A 5 s round is then
+1.6% of one core at 12 worktrees, 3.3% at 24, 6.6% at 48.
+
+So "a few ms" was right, but the fleet claim — "well under a percent of a core
+at dozens of worktrees" — was wrong by roughly 3x at 24. The conclusion holds
+(single-digit percent of one core is cheap; cost is not a reason to widen the
+interval) and the 5 s value stands, but the supporting claim was overstated and
+is corrected rather than quietly dropped. The figure is process-spawn
+dominated, so it measures THIS box under load, not a property of the
+operation — which is the point of naming the instrument: without it, a reader
+cannot tell which of those two they were given.
+
 Per root's clarification, the notify+backstop property itself (hooks wake,
 reconciliation decides, polling is the fallback) is NOT an obligation of this
 lane — PRD 19 already structurally mandates it as acceptance criterion 8, and
