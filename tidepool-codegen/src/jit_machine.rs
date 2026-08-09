@@ -704,6 +704,16 @@ impl Drop for RegistryGuard {
             // clear until the map is genuinely unreachable from any live
             // continuation — see `realm_stream_registry_lifetime.rs` for the
             // red (unconditional clear) / green (this guard) receipt.
+            //
+            // GROWTH, named because it is the normal case rather than a corner:
+            // while ANY realm stays parked the map is never cleared, so entries
+            // accumulate across every run in between. A cycle's outer driver is
+            // parked for the whole cycle, so that is the steady state, not an
+            // edge. It is bounded by the machine's life and reclaimed on drop
+            // (`free_session_heap`), which is exactly what cycle-scoped
+            // lifetime buys — the same bound every other per-machine registry
+            // here relies on. An immortal machine would make this unbounded,
+            // which is one more reason cycle-scoping is load-bearing.
             let nothing_suspended =
                 (*self.continuations).is_empty() && (*self.suspended_continuation).is_none();
             if nothing_suspended {

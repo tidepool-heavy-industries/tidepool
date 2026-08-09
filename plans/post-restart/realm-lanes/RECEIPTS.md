@@ -249,6 +249,66 @@ one — `assert_rooting_receipt` (`debug_assert_eq!`, so release callers pay no
 counting cost) at four registry mutation sites: park, re-park during a resume,
 rejected A5 resume, successful removal, and the Drop-time drain.
 
+## External review response — falsifier breadth + a REAL bug (codex items 3, 5)
+
+Item 5 confirmed the GC/walker design SOUND (the frame's `cell` is an external
+root slot, the RBP walker correctly out of scope, the other fields Rust-owned),
+so this was scoped as coverage breadth, not a bug hunt. It found a bug anyway.
+
+**The falsifier went from 1 falsified heap shape to 5.** Added W1 nested/mid-effect,
+W2 streamed-response tail, W3 finalized-closure park, W4a/W4b binding parks
+(`forced` true and false). Every one is parked across a real collection and
+deep-verified on resume.
+
+**Fourth negative-control re-proof, and the suite's teeth grew with it:**
+`binary(realm_multi_continuation)` → **12 tests run: 4 passed, 8 failed** under
+the control, against 3 kills before this work. All five new shapes die. F1/F2 and
+the two guard tests stay green and remain labelled ordering/bookkeeping in the
+file header.
+
+Note the control now needs THREE lines disabled, not two: the production
+`assert_rooting_receipt` (`debug_assert_eq!`) fires at the first unrooted park
+and would otherwise mask the memory failure behind a cleaner assertion. That is
+the new production invariant doing its job — it catches the unrooted park at the
+mutation site rather than at the next collection.
+
+W3's split reasoning was checked and is correct: `tenure_finalized_payload`
+registers the finalized VALUE as an old-space persistent root for the machine's
+life, independent of `stowed_roots`, so the finalized-root read genuinely
+survives the control while the continuation half dies.
+
+**A REAL, reachable bug — not the hypothesis it was filed as.**
+`MachineState::parked_streams` was cleared unconditionally on EVERY run/resume
+teardown (`RegistryGuard::drop`). Any continuation crossing a suspend boundary
+while holding an unforced streamed-response tail lost its `StreamId` — orphaned
+the instant *any* run on the machine returned, **including the very run that
+parked it**. Forcing the tail later produced a clean but wrong "registry entry
+missing (stale continuation?)" error with nothing wrong in the continuation.
+Fixed by deferring the clear until nothing is suspended anywhere on the machine;
+`realm_stream_registry_lifetime.rs` pins it red/green.
+
+Growth consequence, documented at the site because it is the steady state rather
+than a corner: while any realm stays parked the map never clears, and a cycle's
+outer driver is parked for the whole cycle. Bounded by machine life and reclaimed
+on drop — which is precisely what cycle-scoped lifetime buys, and one more reason
+an immortal machine is out.
+
+**A second instance of item 4's class, documented but NOT closed.** `ConTags` /
+`json_con_ids` / `time_con_ids` are machine-global and last-writer-wins across
+`add_function` calls from any realm. This is safe only because every realm's
+`Val`/`E`/`Union`/`Leaf`/`Node` come from the same fixed library modules and
+resolve to the same numeric tags — assumed, not checked. A table assigning a
+different tag to one of these shared constructors would silently corrupt how an
+already-parked SIBLING realm's continuation is interpreted on resume. What IS
+guarded is the part that matters for realms: a realm's own DOMAIN constructors
+never go through this cache, because `resume_parked` decodes exclusively against
+`ContinuationFrame::table`, so two realms may reuse the same numeric `DataConId`
+for different domain constructors without collision — pinned by
+`realm_global_id_isolation.rs`. The envelope-tag divergence is named at the
+accumulation site and left untested; it is the same shape as item 4 (machine-global
+state all realms are assumed to agree on, with nothing checking it) and is
+carried up rather than silently absorbed.
+
 ## Step 6 — DEFERRED, and why
 
 One-line reason, as the spec requires: **no caller can supply a `RealmId` until
