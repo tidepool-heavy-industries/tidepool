@@ -77,6 +77,15 @@ each tests an EARLY-RETURN or filesystem-failure path that by design never
 spawns git. A gate proving "this refuses before doing the work" is correctly
 cheap; if it were slow, THAT would be the finding.
 
+Root's ruling on the skip sites that prompted this: missing required
+environment FAILS LOUDLY, naming the variable. That was ALREADY the stated
+convention (root `CLAUDE.md`: tests without `TIDEPOOL_EXTRACT` "fail loud") —
+the skip-as-pass sites were nonconforming, not a competing style. Worth noting
+the shape: the rule existed and was silently violated, which is the expensive
+kind, because everyone assumes a stated rule is being followed.
+`TIDEPOOL_EXPENSIVE_TESTS` gating remains the sanctioned exception.
+`tidepool-worktree` was checked and is clean of the pattern.
+
 The hazard is a gate that is fast while claiming work it could not have done in
 the time — 6 ms for a gate driving GHC → extract → JIT → a temp repository.
 Applied as "fast = bad" this rule produces false alarms and gets ignored, which
