@@ -161,14 +161,26 @@ The deltas that change vertical-core design:
   fingerprint is checkpointable resident data; a later cycle recreates the
   typed handle from it and fails loudly if the deployed protocol no longer
   matches. The registry gains a first-class detached-but-running state.
-- **`sendMessage` and `followupTask` collapse into one `pokeAgent`** with a
-  durable per-agent queue: steers an active turn when possible, starts or
-  queues a follow-up when idle, retains the message when the target is
-  temporarily unsteerable, and never silently discards. Only a terminal or
-  released target produces a typed failure.
+- **Every control operation collapses into one `pokeAgent` with a TAGGED
+  message.** `sendMessage`, `followupTask` and `interruptAgent` are all gone as
+  authored operations. The entire authored control surface is `spawnAgent`,
+  `pokeAgent`, `waitAgent`, **plus the tag choice**:
+
+  ```haskell
+  whenSafe     :: input -> Poke input
+  interrupting :: input -> Poke input
+  ```
+
+  `whenSafe` steers an active turn when possible, starts or queues a follow-up
+  when idle, and — open decision — either reaches or waits out a parked tool
+  call. `interrupting` cancels any active turn and delivers its message as the
+  next turn. Delivery is durable in both cases; only a terminal or released
+  target produces a typed failure.
 - **`AgentFinished` splits into `AgentWentIdle` and `AgentFinalized`.** Idle is
-  an ordinary typed outcome the resident may poke, replace, or stop on — not an
-  exception.
+  an ordinary typed outcome, not an exception, and it is what makes the
+  escalation ladder authorable: `whenSafe (PleaseFinalize …)` first,
+  `interrupting` later, resident policy choosing when to climb. The runtime
+  supplies liveness and staleness; it never escalates on its own.
 - **`drainMailbox`** — the resident's own typed inbox, drained atomically once
   per cycle rather than polled.
 - **Endgame note:** dev-tree replaces the Exomonad swarm for Tidepool's own
@@ -216,11 +228,21 @@ Two further specifics for the registry API:
   stop is resident **policy**. Keep that boundary clean — the registry reports
   that a worker is stale; it never decides what to do about it.
 
-Consequence for wave 2 already visible: spike 2 (steer/interrupt while parked)
-is promoted from "does the API narrow" to "**when** is a queued poke delivered
-during a tool park" — PRD 18's open decision 2. The API no longer narrows
-either way, because retain-until-deliverable is adapter behavior; the spike
-decides delivery timing, not surface. Wave-2 scoped.
+### Spike 2, now precisely scoped — the wave-2 adapter work item
+
+The tagged-poke surface splits the old "steer/interrupt while parked" question
+into two, with **different stakes**. Wave 2 must answer them separately; a
+combined verdict hides the one that matters.
+
+| Question | If the answer is no |
+|---|---|
+| Does a `whenSafe` poke reach a turn parked on a dynamic tool call, or wait it out? | **Acceptable degradation.** Delayed delivery is fine — the queue retains it and delivers after the tool call resolves. Record which happens; the API does not narrow either way. |
+| Does a parked request **block** an `interrupting` poke? | **Needs an adapter workaround**, which PRD 18 names as required before broader implementation. An `interrupting` poke that cannot land while a child is parked breaks the escalation ladder at exactly the point a resident reaches for it — a stuck worker is usually stuck *in* a tool call. |
+
+The second is the one to design the run around. The first is a measurement.
+
+Both are wave-2 scoped; neither was probed during wave 1's single gated turn,
+by the go's own condition against park-duration probing.
 
 ## HOLD lines (root announces each lift; all intact as of wave 1)
 
@@ -233,11 +255,23 @@ decides delivery timing, not surface. Wave-2 scoped.
    JOINTLY, via root, when both sides are ready. Until then `seam::Workspace`
    is transitional data and every use site says so.
 
-   **Doubly load-bearing as of 2026-08-08:** PRD 19 is being fully rewritten by
-   the author of PRDs 14/15, and root has frozen its own edits to it. Do not
-   design the coupled-spawn seam against the *current* PRD 19 text either —
-   not just against an un-announced seam. Root announces when the rewrite
-   lands.
+   **Text-stability part LIFTED (root, tip `d766b9cb`):** the PRD 19 rewrite
+   has landed and both PRDs are final. Design *inputs* are now stable and
+   confirmed: `WorkerRun` as the coupled-spawn result shape, one worktree per
+   agent with explicit second-binding failure, `worktreeHead` in the public
+   surface, `readOnlyOf` gone.
+
+   **The hold itself still stands.** Stable text is not the announcement —
+   this hold was always on worktree-wave's vertical core existing and the seam
+   being designed JOINTLY via root, and neither has happened. `seam::Workspace`
+   stays transitional.
+
+   Worth noting for whoever designs it: `worktreeHead` exists so a resident can
+   compare against a checkpointed head before re-registering handlers, which is
+   what closes the between-cycle no-replay gap. That is a direct consequence of
+   agents outliving cycles — subscriptions do not survive, so a resident
+   re-registering in a later cycle would otherwise silently miss everything
+   that moved while it was away.
 3. **root's realm step-4 go-signal** — nothing in `resident.rs`
    pending/`ChildSuspended`.
 
