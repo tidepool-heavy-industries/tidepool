@@ -24,14 +24,6 @@ use tidepool_harness::{
     SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -190,12 +182,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
 /// appears raw.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn narration_shows_source_types_holes_and_answers_with_no_raw_sentinels() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let (console, _transcript) = run_one_cycle_with_a_retry().await;
 
     // Deliverable 1: the compiled source, verbatim — both the failing round's
@@ -299,12 +286,7 @@ fn retries_per_hole(by_site: &BTreeMap<u64, Rounds>) -> BTreeMap<u64, usize> {
 /// so both metrics are non-degenerate (rate < 1.0, at least one retry).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transcript_fold_computes_first_compile_success_rate_and_retries_per_hole() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let (_console, transcript) = run_one_cycle_with_a_retry().await;
 
     let by_site = fold_answerer_rounds(&transcript);

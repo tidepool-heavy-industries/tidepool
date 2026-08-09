@@ -44,17 +44,19 @@ fn text_of(res: &CallToolResult) -> String {
 
 /// Build a server with the real project `.tidepool/lib` on the include path
 /// AND `session_decl_module_env(true)` (decl items get `import Library`).
-/// Skips (via the caller's `extract_available` check) if the repo doesn't
-/// have `.tidepool/lib/Library.hs` — this test is meaningless without it.
-fn build_server_with_real_library(cwd: PathBuf) -> Option<TidepoolReplServer> {
+/// `.tidepool/lib/Library.hs` is a committed repo fixture, not an optional
+/// artifact — its absence is a broken checkout, not a legitimate skip.
+fn build_server_with_real_library(cwd: PathBuf) -> TidepoolReplServer {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
         .to_path_buf();
     let project_lib = repo_root.join(".tidepool").join("lib");
-    if !project_lib.join("Library.hs").is_file() {
-        return None;
-    }
+    assert!(
+        project_lib.join("Library.hs").is_file(),
+        ".tidepool/lib/Library.hs not found — this test is meaningless without \
+         the real project Library facade; check the checkout"
+    );
 
     let kv_path = cwd.join("kv.json");
     let handler_cfg = HandlerConfig {
@@ -88,7 +90,7 @@ fn build_server_with_real_library(cwd: PathBuf) -> Option<TidepoolReplServer> {
         wedged_ttl: None,
         turn_timeout: None,
     };
-    Some(TidepoolReplServer::new(stack, cfg))
+    TidepoolReplServer::new(stack, cfg)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -97,9 +99,7 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
     let cwd =
         std::env::temp_dir().join(format!("tidepool-repl-declimp-cwd-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).unwrap();
-    let Some(server) = build_server_with_real_library(cwd) else {
-        return;
-    };
+    let server = build_server_with_real_library(cwd);
 
     // `EditOutcome` is defined in `.tidepool/lib/Edit.hs` and re-exported by
     // `Library` — NOT imported explicitly here. Before the fix this failed
@@ -129,9 +129,7 @@ async fn decl_defining_a_library_reexported_name_does_not_collide() {
     let cwd =
         std::env::temp_dir().join(format!("tidepool-repl-declimp-cwd2-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).unwrap();
-    let Some(server) = build_server_with_real_library(cwd) else {
-        return;
-    };
+    let server = build_server_with_real_library(cwd);
 
     // `Rose` is defined in `.tidepool/lib/Schemes.hs` (`data Rose a = Rose a
     // [Rose a]`) and re-exported by `Library`. Redefining it here would be an
