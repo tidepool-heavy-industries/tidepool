@@ -39,8 +39,10 @@ use serial_test::serial;
 
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::build_value_fragment;
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
 use session_scaffold::C1;
+use session_scaffold_value::build_value_fragment;
 
 const MACHINES: usize = 32;
 const FRAGMENTS_PER_MACHINE: usize = 16;
