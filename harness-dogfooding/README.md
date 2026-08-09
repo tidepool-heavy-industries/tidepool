@@ -37,5 +37,5 @@ roadmap* for the next harness helpers.
   retained worktrees, and lexical event handlers**. It unfolds an ordinary
   recursive `DevPlan` into coding agents, pokes descendants when parent HEADs
   move, then asks fresh integration agents to merge completed branches
-  bottom-up. It is intentionally tagged against PRD 18 and the forthcoming
-  narrow Worktree/Event PRD and will compile as those surfaces land.
+  bottom-up. It is intentionally tagged against PRD 18 and
+  `19-managed-worktrees-events-prd.md` and will compile as those surfaces land.

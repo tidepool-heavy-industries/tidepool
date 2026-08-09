@@ -332,8 +332,10 @@ workspace observation.
 - Making recursive self-improvement safe or effective by assertion; that is an
   evaluation question after the substrate exists.
 - Creating git worktrees, managing branches, merging changes, or promoting a
-  canonical branch. A separate workspace/git effect may compose those policies
-  around Agent; spawning itself accepts an assigned workspace.
+  canonical branch. The separate
+  [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+  composes worktree allocation and repository events around Agent; spawning
+  itself accepts an assigned workspace.
 
 ## Primary authored experience
 
@@ -1179,14 +1181,16 @@ green.
 
 ### Follow-on composition — workspace event streams
 
-Specify worktree creation, git-event subscriptions, validation, and integration
-in a separate PRD. It can compose a `WorktreeHandle` with an `AgentHandle` into
-a higher-level worker run and later support hylo-shaped repository workflows.
+[`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+specifies worktree creation and git-event subscriptions. It composes a
+`WorktreeHandle` with an `AgentHandle` into a higher-level worker run and uses a
+recursive development-tree dogfood to prove authored integration workflows.
 None of those git semantics belong to the Agent effect.
 
 > **Joint design target (Inanna, 2026-08-08):**
 > `harness-dogfooding/dev-tree/` is authored deliberately against this PRD
-> AND the forthcoming Worktree/Event PRD in unison — it unfolds a recursive
+> AND [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+> in unison — it unfolds a recursive
 > `DevPlan` into coding agents, pokes descendants when parent HEADs move,
 > and merges completed branches bottom-up with fresh integration agents.
 > It is the concrete acceptance pressure for both surfaces: when writing

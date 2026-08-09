@@ -8,8 +8,8 @@
 -- | Forward dogfood: recursive coding agents in retained Git worktrees.
 --
 -- This is deliberately a sketch of the intended authored surface.  It will
--- compile after PRD 18 (typed headless subagents) and the forthcoming narrow
--- Worktree/Event PRD land.  TODO(PRD 18 / Worktree PRD): keep this file as the
+-- compile after PRD 18 (typed headless subagents) and PRD 19 (managed
+-- worktrees/events) land.  TODO(PRD 18 / PRD 19): keep this file as the
 -- executable acceptance target while those APIs are implemented.
 module Harness
   ( State (..)
