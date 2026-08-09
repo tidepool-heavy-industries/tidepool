@@ -291,3 +291,24 @@ nobody routinely runs is not enforced; and its companion — duplicate a
 mechanism and you duplicate its documentation into a context where it
 lies. Open sweep question: what else is pinned only behind
 --ignore-default-filter?
+
+### Item 14 addendum (2026-08-09): full-shard red census — SEVEN in tidepool-runtime
+
+With fail-fast truncation lifted, a fresh full shard (881 tests,
+--no-fail-fast, cache-consistent A/B'd) shows 7 pre-existing reds. THIS
+LIST is the source of truth for "sanctioned" (counts in messages go stale):
+1. mock_stack_matches_production (mock-derive in flight)
+2. sum_type_rejected_at_compile_time (item 14 design decision)
+3. mixed_nullary_sum_still_rejected_at_compile_time (same family/root as 2)
+4. qq_fmt_brace_inside_hole_non_string_expr_still_works (toExp Let case)
+5. user_union_normalize::user_defined_union_survives_effectful_normalize
+   ("missing freer-simple constructor 'Union' in DataConTable" — D2/ConTags
+   -adjacent; A/B-confirmed pre-existing on trunk)
+6. jit_surface::works_from_json_float (decodeFloat_Int# unboxed-tuple
+   primop, self-described extract landmine)
+7. stdlib_regressions_02_medium::works_int_prism_floors_not_truncates
+Items 5-7 surfaced only because truncation ended — the crate's full red
+set had never been seen on any routine path. Morning triage owns 3-7's
+routing. HAZARD note: git stash is SHARED across all worktrees on this
+box — A/B stashers must push/pop LIFO immediately; prefer diff-to-patch
+plus checkout for A/B legs.
