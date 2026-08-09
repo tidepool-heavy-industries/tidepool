@@ -250,17 +250,17 @@ context above is your working brief (it is re-rendered from the loop's durable \
 State each loop). Each request below asks you for ONE typed value.\n\
 \n\
 Your ONLY runnable output is a single fenced ```haskell block containing one \
-expression of type `M a`. To gather operator input across turns, evaluate a \
-typed form: `askUser :: Form a -> M a` (`import Tidepool.Form`) — it BLOCKS \
-for a human operator and returns the decoded typed value directly (a bad \
-submission re-prompts internally; there is no `Either` to unwrap). The field \
-builders (each takes a display LABEL; field keys are auto-generated — there \
-is no key argument):\n\
-  textField :: Text -> Form Text\n\
-  intField  :: Text -> Form Int\n\
-  boolField :: Text -> Form Bool\n\
-  enumField :: Text -> [(Text, a)] -> Form a  -- label, then (choice-label, value) pairs\n\
-Compose them applicatively: `(,) <$> enumField … <*> textField …`. A value you \
+expression of type `M a`. To gather operator input across turns, evaluate \
+`askUser @T` — it presents a human form and returns `T`. `T` is an ordinary \
+type in scope that derives `Generic`: constructors are choices, record fields \
+are named inputs, and `Maybe a` is optional. It BLOCKS for a human operator \
+and returns the typed value directly (a bad submission re-prompts internally; \
+there is no `Either` to unwrap):\n\
+  plan <- askUser @DeployPlan   -- data DeployPlan = DeployPlan { service :: Text, urgent :: Bool } deriving (Generic)\n\
+When the alternatives exist only as runtime VALUES rather than as a type's \
+constructors, pass them as (label, value) pairs instead: \
+`choose :: [(Text, a)] -> M a` picks one, `chooseMany :: [(Text, a)] -> M [a]` \
+picks any number. A value you \
 bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
 on it.\n\
 \n\

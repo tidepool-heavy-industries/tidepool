@@ -17,13 +17,12 @@
 //! ## Recursive rendering — [`generic_shape`]
 //!
 //! [`panel`]/[`View`]/[`form`] above render the FLAT `FormSpec` — unchanged,
-//! still what the live `askUser` effect emits today. [`generic_shape`]
+//! and still what a spec with no `shape` takes. [`generic_shape`]
 //! renders the RECURSIVE `FormShape`
-//! (`tidepool_harness::selfharness::operator`) instead: it is a new,
-//! independent entry point, not yet wired into [`View`]/[`panel`] — the
-//! Haskell side does not emit `FormShape` yet (a later step in
-//! `plans/self-iterating-harness/14-generic-derived-askuser-prd.md`), so
-//! there is nothing live to route it to. It reuses the SAME flat
+//! (`tidepool_harness::selfharness::operator`) instead, and [`form`] routes
+//! to it whenever the pending spec carries one — which is what `askUser @T`
+//! (`plans/self-iterating-harness/14-generic-derived-askuser-prd.md`) emits.
+//! It reuses the SAME flat
 //! `[data-bind]`/`[data-kind]` collector `shell::JS` already ships — no
 //! client JS changes — by binding every leaf at a DOTTED path
 //! (`tidepool_harness::selfharness::operator::child_path`) instead of a bare
@@ -47,6 +46,7 @@
 use maud::{html, Markup, PreEscaped};
 use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, Field, FieldKind, FieldShape, FormShape, FormSpec, VariantShape,
+    ROOT_BIND_PATH,
 };
 
 /// What the operator panel is currently showing.
@@ -93,11 +93,21 @@ fn idle() -> Markup {
 /// The pending form: one numbered row per field, then a Submit button. The
 /// whole thing is a `data-on-submit="@post('/submit')"` form so the vendored
 /// JS collects every `[data-bind]` into a flat object and POSTs it.
+///
+/// A spec carrying a recursive `shape` (what `askUser @T` emits) renders
+/// through [`generic_shape`] at [`ROOT_BIND_PATH`] instead of the flat field
+/// rows — the same `[data-bind]` collector either way, since `generic_shape`
+/// binds its leaves at dotted paths. `crate::server::collect_form_answer`
+/// reassembles those, guided by this same shape.
 fn form(spec: &FormSpec) -> Markup {
     html! {
         form class="form" data-on-submit="@post('/submit')" {
-            @for (i, field) in spec.fields.iter().enumerate() {
-                (field_row(i + 1, field))
+            @if let Some(shape) = &spec.shape {
+                (generic_shape(ROOT_BIND_PATH, shape))
+            } @else {
+                @for (i, field) in spec.fields.iter().enumerate() {
+                    (field_row(i + 1, field))
+                }
             }
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
@@ -342,6 +352,7 @@ mod tests {
                     kind: FieldKind::Bool,
                 },
             ],
+            shape: None,
         }
     }
 

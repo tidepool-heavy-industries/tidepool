@@ -139,6 +139,17 @@ surface here — it drifts. Module map:
 - `Data/Time` — `UTCTime` newtype (epoch-millisecond, opaque); `formatISO8601` (ISO-8601, pure civil_from_days); `diffUTCTime`/`addUTCTime` (seconds); `epochMillis` escape hatch. `getCurrentTime :: M UTCTime` lives in the generated `Tidepool.Effects` (via `time_decl()` helpers).
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters.
+- `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
+  (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
+  `choose`/`chooseMany` for alternatives that exist only as runtime VALUES.
+  Sub-modules: `Form.Shape` (the frozen `FormShape`/`FormAnswer` algebra),
+  `Form.GForm` (the generic interpreter — shape out, typed value back),
+  `Form.Check` (compile-time `TypeError` diagnostics), `Form.Wire` (the JSON
+  transport, matching `tidepool-harness`'s `selfharness::operator` module
+  docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
+  (it builds on `askUserRaw`), and auto-imported whenever it is.
+  `Form.Legacy` is the de-advertised applicative builder, kept only until the
+  successor lane deletes it — do not build on it or mention it to a model.
 - `Ui` — the `Ui` eDSL (card/prose/code/choice/textIn/badge smart constructors).
   `FormQQ` — `[form|]`, a line-based DSL compiling to `[Ui]` (one widget per
   line: `choice <prompt>: <key> ...` / `text <prompt>` / `multiline <prompt>` /

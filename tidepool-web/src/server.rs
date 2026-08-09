@@ -25,16 +25,19 @@
 //! # Nested submissions — [`collect_form_answer`]
 //!
 //! The four verbs above and [`WebGate`] serve the FLAT `FormSpec`/
-//! `Submission` path — unchanged, still what the live `askUser` effect
-//! drives today. [`collect_form_answer`] is the RECURSIVE counterpart: it
+//! `Submission` path — unchanged, and still what a spec with no `shape`
+//! takes. [`collect_form_answer`] is the RECURSIVE counterpart: it
 //! takes the flat `{"<dotted.path>": <scalar>}` object `render::generic_shape`'s
 //! markup produces via `shell::JS`'s ordinary flat collector (see
 //! `render.rs`'s module docs) and reassembles it into a structural
 //! `FormAnswer`, guided by the same `FormShape` the form was rendered from —
 //! so a nested product-of-sum submission comes back nested, not flattened.
-//! It is not yet wired into a route: no `Pending`/route emits a `FormShape`
-//! today (the Haskell `askUser` swap is a later step), so this is a pure,
-//! independently testable function ahead of that wiring.
+//!
+//! [`submit`] runs it whenever the pending spec carries a `shape` (what
+//! `askUser @T` emits), and hands the SERIALIZED `FormAnswer` back as the
+//! `Submission` — every non-unit `FormAnswer` variant is a one-key JSON
+//! object, so the flat map carries it without a second channel. Neither the
+//! client JS nor the gate signature changes.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -47,7 +50,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, FormAnswer, FormShape, FormSpec, OperatorGate, Submission,
+    child_path, FormAnswer, FormShape, FormSpec, OperatorGate, Submission, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -231,7 +234,24 @@ async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
         return err_json("submission must be a flat JSON object".to_string());
     };
     match st.take() {
-        Pending::Form { resolve, .. } => {
+        Pending::Form { spec, resolve } => {
+            // A spec carrying a recursive `shape` (what `askUser @T` emits)
+            // was rendered at dotted bind paths: reassemble the flat POST
+            // into the structural `FormAnswer` the Haskell side reads back.
+            // The answer travels in the same flat `Submission` map because
+            // every non-unit `FormAnswer` variant IS a one-key JSON object.
+            // An incomplete or wrong-typed submission resolves to an EMPTY
+            // map, which the Haskell decode rejects and re-presents — the
+            // same path a bad flat submission already takes.
+            let submission = match &spec.shape {
+                Some(shape) => collect_form_answer(shape, ROOT_BIND_PATH, &submission)
+                    .and_then(|answer| match serde_json::to_value(answer) {
+                        Ok(Jv::Object(map)) => Some(map),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+                None => submission,
+            };
             let _ = resolve.send(submission);
             Json(json!({"ok": true})).into_response()
         }
@@ -360,6 +380,7 @@ mod tests {
                     kind: FieldKind::Int,
                 },
             ],
+            shape: None,
         }
     }
 
@@ -540,6 +561,37 @@ mod tests {
         assert_eq!(
             field(fields, "releaseNote"),
             Some(&FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string())))))
+        );
+    }
+
+    /// The LIVE recursive path, both halves from the same root: a spec
+    /// carrying a `shape` renders through `render::form` at
+    /// [`ROOT_BIND_PATH`], and [`submit`] collects from that same root.
+    ///
+    /// A root SUM (what `choose` and `askUser @<enum>` produce) is the case
+    /// that pins why the root is NON-EMPTY: its radios are grouped by `name`,
+    /// and HTML does not group radios sharing an empty one — an empty root
+    /// would let the operator check two branches of one choice.
+    #[test]
+    fn root_bind_path_renders_and_collects_a_root_sum() {
+        let spec = FormSpec {
+            fields: vec![],
+            shape: Some(destination_shape()),
+        };
+        let html = crate::render::panel(&crate::render::View::Form(&spec), 1).into_string();
+        assert!(
+            html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
+            "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"
+        );
+
+        let mut raw = Map::new();
+        raw.insert(ROOT_BIND_PATH.to_string(), json!("LocalHost"));
+        assert_eq!(
+            collect_form_answer(&destination_shape(), ROOT_BIND_PATH, &raw),
+            Some(FormAnswer::Sum {
+                constructor: "LocalHost".to_string(),
+                payload: Box::new(FormAnswer::Unit),
+            })
         );
     }
 

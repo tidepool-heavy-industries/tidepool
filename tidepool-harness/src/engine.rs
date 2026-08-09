@@ -210,16 +210,35 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
 /// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
 /// mismatch — the caller falls back to the plain-Ask routing.
+///
+/// TWO Haskell surfaces ride this one constructor, and they are told apart
+/// by decode rather than by a second routing arm: `askUser @T`
+/// (`Tidepool.Form`) sends a bare
+/// [`crate::selfharness::operator::FormShape`] — exactly the JSON
+/// `selfharness::operator`'s module docs specify — and the de-advertised
+/// applicative builder sends a flat `{"fields": [...]}` spec. A bare shape
+/// cannot decode as a `FormSpec` (`fields` is required there), so trying the
+/// flat wire first is unambiguous; a shape is lifted into
+/// [`crate::selfharness::operator::FormSpec::shape`] for the gate to render.
 fn decode_askuser_spec(
     request: &Value,
     table: &DataConTable,
 ) -> Option<crate::selfharness::operator::FormSpec> {
+    use crate::selfharness::operator::{FormShape, FormSpec};
+
     let Value::Con(_, fields) = request else {
         return None;
     };
     let field = fields.first()?;
     let json = tidepool_runtime::value_to_json(field, table, 0);
-    serde_json::from_value(json).ok()
+    if let Ok(spec) = serde_json::from_value::<FormSpec>(json.clone()) {
+        return Some(spec);
+    }
+    let shape: FormShape = serde_json::from_value(json).ok()?;
+    Some(FormSpec {
+        fields: Vec::new(),
+        shape: Some(shape),
+    })
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
@@ -500,8 +519,8 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
          Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
          WHOLE expression with `:: M {ty}` — in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
-         bind its result, then `finalize`.)"
+         loop.{scope} (To gather operator input first, evaluate `askUser @T` for \
+         a type in scope; bind its result, then `finalize`.)"
     )
 }
 

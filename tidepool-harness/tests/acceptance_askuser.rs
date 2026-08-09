@@ -1,16 +1,32 @@
-//! Acceptance coverage: the answerer `askUser`
-//! operator-form round-trip (`plans/self-iterating-harness/09-askuser-form-gui.md`).
+//! Acceptance coverage: the answerer `askUser @T` operator-form round-trip
+//! (`plans/self-iterating-harness/14-generic-derived-askuser-prd.md`, delivery
+//! step 5).
+//!
 //! ONE `render` -> `loop` -> `runLLMTurn @Decision` -> (answerer suspends on
-//! `askUser`, a scripted [`OperatorGate`] submits, the typed value resumes
-//! and flows into `finalize`) -> `render` cycle, driven through the
+//! `askUser @Decision`, a scripted [`OperatorGate`] submits, the typed value
+//! resumes and flows into `finalize`) -> `render` cycle, driven through the
 //! production entry point (`SelfHarnessDriver::run_one_cycle`), against the
-//! reference harness module (`examples/harness/Harness.hs`). Also asserts
-//! the durable per-node log's `turn_start` record carries the EXTRACTED
-//! executed Haskell (the `askUser`+`finalize` block), not a coarse
-//! "model" provenance tag. Needs `TIDEPOOL_EXTRACT` and the with-packages
-//! GHC on PATH — run inside `nix develop` (see `haskell/CLAUDE.md`).
+//! reference harness module (`examples/harness/Harness.hs`).
+//!
+//! Three things ride that one cycle:
+//!
+//! - the form the operator is presented is the shape DERIVED from `Decision`'s
+//!   own `Generic` representation — asserted here structurally, which is what
+//!   proves the Haskell encoder (`Tidepool.Form.Wire`) and the Rust wire
+//!   (`selfharness::operator`) agree through the real extract/JIT;
+//! - a MALFORMED submission re-presents the SAME form rather than surfacing an
+//!   error — `askUser` re-prompts by recursion, no `Either` reaches the caller,
+//!   and the driver's bounded servicing loop is untouched;
+//! - `chooseMany` selects among runtime VALUES by their labels and returns the
+//!   typed values.
+//!
+//! Also asserts the durable per-node log's `turn_start` record carries the
+//! EXTRACTED executed Haskell, not a coarse "model" provenance tag. Needs
+//! `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
+//! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod support;
 
@@ -18,6 +34,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::selfharness::operator::{FieldShape, FormAnswer, FormShape, VariantShape};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, FormSpec, Harness, LogObserver, OperatorGate,
@@ -48,6 +65,10 @@ fn examples_harness_dir() -> std::path::PathBuf {
     repo_root().join("examples/harness")
 }
 
+fn fixtures_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
 fn header() -> LogHeader {
     LogHeader {
         prelude_hash: "acceptance-askuser".into(),
@@ -56,36 +77,159 @@ fn header() -> LogHeader {
     }
 }
 
-/// A scripted operator: always submits `{"f0": "High", "f1": 7}` (the
-/// positional keys `Tidepool.Form` assigns an `enumField`/`intField` pair
-/// built applicatively, `Form.hs`'s `keyName`) and never blocks on the
-/// between-loops continue gate.
-struct ScriptedGate;
+/// The form `askUser @Decision` must present: `Decision`'s structure, keyed by
+/// its own selector and constructor names, in declaration order — a nested
+/// product-of-sum, since `confidence :: Confidence` is an enum.
+///
+/// Written out rather than derived, because "the operator sees the type's own
+/// structure" is exactly the claim under test.
+fn expected_decision_shape() -> FormShape {
+    FormShape::Product {
+        type_key: "Decision".to_string(),
+        constructor: "Decision".to_string(),
+        fields: vec![
+            FieldShape {
+                key: "action".to_string(),
+                shape: FormShape::String,
+            },
+            FieldShape {
+                key: "rationale".to_string(),
+                shape: FormShape::String,
+            },
+            FieldShape {
+                key: "confidence".to_string(),
+                shape: FormShape::Sum {
+                    type_key: "Confidence".to_string(),
+                    variants: vec![
+                        VariantShape {
+                            constructor: "Low".to_string(),
+                            shape: FormShape::Unit,
+                        },
+                        VariantShape {
+                            constructor: "Medium".to_string(),
+                            shape: FormShape::Unit,
+                        },
+                        VariantShape {
+                            constructor: "High".to_string(),
+                            shape: FormShape::Unit,
+                        },
+                    ],
+                },
+            },
+        ],
+    }
+}
+
+/// A `Decision` the operator built: `act-7`, `High`. Rule 1 (bare product for
+/// a single-constructor type) and rule 2 (`Sum` wrapper even for a nullary
+/// branch) are both exercised.
+fn decision_answer() -> FormAnswer {
+    FormAnswer::Product(vec![
+        (
+            "action".to_string(),
+            FormAnswer::String("act-7".to_string()),
+        ),
+        (
+            "rationale".to_string(),
+            FormAnswer::String("from form".to_string()),
+        ),
+        (
+            "confidence".to_string(),
+            FormAnswer::Sum {
+                constructor: "High".to_string(),
+                payload: Box::new(FormAnswer::Unit),
+            },
+        ),
+    ])
+}
+
+/// A [`Submission`] carrying a structural answer: every non-unit
+/// [`FormAnswer`] variant serializes to a one-key JSON object, so the flat
+/// submission map carries it as-is — no second channel, no gate signature
+/// change.
+fn submission_of(answer: &FormAnswer) -> Submission {
+    match serde_json::to_value(answer).expect("a FormAnswer serializes") {
+        serde_json::Value::Object(map) => map,
+        other => panic!("a structural answer must serialize to a JSON object, got {other}"),
+    }
+}
+
+/// A scripted operator that answers from the SHAPE it is handed rather than
+/// from a hardcoded key list — which is the point: `askUser @T` sends the
+/// derived structure, and a gate that can read it can fill it.
+///
+/// The FIRST presentation of the `Decision` form is answered with an empty
+/// submission — a malformed answer, the thing a real operator produces by
+/// submitting an incomplete form (and the thing the headless `StdinGate`
+/// produces at EOF). `askUser` must re-present the same form rather than
+/// failing the turn.
+struct ScriptedGate {
+    /// Every shape presented, in order — the receipt for "the SAME form came
+    /// back" after a malformed submission.
+    seen: Mutex<Vec<FormShape>>,
+    decision_presentations: AtomicUsize,
+}
+
+impl ScriptedGate {
+    fn new() -> Self {
+        ScriptedGate {
+            seen: Mutex::new(Vec::new()),
+            decision_presentations: AtomicUsize::new(0),
+        }
+    }
+}
 
 impl OperatorGate for ScriptedGate {
-    fn present_form(&self, _spec: &FormSpec) -> Submission {
-        let mut sub = Submission::new();
-        sub.insert("f0".to_string(), serde_json::Value::String("High".into()));
-        sub.insert("f1".to_string(), serde_json::Value::Number(7.into()));
-        sub
+    fn present_form(&self, spec: &FormSpec) -> Submission {
+        let shape = spec
+            .shape
+            .clone()
+            .expect("askUser @T must present a derived FormShape, not a flat field list");
+        self.seen.lock().unwrap().push(shape.clone());
+
+        match &shape {
+            // `askUser @Decision`.
+            FormShape::Product { type_key, .. } if type_key == "Decision" => {
+                let nth = self.decision_presentations.fetch_add(1, Ordering::SeqCst);
+                if nth == 0 {
+                    // Malformed: not an answer at all. Re-prompt, don't fail.
+                    Submission::new()
+                } else {
+                    submission_of(&decision_answer())
+                }
+            }
+            // `chooseMany` — one checkbox per offered label. Keep the first.
+            FormShape::Product {
+                type_key, fields, ..
+            } if type_key == "Choices" => submission_of(&FormAnswer::Product(
+                fields
+                    .iter()
+                    .map(|f| (f.key.clone(), FormAnswer::Bool(f.key == "keep")))
+                    .collect(),
+            )),
+            other => panic!("unexpected form shape presented: {other:?}"),
+        }
     }
 
     fn await_continue(&self) {}
 }
 
-/// The ONE recorded answerer reply: a fenced Haskell `do`-block that reads
-/// BOTH an enum and an int from a single `askUser` form, then `finalize`s a
-/// `Decision` built from them. `askUser` suspends AND resumes WITHIN this
-/// one block execution (the form resume is not a new model turn), so one
-/// reply covers the whole exchange. `Tidepool.Form` is auto-imported here
-/// (answerer_decls includes `AskUser`), so the import list only needs the
-/// reference harness's own types.
+/// The ONE recorded answerer reply: a fenced Haskell `do`-block that asks the
+/// operator for a whole `Decision` with `askUser @Decision`, then picks among
+/// two RUNTIME values with `chooseMany`, then `finalize`s. Both suspensions
+/// happen WITHIN this one block execution (a form resume is not a new model
+/// turn), so one reply covers the whole exchange.
+///
+/// Nothing is imported but the answer types themselves: no form builder, no
+/// codec, no `Tidepool.Form` import (it is auto-imported whenever `AskUser` is
+/// in the compiling row).
 fn askuser_reply() -> RecordedReply {
     let content = "```haskell\n\
          import HarnessTypes (Decision (..), Confidence (..))\n\n\
          (do\n\
-         \x20  (conf, n) <- askUser ((,) <$> enumField \"Confidence\" [(\"Low\", Low), (\"High\", High)] <*> intField \"Count\")\n\
-         \x20  finalize @Decision (Decision { action = \"act-\" <> show n, rationale = \"from form\", confidence = conf })) :: M ()\n\
+         \x20  d <- askUser @Decision\n\
+         \x20  picks <- chooseMany [(\"keep\", \"kept\"), (\"drop\", \"dropped\")]\n\
+         \x20  finalize @Decision (d { rationale = T.intercalate \"+\" picks })) :: M ()\n\
          ```";
     RecordedReply {
         node: NodeId(0),
@@ -98,11 +242,9 @@ fn askuser_reply() -> RecordedReply {
     }
 }
 
-/// ONE render -> loop -> runLLMTurn @Decision -> (askUser form round-trip)
-/// -> finalize -> render cycle. Asserts a typed enum+int flows from a
-/// scripted operator submission through `Tidepool.Form`'s decode into a
-/// `finalize @Decision` reply, and that the durable per-node log records the
-/// EXTRACTED executed Haskell for that turn.
+/// ONE render -> loop -> runLLMTurn @Decision -> (askUser @Decision form
+/// round-trip, one malformed submission, one `chooseMany`) -> finalize ->
+/// render cycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn askuser_operator_form_round_trip_and_ws4_log() {
     if !extract_available() {
@@ -128,7 +270,8 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    driver.set_gate(Arc::new(ScriptedGate));
+    let gate = Arc::new(ScriptedGate::new());
+    driver.set_gate(gate.clone());
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
@@ -137,10 +280,54 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         .await
         .expect("one full render->loop->runLLMTurn->askUser->finalize->render cycle");
 
-    // The typed round-trip: the scripted submission's enum tag ("High")
-    // decoded to `Confidence High`, its int (7) decoded to `Int`, and both
-    // flowed into the `finalize @Decision` reply, which `loop` folded into
-    // the returned `State`.
+    // The form the operator saw IS the type's own structure, derived with no
+    // `Decision` value in existence: exact selector keys, exact constructor
+    // keys, declaration order, and the nested `Confidence` choice. This is the
+    // Haskell encoder and the Rust wire agreeing through the real extract/JIT.
+    let seen = gate.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.first(),
+        Some(&expected_decision_shape()),
+        "askUser @Decision must present Decision's own derived structure"
+    );
+
+    // A malformed submission re-presented the SAME form — `askUser` re-prompts
+    // by recursion, so the driver saw a fresh `AskUser` suspension rather than
+    // an error, and no `Either` ever reached the answerer's Haskell.
+    assert_eq!(
+        seen.get(1),
+        Some(&expected_decision_shape()),
+        "a malformed submission must re-present the SAME form, got: {seen:?}"
+    );
+    assert_eq!(
+        gate.decision_presentations.load(Ordering::SeqCst),
+        2,
+        "exactly one re-prompt was scripted"
+    );
+
+    // `chooseMany`'s form is the third: one checkbox per RUNTIME label.
+    assert_eq!(
+        seen.get(2),
+        Some(&FormShape::Product {
+            type_key: "Choices".to_string(),
+            constructor: "Choices".to_string(),
+            fields: vec![
+                FieldShape {
+                    key: "keep".to_string(),
+                    shape: FormShape::Bool,
+                },
+                FieldShape {
+                    key: "drop".to_string(),
+                    shape: FormShape::Bool,
+                },
+            ],
+        }),
+        "chooseMany must offer one control per runtime label, got: {seen:?}"
+    );
+
+    // The typed round-trip: the operator's structural submission decoded into a
+    // real `Decision` (a nested ADT — `confidence` is a `Confidence`, not a
+    // string), which flowed into `finalize @Decision` and then into `State`.
     let state = &outcome.state_json;
     assert_eq!(
         driver.iteration(),
@@ -154,12 +341,19 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     assert_eq!(
         decision.get("action").and_then(|v| v.as_str()),
         Some("act-7"),
-        "askUser's int field must flow through finalize into Decision.action, got {decision:?}"
+        "askUser's text field must flow through finalize into Decision.action, got {decision:?}"
     );
     assert_eq!(
         decision.get("confidence").and_then(|v| v.as_str()),
         Some("High"),
-        "askUser's enum field must flow through finalize into Decision.confidence, got {decision:?}"
+        "askUser's nested enum must flow through finalize into Decision.confidence, got {decision:?}"
+    );
+    // `chooseMany` returned the VALUE behind the chosen LABEL ("keep" -> "kept"),
+    // and only the chosen one.
+    assert_eq!(
+        decision.get("rationale").and_then(|v| v.as_str()),
+        Some("kept"),
+        "chooseMany must return the typed values of the selected labels, got {decision:?}"
     );
 
     // The post-loop render reflects the NEW state — the loop reached
@@ -207,5 +401,50 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         found_turn_start_with_source,
         "WS4: expected a turn_start log record whose source contains both \
          askUser and finalize (the executed Haskell), log:\n{log_contents}"
+    );
+}
+
+/// The PRD's headline claim, at COMPILE level: declare the example ADTs with
+/// `deriving (Generic)` and nothing else, then ask for one — no imports beyond
+/// the module that defines them, no pragmas, no codec, no form builder, no
+/// instance of anything Tidepool-specific
+/// (`tests/fixtures/PrdTypes.hs` is the fixture, and what it does NOT contain
+/// is the assertion).
+///
+/// `req.service :: Text` in the same block is what pins the SECOND half — the
+/// binding has exactly the requested Haskell type, not a `Value` or a tuple.
+/// A wrong type there is a GHC error, so this compiling IS the proof.
+#[test]
+fn prd_example_adts_compile_with_only_deriving_generic() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+        .expect("answerer engine config");
+    cfg.include.push(fixtures_dir());
+
+    let code = "(do { req <- askUser @DeployRequest; pure req.service }) :: M Text";
+    let target = cfg.turn_target(None).expect("turn target");
+    let src = tidepool_harness::engine::template_turn_for(
+        &cfg.decls,
+        &target.stack,
+        code,
+        "PrdTypes",
+        "",
+    );
+    let result = tidepool_harness::compile::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    );
+    assert!(
+        result.is_ok(),
+        "`askUser @DeployRequest` against types that derive ONLY Generic must \
+         compile, and its binding must be a real DeployRequest — got: {:?}",
+        result.err().map(|e| e.to_string())
     );
 }

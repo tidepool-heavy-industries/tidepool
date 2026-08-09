@@ -359,7 +359,7 @@ fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
     let imports = vec!["HarnessTypes".to_string()];
     let shape = prescribed_finalize_shape("Decision", &imports);
     assert_eq!(
-        shape, "finalize @Decision (value :: Decision)",
+        shape, "(finalize @Decision value :: M Decision)",
         "the answerer prompt's prescribed shape changed — re-read \
          `engine::answerer_hole_card` and update this pinned literal"
     );
@@ -409,17 +409,18 @@ fn bare_finalize_with_no_annotation_compiles_when_pinned() {
 }
 
 /// The case that distinguishes `__anchor` from the REJECTED hard pin (`_r ::
-/// T`). A bare, non-bind `askUser form` turn — gathering operator input with
+/// T`). A bare, non-bind `askUser @T` turn — gathering operator input with
 /// no `finalize` in the same block, a real shape (elicit now, finalize on a
-/// LATER turn) — leaves the block's result concretely `M Int` (`intField`'s
-/// own type), which already has both `Show` and `ToJSON` instances and needs
+/// LATER turn) — leaves the block's result concretely `M Confidence` (the
+/// asked-for type itself), which already has both `Show` and `ToJSON` instances and needs
 /// no defaulting at all. `__anchor` is `id` under an ADDITIVE `Show`
 /// constraint, so it resolves trivially against that concrete `Int` and
 /// changes nothing observable.
 ///
 /// A hard pin would instead unify the block's result type against the row's
-/// `Decision` (`_r :: Decision`) and reject this compile outright — `Int` is
-/// not `Decision` — even though the turn never touches `finalize`. Compiled
+/// `Decision` (`_r :: Decision`) and reject this compile outright —
+/// `Confidence` is not `Decision` — even though the turn never touches
+/// `finalize`. Compiled
 /// against a `Decision`-pinned row specifically (not `Finalize NoAnswer`) so
 /// the anchor is actually active for this compile, proving the additive
 /// claim rather than a compile that never exercised it.
@@ -429,11 +430,11 @@ fn bare_non_bind_askuser_form_compiles_when_pinned() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
-    let code = "askUser (intField \"Count\")";
+    let code = "askUser @Confidence";
     let result = compile_turn(code, "HarnessTypes", Some("Decision"));
     assert!(
         result.is_ok(),
-        "a bare non-bind `askUser form` turn (no finalize in the block) must \
+        "a bare non-bind `askUser @T` turn (no finalize in the block) must \
          still compile against a Decision-pinned row — got: {:?}",
         result.err().map(|e| e.to_string())
     );

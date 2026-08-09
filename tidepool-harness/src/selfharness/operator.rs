@@ -23,16 +23,18 @@
 //! [`FormShape`] and [`FormAnswer`] are the RECURSIVE wire, mirroring
 //! Haskell's `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`/
 //! `FormAnswer`) constructor for constructor. They exist ALONGSIDE the flat
-//! types, not in place of them: the generic-derived `askUser @T` path (PRD
-//! `plans/self-iterating-harness/14-generic-derived-askuser-prd.md`) has not
-//! been wired into the effect yet — that is a later step in this wave. This
-//! module is the Rust half of that contract, landed early so the later
-//! Haskell encoder and the web renderer have something concrete to target.
+//! types, not in place of them: `askUser @T` (PRD
+//! `plans/self-iterating-harness/14-generic-derived-askuser-prd.md`) is the
+//! live Haskell surface and emits a bare [`FormShape`] through the same
+//! `AskUserWith` suspension; [`crate::engine::classify_hole`] lifts it into
+//! [`FormSpec::shape`]. The flat types stay because the successor lane
+//! retires them, not because anything still emits them.
 //!
 //! ## The JSON encoding is OWNED here, not by aeson
 //!
-//! The Haskell side does not (yet) have an encoder for this wire — a later
-//! step writes one against exactly what follows. It is an internal
+//! The Haskell encoder (`Tidepool.Form.Wire`) targets exactly what follows,
+//! and `tidepool-runtime/tests/generic_form_wire.rs` asserts it against
+//! these worked examples themselves. It is an internal
 //! transport representation, not an aeson `ToJSON`/`FromJSON` contract:
 //! nothing on either side derives or routes through generic JSON codecs for
 //! these types. Every shape below is what `#[derive(Serialize,
@@ -61,8 +63,8 @@
 //! `plans/self-iterating-harness/16-generic-spike-receipts.md`)
 //!
 //! These are usage discipline for whoever CONSTRUCTS a [`FormAnswer`]
-//! against a given [`FormShape`] (the future collector in `tidepool-web`,
-//! and the future Haskell encoder) — the Rust enum does not and cannot
+//! against a given [`FormShape`] (`tidepool-web`'s collector, and
+//! `Tidepool.Form.Wire`) — the Rust enum does not and cannot
 //! enforce them by itself, exactly as the Haskell ADT doesn't either:
 //!
 //! 1. A single-constructor datatype answers with a bare [`FormAnswer::Product`]
@@ -146,12 +148,38 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A typed form the agent spawned via `askUser :: Form a -> M a`. Rendered by
-/// the web GUI; its [`Submission`] decodes back to the agent's `a`. v1 field
-/// kinds only: enum (1-of-N) / int / text / bool.
+/// A typed form an agent spawned. Rendered by the web GUI; its
+/// [`Submission`] decodes back to the agent's `a`.
+///
+/// TWO forms arrive here, and which one it is depends on which field is
+/// populated:
+///
+/// - `fields` — the FLAT v1 wire (enum (1-of-N) / int / text / bool, one
+///   scalar per top-level key), built by the de-advertised applicative
+///   builder (`Tidepool.Form.Legacy`). No Haskell caller emits it any more;
+///   it stays live until the successor lane confirms nothing else consumes
+///   it.
+/// - `shape` — the RECURSIVE [`FormShape`] derived from the answer TYPE by
+///   `askUser @T` (`Tidepool.Form`). This is what the live surface emits.
+///   The Haskell side sends the shape BARE — exactly the JSON documented in
+///   this module — and [`crate::engine::classify_hole`] lifts it into this
+///   struct, so nothing on the wire carries an invented envelope.
+///
+/// A gate renders `shape` when it is present and `fields` otherwise. The
+/// [`Submission`] it returns is a flat map either way: for a `shape` form
+/// that map IS the serialized [`FormAnswer`] (every non-unit `FormAnswer`
+/// variant is a one-key JSON object — see the encoding docs above), which is
+/// what `askUser @T` reads back.
+///
+/// `fields` stays REQUIRED on the wire: that is what keeps a bare
+/// [`FormShape`] JSON from deserializing into an empty `FormSpec` (serde
+/// ignores unknown fields), so the two wires stay tellable apart by decode
+/// alone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FormSpec {
     pub fields: Vec<Field>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<FormShape>,
 }
 
 /// One field in a [`FormSpec`]. `key` is the stable submission key; `label` is
@@ -309,6 +337,17 @@ pub enum FormAnswer {
         payload: Box<FormAnswer>,
     },
 }
+
+/// The bind path a recursively-rendered [`FormShape`] sits at when it IS the
+/// whole form — the root `tidepool-web`'s renderer and its submission
+/// collector must BOTH start from, since a bind path is only meaningful
+/// relative to the root it was built from.
+///
+/// Non-empty on purpose. A root [`FormShape::Sum`] (what `choose` and
+/// `askUser @<enum>` produce) binds its radio group at the root path itself,
+/// and HTML does not group radios that share an EMPTY `name` — an empty root
+/// would let an operator check two branches of the same choice.
+pub const ROOT_BIND_PATH: &str = "answer";
 
 /// Join a parent dotted-path bind key with a child field/constructor key —
 /// the ONE path-construction convention the recursive renderer
@@ -617,7 +656,51 @@ mod tests {
                 label: "Mood".to_string(),
                 kind: FieldKind::Bool,
             }],
+            shape: None,
         };
         let _recursive = FormShape::Bool;
+    }
+
+    /// The two wires are tellable apart BY DECODE, which is what
+    /// [`crate::engine::classify_hole`] relies on: a bare `FormShape` (what
+    /// `askUser @T` emits) must NOT deserialize into an empty flat
+    /// `FormSpec`. `fields` being required is the whole mechanism — serde
+    /// ignores unknown fields, so an optional `fields` would swallow it.
+    #[test]
+    fn a_bare_shape_is_not_a_flat_form_spec() {
+        let shape = serde_json::to_value(ssh_product_shape()).unwrap();
+        assert!(
+            serde_json::from_value::<FormSpec>(shape).is_err(),
+            "a bare FormShape must not decode as a flat FormSpec"
+        );
+    }
+
+    /// A shape-carrying spec round-trips, and a flat spec still serializes
+    /// WITHOUT a `shape` key (nothing on the existing wire changes shape).
+    #[test]
+    fn shape_carrying_spec_round_trips_and_flat_spec_is_unchanged() {
+        let shaped = FormSpec {
+            fields: vec![],
+            shape: Some(ssh_product_shape()),
+        };
+        let wire = serde_json::to_string(&shaped).unwrap();
+        assert_eq!(serde_json::from_str::<FormSpec>(&wire).unwrap(), shaped);
+
+        let flat = FormSpec {
+            fields: vec![Field {
+                key: "mood".to_string(),
+                label: "Mood".to_string(),
+                kind: FieldKind::Bool,
+            }],
+            shape: None,
+        };
+        // No `shape` key at all — `skip_serializing_if` keeps the existing
+        // flat wire byte-identical to what it was before `shape` existed.
+        // (`kind` nests because [`FieldKind`] is INTERNALLY tagged on `kind`;
+        // that is the pre-existing flat encoding, not something added here.)
+        assert_eq!(
+            serde_json::to_value(&flat).unwrap(),
+            json!({"fields": [{"key": "mood", "label": "Mood", "kind": {"kind": "bool"}}]})
+        );
     }
 }
