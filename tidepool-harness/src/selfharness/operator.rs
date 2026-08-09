@@ -1,4 +1,4 @@
-//! The operator-input seam (`09-askuser-form-gui.md`), consumed as-is by the
+//! The operator-input seam, consumed as-is by the
 //! `AskUser` effect decode, the driver's form servicer, and the web GUI —
 //! never redefined at those call sites. Single source for the form-spec /
 //! submission wire types and the [`OperatorGate`] the driver blocks on.

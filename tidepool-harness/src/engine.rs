@@ -705,8 +705,7 @@ impl EngineConfig {
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
     /// driver uses this for its `Eff '[RunLLMTurn]`-only compile
     /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
-    /// to the literal single-effect row 02-runtime.md locks in, rather than
-    /// the full Agent stack.
+    /// to that literal single-effect row rather than the full Agent stack.
     pub fn from_decls(
         decls: Vec<tidepool_mcp::EffectDecl>,
         prelude_dir: PathBuf,
