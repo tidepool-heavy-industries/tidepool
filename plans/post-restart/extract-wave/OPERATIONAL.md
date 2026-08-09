@@ -135,6 +135,14 @@ localized diffs and log it at fold):
   ages and commands (`ps -o etime=,args= -p <pid>`), since a slot held for an
   hour by a serialised run is a different problem from four slots doing work.
 
+  **DRAIN, DON'T KILL — a running holder and a queued waiter are different
+  objects** (boot-targets' corollary). Killing a RUNNING holder wastes the slot
+  time already spent and frees the slot no sooner than letting it finish; kill
+  it only when the work is known-void, never to reclaim capacity. Cancelling a
+  QUEUED waiter is free and does relieve pressure — so cancel those freely.
+  This is the operational half of "report the holders, not just the waiters":
+  once you have both columns, the two columns afford different actions.
+
   **AT MOST ONE BROKERED LEG PER DEV AT A TIME.** Sequence gate legs; do not
   launch them concurrently. `detach` makes concurrency *easy* and does not make
   it *permitted* — detach is about surviving the WAIT, not about running things
