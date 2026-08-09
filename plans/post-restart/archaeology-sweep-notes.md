@@ -89,6 +89,55 @@ filtered way, not the raw grep count, so it is apples-to-apples.
     `turn_classification_corpus_old_and_new_path_agree` test's `Case` table
     (the `lambda_case_decl`, `quasiquote_decl` entries) and their
     surrounding comment, unchanged in substance.
+- `tidepool-harness` pass (commits `9331f1e7..HEAD`, ~15 commits, one per
+  file): `R0`/`R1`/`R2` and `v1` are NOT archaeology in this crate — the
+  crate's own `tidepool-harness/CLAUDE.md` self-describes as "typed-yield
+  session harness (R0 build)" and the code uses `R0`/`R1`/`R2`/`v1`
+  consistently as present-tense scope markers ("out of R0 scope", "unsupported
+  in v1"), not as internal wave/review-IDs — left untouched throughout. The
+  actual review-ID/wave-label hits removed were `W1`, `W2`, `C2`, `S3`, `F1`,
+  `F2`, `F3`, `B1` (14 token occurrences across `engine.rs`, `forcing.rs`,
+  `harness.rs`, `registry.rs`, `selfharness/driver.rs`, `selfharness/mod.rs`,
+  `uiof.rs`), plus dangling citations to plan docs that no longer exist in
+  this tree (`02-runtime.md`, `08-wave1-correctness.md`,
+  `03-agent-surface.md`, `01/02-runtime.md`, `01/02/03`, `00-scaffold`'s
+  contract doc, `09-askuser-form-gui.md`, `plans/harness-r0/…`) — condensed to
+  the present-tense invariant the citation was backing, verified still true
+  by reading the referenced code. Three items are load-bearing enough to call
+  out explicitly (invariants preserved in the comments left behind, only the
+  history/label framing dropped):
+  - `tidepool-harness/src/selfharness/harness_source.rs`'s module doc: **prior
+    bug (empirically hit, not hypothetical) — splicing a harness file into
+    the session decl plane instead of importing it as a static module gives
+    its types a generation-versioned "home module" that differs between the
+    outer harness compile and a separately-compiled nested Agent turn; since
+    a `Value`'s constructor id is a stable hash of (defining module, name,
+    arity), a value built under one home module case-traps on `resume` when
+    the other side expects its own.** Fixed by importing the SAME static
+    module from both sides so constructor ids always agree — the doc comment
+    dropped only the "confirmed empirically" past-tense framing, the
+    mechanism and hazard are unchanged in the comment left behind.
+  - `tidepool-harness/src/harness.rs`'s `Harness::run_id` field: **prior bug —
+    without a unique per-construction run identity scoping each instance's
+    node decl-plane directories, two concurrent `Harness`es sharing one cache
+    root (a different process, or a second `Harness` in-process) could
+    construct the same node directory and `remove_dir_all` the other's live
+    declarations out from under it.** `run_id` scopes every node dir to
+    `harness-sessions/<run_id>/node-<id>` so this can't happen; only the
+    `(F3 fix)` label was dropped, the invariant is unchanged.
+  - `tidepool-harness/src/harness.rs`'s `cleanup_failed_child` /
+    `drive_answerer_to_value`: **prior bug (external review flagged) — only
+    the success path called `node_done` + `drop_session` on a fork/fanout
+    child; a provider/join/log fault inside `drive_answerer_to_value`, or a
+    `resume_parent` failure after, propagated via `?` and orphaned the child
+    as a live resident session stuck `Running` forever. Separately, cap
+    exhaustion used to hard-fail straight out of the same function, which
+    leaked a `Running` answerer and wedged the parent.** Both are fixed
+    structurally now — `cleanup_failed_child` runs on every fork/fanout error
+    path, and cap exhaustion routes through the `handle_cap_exhaustion`
+    escalation ladder instead of returning — the doc comments dropped the
+    "used to"/"the leak external review flagged" narration but kept the
+    mechanism description (what would leak, and what prevents it now) intact.
 
 ## Uncertain-keep list
 
