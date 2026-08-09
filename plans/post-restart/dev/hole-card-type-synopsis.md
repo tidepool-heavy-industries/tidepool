@@ -149,10 +149,15 @@ mtimes unchanged).
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>` (absolute
   path). NEVER `exclusive` mode. Do not override `.config/nextest.toml`'s
   default-deny `ghc-heavy` group.
-- Shard to ONE test per invocation; run foreground with a long timeout; gate
-  on tests-RUN counts, never exit codes (a run killed at the ~380s boundary is
-  indistinguishable from a failure by exit status — a short count means
-  RE-RUN).
+- Shard to ONE test per invocation; gate on tests-RUN counts, never exit
+  codes (a run killed at the ~380s boundary is indistinguishable from a
+  failure by exit status — a short count means RE-RUN).
+- **Run GHC-heavy binaries DETACHED, not foreground.** This environment
+  hard-kills background processes at ~380s. Measured on this lane:
+  `selfharness_lifecycle` needs ~596s and `acceptance_selfharness` ~210s, so
+  a foreground `selfharness_lifecycle` WILL be killed mid-suite and will look
+  like a failure. Detaching it is not an optimization; it is the only way to
+  get a real count.
 - No LSP / rust-analyzer — `grep` and `Read` only.
 - Scope kills to your own PID or worktree path; never a bare `pkill -f`.
 - Never `git add -A`; never force-push; repo-root `tmp/` is protected; commit

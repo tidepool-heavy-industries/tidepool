@@ -198,6 +198,12 @@ Shared and READ-ONLY. Never rebuild it, never touch `haskell/`.
 - `--no-fail-fast` on any suite with a known red. Gate on tests-RUN counts,
   never on exit codes. Capture full output to a file and extract afterwards —
   never pipe through `head`/`tail` at capture time.
+- **Run GHC-heavy binaries DETACHED, not foreground.** This environment
+  hard-kills background processes at ~380s. Measured on this lane:
+  `selfharness_lifecycle` needs ~596s and `acceptance_selfharness` ~210s, so
+  a foreground `selfharness_lifecycle` WILL be killed mid-suite and is
+  indistinguishable from a failure by exit status. A short tests-RUN count
+  means RE-RUN, not "failure".
 - Never `git add -A`. Never force-push. Repo-root `tmp/` is protected human
   scratch. Commit with `--no-verify` (the hooks run tests; standing directive).
 - A flaky test never lands. Fix it, or narrow it to a documented
