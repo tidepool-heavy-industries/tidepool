@@ -21,10 +21,10 @@ those facts:
 ```haskell
 withHandler (headChanged parentTree) (\change ->
   for_ childAgents $ \child ->
-    sendMessage child (RebaseWhenSafe (newHead change))
+    pokeAgent child (whenSafe (RebaseWhenSafe (newHead change)))
   ) $ do
     parent <- spawnAgent parentSpec parentTask
-    waitAgent parent
+    observeUntilQuiescent parent
 ```
 
 The child is not re-based by a magical Haskell operation. It receives a typed
@@ -52,9 +52,10 @@ This follows the per-layer fluency rule from PRD 18:
 - Git observations and process receipts are authority. Agent prose is useful
   context, never proof of a commit, rebase, merge, or clean tree.
 
-Tidepool is not replacing Exomonad's whole swarm. It is building the typed
-worktree/event seam through which a Tidepool resident can express a recursive
-development tree and improve it at conversation cadence.
+Tidepool is building the typed, headless successor to Exomonad's swarm. The
+worktree/event seam lets a resident express a recursive development tree and
+improve it at conversation cadence; Exomonad remains prior art and migration
+input, not a runtime dependency or public API.
 
 ## Goals
 
@@ -67,12 +68,13 @@ development tree and improve it at conversation cadence.
    agent can receive. One worktree per agent; all agents isolated.
 5. Expose typed `commit` and `headChanged` sources whose handlers execute in
    the surrounding resident effect row.
-6. Make handler lifetime lexical, cleanup reliable, and replay opt-in rather
-   than accidental.
+6. Make handler lifetime lexical, cleanup reliable, and prohibit implicit
+   replay.
 7. Support the recursive development-tree dogfood without adding Git workflow
    verbs or a graph DSL to the runtime.
-8. Orchestrate a human-guided integration with Exomonad's relevant worktree,
-   sidecar, hook, watcher, and lifecycle technology.
+8. Orchestrate a human-guided migration/review against Exomonad's relevant
+   worktree, hook, watcher, and lifecycle technology, recording which
+   reliability properties Tidepool reimplements natively.
 
 ## Non-goals
 
@@ -222,7 +224,12 @@ heterogeneous selection typed.
   fails loudly; commits are never silently dropped.
 
 Closures live only in the current realm. A later resident cycle re-registers
-reactions from explicit `State` and stable worktree IDs.
+reactions from explicit `State` and stable worktree IDs. Because registration
+does not replay, a resident spanning cycles also compares `worktreeHead tree`
+with the last head stored in its checkpoint before registering live reactions.
+This closes the gap in which `HEAD` moves after one cycle unregisters and
+before the next registers; the journal remains diagnostic rather than becoming
+an implicit callback replay mechanism.
 
 **Design stance (Inanna, 2026-08-08):** this surface is designed as an
 ideal DSL first — the vocabulary a fluent Haskell author would naturally
@@ -309,8 +316,9 @@ data DevMessage
 ```
 
 The child decides how to make itself safe and uses native Git. If it is
-finished or unsuitable, the resident may follow up or spawn a replacement
-agent in the retained worktree after writer handoff.
+finished or unsuitable, the resident may send an interrupting finish/handoff
+poke or spawn a replacement agent in the retained worktree after writer
+handoff.
 
 ## Public surface
 
@@ -333,8 +341,8 @@ createWorktree
   -> M effs (Either WorktreeError WorktreeHandle)
 
 workspaceOf    :: WorktreeHandle -> Workspace
-readOnlyOf     :: WorktreeHandle -> Workspace
 worktreeBranch :: WorktreeHandle -> M effs BranchName
+worktreeHead   :: WorktreeHandle -> M effs GitOid
 worktreeId     :: WorktreeHandle -> WorktreeId
 
 lookupWorktree :: WorktreeId -> M effs (Either WorktreeError WorktreeHandle)
@@ -364,29 +372,19 @@ complementary: agent receipts say what the harness observed the worker doing;
 worktree receipts say what Git actually became. The persistent event journal is
 for traceability and restart diagnosis, not implicit callback replay.
 
-## Exomonad integration, under human guidance
+## Exomonad migration/review, under human guidance
 
-> **Endgame decision (Inanna, 2026-08-08), superseding the open framing
-> below:** the exo swarm is ultimately HOSTED ON dev-tree — replacement,
-> not coexistence. Critically, exo's distinctive machinery (the MCP
-> sidecar, message routing) goes UNUSED in that future: it existed to
-> drive interactive Claude sessions, and dev-tree drives HEADLESS agents
-> directly through the backend adapter (PRD 18), which is strictly
-> simpler. Consequence: NOTHING from Exomonad is ported or adopted —
-> no hooksock adaptation, no inbox-reader extraction, no shared crate.
-> The L5 decision record stands as reference/prior-art documentation
-> only; its per-property analysis remains useful as a checklist of
-> reliability properties Tidepool's own designs must satisfy natively
-> (notify + periodic backstop, durable cursors, no-replay for fresh
-> readers), but the mechanisms are reimplemented Tidepool-native where
-> PRD acceptance criteria already demand them, not carried over. Goal 8
-> and the review-lane framing below are retained for historical context
-> of how this was decided.
+This is an explicit implementation lane. The endgame is replacement: the Exo
+swarm is hosted on the dev-tree resident, whose headless agents communicate
+through PRD 18 rather than Exomonad's interactive-session MCP sidecar. Tidepool
+does not import Exomonad public types, process topology, hooksock, inbox reader,
+or a shared runtime crate.
 
-This is an explicit implementation lane. A Tidepool maintainer and an
-Exomonad-aware human/agent jointly map useful existing components and choose
-whether to extract a shared crate, adapt a proven pattern with tests, or retain
-separate implementations.
+A Tidepool maintainer and an Exomonad-aware human/agent still perform a
+property-by-property review before implementation. This preserves the hard-won
+failure semantics while implementing them against Tidepool's realm, registry,
+and receipt model rather than copying mechanisms designed for tmux/interactive
+Claude sessions.
 
 The review starts from concrete precedent:
 
@@ -395,27 +393,23 @@ The review starts from concrete precedent:
   safe default while adding the explicit snapshot escape hatch.
 - `exo-node` has a runtime-owned Unix-domain hook RPC with bounded payload,
   timeout, local permissions, and a thin client/server split
-  (`rust/exo-node/src/hooksock/`). It is a strong shape for Tidepool's later
-  hook wake-up adapter, not an existing Git-hook implementation.
+  (`rust/exo-node/src/hooksock/`). It is prior art for Tidepool's native hook
+  wake-up adapter, not an existing Git-hook implementation to port.
 - Exomonad's inbox reader combines `notify` wakeups, a periodic backstop,
   durable cursors, no replay for a fresh reader, and advance-after-success
-  delivery (`rust/exo-node/src/inbound.rs`). Tidepool should adopt these
-  reliability properties, adapted to its realm and receipt model.
+  delivery (`rust/exo-node/src/inbound.rs`). Tidepool should reproduce these
+  reliability properties in its own realm and receipt model.
 - Exomonad deliberately preserves worktrees after abnormal teardown for
   post-mortem inspection. This validates Tidepool's retain-first v1 stance.
 
 The lane produces a human-reviewed decision record containing:
 
 1. exact Exomonad modules/contracts considered;
-2. what Tidepool reuses, extracts, adapts, or rejects;
-3. ownership and versioning boundary;
-4. Tidepool-local tests/receipts for adopted failure behavior; and
-5. confirmation that no Exomonad tmux, Claude-only, or global-process
+2. the reliability properties retained and mechanisms rejected;
+3. the Tidepool-native ownership and versioning boundary;
+4. Tidepool-local tests/receipts for each retained failure behavior; and
+5. confirmation that no Exomonad tmux, Claude-only, MCP-sidecar, or global-process
    assumption leaks into Tidepool's public Haskell surface.
-
-Exomonad remains usable as an external swarm/process sidecar. Tidepool's
-authored Agent API remains provider-neutral. Future MCP/message integration is
-possible, but not a prerequisite for this local substrate.
 
 ## Dogfood: recursive development tree
 
@@ -433,17 +427,19 @@ No runtime primitive knows what a rebase, merge, development tree, or
 integration policy is. The only hard runtime behavior is single-writer
 assignment and accurate repository observation.
 
-Poke semantics are PRD 18's `pokeAgent`, whose revision is authoritative
-(superseding this document's earlier fire-and-forget note — that note
-described the pre-revision system and wrongly froze it as a decision):
-a poke is accepted into a durable per-agent queue, remains queued until
-deliverable, and is never silently discarded; delivery to an idle agent
-starts or queues a follow-up turn. `sendMessage`/`followupTask` no longer
-exist as separate operations. What stays authored policy in the resident
-is REACTION — what to do about an unacknowledged poke, a superseded plan,
-or a worker whose queue keeps growing — not delivery mechanics. The
-handler in the example above therefore just pokes; the runtime owns
-delivery.
+Poke semantics are PRD 18's tagged `pokeAgent`, whose revision is authoritative.
+A poke is accepted into a durable per-agent FIFO, remains queued until
+deliverable, and is never silently discarded. Repository propagation normally
+uses `whenSafe`: `RebaseWhenSafe` asks the child to choose a coherent stopping
+point without discarding its current turn. Escalation may use `interrupting`
+with a typed `FinishAndCommit` or handoff message; Tidepool then cancels the
+active turn and delivers that message as the next turn. There are no separate
+authored steer, follow-up, or interrupt operations.
+
+What stays authored policy in the resident is reaction: when to escalate, what
+message to send, and whether to wait, replace, integrate, or stop. Delivery,
+turn interruption, durable ordering, and idle follow-up mechanics belong to
+the runtime.
 
 **Cycle shape (updated to PRD 18's revised summary, 2026-08-08):** agents
 may CONTINUE RUNNING between resident cycles — their stable identities and
@@ -452,8 +448,10 @@ never crosses a cycle boundary: an attached Haskell handle, a parked
 Haskell continuation, or an event subscription. So the dev-tree unfold/
 fold can span cycles: each cycle re-registers its `withHandler` reactions
 from explicit `State` and stable worktree IDs, and re-attaches to running
-workers by checkpointed identity. A crash loses only the orchestration
-decisions since the last checkpoint; worktrees, branches, receipts, and
+workers by checkpointed identity. Before registering, it compares each current
+`worktreeHead` with the head stored in `State`, so no-replay handler semantics
+cannot hide a between-cycle move. A crash loses only the orchestration decisions
+since the last checkpoint; worktrees, branches, receipts, queued pokes, and
 still-running agent threads all survive and are re-discoverable by ID.
 
 ## Implementation plan
@@ -465,7 +463,8 @@ interpreter. Land:
 
 - clean current-repository worktree creation;
 - stable runtime-owned worktree path, branch, and registry record;
-- workspace assignment with writer lease;
+- coupled agent binding (one worktree per agent; second binding fails
+  explicitly, rebinding only after the previous agent is terminal/released);
 - `headChanged` polling/reconciliation; and
 - one handler closure executing in its parent's effect row while an agent runs.
 
