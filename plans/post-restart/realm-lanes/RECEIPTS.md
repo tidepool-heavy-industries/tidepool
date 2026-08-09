@@ -214,7 +214,7 @@ caller-supplied metadata, and a realm may simply have chosen a lower suspend
 threshold than `H` has handlers. The extending realm's `Memory` at tag 2 sits
 BELOW its own threshold of 3, so it is dispatched rather than suspended, and if
 `H` has a handler at position 2 the request reaches it. Silently. Exactly the
-misroute the check exists to prevent, and exactly what SEAM.md promised could not
+misroute the check exists to prevent, and exactly what continuation-parking-contract.md promised could not
 happen.
 
 **The fix: exact equality between non-empty prefixes** (empty stays compatible
@@ -237,7 +237,7 @@ the escape hatch §5 names for a row that needs a different handled prefix. No
 such row exists, so buying it to serve a hypothetical would be scar tissue.
 
 **The residual is stated instead of claimed away**, in both the code docs and
-SEAM.md: the check enforces agreement AMONG realms and cannot verify a
+continuation-parking-contract.md: the check enforces agreement AMONG realms and cannot verify a
 declaration against an opaque type parameter — nothing at runtime can. Root's
 addition, aimed at the residual's one real consumer: *derive, don't declare* —
 an internal caller building realms from runtime code should derive the prefix

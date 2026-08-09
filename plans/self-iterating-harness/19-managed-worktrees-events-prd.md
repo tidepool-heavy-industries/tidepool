@@ -30,8 +30,10 @@ withHandler (headChanged parentTree) (\change ->
 The child is not re-based by a magical Haskell operation. It receives a typed
 poke, finds a safe stopping point, makes a WIP commit if useful, performs its
 own native Git rebase and conflict resolution, and emits new repository facts.
-Likewise, an integration agent performs merges in a parent worktree; Tidepool
-observes the resulting `HEAD` move rather than trusting an LLM summary.
+Likewise, an integration agent performs merges in its own worktree created
+from the parent branch (agents are isolated — one worktree per agent);
+Tidepool observes the resulting `HEAD` move rather than trusting an LLM
+summary.
 
 The first rich dogfood is an ordinary recursive unfold/fold:
 
@@ -60,7 +62,9 @@ development tree and improve it at conversation cadence.
 2. Offer an explicit, lossless opt-in path for dirty source state.
 3. Retain managed worktrees indefinitely in v1; losing work is worse than
    accumulating it.
-4. Make a managed worktree usable as PRD 18's caller-assigned `Workspace`.
+4. Couple agent creation to worktree allocation: a managed worktree is
+   PRD 18's `Workspace`, and — once this PRD lands — the only workspace an
+   agent can receive. One worktree per agent; all agents isolated.
 5. Expose typed `commit` and `headChanged` sources whose handlers execute in
    the surrounding resident effect row.
 6. Make handler lifetime lexical, cleanup reliable, and replay opt-in rather
@@ -85,11 +89,17 @@ development tree and improve it at conversation cadence.
 
 ## Locked decisions
 
-### Worktree is a separate resource effect
+### Agent and worktree creation are coupled (revised: Inanna, 2026-08-08)
 
-`Agent` and `Worktree` compose but own neither other's lifecycle. `AgentSpec`
-keeps its Servant-inspired `mode` parameter for tool interpretation; workspace
-topology is a value-level resource, not an agent kind.
+An earlier draft made `Agent` and `Worktree` fully separate resources
+composed by the resident, which required a writer-lease mechanism with an
+unspecified enforcement point. Revised: **agent creation is tightly
+coupled to worktree allocation — one worktree per agent, every agent
+isolated.** Spawning a worker allocates (or is handed, atomically at
+spawn) its OWN managed worktree; once this PRD lands, a managed worktree
+is the only workspace an agent can receive. `AgentSpec` keeps its
+Servant-inspired `mode` parameter for tool interpretation; the worktree
+is part of the spawn, not an agent kind.
 
 ```haskell
 data WorkerRun input result = WorkerRun
@@ -98,13 +108,20 @@ data WorkerRun input result = WorkerRun
   }
 ```
 
-`WorkerRun` is an ordinary resident/library convenience record. Common modes
-are therefore ordinary values: a read-only observer in an existing workspace,
-or one read-write coding worker in a managed worktree.
+`WorkerRun` is the natural result shape of a coupled spawn rather than a
+resident-assembled composition.
 
-The runtime rejects two active `WorkspaceWrite` turns for one managed
-worktree. Read-only reviewers may coexist. A resident hands a worktree to a
-replacement worker only after ending or releasing the current writer.
+Consequences of isolation:
+
+- The writer-lease problem dissolves structurally. At most one agent is
+  ever bound to a worktree at a time; binding a second fails explicitly.
+  Rebinding a retained worktree to a replacement agent is permitted only
+  after the previous agent is terminal or released.
+- Reviewers are isolated like everyone else: a reviewer of a child's work
+  gets its own worktree created `fromWorktree` off the child's branch —
+  no shared-directory coexistence, no read-only lease machinery.
+  `readOnlyOf` survives only if a concrete need appears that isolation
+  cannot serve.
 
 ### Retain first; garbage-collect later
 
@@ -207,16 +224,28 @@ heterogeneous selection typed.
 Closures live only in the current realm. A later resident cycle re-registers
 reactions from explicit `State` and stable worktree IDs.
 
-**Dispatch mechanism (binding):** a handler invocation is an ordinary
-parked continuation in the surrounding realm, consumed through the frozen
-seam contract (`../post-restart/realm-lanes/SEAM.md`): exact handled-prefix
-equality with the surrounding row (derived from the row that built the
-handler stack, never re-declared at the dispatch site), cycle-scoped
-lifetime, driver-chosen resume order at suspension points. A handler that
-suspends (spawning a reviewer, asking the operator) parks like any other
-continuation and blocks its own subscription's queue by design. V1 must
-have a configured per-subscription queue bound whose overflow fails the
-scope loudly; the bound's value is tunable, its existence is not.
+**Design stance (Inanna, 2026-08-08):** this surface is designed as an
+ideal DSL first — the vocabulary a fluent Haskell author would naturally
+write (`withHandler`, `Event`, `<|>`, ordinary closures in the ambient
+effect row) — and the runtime is made to serve it. Runtime machinery is
+never part of the authored contract and never shapes the vocabulary.
+
+The authored semantics above are complete in themselves: handlers run in
+the surrounding effect row, may themselves suspend (spawn a reviewer, ask
+the operator), run one-at-a-time per subscription with later observations
+queued in order, and live exactly as long as their lexical scope. V1 has
+a configured per-subscription queue bound whose overflow fails the scope
+loudly; the bound's value is tunable, its existence is not.
+
+*Implementation note (not authored surface):* an invocation is realized
+as an ordinary parked continuation in the surrounding realm under the
+frozen parking contract
+(`../post-restart/realm-lanes/continuation-parking-contract.md`) — exact
+handled-prefix equality derived from the row that built the handler
+stack (never re-declared at the dispatch site), cycle-scoped lifetime,
+driver-chosen resume order at suspension points. These are constraints
+on the implementation; if the runtime cannot meet the authored semantics
+within them, the runtime work grows — the DSL does not shrink.
 
 ### `commit` and `headChanged` serve different jobs
 
@@ -448,7 +477,9 @@ and `withHandler`. Keep choreography in residents and ordinary libraries.
    content without changing source `HEAD`, index, or bytes.
 4. Worktrees, branches, registry records, and receipts survive restart and are
    never automatically deleted.
-5. A second active writer fails explicitly; a read-only reviewer may coexist.
+5. Binding an agent to an already-bound worktree fails explicitly;
+   rebinding succeeds only after the previous agent is terminal or
+   released. Reviewers run isolated in their own worktrees.
 6. `withHandler` runs in the surrounding effect row, cleans up lexically,
    drains already-observed events, and never replays pre-registration events.
 7. A normal native commit yields reconciled `commit` and `headChanged` facts

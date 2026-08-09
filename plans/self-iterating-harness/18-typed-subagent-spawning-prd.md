@@ -927,6 +927,14 @@ Agent spawning consumes a workspace assignment; it does not create or manage
 one. The assignment supplies an absolute `cwd` plus the sandbox access Codex
 may exercise there:
 
+> **Revision (Inanna, 2026-08-08):** once
+> [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+> lands, agent creation is tightly coupled to worktree allocation — a
+> managed worktree is the only workspace an agent can receive, one
+> worktree per agent, all agents isolated. `CurrentWorkspace` and
+> free-form workspace assignment are transitional, valid only for
+> pre-PRD-19 spikes and dogfood.
+
 ```haskell
 data Workspace = Workspace
   { cwd    :: FilePath
@@ -1127,7 +1135,7 @@ Run these branches eagerly through Exomonad:
    Sequencing (Inanna, 2026-08-08): the realm lands FIRST — this wave spawns
    after it, not around it. Freezing the park/resume seam is a named
    deliverable at the realm-build fold, not something to reverse-engineer
-   here. The contract artifact is `plans/post-restart/realm-lanes/SEAM.md`
+   here. The contract artifact is `plans/post-restart/realm-lanes/continuation-parking-contract.md`
    (invariants + consumer-visible surface + internal/churnable list frozen at
    a91a1479; the exact signature table is filled at that lane's fold, after
    its prefix-compatibility step settles the parked-entry signature). Read

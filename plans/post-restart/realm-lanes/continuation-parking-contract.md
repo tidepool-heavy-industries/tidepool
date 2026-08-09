@@ -1,7 +1,7 @@
-# The park/resume seam — frozen contract for downstream consumers
+# Continuation parking and resume — frozen contract for downstream consumers
 
 Written for the typed-subagent wave (PRD 18), whose `Agent` effect consumes this
-machinery, so it reads the seam from a contract instead of reverse-engineering
+machinery, so it reads this API from a written contract instead of reverse-engineering
 `jit_machine.rs` internals. Sequenced to spawn after the realm landing.
 
 STATUS: FROZEN. Invariants and the internal/public split settled at step 2; the

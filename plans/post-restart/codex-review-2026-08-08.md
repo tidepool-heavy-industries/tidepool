@@ -109,7 +109,7 @@ The realm-prefix branch verifies CALLER-SUPPLIED metadata while dispatch
 remains through an opaque monomorphized `H`. If metadata says a tag lies
 beyond the shared prefix but the concrete `H` has a handler at that
 position, the request can silently reach the WRONG handler — a misroute,
-the one outcome SEAM.md promises cannot happen. Prefix-checking metadata
+the one outcome continuation-parking-contract.md promises cannot happen. Prefix-checking metadata
 alone does not establish "mismatch ⇒ clean UnhandledEffect".
 
 Either require exact handled-prefix equality, or bind authenticated roster
