@@ -37,6 +37,15 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
   - Every GHC-heavy run goes through
     `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
     (absolute path). NEVER `exclusive` mode.
+  - **ACTIVE THROTTLE (root, until lifted — box reached load 92):** the
+    slot requirement widens to EVERY heavy invocation, including
+    `cargo check`/`build --workspace`, `cargo clippy --workspace`, and
+    `cargo nextest run` at ANY tier including quick. Single-crate
+    `check -p X`, edits and greps stay exempt; battery scripts self-acquire
+    and must not be double-wrapped. Batch verification into ONE acquisition
+    rather than several. A slot wait over 15 minutes is starvation —
+    report it, never bypass. Delete this bullet when root lifts the
+    throttle; the base rule above is the standing one.
   - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness
     test shard (persistent per-worktree, not mktemp).
   - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs);

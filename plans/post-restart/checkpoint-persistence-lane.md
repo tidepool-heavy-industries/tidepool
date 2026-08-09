@@ -51,7 +51,10 @@ forms recursion guard, or any invented finiteness guard.
 - Operational, copy VERBATIM into every dev spec:
   - Every GHC-heavy run goes through
     `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
-    (absolute path). NEVER `exclusive` mode.
+    (absolute path). NEVER `exclusive` mode. Check whether root's
+    box-wide throttle is still active when this lane spawns — under it the
+    slot requirement widens to every heavy invocation, quick tier and
+    `--workspace` check included.
   - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness test
     shard (persistent per-worktree, not mktemp). `.cache/` is gitignored.
   - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs); never
