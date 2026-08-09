@@ -183,7 +183,17 @@ impl BindingTable {
             state: BindingState::Active,
             bound_at_ms: now_ms,
         });
-        self.persist(worktree)?;
+        // ROLL BACK on a failed write. Without this, a persist failure leaves
+        // memory holding a binding that disk does not — and since the isolation
+        // invariant is enforced from THIS table, a restart would read the
+        // unbound disk state and let a SECOND agent bind the same worktree.
+        // Two writers in one tree is the exact failure the coupling exists to
+        // make unconstructible, so memory and disk must not be allowed to
+        // disagree even transiently.
+        if let Err(e) = self.persist(worktree) {
+            self.bindings.pop();
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -201,8 +211,16 @@ impl BindingTable {
             .iter()
             .rposition(|b| &b.worktree == worktree && b.state == BindingState::Active);
         if let Some(i) = idx {
+            let previous = self.bindings[i].state;
             self.bindings[i].state = state;
-            self.persist(worktree)?;
+            // Same rollback discipline as `bind`, mirrored: a failed write here
+            // would leave memory believing the worktree is rebindable while
+            // disk still says Active — the inverse disagreement, reached the
+            // same way.
+            if let Err(e) = self.persist(worktree) {
+                self.bindings[i].state = previous;
+                return Err(e);
+            }
         }
         Ok(())
     }

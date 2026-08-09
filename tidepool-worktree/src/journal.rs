@@ -87,43 +87,64 @@ impl EventJournal {
         let reader = BufReader::new(file);
 
         let mut entries = Vec::new();
+        // A malformed row is recoverable ONLY as the final row — that is the
+        // torn-write shape (a crash mid-`writeln!`). A malformed row with
+        // anything after it was not torn by a crash; it is a corrupted receipt,
+        // and silently eliding it would delete exactly the evidence the journal
+        // exists to preserve. So a bad row is held PENDING and only forgiven at
+        // EOF; if any further line arrives, it was not last and we fail loudly.
+        let mut pending_bad: Option<(usize, String)> = None;
+        let not_final = |path: &Path, bad: (usize, String), next: usize| {
+            storage_failure(
+                path,
+                format!(
+                    "malformed journal row at line {} is followed by line {} — a \
+                     corrupted receipt in the middle of the journal is not a torn \
+                     write and must not be silently skipped: {}",
+                    bad.0, next, bad.1
+                ),
+            )
+        };
+
         for (idx, line) in reader.lines().enumerate() {
-            let line = match line {
-                Ok(l) => l,
-                // `io::ErrorKind::InvalidData` here means `read_line` decoded
-                // non-UTF-8 bytes — the same torn-write shape as a truncated
-                // JSON row below (a crash mid-`writeln!` cutting a multi-byte
-                // character), so it gets the same treatment: log and skip
-                // rather than refuse to open the journal. Any OTHER error
-                // (permission denied, a genuine read fault) is not explained
-                // by a torn write and propagates as a real storage failure.
+            let lineno = idx + 1;
+            match line {
+                Ok(l) => {
+                    if let Some(bad) = pending_bad.take() {
+                        return Err(not_final(&path, bad, lineno));
+                    }
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<JournalEntry>(&l) {
+                        Ok(entry) => entries.push(entry),
+                        Err(err) => pending_bad = Some((lineno, err.to_string())),
+                    }
+                }
+                // `InvalidData` means `read_line` decoded non-UTF-8 bytes — the
+                // same torn-write shape as a truncated JSON row, so it gets the
+                // same final-row-only treatment. Any OTHER error (permission
+                // denied, a genuine read fault) is not explained by a torn write
+                // and propagates immediately.
                 Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
-                    eprintln!(
-                        "tidepool-worktree: event journal {} line {} unreadable (invalid utf-8), skipping: {err}",
-                        path.display(),
-                        idx + 1
-                    );
-                    continue;
+                    if let Some(bad) = pending_bad.take() {
+                        return Err(not_final(&path, bad, lineno));
+                    }
+                    pending_bad = Some((lineno, format!("invalid utf-8: {err}")));
                 }
                 Err(err) => return Err(storage_failure(&path, err)),
-            };
-            if line.trim().is_empty() {
-                continue;
             }
-            match serde_json::from_str::<JournalEntry>(&line) {
-                Ok(entry) => entries.push(entry),
-                Err(err) => {
-                    // A torn write (crash mid-`writeln!`) leaves an incomplete
-                    // final line. Losing that one observation is recoverable;
-                    // refusing to open the journal over it is not — so this is
-                    // a diagnostic, not a propagated error.
-                    eprintln!(
-                        "tidepool-worktree: event journal {} line {} unreadable, skipping: {err}",
-                        path.display(),
-                        idx + 1
-                    );
-                }
-            }
+        }
+
+        // Reached EOF with a bad row outstanding: it WAS the final row, so this
+        // is the recoverable torn write. Losing that one observation beats
+        // refusing to open the journal over it.
+        if let Some((lineno, reason)) = pending_bad {
+            eprintln!(
+                "tidepool-worktree: event journal {} line {} is a torn final row, skipping: {reason}",
+                path.display(),
+                lineno
+            );
         }
 
         Ok(Self { path, entries })

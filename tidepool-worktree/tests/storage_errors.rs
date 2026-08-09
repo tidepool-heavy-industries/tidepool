@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    AgentRef, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid, HeadChangeKind,
-    HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin,
-    WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
+    AgentRef, BindingState, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid,
+    HeadChangeKind, HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager,
+    WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
 
 /// Make `dir` unwritable (`r-xr-xr-x`) so a create/write inside it fails.
@@ -340,4 +340,169 @@ fn create_reports_typed_failure_when_a_file_blocks_the_worktree_root() {
     // No registry row from the failed attempt: the failure happened before
     // any receipt could be written.
     assert!(manager.list().expect("list").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Pre-fold defects found by external plan review (2026-08-09). Both are
+// loud-failure violations: state that disagrees with itself, silently.
+// ---------------------------------------------------------------------------
+
+/// A malformed row in the MIDDLE of the journal is a corrupted receipt, not a
+/// torn write, and must fail loudly.
+///
+/// The recovery contract tolerates exactly one shape: a crash mid-`writeln!`
+/// leaving an incomplete FINAL line. A bad row with valid rows after it cannot
+/// have been produced that way. Silently skipping it would delete precisely the
+/// evidence the journal exists to preserve — and `EventJournal` is the
+/// traceability substrate PRD 19 points post-mortems at, so a quietly shorter
+/// journal is worse than an unopenable one.
+#[test]
+fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let path = base.path().join("events.jsonl");
+
+    let mut journal = EventJournal::open(&path).expect("open");
+    let ev = RepositoryEvent::HeadChanged(HeadChangeReceipt {
+        worktree: WorktreeId::from_raw("wt-mid"),
+        old_head: None,
+        new_head: GitOid::from_raw("a".repeat(40)),
+        kind: HeadChangeKind::UnknownChange,
+        branch: None,
+        observed_at_ms: 1,
+    });
+    journal.append(&ev, EventId(1)).expect("append 1");
+    journal.append(&ev, EventId(2)).expect("append 2");
+
+    // Corrupt the FIRST row, leaving the second intact after it.
+    let text = fs::read_to_string(&path).expect("read journal");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "fixture must have two rows to corrupt a middle one"
+    );
+    lines[0] = "{ this is not valid json".to_string();
+    fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write corrupted journal");
+
+    match EventJournal::open(&path) {
+        Err(WorktreeError::StorageFailure { path: p, detail }) => {
+            assert_eq!(p, path, "the failure names the journal file");
+            assert!(
+                detail.contains("followed by"),
+                "the failure must say the bad row was not final, so a reader can \
+                 tell corruption from a torn write: {detail}"
+            );
+        }
+        Ok(j) => panic!(
+            "expected StorageFailure; journal opened with {} entries — a corrupted \
+             middle receipt was silently elided",
+            j.since(0).map(|v| v.len()).unwrap_or(0)
+        ),
+        other => panic!("expected StorageFailure, got {other:?}"),
+    }
+}
+
+/// WRONG-REASON GUARD for the gate above: a torn FINAL row must still be
+/// tolerated. Without this, the middle-row gate would also pass if the fix had
+/// simply made every malformed row fatal — which would break restart recovery
+/// rather than tighten it.
+#[test]
+fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let path = base.path().join("events.jsonl");
+
+    let mut journal = EventJournal::open(&path).expect("open");
+    let ev = RepositoryEvent::HeadChanged(HeadChangeReceipt {
+        worktree: WorktreeId::from_raw("wt-tail"),
+        old_head: None,
+        new_head: GitOid::from_raw("b".repeat(40)),
+        kind: HeadChangeKind::UnknownChange,
+        branch: None,
+        observed_at_ms: 1,
+    });
+    journal.append(&ev, EventId(1)).expect("append");
+
+    let text = fs::read_to_string(&path).expect("read journal");
+    fs::write(&path, format!("{text}{{ torn")).expect("append torn final row");
+
+    let reopened = EventJournal::open(&path).expect("a torn FINAL row stays recoverable");
+    assert_eq!(
+        reopened.since(0).expect("since").len(),
+        1,
+        "the intact row survives; only the torn final row is dropped"
+    );
+}
+
+/// A failed persist must roll back the in-memory binding.
+///
+/// Without rollback, memory holds a binding disk does not. The isolation
+/// invariant is enforced from THIS table, so a restart would read the unbound
+/// disk state and let a SECOND agent bind the same worktree — two writers in one
+/// tree, which is the exact condition the coupling exists to make
+/// unconstructible.
+#[test]
+fn binding_failed_bind_persist_rolls_back_in_memory_state() {
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let root = base.path().join("bindings");
+    let mut table = BindingTable::open(&root).expect("open bindings");
+
+    make_read_only(&root);
+    let worktree = WorktreeId::from_raw("wt-rollback");
+    let agent = AgentRef::from_raw("agent-a");
+    let result = table.bind(&worktree, &agent, 1000);
+    make_writable(&root);
+
+    match result {
+        Err(WorktreeError::StorageFailure { .. }) => {
+            assert!(
+                table.current(&worktree).is_none(),
+                "a failed persist must leave NO in-memory binding — memory and disk \
+                 disagreeing here is how a second agent gets to bind after restart"
+            );
+            // And the table is still usable: the rollback left no wreckage.
+            table
+                .bind(&worktree, &agent, 2000)
+                .expect("bind succeeds once the write can land");
+            assert_eq!(table.current(&worktree).expect("bound").agent, agent);
+        }
+        Ok(()) => eprintln!(
+            "SKIPPED: binding_failed_bind_persist_rolls_back_in_memory_state — the write \
+             succeeded despite chmod 0o555, so permission bits are not enforced here \
+             (likely running as root); the rollback path cannot be exercised."
+        ),
+        other => panic!("expected StorageFailure, got {other:?}"),
+    }
+}
+
+/// The mirror of the above: a failed `settle` persist must restore the previous
+/// state, or memory believes the worktree is rebindable while disk still says
+/// `Active`.
+#[test]
+fn binding_failed_settle_persist_rolls_back_in_memory_state() {
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let root = base.path().join("bindings");
+    let mut table = BindingTable::open(&root).expect("open bindings");
+
+    let worktree = WorktreeId::from_raw("wt-settle-rollback");
+    let agent = AgentRef::from_raw("agent-a");
+    table.bind(&worktree, &agent, 1000).expect("initial bind");
+
+    make_read_only(&root);
+    let result = table.settle(&worktree, BindingState::Released);
+    make_writable(&root);
+
+    match result {
+        Err(WorktreeError::StorageFailure { .. }) => {
+            let current = table
+                .current(&worktree)
+                .expect("a failed settle must leave the binding ACTIVE in memory");
+            assert_eq!(current.agent, agent);
+        }
+        Ok(()) => eprintln!(
+            "SKIPPED: binding_failed_settle_persist_rolls_back_in_memory_state — the write \
+             succeeded despite chmod 0o555, so permission bits are not enforced here \
+             (likely running as root); the rollback path cannot be exercised."
+        ),
+        other => panic!("expected StorageFailure, got {other:?}"),
+    }
 }

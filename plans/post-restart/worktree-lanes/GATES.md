@@ -204,6 +204,36 @@ PASS tidepool-worktree::event_monitor unreachable_old_head_after_gc_yields_unkno
 PASS tidepool-worktree::event_monitor unrelated_history_on_the_same_branch_yields_unknown_change_rather_than_a_guess
 ```
 
+## State that must not disagree with itself (external review, 2026-08-09)
+
+Both were silent-disagreement defects: no build error, no failing test, and a
+system that looks correct until a restart reads the other half.
+
+| Gate | Failure mode it exists to catch |
+|---|---|
+| `journal_malformed_middle_row_fails_loudly_rather_than_being_skipped` | a corrupted middle receipt silently elided — the recovery contract tolerates only a torn FINAL row, and a quietly shorter journal deletes the evidence it exists to preserve |
+| `journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix` | WRONG-REASON GUARD: the gate above would also pass if every malformed row became fatal, which would break restart recovery rather than tighten it |
+| `binding_failed_bind_persist_rolls_back_in_memory_state` | memory holding a binding disk does not — isolation is enforced from this table, so a restart reads the unbound disk state and lets a SECOND agent bind the same worktree |
+| `binding_failed_settle_persist_rolls_back_in_memory_state` | the mirror: memory believing a worktree is rebindable while disk still says `Active` |
+
+```
+PASS tidepool-worktree::storage_errors binding_failed_bind_persist_rolls_back_in_memory_state
+PASS tidepool-worktree::storage_errors binding_failed_settle_persist_rolls_back_in_memory_state
+PASS tidepool-worktree::storage_errors journal_malformed_middle_row_fails_loudly_rather_than_being_skipped
+PASS tidepool-worktree::storage_errors journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix
+```
+
+Verified non-vacuous: the two binding gates carry a root-user skip arm (a
+`chmod 0o555` is unenforceable as root), so the run was checked for `SKIPPED`
+lines — zero, at uid 1000. Duration 14–23 ms each is plausible: these exercise
+filesystem-failure and early-return paths that never spawn git.
+
+RESIDUAL, flagged not fixed: those skip arms PASS when skipped, the same shape
+as the env-skip hazard root swept. Different cause — the environment cannot
+express the condition, rather than lacking a tool — and root's ruling was scoped
+to missing-env with this crate excluded, so changing the convention at submit
+time was not mine to do unilaterally.
+
 ## Fresh reads — `worktreeHead` is not a cached field
 
 PRD 19 added `worktreeHead` so a resident spanning cycles can compare the
