@@ -218,15 +218,45 @@ must not be taken on the normal-path numbers alone.
   list/bool/char/unit/numeric/tuple/ordering only). For a PURE machine-entry
   term — `pure (…)`, which is what BOTH the seed being deleted and item 0's
   render entry are — only `Val` is reachable; `E`/`Union`/`Leaf`/`Node` are
-  not. They are present today only because `tyconMeta = collectDataCons
-  tycons` sweeps every home-module TyCon without reachability — **precisely
-  the sweep D2 replaces.**
-  So a reachability-derived `RuntimeTypeClosure` that does not special-case
-  these five will produce a table that boots nothing, surfacing as a
-  `MissingConTags` failure far from the change. **D2 must carry the five as
-  mandatory roots, unconditionally, with a test asserting they survive
-  narrowing on a pure entry term.** Verify the claim before relying on this
-  note; it is reasoned from the anchors above, not measured.
+  not.
+  **SUPPLIER CORRECTED (spawn-latency, verified by this TL) — the first
+  attribution in this note was WRONG and dangerously so.** It said the five
+  ride in on `tyconMeta = collectDataCons tycons`. They cannot:
+  `tycons` is `mg_tcs` (a module's OWN TyCons) and the five live in the
+  freer-simple PACKAGE (`Control.Monad.Freer`, `Data.OpenUnion`,
+  `Data.FTCQueue`), which is NOT vendored under `haskell/` — verified, no
+  such source in the tree. An external package's TyCons never enter a home
+  module's `mg_tcs`, and `type M = Eff '[…]` defines a synonym, not a
+  datacon-carrying TyCon.
+  The real supplier is `collectTransitiveDCons` — the binder-TYPE closure
+  (`Translate.hs` ~1094–1129). It seeds from `idType` of every top-level
+  binder and `closeTyCons` expands through newtype reprs AND
+  `dataConOrigArgTys` field types. From any binder mentioning `Eff`: `Eff`'s
+  datacons are `Val`/`E`; `E`'s field types are `Union effs b` and
+  `FTCQueue (Eff effs) b a`, so the closure reaches the `Union` and
+  `FTCQueue` TyCons, yielding `Union` and `Leaf`/`Node`. All five, **from the
+  TYPE alone** — reachability-independent. `isGhcCompilerTyCon` does not
+  filter them.
+  **Why the correction changes what D2 protects.** Under the wrong story the
+  five ride on Core reachability, so a dev protects them by preserving the
+  home-TyCon sweep. Under the true story they are immune to any narrowing of
+  reachable Core and break ONLY if `RuntimeTypeClosure` replaces
+  `collectTransitiveDCons` — which is live, since this spec lists
+  "target/result + boundary + session-bound types" among D2's roots, reading
+  exactly like a binder-type-closure replacement. A dev following the wrong
+  warning would preserve `tyconMeta`, replace `transitiveMeta`, and ship the
+  precise break while believing they had complied.
+  **The guard is unchanged and correct under both stories:** carry the five as
+  mandatory roots, unconditionally — not "if reachable", not "if the effect
+  row is non-empty" — with a test pinning them through narrowing on a PURE
+  entry term specifically. Treat it as a D2 correctness requirement on par
+  with D1's hard fail.
+  Still traced from code, NOT measured. D2's first step is an empirical
+  attribution: dump a `meta.cbor` for a pure entry and attribute the five to a
+  source, settling it rather than leaving it argued.
+  **When D2 lands, the mandatory-roots set becomes a named, tested artifact
+  with a permanent home in the codegen or extract docs** (root's call) — not
+  folklore recoverable only from this note.
 - **C1** GHC compiles every home module twice per extract (load'
   LoadAllTargets + unconditional second parse/typecheck/core2core loop —
   GhcPipeline.hs ~165/~184; session path ~366/~387). Leading suspect for
