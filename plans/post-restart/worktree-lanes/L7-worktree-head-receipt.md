@@ -1,8 +1,11 @@
 # L7 receipt — `worktreeHead`, a fresh-read HEAD lookup
 
-Base commit: `ea9837e10b7bf073e5c29b192063d2715e9b8785` ("docs(worktree-lanes):
-correct the poke-semantics note; record the cycle-shape change") — the tip of
-this branch when this lane's implementation and tests were written and run.
+Base commit: `5ae91b84` ("docs(worktree-lanes): certify the one-failure-mode
+gates by name") — `root.worktree-wave`'s tip after this branch was rebased
+onto it. (Implementation and tests were originally written and verified
+against the prior tip, `ea9837e1`; the rebase carried forward cleanly with no
+conflicts, and every command below — including the four named gates — was
+re-run and reconfirmed passing against this commit before submission.)
 
 ## What landed
 
