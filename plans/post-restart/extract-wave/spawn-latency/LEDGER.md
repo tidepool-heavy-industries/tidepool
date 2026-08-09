@@ -331,18 +331,63 @@ requirement in their dev spec, the same way D1 got one:
   driven by what Rust actually asks for, not by what the fragment happens to
   build.
 
+---
+
+## C1 measurement — landed (2026-08-08/09)
+
+Full report: `01-c1-measurement.md`. Summary and what changed mid-item, for
+anyone reading this ledger before the report:
+
+- **Bracket design was corrected once, before landing.** First instructed to
+  NEST `depanal`/`load`/`inject` inside `ghc_session`; the wave TL then
+  reversed that (nesting violates `timing.rs`'s documented "stages are FLAT"
+  invariant) and asked for a PARTITION instead: `ghc_setup` + `ghc_load` as
+  two flat, non-overlapping rows recovering the old `ghc_session` figure as
+  their sum. The shipped code is the flat design only — nesting was never
+  committed.
+- **`ghc_session` is RETIRED on the compile lane, kept on the `--classify`
+  lane** (`Binders.hs`'s `classifyBlock`, a much smaller span —
+  `getSessionDynFlags` alone). One emitter, one meaning now; see
+  `timing.rs`'s `PHASE_GHC_SESSION` tombstone.
+- **`plans/self-iterating-harness/11-turn-latency-contract.md` is RETIRED**
+  (`git rm`'d in the same commit that landed the bracket) in favour of
+  `plans/self-iterating-harness/11-extract-timing-contract.md`, per an
+  explicit root/Inanna done-criterion added mid-item. Every reference updated
+  except `plans/post-restart/extract-wave.md:81` (root's own file, outside
+  this namespace — left alone on request).
+- **The sub-TL spec's "typecheck suspicion REFUTED" framing is WITHDRAWN.**
+  The `typecheck` phase counts only ONE of the two typechecks a turn pays
+  (`load'` redoes a first typecheck internally, undecomposed); the report
+  treats home-module typecheck cost as OPEN.
+- **Headline number is the `ghc_load`-share RATIO, demonstrated stable
+  across two load arms** (1-min loadavg ~11→~34, `ghc_load/extract.total`
+  moved <2pp), not an absolute — per a mid-item root throttle directive
+  triggered by a box-wide load-92 incident. Absolutes are reported as
+  contended upper bounds. `parMakeCount`/`-j` confirmed ABSENT (sequential
+  `load'` and sequential second loop) — the mechanistic reason the ratio held.
+- **Session path reached** (`runSessionPipeline`, 5 samples via
+  `tidepool-repl::decl_plane::record_syntax_selectors_localized`, a
+  user-ADT-value vehicle — plain `Int`/`Text` binds do NOT trigger it, see
+  the report's vehicle notes) but the depth axis reached is `Val.G<n>`
+  (session-value generation), NOT `Lib.G<n>` (session-decl generation, the
+  one E2's O(n²) concern is about). **The `Lib.G<n>` scaling question is an
+  explicit, reported UNANSWERED gap** — no existing `tidepool-repl` test
+  drives 5+ sequential decls in one session.
+
+---
+
 ## Item rows
 
 *(measurement / decision / receipts filled in as each item folds)*
 
 | Item | Status | Measurement | Decision | Receipts |
 |---|---|---|---|---|
-| C1 measurement | in flight (`c1-timing`) | — | — | — |
+| C1 measurement | **done** (`c1-timing`) | `01-c1-measurement.md`. `ghc_load` (=`load'` alone) is 28–32% of `extract.total`, second loop (`typecheck`+`core`) 62–69%, combined ~96–97% — demonstrated stable across a 1-min-loadavg swing of ~11→~34 (two arms, 6 samples each, ratio moved <2pp). `ghc_load` is 97–98% of `ghc_setup+ghc_load` in both arms — almost none of the historical "session boot 26–32%" was boot. Typecheck-suspicion REFUTED framing withdrawn mid-item (measures one of two typechecks); treated as OPEN. Session path reached (5 samples, `Val.G1`–`G4`) but on the wrong generation axis — `Lib.G<n>` decl-chain scaling UNANSWERED. | Evidence only, no decision recorded here (that's the wave TL's per spec) — see report §"Answers (3)" | wire-inertness ×2 (stdout+files byte-identical); `extract-fidelity-test` 26/26; `tidepool-harness` acceptance shard 24/24, 0 failed; `cargo check --workspace` clean |
 | D1-A defense | in flight (`d1-defense`) | — | — | — |
 | D1-B removal | queued | — | — | — |
 | E6 tiered `-O2` | queued | — | — | — |
 | D2 runtime closure | queued | — | — | — |
-| **Pivotal: persistent extractor** | BLOCKED on C1 | — | — | — |
+| **Pivotal: persistent extractor** | BLOCKED on C1 → **C1 done, evidence in** | — | Not yet recorded — wave TL's call, per spec | — |
 
 ## Wire-moving items flagged to root
 

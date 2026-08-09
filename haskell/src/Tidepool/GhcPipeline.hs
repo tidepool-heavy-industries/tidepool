@@ -163,6 +163,14 @@ runNormalPipeline path includes = do
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
     -- "No instance for Monad (Eff '[Console, …])".
     modGraphRaw <- depanal [] False
+    -- 'ghc_setup' phase (TIDEPOOL_TIMING): session DynFlags setup +
+    -- guessTarget/setTargets + this 'depanal' call, nothing else. FLAT and
+    -- non-overlapping with 'ghc_load' below — see Tidepool.Timing's module
+    -- haddock and the 'PHASE_GHC_SESSION' tombstone in timing.rs: this pair
+    -- retired the old 'ghc_session' bracket on the compile lane (a
+    -- collector recovers the historical figure as 'ghc_setup' + 'ghc_load').
+    setupT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     -- unpoison: keep the EPS healthy under the TH/QQ downgrade by unsetting
     -- Opt_IgnoreInterfacePragmas on every summary (see the depanal/load'
     -- haddock above). The bytecode-vs-object provisioning choice is made
@@ -171,14 +179,18 @@ runNormalPipeline path includes = do
     -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    loadT0 <- monotonicTime
     loadFlag <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
                (mapMG unpoison modGraphRaw)
+    loadT1 <- monotonicTime
+    -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
+    -- else. FLAT — see 'ghc_setup' above; the two rows partition what
+    -- 'ghc_session' used to bracket, they do not nest inside it.
+    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
-    sessionT1 <- monotonicTime
-    liftIO (emitPhase timing "ghc_session" (elapsedMs sessionT0 sessionT1))
     -- Process all modules: parse, typecheck, desugar, optimize each.
     -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
     -- the load phase may have downgraded them for TH/QQ bytecode provisioning.
@@ -325,8 +337,11 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
 -- (GHC-58427).
 runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
 runSessionPipeline scope path includes = do
-  libdir <- getLibdir
+  timing <- readTimingEnabled
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
+    sessionT0 <- monotonicTime
     dflags <- getSessionDynFlags
     setSessionDynFlags (extractionDynFlags dflags includes)
     target <- guessTarget path Nothing Nothing
@@ -341,6 +356,13 @@ runSessionPipeline scope path includes = do
         -- them resolves from the HPT entry the injection registers in phase 2.
         excludedVal = map renderSessionModule (ssValIfaces scope)
     modGraphRaw <- depanal excludedVal False
+    -- 'ghc_setup' phase (TIDEPOOL_TIMING): session DynFlags setup +
+    -- guessTarget/setTargets + this 'depanal' call — SAME MEANING as the
+    -- normal path's 'ghc_setup' phase. FLAT, partitioning what the retired
+    -- 'ghc_session' bracket used to cover — see Tidepool.Timing's module
+    -- haddock and the 'PHASE_GHC_SESSION' tombstone in timing.rs.
+    setupT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
         targetModName' = mkModuleName targetModName
@@ -384,8 +406,14 @@ runSessionPipeline scope path includes = do
     -- (injected as ifaces in PHASE 2), so it cannot go through @load'@. We use
     -- LoadAllTargets on depGraph (target filtered out above) — equivalent to the
     -- old @LoadDependenciesOf@ but without compiling the target prematurely.
+    loadT0 <- monotonicTime
     loadFlag <- load' Nothing LoadAllTargets
                mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
+    loadT1 <- monotonicTime
+    -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
+    -- else — same meaning as the normal path's 'ghc_load' phase. FLAT — see
+    -- 'ghc_setup' above.
+    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     -- Phase barrier: same policy as 'runNormalPipeline' — a 'Failed' PHASE 1
     -- dependency load stops here, before the module-graph restore, PHASE 2's
     -- Val iface injection, or PHASE 3's per-module compile ever see a
@@ -404,9 +432,15 @@ runSessionPipeline scope path includes = do
     -- PHASE 2 — inject the live @Val.G<g>@ ifaces into the now dep-populated
     -- HPT. AFTER @load'@, so its upsweep does not discard them; the subsequent
     -- per-module compile (no further @load'@) preserves them.
+    injectT0 <- monotonicTime
     hsc0 <- getSession
     hscInjected <- injectSessionScope scope hsc0
     setSession hscInjected
+    injectT1 <- monotonicTime
+    -- 'inject' phase (TIDEPOOL_TIMING): PHASE 2's Val-iface injection alone.
+    -- Session-path-only — the normal path never injects session Vals. FLAT,
+    -- like every other phase here — not summed into anything.
+    liftIO (emitPhase timing "inject" (elapsedMs injectT0 injectT1))
     -- PHASE 3 — compile EVERY home-source module (deps + target) to optimized
     -- Core, exactly like 'runNormalPipeline'. This is load-bearing: extracting
     -- only the target and resolving the home-library functions it calls
@@ -432,10 +466,19 @@ runSessionPipeline scope path includes = do
           [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
     when (null summaries) $
       liftIO $ ioError (userError "runSessionPipeline: empty module graph")
+    tcMsRef   <- liftIO (newIORef (0 :: Integer))
+    coreMsRef <- liftIO (newIORef (0 :: Integer))
     results <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
-      parsed      <- parseModule modSum
-      typechecked <- typecheckModule parsed
+      -- 'typecheck'/'core' are summed ACROSS this loop (one line each,
+      -- emitted after) exactly like 'runNormalPipeline' — same rationale:
+      -- the wire grammar is one line per phase per process, and a turn
+      -- module always compiles alongside its preamble/stdlib dep modules in
+      -- the same loop.
+      (typechecked, tcMs) <- timeSection $ do
+        parsed <- parseModule modSum
+        typecheckModule parsed
+      liftIO (modifyIORef' tcMsRef (+ tcMs))
       hscEnv0     <- getSession
       let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
           tcGblEnv = fst (tm_internals_ typechecked)
@@ -445,8 +488,10 @@ runSessionPipeline scope path includes = do
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@ — see 'processSessionFile').
           mResTy   = capturedBindingType "__result" tcGblEnv
-      desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-      simplified <- liftIO $ core2core hscEnv desugared
+      (simplified, coreMs) <- timeSection $ do
+        desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+        liftIO $ core2core hscEnv desugared
+      liftIO (modifyIORef' coreMsRef (+ coreMs))
       -- A deferred module (target ∪ transitive Val-importers, computed above)
       -- was deliberately excluded from PHASE 1's @load'@, so nothing has
       -- registered it in the HPT yet — do that here, now that PHASE 2's Val
@@ -470,6 +515,10 @@ runSessionPipeline scope path includes = do
         hscEnvNow <- getSession
         setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
       return (externalizeInternalTops simplified, mCapTy, mResTy)
+    totalTcMs   <- liftIO (readIORef tcMsRef)
+    totalCoreMs <- liftIO (readIORef coreMsRef)
+    liftIO (emitPhase timing "typecheck" totalTcMs)
+    liftIO (emitPhase timing "core" totalCoreMs)
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
         allGuts = map fst3 results

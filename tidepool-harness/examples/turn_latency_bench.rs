@@ -5,7 +5,7 @@
 //! residual (turn wall minus the sum of attributed stages).
 //!
 //! MEASUREMENT ONLY — see
-//! `plans/self-iterating-harness/11-turn-latency-contract.md` for the
+//! `plans/self-iterating-harness/11-extract-timing-contract.md` for the
 //! documented invocation (both the DEBUG build, which matches production's
 //! `target/debug/tidepool-selfharness`, and the `--release` comparison) and
 //! what the four scenarios below are for.

@@ -263,10 +263,17 @@ mod tests {
     /// shelling a real extract (the bench covers that).
     #[test]
     fn extract_stderr_timing_lines_forward_via_parse_and_record() {
+        // The `ghc_session` line here is a historical fixture (this test
+        // exercises the PARSER, which accepts any phase name) — a REAL
+        // compile-lane stderr never emits `ghc_session` post-partition, only
+        // `ghc_setup`/`ghc_load` (see `PHASE_GHC_SESSION`'s tombstone doc);
+        // both new names are covered alongside it below.
         let stderr = "\
 some ghc warning\n\
 tidepool-timing phase=startup ms=12\n\
 tidepool-timing phase=ghc_session ms=980\n\
+tidepool-timing phase=ghc_setup ms=94\n\
+tidepool-timing phase=ghc_load ms=886\n\
 tidepool-timing phase=typecheck ms=340\n\
 tidepool-timing phase=total ms=1500\n";
         let parsed = timing::ExtractTiming::parse(stderr);
@@ -275,6 +282,8 @@ tidepool-timing phase=total ms=1500\n";
             vec![
                 (timing::PHASE_STARTUP.to_string(), 12),
                 (timing::PHASE_GHC_SESSION.to_string(), 980),
+                (timing::PHASE_GHC_SETUP.to_string(), 94),
+                (timing::PHASE_GHC_LOAD.to_string(), 886),
                 (timing::PHASE_TYPECHECK.to_string(), 340),
                 (timing::PHASE_TOTAL.to_string(), 1500),
             ]

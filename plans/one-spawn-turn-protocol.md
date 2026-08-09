@@ -24,11 +24,17 @@ Two things a reader should carry forward rather than rediscover:
   `classify_block`). The per-turn classify is gone; `tidepool-repl`'s block
   runner cannot fuse its verdicts into a compile, for the reasons in Decision 1
   of the contract doc. The spawn-count table below already said this.
-- **The remaining turn cost is `core`, not spawn count.** The open gap in
-  `plans/self-iterating-harness/11-turn-latency-contract.md` is now closed by a
+- **The remaining turn cost is `core`, not spawn count.** The open gap this
+  passage originally cited (`11-turn-latency-contract.md`, since RETIRED — see
+  `plans/self-iterating-harness/11-extract-timing-contract.md`) was closed by a
   post-swap measurement: 60–66% of a turn's extract spawn is GHC's Core
-  pipeline, 26–32% is session boot, and under 6% is typecheck. Anyone picking up
-  turn latency should start there.
+  pipeline, 26–32% is session boot, and under 6% is typecheck. C1
+  (`plans/post-restart/extract-wave/spawn-latency/01-c1-measurement.md`) revises
+  this reading: the `typecheck` row counted only ONE of the two typechecks a
+  turn actually pays (the second is hidden inside `load'`), and most of the
+  "26–32% session boot" figure is `load'` running a full first compile, not
+  session boot in the narrow sense. Anyone picking up turn latency should start
+  at the newer doc.
 
 ### What Phase A left (historical)
 

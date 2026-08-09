@@ -5,6 +5,27 @@
 -- @PHASE_*@ name vocabulary and the stderr grammar this emits
 -- (@tidepool-timing phase=\<name\> ms=\<int\>@); the two must stay in sync by
 -- hand since they live in separate languages/crates.
+--
+-- __Phases are FLAT, never nested (do not sum a phase into another).__ On
+-- both @GhcPipeline.hs@ extraction paths (@runNormalPipeline@ and
+-- @runSessionPipeline@), @ghc_setup@ (session DynFlags setup +
+-- guessTarget\/setTargets + @depanal@) and @ghc_load@ (the @load'@ call
+-- alone) are two SEPARATE, NON-OVERLAPPING spans that PARTITION what an
+-- older @ghc_session@ bracket used to cover on the compile lane — see the
+-- @PHASE_GHC_SESSION@ tombstone in @tidepool-harness\/src\/timing.rs@. A
+-- collector recovers the old coarse figure as the SUM @ghc_setup + ghc_load@
+-- (a flat-sum collector already does this for free); neither row is emitted
+-- twice, so there is nothing to avoid double-counting. On the session path,
+-- @inject@ (PHASE 2's Val-iface splice) is a third flat row alongside them,
+-- with no normal-path counterpart. @load'@ itself gets NO internal
+-- decomposition: it already redoes the SAME parse\/typecheck\/core2core work
+-- the per-module loop below it redoes a second time, so one row around the
+-- whole call answers what matters. Do not redefine an existing phase's
+-- MEANING when adding a finer one — see the @classify_extract@ RETIRED
+-- tombstone in @plans\/self-iterating-harness\/11-extract-timing-contract.md@
+-- for why a same-named stage carrying a different meaning silently poisons
+-- longitudinal comparison; new granularity gets a NEW name instead (as
+-- @ghc_setup@\/@ghc_load@ did here, rather than repurposing @ghc_session@).
 module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
