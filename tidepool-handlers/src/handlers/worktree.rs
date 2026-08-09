@@ -14,7 +14,7 @@ use tidepool_worktree::error::{
 use tidepool_worktree::git::GitCli;
 use tidepool_worktree::id::{BranchName, GitOid, GitRef, WorktreeId};
 #[cfg(test)]
-use tidepool_worktree::registry::WorktreeOrigin;
+use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
 
 // ============================================================================
@@ -244,14 +244,11 @@ impl WorktreeHandler {
     /// registered — a typo-shaped miss) must stay distinguishable from
     /// `Err(WorktreeLost)` (registered, then gone from disk — data loss); see
     /// `tidepool-worktree/src/registry.rs`'s `WorktreeRegistry::get` doc and
-    /// PRD 19. The frozen wire contract for this verb is `Either WorktreeError
-    /// WorktreeHandle` (no `Maybe` layer — see `worktree_effect_def!`), and the
-    /// frozen `errors` block has no dedicated "never registered" variant, so
-    /// `Ok(None)` is spelled here as `NotARepository` (`never_registered`
-    /// above) — the closest available "there is nothing here" reading, with an
-    /// explanatory detail string — rather than collapsing it onto
-    /// `WorktreeLost`'s tag, which would erase exactly the distinction PRD 19
-    /// asks for.
+    /// PRD 19. `Ok(None)` is spelled here as the wire `WorktreeNotRegistered`
+    /// variant (`never_registered` above), which the `errors` block carries
+    /// specifically to preserve this distinction — never collapsed onto
+    /// `WorktreeLost`'s tag, which would erase exactly what PRD 19 asks be
+    /// kept visible.
     fn worktree_lookup(
         &mut self,
         tree_id: WtWorktreeId,
@@ -422,6 +419,7 @@ mod tests {
             origin: WorktreeOrigin::CurrentRepository,
             source_repository: PathBuf::from("/repo"),
             created_at_ms: 1_700_000_000_000,
+            status: WorktreeRecordStatus::Finalized,
         }
     }
 
@@ -582,6 +580,49 @@ mod tests {
     }
 
     #[test]
+    fn error_to_wire_worktree_not_registered() {
+        let wire = error_to_wire(DomainWorktreeError::WorktreeNotRegistered(
+            WorktreeId::from_raw("wt-typo"),
+        ));
+        assert_eq!(
+            wire,
+            WorktreeError::WorktreeNotRegistered(WtWorktreeId {
+                raw: "wt-typo".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn error_to_wire_invalid_registry_root() {
+        let wire = error_to_wire(DomainWorktreeError::InvalidRegistryRoot {
+            root: PathBuf::from("/repo/.tidepool-registry"),
+            inside: PathBuf::from("/repo"),
+        });
+        assert_eq!(
+            wire,
+            WorktreeError::InvalidRegistryRoot(
+                "/repo/.tidepool-registry".to_string(),
+                "/repo".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn error_to_wire_storage_failure() {
+        let wire = error_to_wire(DomainWorktreeError::StorageFailure {
+            path: PathBuf::from("/registry/wt-1.json"),
+            detail: "No space left on device".to_string(),
+        });
+        assert_eq!(
+            wire,
+            WorktreeError::StorageFailure(
+                "/registry/wt-1.json".to_string(),
+                "No space left on device".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn never_registered_is_distinct_from_worktree_lost() {
         let id = WtWorktreeId {
             raw: "wt-ghost".to_string(),
@@ -591,7 +632,23 @@ mod tests {
             "wt-ghost",
         )));
         assert_ne!(unregistered, lost);
-        assert!(matches!(unregistered, WorktreeError::NotARepository(_)));
+        assert!(matches!(
+            unregistered,
+            WorktreeError::WorktreeNotRegistered(_)
+        ));
         assert!(matches!(lost, WorktreeError::WorktreeLost(_)));
+    }
+
+    #[test]
+    fn never_registered_spells_worktree_not_registered_with_the_given_id() {
+        let id = WtWorktreeId {
+            raw: "wt-typo".to_string(),
+        };
+        assert_eq!(
+            never_registered(&id),
+            WorktreeError::WorktreeNotRegistered(WtWorktreeId {
+                raw: "wt-typo".to_string()
+            })
+        );
     }
 }
