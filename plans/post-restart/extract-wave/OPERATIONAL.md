@@ -282,6 +282,19 @@ localized diffs and log it at fold):
   Check log CONTENT, never exit status: an environment failure exits in
   milliseconds and reads as a fast pass.
 
+- **PREFER AN ARGUMENT AN INCOMPLETE SEARCH CANNOT MISLEAD** (spawn-latency).
+  When a claim rests on a grep being exhaustive, look for a route to the same
+  conclusion that does not. Worked example: asked to bound the blast radius of
+  downgrading CHECK B, the grep-based answer was "only tests asserting
+  extraction FAILS are at risk" — sound, but only as good as the search. The
+  structural answer is stronger and cheaper: **CHECK B is NEW, introduced by
+  this very item, so nothing predating it can depend on its fatality.** Blast
+  radius is exactly the tests the item wrote. Same conclusion, immune to a
+  missed file.
+  This is the constructive twin of the instrument rules below: those say a
+  search can silently return a plausible wrong answer; this says when you can,
+  do not stake the claim on a search at all.
+
 - **HOLD A PRIOR EXPECTATION OF THE ANSWER'S SIZE BEFORE YOU RUN THE COMMAND**
   (spawn-latency — the deepest of the instrument lessons, because it says care
   is not the defense). Counting `#[test]` declarations across 11 acceptance
