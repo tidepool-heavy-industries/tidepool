@@ -344,7 +344,7 @@ fn park_entry(
     expect_req: i64,
 ) -> ContinuationId {
     match machine
-        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm)
+        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
         .expect("entry run_suspendable_parked")
     {
         ParkedOutcome::Suspended { id, request, .. } => {
@@ -380,6 +380,7 @@ fn park_fragment(
             ASK_TAG,
             realm,
             ParkKind::Plain,
+            &[],
         )
         .expect("fragment run_fragment_suspendable_parked")
     {
@@ -472,6 +473,7 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 ASK_TAG,
                 RealmId(0),
                 ParkKind::Binding { forced: true },
+                &[],
             )
             .expect("realm A bind completes");
         let (value_a, root_a) = match outcome_a {
@@ -503,6 +505,7 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 ASK_TAG,
                 RealmId(1),
                 ParkKind::Binding { forced: true },
+                &[],
             )
             .expect("realm B bind completes");
         let (value_b, root_b) = match outcome_b {
@@ -557,7 +560,7 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
         assert_rooting_receipt(&machine, 0);
 
         let id_a = match machine
-            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0))
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
             .expect("realm A parks on its closure-valued finalize")
         {
             ParkedOutcome::Suspended {
@@ -592,6 +595,7 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
                 ASK_TAG,
                 RealmId(1),
                 ParkKind::Plain,
+                &[],
             )
             .expect("realm B parks on its OWN closure-valued finalize")
         {

@@ -260,7 +260,7 @@ fn park_entry(
     expect_req: i64,
 ) -> ContinuationId {
     match machine
-        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm)
+        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
         .expect("entry run_suspendable_parked")
     {
         ParkedOutcome::Suspended { id, request, .. } => {
@@ -306,6 +306,7 @@ fn park_fragment(
             ASK_TAG,
             realm,
             ParkKind::Plain,
+            &[],
         )
         .expect("fragment run_fragment_suspendable_parked")
     {

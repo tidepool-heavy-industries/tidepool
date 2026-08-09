@@ -102,6 +102,20 @@ pub enum JitError {
     EffectResponseTooLarge { nodes: usize, limit: usize },
     #[error("VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression; set TIDEPOOL_VARID_CHECK=0 only to bypass for bisection.")]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
+    /// Refused at park time (never a machine invariant violation — a
+    /// caller/configuration error, so `Err`, not a panic): the realm's
+    /// handled-effect prefix disagrees, at `position`, with the prefix the
+    /// machine already established from an earlier park. See
+    /// [`JitEffectMachine::check_prefix_compatible`].
+    #[error(
+        "realm handled-effect prefix disagrees with the machine's established prefix at \
+         position {position}: established {established:?}, incoming {incoming:?}"
+    )]
+    IncompatibleHandledPrefix {
+        established: Vec<String>,
+        incoming: Vec<String>,
+        position: usize,
+    },
 }
 
 /// A pending first-cause `RuntimeError` surfaces as a yield error — the shape
@@ -203,6 +217,11 @@ pub struct ContinuationFrame {
     /// resume decodes exclusively against the row it was compiled for — a
     /// caller cannot resume a frame against a foreign table.
     table: Arc<DataConTable>,
+    /// This realm's handled prefix — the effect names for tags
+    /// `[0, suspend_tag)`, in position order — captured at park time and
+    /// replayed unchanged on every re-park of the same realm (a resume that
+    /// suspends again). See [`JitEffectMachine::check_prefix_compatible`].
+    handled_prefix: Arc<[String]>,
 }
 
 /// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
@@ -237,12 +256,18 @@ pub enum ParkedOutcome {
 
 /// Where the shared suspendable epilogue puts a continuation when a turn
 /// suspends. Internal: the public entries pick one and project the result.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ParkTarget {
     /// The single `suspended_continuation` slot (every pre-existing entry).
     Slot,
     /// The continuation registry, under a fresh id in this realm.
-    Registry { realm: RealmId, kind: ParkKind },
+    Registry {
+        realm: RealmId,
+        kind: ParkKind,
+        /// This realm's handled prefix, checked against the machine's
+        /// established prefix immediately before the park it would produce.
+        handled_prefix: Arc<[String]>,
+    },
 }
 
 /// Result of the shared suspendable body before it is projected into whichever
@@ -446,6 +471,17 @@ pub struct JitEffectMachine {
     /// removed, only cleared (see [`Self::realm_cancel_handle`]'s doc for
     /// whether a completed run clears it).
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
+    /// The machine's ESTABLISHED handled-effect prefix: the machine cannot
+    /// introspect its own handler stack (`H` is a compile-time monomorphized
+    /// type parameter, not runtime data), so this is the machine's runtime
+    /// record of what `H` is, in its stead. Set from the first NON-EMPTY
+    /// handled prefix any realm parks with ([`Self::park_continuation`]);
+    /// `None` until then. MONOTONIC — never cleared or overwritten
+    /// afterward, including on resume: every realm on a machine is driven
+    /// through the same single `H` for the machine's whole life, so a realm
+    /// that resumed and completed does not release the constraint. See
+    /// [`Self::check_prefix_compatible`].
+    established_prefix: Option<Arc<[String]>>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -716,6 +752,7 @@ impl JitEffectMachine {
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
+            established_prefix: None,
         })
     }
 
@@ -755,6 +792,7 @@ impl JitEffectMachine {
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
+            established_prefix: None,
         })
     }
 
@@ -1392,7 +1430,10 @@ impl JitEffectMachine {
     /// entry) or the continuation registry ([`ParkTarget::Registry`]). `table`
     /// and `park_cancel_flag` are only consulted on the registry path, to
     /// populate the newly-parked [`ContinuationFrame`] (A3/A4) — the slot path
-    /// ignores both, unchanged.
+    /// ignores both, unchanged. On the registry path a SUSPENSION also runs
+    /// [`Self::check_prefix_compatible`] against `park`'s `handled_prefix`
+    /// before anything else in this method's `Suspended` arm mutates —
+    /// enforced constraint 1 (realm-lanes/B-prefix-compat).
     #[allow(clippy::too_many_arguments)]
     fn finish_suspendable(
         &mut self,
@@ -1491,6 +1532,15 @@ impl JitEffectMachine {
                 request_ptr,
                 continuation,
             } => {
+                // ENFORCED CONSTRAINT 1: refuse a position-incompatible realm
+                // BEFORE anything below mutates — no finalized-closure tenure,
+                // no id minted, no root registered, no frame inserted,
+                // established prefix unchanged. Registry-path only: the slot
+                // path has no realm concept and no established prefix to
+                // check against.
+                if let ParkTarget::Registry { handled_prefix, .. } = &park {
+                    self.check_prefix_compatible(handled_prefix)?;
+                }
                 // W4 finalize-by-reference: when the bridged request carries a
                 // CLOSURE_SENTINEL placeholder, its value field (field 1 of the
                 // request Con) is a live closure with no data representation.
@@ -1519,7 +1569,11 @@ impl JitEffectMachine {
                         self.suspended_continuation = Some(continuation);
                         None
                     }
-                    ParkTarget::Registry { realm, kind } => Some(self.park_continuation(
+                    ParkTarget::Registry {
+                        realm,
+                        kind,
+                        handled_prefix,
+                    } => Some(self.park_continuation(
                         continuation,
                         realm,
                         kind,
@@ -1527,6 +1581,7 @@ impl JitEffectMachine {
                         park_cancel_flag,
                         Arc::new(table.clone()),
                         parked_finalized_root,
+                        handled_prefix,
                     )),
                 };
                 Ok(ParkedRaw::Suspended {
@@ -2697,11 +2752,58 @@ impl JitEffectMachine {
     // machine holding N parks.
     // ----------------------------------------------------------------------
 
+    /// Check `incoming` — a realm's handled prefix, the effect names for tags
+    /// `[0, suspend_tag)` in position order — against the machine's
+    /// established prefix, position-by-position up to the SHORTER of the two
+    /// lengths. `DispatchEffect` is positional over an `HList` and the
+    /// suspend test is `tag >= suspend_tag`; both are correct only relative
+    /// to one effect row whose handled effects occupy a contiguous low
+    /// prefix, so two realms sharing a machine must agree on that prefix
+    /// everywhere it overlaps.
+    ///
+    /// An EMPTY `incoming` prefix is compatible with anything — this is the
+    /// outer driver's threshold-zero row (`vec![runllmturn_decl()]`, handled
+    /// prefix empty). If the machine has not established a prefix yet, any
+    /// `incoming` prefix is compatible (it may go on to become the
+    /// establishing one). Otherwise, agreement at every position up to the
+    /// shorter length is COMPATIBLE — this accepts a strict EXTENSION
+    /// (`[FileIO, Proc]` then `[FileIO, Proc, Memory]`) as well as an
+    /// identical prefix. A tag introduced by such an extension beyond the
+    /// machine's actual handler stack falls off the end of the `HList` as
+    /// `EffectError::UnhandledEffect` — a clean error, not a silent misroute,
+    /// but NOT a guarantee the extension is fully safe; only the shared
+    /// prefix is verified. Any disagreement within the shared length is
+    /// refused.
+    fn check_prefix_compatible(&self, incoming: &[String]) -> Result<(), JitError> {
+        if incoming.is_empty() {
+            return Ok(());
+        }
+        if let Some(established) = &self.established_prefix {
+            let shorter = established.len().min(incoming.len());
+            for position in 0..shorter {
+                if established[position] != incoming[position] {
+                    return Err(JitError::IncompatibleHandledPrefix {
+                        established: established.to_vec(),
+                        incoming: incoming.to_vec(),
+                        position,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Park a suspended continuation into the registry as a registered GC root
     /// and mint its [`ContinuationId`]. The heap-stable `Box` cell is the same
     /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
     /// this registration is released by [`Self::resume_parked`], not by a guard
     /// at the end of the next child run.
+    ///
+    /// The caller MUST have already checked `handled_prefix` via
+    /// [`Self::check_prefix_compatible`] — this method performs no check of
+    /// its own, only the establishing write: if the machine has not yet
+    /// established a prefix and `handled_prefix` is non-empty, this park
+    /// BECOMES the establishing one.
     #[allow(clippy::too_many_arguments)]
     fn park_continuation(
         &mut self,
@@ -2712,7 +2814,11 @@ impl JitEffectMachine {
         cancel_flag: Arc<AtomicBool>,
         table: Arc<DataConTable>,
         finalized_root: Option<crate::old_space::RootSlot>,
+        handled_prefix: Arc<[String]>,
     ) -> ContinuationId {
+        if self.established_prefix.is_none() && !handled_prefix.is_empty() {
+            self.established_prefix = Some(handled_prefix.clone());
+        }
         let mut cell = Box::new(continuation);
         let slot: *mut *mut u8 = &mut *cell;
         // SAFETY: `slot` is the address of the Box's inner cell — a stable heap
@@ -2733,6 +2839,7 @@ impl JitEffectMachine {
                 finalized_root,
                 cancel_flag,
                 table,
+                handled_prefix,
             },
         );
         id
@@ -2756,6 +2863,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         realm: RealmId,
+        handled_prefix: &[String],
     ) -> Result<ParkedOutcome, JitError> {
         let func_id = self.func_id;
         self.run_fragment_suspendable_parked(
@@ -2766,6 +2874,7 @@ impl JitEffectMachine {
             suspend_tag,
             realm,
             ParkKind::Plain,
+            handled_prefix,
         )
     }
 
@@ -2775,6 +2884,14 @@ impl JitEffectMachine {
     /// a suspension in the registry under `realm`. `kind` picks the completion
     /// discipline — [`ParkKind::Plain`] bridges the `Done` pointer,
     /// [`ParkKind::Binding`] tenures it as a value-plane bind.
+    ///
+    /// `handled_prefix` is this realm's handled prefix — the effect names for
+    /// tags `[0, suspend_tag)`, in position order (the caller builds the
+    /// decls row, so it has the names). If this turn suspends, it is checked
+    /// against the machine's established prefix immediately before the park
+    /// ([`Self::check_prefix_compatible`]); a disagreement refuses the park
+    /// with `JitError::IncompatibleHandledPrefix` and leaves the machine
+    /// untouched. Ignored entirely if this turn completes instead.
     ///
     /// # Panics
     /// Panics on a non-session machine.
@@ -2788,6 +2905,7 @@ impl JitEffectMachine {
         suspend_tag: u64,
         realm: RealmId,
         kind: ParkKind,
+        handled_prefix: &[String],
     ) -> Result<ParkedOutcome, JitError> {
         self.run_suspendable_shared(
             func_id,
@@ -2796,7 +2914,11 @@ impl JitEffectMachine {
             user,
             suspend_tag,
             kind.bind_forced(),
-            ParkTarget::Registry { realm, kind },
+            ParkTarget::Registry {
+                realm,
+                kind,
+                handled_prefix: Arc::from(handled_prefix),
+            },
         )
         .map(ParkedRaw::into_parked)
     }
@@ -2807,7 +2929,9 @@ impl JitEffectMachine {
     /// the id and the input.
     ///
     /// Resumes in ANY order: the registry imposes none. A re-suspension parks
-    /// again under a FRESH id in the same realm.
+    /// again under a FRESH id in the same realm, replaying the frame's own
+    /// `handled_prefix` — re-checked against the (unchanged) established
+    /// prefix at that new park, same as any other park.
     ///
     /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
     /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
@@ -2841,8 +2965,13 @@ impl JitEffectMachine {
              would free it. Convert the caller to the parked path; do not mix."
         );
         // PEEK the frame — do NOT remove it yet (A5).
-        let (realm, kind, suspend_tag) = match self.continuations.get(&id) {
-            Some(frame) => (frame.realm, frame.kind, frame.suspend_tag),
+        let (realm, kind, suspend_tag, handled_prefix) = match self.continuations.get(&id) {
+            Some(frame) => (
+                frame.realm,
+                frame.kind,
+                frame.suspend_tag,
+                frame.handled_prefix.clone(),
+            ),
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "resume_parked: no continuation parked under {id:?}"
@@ -2887,7 +3016,11 @@ impl JitEffectMachine {
             suspend_tag,
             input,
             kind.bind_forced(),
-            ParkTarget::Registry { realm, kind },
+            ParkTarget::Registry {
+                realm,
+                kind,
+                handled_prefix,
+            },
             cancel_flag,
         )
         .map(ParkedRaw::into_parked)
