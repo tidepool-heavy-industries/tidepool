@@ -123,6 +123,41 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
 - PRD acceptance-criteria sections are the DONE checklist for steps 2–5;
   the bounded malformed-submission re-prompt test stays green throughout.
 
+## POST-REBASE GATE (obligations accrued mid-wave)
+
+This lane forked BEFORE root's jit-chain-2 fold (ConTags fix + retry-path
+consolidation), so it carries a known inherited red: a full
+`tidepool-harness` shard on this base fails 29, and root's shard on the
+fixed tip is 166/166 with none of them reproducing. Rebase happens ONCE,
+after every dev folds — rebasing between folds strands the remaining
+children's merge-bases. Four things must happen at that boundary:
+
+1. **Full `tidepool-harness` shard re-run** as transfer proof, not quick
+   tier alone. This is what CONFIRMS the 29 dissolved instead of assuming
+   it. Anything surviving is a genuinely new finding.
+2. **Re-run the derived-sum-vs-`SumShape`-literal `==` form.** dev-2 hit a
+   case-trap (`runtime_strlen` bad pointer 0x1) comparing a DERIVED sum
+   shape to a literal, and isolated it precisely: derived PRODUCT vs
+   product literal is fine, literal-vs-literal sums are fine, `show` of a
+   derived sum is fine, all 12 types render correctly individually. ONLY
+   derived-sum vs sum-literal traps. Its shape tests assert exact
+   RENDERINGS instead, so coverage is unchanged either way. If the `==`
+   form still traps on the fixed tip it is a real bug with a 2-line repro,
+   and that repro goes straight to root.
+3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
+   resolved-`render` decision; root updated the checkpoint bullet. Keep
+   BOTH.
+4. **`14-generic-derived-askuser-prd.md` is dual-edited** — this lane made
+   the error-UX amendment (acceptance criterion, UX section, plugin note);
+   Inanna finalized content on root's tip `f5d2ee55` (`choose`/`chooseMany`
+   promoted from deferred escape hatch to the chosen sibling surface; the
+   spike named a GO/NO-GO gate for this PRD *and* the typed-subagent PRD
+   18; alternatives record updated). Disjoint sections, no overlap in
+   intent. Keep BOTH.
+
+Say in the rebase receipt which conflicts appeared and how they resolved —
+"kept both" is only checkable if it is stated.
+
 ## DONE CRITERIA
 
 - Spike verdict reported (either way) with receipts.
