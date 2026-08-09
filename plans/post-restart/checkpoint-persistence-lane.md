@@ -1,10 +1,9 @@
 # Spec: checkpoint-persistence TL (successor to generic-surface)
 
-Owns two items cut from the generic-surface queue when that lane's delta grew
-(Inanna, 2026-08-08 — lanes that accumulate separable work run too long):
-**checkpoint persistence round-trip correctness** and the **`Tidepool.Form`
-builder deletion**. Spawns on the post-fold tip, so everything
-generic-surface built is underneath rather than beside you.
+Owns **checkpoint persistence round-trip correctness** and the
+**`Tidepool.Form` builder deletion**, both cut from the generic-surface
+queue. Spawns on the post-fold tip, so everything generic-surface built is
+underneath rather than beside you.
 
 Decisions live in `plans/self-iterating-harness/15-generic-surface-wave.md`
 (anchor) and `14-generic-derived-askuser-prd.md` (the PRD). Cite them; do not
