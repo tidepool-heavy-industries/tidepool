@@ -2789,9 +2789,9 @@ impl EmitContext {
                 // emitted as null placeholder slots and patched by
                 // `letrec_post_simple_step` when the awaited binder lands
                 // (the same pending-capture machinery the Lam pre-alloc knot
-                // uses). Previously these were silently DROPPED by the
-                // capture filter → unresolved_var_trap on force (the `cycle`
-                // Known-Limit, now fixed).
+                // uses). Without this, such a capture would be silently
+                // DROPPED by the capture filter, hitting unresolved_var_trap
+                // on force instead.
                 let promised: FxHashSet<VarId> = fvs
                     .iter()
                     .filter(|v| !args.ctx.env.contains_key(v) && letrec_binders.contains(v))
