@@ -238,6 +238,25 @@ impl WorktreeRegistry {
 
     /// Every registered worktree, present or lost, ordered by `created_at_ms`
     /// then id so the listing is stable across processes.
+    ///
+    /// A LOST worktree (registered, gone from disk) is reported as
+    /// `present: false` rather than failing the listing — one missing tree must
+    /// never hide the others. A CORRUPT record is different and does halt the
+    /// listing with [`WorktreeError::StorageFailure`] naming that file.
+    ///
+    /// The asymmetry is deliberate and worth knowing before it surprises
+    /// someone: loss is an expected outcome of a human removing a directory,
+    /// while corruption is not an expected byproduct of anything this crate
+    /// does (records are written to a temp file in the same directory, fsynced,
+    /// then renamed, so a torn record cannot land here). The tension with
+    /// retain-first is real — one bad file makes every other worktree
+    /// temporarily unlistable — but the error names the exact path to fix and
+    /// no worktree, branch, or record is lost, so the state is recoverable by
+    /// inspection rather than by guesswork. If corruption ever turns out to be
+    /// routine rather than exceptional, the fix is to make a listing able to
+    /// REPRESENT an unreadable row, not to skip it silently; skipping would
+    /// make a retained worktree quietly disappear, which is the exact failure
+    /// retain-first exists to prevent. See `L6-storage-errors-receipt.md`.
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         let dir = self.root.join(RECORDS_DIR);
         let mut receipts = Vec::new();
