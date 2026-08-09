@@ -64,19 +64,83 @@ Established from the 0.146.0 schema:
   `model`, `sandbox`, `developerInstructions`, `baseInstructions`, `config`.
   Supplying `cwd` only at turn start is expressible — which is the shape PRD 18
   wants for avoiding the project-trust write.
-- **Open, and the first thing bring-up must resolve:** `dynamicTools` is not a
-  declared property of `ThreadStartParams` or `TurnStartParams` in 0.146.0.
-  `DynamicToolSpec` / `DynamicToolNamespaceTool` definitions exist (function
-  and namespace forms, each `{name, description, inputSchema, deferLoading?}`)
-  but nothing in the generated schema references them, and `ThreadStartParams.config`
-  is an open `additionalProperties: true` object. Find the real attachment
-  point from `codex-codes` and the CLI's own source before any live run.
+- **RESOLVED by bring-up — and the generated schema was misleading here.**
+  `dynamicTools` is a top-level field of `ThreadStartParams`, sibling to
+  `cwd`/`config`/`model`, NOT nested in `config`. It is thread-scoped (frozen
+  at creation, as PRD 18 assumed), gated by
+  `#[experimental("thread/start.dynamicTools")]`, and unlocked by
+  `InitializeParams.capabilities.experimentalApi = true`.
+
+  The reason it looked absent: **schema generation silently drops
+  `#[experimental(...)]`-gated fields**, so `DynamicToolSpec` and
+  `DynamicToolNamespaceTool` appear as definitions that nothing references.
+  Treat the generated schema as a lower bound on the protocol, never as a
+  complete picture — reading it as complete leads to "dynamic tools do not
+  exist". Answers about experimental surface come from `openai/codex` at the
+  matching git tag (`rust-v0.146.0`). Full sourcing in
+  `tidepool-agent/fixtures/app-server-0.146.0/PROTOCOL-NOTES.md`.
+
+  Same cause, second consequence: `codex-codes` 0.146.4 exposes none of the
+  dynamic-tool types either. They are hand-rolled under
+  `backend::codex::dynamic_tools` and sent through the crate's raw `request()`
+  escape hatch — which PRD 18 anticipated, and which keeps containment intact.
+
+- `outputSchema` constrains the **text of the final `agentMessage` item**.
+  There is no separate structured-output field on the turn or the thread item:
+  the model's final message text *is* the schema-conforming JSON, and the
+  driver decodes it. This matters more than it looks — see the encoding
+  polarity note below.
 
 Schema regenerate command (idempotent, offline, safe):
 
 ```bash
 codex app-server generate-json-schema --out tidepool-agent/fixtures/app-server-0.146.0/
 ```
+
+## Encoding polarity — the seam between the two wave-1 gates (WAVE-2 DESIGN ITEM)
+
+Wave 1's two Haskell/Rust results are each correct and together they expose a
+constraint neither lane could see alone. Naming it here so the vertical core
+does not discover it by writing the wrong encoder first.
+
+**What gate 1(b) proved** (`receipt-structural-codec.md`): lists and genuine
+recursion survive the real extract/JIT. The self-referential dictionary
+(`Structural Plan` → `Structural [Plan]` → `Structural Plan`) elaborates and
+runs. That is the gate's actual question and the answer is GO, independent of
+wire shape. It uses one uniform `{"tag": …, "fields": [positional…]}` shape for
+every constructor form — a deliberate, well-argued response to the three-shapes
+mistake in `../codex-review-2026-08-08.md` item 8.
+
+**What the backend requires** (`receipt-adapter-bringup.md`): the model is the
+encoder on the other side of two boundaries, and it knows only a JSON Schema.
+Observed live, the child emitted tool arguments as a **named-field object**
+(`{"question": "What is the secret passphrase?"}`), and `outputSchema`
+constrains the final message text the model itself writes.
+
+So the structural interpreter has two boundaries with genuinely different
+requirements, and one encoding cannot serve both:
+
+| Boundary | Who encodes / decodes | Requirement |
+|---|---|---|
+| Tidepool ↔ Tidepool (authored messages, internal state) | Tidepool both ends | Uniformity is a virtue. `{"tag","fields"}` is fine, and inverse-by-construction is the property that matters. |
+| Tidepool ↔ model (tool inputs, tool outputs the child reads, terminal results) | the **model** on the far side | Must be named-field JSON **describable by a JSON Schema**. Positional `fields` arrays are not something a model can be asked to produce reliably, and field order is not a contract the model ever sees. |
+
+Consequences to settle in the vertical core, not now:
+
+1. A sum type crossing the model boundary needs a JSON-Schema-expressible
+   discriminated shape (`oneOf` + a `const` tag, or a tag field), not a
+   positional array. Whether every authored result type may be a sum, or only
+   records, is a real authored-surface decision.
+2. Schema emission and encoder must come from the SAME traversal for the
+   model-facing direction too — the drift argument PRD 18 makes for
+   `compileTools` applies with more force here, because a schema/encoder
+   disagreement shows up as a model producing well-formed JSON we then reject.
+3. Field names become load-bearing on the model-facing side, so
+   selector→wire-name normalization applies to record fields, not just tool
+   names.
+
+None of this reopens gate 1(b). The recursion/list result is what transfers;
+the wire shape was scoped to a proof and said so.
 
 ## HOLD lines (root announces each lift; all intact as of wave 1)
 
