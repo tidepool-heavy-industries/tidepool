@@ -1125,7 +1125,11 @@ Run these branches eagerly through Exomonad:
    Sequencing (Inanna, 2026-08-08): the realm lands FIRST — this wave spawns
    after it, not around it. Freezing the park/resume seam is a named
    deliverable at the realm-build fold, not something to reverse-engineer
-   here.
+   here. The contract artifact is `plans/post-restart/realm-lanes/SEAM.md`
+   (invariants + consumer-visible surface + internal/churnable list frozen at
+   a91a1479; the exact signature table is filled at that lane's fold, after
+   its prefix-compatibility step settles the parked-entry signature). Read
+   the seam from that file, not from `jit_machine.rs`.
 
 Any NO-GO stops convergence and routes to the named substrate repair. No
 agent-authored JSON schema, synchronous subprocess wrapper, or immortal realm
