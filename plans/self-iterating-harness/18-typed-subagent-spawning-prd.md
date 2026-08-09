@@ -541,6 +541,13 @@ observeWorker worker = waitAgent worker >>= \case
     observeWorker worker
 ```
 
+The compact example shows the first cooperative reminder. A real resident
+stores an escalation stage and deadline in checkpointed `State`: later
+`AgentWentIdle` or stale observations can trigger progressively stronger
+`whenSafe` messages, followed by an `interrupting` typed finalize/handoff
+message, replacement, operator escalation, or an explicit stop. The runtime
+reports lifecycle facts; this schedule remains authored policy.
+
 ## Public Haskell API
 
 The exact class/row spelling follows the existing Tidepool effect machinery,

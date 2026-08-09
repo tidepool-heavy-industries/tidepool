@@ -521,12 +521,14 @@ libraries.
    rebinding succeeds only after the previous agent is terminal or
    released. Reviewers run isolated in their own worktrees.
 6. `withHandler` runs in the surrounding effect row, cleans up lexically,
-   drains already-observed events, and never replays pre-registration events.
+   drains already-observed events, and never replays pre-registration events;
+   register-then-`worktreeHead` reconciliation catches between-cycle movement.
 7. A normal native commit yields reconciled `commit` and `headChanged` facts
    sharing an `EventId`; a rebase at least yields an honest `headChanged` fact.
 8. Polling remains correct without hooks; a hook adapter is only a wake-up.
-9. `dev-tree/Harness.hs` typechecks and proves parent-to-child typed rebase
-   pokes plus bottom-up LLM-led integration in a disposable repository.
+9. `dev-tree/Harness.hs` typechecks and proves parent-to-child `whenSafe`
+   rebase pokes, typed interrupting escalation, and bottom-up LLM-led
+   integration in a disposable repository.
 10. The human-guided Exomonad migration/review record is complete and each
     retained reliability property has Tidepool-local tests/receipts.
 
