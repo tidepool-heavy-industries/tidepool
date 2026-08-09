@@ -143,7 +143,9 @@ index. It must not alter the user's branch, `HEAD`, ordinary index, staged
 state, or working-tree bytes. It includes tracked staged/unstaged content plus
 non-ignored untracked files; ignored files are excluded. The receipt records
 source `HEAD`, selected paths, and pre-snapshot status. Dirty submodules fail
-loudly in v1.
+loudly in v1, and so does a source with an in-progress merge, rebase, or
+cherry-pick (`MERGE_HEAD`/`REBASE_HEAD` present) — a synthetic commit of a
+half-merged tree is a reproducible base for the wrong program.
 
 The synthetic commit is a reproducible base, not a claim that the user made a
 commit. Child work uses a Tidepool branch rooted at it; later integration cares
@@ -183,9 +185,10 @@ union operator:
 (<|>) :: Event a -> Event a -> Event a
 ```
 
-It means “the next matching observation from either source”; it need not fake
-a general `Applicative` instance. Mapped sum events keep heterogeneous
-selection typed.
+It means “observations from either source, merged into one subscription”
+(subscriptions repeat for their lexical lifetime; this is not one-shot); it
+need not fake a general `Applicative` instance. Mapped sum events keep
+heterogeneous selection typed.
 
 ### Handler semantics are structured concurrency
 
@@ -204,16 +207,35 @@ selection typed.
 Closures live only in the current realm. A later resident cycle re-registers
 reactions from explicit `State` and stable worktree IDs.
 
+**Dispatch mechanism (binding):** a handler invocation is an ordinary
+parked continuation in the surrounding realm, consumed through the frozen
+seam contract (`../post-restart/realm-lanes/SEAM.md`): exact handled-prefix
+equality with the surrounding row (derived from the row that built the
+handler stack, never re-declared at the dispatch site), cycle-scoped
+lifetime, driver-chosen resume order at suspension points. A handler that
+suspends (spawning a reviewer, asking the operator) parks like any other
+continuation and blocks its own subscription's queue by design. V1 must
+have a configured per-subscription queue bound whose overflow fails the
+scope loudly; the bound's value is tunable, its existence is not.
+
 ### `commit` and `headChanged` serve different jobs
 
 `commit tree` is the high-signal semantic checkpoint: normal commit, merge,
 cherry-pick, or amend observed in that worktree. It is for review, test, and
 receipt reactions.
 
-`headChanged tree` reports every observed movement of the worktree's current
+`headChanged tree` reports observed movement of the worktree's current
 `HEAD`: normal advance, amend, rebase/rewrite, reset, or checkout. It is the
 dependency-propagation signal: children should receive a rebase poke even when
 their parent was itself rebased.
+
+Observations are coalesced state deltas, not a complete movement log: a
+polling observer that finds `HEAD` at C after last seeing A reports one
+transition, even if the tree passed through B in between, and
+classification degrades honestly to `UnknownChange` when the intermediate
+history is not recoverable. No consumer may treat the stream as exhaustive
+history; the dependency-propagation job needs only latest-state semantics,
+which coalescing preserves.
 
 ```haskell
 data HeadChangeKind
@@ -365,9 +387,21 @@ No runtime primitive knows what a rebase, merge, development tree, or
 integration policy is. The only hard runtime behavior is single-writer
 assignment and accurate repository observation.
 
-The sketch deliberately pressures PRD 18's message semantics: a typed poke
-must steer an active turn at a safe backend boundary or enqueue an idle durable
-turn's follow-up. It must never silently disappear.
+Pokes are fire-and-forget (decision: Inanna, 2026-08-08). A `sendMessage`
+poke to an agent with no steerable turn surfaces PRD 18's typed runtime
+error to the SENDING resident's handler — loud, not lost — and any retry,
+`followupTask`, or replacement policy is authored code in the resident.
+There is no runtime delivery queue and no auto-enqueue on idle agents;
+PRD 18's message semantics stand unmodified.
+
+**V1 cycle shape (consequence of decided substrate, stated honestly):**
+the entire unfold/fold runs within ONE resident cycle, because durable
+agent handles across cycles are deferred (deferred question 2 here; PRD
+18 open decision 4) and PRD 18's v1 driver requires agent quiescence at a
+cycle boundary. The trade: no mid-tree checkpoint — a crash loses
+orchestration state back to the last checkpoint, while every worktree,
+branch, and receipt survives by ID for post-mortem and manual restart.
+Accepted for v1; revisit with durable agent identities.
 
 ## Implementation plan
 

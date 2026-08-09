@@ -85,6 +85,23 @@ Also: JSON/time constructor metadata is machine-global; `add_function`
 accumulates and rejects conflicting IDs — document as a global-ID invariant
 and test with two realm tables.
 
+**Resolution at fold (realm-build, 2026-08-08):** the streamed-tail
+hypothesis was a REAL bug — `parked_streams` was cleared on every run
+teardown, so a parked continuation lost its StreamId the moment any run
+returned. Fixed and pinned red/green; map growth while realms are parked
+is the documented steady state, bounded by cycle-scoped machine life.
+Domain-constructor isolation pinned (`realm_global_id_isolation.rs`).
+**Carried up and DECIDED (root):** the residual envelope divergence
+(ConTags/json/time ids machine-global, last-writer-wins, agreement
+assumed unchecked — a divergent tag would silently corrupt how a parked
+SIBLING realm's continuation reads on resume) is ACCEPTED as a documented
+residual for now: divergence requires an extractor id-minting change,
+which fires the three pinned id-stability tests upstream, so the hole is
+double-covered today. A cheap loud agreement check (envelope-subset tag
+checksum verified at add_function/park) is ATTACHED TO STEP 4's work item
+— same lane, same files, when the go-signal fires. Not closed silently;
+not worth a standalone lane.
+
 ## 4. Prefix check does not yet prove the seam's UnhandledEffect promise — CONFIRMED gap in the in-flight design
 **Owner: realm-build lane B (step 3) — URGENT, signature changing now**
 
