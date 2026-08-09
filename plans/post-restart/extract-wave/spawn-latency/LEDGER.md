@@ -185,6 +185,33 @@ standing rule, not merely under-detailed. Concretely, per item:
   it turned RED identified.
 - **D2** — boot's ConTags guard by name AND the base commit it ran against.
 
+## Positive control: an INSTRUMENT needs the same proof as a test
+
+My own error, banked because it generalizes the anti-vacuity rule I had already
+imposed on D1's mutation test. I correctly diagnosed that
+`pgrep -fc tidepool-extract` over-counts (it matches every agent shell carrying
+`TIDEPOOL_EXTRACT=…`: 22–24 matches against 3–4 real compiles), wrote a
+replacement, and reported its output as a finding **without once running it
+against a known-positive case**. Linux truncates `comm` to 15 chars, so
+`tidepool-extract-bin` appears as `tidepool-extrac` and any pattern carrying the
+full 16-char `tidepool-extract` returns 0 on a busy box and 0 on an idle one. I
+reported "zero extracts running" when four were.
+
+Correct instruments (also wave `OPERATIONAL.md` `6033a70b`):
+
+    ps -eo comm= | grep -c '^tidepool-extrac'    # real concurrent compiles
+    cat /proc/loadavg                            # actual load
+
+Anchor and stop at `extrac`. Do NOT generalize "comm truncates to 15" further —
+a 39-char value appears in the same output, so the rule has exceptions I have
+not chased.
+
+**The rule:** a correction to an instrument needs the same verification as the
+instrument it replaces. A zero from a mistyped pattern is indistinguishable from
+a real zero, which is precisely why it survives review — the same reason D1's
+mutation test must prove it can FAIL before its pass means anything. Applied to
+a dev's test and not to my own measurement, which is the asymmetry to watch.
+
 ## Standing check: does the gate detect the mistake it is named for?
 
 Ratified method note (root, via wave TL): the C1 finding came from distrusting
