@@ -530,8 +530,14 @@ before either.
 
 ## Wire-moving items flagged to root
 
-*(none yet — an item that moves the extract wire is reported to `extract-wave`
-for root's redeploy set the moment it is identified)*
+| Item | Moves the wire? | Evidence |
+|---|---|---|
+| C1 (`c1-timing`, folded) | **NO** | Timing is stderr-only and env-gated. Proven, not assumed: wire-inertness checked TWICE (once on the superseded nested build, once on the shipped flat partition) — `TIDEPOOL_TIMING` unset vs `=1` produced byte-identical stdout AND byte-identical emitted files for the same input, `diff -rq` empty on both. This item's named guard; shown by name in its receipts. |
+
+Remaining items are assessed as they land. D1-A is expected inert (a hard-fail
+check that changes nothing on a passing extraction); D1-B, E6 and D2 all change
+what metadata is COLLECTED or what Core is produced, so each must state its wire
+status explicitly rather than inherit C1's.
 
 ## Fold conflicts
 
