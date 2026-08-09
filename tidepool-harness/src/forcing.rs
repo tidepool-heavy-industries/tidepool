@@ -277,6 +277,23 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
+    /// Log a just-compiled turn's extracted types on `node` (the `asks.json`
+    /// site → type table, plus a value-plane bind's bound name/type, when
+    /// either is non-empty). Requires `Running`.
+    pub fn turn_extracted(
+        &self,
+        node: NodeId,
+        asks: Vec<(u32, String)>,
+        bound: Option<(String, String)>,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        inner.require_running(node)?;
+        inner
+            .writer
+            .append(Event::TurnExtracted { node, asks, bound })?;
+        Ok(())
+    }
+
     /// Log one effect request/response pair on `node`. Requires `Running`.
     pub fn effect(
         &self,
@@ -622,6 +639,7 @@ mod tests {
             LogEvent::NodeCreated { node, .. }
             | LogEvent::Forced { node, .. }
             | LogEvent::TurnStart { node, .. }
+            | LogEvent::TurnExtracted { node, .. }
             | LogEvent::Effect { node, .. }
             | LogEvent::HolePublished { node, .. }
             | LogEvent::HoleAnswerAttempt { node, .. }

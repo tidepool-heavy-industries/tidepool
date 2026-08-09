@@ -47,7 +47,7 @@ use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
-use crate::selfharness::observer::{Event, Observer};
+use crate::selfharness::observer::{Event, FormSource, Observer};
 use crate::selfharness::operator::{FormSpec, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
@@ -628,8 +628,20 @@ impl SelfHarnessDriver {
     /// an authored harness routinely also defines (e.g. `render`) — see
     /// `state_cross`'s module doc for the "ambiguous occurrence" this
     /// avoids.
-    fn compile_outer(&mut self, code: &str, helpers: &str) -> Result<CompiledTurn, DriverError> {
-        let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+    ///
+    /// `label` (`"render"`/`"loop"`) identifies this compile in the emitted
+    /// [`Event::OuterCompile`] — the OUTER session has no per-node durable
+    /// log of its own (`crate::log::Event::TurnStart` only ever covers a tree
+    /// node's turns), so this event is the whole record of what the outer
+    /// session's fragments actually were, verbatim (dogfood-observability
+    /// deliverable 1).
+    fn compile_outer(
+        &mut self,
+        code: &str,
+        helpers: &str,
+        label: &str,
+    ) -> Result<CompiledTurn, DriverError> {
+        let outer = self.outer.as_ref().ok_or_else(not_bootstrapped)?;
         let imports = format!(
             "qualified {} as {}",
             outer.module_name,
@@ -640,12 +652,18 @@ impl SelfHarnessDriver {
             .turn_target(None)
             .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
             .stack;
+        let extract_bin = outer.cfg.extract_bin.clone();
+        let include = outer.cfg.include.clone();
         let src = engine::template_turn_for(&outer_decls(), &stack, code, &imports, helpers);
+        self.emit(Event::OuterCompile {
+            label: label.to_string(),
+            source: src.clone(),
+        });
         compile::compile_turn(
-            &outer.cfg.extract_bin,
+            &extract_bin,
             &src,
             "result",
-            &outer.cfg.include,
+            &include,
             timing::NO_NODE,
             timing::NO_ROUND,
         )
@@ -984,7 +1002,7 @@ impl SelfHarnessDriver {
     ) -> Result<(Value, DataConTable), DriverError> {
         let helpers = state_cross::state_in(prior_state);
         let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
-        let compiled = self.compile_outer(&code, &helpers)?;
+        let compiled = self.compile_outer(&code, &helpers, "loop")?;
 
         let mut outcome = {
             let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
@@ -1080,6 +1098,7 @@ impl SelfHarnessDriver {
         self.emit(Event::RunLLMTurnHole {
             site,
             ty: ty.map(String::from),
+            prompt: prompt.to_string(),
         });
 
         let node = self.answerer.ok_or_else(|| {
@@ -1105,7 +1124,7 @@ impl SelfHarnessDriver {
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
-        let outcome = self.drive_answerer_to_finalize(node, ty).await?;
+        let outcome = self.drive_answerer_to_finalize(node, ty, site).await?;
         self.emit(Event::TurnEnd { node });
 
         let is_finalize = matches!(
@@ -1123,8 +1142,11 @@ impl SelfHarnessDriver {
         // W1/C2: take the finalized value AND keep the node live (consume the
         // finalize hole, Suspended→Running) so the NEXT hole can push onto the
         // same accumulating session — not `take_finalized_value`, which cancels.
-        let value = self.agent.take_finalized_value_keep_open(node)?;
-        self.emit(Event::Finalize { node });
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+        self.emit(Event::Finalize {
+            node,
+            value: rendered,
+        });
         // W2: the answerer node is REUSED across the loop's holes (C2), so
         // `node_usage` returns the node's CUMULATIVE context size. The
         // MID-LOOP compaction check (`maybe_compact_answerer`) reads it BETWEEN
@@ -1156,6 +1178,7 @@ impl SelfHarnessDriver {
         &mut self,
         node: NodeId,
         ty: Option<&str>,
+        site: u32,
     ) -> Result<TurnOutcome, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
@@ -1191,6 +1214,31 @@ impl SelfHarnessDriver {
             self.loop_inference_calls += 1;
             rounds += 1;
             let outcome = self.agent.drive_turn(node).await;
+            // A retry loop that burns rounds must be visible while it is
+            // happening, not reconstructable afterwards (dogfood-observability
+            // deliverable 3) — one `AnswererRound` per round that reached a
+            // compile attempt, `error: None` on success regardless of what the
+            // block went on to do. `NoBlock` never reaches a compile, so it is
+            // not a round for this fold's purposes.
+            match &outcome {
+                Ok(TurnOutcome::Suspended { .. } | TurnOutcome::Completed { .. }) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: None,
+                    });
+                }
+                Err(HarnessError::Compile(msg)) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: Some(msg.clone()),
+                    });
+                }
+                Ok(TurnOutcome::NoBlock { .. }) | Err(_) => {}
+            }
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
                     // A Finalize suspension is the answer. An AskUser suspension
@@ -1348,6 +1396,11 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
+            let form_source = FormSource::Answerer { node };
+            self.emit(Event::FormPresented {
+                source: form_source.clone(),
+                spec: spec.clone(),
+            });
             // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
             // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
             // under `block_in_place` so that blocking wait yields the tokio
@@ -1355,6 +1408,10 @@ impl SelfHarnessDriver {
             let gate = Arc::clone(&self.gate);
             let form = spec.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+            self.emit(Event::FormSubmitted {
+                source: form_source,
+                submission: submission.clone(),
+            });
             self.agent
                 .answer_dialog(node, Json::Object(submission))
                 .await?;
@@ -1426,11 +1483,19 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
+            self.emit(Event::FormPresented {
+                source: FormSource::OuterLoop,
+                spec: spec.clone(),
+            });
             // Sync-blocking gate under `block_in_place` (see the frozen contract):
             // a web gate parks a channel here; yield the worker while it waits.
             let gate = Arc::clone(&self.gate);
             let form = spec.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+            self.emit(Event::FormSubmitted {
+                source: FormSource::OuterLoop,
+                submission: submission.clone(),
+            });
             let answer = engine::json_answer_to_value(&Json::Object(submission), &compiled.table)
                 .map_err(|e| {
                 DriverError::Session(format!("outer askUser submission decode: {e}"))
@@ -1567,7 +1632,7 @@ impl SelfHarnessDriver {
             "pure ({q}.render __selfHarnessState __selfHarnessCompaction)",
             q = state_cross::LOADED_QUALIFIER
         );
-        let compiled = self.compile_outer(&code, &helpers)?;
+        let compiled = self.compile_outer(&code, &helpers, "render")?;
         let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
         let outcome = outer
             .session

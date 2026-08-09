@@ -84,12 +84,17 @@ fn derive_stdlib_include() -> Vec<std::path::PathBuf> {
 /// (`u64::MAX`) here: none of this crate's call sites have an answerer node or
 /// round of their own to attribute to (that context lives one layer up, in
 /// `tidepool-harness`). `NodeId(0)` is a REAL, LIVE node id — never pass bare
-/// `0`, only the sentinel.
+/// `0`, only the sentinel. Rendered as `"bootstrap"`/`"-"` (mirroring
+/// `tidepool_harness::timing::render_node`/`render_round`) rather than the raw
+/// `u64::MAX` — this is the SECOND of the two emitters that shape (a back-dep
+/// from `tidepool-harness` would cycle, so this one duplicates the rendering
+/// by hand too) — so a `18446744073709551615` never reaches a console here
+/// either.
 fn record_turn_stage(stage: &str, elapsed: std::time::Duration, bytes: u64) {
     tracing::debug!(
         target: "tidepool_harness::timing",
-        node = u64::MAX,
-        round = u64::MAX,
+        node = "bootstrap",
+        round = "-",
         stage,
         ms = elapsed.as_millis() as u64,
         bytes,

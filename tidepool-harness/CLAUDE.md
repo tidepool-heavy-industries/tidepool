@@ -291,19 +291,40 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
 `selfharness::persistence`):
 
 - **`transcript.jsonl`** (`default_transcript_path`, written by `JsonlObserver`
-  over the `Observer` seam) — the LOOP-level story: `LoopBoundary`,
-  `RunLLMTurnHole`, `TurnStart`/`TurnEnd`/`Finalize` (node ids only),
-  `CompactionTrigger{summary,…}`. One line per driver `Event`.
+  over the `Observer` seam) — the LOOP-level story, and (dogfood-observability,
+  wave 1.5) the whole input to the tier-0 telemetry fold (first-compile success
+  rate, retries-per-hole — `tests/dogfood_observability.rs`):
+  `LoopBoundary`; `RunLLMTurnHole{site,ty,prompt}` (the hole's human-facing
+  ask, not just its site/type); `TurnStart`/`TurnEnd` (node ids only);
+  `AnswererRound{node,site,round,error}` — one line per answerer round while
+  servicing a `runLLMTurn` hole, `round` 1-based WITHIN that hole's servicing,
+  `error` the UNTRUNCATED GHC error on a failed compile or `null` on a
+  compiled round — the fold groups these by `site`; `Finalize{node,value}`
+  (the finalized answer, rendered to JSON text, not just that one arrived);
+  `FormPresented{source,spec}`/`FormSubmitted{source,submission}` (an
+  `askUser` form's spec and the operator's reply — `source` distinguishes a
+  nested answerer's own form from one the AUTHORED OUTER loop raised
+  directly); `OuterCompile{label,source}` (the OUTER session's own `render`/
+  `loop` fragment compiles — `crate::log::Event::TurnStart` never covers
+  these, the outer session is not a tree node); `CompactionTrigger{summary,…}`.
+  One line per driver `Event`.
 - **`log.jsonl`** (`default_log_path`, the durable per-NODE `crate::log`
   written by the answerer `Harness`'s `LogWriter`) — the fine-grained story:
   `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell, so
   `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
-  the exact blocks the answerer ran), `TurnDelta` (the full model reply),
-  `HolePublished`/`HoleConsumed` (each `askUser`/`finalize` suspension +
-  answer), `NodeDone`. `Event::Effect` appears here only for a node whose stack
-  has base effects — the scoped answerer/outer stacks have none, so effect
-  activity shows as `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
+  the exact blocks the answerer ran — also surfaced at console INFO, not just
+  the durable line, as of dogfood-observability), `TurnExtracted{asks,bound}`
+  (what extract said this turn's holes/binds ARE — the `asks.json` site → type
+  table and a value-plane bind's bound name/type, when either is non-empty),
+  `TurnDelta` (the full model reply), `HolePublished`/`HoleConsumed` (each
+  `askUser`/`finalize` suspension + answer), `NodeDone`. `Event::Effect`
+  appears here only for a node whose stack has base effects — the scoped
+  answerer/outer stacks have none, so effect activity shows as
+  `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
 
 A caller boots the answerer `Harness` with `LogWriter::create(&default_log_path(),
 &header)` to land `log.jsonl` on this path; the driver writes `transcript.jsonl`
-via a `JsonlObserver` at `default_transcript_path()`. `tail -f` either.
+via a `JsonlObserver` at `default_transcript_path()`. `tail -f` either. A
+`timing` DEBUG stage's `node`/`round` fields render as words
+(`timing::render_node`/`render_round`) — `"bootstrap"`/`"-"` for
+`NO_NODE`/`NO_ROUND`, never a raw `u64::MAX`.

@@ -76,6 +76,18 @@ pub enum Event {
         source: String,
         input: Option<Value>,
     },
+    /// What extract said the just-compiled turn's holes and binds ARE:
+    /// the `asks.json` sidecar's site → rendered-type pairs (each a
+    /// `runLLMTurn`/`runLLMTurnFork`/`finalize` yield site in the compiled
+    /// block), and — for a value-plane bind (`x <- e`) — the bound name and
+    /// its rendered type. Emitted right after the compile that produced
+    /// `TurnStart` for the same turn succeeds; `asks` is empty and `bound` is
+    /// `None` when the turn has neither (most turns).
+    TurnExtracted {
+        node: NodeId,
+        asks: Vec<(u32, String)>,
+        bound: Option<(String, String)>,
+    },
     Effect {
         node: NodeId,
         seq: u64,

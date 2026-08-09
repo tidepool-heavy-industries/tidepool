@@ -162,6 +162,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
         Event::NodeCreated { node, .. }
         | Event::Forced { node, .. }
         | Event::TurnStart { node, .. }
+        | Event::TurnExtracted { node, .. }
         | Event::Effect { node, .. }
         | Event::HolePublished { node, .. }
         | Event::HoleAnswerAttempt { node, .. }

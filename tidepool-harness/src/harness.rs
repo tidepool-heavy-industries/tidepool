@@ -890,7 +890,11 @@ impl Harness {
         // block runs, so it precedes this turn's Effect / HolePublished
         // events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
-        tracing::debug!(node = node.0, %block, "executed Haskell");
+        // INFO, not DEBUG: a person watching the console must see the exact
+        // source every compile ran (dogfood-observability deliverable 1) —
+        // full text, never truncated (a pathologically large source is
+        // itself signal worth seeing).
+        tracing::info!(node = node.0, source = %block, "compiled turn source");
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -1159,6 +1163,7 @@ impl Harness {
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                self.log_turn_extracted(node, &compiled.asks, None)?;
                 let asks = AsksSidecar::from_pairs(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
@@ -1306,6 +1311,11 @@ impl Harness {
         compiled: CompiledTurn,
         gen: Generation,
     ) -> Result<engine::TurnOutcome, HarnessError> {
+        self.log_turn_extracted(
+            node,
+            &compiled.asks,
+            Some((&binder.name, &binder.type_display)),
+        )?;
         let asks = AsksSidecar::from_pairs(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
@@ -1354,8 +1364,16 @@ impl Harness {
                 }
                 // The model's Haskell didn't compile — feed the GHC error back
                 // verbatim (capped) as a corrective user turn and retry, rather
-                // than cancelling the node.
+                // than cancelling the node. `turns` is this hole's corrective-
+                // retry round index — a burned round must be visible while it
+                // is happening, not just reconstructable afterwards.
                 Err(HarnessError::Compile(msg)) => {
+                    tracing::warn!(
+                        node = node.0,
+                        round = turns,
+                        "compile attempt failed (round {turns} of {}, corrective retry)",
+                        self.cfg.max_turns
+                    );
                     let ghc = truncate_ghc_error(&msg);
                     self.push_user_turn(
                         node,
@@ -1576,11 +1594,13 @@ impl Harness {
     /// Without (2) the next hole's `drive_turn` cannot run a fresh block on the
     /// same session. Returns the finalized value (already read out of the
     /// suspended request by `take_finalized_value_core`, so aborting the
-    /// continuation does not lose it).
+    /// continuation does not lose it) alongside its rendered JSON text — what
+    /// the answer actually WAS, for the driver's `Finalize` narration event
+    /// (dogfood-observability deliverable 4).
     pub(crate) fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<Value, HarnessError> {
+    ) -> Result<(Value, String), HarnessError> {
         // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
         let hole = {
             let convos = self.convos.lock();
@@ -1592,7 +1612,8 @@ impl Harness {
                 .hole
                 .clone()
         };
-        let (value, _table) = self.take_finalized_value_core(node)?;
+        let (value, table) = self.take_finalized_value_core(node)?;
+        let rendered = tidepool_runtime::value_to_json(&value, &table, 0).to_string();
 
         // Abort the resident session's parked finalize continuation so the
         // session returns to idle and can run the NEXT hole's turn. `abort`
@@ -1612,7 +1633,7 @@ impl Harness {
 
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
-        Ok(value)
+        Ok((value, rendered))
     }
 
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
@@ -2695,6 +2716,34 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         self.tree
             .hole_answer_attempt(node, hole.clone(), source.to_string(), outcome)?;
+        Ok(())
+    }
+
+    /// Log what extract said the just-compiled turn's holes and binds ARE —
+    /// the `asks.json` site → type table plus a value-plane bind's bound
+    /// name/type, if either is non-empty — to console INFO and `log.jsonl`
+    /// (dogfood-observability deliverable 2). A no-op (no console line, no
+    /// event) when the turn has neither: most turns don't.
+    fn log_turn_extracted(
+        &self,
+        node: NodeId,
+        asks: &[(u32, String)],
+        bound: Option<(&str, &str)>,
+    ) -> Result<(), HarnessError> {
+        if asks.is_empty() && bound.is_none() {
+            return Ok(());
+        }
+        tracing::info!(
+            node = node.0,
+            asks = ?asks,
+            bound = ?bound,
+            "turn extracted types"
+        );
+        self.tree.turn_extracted(
+            node,
+            asks.to_vec(),
+            bound.map(|(name, ty)| (name.to_string(), ty.to_string())),
+        )?;
         Ok(())
     }
 
