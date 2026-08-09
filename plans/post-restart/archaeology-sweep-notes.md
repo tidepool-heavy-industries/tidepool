@@ -54,6 +54,13 @@ filtered way, not the raw grep count, so it is apples-to-apples.
 - Any other still-load-bearing history moved during the per-module passes is
   recorded in that module's commit message rather than duplicated here, to
   keep this note from re-accumulating archaeology of its own.
+- `tidepool-repl` pass: no content needed relocation — every load-bearing item
+  found (the `worker.rs` cache-dir self-heal, `session.rs`'s `BUG-7` Prelude/
+  verb-plane collision-poisoning hazard, and `session.rs`'s quasiquote
+  byte-offset corruption hazard in `push_verbatim_binding`) had its invariant
+  already stated in prose alongside the label/date being removed, so the
+  present-tense comment left behind carries the same warning in place. See
+  commit range `559c9246..6b4af3b4` for the per-file rationale.
 
 ## Uncertain-keep list
 
