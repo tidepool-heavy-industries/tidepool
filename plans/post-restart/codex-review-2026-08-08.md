@@ -262,3 +262,23 @@ deletion → registry-only conversion → one cycle-owned machine → prefix
 descriptor bound to cycle runtime) matches the standing plan: items 1-2
 route as above, 3 is extract-wave item 0, 4-5 are realm step 4 + PRD 18,
 6 is the contract's derive-don't-declare guidance already in force.
+
+## 14. Vendored-Aeson sum rejection no longer fires for declare-but-don't-use — INHERITED regression (found 2026-08-09)
+
+`0c49f0a2` (2026-08-07) moved the nullary-sum `TypeError` behind
+type-family-dispatched constraint (`GFromJSONSum (IsNullarySum ...)`),
+deferring it to the USE site — so `deriving (Generic, FromJSON)` on a
+non-nullary sum now compiles clean when the instance is never demanded.
+The commit message asserts the opposite ("still rejected at compile time").
+Pinning test `generic_deriving_337::sum_type_rejected_at_compile_time` is
+red — SANCTIONED (second sanctioned red, beside mock_stack until
+mock-derive folds). Fix owner: generic-surface substrate territory; routed
+as a known item, not queued onto their live lane (fold-cadence).
+
+**Durable finding (extract-wave):** the guarantee hid for two days because
+its only enforcing test lives behind `--ignore-default-filter` — "a
+guarantee whose enforcing test lives in a tier nobody routinely runs is
+not enforced." Family member beside the three-variant table, one level
+out: not a receipt overstating coverage but a guard that never executes.
+Open question for a future sweep: what other compile-time rejections are
+pinned only in default-filtered tiers?
