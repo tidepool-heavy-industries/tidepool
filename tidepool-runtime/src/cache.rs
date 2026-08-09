@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// Returns the cache directory for Tidepool's compiled-artifact memos.
 /// Delegates to the canonical resolver ([`crate::paths::cache_dir`]); wrapped in
-/// `Some` to preserve the historical Option-returning call sites.
+/// `Some` since every call site uses `?`/`Option` combinators.
 fn cache_dir() -> Option<PathBuf> {
     Some(crate::paths::cache_dir())
 }
@@ -35,10 +35,10 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> CacheK
 }
 
 /// As [`cache_key`], but additionally mixes an optional `salt` into the key.
-/// Lane A passes `Some("session:<id>:gen:<g>")` so two sessions' identical-text
+/// Sessions pass `Some("session:<id>:gen:<g>")` so two sessions' identical-text
 /// `Lib.G<g>` modules never share an entry and a generation bump invalidates
-/// correctly (plan §3 R6). `None` reproduces the historical key byte-for-byte,
-/// so existing non-session cache entries stay valid.
+/// correctly. `None` must reproduce `cache_key`'s output byte-for-byte, so
+/// existing non-session cache entries stay valid.
 pub(crate) fn cache_key_salted(
     source: &str,
     target: &str,
@@ -46,9 +46,9 @@ pub(crate) fn cache_key_salted(
     salt: Option<&str>,
 ) -> CacheKey {
     let mut hasher = blake3::Hasher::new();
-    // Length-prefixed framing (proptest_cache_layer F1a/F1b): NUL separators
-    // alone let a NUL embedded in one field shift bytes across the boundary
-    // (key("a\0b","c") == key("a","b\0c")), serving the wrong artifact.
+    // Length-prefixed framing: NUL separators alone let a NUL embedded in one
+    // field shift bytes across the boundary (key("a\0b","c") == key("a","b\0c")),
+    // serving the wrong artifact.
     frame(&mut hasher, source.as_bytes());
     frame(&mut hasher, target.as_bytes());
     // Salt is framed only when present, so a None call hashes identically to the
@@ -58,10 +58,10 @@ pub(crate) fn cache_key_salted(
         frame(&mut hasher, s.as_bytes());
     }
 
-    // Fingerprint include directories in their ORIGINAL order
-    // (proptest_cache_layer F2): GHC receives `--include` flags in argument
-    // order, and search-path order decides module shadowing — [A,B] and
-    // [B,A] are different compilations and must not share a key.
+    // Fingerprint include directories in their ORIGINAL order: GHC receives
+    // `--include` flags in argument order, and search-path order decides
+    // module shadowing — [A,B] and [B,A] are different compilations and must
+    // not share a key.
     frame(&mut hasher, &(include.len() as u64).to_le_bytes());
     for root in include {
         frame(&mut hasher, root.as_os_str().as_encoded_bytes());
@@ -109,12 +109,11 @@ fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
 
 /// Fingerprints a single binary by path and CONTENT hash.
 ///
-/// (proptest_cache_layer F3a): (size, mtime) alone is blind to same-size
-/// content swaps — and the nix store normalizes ALL mtimes to epoch+1, so
-/// for nix-deployed toolchains only size distinguished versions: a rebuilt
-/// extract binary silently served stale Core. Content is blake3-hashed,
-/// memoized per (path, size, mtime) so each binary is read once per change
-/// per process (~100ms for a GHC-sized binary, amortized to zero).
+/// (size, mtime) alone is blind to same-size content swaps, and the nix store
+/// normalizes ALL mtimes to epoch+1, so for nix-deployed toolchains only
+/// content distinguishes versions. Content is blake3-hashed, memoized per
+/// (path, size, mtime) so each binary is read once per change per process
+/// (~100ms for a GHC-sized binary, amortized to zero).
 fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -231,19 +230,17 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
 
 /// Extracts an absolute path from a shell exec line.
 /// Handles `exec /path/to/bin "$@"`, bare `/path/to/bin "$@"`, and QUOTED
-/// targets — `exec "/path/to/bin" "$@"` (the shellcheck-recommended form,
-/// proptest_cache_layer F5): an unfollowed wrapper target means delegate
-/// binary upgrades silently serve stale Core.
+/// targets — `exec "/path/to/bin" "$@"` (the shellcheck-recommended form): an
+/// unfollowed wrapper target means delegate binary upgrades silently serve
+/// stale Core.
 ///
-/// KNOWN GAP (repo-review-2026-07-06 plan 03, filed not fixed): a target
-/// spelled via a shell variable or relative path (`exec "$DIR/bin"`,
-/// `exec ./bin`) is NOT resolved — only a literal absolute path is followed.
-/// Fixing this in general requires interpreting shell variable assignment
-/// (`DIR=$(dirname "$0")` and its many variants), which is unbounded — a
-/// small text scanner cannot soundly evaluate arbitrary shell. Direct-path
-/// wrappers (the common case for nix/cargo-installed binaries) ARE followed;
-/// only the variable/relative-path spelling silently misses a delegate-only
-/// upgrade.
+/// KNOWN GAP: a target spelled via a shell variable or relative path
+/// (`exec "$DIR/bin"`, `exec ./bin`) is NOT resolved — only a literal
+/// absolute path is followed. Fixing this in general requires interpreting
+/// shell variable assignment, which is unbounded — a small text scanner
+/// cannot soundly evaluate arbitrary shell. Direct-path wrappers (the common
+/// case for nix/cargo-installed binaries) ARE followed; only the
+/// variable/relative-path spelling silently misses a delegate-only upgrade.
 fn extract_exec_target(line: &str) -> Option<&str> {
     let line = line.strip_prefix("exec ").unwrap_or(line);
     if line.is_empty() || line.starts_with('#') {
@@ -311,12 +308,11 @@ fn fingerprint_dir_inner(
         if ext != "hs" && ext != "hs-boot" {
             continue;
         }
-        // Content hash (proptest_cache_layer F3b/F4): (size, mtime) missed
-        // same-size edits, and `DirEntry::metadata()` is lstat — a symlinked
-        // .hs was fingerprinted by the LINK's metadata, so edits to the real
-        // file never invalidated the key. `fs::read` follows symlinks and
-        // hashes what GHC will actually compile. Source files are small;
-        // no memo needed.
+        // Content hash: (size, mtime) misses same-size edits, and
+        // `DirEntry::metadata()` is lstat — fingerprinting a symlinked .hs by
+        // the LINK's metadata would miss edits to the real file. `fs::read`
+        // follows symlinks and hashes what GHC will actually compile. Source
+        // files are small; no memo needed.
         frame(hasher, path.as_os_str().as_encoded_bytes());
         match fs::read(&path) {
             Ok(bytes) => frame(hasher, blake3::hash(&bytes).as_bytes()),
@@ -334,9 +330,8 @@ const SENTINEL_LEN: usize = 64;
 /// Returns `Some((expr_bytes, meta_bytes))` on success.
 /// Beyond mere sentinel existence (completeness), the sentinel's two blake3
 /// digests are recomputed over the loaded bytes and compared: a bit-flip that
-/// still decodes as valid CBOR (cache bug F6 — a corrupted-but-plausible
-/// payload silently served as a different program) now fails the checksum
-/// and falls through to a MISS/recompile instead of being served.
+/// still decodes as valid CBOR would otherwise be served as a different
+/// program, so a checksum mismatch falls through to a MISS/recompile instead.
 pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
     let sentinel_path = dir.join(format!("{}.ok", key));
@@ -363,7 +358,7 @@ pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Stores the compilation results in the cache. Each file is replaced atomically
 /// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
 /// complete — `cache_load` checks for this before reading. The sentinel body is
-/// blake3(expr_bytes) || blake3(meta_bytes) (F6), letting `cache_load` detect a
+/// blake3(expr_bytes) || blake3(meta_bytes), letting `cache_load` detect a
 /// bit-flip that still decodes as plausible CBOR.
 pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
@@ -402,7 +397,7 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
     }
 
     // Sentinel written last — entry is only valid when this exists. Its body
-    // binds the checksums, not just completeness (F6).
+    // binds the checksums, not just completeness.
     let mut checksum = [0u8; SENTINEL_LEN];
     checksum[0..32].copy_from_slice(blake3::hash(expr_bytes).as_bytes());
     checksum[32..64].copy_from_slice(blake3::hash(meta_bytes).as_bytes());
@@ -456,7 +451,7 @@ mod tests {
     #[serial]
     fn test_cache_key_salt_isolates_sessions_and_gens() {
         let (src, tgt) = ("import Tidepool.Session.Lib.G1\nr = 1", "r");
-        // No salt reproduces the historical key exactly (no mass invalidation).
+        // No salt reproduces the unsalted key exactly (no mass invalidation).
         assert_eq!(
             cache_key(src, tgt, &[]),
             cache_key_salted(src, tgt, &[], None)
@@ -593,7 +588,7 @@ mod tests {
             "mtime-only change must not change the cache key (content-defined fingerprint)"
         );
 
-        // Same-size content swap (F3a, the case (size, mtime) was blind to):
+        // Same-size content swap ((size, mtime) alone is blind to this):
         // ctime bumps on write, forcing a re-hash that sees the new content.
         // Sleep first: kernel ctime is coarse-grained (tick granularity, ~ms);
         // a swap within the same tick as the create gets an IDENTICAL ctime
