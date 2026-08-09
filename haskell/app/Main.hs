@@ -61,7 +61,7 @@ main = do
   timing <- readTimingEnabled
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--harness-profile] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
       -- Statement binder extraction (parse-only): bind-vs-expr + bound names
@@ -125,12 +125,18 @@ data Args = Args
   , argTurnOut :: Maybe FilePath
   , argJsonOutput :: Maybe FilePath
   , argTurnVerdict :: Maybe String
+  -- Harness compilation profile (generic-surface wave item 4, PART 2): the
+  -- standard extension set applied to the TARGET module as GHC FLAGS
+  -- (Tidepool.GhcPipeline.harnessProfileExtensions) instead of a source
+  -- LANGUAGE pragma block. See Tidepool.Harness.Prelude.
+  , argHarnessProfile :: Bool
   }
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False Nothing [] []
                      Nothing False [] Nothing Nothing [] Nothing
-                     False [] Nothing Nothing Nothing)
+                     False [] Nothing Nothing Nothing
+                     False)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -151,6 +157,7 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--json-output" : out : rest) = go a { argJsonOutput = Just out } rest
     go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
+    go a ("--harness-profile" : rest) = go a { argHarnessProfile = True } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 
@@ -160,7 +167,7 @@ processFile timing args path = do
       mTarget = argTarget args
   hPutStrLn stderr $ "Processing: " ++ path
   res <- try $ do
-    result <- runPipeline path (argIncludes args)
+    result <- runPipeline (argHarnessProfile args) path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -412,7 +419,7 @@ processSessionFile args path = do
       -- written to stays named @result.cbor@ regardless.
       targetName = fromMaybe "__result" (argTarget args)
   res <- try $ do
-    result <- runPipelineSession (Just scope) path (argIncludes args)
+    result <- runPipelineSession (Just scope) (argHarnessProfile args) path (argIncludes args)
     let binds  = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -525,7 +532,7 @@ runTurnMode args path = do
               { ssRoot      = fromMaybe "" (argSessionRoot args)
               , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
               }
-        result <- runPipelineSession (Just scope) modulePath (argIncludes args)
+        result <- runPipelineSession (Just scope) (argHarnessProfile args) modulePath (argIncludes args)
         let binds       = prBinds result
             tycons      = prTyCons result
             hscEnv      = prHscEnv result

@@ -2,7 +2,9 @@ module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
     -- * Bound-value type analysis (Wave 3b BIND mode)
   , stripMonadHead, isClosureType, renderType
-  , splitTupleType ) where
+  , splitTupleType
+    -- * Harness compilation profile (PART 2, generic-surface wave item 4)
+  , harnessProfileExtensions ) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
@@ -22,8 +24,9 @@ import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
-  ( updOptLevel, gopt_set, gopt_unset
+  ( updOptLevel, gopt_set, gopt_unset, xopt_set, xopt_unset
   , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
+import GHC.LanguageExtensions.Type (Extension(..))
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
@@ -42,7 +45,7 @@ import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import GHC.Types.Unique (getKey)
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
-import Data.List (nub)
+import Data.List (nub, foldl')
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
@@ -86,9 +89,15 @@ data PipelineResult = PipelineResult
   }
 
 -- | The normal one-shot eval extraction. Byte-identical to its historical
--- behaviour: it is exactly @runPipelineSession Nothing@, so no session
--- machinery (iface injection, source-less home modules) ever touches this path.
-runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
+-- behaviour (@harnessProfile = False@): it is exactly
+-- @runPipelineSession Nothing False@, so no session machinery (iface
+-- injection, source-less home modules) ever touches this path.
+--
+-- @harnessProfile@: when 'True', the TARGET module (matched by module name,
+-- never a dependency) compiles under 'harnessProfileExtensions' applied as
+-- GHC FLAGS rather than source pragmas — see that binding's haddock and
+-- 'applyHarnessProfile'.
+runPipeline :: Bool -> FilePath -> [FilePath] -> IO PipelineResult
 runPipeline = runPipelineSession Nothing
 
 -- | Extraction with optional tidepool-repl SESSION scope (Option-C type plane).
@@ -102,14 +111,14 @@ runPipeline = runPipelineSession Nothing
 -- (plans/ghci-implementation-plan.md §2 step 4 / §5.3 "C GATE").
 --
 -- The gate is the @case@ below: the session arm runs ONLY for an active scope.
-runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
-runPipelineSession mscope path includes
+runPipelineSession :: Maybe SessionScope -> Bool -> FilePath -> [FilePath] -> IO PipelineResult
+runPipelineSession mscope harnessProfile path includes
   | Just scope <- mscope, isSessionScopeActive scope =
-      runSessionPipeline scope path includes
-  | otherwise = runNormalPipeline path includes
+      runSessionPipeline scope harnessProfile path includes
+  | otherwise = runNormalPipeline harnessProfile path includes
 
-runNormalPipeline :: FilePath -> [FilePath] -> IO PipelineResult
-runNormalPipeline path includes = do
+runNormalPipeline :: Bool -> FilePath -> [FilePath] -> IO PipelineResult
+runNormalPipeline harnessProfile path includes = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -134,6 +143,7 @@ runNormalPipeline path includes = do
     -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
     -- fails with "member of the hidden package ghc-9.12.2".
     let dflags' = extractionDynFlags dflags includes
+        targetModName = capitalize (takeBaseName path)
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
@@ -162,7 +172,38 @@ runNormalPipeline path includes = do
     -- never re-demands the package interfaces that define their instances —
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
     -- "No instance for Monad (Eff '[Console, …])".
-    modGraphRaw <- depanal [] False
+    modGraphNormal <- depanal [] False
+    -- Harness compilation profile, DOWNSWEEP-LEVEL fix (see
+    -- 'applyHarnessProfile''s haddock for the full story): 'depanal''s
+    -- summarise step BAKES a synthetic implicit "import Prelude" edge into
+    -- the target's @ms_textual_imps@ using whatever @ImplicitPrelude@ state
+    -- was ambient AT DOWNSWEEP TIME — the author's file carries no pragma, so
+    -- that's the ordinary default (ON). A later @ms_hspp_opts@ patch on the
+    -- ALREADY-SUMMARISED node (what the per-module loop below does) changes
+    -- what extensions PARSING/TYPECHECKING see, but does NOT retroactively
+    -- un-bake that edge — confirmed by direct repro (a harness-profiled
+    -- target importing a home-package module got base Prelude's @show@ back
+    -- into scope, ambiguous against Tidepool.Prelude's own, even though the
+    -- SAME per-module override correctly suppressed base Prelude for an
+    -- import-free target, whose downsweep-time baking was ALREADY negative).
+    -- Fix: re-run 'depanal' a second time with the harness extensions ALREADY
+    -- the ambient session default (so the target's OWN summarise step bakes
+    -- the SAME edge a genuine @{-# LANGUAGE NoImplicitPrelude #-}@ pragma
+    -- would — confirmed to compile clean), then SPLICE just the target's
+    -- correctly-summarised node into the NORMAL graph — dependency modules
+    -- (each with their own pragma block, some of which lean on the ambient
+    -- session default for extensions they never mention, e.g.
+    -- @Tidepool.FilePath@ has no @NoImplicitPrelude@ of its own) keep the
+    -- graph 'depanal' built under NORMAL flags, so they're never exposed to
+    -- the harness-augmented session baseline at all.
+    modGraphRaw <-
+      if not harnessProfile
+        then pure modGraphNormal
+        else do
+          setSessionDynFlags (harnessProfileDflags dflags')
+          modGraphHarness <- depanal [] False
+          setSessionDynFlags dflags'
+          pure (spliceHarnessTargetNode targetModName modGraphNormal modGraphHarness)
     -- unpoison: keep the EPS healthy under the TH/QQ downgrade by unsetting
     -- Opt_IgnoreInterfacePragmas on every summary (see the depanal/load'
     -- haddock above). The bytecode-vs-object provisioning choice is made
@@ -182,6 +223,9 @@ runNormalPipeline path includes = do
     -- Process all modules: parse, typecheck, desugar, optimize each.
     -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
     -- the load phase may have downgraded them for TH/QQ bytecode provisioning.
+    -- 'applyHarnessProfile' composes at the SAME point, for the SAME reason:
+    -- it must see the flags 'parseModule' actually compiles the target with,
+    -- not a copy discarded before or reset after.
     -- 'typecheck'/'core' are summed ACROSS this loop (one line each, emitted
     -- after) rather than timed per-module: the wire grammar is one line per
     -- phase per process, and a turn module always compiles alongside its
@@ -189,7 +233,17 @@ runNormalPipeline path includes = do
     tcMsRef <- liftIO (newIORef (0 :: Integer))
     coreMsRef <- liftIO (newIORef (0 :: Integer))
     results <- forM summaries $ \modSum0 -> do
-      let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+      let modName = moduleNameString (ms_mod_name modSum0)
+          -- The target's ms_hspp_opts already carries the harness profile
+          -- from the downsweep-level splice above when harnessProfile is on
+          -- (see 'spliceHarnessTargetNode'); re-applying it here is a cheap,
+          -- idempotent safety net against 'load'' perturbing per-module
+          -- flags the way it's documented to for the TH/QQ downgrade (see
+          -- 'canonicalizeDFlags', re-applied per-module for the same reason).
+          modSum = modSum0
+            { ms_hspp_opts = applyHarnessProfile harnessProfile targetModName
+                modName (canonicalizeDFlags (ms_hspp_opts modSum0))
+            }
       (typechecked, tcMs) <- timeSection $ do
         parsed <- parseModule modSum
         typecheckModule parsed
@@ -234,8 +288,8 @@ runNormalPipeline path includes = do
         "runPipeline: module load failed compiling " ++ path
       Succeeded -> pure ()
     -- Merge: dependency module bindings first, target module last
-    let targetModName = capitalize (takeBaseName path)
-        isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+    -- ('targetModName' is the same binding hoisted above the per-module loop.)
+    let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
         allGuts = map fst3 results
     (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
@@ -305,6 +359,122 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   , avx512pf = False
   }
 
+-- | The extensions the HARNESS COMPILATION PROFILE enables as GHC FLAGS
+-- (via 'applyHarnessProfile'\/'xopt_set') rather than a source
+-- @{-# LANGUAGE ... #-}@ block — so an authored harness module (one that
+-- imports 'Tidepool.Harness.Prelude') needs no pragma line of its own.
+--
+-- Mirrors @tidepool_mcp::preamble::EVAL_PRAGMAS@ (@tidepool-mcp\/src\/
+-- preamble.rs@) — the ONE canonical extension list for "one dialect
+-- everywhere" (repo CLAUDE.md). A Haskell @['Extension']@ and a Rust pragma
+-- string cannot literally share a source across the language boundary, so
+-- keep the two lists in sync BY HAND on any future change to either; this is
+-- deliberately not a third independent list — see that binding's own
+-- haddock for the two Rust-side copies this wave reconciled into one.
+-- Each entry is @(extension, turnOn)@ — mirroring 'EVAL_PRAGMAS'\'s pragma
+-- words one-to-one. A \"No\"-prefixed pragma word (just @NoImplicitPrelude@
+-- here) UNSETS its positive 'Extension' constructor:
+-- "GHC.LanguageExtensions.Type" carries no separate negative constructors, so
+-- @NoImplicitPrelude@ is @(ImplicitPrelude, False)@, not a constructor of its
+-- own (the first build of this list tried @NoImplicitPrelude@ as a data con
+-- and GHC rejected it outright — @xopt_unset@ on the positive constructor is
+-- the actual mechanism, same as GHC's own pragma parser).
+harnessProfileExtensions :: [(Extension, Bool)]
+harnessProfileExtensions =
+  [ (ImplicitPrelude, False)
+  , (OverloadedStrings, True), (DataKinds, True), (TypeOperators, True)
+  , (FlexibleContexts, True), (FlexibleInstances, True)
+  , (UndecidableInstances, True), (GADTs, True)
+  , (PartialTypeSignatures, True), (ScopedTypeVariables, True)
+  , (ExtendedDefaultRules, True), (LambdaCase, True), (TupleSections, True)
+  , (MultiWayIf, True), (RecordWildCards, True), (NamedFieldPuns, True)
+  , (ViewPatterns, True), (BangPatterns, True), (TypeApplications, True)
+  , (BlockArguments, True), (NumericUnderscores, True)
+  , (MultilineStrings, True), (DeriveFunctor, True), (DeriveFoldable, True)
+  , (DeriveTraversable, True), (DeriveGeneric, True), (DeriveAnyClass, True)
+  , (QuasiQuotes, True), (DuplicateRecordFields, True)
+  , (OverloadedRecordDot, True)
+  ]
+
+-- | Apply 'harnessProfileExtensions' to ONE module's flags, scoped by module
+-- NAME to the module actually being extracted (@modName == targetModName@) —
+-- never session-wide, so a harness compile's dependency modules (each
+-- already carrying its own pragma block — @Tidepool.Prelude@,
+-- @Tidepool.Harness@, the generated @Tidepool.Effects@, …) are untouched. A
+-- no-op (returns @dflags@ unchanged) when @enabled@ is 'False' or @modName@
+-- doesn't match, so every existing non-harness caller (@harnessProfile =
+-- False@ everywhere except the new @--harness-profile@ CLI flag) sees
+-- byte-identical behaviour.
+--
+-- This function alone is NOT sufficient to make an authored module
+-- pragma-free — see 'spliceHarnessTargetNode', the downsweep-level half of
+-- the mechanism, and 'harnessProfileDflags' below. Patching ONLY the
+-- per-module 'ms_hspp_opts' fed to 'parseModule'\/'typecheckModule' (what
+-- this function alone does) is enough for every extension EXCEPT the
+-- implicit-Prelude decision: confirmed by direct repro, a harness-profiled
+-- target module that imports a home-package module still got base Prelude's
+-- @show@ back into unqualified scope (ambiguous against Tidepool.Prelude's
+-- own), even though this SAME override correctly suppressed base Prelude for
+-- an import-free target. Root cause: 'depanal''s summarise step BAKES a
+-- synthetic implicit @import Prelude@ edge into the target's
+-- @ms_textual_imps@ using whatever @ImplicitPrelude@ state was ambient AT
+-- DOWNSWEEP TIME (the file has no pragma, so that's the ordinary default —
+-- ON) — a LATER patch to @ms_hspp_opts@ on the already-summarised
+-- 'ModSummary' changes what PARSING/TYPECHECKING see, but does not
+-- retroactively un-bake that edge. This function still matters (defense in
+-- depth against 'load'' perturbing per-module flags, the same reason
+-- 'canonicalizeDFlags' is re-applied per module) — it just isn't the whole
+-- story.
+applyHarnessProfile :: Bool -> String -> String -> DynFlags -> DynFlags
+applyHarnessProfile enabled targetModName modName dflags
+  | enabled, modName == targetModName = foldl' xoptApply dflags harnessProfileExtensions
+  | otherwise = dflags
+
+-- | Apply one @(extension, turnOn)@ entry to 'DynFlags' — the shared
+-- primitive behind 'applyHarnessProfile' (per-module) and
+-- 'harnessProfileDflags' (session-wide, for the throwaway re-downsweep).
+xoptApply :: DynFlags -> (Extension, Bool) -> DynFlags
+xoptApply fl (ext, True)  = xopt_set fl ext
+xoptApply fl (ext, False) = xopt_unset fl ext
+
+-- | 'harnessProfileExtensions' applied to a whole 'DynFlags' value — used to
+-- set the SESSION default (not a per-module override) for the throwaway
+-- re-downsweep 'spliceHarnessTargetNode' drives, so the target module's OWN
+-- 'depanal' summarise step bakes its @ms_textual_imps@ the same way a
+-- genuine @{-# LANGUAGE NoImplicitPrelude, ... #-}@ pragma would.
+harnessProfileDflags :: DynFlags -> DynFlags
+harnessProfileDflags dflags = foldl' xoptApply dflags harnessProfileExtensions
+
+-- | The downsweep-level half of the harness compilation profile (see
+-- 'applyHarnessProfile''s haddock for why the per-module 'ms_hspp_opts'
+-- patch alone is insufficient). Callers: run 'depanal' TWICE — once under
+-- normal session flags (giving every dependency module its ordinary,
+-- correctly-summarised treatment, including modules like
+-- @Tidepool.FilePath@ that carry no @NoImplicitPrelude@ of their own and
+-- lean on the ambient session default for extensions they never mention —
+-- these must NEVER see the harness-augmented baseline), once more under
+-- 'harnessProfileDflags' as the session default (so the target module's OWN
+-- summarise step correctly omits the implicit-Prelude edge, matching what a
+-- genuine pragma produces) — then splice ONLY the target's node from the
+-- second (harness) graph into the first (normal) graph, by module name.
+-- Errors loudly if the target module can't be found in the harness graph —
+-- that would mean 'depanal' silently dropped or renamed it, a genuine bug
+-- rather than a recoverable condition.
+spliceHarnessTargetNode :: String -> ModuleGraph -> ModuleGraph -> ModuleGraph
+spliceHarnessTargetNode targetModName normalGraph harnessGraph =
+  mkModuleGraph (map spliceNode (mgModSummaries' normalGraph))
+  where
+    spliceNode node = case node of
+      ModuleNode _ ms | moduleNameString (ms_mod_name ms) == targetModName -> harnessNode
+      _ -> node
+    harnessNode = case
+      [ n | n@(ModuleNode _ ms) <- mgModSummaries' harnessGraph
+          , moduleNameString (ms_mod_name ms) == targetModName ] of
+      (n : _) -> n
+      []      -> error
+        ("spliceHarnessTargetNode: target module '" ++ targetModName
+          ++ "' not found in the harness-flagged downsweep graph")
+
 -- | The SESSION extraction path (active 'SessionScope' only). It mirrors
 -- 'runNormalPipeline' — @depanal@/@load'@ then a per-module
 -- parse/typecheck/desugar/@core2core@ over every home module, returning all
@@ -323,12 +493,13 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
 -- ErrorSentinels. A reference turn imports @Tidepool.Prelude@ via the eval
 -- preamble; the phase-1 @load'@ also keeps those source deps "loaded"
 -- (GHC-58427).
-runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
-runSessionPipeline scope path includes = do
+runSessionPipeline :: SessionScope -> Bool -> FilePath -> [FilePath] -> IO PipelineResult
+runSessionPipeline scope harnessProfile path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    setSessionDynFlags (extractionDynFlags dflags includes)
+    let dflags' = extractionDynFlags dflags includes
+    setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Success-path warning capture — see the identical install in
@@ -340,7 +511,19 @@ runSessionPipeline scope path includes = do
         -- downsweep (no source to summarise) — a deferred module's @import@ of
         -- them resolves from the HPT entry the injection registers in phase 2.
         excludedVal = map renderSessionModule (ssValIfaces scope)
-    modGraphRaw <- depanal excludedVal False
+    modGraphNormal <- depanal excludedVal False
+    -- Downsweep-level harness-profile splice — see 'spliceHarnessTargetNode'
+    -- and 'applyHarnessProfile''s haddock for why the per-module patch alone
+    -- (further below, in the PHASE 3 loop) is insufficient. Same exclusion
+    -- list both times so the two graphs stay structurally comparable.
+    modGraphRaw <-
+      if not harnessProfile
+        then pure modGraphNormal
+        else do
+          setSessionDynFlags (harnessProfileDflags dflags')
+          modGraphHarness <- depanal excludedVal False
+          setSessionDynFlags dflags'
+          pure (spliceHarnessTargetNode targetModName modGraphNormal modGraphHarness)
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
         targetModName' = mkModuleName targetModName
@@ -433,7 +616,14 @@ runSessionPipeline scope path includes = do
     when (null summaries) $
       liftIO $ ioError (userError "runSessionPipeline: empty module graph")
     results <- forM summaries $ \modSum0 -> do
-      let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+      let modName = moduleNameString (ms_mod_name modSum0)
+          -- Cheap, idempotent safety net — see the identical comment on
+          -- 'runNormalPipeline''s per-module loop. The real fix is the
+          -- downsweep-level splice above ('spliceHarnessTargetNode').
+          modSum = modSum0
+            { ms_hspp_opts = applyHarnessProfile harnessProfile targetModName
+                modName (canonicalizeDFlags (ms_hspp_opts modSum0))
+            }
       parsed      <- parseModule modSum
       typechecked <- typecheckModule parsed
       hscEnv0     <- getSession

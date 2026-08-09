@@ -9,6 +9,17 @@ module Tidepool.Prelude
     Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , Generic
+    -- Render(render) (Tidepool.Render, the [fmt|] hole-coercion class) is
+    -- intentionally NOT re-exported here (approved surface decision,
+    -- generic-surface wave item 4, 2026-08-08): it collides with any
+    -- author-defined `render` (the harness contract's
+    -- `render :: State -> Maybe Text -> Text`), and bare `render` was never
+    -- an advertised verb — the canonical coercion instinct is `show`, which
+    -- this module already serves. `[fmt|...|]` desugars to a TH `'render`
+    -- Name (already-resolved, immune to what a module imports) via
+    -- `Tidepool.Render` directly, so the quasiquoter and
+    -- `haskell/test/Suite.hs`'s direct `import Tidepool.Render (render)` are
+    -- both unaffected by this removal.
     -- NonEmpty is intentionally NOT re-exported: `maximumBy (compare `on` snd)`
     -- and friends cover the argmax case without the NE machinery. Users who
     -- genuinely need it can `import Data.List.NonEmpty as NE` explicitly.
@@ -17,7 +28,6 @@ module Tidepool.Prelude
     -- * Text type (re-exported from Data.Text)
   , Text
   , Pack(..), unpack
-  , Render(render)
     -- * [fmt|...|] format-spec runtime helpers
   , FSign(..), FAlign(..)
   , fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain
@@ -294,7 +304,6 @@ import Control.Monad
   )
 import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
-import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
 import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, decode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
