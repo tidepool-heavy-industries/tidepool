@@ -106,6 +106,13 @@ any other live lane. Log real conflicts at fold.
   git operations. A slot wait over 15 minutes is starvation — report it, never
   bypass the wrapper. A bypassed run on an overloaded box is the exact failure
   this exists to prevent.
+- Use `ghc-slots.sh detach -- <cmd>` (NOT `run`) for any slot-taking work.
+  This is a correctness fix, not a convenience: a QUEUED plain `run` dies at
+  this environment's ~380s kill without ever acquiring its slot, so under a
+  busy queue it can never complete and takes its slot down with it. `detach`
+  runs under `setsid`, prints a pid + log path, returns immediately, queues
+  durably, and releases its slot even if the pane dies. Poll the log across
+  turns.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness
   test shard (persistent per-worktree, not mktemp).
 - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs);
