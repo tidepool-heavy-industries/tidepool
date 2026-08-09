@@ -1,14 +1,11 @@
 //! Compilation-wide indexed free-variable analysis.
 //!
-//! Several call sites in `emit/expr.rs` used to compute a subtree's free
-//! variables by calling `tree.extract_subtree(idx)` — a full copy of the
-//! subtree into a fresh `CoreExpr` — and then `free_vars` (a walk over that
-//! copy). That copy-and-walk pattern was paid repeatedly, several times
-//! inside per-binding loops, making emission quadratic in fragment size. This
-//! module computes the free-variable set of the subtree rooted at EVERY node
-//! index of a `CoreExpr`, once, in a single forward pass, and serves every
-//! query as an O(1) index lookup (plus a cheap sort of that node's own set,
-//! to preserve the exact `free_vars` contract).
+//! Computes the free-variable set of the subtree rooted at EVERY node index
+//! of a `CoreExpr`, once, in a single forward pass, and serves every query
+//! as an O(1) index lookup (plus a cheap sort of that node's own set, to
+//! preserve the exact `free_vars` contract). Avoids the quadratic cost of
+//! extracting and re-walking a fresh subtree per query, which matters
+//! because free-var queries happen repeatedly inside per-binding loops.
 //!
 //! # Traversal order
 //!
@@ -23,23 +20,16 @@
 //!
 //! # Representation
 //!
-//! Each node's free-variable set is stored as `Rc<FxHashSet<VarId>>`. A naive
-//! fresh `HashSet<VarId>` per node is O(nodes * avg-set-size) in memory — for
-//! a large fragment that dwarfs the O(nodes) the flat vector itself costs.
-//! Real Core skews heavily toward nodes that either introduce no binder and
-//! have a single non-empty child's contribution (App/Con/PrimOp chains,
-//! thunk-body wrappers) or remove a binder that turns out not to be free in
-//! the body (dead lambda parameters, unused let/case binders) — in both cases
-//! the node's free-variable set is IDENTICAL to a child's set. `compute`
-//! shares the `Rc` in those cases instead of cloning, and a single canonical
-//! empty set is shared by every node whose free-variable set is empty. Only
-//! nodes that genuinely merge two-or-more non-empty children (an App/Con/
-//! PrimOp/Jump with more than one free-var-bearing argument, a Case with
-//! several alts, a LetRec) or remove a binder that WAS actually free allocate
-//! a fresh `HashSet`. This keeps peak memory close to O(distinct sets), not
-//! O(nodes) times set size, while `free_vars_at` still hands back the exact
-//! same sorted `Vec<VarId>` the reference `free_vars` returns, so every
-//! existing call site's contract (`binary_search`, sortedness) is unchanged.
+//! Each node's free-variable set is stored as `Rc<FxHashSet<VarId>>`, shared
+//! rather than cloned whenever a node's set is identical to a child's (no
+//! binder introduced, or a removed binder wasn't actually free) — the common
+//! case for App/Con/PrimOp chains and dead lambda/let/case binders. A single
+//! canonical empty set is shared by every node with no free variables. Only
+//! nodes that merge two-or-more non-empty children, or remove a binder that
+//! WAS free, allocate a fresh `HashSet`. This keeps peak memory close to
+//! O(distinct sets) rather than O(nodes), while `free_vars_at` still returns
+//! the exact same sorted `Vec<VarId>` the reference `free_vars` does, so
+//! every existing call site's contract (`binary_search`, sortedness) holds.
 
 use rustc_hash::FxHashSet;
 use std::rc::Rc;
