@@ -254,6 +254,28 @@ summary, which is the point of the rule.
 > defense that actually works is a prior expectation about the answer's rough
 > size, not more care with the regex.
 
+**ONE-RED COUNT, and why it needs the denominator rule to be sound.** Root's
+advisory: exactly ONE expected inherited red box-wide
+(`mock_stack_matches_production`) until the mock fix folds. That converts "is
+this red inherited?" from an argument into a COUNT — one is inherited, two
+means the second is yours, no cache-consistent A/B needed.
+
+**EXPIRY: valid only until the mock fix folds** (two commits — `Fork` added as
+the immediate unblock, then `EFFECT_NAMES` derived from `standard_decls()`).
+After that the expected count is zero. Do not cite the allowance past it.
+
+**The two rules interlock and neither is sound alone.** The count is only valid
+on a COMPLETE run: under default fail-fast a run stops at the first failure, so
+"I only saw one red" is guaranteed by construction rather than observed, and a
+second red behind it never executes. `--no-fail-fast` is a PREREQUISITE for the
+count to mean anything. Used together they are strong; the count used without
+it is self-confirming — the same shape as a mutation test whose
+independent collector is the translator it is checking.
+
+Practical, since the battery scripts self-acquire via `$PWD` and worktree copies
+lack root's `7d57cea5` fix: pass it explicitly as
+`scripts/battery-shard.sh <crate> --no-fail-fast -E '<filter>'`.
+
 **"KEEP THIS IN SYNC WITH X" IS NOT A GUARD — binding on D2.** The `Fork` break
 above is the demonstration: `eval_harness.rs:387` documents that the list can
 drift AND cites the prior instance (`f1a480e6`) — then it drifted again. A
