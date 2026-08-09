@@ -331,7 +331,20 @@ filtered way, not the raw grep count, so it is apples-to-apples.
 
 ## Uncertain-keep list
 
-Populated during the per-module passes below as items are found where the
-signal-vs-noise call isn't obvious. See individual commit messages for the
-running list; anything still open at the end of the lane is copied here
-before submit.
+Items where the signal-vs-noise call wasn't fully resolved by the end of the
+lane — copied here from the per-crate passes above before submit:
+
+- `tidepool-effect/src/machine.rs`'s `apply_cont` is deliberately iterative
+  (zipper-style, explicit pending-stack) rather than recursive, because a long
+  effect chain (~800-deep) could otherwise overflow the host stack. No
+  regression test in this crate currently exercises a deep continuation chain
+  to pin that invariant — worth adding
+  (`apply_cont_handles_deep_continuation_chain_without_stack_overflow` or
+  similar) if no equivalent coverage exists elsewhere in the workspace. Left
+  as a follow-up rather than added here, since this lane is comments-only.
+- `tidepool-heap/src/gc/raw.rs:726` has a `(C6)` review-ID tag inside an
+  `assert_eq!` failure-message **string literal**, not a comment/doc-comment/
+  test name — out of this lane's edit surface (string literals are behavior,
+  not documentation) even though it's the same archaeology class as everything
+  else removed. Flagged in case a future lane with string-literal scope wants
+  it.
