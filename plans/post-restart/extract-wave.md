@@ -479,7 +479,7 @@ deliverable, not green legs.**
 |---|---|
 | **C1** — `load'`/second-loop timing split | folded; `ghc_setup`/`ghc_load` partition, flat rows, `ghc_session` tombstoned to the classify lane |
 | **D1-A** — the hard-fail defense | folded; CHECK A hard-fails, CHECK B a loud diagnostic, **two mutation legs at two call sites both naming CHECK A**, anti-vacuity control + permanent CHECK A message pin |
-| **E6** — tiered `-O2` | folded; `core2core` 2908.8→893.7 ms (~3.25×) on the 14-module/10-excluded fixture; fidelity 30/30, acceptance 24/24, quick 1875/1875, differential `compared=312` vs floor 300. **Moves the wire** (in root's redeploy set) |
+| **E6** — tiered `-O2` | folded; `core2core` 2908.8→893.7 ms (~3.25×) on the 14-module/10-excluded fixture; fidelity 30/30, acceptance 24/24, quick 1875/1875 (incl. the RULES guard by name), differential `compared=312` vs floor 300. **Moves the wire** (in root's redeploy set). **SCOPE: normal path only — session turns 2+ do NOT get this tier.** Soundness rests on an invariant now enforced by a positive-controlled guard, not a note |
 | **pivotal decision** | persistent server REJECTED on latency (true boot 0.6–1.9%); C1's own fix promoted ahead of both architectures; FAT interfaces deferred with the measurement attached |
 
 ## Landed, NOT verified — flags intact, legs run in root's central pass
@@ -489,7 +489,7 @@ deliverable, not green legs.**
 | **item 0 steps 1–3 + 6** (`boot-lazy`) | both boot seeds DELETED, unbootstrapped `ResidentSession`. **The drop from 4 is NOT MEASURED** — legs were killed under the stop directive before the measurement ran. Harness acceptance 26/26 passed; `tidepool-repl`, `tidepool-runtime`, `extract-fidelity` **never ran**. `PRE_MODEL_EXTRACT_COMPILES` deliberately **stays at 4** so the central pass gets a test that FAILS LOUDLY if the drop did not happen, rather than a constant edited to match an expectation |
 | **item 0b** (`boot-vocab`) | `effects_module_source_with_vocab` + `emits_helpers_for` (pub(crate)); three legs outstanding |
 | **`--targets` prerequisite** (`boot-targets`) | multi-target emission, strict-mode skip unreachable **as a separate function**; differential/corpus/fidelity outstanding |
-| **D1-B** (`d1-remove`) | `scanMeta` removal + `nameById` decoupling; gates stopped mid-run |
+| **D1-B** (`d1-remove`) | `scanMeta` gone; `nameById` decoupled (`collectReachableConDCsRaw` for CHECK A's names vs the filtered collector for CHECK B). **Wire MOVES, not proven inert.** Its fidelity 30/30 and acceptance 24/24 are complete BUT were taken at `42be934d`, a **pre-E6 tree** — both drive real extracts, which E6's tiering changes, so they do **not** validate the merged tip. Quick tier was killed mid-compile, so **the three pinned id-stability tests never ran** — on the one item (a metadata-source removal) where that trio is genuinely on point |
 
 **Item 0's headline is an EXPECTED 4 → 2, not 4 → 1, and the 2 is UNMEASURED.**
 Two claims, both needing to survive quoting:
@@ -535,3 +535,26 @@ leaving the note visible rather than silently fixing the line.)
    is-it-safe-to-launch property.
 5. Five hand-written copies of the standard effect row across two crates
    (ledger item 17).
+6. **A spec can ask for a measurement no instrumentation could produce.**
+   D1-B's before/after was unobtainable: `scanMeta`'s cost was never inside the
+   `translate` bracket — it is a lazy thunk first forced by the UNTIMED
+   `assertMetaCoversEmitted` call between the translate and cbor_encode phases.
+   Found by the dev while trying to satisfy the requirement. Check that the
+   quantity you are asking for is bracketed by something before you require it.
+
+## What the centralized verification pass must cover
+
+Ordered by what is least covered rather than by item:
+
+1. **D1-B on the merged tip** — its greens are pre-E6 and both suites drive real
+   extracts. Re-run there, not re-read.
+2. **The three pinned id-stability tests against D1-B** — never ran, and D1-B is
+   a metadata-source removal, which is exactly the case that trio observes.
+3. **`boot-lazy`'s three unrun legs** (`tidepool-repl`, `tidepool-runtime`,
+   `extract-fidelity`) — and with them the 4 → 2 drop, still unmeasured. Realm
+   step 4's gate rides on this.
+4. **Item 0b and `--targets`' outstanding legs.**
+5. **The `tidepool-mcp` shard** — where the remaining `Fork` mirrors are red and
+   invisible (ledger item 17).
+6. **Wire status for D1-B** — MOVES, not proven inert. E6 moves it too and is
+   already in the redeploy set.
