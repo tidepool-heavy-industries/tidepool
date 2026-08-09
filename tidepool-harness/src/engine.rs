@@ -470,18 +470,36 @@ pub fn assemble_request(
     }
 }
 
+/// A names-only type-shape line to append to a hole card, or an empty string
+/// when there is nothing to show: no table (the caller couldn't reach one —
+/// see call sites), or [`crate::uiof::type_synopsis`] degraded all the way to
+/// the bare type name (already stated elsewhere in the card, so repeating it
+/// here would add nothing). See `plans/post-restart/dev/hole-card-type-synopsis.md`:
+/// names only, never an invented/partial shape.
+fn type_shape_line(ty: &str, table: Option<&DataConTable>) -> String {
+    match table.map(|t| crate::uiof::type_synopsis(t, ty)) {
+        Some(synopsis) if synopsis != ty => format!("Its shape: `{synopsis}`\n\n"),
+        _ => String::new(),
+    }
+}
+
 /// Render a hole card as a user-turn message: the prompt plus a `resume :: T`
 /// signature the answerer fills. This is what a fork/return answerer sees as
-/// its task.
-pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
+/// its task. `table` is the [`DataConTable`] the hole's type was classified
+/// from (when the caller has one in hand) — used only to render a names-only
+/// shape synopsis, never to invent field types.
+pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -> String {
     match ty {
-        Some(ty) => format!(
-            "A parent computation is suspended and needs a typed answer.\n\n\
-             {prompt}\n\n\
-             Answer by evaluating `resume expr` where:\n\n\
-             ```haskell\nresume :: {ty} -> M {ty}\n```\n\n\
-             Your ```haskell block's value must be of type `{ty}`."
-        ),
+        Some(ty) => {
+            let shape = type_shape_line(ty, table);
+            format!(
+                "A parent computation is suspended and needs a typed answer.\n\n\
+                 {prompt}\n\n\
+                 Answer by evaluating `resume expr` where:\n\n\
+                 ```haskell\nresume :: {ty} -> M {ty}\n```\n\n\
+                 {shape}Your ```haskell block's value must be of type `{ty}`."
+            )
+        }
         None => format!(
             "A parent computation is suspended and needs an answer.\n\n{prompt}\n\n\
              Answer by evaluating `resume expr` in a ```haskell block."
@@ -499,8 +517,27 @@ pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
 /// (`crate::harness::AnswerContract`) — say so, because a model that believes
 /// `{ty}` is out of scope stops trying to build one and finalizes whatever does
 /// compile instead (e.g. a `Text`/tuple) rather than the real type.
-pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) -> String {
+///
+/// Prescribes bare `finalize @{ty} value`, with no outer `:: M {ty}`
+/// annotation — the earlier "annotate the WHOLE expression" wording was a
+/// stopgap for the ambiguous-`a0` defect; `__anchor` (`template_turn_for`)
+/// fixed that at the source, and
+/// `finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
+/// proves the bare shape compiles for a pinned `Finalize T` row. The
+/// annotated form still compiles too (a relaxation, not a prohibition) — it
+/// is simply no longer necessary to prescribe.
+///
+/// `table` is the [`DataConTable`] the hole's answer type was resolved from,
+/// when the caller has one in hand — used only to render a names-only shape
+/// synopsis (see [`hole_card`]), never to invent field types.
+pub fn answerer_hole_card(
+    prompt: &str,
+    ty: Option<&str>,
+    imports: &[String],
+    table: Option<&DataConTable>,
+) -> String {
     let ty = ty.unwrap_or("A");
+    let shape = type_shape_line(ty, table);
     let scope = if imports.is_empty() {
         String::new()
     } else {
@@ -515,8 +552,7 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
-         WHOLE expression with `:: M {ty}` — in a single \
+         {shape}Answer by evaluating `finalize @{ty} value` in a single \
          ```haskell block — this ends your turn and hands the value back to the \
          loop.{scope} (To gather operator input first, evaluate `askUser @T` for \
          a type in scope; bind its result, then `finalize`.)"
@@ -1175,7 +1211,7 @@ fn retarget_result_binder(src: &str) -> String {
 /// `tidepool_mcp::eval_prep`'s `template_haskell_impl` end-line computation
 /// exactly (an empty block is 1 line; a trailing newline doesn't count as an
 /// extra line).
-fn content_line_count(code: &str) -> usize {
+pub(crate) fn content_line_count(code: &str) -> usize {
     if code.is_empty() {
         1
     } else if code.ends_with('\n') {
@@ -1372,6 +1408,122 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    // -- hole card type synopsis --------------------------------------------
+
+    use tidepool_repr::{DataCon, DataConId};
+
+    fn nullary_dc(id: u64, name: &str, tag: u32, type_name: &str) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some(format!("{type_name}.{name}")),
+            type_name: type_name.to_string(),
+        }
+    }
+
+    fn record_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        let dc = DataCon {
+            id: DataConId(1),
+            name: "Contribution".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Contribution.Contribution".to_string()),
+            type_name: "Contribution".to_string(),
+        };
+        table.insert(dc.clone());
+        table.set_field_labels(
+            dc.id,
+            vec![
+                "addedIdeas".to_string(),
+                "draftDelta".to_string(),
+                "advance".to_string(),
+            ],
+        );
+        table
+    }
+
+    fn nullary_sum_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        table.insert(nullary_dc(3, "Abort", 3, "Verdict"));
+        table.insert(nullary_dc(1, "Advance", 1, "Verdict"));
+        table.insert(nullary_dc(2, "Hold", 2, "Verdict"));
+        table
+    }
+
+    #[test]
+    fn hole_card_renders_record_selector_names() {
+        let table = record_table();
+        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        assert!(
+            card.contains("Contribution { addedIdeas, draftDelta, advance }"),
+            "{card}"
+        );
+    }
+
+    #[test]
+    fn answerer_hole_card_renders_nullary_sum_in_tag_order() {
+        let table = nullary_sum_table();
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
+        assert!(card.contains("Advance | Hold | Abort"), "{card}");
+    }
+
+    /// Mutation-close the degrade path at the hole-card level: an unsupported
+    /// shape (here, a type the table has no constructors for) must NOT add a
+    /// partial/invented shape line — the card falls back to naming the type
+    /// alone (already stated elsewhere in the card text).
+    #[test]
+    fn hole_card_unsupported_shape_adds_no_shape_line() {
+        let table = DataConTable::new();
+        let card = hole_card("answer this", Some("Mystery"), Some(&table));
+        assert!(
+            !card.contains("Its shape:"),
+            "an unsupported shape must not render a shape line: {card}"
+        );
+    }
+
+    #[test]
+    fn hole_card_with_no_table_adds_no_shape_line() {
+        let card = hole_card("answer this", Some("Contribution"), None);
+        assert!(!card.contains("Its shape:"), "{card}");
+    }
+
+    /// Derived from the table, not hardcoded: a renamed field changes what
+    /// the hole card shows.
+    #[test]
+    fn hole_card_shape_follows_table_field_rename() {
+        let table = record_table();
+        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        assert!(card.contains("addedIdeas"), "{card}");
+
+        let mut renamed = DataConTable::new();
+        let dc = DataCon {
+            id: DataConId(1),
+            name: "Contribution".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Contribution.Contribution".to_string()),
+            type_name: "Contribution".to_string(),
+        };
+        renamed.insert(dc.clone());
+        renamed.set_field_labels(
+            dc.id,
+            vec![
+                "ideasAdded".to_string(),
+                "deltaDraft".to_string(),
+                "advance".to_string(),
+            ],
+        );
+        let renamed_card = hole_card("answer this", Some("Contribution"), Some(&renamed));
+        assert!(renamed_card.contains("ideasAdded"), "{renamed_card}");
+        assert!(!renamed_card.contains("addedIdeas"), "{renamed_card}");
     }
 
     #[test]

@@ -301,7 +301,7 @@ const A_DECISION: &str =
 /// and the caller's `assert_eq!` against the last-known shape (not this
 /// function) is what tracks the drift instead of silently going stale.
 fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
-    let card = answerer_hole_card("answer the loop's request", Some(ty), imports);
+    let card = answerer_hole_card("answer the loop's request", Some(ty), imports, None);
     const MARKER: &str = "evaluating `";
     let start = card.find(MARKER).unwrap_or_else(|| {
         panic!("answerer_hole_card must prescribe a `finalize` shape via \"evaluating `...`\", got: {card}")
@@ -335,7 +335,7 @@ fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
     let imports = vec!["HarnessTypes".to_string()];
     let shape = prescribed_finalize_shape("Decision", &imports);
     assert_eq!(
-        shape, "(finalize @Decision value :: M Decision)",
+        shape, "finalize @Decision value",
         "the answerer prompt's prescribed shape changed — re-read \
          `engine::answerer_hole_card` and update this pinned literal"
     );

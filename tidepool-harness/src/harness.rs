@@ -312,19 +312,82 @@ fn truncate_ghc_error(msg: &str) -> String {
     }
 }
 
-/// Render a turn-compile failure as text a MODEL can act on.
+/// The `Expr.hs` anchor + display label [`render_compile_error`] renders a
+/// remapped `run_turn` diagnostic under — mirrors `tidepool-mcp`'s eval-path
+/// `anchor: "Expr.hs"` (the module every `run_turn` template declares, via
+/// `tidepool_mcp::build_preamble`), with a harness-specific display label.
+const TURN_ANCHOR: &str = "Expr.hs";
+const TURN_LABEL: &str = "<turn>";
+
+/// The EXPR template's user-code marker — byte-identical to
+/// `tidepool-mcp/src/eval_prep.rs`'s `format_error_with_source::MARKER`,
+/// since `engine::expr_turn_template` is built through the SAME
+/// `tidepool_mcp::template_haskell`/`template_haskell_anchored` that eval
+/// uses (`engine::template_turn_for`).
+const EXPR_MARKER: &str = "__user = let {\n __b =\n";
+
+/// The BIND/BINDDISCARD templates' (`engine::session_bind_template`)
+/// user-code marker: the turn statement is spliced immediately after
+/// `__result = do {`, with no `[user-lines]` annotation of its own (that
+/// marker is `template_haskell`-specific — `session_bind_template` never
+/// calls it) — found empirically by reading the builder, per this item's
+/// spec.
+const BIND_MARKER: &str = "__result = do {\n";
+
+/// Compute a candidate template's own user-code line window: `(line_offset,
+/// (start, end))`, `line_offset` = newline count up to and including
+/// `marker`'s end, `(start, end)` = the 1-based inclusive range `content`
+/// (the turn text `run_block` embedded — same `block` for every candidate)
+/// occupies immediately after it. `None` when `marker` isn't in `source` (a
+/// candidate that was never built, or a builder that changed shape).
+fn candidate_window(
+    source: &str,
+    marker: &str,
+    content_lines: usize,
+) -> Option<(usize, (usize, usize))> {
+    let pos = source.find(marker)?;
+    let offset = source[..pos + marker.len()].matches('\n').count();
+    Some((offset, (offset + 1, offset + content_lines)))
+}
+
+/// Render a turn-compile failure as text a MODEL can act on, with GHC's
+/// coordinates remapped from TEMPLATE space to the model's own turn text
+/// (`block`) — see `plans/post-restart/dev/error-coordinates.md`.
 ///
 /// `CompileError::Diagnostics`' own `Display` reports only how many
 /// diagnostics there were, not what they said — fine for a log line, useless
 /// as the corrective user turn [`Harness::run_to_hole_or_done`] feeds back,
-/// which is the whole mechanism by which a model fixes its own Haskell. So the
-/// diagnostics are rendered here: severity, span, and message per entry, in
-/// the order GHC reported them. Every other variant's `Display` already
-/// carries its detail.
-fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
+/// which is the whole mechanism by which a model fixes its own Haskell.
+/// `9c2b14ff` restored the content (severity/span/message per entry); this
+/// restores the COORDINATES, reusing `tidepool_runtime::diag`'s remapper (the
+/// same one `tidepool-mcp`'s eval path uses) rather than a second one.
+///
+/// `run_turn` builds up to TWO full module sources before it knows which
+/// verdict GHC will pick (`expr_source` always; `bind_source` — representing
+/// both `Bind`/`BindDiscard`, which share its exact preamble/offset — only
+/// when the node has a value-plane bind context worth trying), and a compile
+/// FAILURE carries no verdict tag: `run_turn` returns before ever decoding
+/// which template applied. So a diagnostic is remapped against a candidate
+/// ONLY when its raw line falls inside THAT candidate's own (deterministically
+/// computed, from `block`) user-code window — tried EXPR first, then BIND.
+/// A diagnostic outside every candidate's window (or when there is no
+/// candidate at all) keeps its raw template-space span, exactly as before
+/// this fix: picking the wrong candidate would silently shift every line
+/// number by a wrong constant, which is worse than not remapping.
+fn render_compile_error(
+    e: &tidepool_runtime::CompileError,
+    block: &str,
+    expr_source: &str,
+    bind_source: &str,
+) -> String {
     let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
         return e.to_string();
     };
+    if let Some(opts) = pick_render_opts(diags, block, expr_source, bind_source) {
+        let mut out = format!("GHC error ({} diagnostic(s)):\n", diags.len());
+        out.push_str(&tidepool_runtime::diag::render_diagnostics(diags, &opts));
+        return out;
+    }
     let mut out = format!("GHC error ({} diagnostic(s)):", diags.len());
     for d in diags {
         out.push('\n');
@@ -337,6 +400,44 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
         }
     }
     out
+}
+
+/// Pick which candidate template's [`tidepool_runtime::diag::RenderOpts`]
+/// (if any) a batch of diagnostics should be remapped against — see
+/// [`render_compile_error`]'s doc for why this exists and why the choice is
+/// derived, never guessed. All diagnostics in one `CompileError::Diagnostics`
+/// batch come from the SAME compile, so one representative (anchor-file)
+/// diagnostic's raw line decides for the whole batch.
+fn pick_render_opts<'a>(
+    diags: &[tidepool_runtime::diag::ExtractDiag],
+    block: &str,
+    expr_source: &'a str,
+    bind_source: &'a str,
+) -> Option<tidepool_runtime::diag::RenderOpts<'a>> {
+    let representative_line = diags.iter().find_map(|d| {
+        let span = d.span.as_ref()?;
+        span.file
+            .ends_with(TURN_ANCHOR)
+            .then_some(span.start_line as usize)
+    })?;
+    let content_lines = engine::content_line_count(block);
+    for (source, marker) in [(expr_source, EXPR_MARKER), (bind_source, BIND_MARKER)] {
+        let Some((offset, (start, end))) = candidate_window(source, marker, content_lines) else {
+            continue;
+        };
+        if representative_line >= start && representative_line <= end {
+            return Some(tidepool_runtime::diag::RenderOpts {
+                anchor: TURN_ANCHOR,
+                label: TURN_LABEL,
+                user_lines: Some((start, end)),
+                line_offset: offset,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source,
+            });
+        }
+    }
+    None
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -1036,7 +1137,10 @@ impl Harness {
             },
             TurnTemplate {
                 kind: TemplateSelector::Bind,
-                source: bind_source,
+                // Kept alongside (see below) — a compile failure carries no
+                // verdict tag, so a corrective error needs both candidate
+                // sources to remap against.
+                source: bind_source.clone(),
             },
             TurnTemplate {
                 kind: TemplateSelector::BindDiscard,
@@ -1044,7 +1148,7 @@ impl Harness {
             },
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: expr_source,
+                source: expr_source.clone(),
             },
         ];
         timing::record_stage(
@@ -1098,7 +1202,9 @@ impl Harness {
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
-        .map_err(|e| HarnessError::Compile(render_compile_error(&e)))?;
+        .map_err(|e| {
+            HarnessError::Compile(render_compile_error(&e, block, &expr_source, &bind_source))
+        })?;
 
         match outcome {
             TurnResult::Decl { .. } => {
@@ -2033,10 +2139,17 @@ impl Harness {
             }
         };
         // Push the hole card as a user turn, then drive the node's own loop to an
-        // answering value against itself.
+        // answering value against itself. `suspend_table` is the table THIS
+        // hole was classified from (set when the node suspended) — exactly
+        // the table `ty` was resolved against.
+        let table = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.suspend_table.clone());
         self.push_user_turn(
             node,
-            &engine::hole_card(&pending.classified.prompt, ty.as_deref()),
+            &engine::hole_card(&pending.classified.prompt, ty.as_deref(), table.as_ref()),
         )?;
         let value = self
             .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns, &self.cfg)
@@ -2689,10 +2802,17 @@ impl Harness {
         prompt: &str,
         ty: Option<&str>,
     ) -> Result<NodeId, HarnessError> {
-        let (parent_transcript, parent_framing) = {
+        // `parent`'s `suspend_table` is the table its CURRENT hole (the one
+        // this fork answers) was classified from — exactly the table `ty` was
+        // resolved against.
+        let (parent_transcript, parent_framing, table) = {
             let convos = self.convos.lock();
             let convo = convos.get(&parent).ok_or(HarnessError::NoSession(parent))?;
-            (convo.transcript.clone(), convo.framing.clone())
+            (
+                convo.transcript.clone(),
+                convo.framing.clone(),
+                convo.suspend_table.clone(),
+            )
         };
         let checkpoint = parent_transcript.len() as u64;
         let child = self.tree.create_node(
@@ -2710,7 +2830,7 @@ impl Harness {
         let mut transcript = parent_transcript;
         transcript.push(Message {
             role: Role::User,
-            content: engine::hole_card(prompt, ty),
+            content: engine::hole_card(prompt, ty, table.as_ref()),
             reasoning_items: Vec::new(),
         });
         self.forked_transcripts
@@ -3045,6 +3165,157 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
+    }
+
+    // ---- render_compile_error / error coordinates -------------------------
+    //
+    // `render_compile_error` remaps a `run_turn` compile failure's GHC
+    // coordinates from TEMPLATE space to the model's own turn text. These
+    // build SYNTHETIC candidate sources (same marker shape the real
+    // `expr_turn_template`/`session_bind_template` builders produce, per
+    // `EXPR_MARKER`/`BIND_MARKER`) and a synthetic diagnostic, so the offset
+    // arithmetic is pinned without a real GHC compile.
+
+    fn diag(file: &str, line: u32, col: u32, message: &str) -> tidepool_runtime::diag::ExtractDiag {
+        tidepool_runtime::diag::ExtractDiag {
+            span: Some(tidepool_runtime::diag::DiagSpan {
+                file: file.to_string(),
+                start_line: line,
+                start_col: col,
+                end_line: line,
+                end_col: col + 1,
+            }),
+            severity: "error".to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// A synthetic EXPR-template source: `preamble_lines` filler lines, the
+    /// real `EXPR_MARKER`, then one line per `content_lines` standing in for
+    /// the model's own turn text.
+    fn fake_expr_source(preamble_lines: usize, content_lines: usize) -> String {
+        let mut s = "-- preamble\n".repeat(preamble_lines);
+        s.push_str(EXPR_MARKER);
+        for i in 0..content_lines {
+            s.push_str(&format!("userExprLine{i}\n"));
+        }
+        s.push_str(" } in __b\n");
+        s
+    }
+
+    /// A synthetic BIND-template source: same shape, `BIND_MARKER` instead.
+    fn fake_bind_source(preamble_lines: usize, content_lines: usize) -> String {
+        let mut s = "-- preamble\n".repeat(preamble_lines);
+        s.push_str(BIND_MARKER);
+        for i in 0..content_lines {
+            s.push_str(&format!("userStmtLine{i}\n"));
+        }
+        s.push_str(" ; pure x\n }\n");
+        s
+    }
+
+    /// The assertion that matters most, mutation-closed: a turn whose user
+    /// code fails on its FIRST line reports line 1, not the preamble-offset
+    /// raw line. Break `candidate_window`'s `offset + 1` (e.g. to plain
+    /// `offset`) and this goes red.
+    #[test]
+    fn render_compile_error_remaps_first_line_of_user_code() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        // EXPR_MARKER has 2 newlines, so the first user line lands on raw
+        // line 3.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            3,
+            1,
+            "Variable not in scope: garbage",
+        )]);
+        let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
+        assert!(out.contains("<turn>:1:"), "{out}");
+        assert!(
+            !out.contains("Expr.hs:3"),
+            "raw template line leaked: {out}"
+        );
+    }
+
+    /// A multi-line user turn failing on its Nth line reports N.
+    #[test]
+    fn render_compile_error_remaps_nth_line_of_user_code() {
+        let expr_source = fake_expr_source(0, 3);
+        let bind_source = fake_bind_source(0, 3);
+        // Raw line 5 = offset(2) + 3rd content line.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            5,
+            1,
+            "type error on the third line",
+        )]);
+        let block = "userExprLine0\nuserExprLine1\nuserExprLine2";
+        let out = render_compile_error(&err, block, &expr_source, &bind_source);
+        assert!(out.contains("<turn>:3:"), "{out}");
+    }
+
+    /// The verdict-ambiguity case: when the diagnostic's raw line falls
+    /// outside the EXPR candidate's window but inside the BIND candidate's,
+    /// the BIND candidate is used instead — never the (wrong) EXPR offset.
+    #[test]
+    fn render_compile_error_falls_back_to_bind_candidate_when_expr_window_misses() {
+        // EXPR: 0 preamble lines, 1-line window at raw line 3.
+        let expr_source = fake_expr_source(0, 1);
+        // BIND: 10 preamble lines pushes its window well past EXPR's.
+        let bind_source = fake_bind_source(10, 1);
+        let bind_offset = candidate_window(&bind_source, BIND_MARKER, 1).unwrap().0;
+        let raw_line = (bind_offset + 1) as u32;
+        let err =
+            tidepool_runtime::CompileError::Diagnostics(vec![diag("Expr.hs", raw_line, 1, "oops")]);
+        let out = render_compile_error(&err, "x", &expr_source, &bind_source);
+        assert!(out.contains("<turn>:1:"), "{out}");
+    }
+
+    /// A diagnostic whose raw line falls in NEITHER candidate's window keeps
+    /// its raw template-space span — remapping against the wrong candidate
+    /// would silently shift the line by a wrong constant, which is worse
+    /// than not remapping at all.
+    #[test]
+    fn render_compile_error_leaves_out_of_window_diagnostic_raw() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            9999,
+            1,
+            "deep in generated scaffolding",
+        )]);
+        let out = render_compile_error(&err, "x", &expr_source, &bind_source);
+        assert!(out.contains("Expr.hs:9999:1"), "{out}");
+        assert!(!out.contains("<turn>"), "{out}");
+    }
+
+    /// A non-`Diagnostics` variant carries no GHC coordinates to remap —
+    /// renders verbatim via `Display`, exactly as before this fix.
+    #[test]
+    fn render_compile_error_non_diagnostics_variant_renders_verbatim() {
+        let err = tidepool_runtime::CompileError::IOTypeDetected;
+        let out = render_compile_error(&err, "x", "", "");
+        assert_eq!(out, err.to_string());
+    }
+
+    /// A template-internal binder (`__b`) whose OWN span is in the
+    /// scaffold-preamble region must not leak into a remapped diagnostic —
+    /// exercising `tidepool_runtime::diag`'s scrubbing through the harness's
+    /// own picked `RenderOpts`, not a second implementation of it.
+    #[test]
+    fn render_compile_error_scrubs_template_internal_binder() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        let message = "* Ambiguous type variable `f0'\n\
+             Relevant bindings include\n  \
+             __b :: f0 (Value, b0) (bound at Expr.hs:1:2)\n  \
+             (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)";
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag("Expr.hs", 3, 1, message)]);
+        let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
+        assert!(!out.contains("__b"), "{out}");
+        assert!(out.contains("Ambiguous type variable"), "{out}");
     }
 
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a

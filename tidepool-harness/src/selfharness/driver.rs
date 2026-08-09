@@ -1050,7 +1050,12 @@ impl SelfHarnessDriver {
                     match &classified.routing {
                         HoleRouting::RunLLMTurn { site, ty } => {
                             let answer = self
-                                .service_runllm_hole(*site, ty.as_deref(), &classified.prompt)
+                                .service_runllm_hole(
+                                    *site,
+                                    ty.as_deref(),
+                                    &classified.prompt,
+                                    &compiled.table,
+                                )
                                 .await?;
                             // Between holes — if the answerer's accumulated
                             // context has crossed threshold, compact + replace its
@@ -1121,6 +1126,7 @@ impl SelfHarnessDriver {
         site: u32,
         ty: Option<&str>,
         prompt: &str,
+        table: &DataConTable,
     ) -> Result<Value, DriverError> {
         self.lifecycle = SelfHarnessState::SuspendedOnHole;
         self.emit(Event::RunLLMTurnHole {
@@ -1148,7 +1154,8 @@ impl SelfHarnessDriver {
         // context rather than spawning a fresh one. The SCOPED answerer card
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
         // `resume expr` (which does not compile against this stack).
-        let child_prompt = engine::answerer_hole_card(prompt, ty, self.answerer_imports());
+        let child_prompt =
+            engine::answerer_hole_card(prompt, ty, self.answerer_imports(), Some(table));
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
