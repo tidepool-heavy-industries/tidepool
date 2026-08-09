@@ -10,7 +10,7 @@
 //! parsed shape and (b) leaves an invalid reply's continuation un-consumed so
 //! the caller can retry with a corrected response.
 //!
-//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); skips cleanly otherwise.
+//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -74,10 +74,7 @@ fn parse_suspended(text: &str) -> String {
 /// if it fails (bug: Value was a String) the result is -1.0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_reply_is_extractable_value() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Eval: ask with an object schema; extract field "n" via optic.
@@ -122,10 +119,7 @@ async fn object_reply_is_extractable_value() {
 /// JSON number so `v ^? _Double` succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scalar_reply_extracts_via_double() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl
@@ -159,10 +153,7 @@ async fn scalar_reply_extracts_via_double() {
 ///           → resume AGAIN with the SAME continuation_id and valid response → success.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_reply_does_not_consume_continuation() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl

@@ -29,9 +29,7 @@ fn parse_meta(text: &str) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_resolves_stdlib_proc() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i Proc").await;
@@ -59,9 +57,7 @@ async fn info_resolves_stdlib_proc() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_resolves_stdlib_hit() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i Hit").await;
@@ -79,9 +75,7 @@ async fn info_resolves_stdlib_hit() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_constructor_only_hit() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i UpdateNoChange").await;
@@ -102,9 +96,7 @@ async fn info_constructor_only_hit() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_decl_shadows_stdlib() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Before the session decl, Hit resolves from the stdlib.
@@ -128,9 +120,7 @@ async fn session_decl_shadows_stdlib() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_miss_carries_hint() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i Nonexistent").await;

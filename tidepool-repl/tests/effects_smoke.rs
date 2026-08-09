@@ -10,15 +10,12 @@
 
 mod common;
 
-use common::{build_full_server, extract_available, run_single, text_of};
+use common::{build_full_server, require_extract, run_single, text_of};
 use tidepool_repl::TidepoolReplServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_stack_effects_reachable_through_session() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
@@ -85,10 +82,7 @@ async fn full_stack_effects_reachable_through_session() {
 /// from a later `session_run`. (Regression for the decl/eval preamble asymmetry.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_def_sees_full_eval_vocabulary() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
@@ -168,10 +162,7 @@ async fn run_block(
 ///   3. a bare pure expression reports its inferred `type`, not `null`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn block_runner_input_and_type_cleanups() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 

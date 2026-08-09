@@ -25,9 +25,7 @@ fn parse_result(turn_text: &str) -> serde_json::Value {
 /// self-explainingly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stub_roundtrip_replace_and_unknown() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // 1. A >4096-char field: truncated with a fetchable stub_0 marker + hint.
@@ -93,9 +91,7 @@ async fn stub_roundtrip_replace_and_unknown() {
 /// the additive-only JSON shape guarantee for existing consumers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn small_result_has_no_truncation_key() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl

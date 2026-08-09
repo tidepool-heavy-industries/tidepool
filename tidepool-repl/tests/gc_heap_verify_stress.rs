@@ -27,10 +27,7 @@ use common::*;
 /// expression → fold-result bind → repeat folds. Verifier on throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_text_substrate_folds_heap_verified() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     tidepool_codegen::host_fns::set_heap_verify(true);
     tidepool_codegen::host_fns::set_gc_poison(true);
     let repl = Repl::new();
@@ -102,10 +99,7 @@ async fn session_text_substrate_folds_heap_verified() {
 /// the previous generation's (forwarding-stub seam, `acc <- pure (x : acc)`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_rebind_accumulator_heap_verified() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     tidepool_codegen::host_fns::set_heap_verify(true);
     tidepool_codegen::host_fns::set_gc_poison(true);
     let repl = Repl::new();
