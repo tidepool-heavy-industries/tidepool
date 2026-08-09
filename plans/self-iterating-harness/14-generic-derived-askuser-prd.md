@@ -396,8 +396,15 @@ allowing surrounding GHC wording to vary.
 > supported leaves either). What ships instead carries the FIELD name inside
 > the unsolved constraint, where it appears verbatim beside GHC's own
 > `No instance for (Generic Environment)`. Field and nested type are both
-> named — the property this section actually exists to guarantee — and only
-> the prescriptive wording is lost.
+> named — the property this section actually exists to guarantee.
+>
+> Deferring the rest to GHC is the CORRECT outcome here, not a shortfall we
+> tolerate. The alternative is a second type checker living in our type
+> families, deciding what is and is not a supported type — worse than the
+> one GHC already ships, and permanently out of date with it. We add a
+> custom error where we genuinely know something GHC does not (a list needs
+> a repeat editor; `String` should be `Text`). Where the thing to say is
+> "this type has no instance", GHC says it better.
 >
 > Every other message below is achievable and shipped, because those cases
 > dispatch on a type that DOES reduce.
