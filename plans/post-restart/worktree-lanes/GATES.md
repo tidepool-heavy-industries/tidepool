@@ -134,6 +134,29 @@ PASS tidepool-worktree::worktree_head worktree_head_on_detached_head_returns_the
 PASS tidepool-worktree::worktree_head worktree_head_of_a_lost_worktree_fails_consistently_with_lookup
 ```
 
+## Surface — `Event`'s `(<|>)` in the generated preamble (L4, authorized 2026-08-08)
+
+PRD 19's `(<|>) :: Event a -> Event a -> Event a` collides with the
+`Control.Applicative` operator that `Tidepool.Prelude` re-exports
+(`Prelude.hs:118`, `:317`) and every eval auto-imports (`eval_prep.rs:126`).
+GHC cannot disambiguate: an ambiguous occurrence is name resolution, before
+typechecking. So the PRD's own example fails to compile in a RepoEvent row.
+
+Decision (root, on the lane's proposal): `effects_module_source_at` emits
+`hiding (error, (<|>))` when the row contains RepoEvent, unchanged otherwise —
+the runtime grows so the DSL need not shrink. The priced trade: in a RepoEvent
+row there is exactly ONE unqualified `<|>` and it is `Event`'s, because the
+merge has no alternative spelling while `Maybe`/list fallbacks have
+`fromMaybe`/`maybe`/patterns.
+
+| Gate | Failure mode it exists to catch |
+|---|---|
+| red baseline | the collision being unreachable, making the green gate prove nothing — must assert the EXACT ambiguous-occurrence diagnostic, not merely a failed compile |
+| green | the PRD's example still needing a hand-added `hiding` to compile |
+| no-regression | the hiding being applied unconditionally, silently costing every other row its Alternative `<|>` |
+
+Owed by lane L4; not yet certified here.
+
 ## Still owed
 
 `withHandler`'s semantics (lane L4) are one-failure-mode gates too and are not
