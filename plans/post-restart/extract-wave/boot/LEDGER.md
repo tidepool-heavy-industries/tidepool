@@ -101,15 +101,46 @@ write against code that does not survive.
    after the first turn), not as work. Recorded here so the spec's "six
    steps" never later reads as an unfinished item.
 
-2. **The ConTags self-heal must be a NAMED event, not silent recovery**
-   (wave TL's addition, accepted). `add_function` re-resolving ConTags
-   per fragment table means a pure-`render` boot self-heals when the loop
-   fragment lands. Silent self-healing is the same shape as the boot seed
-   itself — scaffolding that goes load-bearing because nothing names it.
-   `boot-lazy` pins both legs by test AND emits a breadcrumb / one-time
-   assertion at the heal site, so a future regression that stops the heal
-   surfaces here rather than three files away as a confusing dispatch
-   failure.
+2. **The ConTags hazard was MIS-STATED by me, and the corrected mechanism
+   is stronger, not weaker** (re-verified 2026-08-09 under root's
+   sequencing gate).
+
+   I originally described the risk as "render is pure, so its table may
+   lack RunLLMTurn's ConTags". That is wrong about what ConTags are.
+   `ConTags::try_from(&DataConTable)`
+   (`tidepool-codegen/src/effect_machine.rs` 203–250) resolves the
+   **freer-simple scaffolding constructors** — `Control.Monad.Freer.Val`,
+   `.E`, `Data.OpenUnion.Union`, `Data.FTCQueue.Leaf`, `.Node`
+   (`tidepool-repr/src/freer_names.rs` 23–43). It does NOT resolve
+   per-effect GADT constructors like `RunLLMTurnWith`. Any term at `Eff`
+   type carries them; `pure` at `Eff` literally builds a `Val`.
+
+   The decisive evidence is the seed itself: the thing being deleted is
+   `pure (toJSON (0 :: Int))`, documented in-code as "a trivial effectful
+   seed carrying the full effect-stack ConTags". A PURE expression through
+   this exact template demonstrably yields a ConTags-resolvable table
+   today — that is how the machine boots right now. `render` goes through
+   the SAME `template_turn_for(&outer_decls(), &stack, …)` with strictly
+   more in its module (the qualified `Loaded` import, the state and
+   compaction helpers). **It cannot be worse-conditioned than the seed it
+   replaces.**
+
+   Also checked, because it was the other way this could fail:
+   `seed_session_table` goes away, so the session table now starts empty
+   and grows from the first run's `merge_table`. `merge_table`
+   (`persistent.rs` 356–373) extends with unseen entries and rejects only
+   id-collisions with differing content — growth is fine, and is already
+   the normal case today, since the trivial seed table is the SMALLEST
+   table any session ever holds and every real turn merges a bigger one in.
+
+   The pin still stands and is still worth having (wave TL's addition,
+   accepted): `add_function` re-resolves ConTags per fragment table
+   (`jit_machine.rs` 1940–1956), and silent self-healing is the same shape
+   as the boot seed itself — scaffolding that goes load-bearing because
+   nothing names it. But the test now asserts the REAL invariant rather
+   than a proxy: the machine boots from render's own (expr, table) and
+   runs that fragment to completion, and a loop fragment carrying real
+   effect sites then runs and suspends correctly on the same machine.
 
 3. **Item 0b's landing is scoped to the mechanism + RunLLMTurn.** The
    vocabulary/row split is the mechanism; the policy for this landing is

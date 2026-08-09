@@ -41,9 +41,24 @@ the REPL already bootstraps from the first REAL compiled expression
 2. First real run compiles the machine entry directly (mirror the REPL).
 3. DELETE both seed compiles (driver.rs:562, harness.rs:430).
 4. Emit render + loop from ONE extract invocation. `compile_turn` is
-   single-target today (`{target}.cbor`, `tidepool-runtime/src/session/compile.rs`
-   ~95); multi-target is Phase B's multi-binder machinery, which is FOLDED and
-   available to you (gate open at a45fa843).
+   single-target today (`{target}.cbor`, `tidepool-harness/src/compile.rs`
+   ~104).
+
+   > **CORRECTED 2026-08-09** (wave TL, recorded at `a4642cba`; codex ledger
+   > item 10). This step originally read "multi-target is Phase B's
+   > multi-binder machinery, which is FOLDED and available to you (gate open
+   > at a45fa843)". **That machinery does not exist.** Phase B DEFERRED the
+   > `writeWholeModuleClosed` work to a successor
+   > (`one-spawn-turn-protocol-phase-b.md:99`); its actual multi-binder work
+   > is about tuple BINDERS on a session bind turn (`Main.hs` ~671–736), a
+   > different thing from emitting several compile targets from one GHC
+   > session. Verified in-tree: `writeWholeModuleClosed` takes a single
+   > `targetName` (`Main.hs:333`), and the CLI has only `--target` (136) and
+   > `--all-closed` (138).
+   >
+   > Multi-target emission is therefore a NEW prerequisite work item inside
+   > item 0, on the `Main.hs` writer side — see `03-targets-prereq.md`. It
+   > gates step 4 (wave 3) and nothing else.
 5. Outer machine boots from render; loop lands as the second JIT function in
    the same machine.
 6. Answerer session created lazily; its first model-written block boots its

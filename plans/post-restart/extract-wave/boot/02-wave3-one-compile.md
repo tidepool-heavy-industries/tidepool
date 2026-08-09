@@ -1,8 +1,20 @@
 # Wave 3 — `boot-onecompile`: item 0 steps 4–5
 
-**Status: HELD** on wave 2's fold (it rewrites the same functions) and on the
-`root.harness-lifecycle` base merge. Anchors below are post-async; re-verify
-after both.
+**Status: HELD** on TWO things now — wave 2's fold (it rewrites the same three
+functions) and the `--targets` prerequisite (`03-targets-prereq.md`).
+
+> **PREMISE CORRECTED 2026-08-09.** This spec was written believing multi-target
+> emission already existed as "Phase B's multi-binder machinery". It does not
+> — see `03-targets-prereq.md` for the verification. The "extract side" section
+> below therefore describes work that now belongs to that prerequisite item,
+> NOT to this one. When `--targets` lands, this spec reduces to the driver-side
+> fusion only: build one module with both helper decls and both targets, call
+> the multi-target compile once, and hand the pre-compiled loop to
+> `run_loop_fragment_inner`. Re-read this file against the landed `--targets`
+> shape before spawning; do not implement the extract side twice.
+
+The base merge has landed; anchors below were re-derived post-merge, but
+re-grep before trusting any of them.
 
 ## Goal
 
