@@ -462,3 +462,62 @@ Fix ladder, in order of principle:
 
 The two-rows fact stays real either way (positional union tags per row);
 only the per-launch GHC cost for constant artifacts is the defect.
+
+---
+
+# CLOSING STATE (extract-wave TL, 2026-08-09)
+
+Wrap-up directive from Inanna: gate runs STOPPED subtree-wide, recovered
+branches merged **as-is with their unverified flags intact**, everything
+centralized into one branch. Verification and bug-hunts happen ONCE, on the
+merged tip, afterward. **The unverified status travelling in these notes is the
+deliverable, not green legs.**
+
+## Landed and verified
+
+| item | receipt |
+|---|---|
+| **C1** — `load'`/second-loop timing split | folded; `ghc_setup`/`ghc_load` partition, flat rows, `ghc_session` tombstoned to the classify lane |
+| **D1-A** — the hard-fail defense | folded; CHECK A hard-fails, CHECK B a loud diagnostic, **two mutation legs at two call sites both naming CHECK A**, anti-vacuity control + permanent CHECK A message pin |
+| **E6** — tiered `-O2` | folded; `core2core` 2908.8→893.7 ms (~3.25×) on the 14-module/10-excluded fixture; fidelity 30/30, acceptance 24/24, quick 1875/1875, differential `compared=312` vs floor 300. **Moves the wire** (in root's redeploy set) |
+| **pivotal decision** | persistent server REJECTED on latency (true boot 0.6–1.9%); C1's own fix promoted ahead of both architectures; FAT interfaces deferred with the measurement attached |
+
+## Landed, NOT verified — flags intact, legs run in root's central pass
+
+| item | state |
+|---|---|
+| **item 0 steps 1–3 + 6** (`boot-lazy`) | both boot seeds DELETED, unbootstrapped `ResidentSession`. Receipt **`PRE_MODEL_EXTRACT_COMPILES` 4 → 2, measured.** Harness acceptance 26/26 passed; `tidepool-repl`, `tidepool-runtime`, `extract-fidelity` **never ran** |
+| **item 0b** (`boot-vocab`) | `effects_module_source_with_vocab` + `emits_helpers_for` (pub(crate)); three legs outstanding |
+| **`--targets` prerequisite** (`boot-targets`) | multi-target emission, strict-mode skip unreachable **as a separate function**; differential/corpus/fidelity outstanding |
+| **D1-B** (`d1-remove`) | `scanMeta` removal + `nameById` decoupling; gates stopped mid-run |
+
+**Item 0's headline is 4 → 2, NOT 4 → 1.** The remaining two are the render and
+loop compiles that wave 3 would have fused. Do not let "item 0 landed" imply the
+end state.
+
+## Cut, and routed forward ready-to-spawn
+
+- **Wave 3 / `boot-onecompile`** — render+loop fusion (item 0 steps 4–5). Spec on
+  disk at `extract-wave/boot/02-wave3-one-compile.md`, premise-corrected. Both
+  its gates (boot-lazy's fold, `--targets` landing) are satisfied by this fold,
+  so it spawns with no unknowns.
+- **D2** — reachability-narrowed `RuntimeTypeClosure`. Hand-off carries: the
+  enumerated pinned trio and which risk each test observes; mandatory freer
+  roots **derived from `freer_names`**, never hand-listed; the corrected gate
+  set; empirical supplier attribution as step one.
+- **C2/E5, E1, E2, E3, E4** — unstarted, unchanged.
+
+## Standing hazards this wave established (not fixed here)
+
+1. `haskell_suite_differential` and `corpus_report` **never invoke the
+   extractor** — frozen-CBOR JIT differentials. They cannot gate extractor
+   changes absent fixture regeneration, which is a sequenced wave/root action.
+2. The pinned "id-stability" trio is **three DataConId guards** and observes no
+   VarIds. `localVarId` determinism has no guard.
+3. `kind=4 TypeMetadata` has **at least two causes** — the signature does not
+   identify one.
+4. The exempted rustc class has **no box-wide bound** (`nice -j4` is
+   per-invocation, so N lanes = 4N), and `lslocks` has lost the
+   is-it-safe-to-launch property.
+5. Five hand-written copies of the standard effect row across two crates
+   (ledger item 17).
