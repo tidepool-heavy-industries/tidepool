@@ -573,6 +573,77 @@ with the expiry attached because a shortcut whose precondition has silently
 lapsed is this wave's characteristic failure in its purest form — someone
 citing "only one expected red" a week after the count changed.
 
+### A guard that never executes; and three inherited reds
+
+`boot-targets`' `--ignore-default-filter` run of `tidepool-runtime` surfaced
+**three** reds, all established inherited by MECHANISM READ (zero GHC), not
+by diff-overlap:
+
+1. `mock_stack_matches_production` — `Fork` in `standard_decls()`, absent
+   from the hand-written mock list.
+2. `sum_type_rejected_at_compile_time` — the test derives **`FromJSON`**;
+   the non-nullary-sum `TypeError` exists **only on the `ToJSON` side**.
+   Verified in this tree: `grep -c TypeError FromJSON.hs → 0`,
+   `Value.hs → 4`; `FromJSON.hs:172` routes `GFromJSONSum 'False` to
+   `GFromJSONTaggedSum`, a working TaggedObject decoder.
+3. `qq_fmt_brace_inside_hole_non_string_expr_still_works` — `toExp`'s
+   `Let` case is commented out; `let … in …` inside a QQ hole has never
+   been implemented. File byte-identical at `HEAD~1`.
+
+**The durable finding: a guarantee whose enforcing test lives in a tier
+nobody runs is not enforced.** `tidepool-runtime` is excluded by nextest's
+`default-filter`, so #2 sat latent since 2026-08-07. Same family as the
+three-variant table one level out — not a receipt that overstates, but a
+**guard that never executes at all**.
+
+**The substantive gap behind #2, routed out:** a non-nullary sum deriving
+`FromJSON` yields a decoder that fails at RUNTIME (key-not-present) rather
+than being rejected at compile time. The fix is to IMPLEMENT a `TypeError`
+on `GFromJSONSum 'False`, or to decide such sums are supported-but-lossy
+and retire the test — a design decision with a behaviour change, **not a
+repair of something that broke.**
+
+### Duplicated prose lies in its new home — the second edge of single-sourcing
+
+`FromJSON.hs:153` says the `'False` branch goes "to a compile-time
+rejection". `Value.hs:146` and `:208` say the same and are TRUE there.
+The `FromJSON` copy is **not stale — it is INHERITED from a sibling module
+where it was true**, carried across with the `IsNullarySum` type family
+that the commit itself flags as "duplicated rather than shared".
+
+**Duplicate a mechanism and you duplicate its explanation into a context
+where the explanation lies.** So the argument for deriving rather than
+restating is not only that the code drifts: the *prose travels with the
+copy and stops being true*, while still reading as authoritative. Carried
+into `boot-vocab`'s `emits_helpers_for` note.
+
+### Convergence is evidence only when the paths are INDEPENDENT
+
+Recorded as a qualification on the earlier convergence signal (L4 and this
+TL independently reaching the `emits_helpers_for` extraction, treated as
+evidence the structure was right).
+
+On red #2 the wave TL and this TL converged on a "the `TypeError` is
+deferred by type-family dispatch" story — and **both were wrong**. The
+wave TL had grepped the commit diff for `TypeError` and matched
+
+    error "unreachable: non-nullary sum FromJSON is a compile-time TypeError"
+
+**a string literal inside an error message** — prose about the mechanism,
+not the mechanism — and reported it as "I verified the FromJSON side
+specifically". This TL had inferred deferral from the type-family shape
+without reading the file.
+
+Two parties reading the same misleading token is not corroboration. The
+earlier convergence counted because the paths were genuinely independent
+(one reasoning from a call site's requirements, one from a doctrine about
+doc comments); this one counted for nothing. **Convergence is evidence
+about the structure only when the routes to it do not share an input.**
+
+Settled by a dev's mechanism read and this TL's direct grep, against two
+TLs' agreement — which is the reason a dev is told to contradict its TL
+when a stated mechanism does not match what it observes.
+
 ### Doctrine does not exempt the doctrine's carrier
 
 Recorded verbatim at the wave TL's request, because it is the sharpest
