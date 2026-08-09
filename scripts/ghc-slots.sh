@@ -31,6 +31,12 @@
 # waiters on each slot as it drains — which is what a measurement wants.
 set -euo pipefail
 
+# THE COPY IN FORCE is the parent repo's, invoked by absolute path
+# (/home/inanna/dev/tidepool/scripts/ghc-slots.sh) — a worktree's own copy of
+# this file is INERT and its SLOTS= line may be stale; never audit slot count
+# from a worktree checkout. (The nextest cap below is the opposite: per-
+# worktree config, live in each checkout.)
+#
 # 4-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
 # concurrent extracts with every lane compliant at 3x3. The per-run cap is
