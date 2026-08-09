@@ -563,12 +563,37 @@ before the encode `timeSection` (forcing `allMeta` there keeps that cost out of
 MERGED metadata, since multi-target shares one `meta.cbor`.
 Verified: `cabal build tidepool-extract-bin` rc=0, links.
 
-**Verdict on the experiment:** not pre-partitioning cost one conflict across
-two sub-TLs, and the conflict was predicted, localized, and resolvable in one
-sitting. But it would have merged CLEAN and SILENTLY WRONG under a textual
-resolution — so the cost of the policy is not conflict volume, it is that
-someone must understand both diffs at the fold. Cheap here because the same TL
-had reviewed both.
+**A SECOND semantic conflict in the same file, which I MISSED and
+spawn-latency caught — and it is the more instructive one.** My first fold
+silently **reverted D1-B**: boot's `--targets` split had COPIED the pre-D1-B
+body into `writeClosedTargets`, so `scanMeta` (the second full translation
+D1-B exists to delete) reappeared at a NEW LOCATION while D1-B's deletion
+applied to the old one. **Git saw no conflict at all** — no marker, no compile
+error, the ledger row reading "done", and the code not doing the thing.
+
+Fixed, with a site comment recording that it has now been re-introduced twice
+(once by the refactor, once by my merge) and that removal is safe ONLY because
+CHECK A hard-fails. `processFile`'s `--all-closed` `scanMeta` is deliberately
+kept — that path has no CHECK A.
+
+**Then the parent advanced and produced SIX more**, all resolved semantically,
+every one a change of ours the parent's version predates — a keep-theirs or a
+union would have reverted landed work in four of the six. `harness.rs`'s four
+hunks were each item 0's `boot` deletion against a parent that still has it.
+
+**Verdict on the no-pre-partitioning experiment.** The cost is NOT conflict
+volume — it was one textual conflict between the sub-TLs. The cost is that
+**a refactor can re-introduce a deleted thing under a new name, and git cannot
+see it.** Every genuinely dangerous case here was invisible to the merge
+algorithm and visible only to someone who understood both diffs' intent. That
+was affordable while both sub-TLs were alive to review; the `scanMeta` revert
+was caught by the lane that authored D1-B, minutes before it would have
+shipped. By the parent merge both sub-TLs were reaped and no such check
+existed.
+
+So the policy is viable **only while the authoring lanes outlive the fold.**
+If folds happen after reaping, pre-partitioning — or a fold-time diff review by
+each author — buys back the only defense that actually worked.
 
 ## What the centralized verification pass must cover
 
