@@ -217,6 +217,29 @@ requirement in their dev spec, the same way D1 got one:
   `meta.cbor` for a pure entry and attribute the five to a source empirically.
   The guard above is adopted regardless, being correct under either story.
 
+- **D2 FOLD-ORDERING CONSTRAINT (wave TL owns it; binds when D2 can be called
+  done).** Boot pinned the ConTags regression guard into
+  `tidepool-harness/tests/acceptance_*.rs` so `-E 'binary(/^acceptance_/)'`
+  selects it — correct placement, but **that test lives in boot's branch**.
+  Until boot folds into `root.extract-wave` and I merge that base, my
+  harness-acceptance shard does not contain the guard: it would run green over a
+  suite that simply LACKS the test, and D2 would look gated while the thing
+  built to catch D2's failure mode was absent from the run. Same defect one
+  level up from the one boot just fixed.
+
+  Rules: land and gate D2's implementation whenever; D2 is NOT done until its
+  harness-acceptance shard has run on a base carrying boot's pins. The wave TL
+  signals when they are on `root.extract-wave`; merge, re-run, and record THAT
+  run as the receipt, **naming the base commit it ran against**. A per-binary
+  pass count alone is insufficient here — a passing count over a suite missing
+  the test is exactly the failure mode.
+
+  Strengthening I am adding: the receipt must also show the guard test **by
+  name with its own pass line**, not merely an aggregate count on a named base.
+  Naming the base proves which tree ran; naming the test proves the guard
+  executed. Cheap, and it closes the residual case where the pins are present
+  but the shard's filter fails to select them.
+
 - **D2.** "Fragment-reachable" is a label over a measurement taken pre-wrap on
   real session Core. D1's hard fail guards constructors that are EMITTED but
   absent from metadata — it does NOT guard a constructor the RUNTIME needs that
