@@ -358,3 +358,15 @@ haskell/CLAUDE.md warns pruning *_u<n>.cbor drops `compared` below
 COMPARED_FLOOR, so naive regeneration breaks the floor it protects.
 All regeneration requests route through root (or the extract-wave TL
 within its subtree).
+
+### Item 14 second addendum (2026-08-09): three reds UNMASKED by the vacuity sweep
+
+Converting silent-negative skip sites to loud made three previously
+vacuous-green tests visibly red — pre-existing (stash-confirmed identical
+on unmodified files), newly observable:
+8. repro_decl_library_import (2 tests) — GHC "module not loaded",
+   session-aware multi-module decl-compile path
+9. dogfood_observability first test — same path/signature
+Same failure family; likely one root cause on the multi-module
+decl-compile path. Morning triage. (derived_sum_shape_equals_its_literal
+is FIXED on this tip and leaves the sanctioned list.)
