@@ -283,6 +283,64 @@ must not be taken on the normal-path numbers alone.
   target+reachable). SEMANTICS-SENSITIVE: exposed unfoldings affect
   extraction — differential + corpus + extract-fidelity suites mandatory.
 
+### DECISION RECORDED (spawn-latency, 2026-08-08, on C1's measurement)
+
+Measured: `ghc_load` (`load'` alone) **28–32%** of `extract.total`;
+typecheck+core (second loop) **62–69%**; combined **~96–97%**.
+`ghc_load / (ghc_setup + ghc_load)` = **97–98%** on both arms. True boot
+(`startup + ghc_setup`) = **93–233 ms = 0.6–1.9%**. Robust, not assumed: the
+ratio moved <2 pp across a 1-min loadavg swing of ~11→~34 (two arms, n=6 each),
+with a mechanism — `parMakeCount` is never set, so both arms are sequential and
+contention cannot degrade them asymmetrically. Absolutes swung ~40%; the ratio
+did not.
+
+1. **PERSISTENT SERVER — REJECTED, on latency only.** Its distinctive benefit
+   over interfaces is avoiding per-turn process + session establishment, which
+   measures 0.6–1.9%. The historical "session boot 26–32%" was never boot —
+   `ghc_load` is 97–98% of that span. `inject` measured 0 ms at every sampled
+   session turn. A resident process costs lifecycle, crash recovery, cross-turn
+   invalidation, and a new class of state-leak bug; 1–2% does not buy that.
+   **Scope, so it is not over-read: E4's per-process cache death SURVIVES
+   untouched** — the FatIface decode cache dies with each disposable extractor,
+   so every turn re-decodes. That is a real amortization argument for residency,
+   UNMEASURED, not refuted here. If it ever becomes the reason to build a
+   server it must be measured and argued on its own terms, never smuggled back
+   in on the boot argument, which is closed.
+   **Residual flagged by this TL, now RESOLVED AS SCOPED (`abd00d60`):**
+   `ghc_setup` contains `depanal`, which walks a module graph the `Lib.G<n>`
+   chain GROWS; the sampled sessions were pinned at `Lib.G1`. So the rejection
+   is scoped — **the server is rejected on boot cost FOR SESSIONS AT THE DEPTHS
+   SAMPLED**, with depth-scaling of `ghc_setup` named as the one measurement
+   that could reopen it. A repeated `depanal` over a growing graph would be a
+   residency argument arriving through the one door the latency scoping did not
+   close — the same shape as E4's, and named as precisely.
+   Why scoped rather than measured now: at a FLAT module graph (top-level
+   bindings 1706–1709 throughout), `ghc_setup` ranged **68 → 287 ms across five
+   turns — a 4.2x spread with zero module growth.** That is the noise floor; a
+   2–3 generation sweep cannot clear it, distinguishing a depanal trend needs
+   ~8–10 generations, and no existing `tidepool-repl` test drives more than 2–3
+   sequential `repl.def(...)` calls. The depth column is therefore folded into
+   part 3's ALREADY-REQUIRED `Lib.G<n>` compile-time-vs-generations measurement
+   — same vehicle, same run, one more column — not queued as a second errand.
+   Recorded as a PREDICTION, explicitly not as evidence: `depanal` is a
+   header-parse downsweep, O(n) in module count with a small constant, whereas
+   E2's O(n²) lives in the compile chain — so `ghc_setup`'s SHARE should shrink
+   with depth. If the measurement contradicts it, that contradiction is the
+   finding and part 1 reopens on its own terms.
+2. **NEITHER FIRST — C1's own fix is promoted ahead of both.** ~96–97% of a
+   turn is two back-to-back full compiles of the same module set INSIDE ONE
+   PROCESS, so no persistence architecture recovers any of it. Removing the
+   redundant `load'` is ~30% of every extract for a local change, and it
+   re-bases the arithmetic either architecture would be sized against.
+3. **PRECOMPILED (FAT) INTERFACES — surviving candidate, DEFERRED with the
+   measurement attached.** After C1's fix one compile remains (~65% of today's
+   extract). Two figures decide it and neither exists: compile time vs
+   `Lib.G<n>` generations (E2's axis — the session vehicle never grew past
+   `Lib.G1`) and fat-iface bytes/decode per turn (E4 — one measurement serves
+   both this and the residency case). Interfaces must be FAT: unfolding-less
+   iface resolution bakes `ErrorSentinel`s that surface as `kind=4
+   TypeMetadata`.
+
 **The pivotal decision: persistent extractor.** E1/E2/E4 all point at it;
 C1's measurement decides between precompiled interfaces vs persistent
 server. Measure first (Codex ranking: binder-vs-validation spawn breakdown;
@@ -307,14 +365,51 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - The `classify` phase vocabulary decision is binding (see
   plans/one-spawn-turn-protocol.md): extract phase `classify` after
   ghc_session; classify_extract retired with a doc tombstone.
-- Extractor id-stability is now a PINNED invariant (three permanent tests
-  from the ConTags incident — session_table_qualified_identity + two
-  quick-tier assertions). Changing id-minting fires them; that's the
-  design conversation happening, not a test to silence.
+- Extractor id-stability is a PINNED invariant (three permanent tests from the
+  ConTags incident). Changing id-minting fires them; that's the design
+  conversation happening, not a test to silence.
+  **CORRECTED 2026-08-09 (twice — see below). The shorthand over-claims, and
+  the trio was never enumerated anywhere.** No document in this repo names its
+  members: this spec said "session_table_qualified_identity + two quick-tier
+  assertions", `codex-review-2026-08-08.md:99` says "the three pinned
+  id-stability tests" without naming any. The actual three, by exact path, each
+  read to confirm:
+  - `tidepool-repr::extend_checked_equivalence::distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order`
+  - `tidepool-repr::extend_checked_equivalence::merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard`
+  - `tidepool-runtime::session_table_qualified_identity`
+
+  **All three are DataConId qualified-name guards. None observes VarIds at
+  all** — not `localVarId`, not `stableVarId`. `localVarId` bakes the raw GHC
+  `Unique` for internal/floated bindings and is allocation-order-sensitive by
+  its own doc comment. A green triple means constructor-identity guarding is
+  intact; it does NOT mean ids did not move. **Their silence is not consent.**
+  A change on `localVarId`'s path has no pinned guard and owes a direct
+  experiment.
+  (My first correction here named `realm_varid_pinning` and `VarIdMechanismTest`
+  as two of the three — both real tests, neither in the trio. That was
+  relayed from a grep for plausible-looking tests rather than from a source
+  that defines the set, because no such source exists. Fourth guard this wave
+  covering less than its name; also the first citation found to have **no
+  referent at all**.)
 - One-format wire policy: extract changes that move the wire ship both
   sides via redeploy, fail loud on skew.
+- **GATE BAR CORRECTED 2026-08-09:** `haskell_suite_differential` and
+  `corpus_report` **never invoke the extractor** — verified, zero
+  `Command`/`compile_haskell`/`TIDEPOOL_EXTRACT` references; they replay frozen
+  CBOR from `suite_cbor`/`corpus_cbor` as JIT-vs-eval differentials. They
+  therefore **cannot observe any change to what the extractor emits** (E6, D1-B,
+  D2) and pass identically whether it is correct or broken. I named the hardened
+  differential as *the* gate for extractor changes in three specs; that was
+  wrong. Real extractor coverage is `extract-fidelity-test` (real pipeline; its
+  fixtures never touch JSON/Aeson — a known hole) plus harness acceptance (real
+  end-to-end extracts). Fixture REGENERATION is the missing prerequisite and is
+  a sequenced wave-level action, never a lane's call — shared directories,
+  redeploy-class blast radius, and a naive prune drops `compared` below
+  `COMPARED_FLOOR`.
 - Correctness gates: hardened differential (floors), corpus_report,
-  extract-fidelity-test 26/26, harness acceptance. E6 additionally needs
+  extract-fidelity-test (ALL tests — report actual N/N, never match a
+  hardcoded number; it was 26 pre-D1-A and is 30 after), harness acceptance.
+  E6 additionally needs
   the full set with zero tolerance.
 
 ## D7 (measured live, 2026-08-08 dogfood): boot pays FOUR extract compiles
@@ -367,3 +462,76 @@ Fix ladder, in order of principle:
 
 The two-rows fact stays real either way (positional union tags per row);
 only the per-launch GHC cost for constant artifacts is the defect.
+
+---
+
+# CLOSING STATE (extract-wave TL, 2026-08-09)
+
+Wrap-up directive from Inanna: gate runs STOPPED subtree-wide, recovered
+branches merged **as-is with their unverified flags intact**, everything
+centralized into one branch. Verification and bug-hunts happen ONCE, on the
+merged tip, afterward. **The unverified status travelling in these notes is the
+deliverable, not green legs.**
+
+## Landed and verified
+
+| item | receipt |
+|---|---|
+| **C1** — `load'`/second-loop timing split | folded; `ghc_setup`/`ghc_load` partition, flat rows, `ghc_session` tombstoned to the classify lane |
+| **D1-A** — the hard-fail defense | folded; CHECK A hard-fails, CHECK B a loud diagnostic, **two mutation legs at two call sites both naming CHECK A**, anti-vacuity control + permanent CHECK A message pin |
+| **E6** — tiered `-O2` | folded; `core2core` 2908.8→893.7 ms (~3.25×) on the 14-module/10-excluded fixture; fidelity 30/30, acceptance 24/24, quick 1875/1875, differential `compared=312` vs floor 300. **Moves the wire** (in root's redeploy set) |
+| **pivotal decision** | persistent server REJECTED on latency (true boot 0.6–1.9%); C1's own fix promoted ahead of both architectures; FAT interfaces deferred with the measurement attached |
+
+## Landed, NOT verified — flags intact, legs run in root's central pass
+
+| item | state |
+|---|---|
+| **item 0 steps 1–3 + 6** (`boot-lazy`) | both boot seeds DELETED, unbootstrapped `ResidentSession`. **The drop from 4 is NOT MEASURED** — legs were killed under the stop directive before the measurement ran. Harness acceptance 26/26 passed; `tidepool-repl`, `tidepool-runtime`, `extract-fidelity` **never ran**. `PRE_MODEL_EXTRACT_COMPILES` deliberately **stays at 4** so the central pass gets a test that FAILS LOUDLY if the drop did not happen, rather than a constant edited to match an expectation |
+| **item 0b** (`boot-vocab`) | `effects_module_source_with_vocab` + `emits_helpers_for` (pub(crate)); three legs outstanding |
+| **`--targets` prerequisite** (`boot-targets`) | multi-target emission, strict-mode skip unreachable **as a separate function**; differential/corpus/fidelity outstanding |
+| **D1-B** (`d1-remove`) | `scanMeta` removal + `nameById` decoupling; gates stopped mid-run |
+
+**Item 0's headline is an EXPECTED 4 → 2, not 4 → 1, and the 2 is UNMEASURED.**
+Two claims, both needing to survive quoting:
+- Even fully verified, this is 4 → 2. The remaining two are the render and loop
+  compiles wave 3 would have fused. Do not let "item 0 landed" imply the end
+  state.
+- The drop itself has no measurement behind it. Both seed compiles are deleted
+  in the code; nobody has yet observed the count fall. Do not quote "4 → 2" as a
+  result.
+
+(I wrote "4 → 2, measured" in the first draft of this section, from a receipt
+that predated the stop directive. Boot caught it. That is the wave's own failure
+mode reaching the closing summary — the most-quoted artifact — and it is worth
+leaving the note visible rather than silently fixing the line.)
+
+## Cut, and routed forward ready-to-spawn
+
+- **Wave 3 / `boot-onecompile`** — render+loop fusion (item 0 steps 4–5). Spec on
+  disk at `extract-wave/boot/02-wave3-one-compile.md`, premise-corrected. Both
+  its gates (boot-lazy's fold, `--targets` landing) are satisfied by this fold,
+  so it spawns with no unknowns.
+- **D2** — reachability-narrowed `RuntimeTypeClosure`. Hand-off carries: the
+  enumerated pinned trio and which risk each test observes; mandatory freer
+  roots **derived from `freer_names`**, never hand-listed; the corrected gate
+  set; empirical supplier attribution as step one.
+- **C2/E5, E1, E2, E3, E4** — unstarted, unchanged.
+
+## Standing hazards this wave established (not fixed here)
+
+1. `haskell_suite_differential` and `corpus_report` **never invoke the
+   extractor** — frozen-CBOR JIT differentials. They cannot gate extractor
+   changes absent fixture regeneration, which is a sequenced wave/root action.
+2. The pinned "id-stability" trio is **three DataConId guards** and observes no
+   VarIds. `localVarId` determinism has no guard.
+2a. **CHECK A guards EMITTED constructors only.** A constructor the runtime
+   needs but the fragment never emits is invisible to it — which is exactly the
+   sibling-set case D2 must justify when it narrows the table. D1-A's defense is
+   real and is not a general metadata-completeness guarantee.
+3. `kind=4 TypeMetadata` has **at least two causes** — the signature does not
+   identify one.
+4. The exempted rustc class has **no box-wide bound** (`nice -j4` is
+   per-invocation, so N lanes = 4N), and `lslocks` has lost the
+   is-it-safe-to-launch property.
+5. Five hand-written copies of the standard effect row across two crates
+   (ledger item 17).
