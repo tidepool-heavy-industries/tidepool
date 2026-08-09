@@ -165,6 +165,31 @@ produces the wrong preamble in exactly the mismatched (row, vocab) pairs
 boot-vocab's tests construct. The no-regression gate therefore has to cover a
 MISMATCHED pair, not only a matched one.
 
+DECIDED (L4): the predicate keys on **`vocab_effects`**, not `row_effects`.
+The hiding exists so an author can write `Event`'s `(<|>)` unqualified; that
+operator is a GENERATED HELPER, so it is in scope exactly when RepoEvent is in
+the VOCABULARY, whether or not the effect is in the sendable row. The predicate
+tracks what determines the operator's PRESENCE (vocabulary), not what
+determines the program's CAPABILITY (row). Both mismatched pairs misbehave
+under the other choice, and neither is a build error:
+
+- vocab-with / row-without → `(<|>)` is emitted but the Prelude's is no longer
+  hidden, restoring the exact ambiguity the change exists to remove;
+- row-with / vocab-without → the Prelude's `(<|>)` is hidden with nothing
+  replacing it, costing `Alternative` for nothing.
+
+OWED AT RETARGET: the edit currently sits in the old `effects_module_source_at`
+(L4 committed it before the move was announced), where that function passes ONE
+list for both parameters. That matters for what the existing gates prove: a gate
+built on the single-list entry point is NON-DISCRIMINATING between the two
+predicates — it passes under either — so it is not merely incomplete evidence,
+it is no evidence for this question. Owed: move the conditional into
+`effects_module_source_with_vocab`, key it on `vocab_effects`, and add the two
+mismatched-pair gates, which are only expressible once that function exists.
+The reasoning also lives at the call site in `eval_prep.rs`, deliberately:
+whoever performs the mechanical retarget will be reading the code, and picking
+the wrong parameter produces a wrong preamble rather than a build failure.
+
 Owed by lane L4; not yet certified here.
 
 ## Still owed
