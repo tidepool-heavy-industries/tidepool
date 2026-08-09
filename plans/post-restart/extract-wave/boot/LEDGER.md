@@ -328,6 +328,22 @@ by the wave TL:
    touching the same file. `boot-lazy` (Rust session lifecycle) is
    relieved of them; `boot-targets` is not.
 
+   **RATIFIED as standing wave policy** (wave TL): expensive legs run once
+   post-fold on the composed branch, EXCEPT where a lane touches a file
+   another wave also touches — there they run on the lane's own branch
+   first, for attributability. Today that is `haskell/app/Main.hs` and
+   nothing else. If another such file appears, apply the same test without
+   asking.
+
+   The cost argument that settles it: debugging a composed regression
+   across two waves costs more slots than the run spent to prevent it.
+   Unattributable is expensive in a way one extra differential is not.
+
+   The part that makes the asymmetry SAFE is telling the affected dev
+   explicitly that the relief does not extend to it, rather than letting
+   it infer from a sibling's instructions. **A rule that has to be
+   inferred is a rule that gets inferred wrong.**
+
 2. **No fifth concurrent child until at least two of four have folded** —
    held even if slots free up. Four live devs plus wave 3 is the
    amplification that produced load 92.
@@ -349,8 +365,11 @@ throttle forbids:
   compiles) — it matches every agent shell / `bash` / `zsh` / `timeout`
   carrying `TIDEPOOL_EXTRACT=…`, so it tracks how many AGENTS exist.
 - Matching `comm` against the full binary name UNDER-counts to a constant
-  ZERO — Linux truncates `comm` to 15 chars, so `tidepool-extract-bin`
-  shows as `tidepool-extrac` and the full-name grep can never match.
+  ZERO — `comm` is capped at 15 chars for userspace processes, so
+  `tidepool-extract-bin` shows as `tidepool-extrac` and the full-name grep
+  can never match. (Corrected at `480bc367`: "Linux truncates comm to 15"
+  was too general — the >15-char values that exist are kernel threads. The
+  anchored pattern below is right either way, so no command changed.)
 
 Correct: `ps -eo comm= | grep -c '^tidepool-extrac'` and
 `cat /proc/loadavg`. **A zero from a mistyped pattern reads exactly like a
