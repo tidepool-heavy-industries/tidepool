@@ -163,6 +163,28 @@ Every size estimate in this ledger is taken from those figures.
 
 ---
 
+## NAMED-GUARD RULE — binds every item in this lane
+
+Now SWARM-WIDE (root's durable memory; wave `OPERATIONAL.md` `19b8dca9`).
+Verbatim as root recorded it:
+
+> if a gate exists to catch one specific failure mode, the receipt shows that
+> test passing BY NAME with its own pass line; cross-lane guards additionally
+> name the base commit; base proves the tree, name proves execution — both, or
+> neither is established.
+
+Applied UNIFORMLY here, not only to D2's cross-lane guard. An item of mine
+reporting an aggregate where a named guard exists is out of compliance with a
+standing rule, not merely under-detailed. Concretely, per item:
+
+- **D1** — the mutation check's own PASS line by label, and the
+  `TIDEPOOL_TEST_DROP_DC` leg's failure assertion by name. Not `N/N passed`.
+- **C1** — the wire-inertness check (timing off vs on ⇒ byte-identical stdout
+  and emitted files) named explicitly with its diff-empty receipt.
+- **E6** — the mis-tiering detection-power demonstration named, with the gate
+  it turned RED identified.
+- **D2** — boot's ConTags guard by name AND the base commit it ran against.
+
 ## Standing check: does the gate detect the mistake it is named for?
 
 Ratified method note (root, via wave TL): the C1 finding came from distrusting
