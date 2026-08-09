@@ -458,6 +458,106 @@ for it both times, and reported anyway. Bypassing would have unstuck one
 worktree and left the mechanism broken for every lane, with nobody knowing
 why the box kept falling over.
 
+### The adoption sweep: FOUR questions, and three ways a leg fakes "done"
+
+Run as a receipt with **ack by name**, not a broadcast — root endorsed
+making it formal, since the receipts rule applies to adoption claims like
+everything else. One question is not enough: a lane that adopted `detach`
+and then ran five legs concurrently is WORSE for the queue than one that
+never adopted it, and a lane on a stale copy is worse than both.
+
+1. long legs launched via `detach`?
+2. at most ONE brokered leg at a time?
+3. absolute parent path `/home/inanna/dev/tidepool/scripts/ghc-slots.sh`,
+   never a copy?
+4. **does the log show the work actually STARTING** — not merely that the
+   command returned?
+
+Q4 was added after a leg exited in milliseconds on a missing-GHC PATH
+error: no slot time, no failing test, and a log a hurried reader takes for
+done. **A lane can answer yes to 1–3 and be running nothing.**
+
+Q4 then found a THIRD variant nobody anticipated:
+
+| variant | appearance | reality |
+|---|---|---|
+| never started | instant exit, near-empty log | ran nothing |
+| queued, then killed | log shows only "all slots busy" | ran nothing |
+| **fail-fast truncated** | **real PASS lines, names, timings** | **198 of 877 — 23% coverage** |
+
+The first two are visible in the log. **The third looks exactly like a
+completed run** and answers yes to all four questions; the only tell is the
+completed count against the crate total. `nextest` fail-fasts by default,
+so ANY lane hitting an inherited red gets a truncated run that reads as a
+receipt.
+
+**Consequent receipt rule for this lane: report coverage DENOMINATORS, not
+bare counts** — `N passed / M total`. `198 passed` and `198 passed of 877`
+are the same number and completely different claims. The wave's subject,
+found in the test runner's default behaviour.
+
+This also raised the priority of the `Fork`/mock divergence below from
+"route it" to "it is silently truncating other waves' verification while
+it remains unfixed".
+
+### The `Fork` / `EFFECT_NAMES` divergence — a SECOND occurrence
+
+`mock_stack_lockstep::mock_stack_matches_production` fails box-wide:
+production `standard_decls()` carries `Fork` (`effect_defs.rs:955`), the
+hand-written 11-entry `EFFECT_NAMES`
+(`tidepool-testing/src/eval_harness.rs:403`) ends at `RunLLMTurn`.
+
+Established INHERITED by `boot-lazy` in the strong form: same worktree,
+diff stashed vs restored, back-to-back, **byte-identical output on both
+legs** — showing the assertion's *inputs* are unchanged by the diff, not
+merely that both legs fail. Those are different claims and only the first
+settles inheritance. It also reasoned that no Haskell-cache confound axis
+exists (the test is a pure-Rust list comparison per its own doc comment)
+rather than reciting the caveat — the rule applied instead of performed.
+
+**The list's own doc comment (`eval_harness.rs:387`) records a PRIOR
+drift** — it "CAN drift… that's exactly what happened when the SG effect
+was cut and Lsp/Time were added — see `f1a480e6`". So the comment predicted
+its own recurrence, which is the argument that the fix is not "update the
+list" but **stop hand-maintaining it**: derive `EFFECT_NAMES` from
+`standard_decls()`.
+
+Same class `boot-vocab` is single-sourcing `emits_helpers_for` against, one
+file over: a hand-maintained duplicate of a production list, kept in sync
+by convention, diverging silently the moment production changed. Routed
+out of this lane; `boot-lazy` correctly told not to fix it (out of spec,
+and the decision is not its to take).
+
+### Doctrine does not exempt the doctrine's carrier
+
+Recorded verbatim at the wave TL's request, because it is the sharpest
+form of this wave's lesson and it was earned by this TL getting it wrong:
+
+**A wrong mechanism riding in on a sweep finding is worse than one
+arriving anywhere else — it inherits the sweep's trust unearned.**
+
+The instance: this TL told a dev that `detach`'s `setsid` drops the
+interactive environment, so a detached `cabal` comes up without GHC. That
+was **inferred from what "new session" sounds like, never tested.**
+`setsid nohup env` preserves marker variables and the full `PATH`, and
+`detach` is literally `setsid nohup "$0" run -- "$@"` with no scrubbing.
+
+The real cause: the launching shell never had GHC — a bare tool call has
+`cabal` from the nix profile but no `ghc`, and shell state does not persist
+between tool calls, so an earlier `nix develop` is gone.
+
+**Why the wrong mechanism was actively harmful, not merely inaccurate:**
+it implied `run` is safe and `detach` is risky. The identical failure hits
+both, because the cause is the caller's environment. A dev acting on it
+would reasonably have retreated to `run`, losing `detach`'s
+survive-the-queue property while still hitting the bug.
+
+This is the standing instruction given to all four devs — *report the
+mechanism you actually traced, with file and line, not the one you expected
+to find* — violated by the person who issued it. Devs were told explicitly
+to contradict this TL when a stated mechanism does not match what they
+observe; they are closer to the evidence.
+
 ### Two rules this lane generated (wave-wide, `a5f06b85`)
 
 **1. Report the HOLDERS, not just the waiters.** A queue-depth number
