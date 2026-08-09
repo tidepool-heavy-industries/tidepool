@@ -2639,10 +2639,66 @@ fn emit_boxing_wrapper_guard(
     builder.seal_block(unwrap_block);
 }
 
+/// Emit an unconditional `runtime_shape_trap(AddrKind)` call and return its
+/// poison value. Used when a `Raw` SSA value's *static* literal tag already
+/// proves — at emission time, no runtime check needed — that it isn't an
+/// address: only well-typed-Core-violating (i.e. compiler-bug) programs ever
+/// reach this. `scrut_ptr` is passed as 0 (not the raw value itself): the raw
+/// value is NOT a heap pointer — it may be an arbitrary integer — so passing
+/// it as `scrut_ptr` would risk `runtime_shape_trap` dereferencing garbage.
+/// 0 is below `MIN_VALID_ADDR`, so the host fn's `check_ptr_invalid` guard
+/// poisons immediately without ever reading through it.
+fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder) -> Value {
+    let trap_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_shape_trap",
+            Linkage::Import,
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+        )
+        .expect("declare runtime_shape_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+    let call = builder
+        .ins()
+        .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
+    builder.inst_results(call)[0]
+}
+
 /// Unbox an Addr# value recursively.
+///
+/// Only an explicitly address-kinded value may be read as an address:
+/// - `Raw` values must carry the static `LIT_TAG_ADDR` literal tag (set by
+///   the emitter itself when it produced the value) — anything else is
+///   rejected via [`emit_addr_raw_kind_trap`] without ever treating the raw
+///   bits as a pointer.
+/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons (as
+///   before), but the final payload MUST land on a `TAG_LIT` object whose
+///   `lit_tag` is one of the address-carrying classes (`String#`/`Addr#`/
+///   `ByteArray#`) before its payload is loaded as an address. A stray tag
+///   word or a Lit of an unrelated class (e.g. `Int#`) traps cleanly via
+///   `runtime_shape_trap` instead of being dereferenced — this is the fix
+///   for the escape described in codex-review-2026-08-08.md item 1, where a
+///   Con's single field was loaded and used as an address with no literal-
+///   tag check at all.
 fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
-        SsaVal::Raw(v, _) => v,
+        SsaVal::Raw(v, tag) => {
+            if tag == crate::layout::LIT_TAG_ADDR {
+                v
+            } else {
+                emit_addr_raw_kind_trap(pipeline, builder)
+            }
+        }
         SsaVal::HeapPtr(v) => {
             let start_block = builder.create_block();
             let next_block = builder.create_block();
@@ -2687,10 +2743,18 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
 
-            let raw_val =
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
+            // Guard the final load: v_final is only guaranteed NOT to be a
+            // 1-field Con wrapper — it could be a Thunk, Closure, or a Lit of
+            // an unrelated class (e.g. an Int#/Word# tag word that escaped
+            // case dispatch — the f137d34-shaped witness this hardens
+            // against). Require TAG_LIT and an address-carrying lit-tag
+            // before loading LIT_VALUE_OFFSET as an address.
+            let obj_tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), v_final, 0);
+            let not_lit = builder
+                .ins()
+                .icmp_imm(IntCC::NotEqual, obj_tag, layout::TAG_LIT as i64);
             let lit_tag =
                 builder
                     .ins()
@@ -2701,9 +2765,65 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
                 builder
                     .ins()
                     .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING as i64);
+            let is_addr_lit = builder.ins().icmp_imm(
+                IntCC::Equal,
+                lit_tag_ext,
+                crate::layout::LIT_TAG_ADDR as i64,
+            );
             let is_ba = builder
                 .ins()
                 .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_BYTEARRAY as i64);
+            let str_or_addr = builder.ins().bor(is_string, is_addr_lit);
+            let is_addr_class = builder.ins().bor(str_or_addr, is_ba);
+            let wrong_class = builder.ins().icmp_imm(IntCC::Equal, is_addr_class, 0);
+            let bad = builder.ins().bor(not_lit, wrong_class);
+
+            let load_block = builder.create_block();
+            builder.append_block_param(load_block, types::I64);
+            let addr_trap_block = builder.create_block();
+            builder.ins().brif(
+                bad,
+                addr_trap_block,
+                &[],
+                load_block,
+                &[BlockArg::Value(v_final)],
+            );
+
+            builder.switch_to_block(addr_trap_block);
+            builder.seal_block(addr_trap_block);
+            let trap_fn = pipeline
+                .module
+                .declare_function(
+                    "runtime_shape_trap",
+                    Linkage::Import,
+                    &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+                )
+                .expect("declare runtime_shape_trap");
+            let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+            let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3, // align 8
+            ));
+            let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let kind = builder
+                .ins()
+                .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+            let call = builder
+                .ins()
+                .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
+            let poison = builder.inst_results(call)[0];
+            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
+
+            builder.switch_to_block(load_block);
+            builder.seal_block(load_block);
+            let v_load = builder.block_params(load_block)[0];
+
+            let raw_val =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), v_load, LIT_VALUE_OFFSET);
             let needs_adj = builder.ins().bor(is_string, is_ba);
             let adjusted = builder.ins().iadd_imm(raw_val, 8);
             builder.ins().select(needs_adj, adjusted, raw_val)

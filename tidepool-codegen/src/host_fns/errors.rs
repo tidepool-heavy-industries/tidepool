@@ -126,6 +126,13 @@ pub enum ShapeTrapKind {
     /// A numeric unbox landed on a literal of the wrong class (e.g. a `Double`
     /// payload forced by an `Int#` continuation).
     LitClass = 2,
+    /// An address-consuming primop (`strlen#`, `plusAddr#`, ...) received a
+    /// value that isn't explicitly address-kinded: either a `Raw` SSA value
+    /// whose static literal tag isn't `Addr#`, or — after unwrapping any
+    /// 1-field boxing wrapper — a heap payload that isn't a `TAG_LIT` of an
+    /// address-carrying class (`String#`/`Addr#`/`ByteArray#`). Guards
+    /// against a stray tag/int word being dereferenced as a pointer.
+    AddrKind = 3,
 }
 
 impl ShapeTrapKind {
@@ -135,6 +142,7 @@ impl ShapeTrapKind {
         match kind {
             1 => "SHAPE TRAP: boxing-wrapper arity",
             2 => "SHAPE TRAP: literal class",
+            3 => "SHAPE TRAP: address kind",
             _ => "CASE TRAP",
         }
     }
