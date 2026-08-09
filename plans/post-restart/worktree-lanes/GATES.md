@@ -231,8 +231,11 @@ hiding must track the operator's PRESENCE, not the program's capability.
 Presence simply turned out to be row-gated, and that is only visible in code —
 the relay was accurate about the SHAPE and silent about what decides the answer.
 
-Implement it as the SAME expression that gates helper emission, never a
-restatement. A restatement is a second source of truth that diverges the moment
+Implement it by CALLING boot-vocab's published predicate —
+`emits_helpers_for(eff: &EffectDecl, row_effects: &[EffectDecl]) -> bool`,
+returning `in_row || eff.helpers_row_polymorphic`, private or `pub(crate)` and
+never `pub` (the hiding term lands in the same file, and a `pub` predicate would
+commit to callers that do not exist). Never a restatement. A restatement is a second source of truth that diverges the moment
 RepoEvent becomes row-polymorphic — plausible, since that is what the
 vocabulary-without-row story wants. Derive, don't declare: the same discipline
 the parking contract imposes on handled prefixes.
