@@ -1,16 +1,8 @@
-//! Function-application protocol: `runtime_apply` (non-tail, extracted from
+//! Function-application protocol: `runtime_apply` (non-tail, used by
 //! `emit/expr.rs`'s `EmitFrame::App` arm) and `runtime_tail_apply` (tail,
-//! extracted from `emit_tail_app`), sharing the per-function
-//! [`FunctionImports`] cache and the `force_and_check_callee` prefix helper
-//! (force-thunk + `debug_app_check`, byte-for-byte identical between the two
-//! pre-refactor call sites) — see the characterization commits for the exact
-//! step-by-step protocol and the diff list between the tail and non-tail
-//! paths.
-//!
-//! This module is a behaviour-preserving refactor of a duplicated protocol
-//! (the same four host-fn imports and the same force-thunk +
-//! `debug_app_check` prefix had been re-declared at each site), not a
-//! redesign.
+//! used by `emit_tail_app`), sharing the per-function [`FunctionImports`]
+//! cache and the `force_and_check_callee` prefix helper (force-thunk +
+//! `debug_app_check`, identical between the two call sites).
 
 use crate::emit::{
     heap_force_sig, EmitError, EmitSession, SsaVal, CLOSURE_CODE_PTR_OFFSET, VMCTX_TAIL_ARG_OFFSET,
@@ -53,10 +45,8 @@ fn debug_app_return_sig(call_conv: cranelift_codegen::isa::CallConv) -> Signatur
 
 /// Per-function cache of the host-fn `FuncRef`s the application protocol
 /// imports: `heap_force`, `debug_app_check`, `trampoline_resolve`,
-/// `debug_app_return`. Every `App` node previously re-ran
-/// `module.declare_function` + `declare_func_in_func` (rebuilding the
-/// `Signature` inline) for each of these on every node; this caches the
-/// result the first time each is needed within one function.
+/// `debug_app_return`. Declares each import at most once per function
+/// (lazily, on first use) rather than re-declaring it at every `App` node.
 ///
 /// SCOPING, and why it is safe: a `FuncRef` returned by
 /// `Module::declare_func_in_func` is only valid **inside the specific
@@ -329,7 +319,7 @@ pub(crate) fn runtime_apply(
     // increment with a decrement here — every exit from this App
     // node (the poison short-circuit and the post-call/post-TCO-
     // resolution path) converges here, so call_depth tracks live
-    // nesting instead of a running total (Finding 5).
+    // nesting instead of a running total.
     builder.switch_to_block(merge_block);
     builder.seal_block(merge_block);
     let merged_val = builder.block_params(merge_block)[0];
@@ -345,8 +335,7 @@ pub(crate) fn runtime_apply(
 
 /// Tail function application: force the callee, validate it, then hand off to
 /// the trampoline — store callee+arg into `VMContext` and return null — rather
-/// than calling directly. See the characterization commit for the full diff
-/// against `runtime_apply`: no `call_indirect`, no TCO null-check/merge. Same
+/// than calling directly (no `call_indirect`, no TCO null-check/merge). Same
 /// mark-at-creation coverage argument as `runtime_apply` above applies here.
 pub(crate) fn runtime_tail_apply(
     sess: &mut EmitSession,
