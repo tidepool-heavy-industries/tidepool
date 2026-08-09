@@ -85,6 +85,16 @@ where the time is.
   discarding the IR. Fix: translateModule is the one authoritative producer
   (IR + used DCs + types + effect sites); defense-in-depth = cheap Core
   visitor asserting subset, never a second translation.
+  **Codex review 2026-08-08 (see `codex-review-2026-08-08.md` item 7): the
+  subset defense does NOT currently exist** — Main SILENTLY UNIONS the two
+  translations' results (Main.hs ~348), and the runLLMTurn/fork rewrite
+  makes the seeded/unseeded paths genuinely diverge, so disagreement is
+  live. The D1 fix MUST ship a hard fail: walk emitted FlatNode
+  constructor/data-alt IDs and fail extraction if output metadata omits
+  any, plus an independent reachable-Core collector. Acceptance includes a
+  mutation test: deleting one recordDC call must fail extraction, not
+  produce output. Silent under-collection is the signature of the owed
+  garbage-con_tag intermittent — treat this as correctness, not cleanup.
 - **D2** Metadata = every constructor of every home-module TyCon, no
   reachability (mg_tcs → collectDataCons, Translate.hs ~2718). Fix:
   RuntimeTypeClosure from runtime-observable roots (built/matched cons in
