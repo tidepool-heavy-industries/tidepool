@@ -5,6 +5,29 @@ over-collection chain's root plus the declaration-path cluster. MUST wait
 for the one-spawn-turn Phase B TL to land (single owner of
 writeWholeModuleClosed at every point in time).
 
+## Structure (Inanna, 2026-08-08): one TL, TWO SUB-TLs, each with devs
+
+Fork two sub-TLs rather than running one flat dev pool:
+
+- **sub-TL `boot`** — item 0 (one-compile bootstrap Track 1) + item 0b
+  (nameable effect vocabulary). Rust-side session/boot territory plus the
+  Haskell decl-list surface.
+- **sub-TL `spawn-latency`** — the D/C/E chain below, re-aimed by the
+  Phase-B measurement (core-phase-dominant), through the pivotal
+  persistent-extractor decision. haskell/ extractor territory.
+
+Each sub-TL decomposes into reviewed dev leaves and gates its own folds;
+this TL folds sub-TL branches and owns the composed gate + the
+one-format-wire redeploy coordination. Per the realm-spike conflict
+experiment: do NOT pre-partition files between the sub-TLs — allocate
+shared-artifact namespaces (plan numbering, ledger files) up front, and
+log any real conflict at fold.
+
+Coordination point with the realm-build lane (running in parallel):
+`resident.rs:208` — the realm build's ResidentSession conversion (its
+step 4) is HELD until this wave's boot-site work lands; everything else
+in both lanes proceeds concurrently.
+
 ## Item 0 (FIRST): one-compile bootstrap, Track 1
 
 `plans/post-restart/one-compile-bootstrap.md` Track 1 is the confirmed
