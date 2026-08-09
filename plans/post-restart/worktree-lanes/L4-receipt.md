@@ -180,23 +180,58 @@ wrong is silent.** Extract-wave's boot-vocab lane splits the generator into
 `effects_module_source_with_vocab(row_effects, vocab_effects, row)`, at which
 point "the row contains RepoEvent" stops being one predicate and becomes two.
 
-The conditional must key on **`vocab_effects`**. The hiding exists so an author
-can write `Event`'s `(<|>)` unqualified, and that operator is a generated
-HELPER: it is in the author's scope exactly when RepoEvent is in the
-VOCABULARY, whether or not the effect is in the sendable row. Both mismatched
-pairs go wrong under the other choice, and neither is a compile error in the
-generator:
+~~The conditional must key on `vocab_effects`.~~ **SUPERSEDED — that answer was
+wrong.** It is kept struck through rather than deleted so anyone reconstructing
+the argument meets the refutation instead of re-deriving a wrong answer that
+briefly carried an endorsement. (Same treatment in worktree-wave's `GATES.md`,
+reversed at `ec48f685`.)
 
-- vocab-with / row-without → `(<|>)` is still emitted, but the Prelude's is no
-  longer hidden, restoring the exact ambiguity the change exists to remove.
-- row-with / vocab-without → the Prelude's `(<|>)` is hidden while no
-  replacement is emitted, costing `Alternative` for nothing.
+**The conditional must key on the HELPER-EMISSION CONDITION:**
 
-These surface only as a wrong preamble, in precisely the mismatched pairs
-boot-vocab's own item-0b acceptance constructs. So the no-regression gate must
-cover a MISMATCHED pair, not only the matched one — a gate built solely from
-`effects_module_source_at` (which passes one list for both) cannot distinguish
-the two predicates at all and would pass under either.
+```
+in_row(RepoEvent) || RepoEvent.helpers_row_polymorphic
+```
+
+which, for RepoEvent as declared today (not row-polymorphic), reduces to
+`row_effects`.
+
+Why, from the committed code rather than from a description of it
+(`d6fce023`, `eval_prep.rs:273`): helper emission is ROW-GATED —
+`if !(in_row || eff.helpers_row_polymorphic) { continue; }`. A row-CLOSED
+helper (`foo :: A -> M B`, the ordinary shape) only typechecks when its effect
+is actually in the row, so a vocabulary-only effect's helpers are emitted only
+when it declares itself row-polymorphic. `(<|>)` is a RepoEvent HELPER, so
+`Event`'s `(<|>)` exists exactly when RepoEvent's helpers are emitted — not
+merely when RepoEvent is nameable.
+
+**The principle survived; the answer did not.** "The hiding must track the
+operator's PRESENCE, not the program's capability" is correct and is what
+exposed the error. The failure was reasoning from a RELAYED SIGNATURE rather
+than from code: a relay can be accurate about a function's shape while silent
+about the thing that decides the answer. Had the `vocab_effects` answer
+shipped, a vocabulary-only RepoEvent would have hidden the Prelude's `(<|>)`
+while emitting no replacement — exactly the "costs `Alternative` for nothing"
+failure catalogued below, self-inflicted.
+
+**Only ONE mismatched pair is constructible.** `vocab_effects` must be a
+SUPERSET of `row_effects`, enforced by a loud assert (`eval_prep.rs:177`), so
+"row-with / vocab-without" cannot be built — it panics. An earlier draft of
+this receipt listed it as a live hazard; that overstated the hazard space.
+
+| Pair | Correct behaviour | Wrong under the vocab predicate? |
+|---|---|---|
+| RepoEvent in row AND vocab | HIDE — `(<|>)` is emitted | no |
+| RepoEvent vocab-only, not row-polymorphic | do NOT hide — no `(<|>)` emitted | **yes — this is the discriminating gate** |
+| RepoEvent absent | do not hide | no |
+| row-with / vocab-without | unconstructible (panics) | n/a |
+
+**Implementation rule: derive, don't declare.** The condition is written as the
+SAME expression that gates helper emission, never a restatement and never a
+"keep in sync" comment. A restatement is a second source of truth that diverges
+the moment RepoEvent becomes row-polymorphic — which is precisely what the
+vocabulary-without-row story wants. This is the discipline the parking contract
+imposes on handled prefixes, for the same reason: one source of truth makes the
+disagreeing case unconstructible rather than a responsibility to discharge.
 
 Status: the edit currently lives in `effects_module_source_at` (committed in
 `f37f0d17`, before the restructure was announced), keying on the single list
