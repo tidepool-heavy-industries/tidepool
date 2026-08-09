@@ -215,6 +215,65 @@ standing rule, not merely under-detailed. Concretely, per item:
   it turned RED identified.
 - **D2** — boot's ConTags guard by name AND the base commit it ran against.
 
+## D1 CHECK B — the invariant I specified is FALSE by design
+
+`d1-defense` hit CHECK B on real gates (**20 passed / 4 failed / 24 total**,
+harness acceptance) and STOPPED per spec rather than deciding. All four
+identical: `GHC.Types.(#,#)` found in reachable Core, absent from meta.cbor.
+**CHECK A never fired — not once.** The runtime was never at risk.
+
+Cause, verified in `Translate.hs` rather than taken on report: dedicated `Case`
+clauses (~1914, ~1957, ~2000+) match `case <primop> args of (# a, b #) -> body`
+and desugar straight into chained primop splits (`splitMultiReturnPrimOp`),
+never routing through `mapAltCon`'s `DataAlt dc -> recordDC dc`. By design — an
+unboxed tuple has no runtime representation once split.
+
+**The spec defect is mine.** CHECK B asserts *every DataCon in reachable Core is
+in the metadata*. That is FALSE BY DESIGN: the translator's job includes NOT
+translating whole classes of Core. Two classes in one day (`error`'s HasCallStack
+args, then unboxed-tuple multi-return); `Translate.hs` holds many more
+interception patterns. Exclusions cannot fix it — each moves the visitor toward
+re-deriving translator internals, destroying the independence B exists for.
+
+**Resolution (approved by wave TL, escalated to root):**
+
+1. ONE exclusion, **categorical not elision-specific** — `(#,#)` is an unboxed
+   tuple with no runtime heap representation, so it can never require metadata.
+   A TYPE-level fact, not a translator fact, so independence is preserved.
+   Derived from the existing `isUnboxedTupleDataCon`, not restated.
+2. REVERT the CallStack exclusion — elision-specific, the refused class.
+3. DOWNGRADE CHECK B to a loud named diagnostic. **BLOCKED** — see below.
+
+Holds the non-negotiable on its exact words: fail-extraction attaches to
+**(a) = CHECK A**, untouched; **(b)**'s stated purpose is keeping (a) from being
+self-confirming, and what demonstrates that is **(c)**, the mutation test.
+
+### The hole in my own argument (wave TL caught it)
+
+My case for (3) rests entirely on **which check the mutation fires**, and I
+asserted it without running it. **If the mutation fires CHECK B, downgrading B
+means the mutation no longer fails extraction — requirement (c) broken by the
+fix to the defense, leaving a mutation test that passes while testing nothing.**
+
+The 30/30 receipt FELT like coverage because it was a real, named, passing
+result about the mutation test. It answered a different question: that the
+mutation fires *something* under the old shape, not that it fires **A**. **A
+green receipt adjacent to a claim is not evidence for the claim.**
+
+Sharper than the wave's earlier instances: it would have been introduced BY a
+correction, DURING a conversation about verification, with a passing receipt
+attached.
+
+Subtlety that makes this substantive rather than ceremonial: the deletion site
+was chosen as a constructor **only `recordDC` supplies** — a claim about
+metadata SOURCES. That is not the same as being **emitted**, which is what CHECK
+A keys on. The two can come apart.
+
+**(3) is HELD** until the mutation is re-run with B downgraded and its output
+names CHECK A. If it names B, the site is re-chosen to a genuinely emitted
+DataCon — and that is a finding about the original site selection, recorded as
+such, not a quiet re-siting.
+
 ## Denominators, and "keep in sync" is not a guard
 
 **DENOMINATOR RULE (wave, `1b1f7c35`) — every receipt leg carries `N passed /
