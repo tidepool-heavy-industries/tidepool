@@ -61,6 +61,34 @@ filtered way, not the raw grep count, so it is apples-to-apples.
   already stated in prose alongside the label/date being removed, so the
   present-tense comment left behind carries the same warning in place. See
   commit range `559c9246..6b4af3b4` for the per-file rationale.
+- `tidepool-runtime` pass (commits `ba6088c1..b433e480`): every load-bearing
+  item found had its invariant already stated in prose alongside the
+  label/citation being removed, so the present-tense comment left behind
+  carries the same warning — no relocation needed, but two are worth calling
+  out explicitly since they guard real regressions:
+  - `tidepool-runtime/src/diag.rs`'s
+    `user_named_result_binding_with_own_span_in_range_is_kept` test: **prior
+    bug — a name-based `SCAFFOLD_BINDERS` list used to classify a GHC
+    "Relevant bindings include" entry as scaffold-noise by matching its
+    binder NAME; a legitimate user binding named the same as a scaffold
+    binder (e.g. `result`) was wrongly dropped from the rendered diagnostic.
+    Classification is now by the entry's own `(bound at file:line:col)` span
+    against the user's line range — never by name — so a user name can never
+    collide with scaffold-sounding names again.** The doc comment dropped
+    only the "the old `SCAFFOLD_BINDERS` list" phrasing; the invariant itself
+    (span-only classification) is stated in the comment left behind.
+  - `tidepool-runtime/src/session/turn.rs`'s `DECL_TEMPLATE_SOURCE`-adjacent
+    comments used to cite a deleted `binders.rs`'s `wrap_decls` as the origin
+    of the decl template's 17-extension pragma block. That function no
+    longer exists anywhere in the tree (Rust or Haskell side), so the
+    byte-identical-to-`wrap_decls` claim was already unverifiable; the
+    load-bearing part — the pragma block's extension list is what makes
+    certain lexer/parser-gated syntax (`LambdaCase`, quasiquotes, etc.)
+    legal in a bare declaration, and dropping any of them silently narrows
+    what a session decl can compile — is preserved via the existing
+    `turn_classification_corpus_old_and_new_path_agree` test's `Case` table
+    (the `lambda_case_decl`, `quasiquote_decl` entries) and their
+    surrounding comment, unchanged in substance.
 
 ## Uncertain-keep list
 
