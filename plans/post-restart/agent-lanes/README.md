@@ -32,6 +32,37 @@ show each failed for *its own reason* (the asserted message text), since a
 fixture passing on an unrelated error is exactly what this rule exists to
 catch.
 
+### Fail-fast truncation — pass `--no-fail-fast`, report completed-vs-selected
+
+**ADVISORY (root, 2026-08-08), active until the fix folds.** A live inherited
+red — `mock_stack_matches_production`
+(`tidepool-runtime/tests/effect_stack/mock_stack_lockstep.rs`; `Fork` added to
+`standard_decls`, hand-written mock not updated; fix dev in flight) — combined
+with **nextest's default fail-fast** makes a crate-wide run stop at ~23%
+coverage *while emitting real pass lines*. The receipt is indistinguishable
+from a complete run. The only tell is completed-vs-total (observed 198/877).
+
+`scripts/battery.sh` does NOT pass the flag (line 100:
+`cargo nextest run --workspace --ignore-default-filter "$@"`), and this
+worktree does not carry the battery fix `7d57cea5`. So until a rebase brings
+it: **pass `--no-fail-fast` explicitly.**
+
+Two notes specific to this wave's runs:
+
+- A targeted `-E 'binary(<name>)'` run selects a single binary, so it excludes
+  the inherited red. Seeing that red under such a filter means the filter is
+  not scoped as intended — investigate the scoping, do not explain the failure
+  away.
+- **Fail-fast truncates within your own selection too.** One failing
+  diagnostics fixture stops the run, and the receipt then shows genuine pass
+  lines for whichever fixtures ran first. That is the exact failure the
+  named-pass-line rule exists to catch, arriving through the runner rather than
+  through a test name.
+
+Report **completed vs selected** — for a targeted run the honest denominator is
+what the filter selected, not the crate total, and the filter is stated
+alongside it so the number is checkable.
+
 ### Name the INSTRUMENT beside any number
 
 Extends the rule one level down: report not just the count but **what counted
