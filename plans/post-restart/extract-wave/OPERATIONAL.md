@@ -398,6 +398,25 @@ rules below — each is this rule applied to one artifact.
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
+- **NEVER PUT A HARDCODED EXPECTED COUNT IN A SPEC** (spawn-latency; on the
+  audit hunt list beside "citable but unresolvable"). State the PROPERTY —
+  *every pre-existing check passes, named guards appear by name, report actual
+  N/N* — and treat any number given as context, never a target.
+  The mechanism, which is why this is not mere staleness: **a hardcoded count
+  converts the denominator rule from a CHECK into a LOOKUP.** The dev stops
+  asking *"did everything run?"* and starts asking *"does it match the spec?"*
+  Those are the same question until something silently stops running — which is
+  the only case either question exists for. So the stale count **disables the
+  rule that would have caught it going stale**, and fails in the direction that
+  looks correct. Same signature as the unresolvable citation: the artifact reads
+  as more rigorous for containing the number.
+  **Worst on items that ADD tests — i.e. items adding guards.** E6 adds a
+  detection-power demo and a fault-injection knob, so its fidelity total moves
+  by its own work; a spec saying "expect 30/30" would have it reconciling
+  against a number wrong because of its own change, and if a check silently
+  stopped running while the total landed back on 30, the truncated run would
+  match the doc exactly.
+
 - **EVERY RECEIPT CARRIES A DENOMINATOR: `N passed / M total` per leg.** A
   count without a denominator cannot distinguish a completed run from a
   truncated one. Three ways a leg looks done without being done, all found in
