@@ -399,7 +399,100 @@ anyone reading this ledger before the report:
 | D1-B removal | queued | — | — | — |
 | E6 tiered `-O2` | queued | — | — | — |
 | D2 runtime closure | queued | — | — | — |
-| **Pivotal: persistent extractor** | BLOCKED on C1 → **C1 done, evidence in** | — | Not yet recorded — wave TL's call, per spec | — |
+| **Pivotal: persistent extractor** | **DECIDED 2026-08-08** | boot = 0.6–1.9% of extract.total (`startup`+`ghc_setup` vs total); `ghc_load` 97–98% of `ghc_setup+ghc_load`; double compile ~96–97% combined | **Persistent server REJECTED on the latency/boot argument** (E4 amortization survives, unmeasured); **C1 local fix promoted ahead of both**; **precompiled (FAT) interfaces = surviving candidate, commitment DEFERRED** pending E2 generation-scaling + E4 fat-iface bytes. Full reasoning in the section above. | evidence = `01-c1-measurement.md` |
+
+---
+
+## THE PIVOTAL DECISION — persistent extractor — RECORDED 2026-08-08
+
+Made on C1's measurement (`01-c1-measurement.md`), as the wave done-criterion
+requires. Three parts; the first is a rejection, the second a promotion, the
+third a bounded deferral with the measurement attached.
+
+### 1. PERSISTENT SERVER — REJECTED on the boot argument, which is measured
+
+A persistent server's distinctive benefit over precompiled interfaces is
+avoiding per-turn process and GHC-session establishment. That is now measured
+directly, and it is nearly nothing:
+
+    startup     44–91 ms
+    ghc_setup   49–142 ms   (DynFlags setup + guessTarget/setTargets + depanal)
+    ------------------------------------------------------------------
+    combined    ~93–233 ms  against extract.total of 8,105–17,424 ms
+                = 0.6–1.9% of a turn's extract
+
+`ghc_load` is **97–98% of `ghc_setup + ghc_load` in both load arms.** The
+historical "session boot 26–32%" was never boot — it was `load'` performing a
+full first compile of every home module. Boot, properly bracketed, is ~1%.
+
+A resident process costs lifecycle management, crash recovery, cross-turn cache
+invalidation, and a new class of state-leak bug. **1–2% does not buy that.**
+Every other benefit a persistent server would deliver is compiled-state
+retention, which precompiled interfaces deliver with strictly less machinery.
+
+Supporting: `inject` measured **0 ms** at every sampled session turn — splicing
+live thin ifaces into the HPT is free. The interface direction has no measured
+overhead at the point where it would show up.
+
+**SCOPE OF THE REJECTION, stated so it is not over-read:** rejected on the
+LATENCY argument. One persistent-server argument survives untouched because
+this measurement does not address it — **E4's per-process cache death** (the
+FatIface decode cache dies with each disposable extractor, so every turn
+re-decodes). That is a genuine amortization argument for residency, it is
+UNMEASURED, and it is not refuted here. If it is ever the reason to build a
+server, it must be measured first and argued on its own terms — not smuggled
+back in on the boot argument, which is now closed.
+
+### 2. NEITHER, FIRST — C1's own fix is promoted ahead of both
+
+    ghc_load                    28–32% of extract.total
+    typecheck + core (2nd loop) 62–69%
+    ------------------------------------------------
+    combined                    ~96–97%
+
+Nearly the entire extract is **two back-to-back full compiles of the same
+home-module set inside ONE process.** That waste is *within-process*, so no
+persistence architecture is required to recover any of it. Eliminating the
+redundant `load'` is worth **~30% of every extract** for a local change, needs
+no new architecture, and re-bases the arithmetic either architectural option
+would be sized against. Doing persistence first would be optimizing the
+survivor of a duplication we have not yet removed.
+
+Demonstrated contention-robust: the ratio moved <2 pp across a 1-min loadavg
+swing of ~11→~34 (two arms, n=6 each), with a mechanism — the prerequisite
+check confirmed `parMakeCount` is never set, so `load'` and the second loop are
+both sequential and contention has no structural reason to degrade them
+asymmetrically.
+
+### 3. PRECOMPILED INTERFACES — surviving candidate, NOT yet committed
+
+Deferred, with the measurement attached and the two deciding measurements
+named. After C1's fix, ONE compile of the home-module set per turn remains
+(~65% of today's extract). Whether interfaces beat that turns on two figures
+this measurement does NOT provide:
+
+- **compile time vs `Lib.G<n>` generations** — E2's O(n²) home-module-chain
+  axis. Explicitly UNANSWERED. The session-path vehicle reached 5 samples but
+  its `data P = …` decl compiled ONCE (`Lib.G1`) and never grew; top-level
+  bindings stayed flat at 1706–1709 throughout, so nothing could have scaled.
+  No existing `tidepool-repl` test drives 5+ sequential `repl.def(...)` calls
+  (deepest found: 2–3). Needs a new vehicle, or in-process instrumentation of
+  `injectSessionScope`'s actual injected-module count.
+- **fat-iface bytes and decode cost per turn** — E4. Unmeasured. This is the
+  cost side of the interface option and the amortization case for residency;
+  one measurement bears on both.
+
+Interfaces additionally must carry unfoldings: `GhcPipeline.hs`'s PHASE 3
+comment records that iface resolution WITHOUT `-O2` unfoldings bakes
+`ErrorSentinel`s that surface later as `kind=4 TypeMetadata`. So "precompiled
+interfaces" here means FAT ifaces, which is exactly why the E4 number is a
+prerequisite and not a nicety.
+
+**This is a deferral WITH the measurement attached and its coverage stated, per
+the sanctioned form — not a deferral for want of one.** What it defers is the
+commitment to build; what it decides, on measured evidence, is that the server
+option is not the answer to the latency problem and that C1's local fix comes
+before either.
 
 ## Wire-moving items flagged to root
 
