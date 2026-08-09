@@ -96,8 +96,14 @@ Domain-constructor isolation pinned (`realm_global_id_isolation.rs`).
 assumed unchecked — a divergent tag would silently corrupt how a parked
 SIBLING realm's continuation reads on resume) is ACCEPTED as a documented
 residual for now: divergence requires an extractor id-minting change,
-which fires the three pinned id-stability tests upstream, so the hole is
-double-covered today. A cheap loud agreement check (envelope-subset tag
+which fires the pinned id-stability tests upstream, so the hole is
+double-covered today. (Enumerated 2026-08-09 after "the three pinned
+tests" proved citable-but-unresolvable: tidepool-repr::
+extend_checked_equivalence::{distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order,
+merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard}
++ tidepool-runtime::session_table_qualified_identity — ALL DataConId
+qualified-name guards; NONE observes VarIds. The set covers constructor
+identity only.) A cheap loud agreement check (envelope-subset tag
 checksum verified at add_function/park) is ATTACHED TO STEP 4's work item
 — same lane, same files, when the go-signal fires. Not closed silently;
 not worth a standalone lane.
