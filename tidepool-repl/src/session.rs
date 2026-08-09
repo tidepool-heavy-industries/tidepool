@@ -2989,6 +2989,7 @@ mod slim_tests {
                 ],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
             EffectDecl {
                 type_name: "KV",
@@ -2998,6 +2999,7 @@ mod slim_tests {
                 helpers: &["kvSet :: Text -> Value -> M ()\nkvSet k v = undefined"],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
         ]
     }

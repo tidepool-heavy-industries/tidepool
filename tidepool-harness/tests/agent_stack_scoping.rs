@@ -1,12 +1,19 @@
 //! Structural proof of the harness/agent effect-stack split: the OUTER
 //! self-iterating-harness session compiles against `Eff '[RunLLMTurn, AskUser]`
 //! and the nested ANSWERER turn compiles against `Eff '[AskUser, Fork,
-//! Finalize]` ([`answerer_decls`]) — disjoint rows (`Fork`/`AskUser` are
+//! Finalize]` ([`answerer_decls`]) — disjoint ROWS (`Fork`/`AskUser` are
 //! answerer-only; `RunLLMTurn`/`Ask` are not in the answerer's row), not a
-//! single shared stack pinned by convention. `tidepool_mcp::effects_module_source`
-//! only emits an effect's GADT + Member-polymorphic helpers for decls actually
-//! passed into a given compile, so an effect absent from a compile's decl list
-//! is UNDECLARED there, not merely unreachable — calling it is a GHC "not in
+//! single shared stack pinned by convention. `type M` is built from a
+//! compile's ROW alone and stays exactly this narrow.
+//!
+//! **`RunLLMTurn` is the one exception to "absent ⇒ not in scope" (extract-wave
+//! item 0b).** Its GADT + `Member`-polymorphic helpers are NAMEABLE in every
+//! compile (`EngineConfig`'s vocabulary policy widens `row ∪ {RunLLMTurn}`),
+//! so `runLLMTurn` resolves and typechecks up to the `Member RunLLMTurn effs`
+//! constraint — which then fails to SOLVE against a row that doesn't carry
+//! it, a comprehensible `Member` error, not "not in scope". Every OTHER
+//! effect (`Ask`, base effects, …) keeps the old behavior: absent from a
+//! compile's decl list means UNDECLARED there, so calling it is a GHC "not in
 //! scope" error, a stronger wall than a solvable-elsewhere type mismatch.
 //!
 //! The answerer forks via its OWN `Fork` effect (`Tidepool.Fork`'s
@@ -93,14 +100,19 @@ fn compile_pinned(
     )
 }
 
-/// THE answerer-side structural guarantee: `runLLMTurn @T` does NOT typecheck
-/// against the answerer's `Eff '[AskUser, Fork, Finalize]` stack — `RunLLMTurn`
-/// is not in the row. The answerer's parallel-delegation surface is the `Fork`
-/// effect (`fork`/`forkAll`), not `runLLMTurn`, so an answerer cannot suspend
-/// an in-context model turn — it forks (driver-serviced, depth-one) or
+/// THE answerer-side structural guarantee (extract-wave item 0b): `runLLMTurn
+/// @T` does NOT typecheck against the answerer's `Eff '[AskUser, Fork,
+/// Finalize]` ROW — `RunLLMTurn` is not in it. But `RunLLMTurn` IS in the
+/// answerer compile's VOCABULARY now (nameable everywhere), so the failure
+/// mode changed: it is no longer "not in scope" (undeclared) but a `Member`
+/// error (declared, but the row can't supply the constraint) — a
+/// comprehensible capability-boundary error, not a typo-shaped one. The
+/// answerer's parallel-delegation surface is the `Fork` effect (`fork`/
+/// `forkAll`), not `runLLMTurn`, so an answerer still cannot suspend an
+/// in-context model turn — it forks (driver-serviced, depth-one) or
 /// finalizes.
 #[test]
-fn run_llm_turn_is_a_compile_error_in_the_answerer_stack() {
+fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
     if !extract_available() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
@@ -110,14 +122,51 @@ fn run_llm_turn_is_a_compile_error_in_the_answerer_stack() {
     let err = match result {
         Ok(_) => panic!(
             "runLLMTurn compiled against the answerer stack '[AskUser, Fork, Finalize] \
-             — RunLLMTurn must be undeclared there (the answerer forks, it does not \
+             — RunLLMTurn must not be IN THE ROW there (the answerer forks, it does not \
              suspend an in-context model turn)"
         ),
         Err(e) => e.to_string(),
     };
     assert!(
-        err.contains("runLLMTurn") && err.contains("not in scope"),
-        "expected a GHC not-in-scope error naming runLLMTurn, got:\n{err}"
+        err.contains("Member") && err.contains("RunLLMTurn"),
+        "expected a GHC Member error naming RunLLMTurn (nameable, but not in \
+         the answerer's row), got:\n{err}"
+    );
+    let lower = err.to_lowercase();
+    assert!(
+        !lower.contains("not in scope") && !lower.contains("variable not in scope"),
+        "runLLMTurn is NAMEABLE in the answerer compile now (extract-wave item \
+         0b) — a scope error here means the vocabulary widening regressed, \
+         got:\n{err}"
+    );
+}
+
+/// The POSITIVE control for item 0b: `Tidepool.Harness` (which re-exports `M`,
+/// `RunLLMTurn`, and `runLLMTurn` from `Tidepool.Effects`) is IMPORTABLE
+/// against the answerer stack — the import alone proves `RunLLMTurn` has a
+/// real GADT in the answerer's generated `Tidepool.Effects`, independent of
+/// whether the eval code actually calls a `RunLLMTurn` verb (this one calls
+/// `askUserRaw`, an ordinary in-row verb). Before item 0b this import failed
+/// outright: the answerer's generated module never declared `RunLLMTurn` at
+/// all, so naming it — even just to import it — was itself "not in scope".
+#[test]
+fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+
+    let result = compile_against(
+        answerer_decls(),
+        "askUserRaw (toJSON (0 :: Int))",
+        "Tidepool.Harness",
+    );
+    assert!(
+        result.is_ok(),
+        "importing Tidepool.Harness (which names RunLLMTurn/runLLMTurn) must \
+         typecheck against the answerer stack now that RunLLMTurn is nameable \
+         everywhere (extract-wave item 0b), got:\n{:?}",
+        result.err()
     );
 }
 

@@ -113,7 +113,91 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
 /// T)` is what admits its `finalize @T`. `row`'s imports are emitted here too:
 /// the answer type is an author type, and naming it in `type M` needs it in
 /// scope in THIS module, not only in the turn module.
+///
+/// Thin wrapper over [`effects_module_source_with_vocab`] with an unwidened
+/// vocabulary (`vocab_effects == row_effects`) — byte-identical to this
+/// function's behavior before the vocabulary/row split (extract-wave item 0b)
+/// existed, which is exactly what every caller here still wants: only a
+/// caller that deliberately widens what's NAMEABLE beyond what's IN THE ROW
+/// reaches for the vocab-aware entry point directly.
 pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) -> String {
+    effects_module_source_with_vocab(effects, effects, row)
+}
+
+/// [`effects_module_source_at`] with the effect VOCABULARY (what's nameable —
+/// gets a GADT + `type_defs` emitted) split from the effect ROW (`row_effects`
+/// — what's IN `type M`, i.e. actually executable via `Member`). This is the
+/// mechanism behind "effect vocabulary available in scope ≠ effects present
+/// in M's row" (extract-wave item 0b, `plans/post-restart/extract-wave/boot/00-spec.md`):
+/// a name can be IN SCOPE (compiles, resolves, has a real GADT constructor)
+/// without being IN THE ROW (a `Member` constraint at its call site is then
+/// unsolved — a comprehensible type error, not "not in scope").
+///
+/// **The row stays authoritative for `type M`** — `type M = Eff <row_effects>`
+/// exactly as before; `vocab_effects` never touches it. Widening what's
+/// nameable must never widen what's executable, or the capability-rows
+/// separation the row-scoping work built (each source-level compile — outer
+/// harness session, answerer, general Agent turn — gets its OWN row) would be
+/// silently undone by a shared vocabulary.
+///
+/// **`vocab_effects` must be a SUPERSET of `row_effects`** (matched by
+/// `type_name`) — a loud panic, not a silently-widened row, if it isn't: a
+/// row effect with no vocabulary entry would have no GADT to compile its
+/// `type M` against at all.
+///
+/// **Emitted per vocabulary effect, deduplicated by `type_name`** (first
+/// occurrence in `vocab_effects` order wins) so the same effect can never
+/// double-declare its GADT — and in a DETERMINISTIC order (`vocab_effects`'
+/// own order, not a sort), because this generated source is a compile-cache
+/// key (see [`crate::ensure_effects_module_at`]'s content-addressing):
+/// nondeterministic ordering would silently destroy cache hits.
+///
+/// **Helpers are row-gated by default, vocabulary-wide only when declared
+/// safe.** A row-CLOSED helper (`foo :: A -> M B`, the ordinary shape) only
+/// typechecks when its effect is actually in the row — emitting it for a
+/// vocabulary-only effect breaks the compile at the DEFINITION site, the
+/// opposite of the goal. A row-POLYMORPHIC helper (`foo :: Member E effs =>
+/// A -> Eff effs B`, [`EffectDecl::helpers_row_polymorphic`]) typechecks
+/// regardless of the row and fails at the intended USE site instead — so a
+/// vocabulary-only effect's helpers are emitted ONLY when it declares itself
+/// row-polymorphic. Concretely: emit an effect's helpers when it is in
+/// `row_effects` OR `helpers_row_polymorphic` is `true`.
+///
+/// **A vocabulary-only PARAMETERIZED effect (non-empty `type_params`) is
+/// rejected loudly** — `Finalize <hole type>`-shaped effects have no
+/// well-defined spelling without a row application (there's no default `v`
+/// to spell `data Finalize v a where` at outside a row's [`crate::RowArgs`]
+/// entry), so this is a construction-site error, not a half-working emission.
+pub fn effects_module_source_with_vocab(
+    row_effects: &[EffectDecl],
+    vocab_effects: &[EffectDecl],
+    row: &crate::RowArgs,
+) -> String {
+    for r in row_effects {
+        assert!(
+            vocab_effects.iter().any(|v| v.type_name == r.type_name),
+            "effect vocabulary must be a superset of the row: `{}` is in the \
+             row but not in the vocabulary",
+            r.type_name
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    let effects: Vec<&EffectDecl> = vocab_effects
+        .iter()
+        .filter(|v| seen.insert(v.type_name))
+        .inspect(|v| {
+            let in_row = row_effects.iter().any(|r| r.type_name == v.type_name);
+            assert!(
+                in_row || v.type_params.is_empty(),
+                "`{}` is vocabulary-only (not in the row) but parameterized \
+                 (type_params {:?}) — a parameterized effect has no \
+                 well-defined spelling outside a row application",
+                v.type_name,
+                v.type_params
+            );
+        })
+        .collect();
+
     let mut out = String::new();
     out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, DuplicateRecordFields, OverloadedRecordDot #-}\n");
     out.push_str("-- GENERATED by the tidepool MCP server from its effect handler\n");
@@ -155,7 +239,7 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     out.push_str("liftEither :: P.Show e => Either e a -> Eff effs a\nliftEither = either (error . T.pack . P.show) pure\n");
     out.push('\n');
 
-    for eff in effects {
+    for eff in &effects {
         eff.type_defs.iter().for_each(|td| {
             out.push_str(td);
             out.push('\n');
@@ -175,12 +259,21 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     }
 
     // Type alias so helpers can write `M a` instead of `Eff '[Console, KV, Fs] a`
-    if !effects.is_empty() {
-        out.push_str(&format!("type M = Eff {}\n\n", row_type(effects, row)));
+    // — built from `row_effects` ONLY, never the (possibly wider) vocabulary:
+    // widening what's nameable must never widen what's executable.
+    if !row_effects.is_empty() {
+        out.push_str(&format!("type M = Eff {}\n\n", row_type(row_effects, row)));
     }
 
-    // Thin effect helpers (send-wrappers and recipes)
-    for eff in effects {
+    // Thin effect helpers (send-wrappers and recipes) — emitted for an effect
+    // in the row (its `-> M x` helpers only typecheck there) OR one that
+    // declares its helpers row-polymorphic (`Member E effs =>`, typechecks
+    // regardless of the row — see `EffectDecl::helpers_row_polymorphic`).
+    for eff in &effects {
+        let in_row = row_effects.iter().any(|r| r.type_name == eff.type_name);
+        if !(in_row || eff.helpers_row_polymorphic) {
+            continue;
+        }
         for h in eff.helpers {
             out.push_str(h);
             out.push('\n');
@@ -703,6 +796,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
             EffectDecl {
                 type_name: "KV",
@@ -712,6 +806,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
             EffectDecl {
                 type_name: "Fs",
@@ -721,6 +816,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
         ];
         assert_eq!(build_effect_stack_type(&effects), "'[Console, KV, Fs]");
@@ -785,6 +881,88 @@ mod tests {
             build_effect_stack_type_at(&decls, &row),
             "'[Finalize (Int -> Int)]"
         );
+    }
+
+    /// THE vocabulary/row split (extract-wave item 0b): `RunLLMTurn` can be
+    /// NAMEABLE (GADT + `Member`-polymorphic helper emitted) in a compile
+    /// whose ROW is the narrow answerer stack `[AskUser, Finalize]` — while
+    /// `type M` stays built from the row alone, unchanged. This is the
+    /// generator-level twin of `tidepool-harness`'s
+    /// `run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack`
+    /// (a real GHC compile) — this test is the pure, fast-tier half.
+    #[test]
+    fn vocab_widens_nameability_without_widening_the_row() {
+        let row_decls = vec![crate::askuser_decl(), crate::finalize_decl()];
+        let mut vocab_decls = row_decls.clone();
+        vocab_decls.push(crate::runllmturn_decl());
+
+        let src =
+            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
+
+        // RunLLMTurn is NAMEABLE: its GADT and Member-polymorphic helper are
+        // emitted...
+        assert!(src.contains("data RunLLMTurn a where"), "{src}");
+        assert!(src.contains("RunLLMTurnWith ::"), "{src}");
+        assert!(
+            src.contains(
+                "runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a"
+            ),
+            "{src}"
+        );
+        // ...but `type M` is built from the ROW alone — unchanged from the
+        // narrow answerer row, RunLLMTurn absent. This is the check that
+        // capability rows stay separate: nameable ≠ in the row.
+        assert!(
+            src.contains("type M = Eff '[AskUser, Finalize NoAnswer]"),
+            "{src}"
+        );
+    }
+
+    /// For a row that already contains `RunLLMTurn`, unioning it into the
+    /// vocabulary again is a NO-OP: dedup by `type_name` collapses the
+    /// duplicate, and the generated source is byte-identical to the
+    /// unwidened path. This is the case every existing compile (the outer
+    /// harness session, a general Agent turn) hits — widening the vocabulary
+    /// must cost them nothing.
+    #[test]
+    fn vocab_already_containing_the_effect_is_byte_identical() {
+        let decls = standard_decls(); // already carries RunLLMTurn (WS-B)
+        let row = crate::RowArgs::default();
+        let mut widened_vocab = decls.clone();
+        widened_vocab.push(crate::runllmturn_decl()); // naive duplicate union
+
+        let base = effects_module_source_at(&decls, &row);
+        let widened = effects_module_source_with_vocab(&decls, &widened_vocab, &row);
+        assert_eq!(
+            base, widened,
+            "a row that already contains the widened effect must render \
+             byte-identical source regardless of vocabulary widening"
+        );
+    }
+
+    /// The vocabulary must be a superset of the row — a loud panic, not a
+    /// silently narrowed/widened row, when a row effect has no vocabulary
+    /// entry to supply its GADT.
+    #[test]
+    #[should_panic(expected = "superset of the row")]
+    fn vocab_must_be_a_superset_of_the_row() {
+        let row_decls = vec![crate::finalize_decl()];
+        let vocab_decls: Vec<crate::EffectDecl> = vec![]; // missing Finalize
+        let _ =
+            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
+    }
+
+    /// A vocabulary-only PARAMETERIZED effect (`Finalize`, `type_params
+    /// ["v"]`) has no well-defined spelling outside a row application — reject
+    /// it loudly at construction rather than emit a GADT head that can't be
+    /// applied to anything.
+    #[test]
+    #[should_panic(expected = "parameterized")]
+    fn vocab_only_parameterized_effect_is_rejected() {
+        let row_decls = vec![crate::askuser_decl()];
+        let vocab_decls = vec![crate::askuser_decl(), crate::finalize_decl()];
+        let _ =
+            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
     }
 
     #[test]

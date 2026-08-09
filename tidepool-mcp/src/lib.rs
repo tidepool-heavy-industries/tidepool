@@ -211,9 +211,26 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
 /// uncached, so an edit to an author module named in `row` is picked up on the
 /// next compile: there is no compiled artifact for its hash to have to cover.
 pub fn ensure_effects_module_at(effects: &[EffectDecl], row: &RowArgs) -> std::io::Result<PathBuf> {
+    ensure_effects_module_with_vocab(effects, effects, row)
+}
+
+/// [`ensure_effects_module_at`] with the effect VOCABULARY split from the ROW
+/// — see [`effects_module_source_with_vocab`] for the mechanism (extract-wave
+/// item 0b). `type M` (via `effects_module_source_with_vocab`) and the
+/// orchestrate module's `Exec`/`Http`-gated imports both key on `row_effects`
+/// alone; `vocab_effects` (a superset) only controls what gets a GADT +
+/// `type_defs` in the generated `Tidepool.Effects`. The staging dir is
+/// content-addressed on the combined source, so a widened vocabulary gets its
+/// own dir — a narrow-row compile that doesn't widen (`vocab_effects ==
+/// row_effects`) reuses exactly the dir it always has.
+pub fn ensure_effects_module_with_vocab(
+    row_effects: &[EffectDecl],
+    vocab_effects: &[EffectDecl],
+    row: &RowArgs,
+) -> std::io::Result<PathBuf> {
     write_generated_modules(
-        &effects_module_source_at(effects, row),
-        &orchestrate_module_source(effects),
+        &effects_module_source_with_vocab(row_effects, vocab_effects, row),
+        &orchestrate_module_source(row_effects),
     )
 }
 
@@ -548,6 +565,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
             EffectDecl {
                 type_name: "KV",
@@ -560,6 +578,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                helpers_row_polymorphic: false,
             },
         ];
         let preamble = generated_sources(&effects, false);
@@ -611,6 +630,7 @@ mod tests {
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -640,6 +660,7 @@ mod tests {
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -668,6 +689,7 @@ mod tests {
             helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
             type_params: &[],
             default_row_args: &[],
+            helpers_row_polymorphic: false,
         }];
         let desc = build_eval_tool_description(&effects);
         // The slim floor lists each effect name + one-liner …
@@ -1065,6 +1087,7 @@ data Console a where
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -1090,6 +1113,7 @@ data Console a where
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);

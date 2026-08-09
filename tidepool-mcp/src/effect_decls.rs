@@ -40,6 +40,20 @@ pub struct EffectDecl {
     /// is not answering a typed hole cannot finalize at all, and GHC says so
     /// by name (`'Finalize Text' is not a member of '[…, Finalize NoAnswer]'`).
     pub default_row_args: &'static [&'static str],
+    /// Do this effect's `helpers` typecheck against ANY row that carries the
+    /// `Member <Effect> effs` constraint, rather than only the closed `M`
+    /// alias? A row-polymorphic helper (`foo :: Member E effs => A -> Eff
+    /// effs B`, e.g. `RunLLMTurn`'s `runLLMTurn`) compiles fine even when `E`
+    /// is absent from the CURRENT row — the constraint just goes unsolved
+    /// until a call site fixes `effs`, so it's safe to emit for an effect
+    /// that is in the generated module's VOCABULARY but not its ROW (see
+    /// [`crate::effects_module_source_with_vocab`]). A row-CLOSED helper
+    /// (`foo :: A -> M B`, the default) only typechecks when its effect is
+    /// actually in the row — emitting it otherwise breaks the compile at the
+    /// DEFINITION site, the opposite of the vocabulary/row split's goal — so
+    /// such helpers stay row-gated. `false` for every effect except
+    /// `RunLLMTurn`.
+    pub helpers_row_polymorphic: bool,
 }
 
 /// The type arguments a single compile applies to the parameterized effects in

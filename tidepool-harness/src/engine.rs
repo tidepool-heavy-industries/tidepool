@@ -664,6 +664,30 @@ fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     decls
 }
 
+/// This landing's effect-VOCABULARY policy (extract-wave item 0b —
+/// `plans/post-restart/extract-wave/boot/00-spec.md`): `row ∪ {RunLLMTurn}`,
+/// applied at every [`EngineConfig`] compile ([`EngineConfig::from_decls`]'s
+/// default row and [`EngineConfig::turn_target`]'s `Finalize`-pinned row
+/// alike). `RunLLMTurn`'s GADT + helpers are declared row-polymorphic
+/// (`EffectDecl::helpers_row_polymorphic`), so this only ever makes
+/// `runLLMTurn`/`RunLLMTurn` NAMEABLE — never adds it to `type M` — and
+/// `Member RunLLMTurn effs` still fails loudly at any call site whose actual
+/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork,
+/// Finalize]`.
+///
+/// A no-op, returning `decls` unchanged, whenever `RunLLMTurn` is already in
+/// the row (the outer harness session's `[RunLLMTurn, AskUser]`, a general
+/// Agent turn's `standard_decls()`-based stack) — those compiles' generated
+/// source stays byte-identical to before this policy existed.
+fn vocab_with_runllmturn(decls: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
+    if decls.iter().any(|d| d.type_name == "RunLLMTurn") {
+        return decls.to_vec();
+    }
+    let mut vocab = decls.to_vec();
+    vocab.push(tidepool_mcp::runllmturn_decl());
+    vocab
+}
+
 impl EngineConfig {
     /// The canonical effect stack's decls + ask tag + effect names, resolving
     /// the extract binary from `TIDEPOOL_EXTRACT` (falling back to
@@ -729,8 +753,13 @@ impl EngineConfig {
             })
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
-        let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-            .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let vocab = vocab_with_runllmturn(&decls);
+        let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(
+            &decls,
+            &vocab,
+            &tidepool_mcp::RowArgs::default(),
+        )
+        .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = vec![prelude_dir.clone()];
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
@@ -796,7 +825,8 @@ impl EngineConfig {
             });
         };
         let row = tidepool_mcp::RowArgs::at("Finalize", [ty]).importing(imports.iter().cloned());
-        let effects_dir = tidepool_mcp::ensure_effects_module_at(&self.decls, &row)
+        let vocab = vocab_with_runllmturn(&self.decls);
+        let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(&self.decls, &vocab, &row)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = self.include.clone();
         match include.iter().position(|p| p == &self.effects_dir) {
