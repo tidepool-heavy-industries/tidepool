@@ -160,6 +160,27 @@ children's merge-bases. Four things must happen at that boundary:
 1. **Full `tidepool-harness` shard re-run** as transfer proof, not quick
    tier alone. This is what CONFIRMS the 29 dissolved instead of assuming
    it. Anything surviving is a genuinely new finding.
+
+   **Also re-run the full `tidepool-runtime` shard.** A cold-cache A/B on
+   this lane's own tip found **7 failures that pre-exist any of this
+   lane's work** — a crate root's 166/166 harness census never covered, so
+   they have never been characterized. Same-or-dissolved after rebase
+   decides whether they were stale-base like the harness 29 or are real
+   and go to root:
+   `effect_stack::mock_stack_lockstep::mock_stack_matches_production`,
+   `generic_deriving_337::sum_type_rejected_at_compile_time`,
+   `jit_surface::qq_fmt_brace_inside_hole_non_string_expr_still_works`,
+   `jit_surface::works_from_json_float`,
+   `nullary_sum_generic_deriving::mixed_nullary_sum_still_rejected_at_compile_time`,
+   `render::user_union_normalize::user_defined_union_survives_effectful_normalize`,
+   `stdlib_regressions_02_medium::works_int_prism_floors_not_truncates`.
+
+   **Run it COLD** (`rm -rf $PWD/.cache`, rebuild `tidepool-extract-bin`).
+   A warm-cache run of two of those binaries reported 12/12 PASS while the
+   cold run of the same commit failed them — the warm result was a cache
+   artifact. `cache_key_salted` fingerprints include-directory CONTENTS via
+   `fingerprint_dir`, so anything touching `haskell/lib` invalidates
+   broadly and warm-vs-cold is not a small difference here.
 2. **Re-run the derived-sum-vs-`SumShape`-literal `==` form.** dev-2 hit a
    case-trap (`runtime_strlen` bad pointer 0x1) comparing a DERIVED sum
    shape to a literal, and isolated it precisely: derived PRODUCT vs
