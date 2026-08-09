@@ -375,6 +375,71 @@ Correct: `ps -eo comm= | grep -c '^tidepool-extrac'` and
 `cat /proc/loadavg`. **A zero from a mistyped pattern reads exactly like a
 quiet box** — it looks like permission to proceed, not like an error.
 
+### The unsatisfiable triple — reported, fixed, and CONFIRMED by one observation
+
+**The report.** A broker-wrapped command that must queue longer than the
+environment's ~380s process kill can NEVER complete, however compliant the
+dev is. `ghc-slots.sh run` has no timeout — it loops forever (sweep, then
+rotating kernel-blocked waits). So a queued dev is not being *refused* a
+slot; it is being *killed while queued*. "Wrap everything" + "~380s kill"
++ "3 slots across three waves" is unsatisfiable under contention, and it
+cannot be fixed at the lane level.
+
+Evidence was DEMONSTRATED, not inferred: `boot-targets` died twice at
+~340s while correctly queued, having refused to bypass both times.
+
+**Three mechanism fixes followed within the hour:** `ghc-slots.sh detach`
+(root's `bf3026af` — `setsid`, returns instantly, the detached child is
+`run` itself so it holds and releases the `flock`: full slot discipline,
+not a bypass); the per-run `ghc-heavy` cap 3→1 (`fc3363dc`); and the slot
+count 3→4 (`45b93ee1`), gated on lanes confirming the cap.
+
+**The receipt, and it is a single observation validating all three
+together:** `boot-targets` went from two attempts dying at ~340s to
+acquired-and-complete on the FIRST attempt afterwards, well inside its
+45-minute priority window. `cabal build tidepool-extract-bin` linked
+clean.
+
+The arithmetic that was actually wrong: the box-wide extract ceiling is
+`slots × per-run cap`. It was 3×3 = **9**, which is how three fully
+compliant lanes produced seven concurrent extracts. It is now 4×1 = **4**
+— a net reduction WITH more lanes progressing concurrently.
+
+**Recorded as the argument for the no-bypass rule**, since it is rare to
+get it this cleanly: the dev refused to bypass twice, got nothing visible
+for it both times, and reported anyway. Bypassing would have unstuck one
+worktree and left the mechanism broken for every lane, with nobody knowing
+why the box kept falling over.
+
+### Instruments: count at the SOURCE, not by external pattern match
+
+Three external-observation instruments were wrong in three different
+directions within one day:
+
+| instrument | failure |
+|---|---|
+| `pgrep -fc tidepool-extract` | OVER-counts ~5x — matches shells carrying `TIDEPOOL_EXTRACT` in the environment |
+| `grep tidepool-extract-bin` on `comm` | UNDER-counts to a constant ZERO — `comm` caps at 15 chars for userspace |
+| `pgrep -f "ghc-slots.sh"` | OVER-counts — 22 agent sessions + 8 bash + 5 zsh read as waiters, against a kernel truth of 4 holders / 4 waiters |
+
+Correct: `ps -eo comm= | grep -c '^tidepool-extrac'`,
+`lslocks | grep tidepool-ghc` (WRITE = holder, WRITE\* = blocked waiter),
+`cat /proc/loadavg`.
+
+**The general form: an args-grep counts command lines, not processes doing
+work** — and it fails in whichever direction is least convenient. A zero
+from a mistyped pattern reads exactly like a quiet box: not like an error,
+like permission to proceed.
+
+**The lesson that generalises** (carried up as a swarm-wide suggestion):
+`boot-count`'s `acceptance_boot_compile_count` counts extract spawns **at
+the source, inside the code path**, which is why its number (4) is
+trustworthy in a week when every external instrument was wrong. **An
+in-code counter establishes its referent structurally; an external pattern
+match only asserts one.** Hence: name the instrument alongside any number
+in a receipt. That is the named-guard rule one level down — a measurement,
+like a test name, must establish its referent rather than assert it.
+
 ### Sixth instance of the wave's characteristic failure
 
 `OPERATIONAL.md`'s Block briefly contradicted itself: the new throttle
