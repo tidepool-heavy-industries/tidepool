@@ -35,6 +35,15 @@ impl std::fmt::Display for WorktreeId {
 /// sharing is how a consumer can tell "these are two views of one thing" from
 /// "these are two things", so the id is minted once per reconciliation pass,
 /// not once per emitted observation.
+///
+/// The multi-commit case follows from that and is worth stating so it is not
+/// re-litigated: when a pass coalesces several commits into one `Advanced`, the
+/// pass emits one `headChanged` and one `commit` per gained commit, and ALL of
+/// them carry the pass's single id. So the id means "these facts were reconciled
+/// together", which is exactly what a consumer can act on — it does NOT mean
+/// "these describe one commit", and nothing should read it that way. Each gained
+/// commit is independently and honestly inferable, so dropping all but one would
+/// hide real review targets from a `commit` subscriber for no gain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EventId(pub u64);
 

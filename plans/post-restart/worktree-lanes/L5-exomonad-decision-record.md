@@ -1,5 +1,31 @@
 # L5 — Exomonad integration decision record
 
+> ## RESOLVED (Inanna, via root, 2026-08-08) — REFERENCE ONLY
+>
+> The human review this record was written to feed has happened, and its answer
+> is broader than any per-component verdict below: **nothing is adopted from
+> Exomonad, ever.** The exo swarm is ultimately hosted ON dev-tree —
+> replacement, not coexistence — and exo's distinctive machinery (the MCP
+> sidecar, message routing) goes unused in that future, because dev-tree drives
+> headless agents directly through PRD 18's backend adapter.
+>
+> **What this changes below.** §2b's "ADAPT the shape, later" is superseded:
+> there is no later adaptation. Every recommendation hardens to reject-adoption.
+> Open question 1 (write the hooksock shape up as a standalone design note now?)
+> and open question 2 (standalone crate vs copied lines?) are dissolved rather
+> than answered — nothing will be copied, so the boundary they argued over has
+> no subject.
+>
+> **What stays valuable, and why this file is kept rather than deleted.** The
+> per-property analysis in §4 becomes a CHECKLIST of reliability properties
+> Tidepool's own designs must satisfy NATIVELY — notify + backstop, durable
+> cursors, no-replay — which PRD 19 and lane L3 already demand independently.
+> Read it as prior art a future Tidepool-native hook adapter may cite, never as
+> a set of mechanisms to carry over. The distinction matters: the properties are
+> the requirement; Exomonad's implementations of them are not the answer.
+>
+> Everything below this box is the record as written, unedited.
+
 **Lane:** L5 (worktree-wave, PRD 19). **Status:** mapping only — see the status
 line at the end. Nothing in this document has been adopted, extracted,
 vendored, or depended on. No `Cargo.toml` changed. No production code changed.

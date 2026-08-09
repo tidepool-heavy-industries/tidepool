@@ -62,6 +62,25 @@ pub enum WorktreeError {
     #[error("registry root {} resolves inside the git working tree at {} — the registry must live outside every source repository", .root.display(), .inside.display())]
     InvalidRegistryRoot { root: PathBuf, inside: PathBuf },
 
+    /// Tidepool's OWN durable storage failed — the registry, the binding table,
+    /// or the event journal could not be read or written.
+    ///
+    /// Typed rather than a panic because of who is calling. A resident is a
+    /// long-running process driving many worktrees, and `ENOSPC` while
+    /// journalling one event should fail that cycle, not abort the process and
+    /// take every other worktree's in-flight work with it. Loud is required
+    /// here — the PRD is explicit that inability to journal or drain fails
+    /// loudly and commits are never silently dropped — but loud means an error
+    /// the caller must handle, not a crash it cannot.
+    ///
+    /// This is for genuine I/O failure against runtime-owned storage. Failures
+    /// that are unreachable-by-construction (serializing our own types) or that
+    /// indicate the machine is broken in a way no caller can act on (a system
+    /// clock before the Unix epoch) stay panics — a `Result` a caller can only
+    /// `unwrap` is noise.
+    #[error("tidepool storage failure at {}: {detail}", .path.display())]
+    StorageFailure { path: PathBuf, detail: String },
+
     /// A dirty submodule in the source. v1 refuses rather than snapshotting a
     /// gitlink whose pointed-at content it did not capture.
     #[error("dirty submodule is unsupported in v1: {}", .0.display())]
