@@ -81,3 +81,34 @@ ephemeral port and drives it with a real HTTP client (`reqwest`) — the
 `/sse` frame. It asserts only on the wire contract (the `id="panel"` root,
 `data-bind`/`data-kind`, `@post` targets, JSON bodies), never on markup —
 see `CLAUDE.md`'s "Wire contract" section.
+
+`tests/form_api.rs` covers the testing-convenience form API below the same way.
+
+## Testing convenience: the form API (NOT for browser/production use)
+
+A separate, DISABLED-BY-DEFAULT surface lets a test/agent driver read and
+answer the pending form as plain JSON — no browser needed. Off unless you set:
+
+```bash
+TIDEPOOL_FORM_API=1 cargo run --bin tidepool-selfharness-web -- --port 4601
+```
+
+```bash
+# The pending form (or {"pending": false} if nothing is pending), plus a
+# nonce that must be echoed back on submit.
+curl -s http://127.0.0.1:4601/api/form
+
+# Resolve it. "nonce" must be the value the GET above returned for THIS
+# pending occurrence; a missing/wrong/stale nonce is rejected with a 400 and
+# the pending form is left untouched.
+curl -sX POST http://127.0.0.1:4601/api/form \
+  -H 'content-type: application/json' \
+  -d '{"nonce": 1, "answer": {"direction": "continue", "iterations": 3, "note": "", "verbose": false}}'
+```
+
+Every response — success or error — carries a `test_only` note. This is a
+second front door onto the exact same `OperatorGate` a browser `/submit`
+resolves, not a second, weaker gate: a submission through here is operator
+authority, same as through the page. See `src/formapi.rs` for the full
+hardening story (loopback-only inherited from the one server bind, the
+nonce/revision tie, disabled-by-default at the router-construction level).

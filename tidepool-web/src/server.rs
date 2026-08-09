@@ -13,6 +13,10 @@
 //! - `POST /continue` — resolve the between-loops gate; unparks
 //!   `await_continue`.
 //!
+//! [`router_with_form_api`] additionally mounts `GET`/`POST /api/form` — a
+//! disabled-by-default testing-convenience surface over the SAME pending
+//! form; see [`crate::formapi`] for the wire shape and hardening properties.
+//!
 //! # The gate
 //!
 //! [`OperatorGate`] is SYNC-BLOCKING by contract (the driver calls it from a
@@ -35,6 +39,7 @@ use serde_json::{json, Value as Jv};
 use tidepool_harness::selfharness::operator::{FormSpec, OperatorGate, Submission};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::formapi::{FormApiConfig, FormApiSubmitError};
 use crate::render::{panel, View};
 use crate::shell;
 
@@ -133,6 +138,44 @@ impl AppState {
         self.ping();
         taken
     }
+
+    /// The form-api `GET` view: a clone of the pending form's spec plus its
+    /// nonce (the current revision), or `None` when nothing is pending or the
+    /// pending interaction is a Continue gate rather than a form.
+    pub fn pending_form(&self) -> Option<(FormSpec, u64)> {
+        let slot = self.slot.lock().unwrap();
+        match &slot.pending {
+            Pending::Form { spec, .. } => Some((spec.clone(), slot.rev)),
+            _ => None,
+        }
+    }
+
+    /// The form-api `POST` resolution: resolve the pending form iff `nonce`
+    /// matches its current revision. Same resolution as a browser `/submit`
+    /// (take, bump the revision, ping SSE, send on the oneshot) — a second
+    /// front door onto the same gate, not a second gate.
+    pub fn submit_form(
+        &self,
+        nonce: u64,
+        submission: Submission,
+    ) -> Result<(), FormApiSubmitError> {
+        let mut slot = self.slot.lock().unwrap();
+        match &slot.pending {
+            Pending::Form { .. } if slot.rev == nonce => {
+                let taken = std::mem::replace(&mut slot.pending, Pending::Idle);
+                slot.rev += 1;
+                drop(slot);
+                self.ping();
+                let Pending::Form { resolve, .. } = taken else {
+                    unreachable!("matched Pending::Form above")
+                };
+                let _ = resolve.send(submission);
+                Ok(())
+            }
+            Pending::Form { .. } => Err(FormApiSubmitError::NonceMismatch { current: slot.rev }),
+            _ => Err(FormApiSubmitError::NoFormPending),
+        }
+    }
 }
 
 /// The web [`OperatorGate`]: publishes the pending interaction for the page to
@@ -168,14 +211,22 @@ impl OperatorGate for WebGate {
     }
 }
 
-/// Build the axum router over the app state.
+/// Build the axum router over the app state. The form-api testing surface is
+/// disabled — equivalent to `router_with_form_api(state, FormApiConfig::default())`.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_form_api(state, FormApiConfig::default())
+}
+
+/// Build the axum router, optionally mounting the form-api testing surface
+/// (`crate::formapi`) alongside the four browser verbs. See that module's
+/// docs for the hardening properties `form_api` gates.
+pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router {
+    let base: Router<AppState> = Router::new()
         .route("/", get(page))
         .route("/sse", get(sse))
         .route("/submit", post(submit))
-        .route("/continue", post(continue_loop))
-        .with_state(state)
+        .route("/continue", post(continue_loop));
+    crate::formapi::merge(base, form_api).with_state(state)
 }
 
 async fn page(State(st): State<AppState>) -> Html<String> {
