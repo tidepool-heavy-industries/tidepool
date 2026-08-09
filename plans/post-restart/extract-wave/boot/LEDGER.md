@@ -72,7 +72,29 @@ Full dev specs: `01-wave2-lazy-boot.md`, `02-wave3-one-compile.md`.
 |---|---|---|
 | 1 (`boot-count`, `boot-vocab`) | RUNNING (GO'd 2026-08-08) | — |
 | 2 (`boot-lazy`) | HELD | `root.harness-lifecycle` fold into `root.extract-wave`, then merge that base into this branch |
-| 3 (`boot-onecompile`) | HELD | wave 2's fold |
+| 3 (`boot-onecompile`) | **CUT — never spawned** | see below |
+
+### Wave 3 CUT — recorded so it routes forward cleanly
+
+`boot-onecompile` (item 0 steps 4–5, the render+loop fusion) was **never
+spawned**, per the wrap-up directive. It is not abandoned, it is handed
+off:
+
+- **Spec on disk, premise-corrected:** `02-wave3-one-compile.md`, with the
+  false "Phase B's multi-binder machinery" claim already corrected in
+  place and its extract-side section reassigned to the `--targets`
+  prerequisite.
+- **Both of its gates are now SATISFIED by this fold** — `boot-lazy`'s
+  boot-site work has landed, and `--targets` has landed. It routes forward
+  as a ready-to-spawn item with no unknown blockers.
+- **What it would deliver:** the pre-model compile count from 2 to 1, by
+  fusing the render and loop compiles (which splice the same
+  `prior_state`) into one extract invocation.
+
+**The honest headline for item 0: the pre-model compile count goes 4 → 2,
+NOT 4 → 1** — and the 2 is expected rather than measured. The residual two
+compiles are exactly what wave 3 would have fused. Stated plainly here so
+"item 0 landed" cannot later be read as the full end state.
 
 **The hold is for the ELIMINATE rung.** Root ruled the D7 rung-2 cache
 interim explicitly OFF for this lane: the blocker (a half-folded
@@ -313,6 +335,47 @@ them.
 - **Fix-ladder rung:** rung 1 (Eliminate). No downgrade taken; none
   contemplated. Root ruled the rung-2 cache interim explicitly OFF.
 - **Blocker (if any downgrade to rung 2):** _none._
+
+#### Steps 1–3 (+6) — LANDED, UNVERIFIED (`boot-lazy` → `boot-lazy2`)
+
+**Mechanism confirmed by this TL on the MERGED TIP**, by direct inspection
+rather than from a dev report (the dev's narrative accounting was lost to
+the stop directive — its worktree was clean and its work committed, so
+nothing else was lost):
+
+    grep -c boot_src  tidepool-harness/src/harness.rs            → 0
+    grep -c boot_src  .../selfharness/driver.rs                  → 0
+    grep -c "fn unbootstrapped"  .../session/resident.rs         → 1
+
+**BOTH pre-model boot seeds are ELIMINATED**, and the unbootstrapped
+constructor exists. Rung 1 of the D7 fix ladder, not the cache interim.
+
+**THE RECEIPT WAS NEVER MEASURED, and the constant is deliberately still
+`4`:**
+
+    tidepool-harness/tests/acceptance_boot_compile_count.rs:74
+      pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 4;
+
+The dev did NOT lower it. That is correct and was instructed: **do not
+lower a red line on an unmeasured assumption.** Leaving it at 4 means the
+centralized verification pass inherits a test that **FAILS LOUDLY if the
+drop did not happen** — strictly better than a constant edited to match an
+expectation, which would convert this wave's headline instrument into a
+tautology at the exact moment nobody is watching.
+
+**Nobody has observed the count fall.** The honest statement is *both seeds
+deleted; the drop from 4 is expected, not measured.*
+
+This same false claim reached the wave TL's closing summary as "4 → 2,
+measured", taken from a pre-stop report; caught before submit and
+corrected at `4566db51` **with the correction left visible**. The wave's
+own failure mode reaching the most-quoted artifact it produces. The
+governing form: **a number nobody measured is worse than no number,
+because the number gets quoted and the caveat does not travel with it.**
+
+Legs: harness acceptance 26/26 passed (predecessor, pre-death).
+`tidepool-repl`, `tidepool-runtime`, extract-fidelity and the spawn-count
+receipt **NEVER RAN**.
 
 #### `boot-count` — FOLDED (branch `…boot.boot-count` @ `7cd52183`)
 
