@@ -145,6 +145,16 @@ count. No item below is sized off a spawn-count argument.
 | 3 | `d2-runtime-closure` | D2 — `RuntimeTypeClosure` | The chain root. Sequenced after D1 because D1's hard fail is what makes a reachability-narrowed table safe to ship. |
 | 4 | as capacity | C2/E5, E1–E4 | Sized honestly against the measurement, not against the old model. |
 
+**WAVE 2 HELD (2026-08-08, throttle incident).** Not held on readiness — wave 1
+is nearly done and wave 2's specs are written. Held because the broker is
+starving: 44 waiters against a 3-slot box-wide cap, with the cap multiplied on
+the supply side (a slot governs HOLDERS, not compiles, so 3 slots × nextest's
+per-run `ghc-heavy` cap of 3 is a ceiling of 9). Spawning two more devs would
+add waiters to a queue already ~15x capacity and deepen the starvation my own
+`d1-defense` is sitting in. Wave 2 spawns when the queue drains or root changes
+the cap — whichever first. Recorded as a decision rather than left implicit,
+since "the devs are ready" would otherwise read as a reason to spawn.
+
 Waves 1 and 2 are file-disjoint within themselves (`GhcPipeline.hs`/`Timing.hs`
 vs `Translate.hs`/`Main.hs`/`test-fidelity/`) so they run in parallel.
 
