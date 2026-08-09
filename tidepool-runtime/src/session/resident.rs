@@ -299,6 +299,23 @@ where
         self.core.machine().map(|m| m.heap_stats())
     }
 
+    /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
+    /// session's live value bindings that `expr` actually references (D9), so
+    /// the fragment can resolve an earlier `x <- e` at a Var-miss. Empty until
+    /// the first bind materializes AND this fragment references one, so a
+    /// value-plane-free session behaves exactly as before.
+    ///
+    /// [`Self::run`] and [`Self::run_bind`] call this on their way to
+    /// `add_fragment_session`, so it is the seeding path rather than a
+    /// reconstruction of it — a test asserting on the returned env is
+    /// asserting on the env a fragment really compiles against, and the
+    /// VarId-keyed isolation property (only referenced `SessionVarId`s, never
+    /// another scope's) cannot drift away from what this returns.
+    pub fn seed_external_env_for(&self, expr: &CoreExpr) -> ExternalEnv {
+        let referenced = tidepool_repr::free_vars::free_vars(expr);
+        self.core.seed_external_env(&referenced)
+    }
+
     fn next_cont_id(&self) -> String {
         format!(
             "{}_{}",
@@ -330,11 +347,7 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        // Seed the env from the session's live value bindings so this turn can
-        // reference an earlier `x <- e` (the value plane's Var-miss resolution).
-        // Empty until the first bind materializes, so a value-plane-free session
-        // behaves exactly as before.
-        let env = self.core.seed_external_env();
+        let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
@@ -372,7 +385,7 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        let env = self.core.seed_external_env();
+        let env = self.seed_external_env_for(expr);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
@@ -655,27 +668,46 @@ where
             }
         }
         let ask_tag = self.core.ask_tag();
-        // `resume_suspended` consumes the machine's stowed continuation as soon
-        // as it is entered (`.take()`), so the OLD hole is spent regardless of
-        // the re-entry's outcome — clear `pending` up front. `classify` re-arms
-        // it with a FRESH hole if the re-entry suspends again; an error leaves
-        // the session idle (the spent continuation cannot be resumed twice).
-        self.pending = None;
-        // A bind re-entry drives the tenure-on-completion variant. `forced` is
-        // Copy so it (not the borrowed `bind`) is what crosses into the eval
-        // closure; `bind` stays here for the post-run materialize.
+        // The machine is authoritative on whether the stowed continuation was
+        // actually consumed: `resume_suspended{,_binding}` NF-force a
+        // data-kinded answer BEFORE taking the continuation (A5), and on a
+        // retryable rejection (a bottom in the answer) leave it stowed so the
+        // caller can retry — `pending` must NOT be cleared here, or a
+        // retryable failure wedges the session (`is_idle()` lies `true` while
+        // the machine is still suspended). `classify` (below, on `Ok`) is the
+        // sole owner of `pending` on a real outcome.
         let forced = bind.map(|(b, _)| matches!(b.tier, ValueTier::Tier0Data));
-        let outcome =
-            self.on_eval_thread(move |machine, table, handlers, captured| match forced {
-                Some(forced) => machine
-                    .resume_suspended_binding(table, handlers, captured, ask_tag, input, forced),
-                None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
-            })?;
-        // A bind that completed on this re-entry tenured its result — bind it.
-        if let (Some((binder, gen)), SuspendableOutcome::Completed(_)) = (bind, &outcome) {
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| match forced {
+            Some(forced) => {
+                machine.resume_suspended_binding(table, handlers, captured, ask_tag, input, forced)
+            }
+            None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
+        });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Reconcile against the machine's ground truth: if it is no
+                // longer suspended, the continuation WAS consumed before this
+                // run failed (a genuine mid-run error) — the old hole is
+                // spent and the session goes idle. If it is still suspended,
+                // this was a retryable rejection (e.g. A5's NF-force) — the
+                // same hole stays pending, untouched.
+                if !self.core.machine().is_some_and(|m| m.is_suspended()) {
+                    self.pending = None;
+                }
+                return Err(e);
+            }
+        };
+        // A completed bind materializes AFTER `classify` has already retired
+        // `pending` for this hole, so a materialize failure here — a second,
+        // different door onto the same wedge class — cannot leave `pending`
+        // stuck on a hole the machine no longer recognizes as suspended.
+        let completed = matches!(outcome, SuspendableOutcome::Completed(_));
+        let resident_outcome = self.classify(outcome);
+        if let (Some((binder, gen)), true) = (bind, completed) {
             self.materialize_binder(binder, gen)?;
         }
-        Ok(self.classify(outcome))
+        Ok(resident_outcome)
     }
 
     /// Materialize a completed bind's tenured root into the value plane at `gen`

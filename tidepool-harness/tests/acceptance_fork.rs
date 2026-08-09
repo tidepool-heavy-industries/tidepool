@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -82,6 +84,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
@@ -136,6 +139,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full render->loop->runLLMTurn->forkAll(2 children)->finalize->render cycle");
 
     // The finalized Decision is the FIRST child's ("sub-brief A" / child 0),

@@ -25,19 +25,38 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One reasoning item exactly as the Responses API returns it in the
+/// `output` array when `include: ["reasoning.encrypted_content"]` is
+/// requested (`type: "reasoning"`, carrying `id`/`encrypted_content`/
+/// `summary`). Opaque by design — never parsed or reshaped, only carried
+/// from the SSE stream that produced it back into the next request's
+/// `input`, in original position, so a stateless Responses call gets its
+/// prior thinking back. `PartialEq` only: the wrapped `Value` may hold a
+/// float, which has no `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningItem(pub serde_json::Value);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Encrypted reasoning items the provider surfaced for THIS assistant
+    /// turn — empty for user/system messages and for providers that never
+    /// produce them. In-memory only: `#[serde(skip)]` so it never reaches
+    /// the durable log (`Event::TurnDelta` has its own fields, never a
+    /// `Message`), and never needs to survive a process restart (a restart
+    /// already loses the parked session).
+    #[serde(skip, default)]
+    pub reasoning_items: Vec<ReasoningItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRequest {
     pub messages: Vec<Message>,
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnResponse {
     pub text: String,
     pub usage: Usage,
@@ -47,6 +66,12 @@ pub struct TurnResponse {
     /// is the "thinking" shown in the observatory, distinct from the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// The encrypted reasoning items this turn produced (see
+    /// [`ReasoningItem`]) — distinct from `reasoning` above, which is the
+    /// human-facing summary text, not the item the backend wants echoed
+    /// back. Empty for providers that never produce them.
+    #[serde(skip, default)]
+    pub reasoning_items: Vec<ReasoningItem>,
 }
 
 /// Recorded into the event log / meters per turn.
@@ -131,5 +156,63 @@ impl ModelProvider for dyn DynModelProvider + '_ {
         sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         self.complete_boxed(req, sink).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_reasoning_item() -> ReasoningItem {
+        ReasoningItem(serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-blob",
+        }))
+    }
+
+    /// The wire-format guard the design depends on: `reasoning_items` is
+    /// `#[serde(skip)]`, so a `Message`'s serialized form must not depend on
+    /// it at all — this is what keeps the encrypted payload out of the
+    /// durable log (`Event::TurnDelta` never holds a `Message`, but nothing
+    /// stops a FUTURE log event from serializing one, so the field itself
+    /// must be silent regardless).
+    #[test]
+    fn message_serialization_is_unaffected_by_reasoning_items() {
+        let plain = Message {
+            role: Role::Assistant,
+            content: "hello".to_string(),
+            reasoning_items: Vec::new(),
+        };
+        let with_reasoning = Message {
+            reasoning_items: vec![sample_reasoning_item()],
+            ..plain.clone()
+        };
+        let plain_json = serde_json::to_string(&plain).unwrap();
+        let with_reasoning_json = serde_json::to_string(&with_reasoning).unwrap();
+        assert_eq!(
+            plain_json, with_reasoning_json,
+            "a Message's serialized wire form must not depend on reasoning_items"
+        );
+        assert!(!plain_json.contains("reasoning_items"));
+        assert!(!plain_json.contains("encrypted"));
+    }
+
+    #[test]
+    fn turn_response_serialization_is_unaffected_by_reasoning_items() {
+        let plain = TurnResponse {
+            text: "hi".to_string(),
+            usage: Usage::default(),
+            reasoning: None,
+            reasoning_items: Vec::new(),
+        };
+        let with_reasoning = TurnResponse {
+            reasoning_items: vec![sample_reasoning_item()],
+            ..plain.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&with_reasoning).unwrap()
+        );
     }
 }

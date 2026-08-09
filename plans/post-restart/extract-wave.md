@@ -1,9 +1,46 @@
-# Spec: extract-side latency wave TL (respawn AFTER Phase B lands)
+# Spec: extract-side latency wave TL
+
+**GATE OPEN (2026-08-08): Phase B is FOLDED at a45fa843** — single
+ownership of writeWholeModuleClosed is yours. Detail in
+`plans/one-spawn-turn-protocol-phase-b.md`.
+
+**WIRE BREAK IN EFFECT (from Phase B):** `--emit-stmt-binders`/
+`--emit-binders` no longer exist; the Rust side requires an extract
+supporting `--classify`. The DEPLOYED server/extract pair on this box is
+still the old consistent pair and dogfood is PAUSED — do not run
+`scripts/redeploy.sh` yourself; root owns the redeploy at dogfood
+resume. Your test runs build the repo extract fresh (battery scripts),
+so this does not affect your lanes. Stale-skew now fails LOUD as
+VersionSkew naming the flag (phase-b pinned it against the old binary's
+exact output) — if you ever see a `parse error on input '<-'` flavored
+failure in a session context, that diagnosis path is already fixed;
+suspect something else.
 
 Owns the extract-side half of the latency program: the metadata
-over-collection chain's root plus the declaration-path cluster. MUST wait
-for the one-spawn-turn Phase B TL to land (single owner of
-writeWholeModuleClosed at every point in time).
+over-collection chain's root plus the declaration-path cluster.
+
+## Structure (Inanna, 2026-08-08): one TL, TWO SUB-TLs, each with devs
+
+Fork two sub-TLs rather than running one flat dev pool:
+
+- **sub-TL `boot`** — item 0 (one-compile bootstrap Track 1) + item 0b
+  (nameable effect vocabulary). Rust-side session/boot territory plus the
+  Haskell decl-list surface.
+- **sub-TL `spawn-latency`** — the D/C/E chain below, re-aimed by the
+  Phase-B measurement (core-phase-dominant), through the pivotal
+  persistent-extractor decision. haskell/ extractor territory.
+
+Each sub-TL decomposes into reviewed dev leaves and gates its own folds;
+this TL folds sub-TL branches and owns the composed gate + the
+one-format-wire redeploy coordination. Per the realm-spike conflict
+experiment: do NOT pre-partition files between the sub-TLs — allocate
+shared-artifact namespaces (plan numbering, ledger files) up front, and
+log any real conflict at fold.
+
+Coordination point with the realm-build lane (running in parallel):
+`resident.rs:208` — the realm build's ResidentSession conversion (its
+step 4) is HELD until this wave's boot-site work lands; everything else
+in both lanes proceeds concurrently.
 
 ## Item 0 (FIRST): one-compile bootstrap, Track 1
 
@@ -40,6 +77,14 @@ non-mechanical.
 
 - turn 1: table=164 constructors, fragment-reachable=24 → 6.8:1 (~15%)
 - turn 2: table=166, reachable=15 → 11.1:1 (~9%) — worsens as the table grows
+
+Phase-B measurement (2026-08-08, `11-turn-latency-contract.md`) RE-AIMS the
+spawn items: 60–66% of a turn's extract spawn is GHC's `core` phase,
+26–32% session boot, under 6% typecheck. The standing home-module
+typecheck suspicion is REFUTED — promote E6 (tiered -O2) and D1 (double
+translation of reachable Core), and read C1's double-compile suspicion
+against this breakdown before spending on it. Spawn count is no longer
+where the time is.
 - downstream: turn 1 emits 232 Cranelift funcs / 13,348 blocks for a
   24-constructor fragment
 - CAVEAT (carry with the number): "single-digit-to-low-teens percent
@@ -54,6 +99,16 @@ non-mechanical.
   discarding the IR. Fix: translateModule is the one authoritative producer
   (IR + used DCs + types + effect sites); defense-in-depth = cheap Core
   visitor asserting subset, never a second translation.
+  **Codex review 2026-08-08 (see `codex-review-2026-08-08.md` item 7): the
+  subset defense does NOT currently exist** — Main SILENTLY UNIONS the two
+  translations' results (Main.hs ~348), and the runLLMTurn/fork rewrite
+  makes the seeded/unseeded paths genuinely diverge, so disagreement is
+  live. The D1 fix MUST ship a hard fail: walk emitted FlatNode
+  constructor/data-alt IDs and fail extraction if output metadata omits
+  any, plus an independent reachable-Core collector. Acceptance includes a
+  mutation test: deleting one recordDC call must fail extraction, not
+  produce output. Silent under-collection is the signature of the owed
+  garbage-con_tag intermittent — treat this as correctness, not cleanup.
 - **D2** Metadata = every constructor of every home-module TyCon, no
   reachability (mg_tcs → collectDataCons, Translate.hs ~2718). Fix:
   RuntimeTypeClosure from runtime-observable roots (built/matched cons in
@@ -93,6 +148,19 @@ compile time vs #generations; modules typechecked per generation;
 fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 
 ## Constraints
+
+- STANDING DEV-SPEC RULE (from the generic-surface wave, 2026-08-08 — copy
+  into every dev spec, both sub-TLs): a "pre-existing/inherited red" claim
+  requires a cache-consistent A/B baseline run in the dev's OWN worktree —
+  same compile-cache state on both legs, the dev's diff absent vs present.
+  An argument from "my diff doesn't touch the failing test files" is
+  invalid for global surfaces (prelude exports, pragma/extension sets,
+  shared flags): every Haskell compile is downstream of those whether or
+  not its file is in the diff. Note the cache confound explicitly: a
+  fingerprint-invalidating change makes a naive comparison measure
+  cold-vs-warm, not the diff. Empirically (this wave): both devs given
+  this instruction produced sound baselines; the one that wasn't produced
+  a plausible wrong argument.
 
 - The `classify` phase vocabulary decision is binding (see
   plans/one-spawn-turn-protocol.md): extract phase `classify` after

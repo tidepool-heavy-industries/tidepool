@@ -10,7 +10,7 @@ use super::errors::{
     runtime_oom, RuntimeError, MIN_VALID_ADDR,
 };
 use super::force::heap_force;
-use super::gc::{gc_trigger, write_barrier};
+use super::gc::write_barrier;
 
 // ---------------------------------------------------------------------------
 // ByteArray runtime functions
@@ -833,15 +833,16 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
             return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
-    match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+    let converted = crate::heap_bridge::gc_retry(
+        vmctx,
+        |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
+            matches!(r, Err(crate::heap_bridge::BridgeError::NurseryExhausted))
+        },
+        || crate::heap_bridge::value_to_heap(&value, &mut *vmctx),
+    );
+    match converted {
         Ok(p) => p,
-        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
-            gc_trigger(vmctx);
-            match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
-                Ok(p) => p,
-                Err(_) => runtime_oom(),
-            }
-        }
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => runtime_oom(),
         Err(e) => {
             let msg = format!("eitherDecode: result materialization failed: {e}");
             runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)
@@ -900,15 +901,16 @@ pub unsafe extern "C" fn runtime_parse_iso8601(
     };
 
     let value = tidepool_eval::time::parse_iso8601_str(&s, &ids);
-    match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+    let converted = crate::heap_bridge::gc_retry(
+        vmctx,
+        |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
+            matches!(r, Err(crate::heap_bridge::BridgeError::NurseryExhausted))
+        },
+        || crate::heap_bridge::value_to_heap(&value, &mut *vmctx),
+    );
+    match converted {
         Ok(p) => p,
-        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
-            gc_trigger(vmctx);
-            match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
-                Ok(p) => p,
-                Err(_) => runtime_oom(),
-            }
-        }
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => runtime_oom(),
         Err(e) => {
             let msg = format!("parseISO8601: result materialization failed: {e}");
             runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)

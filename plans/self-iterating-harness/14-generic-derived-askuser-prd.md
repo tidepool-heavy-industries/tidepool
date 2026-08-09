@@ -260,9 +260,16 @@ renderer may humanize `NeedsReview` to “Needs review” and `releaseNote` to
 
 Runtime-defined choices are a different problem. If the options exist as
 values—conceptually `[(Text, x)]`—they cannot be recovered from `Generic`
-without an input value. They are explicitly outside `askUser @T` v1 and may
-later use a separate value-taking escape hatch. Do not contaminate the zero-
-argument generic path with that concern.
+without an input value. They are explicitly outside `askUser @T` and use the
+sibling value-taking verbs approved in
+[`15-generic-surface-wave.md`](15-generic-surface-wave.md):
+
+```haskell
+choose     :: [(Text, a)] -> M a
+chooseMany :: [(Text, a)] -> M [a]
+```
+
+Do not contaminate the zero-argument generic path with that concern.
 
 ## Canonical structural wire shape
 
@@ -570,14 +577,20 @@ Migration requirements:
 6. **Migration and deletion.** Convert fixtures/docs, remove builder
    advertising, then delete the old implementation once acceptance is green.
 
+The first item is a real GO/NO-GO gate for this PRD and the typed-subagent
+surface that reuses its Generic substrate. If Generic dictionary elaboration
+does not survive the real extract/JIT path, neither PRD papers over it with an
+agent-authored schema. Stop and run a JIT-capability/specialization wave, then
+repeat the spike before either authored surface proceeds.
+
 ## Future extensions
 
 - `[a]` and `NonEmpty a` after a repeatable-control and finite answer contract
   exists.
 - `Day`, `UTCTime`, file references, secrets, and multiline text as blessed
   semantic leaves.
-- Runtime option sets through a separate value-taking API, plausibly keyed as
-  `[(Text, a)]`; this solves a genuinely different problem from type-defined
+- Richer runtime option metadata beyond the first-wave `choose`/`chooseMany`
+  verbs; value-defined choices remain a different problem from type-defined
   sums.
 - Defaults, ranges, descriptions, and presentation hints through a small
   optional annotation layer.
@@ -602,8 +615,8 @@ construction beside the type.
   all redundantly reconstruct a shape the ADT already contains.
 - **Rejected:** agent-authored HTML or JSON Schema; useful wire languages, but
   unnecessary authoring surfaces here.
-- **Deferred:** `[(Text, a)]` runtime choices; they require a value-taking API
-  and should not complicate type-defined sums.
+- **Chosen sibling surface:** `choose`/`chooseMany` for `[(Text, a)]` runtime
+  choices; they remain outside the zero-argument Generic form derivation.
 - **Amended (2026-08-08):** prescriptive correction text for missing
   `Generic` and for an unsupported leaf is unbuildable without observing
   constraint satisfiability, which the type language cannot do — a stuck

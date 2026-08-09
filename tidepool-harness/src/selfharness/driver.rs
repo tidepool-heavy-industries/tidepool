@@ -15,16 +15,23 @@
 //! JSON) and is fed straight into [`ResidentSession::resume`] to resume the
 //! OUTER session's parked `runLLMTurn` continuation.
 //!
-//! # Sync surface, async underneath
+//! # Async turn loop, sync-blocking operator gate
 //!
 //! [`SelfHarnessDriver::run_loop`]/[`SelfHarnessDriver::run_one_cycle`] are
-//! synchronous (the frozen S3 contract), but servicing a `runLLMTurn` hole
-//! drives the nested [`Harness`]'s `async` turn loop
-//! ([`service_runllm_hole`](SelfHarnessDriver::service_runllm_hole)) — so
-//! every entry point here must be called from a thread with an ACTIVE tokio
-//! runtime (`#[tokio::main]`/`#[tokio::test(flavor = "multi_thread")]`); the
-//! bridge is `tokio::task::block_in_place` + `Handle::current().block_on`,
-//! which requires the multi-thread runtime flavor.
+//! `async fn` and `.await` the nested [`Harness`]'s turn loop
+//! ([`service_runllm_hole`](SelfHarnessDriver::service_runllm_hole)) directly
+//! — every entry point here must still be called from a thread with an
+//! ACTIVE tokio runtime (`#[tokio::main]`/`#[tokio::test(flavor =
+//! "multi_thread")]`), because the [`crate::selfharness::operator::OperatorGate`]
+//! park (`present_form`/`await_continue`) is SYNC-BLOCKING by frozen contract
+//! (a web gate parks a channel), so a call into it from this async code runs
+//! under `tokio::task::block_in_place` — a genuinely blocking call yielding
+//! the tokio worker to other tasks, not a sync-to-async bridge — which
+//! requires the multi-thread runtime flavor. The resident JIT run/resume
+//! calls the loop also drives are CPU-blocking and sit inside these `async
+//! fn`s unchanged (they already blocked a tokio worker before this
+//! conversion); see [`Self::drive_answerer_to_finalize`]'s doc for why they
+//! are not `spawn_blocking`'d.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -686,7 +693,7 @@ impl SelfHarnessDriver {
     /// `self.last_compaction` before `prompt_after` is rendered, so
     /// `prompt_after` already reflects it — proving the summary reaches the
     /// very next render.
-    pub fn run_one_cycle(
+    pub async fn run_one_cycle(
         &mut self,
         source: &HarnessSource,
         prior_state: Option<&Json>,
@@ -740,8 +747,8 @@ impl SelfHarnessDriver {
         // Run the fallible body, then publish `Idle` on success or `Failed`
         // (after discarding that resident state) on error — never `Idle` on
         // a path that didn't actually finish.
-        let result: Result<CycleOutcome, DriverError> = (|| {
-            let (value, table) = self.run_loop_fragment(prior_state)?;
+        let result: Result<CycleOutcome, DriverError> = async {
+            let (value, table) = self.run_loop_fragment(prior_state).await?;
             let state_json = state_cross::state_out(&value, &table);
 
             // This cycle's `loop` completed — advance the runtime's OWN
@@ -776,7 +783,8 @@ impl SelfHarnessDriver {
                 prompt_after,
                 compaction,
             })
-        })();
+        }
+        .await;
         match &result {
             Ok(_) => self.lifecycle = SelfHarnessState::Idle,
             Err(err) => {
@@ -806,16 +814,47 @@ impl SelfHarnessDriver {
     /// misbehaving harness from running away across loops. `auto` (the
     /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
     /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
-    pub fn run_loop(&mut self, source: &HarnessSource, auto: bool) -> Result<(), DriverError> {
+    ///
+    /// Defense in depth against a state-decode failure taking the whole
+    /// process down: whatever [`Self::restore`]'s fingerprint check misses (a
+    /// hash collision, a hand-edited checkpoint, a same-source edit that
+    /// changes the `State` type without changing the file's fingerprint), a
+    /// cycle that fails with [`DriverError::StateDecode`] while `state_json`
+    /// was `Some` (a restored or prior-cycle state, not the very first cycle)
+    /// is retried EXACTLY ONCE from fresh `initialState` rather than
+    /// propagated — logged loudly first. If the retry ALSO fails, that is an
+    /// ordinary cycle error and takes the existing F3 (`Failed`/`Poisoned`)
+    /// path, same as any other error; this is a single retry, not a new
+    /// ladder rung. A `StateDecode` when `state_json` is already `None` means
+    /// the harness source's own `initialState`/`FromJSON State` disagree —
+    /// a real bug in the harness, not a stale checkpoint — and propagates as
+    /// it does for every other cycle error.
+    pub async fn run_loop(
+        &mut self,
+        source: &HarnessSource,
+        auto: bool,
+    ) -> Result<(), DriverError> {
         self.refuse_if_poisoned()?;
-        let mut state_json: Option<Json> = self.restore(source)?;
+        let mut state_json: Option<Json> = self.restore(source).await?;
         let mut first = true;
         loop {
             if !first && !auto {
                 self.between_loops_gate()?;
             }
             first = false;
-            let outcome = self.run_one_cycle(source, state_json.as_ref())?;
+            let outcome = match self.run_one_cycle(source, state_json.as_ref()).await {
+                Ok(outcome) => outcome,
+                Err(DriverError::StateDecode(detail)) if state_json.is_some() => {
+                    tracing::warn!(
+                        detail = %detail,
+                        "cycle failed to decode its restored State — retrying once from \
+                         fresh initialState instead of taking the process down"
+                    );
+                    state_json = None;
+                    self.run_one_cycle(source, state_json.as_ref()).await?
+                }
+                Err(e) => return Err(e),
+            };
             state_json = Some(outcome.state_json);
         }
     }
@@ -831,29 +870,47 @@ impl SelfHarnessDriver {
     /// resetting to `0`.
     ///
     /// `source`'s fingerprint identifies the harness file THIS process just
-    /// loaded. A restored checkpoint whose fingerprint disagrees does not
-    /// block the restore — a harness file is expected to change across a
-    /// self-iteration run — but is reported via
-    /// [`Event::HarnessSourceChanged`] so a later
-    /// [`DriverError::StateDecode`] is diagnosable rather than mysterious.
+    /// loaded. A restored checkpoint whose fingerprint disagrees is DISCARDED
+    /// rather than restored: the checkpoint's `State` was produced by a
+    /// DIFFERENT harness source and is not safe to decode against the
+    /// current one (a mismatched `State` shape crashes the process on boot —
+    /// the whole reason this check exists). [`Event::HarnessSourceChanged`]
+    /// is still emitted, carrying both fingerprints, as the durable record of
+    /// what happened; the generation counter still adopts
+    /// `checkpoint.generation` so it stays monotonic across the restart, but
+    /// `self.last_compaction` is left `None` (a compaction summary describes
+    /// the discarded harness's loop, not this one) and the run starts fresh
+    /// from `initialState`, exactly the first-ever-run path. A harness file
+    /// that self-edits and restarts therefore loses its accumulated `State`
+    /// even when the `State` TYPE didn't change — a real cost, taken
+    /// deliberately: a lost `State` costs a run, a decoded-then-poisoned one
+    /// costs the process.
     ///
     /// Called by [`Self::run_loop`] at start; exposed so a restart-durability
     /// test can drive the same reload path without entering the
     /// forever-loop.
-    pub fn restore(&mut self, source: &HarnessSource) -> Result<Option<Json>, DriverError> {
+    pub async fn restore(&mut self, source: &HarnessSource) -> Result<Option<Json>, DriverError> {
         self.refuse_if_poisoned()?;
         let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
             return Ok(None);
         };
-        self.last_compaction = checkpoint.compaction;
         self.checkpoint_generation = checkpoint.generation;
         self.iteration = checkpoint.iteration;
         if checkpoint.harness_source != source.fingerprint {
+            tracing::info!(
+                restored_fingerprint = %checkpoint.harness_source,
+                current_fingerprint = %source.fingerprint,
+                "checkpoint harness_source disagrees with the current source fingerprint — \
+                 discarding the persisted state and starting fresh from initialState"
+            );
             self.emit(Event::HarnessSourceChanged {
                 restored_fingerprint: checkpoint.harness_source,
                 current_fingerprint: source.fingerprint.clone(),
             });
+            self.last_compaction = None;
+            return Ok(None);
         }
+        self.last_compaction = checkpoint.compaction;
         Ok(Some(checkpoint.state))
     }
 
@@ -891,9 +948,10 @@ impl SelfHarnessDriver {
     /// original headless behavior (block on a stdin line); a web/GUI gate
     /// parks on a button click instead.
     fn between_loops_gate(&mut self) -> Result<(), DriverError> {
-        // The gate is SYNC-blocking (frozen contract); run the park under
-        // `block_in_place` so a web gate's channel-wait yields the tokio worker
-        // to other tasks instead of stalling it.
+        // `OperatorGate::await_continue` is SYNC-BLOCKING by frozen contract
+        // (`selfharness/operator.rs`) — a web gate parks a channel. Run the
+        // park under `block_in_place` so that blocking wait yields the tokio
+        // worker to other tasks instead of stalling it.
         let gate = Arc::clone(&self.gate);
         tokio::task::block_in_place(move || gate.await_continue());
         Ok(())
@@ -913,7 +971,7 @@ impl SelfHarnessDriver {
     /// answerer's holes/rounds against its real accumulated context), setting
     /// `self.cycle_compaction`/`self.last_compaction` in place while the loop
     /// continues under the summary.
-    fn run_loop_fragment(
+    async fn run_loop_fragment(
         &mut self,
         prior_state: Option<&Json>,
     ) -> Result<(Value, DataConTable), DriverError> {
@@ -930,17 +988,17 @@ impl SelfHarnessDriver {
         self.agent.force(answerer, Actor::Operator)?;
         self.answerer = Some(answerer);
 
-        let result = self.run_loop_fragment_inner(prior_state);
+        let result = self.run_loop_fragment_inner(prior_state).await;
         self.retire_answerer();
         result
     }
 
-    /// Drop the current loop's answerer session, so the next loop
-    /// starts from a fresh render-seeded one. Idempotent — a no-op if no
-    /// answerer is live.
+    /// Retire the current loop's answerer node (terminalize it and drop its
+    /// session), so the next loop starts from a fresh render-seeded one.
+    /// Idempotent — a no-op if no answerer is live.
     fn retire_answerer(&mut self) {
         if let Some(node) = self.answerer.take() {
-            self.agent.drop_session(node);
+            let _ = self.agent.terminate_node(node, "loop answerer retired");
         }
     }
 
@@ -955,7 +1013,7 @@ impl SelfHarnessDriver {
     /// checks the answerer's real accumulated context against the threshold and,
     /// if past it, summarizes + replaces the answerer's context IN PLACE so the
     /// loop's REMAINING holes continue under a smaller window (no abort).
-    fn run_loop_fragment_inner(
+    async fn run_loop_fragment_inner(
         &mut self,
         prior_state: Option<&Json>,
     ) -> Result<(Value, DataConTable), DriverError> {
@@ -980,8 +1038,9 @@ impl SelfHarnessDriver {
                         engine::classify_hole(&request, &compiled.table, &compiled.asks);
                     match &classified.routing {
                         HoleRouting::RunLLMTurn { site, ty } => {
-                            let answer =
-                                self.service_runllm_hole(*site, ty.as_deref(), &classified.prompt)?;
+                            let answer = self
+                                .service_runllm_hole(*site, ty.as_deref(), &classified.prompt)
+                                .await?;
                             // Between holes — if the answerer's accumulated
                             // context has crossed threshold, compact + replace its
                             // context IN PLACE now, so the NEXT hole drives under
@@ -997,7 +1056,7 @@ impl SelfHarnessDriver {
                             // it: a future refactor that moves this call BEFORE the
                             // answer is taken would compact a mid-finalize session —
                             // do not.
-                            self.maybe_compact_answerer()?;
+                            self.maybe_compact_answerer().await?;
                             let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
                             outcome = outer.session.resume(&hole, answer).map_err(|e| {
                                 DriverError::Session(format!("loop resume failed: {e}"))
@@ -1046,7 +1105,7 @@ impl SelfHarnessDriver {
     /// a per-hole budget — at [`ANSWERER_NUDGE_ROUNDS`] the answerer is nudged
     /// to finalize, at [`ANSWERER_MAX_ROUNDS`] the hole hard-fails — and
     /// against the per-loop [`LOOP_INFERENCE_CALL_CAP`] total.
-    pub fn service_runllm_hole(
+    pub async fn service_runllm_hole(
         &mut self,
         site: u32,
         ty: Option<&str>,
@@ -1081,7 +1140,7 @@ impl SelfHarnessDriver {
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
-        let outcome = self.drive_answerer_to_finalize(node, ty)?;
+        let outcome = self.drive_answerer_to_finalize(node, ty).await?;
         self.emit(Event::TurnEnd { node });
 
         let is_finalize = matches!(
@@ -1120,7 +1179,15 @@ impl SelfHarnessDriver {
     /// re-prompted toward `finalize` — rather than accepted, since the
     /// answerer's contract is to resolve the hole via `finalize`, not return a
     /// plain value.
-    fn drive_answerer_to_finalize(
+    ///
+    /// Each round `.await`s [`Harness::drive_turn`] directly — the resident
+    /// JIT run it performs is CPU-blocking and sits inside this `async fn`
+    /// unchanged; it already blocked a tokio worker before this method was
+    /// `async` (called straight from async test bodies and `#[tokio::main]`
+    /// with no bridge), so nothing about that changes here. It is not
+    /// `spawn_blocking`'d: the resident session is not `Send`-shaped for
+    /// that, and doing so is a separate piece of work.
+    async fn drive_answerer_to_finalize(
         &mut self,
         node: NodeId,
         ty: Option<&str>,
@@ -1158,9 +1225,7 @@ impl SelfHarnessDriver {
 
             self.loop_inference_calls += 1;
             rounds += 1;
-            let outcome = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.agent.drive_turn(node))
-            });
+            let outcome = self.agent.drive_turn(node).await;
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
                     // A Finalize suspension is the answer. An AskUser suspension
@@ -1179,7 +1244,7 @@ impl SelfHarnessDriver {
                         return Ok(out);
                     }
                     if let HoleRouting::AskUser { spec } = &classified.routing {
-                        match self.service_askuser_hole(node, spec)? {
+                        match self.service_askuser_hole(node, spec).await? {
                             Some(finalize_outcome) => return Ok(finalize_outcome),
                             None => {
                                 // The askUser chain resolved (the answerer's block
@@ -1193,8 +1258,9 @@ impl SelfHarnessDriver {
                                     node,
                                     &format!(
                                         "That did not resolve the request. Answer by \
-                                         evaluating `finalize @{ty_label} (value :: \
-                                         {ty_label})`."
+                                         evaluating `(finalize @{ty_label} value :: M \
+                                         {ty_label})` — the whole expression must carry \
+                                         the type annotation, not just the argument."
                                     ),
                                 )?;
                                 continue;
@@ -1206,7 +1272,7 @@ impl SelfHarnessDriver {
                     // reimplemented) rather than handing it to an operator that
                     // doesn't exist here.
                     if matches!(classified.routing, HoleRouting::Fork { .. }) {
-                        if let Some(out) = self.drain_answerer_fork(node, ty_label)? {
+                        if let Some(out) = self.drain_answerer_fork(node, ty_label).await? {
                             return Ok(out);
                         }
                         // The parent completed without ever finalizing —
@@ -1235,7 +1301,9 @@ impl SelfHarnessDriver {
                         node,
                         &format!(
                             "That did not resolve the request. Answer by evaluating \
-                             `finalize @{ty_label} (value :: {ty_label})`."
+                             `(finalize @{ty_label} value :: M {ty_label})` — the whole \
+                             expression must carry the type annotation, not just the \
+                             argument."
                         ),
                     )?;
                 }
@@ -1298,7 +1366,7 @@ impl SelfHarnessDriver {
     /// finished without ever calling `finalize`); the caller falls through to
     /// its existing completed-without-finalize corrective retry. `Err` on a
     /// resume failure or the reprompt cap being hit.
-    fn service_askuser_hole(
+    async fn service_askuser_hole(
         &mut self,
         node: NodeId,
         spec: &FormSpec,
@@ -1315,16 +1383,16 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
-            // The gate is SYNC-blocking (frozen contract): park it under
-            // `block_in_place` so a web gate's channel-wait yields the tokio
+            // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
+            // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
+            // under `block_in_place` so that blocking wait yields the tokio
             // worker rather than stalling it.
             let gate = Arc::clone(&self.gate);
             let form = spec.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(self.agent.answer_dialog(node, Json::Object(submission)))
-            })?;
+            self.agent
+                .answer_dialog(node, Json::Object(submission))
+                .await?;
 
             let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
                 // The resume completed the node with no further suspension.
@@ -1449,7 +1517,7 @@ impl SelfHarnessDriver {
     /// ([`crate::harness::HarnessError::Aborted`], surfaced from
     /// `answer_fanout`/`answer_fork` via `?`) is a hard error — the
     /// self-harness driver has no operator inside a fork child (v1).
-    fn drain_answerer_fork(
+    async fn drain_answerer_fork(
         &mut self,
         node: NodeId,
         ty_label: &str,
@@ -1464,16 +1532,10 @@ impl SelfHarnessDriver {
                 })?;
             match routing {
                 HoleRouting::Fork { fan: Some(_), .. } => {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(self.agent.answer_fanout(node, Actor::Operator))
-                    })?;
+                    self.agent.answer_fanout(node, Actor::Operator).await?;
                 }
                 HoleRouting::Fork { fan: None, .. } => {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(self.agent.answer_fork(node, Actor::Operator))
-                    })?;
+                    self.agent.answer_fork(node, Actor::Operator).await?;
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -1508,7 +1570,8 @@ impl SelfHarnessDriver {
             node,
             &format!(
                 "The fork results did not resolve the request. Answer by evaluating \
-                 `finalize @{ty_label} (value :: {ty_label})`."
+                 `(finalize @{ty_label} value :: M {ty_label})` — the whole expression \
+                 must carry the type annotation, not just the argument."
             ),
         )?;
         Ok(None)
@@ -1602,7 +1665,7 @@ impl SelfHarnessDriver {
     ///    persisted for restart durability).
     /// 4. Emits [`Event::CompactionTrigger`] with its payload (summary, pre/post
     ///    context size, node).
-    fn maybe_compact_answerer(&mut self) -> Result<(), DriverError> {
+    async fn maybe_compact_answerer(&mut self) -> Result<(), DriverError> {
         let Some(budget) = self.agent.cfg().context_window_tokens else {
             return Ok(());
         };
@@ -1653,9 +1716,7 @@ impl SelfHarnessDriver {
         // session, which already holds the full context — no second node, no
         // `finalize`, no hand-serialized transcript. The model summarizes
         // itself, so it cannot confabulate.
-        let (summary, post_usage) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.summarize_turn(answerer, &prompt))
-        })?;
+        let (summary, post_usage) = self.agent.summarize_turn(answerer, &prompt).await?;
         let summary = summary.trim().to_string();
 
         // In-place relief: the answerer's context becomes `[system + summary]`,

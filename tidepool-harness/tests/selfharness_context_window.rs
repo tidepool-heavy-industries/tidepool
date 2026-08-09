@@ -11,6 +11,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -98,6 +100,7 @@ impl ModelProvider for ContextCapturingProvider {
                 output_tokens: 5,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -108,6 +111,7 @@ async fn second_hole_sees_first_holes_exchange() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let second_saw_first = Arc::new(Mutex::new(None));
     let provider: Arc<dyn DynModelProvider> = Arc::new(ContextCapturingProvider {
@@ -132,6 +136,7 @@ async fn second_hole_sees_first_holes_exchange() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one full two-hole cycle");
 
     // Both answers landed in State — the loop ran both holes.

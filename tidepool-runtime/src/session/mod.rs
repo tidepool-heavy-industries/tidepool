@@ -3,7 +3,7 @@
 //! A [`SessionLib`] accumulates user declarations as **source text** across
 //! turns. Each `define` turn:
 //!   1. extracts the declaration's binder names **from GHC** (never a Rust-side
-//!      Haskell parser) — see [`binders::extract_binders`];
+//!      Haskell parser) — see [`turn::run_turn`]'s `Decl` verdict;
 //!   2. appends a [`render::DeclTurn`] to the ordered log and bumps the
 //!      [`Generation`];
 //!   3. regenerates the whole `Tidepool.Session.Lib.G<g>` module as a pure
@@ -16,7 +16,6 @@
 //! and type planes (Waves 1/3) are out of scope here — this lane ships standalone
 //! as a usable declaration REPL.
 
-pub mod binders;
 pub mod engine;
 pub mod persistent;
 pub mod render;
@@ -33,9 +32,9 @@ pub use engine::{
 pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
 
 pub use turn::{
-    classify_turn, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
+    classify_block, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
     SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier,
+    TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::path::{Path, PathBuf};
@@ -119,6 +118,34 @@ pub enum SessionError {
     /// `FailureClass::VersionSkew`).
     #[error("malformed extract diagnostics: {0}")]
     MalformedDiagnostics(String),
+}
+
+/// [`crate::CompileError`] → [`SessionError`], preserving the split the
+/// deleted `binders::extract_binders` had: an environment problem stays
+/// `Io`, a stale/skewed extractor stays `MalformedDiagnostics`, and every
+/// user-Haskell-shaped rejection collapses into `BinderExtraction`.
+fn compile_error_to_session_error(e: crate::CompileError) -> SessionError {
+    use crate::CompileError;
+    match e {
+        CompileError::Io(io) => SessionError::Io(io),
+        CompileError::MalformedDiagnostics(msg) => SessionError::MalformedDiagnostics(msg),
+        CompileError::Diagnostics(diags) => SessionError::BinderExtraction(
+            diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        CompileError::ExtractFailed(msg) => SessionError::BinderExtraction(msg),
+        CompileError::MissingOutput(path) => SessionError::BinderExtraction(format!(
+            "extractor produced no turn output: {}",
+            path.display()
+        )),
+        CompileError::ReadError(err) => SessionError::BinderExtraction(err.to_string()),
+        CompileError::IOTypeDetected => {
+            SessionError::BinderExtraction("IO type detected in decl turn".to_string())
+        }
+    }
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -391,7 +418,33 @@ impl SessionLib {
         let combined = sources.join("\n\n");
         let mut binder_include: Vec<&Path> = vec![self.root.as_path()];
         binder_include.extend(self.extra_include.iter().map(PathBuf::as_path));
-        let items = binders::extract_binders(&combined, &binder_include)?;
+
+        let decl_template = TurnTemplate {
+            kind: TemplateSelector::Decl,
+            source: turn::DECL_TEMPLATE_SOURCE.to_string(),
+        };
+        let turn_result = run_turn(TurnRequest {
+            turn_text: &combined,
+            templates: std::slice::from_ref(&decl_template),
+            include: &binder_include,
+            session_root: self.root.as_path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Decl,
+                binders: Vec::new(),
+            }),
+            target: None,
+        })
+        .map_err(compile_error_to_session_error)?;
+        let items = match turn_result {
+            TurnResult::Decl { items, .. } => items,
+            other => {
+                return Err(SessionError::BinderExtraction(format!(
+                    "decl verdict produced an unexpected TurnResult variant: {other:?}"
+                )))
+            }
+        };
 
         self.log.push(DeclTurn {
             sources,
@@ -519,7 +572,7 @@ impl SessionLib {
 
         if !output.status.success() {
             // An unparseable report is a stale/skewed extractor, not the
-            // user's declaration — same split as `classify_turn`.
+            // user's declaration — the same split every extract call site makes.
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(r) => r,
                 Err(msg) => return Err(SessionError::MalformedDiagnostics(msg)),

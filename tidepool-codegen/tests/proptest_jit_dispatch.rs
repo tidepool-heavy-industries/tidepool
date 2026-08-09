@@ -579,6 +579,7 @@ fn jit_err_class(e: &JitError) -> (u8, i64) {
         JitError::Pipeline(_) => (errclass::OTHER, -1),
         JitError::MissingConTags(_) => (errclass::OTHER, -1),
         JitError::VarIdCollision(_) => (errclass::OTHER, -1),
+        JitError::IncompatibleHandledPrefix { .. } => (errclass::OTHER, -1),
     }
 }
 

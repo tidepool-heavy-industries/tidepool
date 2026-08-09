@@ -261,6 +261,35 @@ pub fn template_haskell(
         input,
         budget,
         false,
+        false,
+    )
+}
+
+/// Like [`template_haskell`], but the result binding carries an extra `Show`
+/// anchor (see [`template_haskell_impl`]'s `anchor_result` doc) so a turn
+/// compiled against a real `Finalize T` row can resolve `finalize`'s free
+/// result tyvar. Every OTHER caller keeps using [`template_haskell`] /
+/// [`template_haskell_show_default`] unpinned — this is additive to a single
+/// turn's own module, never a change to the shared template those callers see.
+pub fn template_haskell_anchored(
+    preamble: &str,
+    effect_stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    input: Option<&serde_json::Value>,
+    budget: Option<u32>,
+) -> String {
+    template_haskell_impl(
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        false,
+        true,
     )
 }
 
@@ -290,10 +319,49 @@ pub fn template_haskell_show_default(
         input,
         budget,
         true,
+        false,
     )
 }
 
-#[allow(clippy::too_many_arguments)] // shared impl behind template_haskell / _show_default
+/// Shared impl behind `template_haskell` / `_show_default` / `_anchored`.
+///
+/// `anchor_result`: when `true`, the result binding routes `_r` through a
+/// generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
+/// rendering it. This is ADDITIVE, not a type pin: `__anchor` is `id`, so it
+/// never forces `_r`'s type to anything — it only adds a `Show a0` constraint
+/// alongside the render call's `ToJSON`/`ToWire` one.
+///
+/// Why that's needed at all: GHC's defaulting (even under
+/// `ExtendedDefaultRules`, even with an explicit `default (...)` list naming
+/// a type with a matching instance) requires the ambiguous variable's
+/// constraint set to carry at least one class from GHC's own fixed "standard"
+/// set — the GHC User's Guide's `ExtendedDefaultRules` section states rule 3
+/// as relaxed to "at least one of the classes Ci is numeric, or is Show, Eq,
+/// or Ord" (a relaxation of the anchor requirement, never its removal). A
+/// solitary `ToJSON a0`/`ToWire a0` — both ordinary library classes with no
+/// superclass — never qualifies, so `finalize`'s intentionally free result
+/// tyvar (`finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff
+/// effs a`, `a` unconstrained by design) is permanently unreachable by
+/// defaulting on its own. Confirmed empirically, not by reasoning about the
+/// docs: a minimal `IO`-do-block repro and a real `freer-simple` `Eff`-row
+/// repro fail IDENTICALLY under identical pragmas (ruling out any
+/// `Eff`-row/`MonoLocalBinds`/implication-specific explanation), and adding a
+/// bare `Num` constraint on the SAME otherwise-ambiguous tyvar, nothing else
+/// changed, makes defaulting fire — that is what `__anchor` supplies, in the
+/// one turn shape that needs it, without touching a type any concretely-typed
+/// result (an ordinary eval, or an answerer turn whose block doesn't reach
+/// `finalize`) already has.
+///
+/// `__anchor` only becomes load-bearing when `_r`'s type is otherwise
+/// ambiguous — which happens ONLY for a turn compiled against a real
+/// `Finalize T` row whose block's result is `finalize`'s free `a`. Any
+/// concretely-typed result (an ordinary eval's `Value`/`Int`/record, or an
+/// answerer turn that suspends on `askUser` without finalizing) already has a
+/// resolved type with its own `Show` instance available, so `__anchor`
+/// resolves trivially and changes nothing observable — this is why it's safe
+/// to add without threading the hole's concrete answer type through at all,
+/// only a per-turn boolean (see `tidepool-harness::engine::template_turn_for`).
+#[allow(clippy::too_many_arguments)] // shared impl behind template_haskell / _show_default / _anchored
 fn template_haskell_impl(
     preamble: &str,
     effect_stack: &str,
@@ -303,6 +371,7 @@ fn template_haskell_impl(
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
     show_default: bool,
+    anchor_result: bool,
 ) -> String {
     let mut out = String::new();
 
@@ -368,6 +437,16 @@ fn template_haskell_impl(
     // render_call: toWire in REPL (Show-default), toJSON in stateless server.
     let render_call = if show_default { "toWire" } else { "toJSON" };
 
+    // The defaulting anchor (see this fn's doc): `id` under a `Show`
+    // constraint, so it never forces `_r`'s type — only adds the standard-
+    // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
+    // when `anchor_result` is set (a real `Finalize T` row); every other
+    // caller's `_r` is rendered exactly as before.
+    if anchor_result {
+        out.push_str("__anchor :: P.Show a => a -> a\n__anchor = P.id\n\n");
+    }
+    let rendered = if anchor_result { "(__anchor _r)" } else { "_r" };
+
     out.push_str(&format!("result :: Eff {} Value\n", effect_stack));
     out.push_str("result = do\n");
     if budget.is_some() {
@@ -378,11 +457,13 @@ fn template_haskell_impl(
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
         out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
         out.push_str(&format!(
-            "  paginateResult (max 100 ({} - _sayC)) ({render_call} _r)\n",
+            "  paginateResult (max 100 ({} - _sayC)) ({render_call} {rendered})\n",
             b
         ));
     } else {
-        out.push_str(&format!("  paginateResult 4096 ({render_call} _r)\n"));
+        out.push_str(&format!(
+            "  paginateResult 4096 ({render_call} {rendered})\n"
+        ));
     }
 
     out

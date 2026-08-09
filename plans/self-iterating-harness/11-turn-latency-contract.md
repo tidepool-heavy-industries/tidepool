@@ -4,6 +4,21 @@ Measurement only. Nothing in this document proposes a fix; the attribution
 report (`11-turn-latency-report.md`) ranks candidates, and a later wave picks
 one.
 
+> **CORRECTION (extract-wave audit, 2026-08-08) — read before citing any
+> number from this contract:** (1) The phase rows do not bracket what their
+> names say: `load'` — which parses, typechecks, AND core2cores every home
+> module — runs INSIDE the row labelled `ghc_session`, so "26–32% session
+> boot" includes a full first compile, and the `typecheck`/`core` rows sum
+> only the SECOND loop. "Under 6% typecheck" therefore does NOT refute the
+> home-module typecheck suspicion (it measures one of two typechecks); the
+> suspicion is OPEN, and C1 (double compile) is CONFIRMED in code with
+> unknown size. (2) Every number here is TURN-1-ONLY: `runSessionPipeline`
+> emits zero `emitPhase` calls and all session-scope turns (turn 2+ of any
+> real dogfood run — the ones carrying E2's compounding chain) route
+> there, unmeasured. Read the 60/26/6 split as "turn 1", never "a turn".
+> Anchors and the corrected re-aiming live in
+> `plans/post-restart/extract-wave.md` (extract-wave branch, ecfc4eb1).
+
 ## The pipeline one answerer round walks
 
 `SelfHarnessDriver::drive_answerer_to_finalize` loops over
@@ -11,24 +26,36 @@ one.
 
 1. **provider call** — `Harness::stream_turn`: the model writes a reply,
    possibly containing a fenced Haskell block. Network + inference.
-2. **classify** — `run_block` calls `tidepool_runtime::session::classify_turn`,
-   which spawns `tidepool-extract --emit-stmt-binders` (parse-only lane, no
-   Core pipeline — but still a full process start).
-3. **template** — `engine::template_turn` wraps the block in a module with the
-   effect row, pragmas, imports, and the node's `Lib.G<gen>` decl module.
-4. **extract** — `compile::compile_turn` spawns `tidepool-extract` again, this
-   time through the whole GHC pipeline, and it writes `<target>.cbor`,
-   `meta.cbor`, `asks.json` into a tempdir.
-5. **read + deserialize** — the three files are read and decoded into
-   `CoreExpr`, `DataConTable`, `AsksSidecar`.
-6. **jit codegen** — `ResidentSession::run` → `add_fragment_session`: Cranelift
+2. **template** — `run_block` builds every wrapper template the turn's
+   verdict might select (`engine::expr_turn_template`/`template_session_bind`,
+   the decl parse wrapper) — the effect row, pragmas, imports, the node's
+   `Lib.G<gen>` decl module, and its current `Val.G<gen>` modules — BEFORE the
+   verdict is known, since the one spawn below classifies and compiles
+   together.
+3. **turn compile** — `tidepool_runtime::session::run_turn` spawns
+   `tidepool-extract --turn` ONCE: the extract classifies the block itself
+   (bind/expr/decl — GHC-sourced, never a Rust-side guess), splices the
+   matching template, and — for a BIND or EXPR verdict — compiles it through
+   the whole GHC pipeline in the SAME process, writing `result.cbor`,
+   `meta.cbor`, `asks.json`, and the `TurnOut` sidecar into a tempdir. A DECL
+   verdict does not compile here: `run_block` separately calls
+   `session.define_scoped`, which performs its OWN decl-plane `run_turn`
+   spawn (see `plans/one-spawn-turn-protocol-phase-b.md`'s Decision 1 — this
+   is the one case Phase B's "one spawn per turn" claim does not cover, and
+   says so).
+4. **read + deserialize** — `result.cbor`/`meta.cbor` are read and decoded
+   into `CoreExpr`, `DataConTable`; `asks` arrives already decoded, off the
+   `TurnOut` wire payload.
+5. **jit codegen** — `ResidentSession::run` → `add_fragment_session`: Cranelift
    mints the fragment against the merged table.
-7. **run** — `Threadless::run_fragment` on the eval thread, to completion or to
+6. **run** — `Threadless::run_fragment` on the eval thread, to completion or to
    a suspension (`finalize`, `askUser`, `fork`).
 
-Steps 2 and 4 are two separate `tidepool-extract` process spawns per round.
-A compile error at step 4 costs a full round: the driver pushes the diagnostic
-back as a user turn and the loop restarts at step 1.
+Step 3 is the round's one `tidepool-extract` process spawn (down from the two
+separate spawns — a parse-only classify, then a full compile — a harness turn
+made before the one-spawn-per-turn migration). A compile error at step 3
+costs a full round: the driver pushes the diagnostic back as a user turn and
+the loop restarts at step 1.
 
 ## Stage vocabulary and event shape
 
@@ -291,11 +318,29 @@ rows appear — see the gap note below. Medians in ms:
 |---|---|---|---|
 | `extract_spawn` | 6778 | 9425 | 12620 |
 | `jit_codegen` | 2704 | 4070 | 4361 |
-| `classify_extract` | 33 | 75 | 72 |
+| `classify_extract` **RETIRED** (see tombstone below) | 33 | 75 | 72 |
 | `cbor_deserialize` | 9 | 17 | 21 |
 | `run_exec` | 0 | 0 | 3 |
 | `template`, `cbor_read`, `asks_parse` | 0 | 0 | 0 |
 | `provider_call` | 0 | 0 | 0 (replayed, not a live model) |
+
+> **`classify_extract` — RETIRED at `8d952eca7aa8c6d65871f3b5e66437db5f6a85b4`, successor
+> `extract.classify`.** Its semantics were a SEPARATE process spawn's wall
+> clock — the parse-only `--emit-stmt-binders` lane `run_block` called before
+> compiling. That spawn no longer exists: the one-spawn-per-turn migration
+> (`plans/one-spawn-turn-protocol-phase-b.md`) folded classification into the
+> single `--turn` process a harness turn now makes, which times its own
+> in-process classify substep as `extract.classify` (an `extract.*` phase
+> forwarded from INSIDE `extract_spawn`, not a sibling Rust-side stage — see
+> `timing.rs`'s module doc). A same-named stage carrying that different
+> meaning would silently poison any longitudinal comparison against the rows
+> above, so the constant is retired rather than repurposed — same fails-loud
+> principle as the one-format wire policy. The 33–75ms row above stays
+> exactly as measured: it is what reframed this whole workstream (a
+> parse-only spawn costing tens of milliseconds against a ~6.8s compile,
+> settled below), and remains the reproducible baseline `extract.classify`
+> should be compared against once it is next measured — read it as a
+> retired-but-interpretable historical figure, not a stale one.
 
 Per-turn residual (`wall_ms − attributed_ms`) is 32–76ms against 9–21s turns —
 under 0.4%, so the stage set accounts for essentially the whole turn and
@@ -329,3 +374,91 @@ answers point at different mechanisms. Re-running the bench with
 `TIDEPOOL_TIMING=1` against an extract built from this branch's `haskell/`
 answers it in one shot — that capture was queued and then deliberately
 abandoned when the measurement was shelved, not attempted and failed.
+
+> **Closed.** That capture was taken after the one-spawn swap — see *The open
+> gap above is now CLOSED* at the end of this document. The answer is neither
+> candidate named here: it is `core`.
+
+## Post-swap stage attribution (one run, debug, one-spawn path)
+
+Taken after the one-spawn-per-turn swap landed
+(`plans/one-spawn-turn-protocol-phase-b.md`), debug profile,
+`N=2 / size_n=1 / retry_n=1`, `TIDEPOOL_TIMING=1`, against an extract built
+from this branch's `haskell/`.
+
+**Read this as a SHAPE check, not a latency comparison.** It ran under
+`scripts/ghc-slots.sh run` (a shared slot) while a sibling lane was executing
+a full repl suite, so the absolute numbers are inflated by contention —
+`extract_spawn` medians of 6.4–16.1s here against 6.8–12.6s in the quiet-box
+run above. Nothing should be concluded about whether the swap made a turn
+faster or slower from these; the swap removes a 33–75ms parse-only spawn, and
+that is below this run's noise floor by two orders of magnitude. What the run
+DOES establish is that the phase table survives the new entry point intact.
+
+Medians in ms, by scenario (cold/warm, small/large, retry round-trip):
+
+| stage | cold/warm | small/large | retry |
+|---|---|---|---|
+| `extract_spawn` | 16058 | 13137 | 6449 |
+| `extract.total` | 15915 | 12962 | 6379 |
+| `extract.core` | 9913 | 8563 | 3829 |
+| `extract.ghc_session` | 4790 | 3290 | 2083 |
+| `extract.typecheck` | 632 | 425 | 359 |
+| `extract.translate` | 400 | 528 | 152 |
+| `extract.classify` | 156 | 56 | 34 |
+| `extract.startup` | 76 | 49 | 38 |
+| `extract.cbor_encode` | 32 | 49 | 13 |
+| `extract.write` | 2 | 1 | 0 |
+| `jit_codegen` | 1433 | 1104 | 626 |
+| `cbor_deserialize` | 5 | 4 | 3 |
+| `template`, `cbor_read`, `run_exec`, `provider_call` | ~0 | ~0 | ~0 |
+
+Three things this settles:
+
+- **`classify_extract`'s successor reads the same.** `extract.classify` costs
+  34–156ms, against the retired stage's 33–75ms — the same band, now measured
+  INSIDE the compile process rather than as a separate spawn. The measurement
+  that reframed this workstream is reproducible after the swap, which is the
+  whole reason the phase was added rather than the classify step left silent.
+- **`classify_extract` is gone from the Rust timeline**, as intended: no
+  scenario's stage list carries it. One stage left the Rust timeline as
+  another joined the extract timeline, and both halves are visible here.
+- **Every turn reached `Suspended`** (the `Finalize` hole), including the
+  compile-error retry round-trip — so the corrective loop still recovers from
+  an injected error through the one-spawn path.
+
+`attributed_ms` exceeds `wall_ms` in this run and the residual clamps to 0,
+because the summary sums `extract_spawn` AND the `extract.*` phases it
+contains. That is the documented double-count a collector must avoid (see the
+flat-stages rule above): pick one granularity. It is a property of the
+summary, not of the instrumentation.
+
+### The open gap above is now CLOSED: it is `core`, not session boot
+
+The question the previous section left open — whether the seconds inside
+`extract_spawn` are session/interface loading or typechecking the preamble +
+`Tidepool.Prelude` + effect-stack home modules — has an answer, and it is
+neither:
+
+- `extract.core` (desugar to Core + the simplifier passes GHC runs before the
+  binds are read) is **60–66% of the whole spawn** in every scenario.
+- `extract.ghc_session` is 26–32%.
+- `extract.typecheck` is **under 6%** — so "typechecking the extra home
+  modules" was the wrong suspicion.
+
+That relocates the only large remaining turn cost to GHC's Core pipeline over
+the home-module set, which is a different mechanism from anything this
+workstream touched, and a different one from what the synthetic single-module
+run (194ms total, `ghc_session` 122ms, `typecheck` ~1ms) suggested. Whoever
+picks up turn latency next should start there rather than at spawn count.
+
+### The bench needed a fix to run at all
+
+`turn_latency_bench` was written before `Finalize` became type-indexed and
+instantiated in the row. Every block it replays is `finalize @Int …`, but it
+set no answer contract, so its turns compiled against `Finalize NoAnswer` —
+an uninhabited type admitting no answer — and failed at the first compile with
+`'Finalize Int' is not a member of '[AskUser, Fork, Finalize NoAnswer]'`. It
+now pins the contract to `Int` per node before driving. The break predates the
+one-spawn swap by two commits and was never a regression of it; it simply had
+not been re-run since.

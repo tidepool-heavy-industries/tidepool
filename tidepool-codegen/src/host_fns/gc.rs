@@ -1162,12 +1162,11 @@ pub fn gc_trigger_last_vmctx() -> usize {
 /// # Safety
 /// `vmctx` must be valid with a live nursery and GC state installed.
 pub(crate) unsafe fn host_alloc_gc(vmctx: *mut VMContext, size: usize) -> *mut u8 {
-    let p = crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size);
-    if !p.is_null() {
-        return p;
-    }
-    gc_trigger(vmctx);
-    crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size)
+    crate::heap_bridge::gc_retry(
+        vmctx,
+        |p: &*mut u8| p.is_null(),
+        || crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size),
+    )
 }
 
 #[cfg(test)]

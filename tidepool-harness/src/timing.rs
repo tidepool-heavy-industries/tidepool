@@ -25,12 +25,15 @@
 //! Stages are FLAT and non-nesting: a collector sums by `stage` and never has
 //! to reason about containment. Where a coarse stage contains finer ones, the
 //! fine stages are prefixed by WHICH `tidepool-extract` spawn they came from —
-//! a round makes TWO separate spawns (see `plans/self-iterating-harness/
+//! a harness turn makes exactly ONE spawn (see `plans/self-iterating-harness/
 //! 11-turn-latency-contract.md`'s pipeline walk): `extract.*` is the inside of
-//! the compile lane's `extract_spawn`, and `classify.*` is the inside of the
-//! parse-only classify lane's `classify_extract`. Keeping them under distinct
-//! prefixes matters beyond bookkeeping: it is the only way to see whether the
-//! classify spawn is almost entirely GHC-session boot or does real work. A
+//! that single `--turn` spawn's `extract_spawn`, including its own in-process
+//! `classify` substep (`extract.classify`). `classify.*` is a DIFFERENT
+//! lane's prefix — the block-classify spawn `tidepool_runtime::session::
+//! classify_block` makes on the repl's behalf, not something a harness turn
+//! emits at all. Keeping them under distinct prefixes matters beyond
+//! bookkeeping: it is the only way to see whether the extract's in-process
+//! classify substep is almost entirely GHC-session boot or does real work. A
 //! collector summing `extract.ghc_session` must never fold in
 //! `classify.ghc_session`'s numbers — that would silently merge two different
 //! subprocess spawns into one row and make the two lanes' costs unreadable.
@@ -74,8 +77,6 @@ pub const NO_NODE: u64 = u64::MAX;
 
 /// Model inference: the provider call that produces the turn's reply.
 pub const STAGE_PROVIDER_CALL: &str = "provider_call";
-/// The parse-only `--emit-stmt-binders` extract subprocess (turn classification).
-pub const STAGE_CLASSIFY_EXTRACT: &str = "classify_extract";
 /// Assembling the templated module source for the block.
 pub const STAGE_TEMPLATE: &str = "template";
 /// The full compile extract subprocess, spawn to exit (contains `extract.*`).
@@ -94,7 +95,6 @@ pub const STAGE_RUN_EXEC: &str = "run_exec";
 /// Every Rust-side stage, in pipeline order — the attribution table's row order.
 pub const RUST_STAGES: &[&str] = &[
     STAGE_PROVIDER_CALL,
-    STAGE_CLASSIFY_EXTRACT,
     STAGE_TEMPLATE,
     STAGE_EXTRACT_SPAWN,
     STAGE_CBOR_READ,
@@ -112,6 +112,10 @@ pub const RUST_STAGES: &[&str] = &[
 pub const PHASE_STARTUP: &str = "startup";
 /// Creating the GHC session: flag parsing, package-db + interface loading.
 pub const PHASE_GHC_SESSION: &str = "ghc_session";
+/// The `--turn` mode's in-process classify substep (GHC-sourced verdict,
+/// inside the booted session, before any compile work) — absent when a
+/// caller supplies `--turn-verdict` and the mode skips its own re-parse.
+pub const PHASE_CLASSIFY: &str = "classify";
 /// Parse + rename + typecheck of the turn module (and any `--include` modules).
 pub const PHASE_TYPECHECK: &str = "typecheck";
 /// Desugar to Core + the simplifier passes GHC runs before we read binds.
@@ -129,6 +133,7 @@ pub const PHASE_TOTAL: &str = "total";
 pub const EXTRACT_PHASES: &[&str] = &[
     PHASE_STARTUP,
     PHASE_GHC_SESSION,
+    PHASE_CLASSIFY,
     PHASE_TYPECHECK,
     PHASE_CORE,
     PHASE_TRANSLATE,
@@ -152,9 +157,12 @@ pub fn extract_stage_name(phase: &str) -> String {
 }
 
 /// The stage name a forwarded CLASSIFY-lane extract phase is emitted under
-/// (`classify.<phase>`) — the inside of `classify_extract`. Kept under its own
-/// prefix so the parse-only classify spawn's internal phases never merge with
-/// the full compile spawn's when a collector sums by stage name.
+/// (`classify.<phase>`) — the inside of `tidepool_runtime::session::classify_block`'s
+/// batch spawn (not something a harness turn makes; the repl's block runner
+/// is this prefix's only caller). Kept under its own prefix so that spawn's
+/// internal phases never merge with a `--turn` spawn's `extract.*` phases
+/// (which include their OWN in-process `extract.classify` substep) when a
+/// collector sums by stage name.
 pub fn classify_stage_name(phase: &str) -> String {
     format!("{CLASSIFY_STAGE_PREFIX}{phase}")
 }

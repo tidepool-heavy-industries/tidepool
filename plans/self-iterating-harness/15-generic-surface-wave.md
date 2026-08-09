@@ -47,17 +47,24 @@ from the PRD-dev window (file anchors verified against tree by root), and
   Fingerprint note: the checkpoint fingerprint is source-derived, so this is
   hygiene, not churn reduction — and the driver must persist the iteration
   count in the checkpoint ENVELOPE so restart behavior stays continuous.
-- **Checkpoint persistence is separately gated.** Scope is bug-fix plus
-  wiring: fix the confirmed round-trip defects in the existing
+- **Checkpoint persistence is separately gated; wire-compat is the DEFAULT,
+  not a requirement** (Inanna: "json is fine as a default but we can just
+  break compat if it's cleaner/easier"). Scope is bug-fix plus wiring, NOT a
+  new codec: fix the confirmed round-trip defects in the existing
   serialization path, and move persistence onto
   `genericToJSON`/`genericParseJSON` so authored types need only
-  `deriving (Generic)`. Wire compatibility is the DEFAULT, not a
-  requirement — where matching the current shape costs real complexity,
-  break instead, provided the break is a typed decode error and never a
-  silent misparse. Residual churn is source-fingerprint churn from editing
-  deriving clauses, which needs the restore/discard story, not a data-wire
-  migration. Sequenced AFTER forms: forms are additive, persistence is a
-  repair in the subsystem that produced both dogfood crashes.
+  `deriving (Generic)`. Target the current encoding (records→objects,
+  lists→arrays, `Maybe`→value/null, nullary constructors→strings, tagged
+  sums) where it falls out naturally; where matching that shape costs real
+  complexity, break instead — the cost of a break is old checkpoints
+  unreadable → fresh session start, cheap while dogfood is paused. A break
+  must be LOUD (typed decode error naming the change, discard-and-restart),
+  never a silent misparse. Residual churn either way is source-fingerprint
+  churn from editing deriving clauses. Sequenced AFTER forms: forms are
+  additive, persistence is a repair in the subsystem that produced both
+  dogfood crashes. Routed to its OWN successor lane
+  ([`../post-restart/checkpoint-persistence-lane.md`](../post-restart/checkpoint-persistence-lane.md)),
+  not the generic-surface queue.
 - **One-file harness prerequisite is explicit:** effect vocabulary available
   in scope ≠ effects present in M's row. Today the answerer compile omits
   the `RunLLMTurn` GADT/helpers entirely (see `haskell/lib/Tidepool/

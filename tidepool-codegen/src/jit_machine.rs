@@ -44,7 +44,24 @@
 //! computation on the heap at a time). Module accretion (a child's
 //! `add_function`) is inert for the parent — it mints a fresh `FuncId` and does
 //! not touch the stowed continuation.
+//!
+//! # The parked-continuation registry (realm prototype)
+//!
+//! [`JitEffectMachine::run_suspendable_parked`] and [`JitEffectMachine::resume_parked`]
+//! are an ADDITIVE second suspension path that generalizes the single
+//! `suspended_continuation` slot to a map of many. A parked continuation is
+//! never protected by the temporal argument: it is a registered `stowed_roots`
+//! entry from the moment it parks until the moment it resumes, so a collection
+//! triggered by ANY later computation on the machine — a sibling park, a plain
+//! fragment, another realm's resume — evacuates it and rewrites its cell.
+//!
+//! The parked path deliberately leaves `suspended_continuation` as `None`, so
+//! the L7 asserts on every plain run entry keep passing and keep protecting the
+//! single-slot path. The two paths do not interact: a machine using the parked
+//! registry never stows into the slot, and a machine using the slot never
+//! populates the registry.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -60,6 +77,29 @@ use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 use crate::yield_type::Yield;
+
+/// Why an incoming handled prefix was refused against the machine's
+/// established one ([`JitEffectMachine::check_prefix_compatible`]). Two
+/// non-empty prefixes must be EXACTLY EQUAL, so a disagreement is either a
+/// length difference (not reducible to any shared position — naming one
+/// would be misleading) or, at equal length, a content disagreement at a
+/// specific position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixMismatch {
+    /// Both prefixes are non-empty but of different lengths.
+    Length,
+    /// Same length, but the prefixes disagree at this 0-based position.
+    Position(usize),
+}
+
+impl std::fmt::Display for PrefixMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefixMismatch::Length => write!(f, "differing lengths"),
+            PrefixMismatch::Position(position) => write!(f, "position {position}"),
+        }
+    }
+}
 
 /// Error type for JIT compilation/execution failures.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +125,24 @@ pub enum JitError {
     EffectResponseTooLarge { nodes: usize, limit: usize },
     #[error("VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression; set TIDEPOOL_VARID_CHECK=0 only to bypass for bisection.")]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
+    /// Refused at ENTRY to the parked path, before the machine is driven at
+    /// all (never a machine invariant violation — a caller/configuration
+    /// error, so `Err`, not a panic): the realm's handled-effect prefix
+    /// disagrees with the prefix the machine already established from an
+    /// earlier entry. Two non-empty prefixes must be EXACTLY EQUAL — an
+    /// empty prefix never produces this error, it is compatible with
+    /// anything. See [`JitEffectMachine::check_prefix_compatible`] for why
+    /// exact equality is the sound check and what it does, and does not,
+    /// verify.
+    #[error(
+        "realm handled-effect prefix disagrees with the machine's established prefix \
+         ({mismatch}): established {established:?}, incoming {incoming:?}"
+    )]
+    IncompatibleHandledPrefix {
+        established: Vec<String>,
+        incoming: Vec<String>,
+        mismatch: PrefixMismatch,
+    },
 }
 
 /// A pending first-cause `RuntimeError` surfaces as a yield error — the shape
@@ -113,6 +171,304 @@ pub struct HeapStats {
     pub live_bytes: usize,
     /// Number of collections this machine has run ([`MachineState::gc_generation`]).
     pub gc_count: u64,
+}
+
+/// Identity of one continuation parked in a machine's continuation registry.
+/// Minted by [`JitEffectMachine::run_suspendable_parked`], consumed by
+/// [`JitEffectMachine::resume_parked`]. Ids are never reused within a machine:
+/// a resume that suspends AGAIN mints a fresh id (same realm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContinuationId(pub u64);
+
+/// Identity of a realm — the ownership scope a parked continuation belongs to
+/// (an outer loop turn, one answerer subtree, …). Carried on the frame so a
+/// caller can group, cancel, or drain a realm's parks without tracking ids
+/// externally. The machine itself attaches no semantics to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RealmId(pub u64);
+
+/// What kind of turn parked a continuation — the registry's spelling of the
+/// single-slot path's `bind_forced: Option<bool>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkKind {
+    /// A plain suspendable turn: on completion the `Done` pointer is bridged
+    /// and returned (`bind_forced == None`).
+    Plain,
+    /// A value-plane BIND turn: on completion the result is tenured into
+    /// old-space and its [`crate::old_space::RootSlot`] stashed on the machine
+    /// (`bind_forced == Some(forced)`). `forced` deep-forces to NF before
+    /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
+    Binding { forced: bool },
+}
+
+impl ParkKind {
+    /// Project to the `bind_forced` shape the shared suspendable epilogue takes.
+    fn bind_forced(self) -> Option<bool> {
+        match self {
+            ParkKind::Plain => None,
+            ParkKind::Binding { forced } => Some(forced),
+        }
+    }
+}
+
+/// One parked continuation in a machine's continuation registry.
+///
+/// `cell` is a heap-stable `Box` holding the continuation pointer, exactly the
+/// `stowed_root_cell` pattern: the machine itself moves between threads (stow
+/// XOR run), but the `Box`'s POINTEE address is a stable heap allocation, so
+/// the `stowed_roots` registration (the cell's address) stays valid across the
+/// move. The GC reads and rewrites `*cell` in place on every collection, so the
+/// pointer read back out at resume is the GC-current one.
+pub struct ContinuationFrame {
+    /// Heap-stable cell holding the (GC-current) continuation pointer.
+    cell: Box<*mut u8>,
+    /// The realm this park belongs to.
+    realm: RealmId,
+    /// The union tag the turn suspended at, replayed on resume so the caller
+    /// does not have to remember it per-park.
+    suspend_tag: u64,
+    /// Plain park vs value-plane binding park.
+    kind: ParkKind,
+    /// The persistent root of a closure-valued `finalize`'s finalized value
+    /// (W4), tenured at park time. `Some` only for a frame parked while
+    /// suspended on a closure-valued finalize; taken via
+    /// [`JitEffectMachine::take_parked_finalized_root`], which leaves the
+    /// frame itself parked and rooted.
+    finalized_root: Option<crate::old_space::RootSlot>,
+    /// This frame's realm's cancel flag, cloned at park time so
+    /// [`JitEffectMachine::resume_parked`] installs it without a second
+    /// per-realm cancel-flag lookup.
+    cancel_flag: Arc<AtomicBool>,
+    /// The [`DataConTable`] this frame's continuation suspended against,
+    /// cloned once at park time (not per collection, not per resume) so a
+    /// resume decodes exclusively against the row it was compiled for — a
+    /// caller cannot resume a frame against a foreign table.
+    table: Arc<DataConTable>,
+    /// This realm's handled prefix — the effect names for tags
+    /// `[0, suspend_tag)`, in position order — checked (and possibly
+    /// establishing) at ENTRY to the parked path
+    /// ([`JitEffectMachine::enter_parked_path`]), stored here purely so
+    /// [`JitEffectMachine::resume_parked`] can replay it through that same
+    /// entry check on a re-suspension.
+    handled_prefix: Arc<[String]>,
+}
+
+/// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
+/// [`ContinuationId`] a suspension parked under.
+#[derive(Debug)]
+pub enum ParkedOutcome {
+    /// The turn ran to completion.
+    Completed {
+        /// The bridged result.
+        value: tidepool_eval::value::Value,
+        /// A1: the tenured root of a value-plane BIND's result, returned
+        /// INLINE in the same call that observed completion — `Some` exactly
+        /// when the park kind was [`ParkKind::Binding`], `None` for
+        /// [`ParkKind::Plain`]. A completed park leaves no frame in the
+        /// registry (a frame exists only while parked), so there is nowhere
+        /// for a machine-level stash to live between write and read; this is
+        /// what closes realm-checklist Item 3 — no window for a second
+        /// realm's completion to overwrite it before the caller reads it.
+        bound_root: Option<crate::old_space::RootSlot>,
+    },
+    /// The turn suspended and its continuation was PARKED in the registry as a
+    /// registered GC root. Resume it with [`JitEffectMachine::resume_parked`].
+    Suspended {
+        /// The registry key this continuation parked under.
+        id: ContinuationId,
+        /// The bridged suspend request.
+        request: tidepool_eval::value::Value,
+        /// See [`SuspendableOutcome::Suspended::has_finalized_closure`].
+        has_finalized_closure: bool,
+    },
+}
+
+/// Where the shared suspendable epilogue puts a continuation when a turn
+/// suspends. Internal: the public entries pick one and project the result.
+#[derive(Debug, Clone)]
+enum ParkTarget {
+    /// The single `suspended_continuation` slot (every pre-existing entry).
+    Slot,
+    /// The continuation registry, under a fresh id in this realm.
+    Registry {
+        realm: RealmId,
+        kind: ParkKind,
+        /// This realm's handled prefix, already checked (and possibly
+        /// established) at entry to the parked path — carried here only to
+        /// be stored on the frame if this run suspends.
+        handled_prefix: Arc<[String]>,
+    },
+}
+
+/// Result of the shared suspendable body before it is projected into whichever
+/// public outcome type the caller's entry returns. `id` is `Some` exactly when
+/// the park target was [`ParkTarget::Registry`].
+enum ParkedRaw {
+    Completed {
+        value: tidepool_eval::value::Value,
+        bound_root: Option<crate::old_space::RootSlot>,
+    },
+    Suspended {
+        request: tidepool_eval::value::Value,
+        has_finalized_closure: bool,
+        id: Option<ContinuationId>,
+    },
+}
+
+impl ParkedRaw {
+    /// Project onto the single-slot path's outcome type.
+    fn into_suspendable(self) -> SuspendableOutcome {
+        match self {
+            ParkedRaw::Completed { value, .. } => SuspendableOutcome::Completed(value),
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => {
+                debug_assert!(id.is_none(), "slot park target must not mint an id");
+                SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+        }
+    }
+
+    /// Project onto the registry path's outcome type.
+    fn into_parked(self) -> ParkedOutcome {
+        match self {
+            ParkedRaw::Completed { value, bound_root } => {
+                ParkedOutcome::Completed { value, bound_root }
+            }
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => ParkedOutcome::Suspended {
+                id: id.expect("registry park target mints an id on suspension"),
+                request,
+                has_finalized_closure,
+            },
+        }
+    }
+}
+
+/// ROUTE-DIFFERENCE TABLE (external review, runner-unification lane) — every
+/// public run variant's setup/epilogue shape, tabled before folding any of
+/// them behind [`JitEffectMachine::with_active_run`].
+///
+/// | route | drive | session | materialization | pre-refactor reclaim arm |
+/// |---|---|---|---|---|
+/// | [`JitEffectMachine::run`] / [`JitEffectMachine::run_fragment`] | effectful (`drive_to_done`) | optional | `Value` | early, before drive |
+/// | [`JitEffectMachine::run_pure`] / [`JitEffectMachine::run_fragment_pure`] | pure (raw call, no `Yield` decoding) | optional | `Value` | early, before drive |
+/// | [`JitEffectMachine::run_pure_and_bind`] | pure | REQUIRED | `Bind { forced: true }` (unconditional) | last, after tenure |
+/// | [`JitEffectMachine::run_fragment_and_bind`] | effectful | REQUIRED | `Bind { forced: <caller> }` | last, after tenure |
+/// | [`JitEffectMachine::run_fragment_and_bind_projected`] | effectful | REQUIRED | `Project { n_fields }` | last, after tenure |
+/// | [`JitEffectMachine::run_fragment_and_bind_render`] | effectful | REQUIRED | `Render { field0_forced }` | last, after tenure (+ extra field0 `RootScope` across the field1 bridge) |
+/// | [`JitEffectMachine::run_child_fragment`] / `_pure` | → `run_with_entry` / `run_pure_with_entry`, wrapped in [`JitEffectMachine::enter_nested_child`] | requires a suspended parent | `Value` | unaffected — rides the entry it wraps |
+///
+/// The suspend/park family (`run_suspendable*`, `resume_suspended*`,
+/// `run_suspendable_parked`, `run_fragment_suspendable_parked`,
+/// `resume_parked`) is NOT in this table and NOT touched by this refactor: it
+/// already funnels through one shared setup body
+/// ([`JitEffectMachine::run_suspendable_shared`] /
+/// [`JitEffectMachine::resume_applied`]) and one shared epilogue
+/// ([`JitEffectMachine::finish_suspendable`]) with reclaim armed
+/// unconditionally last, exactly the shape this table's six routes are
+/// folded into below — it already satisfies this lane's ask.
+///
+/// The fold: every routed listed above becomes a thin wrapper over
+/// [`JitEffectMachine::with_active_run`], which owns registry install/reclaim
+/// and `VMContext`/`CompiledEffectMachine` lifecycle once, drives through
+/// [`JitEffectMachine::drive_active`], and hands the `Done` pointer to
+/// [`JitEffectMachine::materialize`] — an explicit [`ResultMaterialization`]
+/// enum so the four semantic policies (`Value`/`Bind`/`Project`/`Render`)
+/// stay visible as named variants rather than folding into one opaque
+/// callback. Reclaim is armed exactly ONCE, in `with_active_run`, always
+/// AFTER `materialize` returns (Ok or Err) — structurally the "arm last"
+/// ordering every bind route previously had to get right by hand (see each
+/// route's old "arm reclaim LAST" comment, and `run_pure_and_bind`'s Finding
+/// 4 about what an early arm on an error path used to cost).
+enum ResultMaterialization {
+    /// Bridge `Done` to an owned [`Value`] — the plain (non-bind) routes.
+    Value,
+    /// Value-plane BIND: optionally deep-force to NF (`forced`), tenure into
+    /// old-space, return the persistent [`crate::old_space::RootSlot`].
+    Bind { forced: bool },
+    /// Multi-binder BIND: deep-force the WHOLE `Done` tuple, then project and
+    /// tenure each of `n_fields` fields in order.
+    Project { n_fields: usize },
+    /// The single-compile `it`-binding epilogue: bridge field 1 (the render)
+    /// into an owned [`Value`] FIRST — field0/field1 may alias, and the
+    /// bridge is a full owned copy immune to whatever tenuring field0 does
+    /// afterward — then optionally force + tenure field 0 alone. Field 1 is
+    /// never tenured.
+    Render { field0_forced: bool },
+}
+
+/// The materialized result of [`JitEffectMachine::materialize`], one variant
+/// per [`ResultMaterialization`] policy. Every thin route wrapper requests
+/// exactly one policy and unwraps exactly the matching variant — the other
+/// three are unreachable for that call site by construction.
+enum Materialized {
+    Value(Value),
+    Bind(crate::old_space::RootSlot),
+    Project(Vec<crate::old_space::RootSlot>),
+    Render(crate::old_space::RootSlot, Value),
+}
+
+/// Which driver [`JitEffectMachine::with_active_run`] uses, and — for the
+/// effectful case — the handler triple every pre-refactor effectful entry
+/// threaded through by hand. Pure programs skip the freer-simple effect loop
+/// entirely (the compiled function returns a raw value directly — no `Yield`
+/// decoding); effectful programs step through [`drive_to_done`], dispatching
+/// each request through `handlers`.
+enum RunTarget<'a, U, H: DispatchEffect<U>> {
+    Pure,
+    Effectful {
+        table: &'a DataConTable,
+        handlers: &'a mut H,
+        user: &'a U,
+    },
+}
+
+/// Uninhabited marker instantiating [`RunTarget`]'s `H` type parameter for a
+/// [`RunTarget::Pure`] call, where no handler is ever dispatched.
+/// [`RunTarget::Pure`] carries no handlers value, so a caller driving a pure
+/// run still has to name SOME concrete `H: DispatchEffect<U>` to monomorphize
+/// [`JitEffectMachine::with_active_run`]; this type exists purely to fill
+/// that slot. It can never be constructed, so `dispatch` is unreachable by
+/// construction — [`JitEffectMachine::drive_active`]'s pure branch never
+/// calls it either.
+enum NoHandlers {}
+
+impl DispatchEffect<()> for NoHandlers {
+    fn dispatch(
+        &mut self,
+        _tag: u64,
+        _request: &Value,
+        _cx: &EffectContext<'_, ()>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match *self {}
+    }
+}
+
+/// The live driving context [`JitEffectMachine::with_active_run`] owns for one
+/// run: a bare [`VMContext`] for [`RunTarget::Pure`], or a
+/// [`CompiledEffectMachine`] (which owns its own `VMContext`) for
+/// [`RunTarget::Effectful`].
+enum ActiveContext {
+    Pure(VMContext),
+    Effectful(CompiledEffectMachine),
+}
+
+impl ActiveContext {
+    fn vmctx_mut(&mut self) -> &mut VMContext {
+        match self {
+            ActiveContext::Pure(vmctx) => vmctx,
+            ActiveContext::Effectful(machine) => machine.vmctx_mut(),
+        }
+    }
 }
 
 /// High-level JIT effect machine.
@@ -205,6 +561,11 @@ pub struct JitEffectMachine {
     /// except in the window between a bind fragment completing and the caller
     /// taking it via [`Self::take_last_bound_root`]. A fork bind lands here on the
     /// eventual `resume`, not the initial (suspending) run.
+    ///
+    /// SLOT PATH ONLY (A1): the parked path never writes this field — its
+    /// `ParkedOutcome::Completed::bound_root` returns the tenured root inline
+    /// instead, so a second realm's completion cannot overwrite a first
+    /// realm's still-unread root (realm-checklist Item 3).
     last_bound_root: Option<crate::old_space::RootSlot>,
     /// W4 finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
@@ -214,7 +575,64 @@ pub struct JitEffectMachine {
     /// reference. Rides inside the machine (already `Send` under stow-XOR-run),
     /// like `last_bound_root`, because a `RootSlot` (`*mut *mut u8`) is `!Send`
     /// and cannot cross the eval-thread scope boundary as a bare value.
+    ///
+    /// SLOT PATH ONLY (A2): the parked path stashes this on the
+    /// [`ContinuationFrame`] instead (`ContinuationFrame::finalized_root`,
+    /// taken via [`Self::take_parked_finalized_root`]) — a frame exists for
+    /// the whole parked lifetime, so there is nowhere for a race to land.
     suspended_finalized_root: Option<crate::old_space::RootSlot>,
+    /// REALM PROTOTYPE — the many-continuation generalization of
+    /// `suspended_continuation`: every continuation parked by
+    /// [`Self::run_suspendable_parked`], keyed by [`ContinuationId`] and tagged
+    /// with the [`RealmId`] that owns it. Empty on every machine that only uses
+    /// the single-slot path.
+    ///
+    /// THE INVARIANT: a frame's `cell` is registered in `stowed_roots` from the
+    /// moment it is parked until the moment it is resumed — not just while a
+    /// child runs. The single-slot path protects an idle-suspended continuation
+    /// by a TEMPORAL argument (no GC can run on a suspended machine, enforced by
+    /// the L7 `suspended_continuation.is_none()` asserts) and only falls back to
+    /// a registered root for the window a nested child occupies. A parked frame
+    /// has no such window: it is a root for its whole parked lifetime, so any
+    /// collection — from a sibling park's turn, a plain fragment, another
+    /// realm's resume, or a heap doubling in any of them — evacuates its
+    /// continuation tree and rewrites `*cell` in place. Dropping the temporal
+    /// argument is exactly what lets several continuations coexist on one heap
+    /// while unrelated computation keeps running.
+    ///
+    /// Consequently `stowed_roots_count()` equals `continuations.len()` at
+    /// every quiescent point on the parked path (plus one transiently while a
+    /// `run_child_fragment*` guard is alive on the single-slot path).
+    continuations: HashMap<ContinuationId, ContinuationFrame>,
+    /// Monotonic source of [`ContinuationId`]s for `continuations`. Never
+    /// rewound — a resumed id is not reused, so a stale id from a caller is a
+    /// clean "unknown continuation" error rather than a silent aliasing of some
+    /// later park.
+    next_continuation_id: u64,
+    /// A3: per-realm cancel flags, lazily minted on first park-path run/resume
+    /// entry for a realm ([`Self::realm_cancel_flag`]). The parked entries
+    /// install a realm's own flag into [`MachineState`] instead of
+    /// `cancel_flag`, so cancelling one realm cannot abort a sibling realm's
+    /// run — cancellation is realm-scoped, not machine-scoped, because a
+    /// realm's continuation ids change on every re-suspension and cannot live
+    /// only on the frame. Never shrinks: a cancelled realm's flag is not
+    /// removed, only cleared (see [`Self::realm_cancel_handle`]'s doc for
+    /// whether a completed run clears it).
+    realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
+    /// The machine's ESTABLISHED handled-effect prefix: the machine cannot
+    /// introspect its own handler stack (`H` is a compile-time monomorphized
+    /// type parameter, not runtime data), so this is the machine's runtime
+    /// record of what `H` is, in its stead. Set from the first NON-EMPTY
+    /// handled prefix any realm ENTERS the parked path with
+    /// ([`Self::enter_parked_path`], called before the machine is driven —
+    /// deliberately not deferred to an actual park, since a realm whose turn
+    /// completes without ever suspending still dispatches every effect
+    /// through `H`); `None` until then. MONOTONIC — never cleared or
+    /// overwritten afterward, including on resume: every realm on a machine
+    /// is driven through the same single `H` for the machine's whole life,
+    /// so a realm that resumed and completed does not release the
+    /// constraint. See [`Self::check_prefix_compatible`].
+    established_prefix: Option<Arc<[String]>>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -307,6 +725,16 @@ pub(crate) struct RegistryGuard {
     /// The thread's `CURRENT_MACHINE` value before `install_registries`
     /// installed `machine_state` (null unless runs nest) — restored on drop.
     prev_machine: *mut MachineState,
+    /// Points at the owning `JitEffectMachine::continuations`, set by
+    /// `install_registries_with_cancel_flag`. Read at Drop time (after this
+    /// run's own park/resume has already mutated it) to decide whether
+    /// `parked_streams` is safe to clear — see the PARKED-STREAM LIFETIME note
+    /// on `Drop for RegistryGuard` below.
+    continuations: *const HashMap<ContinuationId, ContinuationFrame>,
+    /// Points at the owning `JitEffectMachine::suspended_continuation`, same
+    /// timing/rationale as `continuations` above (the single-slot path's
+    /// sibling state).
+    suspended_continuation: *const Option<*mut u8>,
 }
 
 /// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
@@ -378,9 +806,45 @@ impl Drop for RegistryGuard {
             (*self.machine_state).clear_cancel_flag();
             let _ = (*self.machine_state).take_runtime_error();
             let _ = (*self.machine_state).drain_diagnostics();
-            (*self.machine_state).clear_parked_streams();
+            // PARKED-STREAM LIFETIME: `parked_streams` is machine-global
+            // (`MachineState`, not per-frame), but a continuation can cross a
+            // suspend boundary — this run's own suspend, OR a sibling realm's
+            // — while still holding an UNFORCED streamed-response tail thunk
+            // (`host_fns::streaming`'s `alloc_stream_tail_thunk`/
+            // `alloc_element_thunk`) that names an entry in this map. Clearing
+            // unconditionally on every run's teardown (the pre-fix behavior)
+            // orphaned that entry the instant ANY run on the machine
+            // returned — including the very run that just parked it — so
+            // forcing the tail later hit a clean but wrong "registry entry
+            // missing (stale continuation?)" error even with no bug in the
+            // continuation itself. Clearing only when NOTHING is left
+            // suspended (neither the single slot nor the registry) defers the
+            // clear until the map is genuinely unreachable from any live
+            // continuation — see `realm_stream_registry_lifetime.rs` for the
+            // red (unconditional clear) / green (this guard) receipt.
+            //
+            // GROWTH, named because it is the normal case rather than a corner:
+            // while ANY realm stays parked the map is never cleared, so entries
+            // accumulate across every run in between. A cycle's outer driver is
+            // parked for the whole cycle, so that is the steady state, not an
+            // edge. It is bounded by the machine's life and reclaimed on drop
+            // (`free_session_heap`), which is exactly what cycle-scoped
+            // lifetime buys — the same bound every other per-machine registry
+            // here relies on. An immortal machine would make this unbounded,
+            // which is one more reason cycle-scoping is load-bearing.
+            let nothing_suspended =
+                (*self.continuations).is_empty() && (*self.suspended_continuation).is_none();
+            if nothing_suspended {
+                (*self.machine_state).clear_parked_streams();
+            }
             (*self.machine_state).reset_call_depth();
         }
+        // D7: this drops only the thread-local's Rc *handle* to the lambda
+        // registry this run installed — the accumulated registry itself lives
+        // in `self.pipeline` (an `Rc<LambdaRegistry>` field) and is untouched.
+        // Dropping the handle here is what lets the NEXT `install_registries`
+        // call's `build_lambda_registry` extend that shared registry in place
+        // (refcount back to 1) instead of falling back to a clone.
         crate::debug::clear_lambda_registry();
         crate::host_fns::set_exec_context("");
         crate::machine_state::restore_current_machine(self.prev_machine);
@@ -476,6 +940,10 @@ impl JitEffectMachine {
             nested_child_depth: 0,
             last_bound_root: None,
             suspended_finalized_root: None,
+            continuations: HashMap::new(),
+            next_continuation_id: 0,
+            realm_cancel_flags: HashMap::new(),
+            established_prefix: None,
         })
     }
 
@@ -512,6 +980,10 @@ impl JitEffectMachine {
             nested_child_depth: 0,
             last_bound_root: None,
             suspended_finalized_root: None,
+            continuations: HashMap::new(),
+            next_continuation_id: 0,
+            realm_cancel_flags: HashMap::new(),
+            established_prefix: None,
         })
     }
 
@@ -522,6 +994,35 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
+    /// A3: obtain a clone-able cancellation handle scoped to ONE realm,
+    /// lazily minting that realm's flag on first request. Cancelling this
+    /// handle aborts only runs/resumes parked-path-entered under `realm` —
+    /// a sibling realm's run on the same machine is unaffected, because the
+    /// parked entries install the ACTIVE realm's flag into [`MachineState`]
+    /// (see [`Self::realm_cancel_flag`]), not the machine-level
+    /// [`Self::cancel_flag`].
+    ///
+    /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
+    /// completes — same discipline as the machine-level [`CancelHandle`]
+    /// (whose own doc says "call `reset` between runs if you intend to
+    /// reuse"): the caller decides when a realm is done retrying and calls
+    /// `CancelHandle::reset` explicitly.
+    pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
+        CancelHandle(self.realm_cancel_flag(realm))
+    }
+
+    /// A3: this realm's cancel flag, lazily minted on first park-path
+    /// run/resume entry for `realm`. Never removed once minted, so the same
+    /// `Arc` identity is returned for the machine's whole life — a
+    /// [`ContinuationFrame`] cloning it at park time and a later
+    /// [`Self::realm_cancel_handle`] call always observe the same flag.
+    fn realm_cancel_flag(&mut self, realm: RealmId) -> Arc<AtomicBool> {
+        self.realm_cancel_flags
+            .entry(realm)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
     /// Drain this machine's accumulated diagnostics. The machine-scoped
     /// sibling of the ambient `host_fns::drain_diagnostics` free-fn shim
     /// (per #340).
@@ -529,12 +1030,28 @@ impl JitEffectMachine {
         self.machine_state.drain_diagnostics()
     }
 
-    /// Install per-run thread-local registries and return a drop guard.
+    /// Install per-run thread-local registries (using the machine-level
+    /// cancel flag) and return a drop guard. Every entry outside the parked
+    /// run/resume path calls this.
     ///
     /// For session machines: re-points the GC state at the retained heap
     /// buffer (if a GC has already run) OR at `nursery.start()` (first run
     /// only). For one-shot machines: always points at `nursery.start()`.
     pub(crate) fn install_registries(&mut self) -> RegistryGuard {
+        let flag = self.cancel_flag.clone();
+        self.install_registries_with_cancel_flag(flag)
+    }
+
+    /// Shared body of [`Self::install_registries`]: install per-run
+    /// thread-local registries using the given `cancel_flag` rather than
+    /// unconditionally `self.cancel_flag` — the parked run/resume entries
+    /// (A3) pass the ACTIVE realm's flag here instead, via
+    /// [`Self::realm_cancel_flag`], so cancelling one realm cannot abort a
+    /// sibling realm's run on the same machine.
+    fn install_registries_with_cancel_flag(
+        &mut self,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         self.machine_state
             .set_stack_map_registry(&self.pipeline.stack_maps);
@@ -549,7 +1066,7 @@ impl JitEffectMachine {
                 .machine_state
                 .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
         }
-        self.machine_state.set_cancel_flag(self.cancel_flag.clone());
+        self.machine_state.set_cancel_flag(cancel_flag);
         // Make the aeson-`Value` constructor ids (JsonDecode) and the
         // Either/I#/Text ids (ParseISO8601) visible to those primops' host fns
         // for the duration of this run.
@@ -565,6 +1082,8 @@ impl JitEffectMachine {
             reclaim: None,
             machine_state: machine_state_ptr,
             prev_machine,
+            continuations: &self.continuations as *const _,
+            suspended_continuation: &self.suspended_continuation as *const _,
         }
     }
 
@@ -598,6 +1117,408 @@ impl JitEffectMachine {
         vmctx
     }
 
+    /// The shared executor every plain (non-suspending) run route is a thin
+    /// wrapper over — see the ROUTE-DIFFERENCE TABLE above
+    /// [`ResultMaterialization`] for what used to be six near-duplicate
+    /// bodies. Owns, exactly once: the L7/session asserts, signal-handler
+    /// install, registry install (+ its drop-guard), `VMContext`/
+    /// `CompiledEffectMachine` construction, and — structurally, not by
+    /// convention — reclaim arming LAST, after [`Self::materialize`] (the
+    /// only place a `Bind`/`Project`/`Render` epilogue touches `self.session`
+    /// via `tenure`), unconditionally on every exit path.
+    #[allow(clippy::too_many_arguments)]
+    fn with_active_run<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        mode: RunTarget<'_, U, H>,
+        materialization: ResultMaterialization,
+        l7_msg: &str,
+        exec_start: &str,
+        resume_suffix: &str,
+    ) -> Result<Materialized, JitError> {
+        // L7 (repo-review-2026-07-06/01-gc-memory-safety.md): shared by every
+        // plain entry — starting a new turn while a prior one is still parked
+        // at resume_suspended isn't a GC-rooted invariant anything else
+        // enforces.
+        assert!(self.suspended_continuation.is_none(), "{l7_msg}");
+        let tags = match &mode {
+            RunTarget::Pure => None,
+            RunTarget::Effectful { .. } => Some(self.tags.map_err(JitError::MissingConTags)?),
+        };
+
+        // Per-thread signal handler + altstack; idempotent.
+        crate::signal_safety::install();
+        let mut _guard = self.install_registries();
+
+        // SAFETY: get_function_ptr returns a finalized JIT code pointer.
+        // Transmuting to the expected calling convention is correct per our
+        // compilation contract.
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
+
+        let raw_vmctx = if self.session.is_some() {
+            self.make_session_vmctx()
+        } else {
+            self.nursery.make_vmctx(crate::host_fns::gc_trigger)
+        };
+        let mut ctx = match tags {
+            None => {
+                let mut vmctx = raw_vmctx;
+                // SAFETY: machine_state outlives this run (owned by self).
+                vmctx.machine_state = &mut self.machine_state as *mut MachineState;
+                ActiveContext::Pure(vmctx)
+            }
+            Some(tags) => {
+                let mut machine = CompiledEffectMachine::new(func_ptr, raw_vmctx, tags);
+                // SAFETY: machine_state outlives this run (owned by self).
+                machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
+                ActiveContext::Effectful(machine)
+            }
+        };
+
+        let result = self
+            .drive_active(&mut ctx, func_ptr, mode, exec_start, resume_suffix)
+            .and_then(|done_ptr| self.materialize(&mut ctx, done_ptr, materialization));
+
+        // Arm reclaim LAST, unconditionally, on every exit path — this one
+        // call site is the whole point of the fold: no route-local judgment
+        // call about ordering survives to be gotten wrong.
+        //
+        // SAFETY: `ctx` (a `VMContext` or a `CompiledEffectMachine`, which
+        // owns its own `VMContext`) is a local in THIS frame, live until this
+        // function returns; neither type has a custom Drop, so its bytes are
+        // valid when `_guard` drops immediately after (same frame).
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, ctx.vmctx_mut() as *const _);
+        }
+        result
+    }
+
+    /// Drive `ctx` to its `Done` heap pointer: a raw call (no `Yield`
+    /// decoding) for [`RunTarget::Pure`], or the shared freer-simple step
+    /// loop ([`drive_to_done`]) for [`RunTarget::Effectful`]. The explicit
+    /// pre-bridge `take_runtime_error`/null checks below are PURE-ONLY: the
+    /// effectful loop already surfaces a runtime error via its own
+    /// `Yield::Error` arm before ever reaching `Done`, so `drive_to_done`
+    /// needs no separate check here — this is not an oversight, see the
+    /// route table above.
+    fn drive_active<U, H: DispatchEffect<U>>(
+        &mut self,
+        ctx: &mut ActiveContext,
+        func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8,
+        mode: RunTarget<'_, U, H>,
+        exec_start: &str,
+        resume_suffix: &str,
+    ) -> Result<*mut u8, JitError> {
+        match (ctx, mode) {
+            (ActiveContext::Pure(vmctx), RunTarget::Pure) => {
+                self.machine_state.reset_call_depth();
+                crate::host_fns::set_exec_context(exec_start);
+                let vmctx_ptr = vmctx as *mut VMContext;
+                // SAFETY: calling the JIT function through a valid function
+                // pointer with signal protection for crash recovery; vmctx is
+                // freshly constructed.
+                let result_ptr: *mut u8 =
+                    unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(vmctx_ptr)) }
+                        .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
+                // SAFETY: resolving pending tail calls; vmctx.tail_callee/
+                // tail_arg are valid heap pointers set by JIT tail-call sites.
+                let result_ptr = unsafe { resolve_tail_calls_protected(vmctx, result_ptr)? };
+                // Runtime error now returns a poison object instead of null,
+                // so the null check alone is not enough — check first.
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                if result_ptr.is_null() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                }
+                Ok(result_ptr)
+            }
+            (
+                ActiveContext::Effectful(machine),
+                RunTarget::Effectful {
+                    table,
+                    handlers,
+                    user,
+                },
+            ) => drive_to_done(
+                machine,
+                &self.cancel_flag,
+                table,
+                handlers,
+                user,
+                exec_start,
+                resume_suffix,
+            ),
+            _ => unreachable!(
+                "with_active_run always constructs ActiveContext to match RunTarget's variant"
+            ),
+        }
+    }
+
+    /// The shared epilogue for every plain (non-suspending) run route —
+    /// [`ResultMaterialization`]'s four policies, each ported verbatim from
+    /// the route body it used to live in. Uniform over pure vs. effectful:
+    /// every operation here only ever needs `ctx.vmctx_mut()`, which both
+    /// [`ActiveContext`] variants provide.
+    fn materialize(
+        &mut self,
+        ctx: &mut ActiveContext,
+        done_ptr: *mut u8,
+        materialization: ResultMaterialization,
+    ) -> Result<Materialized, JitError> {
+        match materialization {
+            ResultMaterialization::Value => {
+                // SAFETY: done_ptr is a valid heap pointer returned by the
+                // JIT; vmctx_ptr is valid for forcing thunks; signal
+                // protection guards against crashes.
+                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
+                let bridge_res = unsafe {
+                    crate::signal_safety::with_signal_protection(|| {
+                        heap_bridge::heap_to_value_forcing(done_ptr, vmctx_ptr)
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                // A cancel observed during forcing (gc_trigger) records the
+                // first cause; the bridge outcome — even a successful bridge
+                // of a poison value — is only its symptom.
+                let value =
+                    crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
+                Ok(Materialized::Value(value))
+            }
+            ResultMaterialization::Bind { forced } => {
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                if done_ptr.is_null() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                }
+                // Optionally deep-force to NF before tenuring (Tier0 data);
+                // Tier1 closures tenure as-is (callable code, not data).
+                let nf_ptr = if forced {
+                    let nf = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            crate::host_fns::deep_force(ctx.vmctx_mut() as *mut VMContext, done_ptr)
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    nf
+                } else {
+                    done_ptr
+                };
+                // E/D — tenure the (optionally forced) closure out of the
+                // nursery into old-space and register its persistent root.
+                // gc_active_range is the nursery from-range (still installed;
+                // the guard has not dropped). SAFETY: nf_ptr is a live heap
+                // object in the nursery from-range; tenure evacuates its
+                // closure and registers the returned slot as a persistent
+                // root valid for the machine's life. `self.session` is
+                // unaliased here — reclaim is armed strictly after this
+                // method returns (`with_active_run`'s single arm-last call).
+                let from = self
+                    .machine_state
+                    .gc_active_range()
+                    .expect("GC state installed for the bind run");
+                let from_range = (from.0 as *const u8, unsafe {
+                    from.0.add(from.1) as *const u8
+                });
+                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
+                let slot = unsafe {
+                    self.session
+                        .as_mut()
+                        .expect("session machine")
+                        .old_space
+                        .tenure(vmctx_ptr, nf_ptr, from_range)
+                };
+                Ok(Materialized::Bind(slot))
+            }
+            ResultMaterialization::Project { n_fields } => {
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                if done_ptr.is_null() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                }
+                // GC-safe projection protocol:
+                // 1. deep_force the WHOLE TUPLE first. deep_force internally
+                //    registers every pending parent as a Rust GC root and
+                //    re-reads field slots from the live (possibly relocated)
+                //    parent after each heap_force — so no pointer is cached
+                //    across a GC. Closures (TAG_CLOSURE) are forced to WHNF
+                //    and left as-is.
+                let nf_tuple = unsafe {
+                    crate::signal_safety::with_signal_protection(|| {
+                        crate::host_fns::deep_force(ctx.vmctx_mut() as *mut VMContext, done_ptr)
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                // 2. Validate arity from the NF (post-GC) object.
+                let n_actual = unsafe {
+                    *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+                        as usize
+                };
+                if n_actual != n_fields {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                        crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                            "multi-bind: result tuple has {} fields, expected {}",
+                            n_actual, n_fields
+                        )),
+                    )));
+                }
+                // 3. Capture from_range AFTER deep_force (GC may have changed
+                //    the active region). tenure() is pure Rust — no JIT GC
+                //    fires — so this range stays valid for all field tenures.
+                let from = self
+                    .machine_state
+                    .gc_active_range()
+                    .expect("GC state installed for the bind run");
+                let from_range = (from.0 as *const u8, unsafe {
+                    from.0.add(from.1) as *const u8
+                });
+                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
+                // 4. Project each field from nf_tuple and tenure. nf_tuple
+                //    stays valid across all tenure() calls (no JIT GC).
+                let mut slots = Vec::with_capacity(n_fields);
+                for i in 0..n_fields {
+                    let field_ptr = unsafe {
+                        *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
+                            as *const *mut u8)
+                    };
+                    let slot = unsafe {
+                        self.session
+                            .as_mut()
+                            .expect("session machine")
+                            .old_space
+                            .tenure(vmctx_ptr, field_ptr, from_range)
+                    };
+                    slots.push(slot);
+                }
+                Ok(Materialized::Project(slots))
+            }
+            ResultMaterialization::Render { field0_forced } => {
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                if done_ptr.is_null() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                }
+                // `Yield::Done` (effect_machine::parse_result) already forces
+                // the Val field to WHNF before returning it, so done_ptr is
+                // guaranteed a real Con here (never a thunk) — safe to read
+                // its header directly, no additional WHNF force needed.
+                let tag = unsafe { *done_ptr };
+                if tag != crate::layout::TAG_CON {
+                    return Err(JitError::Yield(
+                        crate::yield_type::YieldError::UnexpectedTag(tag),
+                    ));
+                }
+                let n_actual = unsafe {
+                    *(done_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+                        as usize
+                };
+                if n_actual != 2 {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                        crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                            "bind-render: result tuple has {} fields, expected 2",
+                            n_actual
+                        )),
+                    )));
+                }
+                // Read-only, no GC-capable calls in between — both field
+                // pointers are consistent with the (already-WHNF) done_ptr.
+                let field0_ptr = unsafe {
+                    *(done_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+                };
+                let field1_ptr = unsafe {
+                    *(done_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+                };
+                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
+
+                // Root field0_ptr across the field1 bridge below: bridging
+                // can force thunks reachable from field1's subtree, which can
+                // allocate and trigger a minor GC that relocates field0's
+                // object (whether or not it aliases field1).
+                let mut field0_ptr = field0_ptr;
+                // SAFETY: vmctx_ptr is the active run's VMContext; the scope
+                // covers exactly the field1 bridge call below.
+                let _root0 = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+                // SAFETY: the slot lives on this frame until _root0 drops.
+                unsafe {
+                    crate::host_fns::register_rust_root(vmctx_ptr, &mut field0_ptr as *mut *mut u8);
+                }
+
+                // READ-BEFORE-TENURE (load-bearing): bridge field1 (the
+                // render) into a fully OWNED Value before field0 is forced or
+                // tenured. heap_to_value_forcing's result retains no pointer
+                // into the JIT heap, so it is unaffected by whatever tenure()
+                // below does to field0's object — even when field0 and
+                // field1 alias.
+                let bridge_res = unsafe {
+                    crate::signal_safety::with_signal_protection(|| {
+                        heap_bridge::heap_to_value_forcing(field1_ptr, vmctx_ptr)
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                let rendered =
+                    crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
+
+                // field0_ptr is no longer needed as a GC root past this point
+                // — deep_force (if field0_forced) roots its own traversal,
+                // and tenure triggers no JIT GC.
+                drop(_root0);
+
+                // Force (iff field0_forced) and tenure field0 ONLY. field1 is
+                // never tenured — it was already fully consumed into
+                // `rendered` above.
+                let nf_field0 = if field0_forced {
+                    let nf = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            crate::host_fns::deep_force(
+                                ctx.vmctx_mut() as *mut VMContext,
+                                field0_ptr,
+                            )
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    nf
+                } else {
+                    field0_ptr
+                };
+
+                // Capture from_range AFTER any forcing above (GC may have
+                // changed the active region) — same ordering as Project.
+                let from = self
+                    .machine_state
+                    .gc_active_range()
+                    .expect("GC state installed for the bind run");
+                let from_range = (from.0 as *const u8, unsafe {
+                    from.0.add(from.1) as *const u8
+                });
+                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
+                let slot = unsafe {
+                    self.session
+                        .as_mut()
+                        .expect("session machine")
+                        .old_space
+                        .tenure(vmctx_ptr, nf_field0, from_range)
+                };
+                Ok(Materialized::Render(slot, rendered))
+            }
+        }
+    }
+
     /// Run to completion, dispatching effects through the handler HList.
     pub fn run<U, H: DispatchEffect<U>>(
         &mut self,
@@ -622,71 +1543,22 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
-        // L7 (repo-review-2026-07-06/01-gc-memory-safety.md): starting a new
-        // turn while a prior one is still parked at `resume_suspended` isn't
-        // a GC-rooted invariant anything else enforces — closing over it
-        // here instead of relying on tidepool-repl's external discipline.
-        // Shared by `run` and `run_fragment`.
-        assert!(
-            self.suspended_continuation.is_none(),
+        match self.with_active_run(
+            func_id,
+            RunTarget::Effectful {
+                table,
+                handlers,
+                user,
+            },
+            ResultMaterialization::Value,
             "run/run_fragment called while a continuation is suspended — \
-             resume_suspended it first"
-        );
-        let tags = self.tags.map_err(JitError::MissingConTags)?;
-
-        // Ensure signal handlers + this thread's alternate stack are installed:
-        // library embedders (compile_and_run*) don't call install() themselves,
-        // and without it a JIT fault kills the whole process instead of
-        // surfacing a clean YieldError. Idempotent per thread.
-        crate::signal_safety::install();
-
-        // Install registries
-        let mut _guard = self.install_registries();
-
-        // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
-        // expected calling convention (vmctx -> result) is correct per our compilation contract.
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let vmctx = if self.session.is_some() {
-            self.make_session_vmctx()
-        } else {
-            self.nursery.make_vmctx(crate::host_fns::gc_trigger)
-        };
-
-        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
-        // SAFETY: machine_state outlives this run (owned by self); machine's
-        // vmctx is stable for the run's duration.
-        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // Arm reclaim so Drop can recover active_buffer → session.heap.
-        // SAFETY: machine.vmctx_mut() points into `machine` on this stack frame;
-        // CompiledEffectMachine has no custom Drop so the bytes are valid when
-        // _guard drops (machine drops first but the stack frame is still live).
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
-        }
-        let done_ptr = drive_to_done(
-            &mut machine,
-            &self.cancel_flag,
-            table,
-            handlers,
-            user,
+             resume_suspended it first",
             "stepping main function",
             "",
-        )?;
-        // SAFETY: done_ptr is a valid heap pointer returned by the JIT.
-        // vmctx_ptr is valid for forcing thunks. Signal protection guards
-        // against crashes.
-        let bridge_res = unsafe {
-            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-            crate::signal_safety::with_signal_protection(|| {
-                heap_bridge::heap_to_value_forcing(done_ptr, vmctx_ptr)
-            })
+        )? {
+            Materialized::Value(v) => Ok(v),
+            _ => unreachable!("ResultMaterialization::Value always yields Materialized::Value"),
         }
-        .map_err(JitError::Signal)?;
-        // A cancel observed during forcing (`gc_trigger`) records the first
-        // cause; the bridge outcome — even a successful bridge of a poison
-        // value — is only its symptom.
-        crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))
     }
 
     // ----------------------------------------------------------------------
@@ -776,6 +1648,34 @@ impl JitEffectMachine {
         suspend_tag: u64,
         bind_forced: Option<bool>,
     ) -> Result<SuspendableOutcome, JitError> {
+        self.run_suspendable_shared(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            bind_forced,
+            ParkTarget::Slot,
+        )
+        .map(ParkedRaw::into_suspendable)
+    }
+
+    /// Shared suspendable run body for BOTH suspension paths, parametrized by
+    /// the entry `func_id` and by `park` — where a suspension puts its
+    /// continuation (the single `suspended_continuation` slot, or the
+    /// continuation registry). Everything before the epilogue is identical, so
+    /// the pre-existing entries stay byte-identical to the pre-registry body.
+    #[allow(clippy::too_many_arguments)]
+    fn run_suspendable_shared<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        bind_forced: Option<bool>,
+        park: ParkTarget,
+    ) -> Result<ParkedRaw, JitError> {
         assert!(
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
@@ -786,9 +1686,49 @@ impl JitEffectMachine {
             "run_suspendable called while a continuation is already suspended — \
              resume_suspended it first"
         );
+        // Interim guard (codex-review-2026-08-08.md item 11): the slot-vs-
+        // registry exclusion — no machine holds both a slot continuation and
+        // parked ones — used to be convention, not machine-enforced. The
+        // sibling direction (a parked-path entry while the SLOT is occupied)
+        // was already caught by the `suspended_continuation.is_none()` assert
+        // above, since every parked-path entry funnels through this same
+        // method too. This was the missing direction: a caller could park a
+        // realm, then call a legacy slot-path entry, reaching the mixed
+        // state — and only find out later, when `resume_parked` panics
+        // rather than run a collection with the slot-held continuation
+        // unrooted. Reject it HERE instead, before anything is driven.
+        //
+        // A clean `Err`, deliberately NOT a panic/assert: parking a realm and
+        // then calling a legacy entry is ordinary caller misuse (a plausible
+        // sequencing mistake, not a violated internal invariant), and it must
+        // reject the same way in every build, debug or release — a
+        // `debug_assert!` here would panic before this Err is ever reached in
+        // the debug builds tests run under, making the "clean rejection" this
+        // guard exists to provide untestable and unreachable in practice.
+        if let ParkTarget::Slot = park {
+            if !self.continuations.is_empty() {
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "run_suspendable/run_fragment_suspendable* called while {} \
+                     continuation(s) are parked in the registry — the slot path and the \
+                     registry path must not mix (a slot-held continuation is unrooted; \
+                     parked-path activity can collect while this ran). Use the parked \
+                     path (run_suspendable_parked / run_fragment_suspendable_parked) \
+                     instead.",
+                    self.continuations.len()
+                ))));
+            }
+        }
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
-        let mut _guard = self.install_registries();
+        // A3: the parked path installs THAT realm's cancel flag (lazily
+        // minted) instead of the machine-level one; the slot path installs
+        // `self.cancel_flag`, byte-identical to before this method took a
+        // `park` argument.
+        let park_cancel_flag: Arc<AtomicBool> = match park {
+            ParkTarget::Slot => self.cancel_flag.clone(),
+            ParkTarget::Registry { realm, .. } => self.realm_cancel_flag(realm),
+        };
+        let mut _guard = self.install_registries_with_cancel_flag(park_cancel_flag.clone());
         // SAFETY: finalized JIT code pointer; calling convention per contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
@@ -805,7 +1745,7 @@ impl JitEffectMachine {
         let yield_result = initial_step(&mut machine, "stepping main function");
         let finished = match drive_effect_loop(
             &mut machine,
-            &self.cancel_flag,
+            &park_cancel_flag,
             table,
             handlers,
             user,
@@ -813,7 +1753,15 @@ impl JitEffectMachine {
             Some(suspend_tag),
             yield_result,
         ) {
-            Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+            Ok(outcome) => self.finish_suspendable(
+                &mut machine,
+                outcome,
+                bind_forced,
+                park,
+                suspend_tag,
+                table,
+                park_cancel_flag,
+            ),
             Err(e) => Err(e),
         };
         // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
@@ -890,6 +1838,20 @@ impl JitEffectMachine {
                 "resume_suspended called on a machine that is not suspended".into(),
             )));
         }
+        // Defense-in-depth companion to the entry guard in
+        // `run_suspendable_shared` (codex-review-2026-08-08.md item 11): by
+        // construction, the registry can only gain entries while the slot is
+        // empty (the same shared method's L7 assert), so reaching a slot
+        // resume with the registry non-empty should be unreachable. Not a
+        // caller-facing error path — a caller cannot trigger this from the
+        // public API — so `debug_assert!`, not a typed `Err`, matching
+        // `assert_rooting_receipt`'s discipline for an internal invariant.
+        debug_assert!(
+            self.continuations.is_empty(),
+            "slot resume reached with {} realm(s) parked in the registry — \
+             the entry guard in run_suspendable_shared should have prevented this",
+            self.continuations.len()
+        );
         // A5 — NF-force the data-kinded answer BEFORE consuming the
         // continuation. A bottom anywhere in the answer (a residual unforced
         // thunk — an `undefined`/`⊥` the child-answer bridge would have raised,
@@ -911,11 +1873,49 @@ impl JitEffectMachine {
             .suspended_continuation
             .take()
             .expect("suspended_continuation present (checked is_some above)");
+        let flag = self.cancel_flag.clone();
+        self.resume_applied(
+            continuation,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            bind_forced,
+            ParkTarget::Slot,
+            flag,
+        )
+        .map(ParkedRaw::into_suspendable)
+    }
+
+    /// Apply an already-acquired continuation to a resume `input` and drive to
+    /// the next suspension or completion. Shared by BOTH resume paths: the
+    /// single-slot [`Self::resume_suspended_inner`] (which `take()`s the slot)
+    /// and the registry [`Self::resume_parked`] (which removes the frame and
+    /// deregisters its root). Both callers have already run the A5 NF-force, so
+    /// by the time control reaches here the continuation is committed.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_applied<U, H: DispatchEffect<U>>(
+        &mut self,
+        continuation: *mut u8,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        bind_forced: Option<bool>,
+        park: ParkTarget,
+        // A3: the flag to install for THIS run — `self.cancel_flag` for the
+        // slot path, or (`resume_parked`'s) already-cloned
+        // `ContinuationFrame::cancel_flag` for the registry path, so a
+        // resume never does a second `realm_cancel_flags` lookup.
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<ParkedRaw, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
         // Re-points GC state at the retained heap (heap `Some` → session buffer,
         // else nursery at the preserved cursor) — NOT a nursery reset.
-        let mut _guard = self.install_registries();
+        let mut _guard = self.install_registries_with_cancel_flag(cancel_flag.clone());
         // SAFETY: finalized JIT code pointer. The entry func is not re-called on
         // resume (the continuation is applied via `machine.resume`), but
         // CompiledEffectMachine needs a func_ptr for its own tail-call resolution.
@@ -971,7 +1971,7 @@ impl JitEffectMachine {
         ) {
             Ok(yield_result) => match drive_effect_loop(
                 &mut machine,
-                &self.cancel_flag,
+                &cancel_flag,
                 table,
                 handlers,
                 user,
@@ -979,7 +1979,15 @@ impl JitEffectMachine {
                 Some(suspend_tag),
                 yield_result,
             ) {
-                Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced),
+                Ok(outcome) => self.finish_suspendable(
+                    &mut machine,
+                    outcome,
+                    bind_forced,
+                    park,
+                    suspend_tag,
+                    table,
+                    cancel_flag,
+                ),
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -998,17 +2006,39 @@ impl JitEffectMachine {
     ///
     /// `bind_forced` distinguishes a plain suspendable turn (`None` — bridge the
     /// `Done` pointer, byte-identical to the pre-W1b epilogue) from a VALUE-PLANE
-    /// BIND (`Some(forced)` — tenure the `Done` result into old-space, stash its
-    /// [`RootSlot`] on `self.last_bound_root`, and bridge the tenured value). The
-    /// bind branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
+    /// BIND (`Some(forced)` — tenure the `Done` result into old-space and bridge
+    /// the tenured value). On the slot path the tenured [`RootSlot`] is ALSO
+    /// stashed on `self.last_bound_root` (byte-identical to before this method
+    /// took a `park` argument); on the registry path it is returned INLINE via
+    /// `ParkedRaw::Completed::bound_root` instead — A1, closing
+    /// realm-checklist Item 3 (two realms' binds completing before either is
+    /// drained would otherwise overwrite one machine-level slot). The bind
+    /// branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
     /// have armed reclaim before this call (the guard's `*mut self.session` would
     /// alias) — see `run_fragment_and_bind`'s arm-last ordering.
+    ///
+    /// `park` selects where a SUSPENSION puts its continuation: the single
+    /// `suspended_continuation` slot ([`ParkTarget::Slot`], every pre-existing
+    /// entry) or the continuation registry ([`ParkTarget::Registry`]). `table`
+    /// and `park_cancel_flag` are only consulted on the registry path, to
+    /// populate the newly-parked [`ContinuationFrame`] (A3/A4) — the slot path
+    /// ignores both, unchanged. Enforced constraint 1 (realm-lanes/B-prefix-
+    /// compat) is checked and established at ENTRY to the parked path
+    /// ([`Self::enter_parked_path`], called from the public
+    /// `run_fragment_suspendable_parked`/`resume_parked` entries) — by the
+    /// time this method runs, that check has already passed, regardless of
+    /// whether the turn is about to complete or suspend.
+    #[allow(clippy::too_many_arguments)]
     fn finish_suspendable(
         &mut self,
         machine: &mut CompiledEffectMachine,
         outcome: DriveOutcome,
         bind_forced: Option<bool>,
-    ) -> Result<SuspendableOutcome, JitError> {
+        park: ParkTarget,
+        suspend_tag: u64,
+        table: &DataConTable,
+        park_cancel_flag: Arc<AtomicBool>,
+    ) -> Result<ParkedRaw, JitError> {
         match outcome {
             DriveOutcome::Done(done_ptr) => {
                 if let Some(forced) = bind_forced {
@@ -1054,7 +2084,9 @@ impl JitEffectMachine {
                             .old_space
                             .tenure(vmctx_ptr, nf_ptr, from_range)
                     };
-                    self.last_bound_root = Some(slot);
+                    if let ParkTarget::Slot = park {
+                        self.last_bound_root = Some(slot);
+                    }
                     // Bridge the TENURED (rooted, stable) value for the turn's
                     // rendered result. SAFETY: slot.current() is the live old-space
                     // pointer; forcing is a no-op on the already-NF Tier0 case.
@@ -1067,7 +2099,10 @@ impl JitEffectMachine {
                     .map_err(JitError::Signal)?;
                     let value =
                         crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                    return Ok(SuspendableOutcome::Completed(value));
+                    return Ok(ParkedRaw::Completed {
+                        value,
+                        bound_root: Some(slot),
+                    });
                 }
                 // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
                 // vmctx is valid for forcing thunks; signal protection guards
@@ -1081,7 +2116,10 @@ impl JitEffectMachine {
                 .map_err(JitError::Signal)?;
                 let value =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                Ok(SuspendableOutcome::Completed(value))
+                Ok(ParkedRaw::Completed {
+                    value,
+                    bound_root: None,
+                })
             }
             DriveOutcome::Suspended {
                 request,
@@ -1096,14 +2134,45 @@ impl JitEffectMachine {
                 // child GC as a persistent root, and hand the slot up so the
                 // harness can apply it by reference via `run_child`.
                 let has_finalized_closure = request_carries_closure_sentinel(&request);
+                // A2: on the slot path the tenured slot goes to
+                // `self.suspended_finalized_root` exactly as before (only
+                // written when `has_finalized_closure`, so an unrelated
+                // suspension never clobbers a stale value there); on the
+                // registry path it rides to `park_continuation` instead and
+                // lands on the frame — never on a machine-level field a
+                // second realm could overwrite.
+                let mut parked_finalized_root = None;
                 if has_finalized_closure {
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
-                    self.suspended_finalized_root = Some(slot);
+                    match park {
+                        ParkTarget::Slot => self.suspended_finalized_root = Some(slot),
+                        ParkTarget::Registry { .. } => parked_finalized_root = Some(slot),
+                    }
                 }
-                self.suspended_continuation = Some(continuation);
-                Ok(SuspendableOutcome::Suspended {
+                let id = match park {
+                    ParkTarget::Slot => {
+                        self.suspended_continuation = Some(continuation);
+                        None
+                    }
+                    ParkTarget::Registry {
+                        realm,
+                        kind,
+                        handled_prefix,
+                    } => Some(self.park_continuation(
+                        continuation,
+                        realm,
+                        kind,
+                        suspend_tag,
+                        park_cancel_flag,
+                        Arc::new(table.clone()),
+                        parked_finalized_root,
+                        handled_prefix,
+                    )),
+                };
+                Ok(ParkedRaw::Suspended {
                     request,
                     has_finalized_closure,
+                    id,
                 })
             }
         }
@@ -1192,73 +2261,18 @@ impl JitEffectMachine {
     /// uses the machine's original entry; [`Self::run_fragment_pure`] passes an
     /// [`Self::add_function`]-minted fragment id. Same session lifecycle either way.
     fn run_pure_with_entry(&mut self, func_id: FuncId) -> Result<Value, JitError> {
-        // L7: see run_with_entry's doc. Shared by `run_pure` and `run_fragment_pure`.
-        assert!(
-            self.suspended_continuation.is_none(),
+        match self.with_active_run::<(), NoHandlers>(
+            func_id,
+            RunTarget::Pure,
+            ResultMaterialization::Value,
             "run_pure/run_fragment_pure called while a continuation is suspended — \
-             resume_suspended it first"
-        );
-        // Per-thread signal handler + altstack; see `run`. Idempotent.
-        crate::signal_safety::install();
-
-        // Install registries
-        let mut _guard = self.install_registries();
-
-        // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
-        // expected calling convention (vmctx -> result) is correct per our compilation contract.
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let mut vmctx = if self.session.is_some() {
-            self.make_session_vmctx()
-        } else {
-            self.nursery.make_vmctx(crate::host_fns::gc_trigger)
-        };
-        // SAFETY: machine_state outlives this run (owned by self).
-        vmctx.machine_state = &mut self.machine_state as *mut MachineState;
-        // Arm reclaim so Drop can recover active_buffer → session.heap.
-        // SAFETY: &vmctx lives on this stack frame; VMContext has no custom Drop
-        // so its bytes are valid when _guard drops (which is before run_pure returns).
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
+             resume_suspended it first",
+            "running pure computation",
+            "",
+        )? {
+            Materialized::Value(v) => Ok(v),
+            _ => unreachable!("ResultMaterialization::Value always yields Materialized::Value"),
         }
-
-        self.machine_state.reset_call_depth();
-        crate::host_fns::set_exec_context("running pure computation");
-        // SAFETY: Calling the JIT function through a valid function pointer with signal
-        // protection for crash recovery. vmctx is freshly created from the nursery.
-        let result_ptr: *mut u8 =
-            unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
-                .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
-
-        // SAFETY: Resolving pending tail calls. vmctx.tail_callee/tail_arg are valid
-        // heap pointers set by JIT tail-call sites. Code pointers in closures point to
-        // finalized JIT functions. Signal protection guards each call.
-        let result_ptr = unsafe { resolve_tail_calls_protected(&mut vmctx, result_ptr)? };
-
-        // Check for runtime error FIRST — runtime_error now returns a poison
-        // object instead of null, so we can't rely on null-check alone.
-        if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-        }
-        if result_ptr.is_null() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-        }
-
-        // SAFETY: result_ptr is a valid heap pointer returned by the JIT.
-        // vmctx_ptr is valid for forcing thunks during value conversion.
-        let bridge_result = unsafe {
-            let vmctx_ptr = &mut vmctx as *mut VMContext;
-            crate::signal_safety::with_signal_protection(|| {
-                heap_bridge::heap_to_value_forcing(result_ptr, vmctx_ptr)
-            })
-        }
-        .map_err(JitError::Signal)?;
-
-        // The bridge calls back into JIT via `heap_force`, which can trigger
-        // `gc_trigger` — an external cancel observed there records
-        // `RuntimeError::Cancelled` as the first cause, while the bridge
-        // reports only its symptom (the forced thunk never completed).
-        crate::host_fns::surface_error(bridge_result.map_err(JitError::HeapBridge))
     }
 
     // ----------------------------------------------------------------------
@@ -1340,6 +2354,36 @@ impl JitEffectMachine {
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
         self.pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
+        // GLOBAL-ID INVARIANT (codex-review-2026-08-08.md item 3): `json_con_ids`,
+        // `time_con_ids`, and `tags` (`ConTags`) below are MACHINE-GLOBAL —
+        // one slot each on `JitEffectMachine`/`MachineState`, not one per
+        // realm or per parked frame. Every `add_function` call on this
+        // machine (any realm) accumulates into the SAME three slots, and a
+        // later call's successfully-resolved ids OVERWRITE an earlier one's
+        // (re-resolved, not merged — see the `tags` comment below for the
+        // exact Err/Ok transition table). `resume_applied` reads `self.tags`
+        // (not a per-frame copy) to interpret a resumed continuation's own
+        // freer-simple envelope (`Val`/`E`/`Union`/`Leaf`/`Node`).
+        //
+        // This is safe ONLY because every realm sharing one machine is
+        // expected to agree on these ids: `Val`/`E`/`Union`/`Leaf`/`Node`
+        // (and, if used, the JSON `Either`/`I#`/`Text` / time constructors)
+        // come from the SAME fixed library modules for every realm compiled
+        // through this process, so in practice every table resolves them to
+        // the SAME numeric tags — this is what makes "last writer wins"
+        // harmless rather than a silent tag-confusion hazard. It is NOT
+        // guaranteed by any check here: a table that assigned a DIFFERENT
+        // numeric tag to one of these shared constructors would silently
+        // corrupt how an already-parked SIBLING realm's continuation gets
+        // interpreted on its next resume. What IS guarded, and load-bearing
+        // for realms in general, is that a realm's OWN domain constructors
+        // never go through this machine-global cache at all: `resume_parked`
+        // decodes exclusively against `ContinuationFrame::table` (A4, cloned
+        // once at park time), so two realms may freely reuse the SAME numeric
+        // `DataConId`/tag for DIFFERENT domain constructors without collision
+        // or shadowing — see `realm_global_id_isolation.rs` for the pinning
+        // test.
+        //
         // ACCUMULATE the primop constructor-id bundles (JsonDecode / ParseISO8601)
         // as fragments introduce constructors: upgrade None -> Some, never clobber
         // a resolved bundle. Each turn's table is a SUBSET of the session, so a
@@ -1354,6 +2398,25 @@ impl JitEffectMachine {
         }
         if let Some(ids) = tidepool_eval::time::TimeConIds::from_table(table) {
             self.time_con_ids = Some(ids);
+        }
+        // Refresh `tags` too — re-resolve ConTags against THIS fragment's table
+        // rather than leaving it frozen at whatever `compile_inner` saw at
+        // bootstrap (plans/self-iterating-harness/12-contags-staleness-findings.md,
+        // finding 1/1b). The asymmetry is deliberate, not an oversight:
+        //   Err -> Ok: install. Mirrors json_con_ids/time_con_ids' accumulate-
+        //     never-clobber intent — a later turn's table may supply a freer
+        //     constructor (Val/E/Union/Leaf/Node) that bootstrap's table lacked,
+        //     and without this a session stays permanently `MissingConTags`
+        //     even once the table can classify (finding 1b, deterministic).
+        //   Ok -> Ok (re-resolved): install. An accumulated session table is a
+        //     superset of the bootstrap one, so this is a no-op in practice,
+        //     but re-resolving against the turn's own table rather than
+        //     assuming stability is the honest rule.
+        //   Ok -> Err: do NOT clobber. Overwriting an established `Ok` with a
+        //     fresh `Err` would break a session whose later turn happens to
+        //     carry a sparser table than a prior turn did.
+        if let Ok(refreshed) = ConTags::from_table(table) {
+            self.tags = Ok(refreshed);
         }
         let nodes = expr.nodes.len();
         // Subtract the pre-wrap diagnostic walk's own time: it sits inside this
@@ -1449,100 +2512,21 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_pure_and_bind requires a session machine (compile_session)"
         );
-        // L7: see run_with_entry's doc.
-        assert!(
-            self.suspended_continuation.is_none(),
+        // run_pure_and_bind always forces to NF (Tier0 data) before tenuring
+        // — unlike its effectful sibling `run_fragment_and_bind`, it takes no
+        // `forced` flag.
+        match self.with_active_run::<(), NoHandlers>(
+            func_id,
+            RunTarget::Pure,
+            ResultMaterialization::Bind { forced: true },
             "run_pure_and_bind called while a continuation is suspended — \
-             resume_suspended it first"
-        );
-        // Per-thread signal handler + altstack; see `run`. Idempotent.
-        crate::signal_safety::install();
-
-        let mut _guard = self.install_registries();
-
-        // SAFETY: finalized JIT code pointer; calling convention per contract.
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let mut vmctx = self.make_session_vmctx();
-        // SAFETY: machine_state outlives this run (owned by self).
-        vmctx.machine_state = &mut self.machine_state as *mut MachineState;
-
-        self.machine_state.reset_call_depth();
-        crate::host_fns::set_exec_context("running pure computation (bind)");
-
-        // All fallible steps live in this closure so `arm_reclaim` below runs
-        // unconditionally on every exit, success OR error (mirrors
-        // `run_fragment_and_bind`'s `drive_to_done(..).and_then(..)` shape).
-        // Skipping arm_reclaim on an error path used to leave `session.cursor`
-        // stale: `RegistryGuard::drop`'s `clear_run_scratch` frees the active
-        // buffer (possibly GC-grown up to 1 GiB) regardless of whether reclaim
-        // ran, but only reclaim writes back the buffer + correct high-water
-        // cursor. The next run would then compute `alloc_ptr` from the stale
-        // cursor against a fresh, smaller nursery — an out-of-bounds pointer.
-        let result = (|| -> Result<crate::old_space::RootSlot, JitError> {
-            // SAFETY: calling the JIT function through a valid pointer, signal-protected.
-            let result_ptr: *mut u8 =
-                unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
-                    .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
-            // SAFETY: resolves pending tail calls (vmctx tail slots are valid).
-            let result_ptr = unsafe { resolve_tail_calls_protected(&mut vmctx, result_ptr)? };
-
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-            if result_ptr.is_null() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-            }
-
-            // K — deep-force the result to NF before tenuring (no thunks survive into
-            // old-space; the no-write-barrier tenuring invariant assumes NF data).
-            // SAFETY: result_ptr is a valid heap object; vmctx is the active context.
-            let nf_ptr = unsafe {
-                crate::signal_safety::with_signal_protection(|| {
-                    crate::host_fns::deep_force(&mut vmctx as *mut VMContext, result_ptr)
-                })
-            }
-            .map_err(JitError::Signal)?;
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-
-            // E/D — tenure the NF closure out of the nursery into old-space and
-            // register its persistent root. gc_active_range is the nursery from-range
-            // (still installed; the guard has not dropped). The tenured copy lives in
-            // old-space arenas, independent of the buffer the guard reclaims.
-            let from = self
-                .machine_state
-                .gc_active_range()
-                .expect("GC state installed for the bind run");
-            let from_range = (from.0 as *const u8, unsafe {
-                from.0.add(from.1) as *const u8
-            });
-            let vmctx_ptr = &mut vmctx as *mut VMContext;
-            // SAFETY: nf_ptr is a live heap object inside the nursery from-range;
-            // tenure evacuates its closure and registers the returned slot (via
-            // vmctx_ptr's machine_state) as a persistent root valid for the
-            // machine's life.
-            let slot = unsafe {
-                self.session
-                    .as_mut()
-                    .expect("session machine")
-                    .old_space
-                    .tenure(vmctx_ptr, nf_ptr, from_range)
-            };
-            Ok(slot)
-        })();
-
-        // Arm reclaim LAST (after all `self.session` access) so the guard's raw
-        // pointer to `self.session` is not aliased by an intervening `&mut`
-        // borrow — and unconditionally on both Ok and Err (Finding 4). On drop
-        // the guard recovers the live buffer + high-water cursor → session.
-        // heap/cursor for the next run. SAFETY: &vmctx lives on this frame;
-        // VMContext has no custom Drop so its bytes are valid at drop.
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
+             resume_suspended it first",
+            "running pure computation (bind)",
+            "",
+        )? {
+            Materialized::Bind(slot) => Ok(slot),
+            _ => unreachable!("ResultMaterialization::Bind always yields Materialized::Bind"),
         }
-        result
     }
 
     /// The effectful value-plane **bind primitive**: run `func_id` through the
@@ -1562,12 +2546,6 @@ impl JitEffectMachine {
     /// appears at `Yield::Done(ptr)` AFTER the effect step loop reduces the
     /// tree. This method runs the loop and then applies the bind sequence.
     ///
-    /// **Reclaim ordering (UAF risk):** follows `run_pure_and_bind` (NOT
-    /// `run_with_entry`). Do NOT arm reclaim before the step loop — the Done
-    /// arm accesses `self.session` for tenure, and `arm_reclaim` stores a raw
-    /// `*mut self.session`; the two cannot alias. Arm reclaim LAST after the
-    /// loop exits, after all `self.session` access.
-    ///
     /// # Panics
     /// Panics if called on a non-session machine (no old-space to tenure into).
     pub fn run_fragment_and_bind<U, H: DispatchEffect<U>>(
@@ -1582,132 +2560,33 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind requires a session machine (compile_session)"
         );
-        // L7: see run_with_entry's doc.
-        assert!(
-            self.suspended_continuation.is_none(),
+        match self.with_active_run(
+            func_id,
+            RunTarget::Effectful {
+                table,
+                handlers,
+                user,
+            },
+            ResultMaterialization::Bind { forced },
             "run_fragment_and_bind called while a continuation is suspended — \
-             resume_suspended it first"
-        );
-
-        let tags = self.tags.map_err(JitError::MissingConTags)?;
-
-        // Per-thread signal handler + altstack; idempotent (see run_with_entry).
-        crate::signal_safety::install();
-
-        // Install registries
-        let mut _guard = self.install_registries();
-
-        // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
-        // expected calling convention (vmctx -> result) is correct per our compilation contract.
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let vmctx = self.make_session_vmctx();
-
-        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
-        // SAFETY: machine_state outlives this run (owned by self).
-        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // NOTE: do NOT arm reclaim before the step loop — the Done arm accesses
-        // self.session (for tenure) and arm_reclaim stores a raw *mut self.session;
-        // the two cannot alias. Follow run_pure_and_bind's ordering: tenure first
-        // inside the loop, arm_reclaim LAST after the loop exits.
-
-        let result = drive_to_done(
-            &mut machine,
-            &self.cancel_flag,
-            table,
-            handlers,
-            user,
+             resume_suspended it first",
             "stepping effectful computation (bind)",
             "",
-        )
-        .and_then(|ptr| {
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-            if ptr.is_null() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-            }
-
-            // K — optionally deep-force to NF before tenuring (Tier0).
-            // Tier1 closures are NOT forced (they are callable code, not data).
-            // SAFETY: ptr is a valid heap object; machine.vmctx_mut() is the
-            // active VMContext for forcing thunks.
-            let nf_ptr = if forced {
-                let nf = unsafe {
-                    crate::signal_safety::with_signal_protection(|| {
-                        crate::host_fns::deep_force(machine.vmctx_mut() as *mut VMContext, ptr)
-                    })
-                }
-                .map_err(JitError::Signal)?;
-                // Forcing may have triggered a gc_trigger cancel observation;
-                // prefer that over a symptomatic bridge error.
-                if let Some(err) = crate::host_fns::take_runtime_error() {
-                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-                }
-                nf
-            } else {
-                ptr
-            };
-
-            // E/D — tenure the (optionally forced) closure out of the nursery
-            // into old-space and register its persistent root. gc_active_range
-            // is the nursery from-range (still installed; the guard has not
-            // dropped). The tenured copy lives in old-space arenas, independent
-            // of the buffer the guard reclaims.
-            let from = self
-                .machine_state
-                .gc_active_range()
-                .expect("GC state installed for the bind run");
-            let from_range = (from.0 as *const u8, unsafe {
-                from.0.add(from.1) as *const u8
-            });
-            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-            // SAFETY: nf_ptr is a live heap object inside the nursery
-            // from-range; tenure evacuates its closure and registers the
-            // returned slot (via vmctx_ptr's machine_state) as a persistent
-            // root valid for the machine's life.
-            let slot = unsafe {
-                self.session
-                    .as_mut()
-                    .expect("session machine")
-                    .old_space
-                    .tenure(vmctx_ptr, nf_ptr, from_range)
-            };
-            Ok(slot)
-        });
-
-        // Arm reclaim LAST (after all `self.session` access — tenure is in the
-        // epilogue above) so the guard's raw pointer to `self.session` is not
-        // aliased by an intervening `&mut` borrow. On drop the guard recovers
-        // the live buffer + high-water cursor → session.heap/cursor for the
-        // next run. SAFETY: machine.vmctx_mut() points into `machine` on this
-        // stack frame; CompiledEffectMachine has no custom Drop so its bytes
-        // are valid when _guard drops (machine drops first but the stack frame
-        // is still live).
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        )? {
+            Materialized::Bind(slot) => Ok(slot),
+            _ => unreachable!("ResultMaterialization::Bind always yields Materialized::Bind"),
         }
-        result
     }
 
     /// Multi-binder effectful bind: run `func_id` through the effect step loop,
-    /// and at `Yield::Done(tuple_ptr)` project each field of the result tuple,
-    /// optionally deep-force Tier-0 fields, tenure each field into old-space, and
-    /// return one [`RootSlot`](crate::old_space::RootSlot) per component.
-    ///
-    /// `forced_mask[i] = true` → deep-force field `i` before tenuring (Tier-0
-    /// data); `false` → tenure as-is (Tier-1 closure). The caller (session.rs
-    /// `run_multi_bind`) zips the returned slots with the binder metadata.
-    ///
-    /// **Field order invariant**: `forced_mask` must align with the tuple fields in
-    /// source order — the same order as the `pure (a, b, …)` wrapper and the
-    /// binders in the JSON sidecar. The assertion on `n_actual` guards against
-    /// shape mismatches.
-    ///
-    /// **Reclaim ordering** follows `run_fragment_and_bind`: tenure ALL fields
-    /// inside the Done arm (before arm_reclaim), then arm reclaim LAST after the
-    /// loop exits so the `*mut self.session` raw pointer is not aliased by an
-    /// intervening `&mut` borrow.
+    /// deep-force the WHOLE `Yield::Done(tuple_ptr)` result tuple (Tier-0 —
+    /// every field is forced, unconditionally, unlike the single-binder
+    /// `run_fragment_and_bind`'s per-call `forced` choice), then project and
+    /// tenure each of `n_fields` fields into old-space. The caller
+    /// (session.rs `run_multi_bind`) zips the returned slots with the binder
+    /// metadata, in the same source order as the `pure (a, b, …)` wrapper and
+    /// the binders in the JSON sidecar; the assertion on `n_actual` guards
+    /// against shape mismatches.
     ///
     /// # Panics
     /// Panics if called on a non-session machine.
@@ -1727,115 +2606,22 @@ impl JitEffectMachine {
             n_fields > 0,
             "run_fragment_and_bind_projected requires at least one field"
         );
-        // L7: see run_with_entry's doc.
-        assert!(
-            self.suspended_continuation.is_none(),
+        match self.with_active_run(
+            func_id,
+            RunTarget::Effectful {
+                table,
+                handlers,
+                user,
+            },
+            ResultMaterialization::Project { n_fields },
             "run_fragment_and_bind_projected called while a continuation is \
-             suspended — resume_suspended it first"
-        );
-
-        let tags = self.tags.map_err(JitError::MissingConTags)?;
-
-        crate::signal_safety::install();
-        let mut _guard = self.install_registries();
-
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let vmctx = self.make_session_vmctx();
-        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
-        // SAFETY: machine_state outlives this run (owned by self).
-        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // NOTE: do NOT arm reclaim before the step loop (same ordering as
-        // run_fragment_and_bind — tenure is in the Done arm).
-
-        let result = drive_to_done(
-            &mut machine,
-            &self.cancel_flag,
-            table,
-            handlers,
-            user,
+             suspended — resume_suspended it first",
             "stepping effectful computation (multi-bind)",
             " (multi-bind)",
-        )
-        .and_then(|tuple_ptr| {
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-            if tuple_ptr.is_null() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-            }
-
-            // GC-safe projection protocol:
-            // 1. deep_force the WHOLE TUPLE first. deep_force internally
-            //    registers every pending parent as a Rust GC root and re-reads
-            //    field slots from the live (possibly relocated) parent after
-            //    each heap_force — so no pointer is cached across a GC.
-            //    Returns nf_tuple: the post-GC NF address with all field slots
-            //    updated to live NF children. Closures (TAG_CLOSURE) are
-            //    forced to WHNF and left as-is.
-            let nf_tuple = unsafe {
-                crate::signal_safety::with_signal_protection(|| {
-                    crate::host_fns::deep_force(machine.vmctx_mut() as *mut VMContext, tuple_ptr)
-                })
-            }
-            .map_err(JitError::Signal)?;
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-
-            // 2. Validate arity from the NF (post-GC) object.
-            let n_actual = unsafe {
-                *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
-                    as usize
-            };
-            if n_actual != n_fields {
-                return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
-                    crate::host_fns::RuntimeError::UserErrorMsg(format!(
-                        "multi-bind: result tuple has {} fields, expected {}",
-                        n_actual, n_fields
-                    )),
-                )));
-            }
-
-            // 3. Capture from_range AFTER deep_force (GC may have changed the
-            //    active region). tenure() is pure Rust — no JIT GC fires — so
-            //    this range stays valid for all field tenures.
-            let from = self
-                .machine_state
-                .gc_active_range()
-                .expect("GC state installed for the bind run");
-            let from_range = (from.0 as *const u8, unsafe {
-                from.0.add(from.1) as *const u8
-            });
-            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-
-            // 4. Project each field from nf_tuple and tenure. nf_tuple stays
-            //    valid across all tenure() calls (no JIT GC). deep_force
-            //    already wrote live NF pointers into each slot.
-            let mut slots = Vec::with_capacity(n_fields);
-            for i in 0..n_fields {
-                let field_ptr = unsafe {
-                    *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
-                        as *const *mut u8)
-                };
-                let slot = unsafe {
-                    self.session
-                        .as_mut()
-                        .expect("session machine")
-                        .old_space
-                        .tenure(vmctx_ptr, field_ptr, from_range)
-                };
-                slots.push(slot);
-            }
-            Ok(slots)
-        });
-
-        // Arm reclaim LAST (after all self.session access — tenure is in the
-        // epilogue above). Same UAF ordering as run_fragment_and_bind.
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        )? {
+            Materialized::Project(slots) => Ok(slots),
+            _ => unreachable!("ResultMaterialization::Project always yields Materialized::Project"),
         }
-        result
     }
 
     /// The single-compile `it`-binding primitive: run `func_id` through the
@@ -1864,10 +2650,6 @@ impl JitEffectMachine {
     /// `true` (Tier0Data) deep-forces field 0 to NF before tenuring; `false`
     /// (Tier1 closure) tenures field 0 as-is, unforced.
     ///
-    /// **Reclaim ordering** follows `run_fragment_and_bind`/`_projected`:
-    /// tenure inside the Done arm (before arm_reclaim), arm reclaim LAST after
-    /// the loop exits.
-    ///
     /// # Panics
     /// Panics if called on a non-session machine.
     pub fn run_fragment_and_bind_render<U, H: DispatchEffect<U>>(
@@ -1882,162 +2664,22 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind_render requires a session machine"
         );
-        // L7: see run_with_entry's doc.
-        assert!(
-            self.suspended_continuation.is_none(),
+        match self.with_active_run(
+            func_id,
+            RunTarget::Effectful {
+                table,
+                handlers,
+                user,
+            },
+            ResultMaterialization::Render { field0_forced },
             "run_fragment_and_bind_render called while a continuation is \
-             suspended — resume_suspended it first"
-        );
-
-        let tags = self.tags.map_err(JitError::MissingConTags)?;
-
-        crate::signal_safety::install();
-        let mut _guard = self.install_registries();
-
-        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
-        let vmctx = self.make_session_vmctx();
-        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
-        // SAFETY: machine_state outlives this run (owned by self).
-        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // NOTE: do NOT arm reclaim before the step loop (same ordering as
-        // run_fragment_and_bind / _projected — tenure is in the Done arm).
-
-        let result = drive_to_done(
-            &mut machine,
-            &self.cancel_flag,
-            table,
-            handlers,
-            user,
+             suspended — resume_suspended it first",
             "stepping effectful computation (bind-render)",
             " (bind-render)",
-        )
-        .and_then(|tuple_ptr| {
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-            if tuple_ptr.is_null() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-            }
-
-            // `Yield::Done` (effect_machine::parse_result) already forces the
-            // Val field to WHNF before returning it, so tuple_ptr is
-            // guaranteed a real Con here (never a thunk) — safe to read its
-            // header directly, no additional WHNF force needed.
-            let tag = unsafe { *tuple_ptr };
-            if tag != crate::layout::TAG_CON {
-                return Err(JitError::Yield(
-                    crate::yield_type::YieldError::UnexpectedTag(tag),
-                ));
-            }
-            let n_actual = unsafe {
-                *(tuple_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
-                    as usize
-            };
-            if n_actual != 2 {
-                return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
-                    crate::host_fns::RuntimeError::UserErrorMsg(format!(
-                        "bind-render: result tuple has {} fields, expected 2",
-                        n_actual
-                    )),
-                )));
-            }
-
-            // Read-only, no GC-capable calls in between — both field
-            // pointers are consistent with the (already-WHNF) tuple_ptr.
-            let field0_ptr = unsafe {
-                *(tuple_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
-            };
-            let field1_ptr = unsafe {
-                *(tuple_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
-            };
-
-            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-
-            // Root field0_ptr across the field1 bridge below: bridging can
-            // force thunks reachable from field1's subtree, which can
-            // allocate and trigger a minor GC that relocates field0's object
-            // (whether or not it aliases field1). Registering it here keeps
-            // it live and GC-updated so the value we tenure afterward is
-            // correct post-GC.
-            let mut field0_ptr = field0_ptr;
-            // SAFETY: vmctx_ptr is the active run's VMContext; the scope
-            // covers exactly the field1 bridge call below.
-            let _root0 = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
-            // SAFETY: the slot lives on this frame until _root0 drops.
-            unsafe {
-                crate::host_fns::register_rust_root(vmctx_ptr, &mut field0_ptr as *mut *mut u8);
-            }
-
-            // READ-BEFORE-TENURE (load-bearing): bridge field1 (the render)
-            // into a fully OWNED Value before field0 is forced or tenured.
-            // heap_to_value_forcing's result retains no pointer into the JIT
-            // heap, so it is unaffected by whatever tenure() below does to
-            // field0's object — even when field0 and field1 alias.
-            let bridge_res = unsafe {
-                crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::heap_to_value_forcing(field1_ptr, vmctx_ptr)
-                })
-            }
-            .map_err(JitError::Signal)?;
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-            }
-            let rendered =
-                crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-
-            // field0_ptr is no longer needed as a GC root past this point —
-            // `deep_force` (if field0_forced) roots its own traversal, and
-            // `tenure` triggers no JIT GC.
-            drop(_root0);
-
-            // Force (iff field0_forced, mirroring run_fragment_and_bind's
-            // tier-driven forcing) and tenure field0 ONLY. field1 is never
-            // tenured — it was already fully consumed into `rendered` above.
-            let nf_field0 = if field0_forced {
-                let nf = unsafe {
-                    crate::signal_safety::with_signal_protection(|| {
-                        crate::host_fns::deep_force(
-                            machine.vmctx_mut() as *mut VMContext,
-                            field0_ptr,
-                        )
-                    })
-                }
-                .map_err(JitError::Signal)?;
-                if let Some(err) = crate::host_fns::take_runtime_error() {
-                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-                }
-                nf
-            } else {
-                field0_ptr
-            };
-
-            // Capture from_range AFTER any forcing above (GC may have
-            // changed the active region) — same ordering as `_projected`.
-            let from = self
-                .machine_state
-                .gc_active_range()
-                .expect("GC state installed for the bind run");
-            let from_range = (from.0 as *const u8, unsafe {
-                from.0.add(from.1) as *const u8
-            });
-            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-            let slot = unsafe {
-                self.session
-                    .as_mut()
-                    .expect("session machine")
-                    .old_space
-                    .tenure(vmctx_ptr, nf_field0, from_range)
-            };
-            Ok((slot, rendered))
-        });
-
-        // Arm reclaim LAST (after all self.session access — tenure is in the
-        // epilogue above). Same UAF ordering as run_fragment_and_bind.
-        unsafe {
-            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        )? {
+            Materialized::Render(slot, rendered) => Ok((slot, rendered)),
+            _ => unreachable!("ResultMaterialization::Render always yields Materialized::Render"),
         }
-        result
     }
 
     /// Register a session-scoped GC root slot that survives across runs (i.e.
@@ -2078,6 +2720,26 @@ impl JitEffectMachine {
     /// rationale as `persistent_roots_count`.
     pub fn remembered_slots_count(&self) -> usize {
         self.machine_state.remembered_slots_count()
+    }
+
+    /// Session-lifetime count of Cranelift functions successfully compiled
+    /// into this machine's `JITModule` (test/diagnostic accessor — realm-
+    /// lifetime spike, COST B). Delegates to [`CodegenPipeline::functions_defined`],
+    /// which has no other reach from `JitEffectMachine` today.
+    pub fn functions_defined(&self) -> u64 {
+        self.pipeline.functions_defined()
+    }
+
+    /// Total bytes currently tenured in this session's old-space (test/
+    /// diagnostic accessor — realm-lifetime spike, COST A). 0 for a one-shot
+    /// machine (no session, no old-space). Delegates to
+    /// [`crate::old_space::OldSpace::bytes_used`], which has no other reach
+    /// from `JitEffectMachine` today.
+    pub fn old_space_bytes_used(&self) -> usize {
+        self.session
+            .as_ref()
+            .map(|s| s.old_space.bytes_used())
+            .unwrap_or(0)
     }
 
     /// Whether this machine is currently suspended at a typed yield (`Ask`),
@@ -2216,6 +2878,448 @@ impl JitEffectMachine {
         let _nested = self.enter_nested_child();
         self.run_pure_with_entry(func_id)
     }
+
+    // ----------------------------------------------------------------------
+    // REALM PROTOTYPE — the parked-continuation registry.
+    //
+    // Many continuations parked in ONE machine, each a REGISTERED GC ROOT for
+    // its whole parked lifetime, resumable in any order. The temporal argument
+    // ("no GC runs on a suspended machine") is dropped entirely here: the
+    // parked path never populates `suspended_continuation`, so the L7 asserts
+    // on the plain entries pass and arbitrary further computation — including
+    // computation that collects and doubles the heap — runs freely against a
+    // machine holding N parks.
+    // ----------------------------------------------------------------------
+
+    /// Check `incoming` — a realm's handled prefix, the effect names for tags
+    /// `[0, suspend_tag)` in position order — against the machine's
+    /// established prefix. `DispatchEffect` is positional over an `HList`
+    /// and the suspend test is `tag >= suspend_tag`; both are correct only
+    /// relative to one effect row whose handled effects occupy a contiguous
+    /// low prefix, so two realms sharing a machine must agree on that prefix
+    /// exactly, not merely where they happen to overlap.
+    ///
+    /// An EMPTY `incoming` prefix is compatible with anything — this is the
+    /// outer driver's threshold-zero row (`vec![runllmturn_decl()]`, handled
+    /// prefix empty: nothing handled, nothing ever dispatched, so it cannot
+    /// misroute). If the machine has not established a prefix yet, any
+    /// `incoming` prefix is compatible (it may go on to become the
+    /// establishing one). Otherwise, two non-empty prefixes must be EXACTLY
+    /// EQUAL: a length difference is refused as [`PrefixMismatch::Length`]
+    /// (a strict EXTENSION, e.g. `[FileIO, Proc]` established against
+    /// `[FileIO, Proc, Memory]` incoming, is REFUSED, not accepted — see
+    /// below for why); equal length but disagreeing content is refused as
+    /// [`PrefixMismatch::Position`] at the first differing index.
+    ///
+    /// **Why exact equality, not agreement-up-to-the-shorter-length.** The
+    /// established prefix is CALLER-SUPPLIED metadata, not something read off
+    /// the machine's actual (compile-time monomorphized, runtime-opaque) `H`.
+    /// A realm declaring a shorter prefix says nothing about how many
+    /// handlers `H` really has — it may simply use a lower suspend
+    /// threshold. So accepting an extension is unsound: if `H` really does
+    /// have a handler at the extended position, the extending realm's tag
+    /// there is BELOW ITS OWN threshold (dispatched, not suspended), and it
+    /// reaches that handler — a silent misroute, exactly what this check
+    /// exists to prevent.
+    ///
+    /// **Why exact equality IS sound.** With every non-empty established
+    /// prefix on a machine equal to every other, and an empty prefix
+    /// dispatching nothing, every tag that is ever DISPATCHED (as opposed to
+    /// suspended) is strictly below the one common prefix length, and every
+    /// realm agrees on what sits at every position below that length. No
+    /// dispatched tag can therefore reach a position two realms disagree
+    /// about.
+    ///
+    /// **The residual, stated rather than glossed.** This check enforces
+    /// agreement AMONG realms sharing a machine; it cannot verify a declared
+    /// prefix against the actual, opaque `H` — a single realm parking alone,
+    /// or every realm agreeing with each other while all of them are wrong
+    /// about `H`, is not caught here. A wrong declared prefix, undetected by
+    /// any other realm's disagreement, remains the caller's responsibility.
+    fn check_prefix_compatible(&self, incoming: &[String]) -> Result<(), JitError> {
+        if incoming.is_empty() {
+            return Ok(());
+        }
+        if let Some(established) = &self.established_prefix {
+            if established.len() != incoming.len() {
+                return Err(JitError::IncompatibleHandledPrefix {
+                    established: established.to_vec(),
+                    incoming: incoming.to_vec(),
+                    mismatch: PrefixMismatch::Length,
+                });
+            }
+            for (position, (e, i)) in established.iter().zip(incoming.iter()).enumerate() {
+                if e != i {
+                    return Err(JitError::IncompatibleHandledPrefix {
+                        established: established.to_vec(),
+                        incoming: incoming.to_vec(),
+                        mismatch: PrefixMismatch::Position(position),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Enter the parked path with `incoming` — a realm's handled prefix.
+    /// Checks it against the machine's established prefix
+    /// ([`Self::check_prefix_compatible`]) and, if compatible, ESTABLISHES it
+    /// when this is the first non-empty prefix to enter. Two non-empty
+    /// prefixes must be EXACTLY EQUAL to be compatible — see
+    /// [`Self::check_prefix_compatible`] for why that is sound (every
+    /// dispatched tag sits below the one common prefix length every realm
+    /// agrees on) and its residual (agreement AMONG realms, not verification
+    /// against the actual opaque `H`).
+    ///
+    /// `H` is fixed for the machine's life regardless of whether the
+    /// entering turn goes on to suspend or complete, so establishing must
+    /// happen HERE — at entry, before the machine is driven at all — not at
+    /// park: a realm that runs a turn to completion without ever suspending
+    /// dispatches every one of its effects through `H` exactly the same as
+    /// one that suspends, so establishing only on suspension would leave
+    /// such a realm's non-empty prefix never recorded, after which an
+    /// incompatible realm could park successfully because nothing was
+    /// established.
+    ///
+    /// Called at the TOP of every parked-path entry
+    /// ([`Self::run_fragment_suspendable_parked`], [`Self::resume_parked`]),
+    /// before anything is driven — a refusal here leaves the machine
+    /// untouched because nothing has run yet, which is a strictly easier
+    /// property to hold than checking after a run has already suspended.
+    fn enter_parked_path(&mut self, incoming: &Arc<[String]>) -> Result<(), JitError> {
+        self.check_prefix_compatible(incoming)?;
+        if self.established_prefix.is_none() && !incoming.is_empty() {
+            self.established_prefix = Some(incoming.clone());
+        }
+        Ok(())
+    }
+
+    /// The rooting receipt (SEAM.md §1): every parked continuation must be a
+    /// registered GC root for its whole parked lifetime, so
+    /// `stowed_roots_count() == parked_count()` at every quiescent point the
+    /// registry passes through. `debug_assert_eq!` rather than a hard
+    /// assertion — a violation is a soundness bug worth crashing a debug or
+    /// test build over, but no release caller should pay a counting cost for
+    /// it. Call after every registry mutation: a park, a re-park during a
+    /// resume, a rejected resume that leaves the frame parked, a successful
+    /// removal, and a drain.
+    fn assert_rooting_receipt(&self) {
+        debug_assert_eq!(
+            self.machine_state.stowed_roots_count(),
+            self.continuations.len(),
+            "rooting receipt violated: stowed_roots_count() must equal the parked \
+             continuation count at every quiescent point"
+        );
+    }
+
+    /// Park a suspended continuation into the registry as a registered GC root
+    /// and mint its [`ContinuationId`]. The heap-stable `Box` cell is the same
+    /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
+    /// this registration is released by [`Self::resume_parked`], not by a guard
+    /// at the end of the next child run.
+    ///
+    /// The caller has already checked AND established `handled_prefix` via
+    /// [`Self::enter_parked_path`] at entry to the parked path — before the
+    /// machine was driven at all. This method performs no check or establish
+    /// of its own; `handled_prefix` is stored on the new frame purely so a
+    /// later [`Self::resume_parked`] can replay it through that same entry
+    /// check.
+    #[allow(clippy::too_many_arguments)]
+    fn park_continuation(
+        &mut self,
+        continuation: *mut u8,
+        realm: RealmId,
+        kind: ParkKind,
+        suspend_tag: u64,
+        cancel_flag: Arc<AtomicBool>,
+        table: Arc<DataConTable>,
+        finalized_root: Option<crate::old_space::RootSlot>,
+        handled_prefix: Arc<[String]>,
+    ) -> ContinuationId {
+        let mut cell = Box::new(continuation);
+        let slot: *mut *mut u8 = &mut *cell;
+        // SAFETY: `slot` is the address of the Box's inner cell — a stable heap
+        // allocation that does not move when the Box moves into the map or the
+        // machine moves between threads. It stays valid until `resume_parked`
+        // deregisters it and drops the frame. The GC reads and rewrites `*slot`
+        // in place on every collection until then.
+        self.machine_state.register_stowed_root(slot);
+        let id = ContinuationId(self.next_continuation_id);
+        self.next_continuation_id += 1;
+        self.continuations.insert(
+            id,
+            ContinuationFrame {
+                cell,
+                realm,
+                suspend_tag,
+                kind,
+                finalized_root,
+                cancel_flag,
+                table,
+                handled_prefix,
+            },
+        );
+        self.assert_rooting_receipt();
+        id
+    }
+
+    /// Parked sibling of [`Self::run_suspendable`]: drive the machine's entry
+    /// through the same suspend path, but PARK a suspension in the continuation
+    /// registry under `realm` instead of stowing it in the single slot.
+    ///
+    /// `suspended_continuation` is left `None` throughout, so the machine stays
+    /// usable: further fragments, further parked turns, and resumes of OTHER
+    /// parked continuations all run against it while this one waits.
+    ///
+    /// `handled_prefix` must be EXACTLY EQUAL to every other non-empty
+    /// prefix already on this machine, or empty — see
+    /// [`Self::check_prefix_compatible`] for why that is the sound check
+    /// (not merely agreement up to a shared length) and its residual (it
+    /// enforces agreement AMONG realms, not verification against the
+    /// actual, opaque `H`).
+    ///
+    /// # Panics
+    /// Panics on a non-session machine — heap retention across the suspension
+    /// requires [`Self::compile_session`].
+    pub fn run_suspendable_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        realm: RealmId,
+        handled_prefix: &[String],
+    ) -> Result<ParkedOutcome, JitError> {
+        let func_id = self.func_id;
+        self.run_fragment_suspendable_parked(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            realm,
+            ParkKind::Plain,
+            handled_prefix,
+        )
+    }
+
+    /// Parked sibling of [`Self::run_fragment_suspendable`] /
+    /// [`Self::run_fragment_suspendable_binding`]: drive an
+    /// [`Self::add_function`]-minted fragment through the suspend path, parking
+    /// a suspension in the registry under `realm`. `kind` picks the completion
+    /// discipline — [`ParkKind::Plain`] bridges the `Done` pointer,
+    /// [`ParkKind::Binding`] tenures it as a value-plane bind.
+    ///
+    /// `handled_prefix` is this realm's handled prefix — the effect names for
+    /// tags `[0, suspend_tag)`, in position order (the caller builds the
+    /// decls row, so it has the names). Checked against the machine's
+    /// established prefix, and established if this is the first non-empty
+    /// prefix to enter, BEFORE the machine is driven at all
+    /// ([`Self::enter_parked_path`]) — an incompatible realm never executes a
+    /// single effect against a foreign handler stack, whether or not it
+    /// would go on to suspend or complete. Two non-empty prefixes must be
+    /// EXACTLY EQUAL to be compatible — a strict extension of the
+    /// established prefix is REFUSED, not accepted, because the established
+    /// prefix is caller-supplied metadata, not a read of the machine's
+    /// actual (opaque) handler stack (see
+    /// [`Self::check_prefix_compatible`] for the full argument and its
+    /// residual: this enforces agreement AMONG realms, not verification
+    /// against the real `H`). A disagreement refuses with
+    /// `JitError::IncompatibleHandledPrefix` and leaves the machine
+    /// untouched (nothing has run yet).
+    ///
+    /// # Panics
+    /// Panics on a non-session machine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        realm: RealmId,
+        kind: ParkKind,
+        handled_prefix: &[String],
+    ) -> Result<ParkedOutcome, JitError> {
+        let handled_prefix: Arc<[String]> = Arc::from(handled_prefix);
+        self.enter_parked_path(&handled_prefix)?;
+        self.run_suspendable_shared(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            kind.bind_forced(),
+            ParkTarget::Registry {
+                realm,
+                kind,
+                handled_prefix,
+            },
+        )
+        .map(ParkedRaw::into_parked)
+    }
+
+    /// Re-enter the continuation parked under `id`, feeding the answer (or an
+    /// abort) and driving to the next suspension or completion. The frame's own
+    /// `suspend_tag` and [`ParkKind`] are replayed — the caller supplies only
+    /// the id and the input.
+    ///
+    /// Resumes in ANY order: the registry imposes none. A re-suspension parks
+    /// again under a FRESH id in the same realm, replaying the frame's own
+    /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
+    /// to establish) via [`Self::enter_parked_path`] at the TOP of this
+    /// method, before the continuation is driven at all — same discipline as
+    /// [`Self::run_fragment_suspendable_parked`]'s entry check. The frame's
+    /// own prefix was already checked EXACTLY EQUAL to the machine's
+    /// established one when it first parked, and the established prefix is
+    /// monotonic, so this re-check cannot newly disagree — see
+    /// [`Self::check_prefix_compatible`] for why exact equality is sound and
+    /// its residual (agreement AMONG realms, not verification against the
+    /// real `H`).
+    ///
+    /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
+    /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
+    /// answer leaves the frame PARKED and still ROOTED and the caller can retry
+    /// with a corrected answer.
+    ///
+    /// A4: the frame's own `table` (cloned at park time, see
+    /// [`ContinuationFrame::table`]) is what gets decoded against — this
+    /// method no longer accepts a caller-supplied table at all, so resuming a
+    /// frame against a foreign row is impossible by construction.
+    ///
+    /// # Panics
+    /// Panics if the single `suspended_continuation` slot is occupied. The two
+    /// suspension paths must not be MIXED on one machine: a slot-held
+    /// continuation is unregistered, so driving a parked resume against it
+    /// would let this run's collections free the slot-held one. This is the L7
+    /// assert's sibling for the registry path, and it is why a caller one level
+    /// up (`ResidentSession::run_child`'s `ChildSuspended` wall) has to convert
+    /// its parent to the registry too rather than park only the child.
+    pub fn resume_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        id: ContinuationId,
+        handlers: &mut H,
+        user: &U,
+        input: ResumeInput,
+    ) -> Result<ParkedOutcome, JitError> {
+        assert!(
+            self.suspended_continuation.is_none(),
+            "resume_parked called while the single-slot continuation is occupied — \
+             the slot-held continuation is UNREGISTERED and this run's collections \
+             would free it. Convert the caller to the parked path; do not mix."
+        );
+        // PEEK the frame — do NOT remove it yet (A5).
+        let (realm, kind, suspend_tag, handled_prefix) = match self.continuations.get(&id) {
+            Some(frame) => (
+                frame.realm,
+                frame.kind,
+                frame.suspend_tag,
+                frame.handled_prefix.clone(),
+            ),
+            None => {
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "resume_parked: no continuation parked under {id:?}"
+                ))))
+            }
+        };
+        // Entry check, BEFORE the continuation is driven at all (same
+        // discipline as run_fragment_suspendable_parked). The established
+        // prefix is monotonic, so this frame's own prefix — already checked
+        // compatible when it first parked — stays compatible forever; this
+        // re-confirmation is a no-op in practice, kept for the same
+        // before-anything-runs discipline rather than because it can newly
+        // disagree.
+        self.enter_parked_path(&handled_prefix)?;
+        if let ResumeInput::Answer(val) = &input {
+            if let Err(reason) = answer_force_nf(val) {
+                // A5: rejected WITHOUT consuming — the frame stays parked and
+                // still rooted, so the rooting receipt must still hold.
+                self.assert_rooting_receipt();
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "resume answer is not in normal form (bottom in the answer): {reason}"
+                ))));
+            }
+        }
+        // Answer verified NF (or this is an Abort) — NOW take the frame and
+        // release its root. Every early return above left it parked and rooted.
+        let mut frame = self
+            .continuations
+            .remove(&id)
+            .expect("frame present (peeked above, &mut self held throughout)");
+        let slot: *mut *mut u8 = &mut *frame.cell;
+        self.machine_state.deregister_stowed_root(slot);
+        self.assert_rooting_receipt();
+        // Read the GC-CURRENT pointer out of the cell: collections since the
+        // park rewrote it in place through the registered slot.
+        let continuation = *frame.cell;
+        // A3/A4: the frame's own cancel flag and table — no `realm_cancel_flags`
+        // or caller lookup needed, this IS the second-lookup avoidance the
+        // frame exists for.
+        let cancel_flag = frame.cancel_flag.clone();
+        let table = frame.table.clone();
+        // Any finalized root never taken via `take_parked_finalized_root` is
+        // dropped here with the frame; its persistent-root registration lives
+        // independently for the machine's life regardless (same as
+        // `take_finalized_root`'s doc), so this is not a leak — just an
+        // explicit acknowledgment rather than a silent field drop.
+        let _ = frame.finalized_root.take();
+        drop(frame);
+        self.resume_applied(
+            continuation,
+            &table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            kind.bind_forced(),
+            ParkTarget::Registry {
+                realm,
+                kind,
+                handled_prefix,
+            },
+            cancel_flag,
+        )
+        .map(ParkedRaw::into_parked)
+    }
+
+    /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry
+    /// path (A2): take the persistent root of a PARKED frame's closure-valued
+    /// `finalize` payload, tenured at park time. The frame stays parked and
+    /// rooted — only the frame's own handle to the slot is cleared, not its
+    /// persistent-root registration, which lives for the machine's life
+    /// regardless (same as `take_finalized_root`'s doc). `None` unless `id`
+    /// names a frame that parked while suspended on a closure-valued
+    /// finalize, or its slot was already taken.
+    pub fn take_parked_finalized_root(
+        &mut self,
+        id: ContinuationId,
+    ) -> Option<crate::old_space::RootSlot> {
+        self.continuations
+            .get_mut(&id)
+            .and_then(|frame| frame.finalized_root.take())
+    }
+
+    /// Number of continuations currently parked in the registry. Equal to
+    /// [`Self::stowed_roots_count`] at every quiescent point on the parked path
+    /// — that equality IS the rooting receipt.
+    pub fn parked_count(&self) -> usize {
+        self.continuations.len()
+    }
+
+    /// The ids currently parked, ascending. Ordering is imposed here (a
+    /// `HashMap` has none) purely so callers and tests can enumerate
+    /// deterministically.
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        let mut ids: Vec<ContinuationId> = self.continuations.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The realm owning the continuation parked under `id`, if any.
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        self.continuations.get(&id).map(|f| f.realm)
+    }
 }
 
 /// RAII proof that a nested child is running against a suspended parent
@@ -2265,6 +3369,17 @@ impl Drop for NestedChildGuard {
 
 impl Drop for JitEffectMachine {
     fn drop(&mut self) {
+        // REALM PROTOTYPE: deregister every parked continuation's stowed root
+        // BEFORE its `Box` cell is freed (the `HashMap` drops with `self` after
+        // this body returns). `free_session_heap` below also clears stowed
+        // roots, but only on a session machine — doing it here makes the
+        // "registered from park until resume, and no longer" invariant hold on
+        // every drop path.
+        for (_, mut frame) in self.continuations.drain() {
+            let slot: *mut *mut u8 = &mut *frame.cell;
+            self.machine_state.deregister_stowed_root(slot);
+        }
+        self.assert_rooting_receipt();
         // Clear this machine's persistent-root registry (whose slots point
         // into the session heap Vec, which drops with self after this).
         // Harmless for one-shot machines (free_session_heap does nothing if
@@ -2783,10 +3898,30 @@ fn materialize_response_and_resume(
         ResponsePlan::Ready(p) => p,
         ResponsePlan::Park(stream) => {
             let id = crate::host_fns::park_stream(stream);
-            // SAFETY: vmctx is valid with installed GC state.
+            // SAFETY: vmctx is valid with installed GC state. One
+            // GC-and-retry via the shared `gc_retry` helper, matching the
+            // Eager arm below: `continuation` is already a registered
+            // rust_root (above), so the retry's collection evacuates it
+            // safely, and a transient nursery-full for this (small,
+            // fixed-size) tail-thunk allocation is recoverable rather than
+            // fatal.
+            //
+            // NESTED RETRY, not a second policy layer: `alloc_stream_tail_thunk`
+            // already retries internally via `host_alloc_gc` (also `gc_retry`-
+            // based), so on the failure path this can run alloc→gc→alloc→gc
+            // (inner) →alloc→gc→alloc (outer) — up to two collections, not
+            // `gc_retry`'s documented one. This outer wrap exists as
+            // defence-in-depth against that inner retry being removed or
+            // this allocation growing past what one collection can satisfy,
+            // not because one collection is insufficient today (it isn't —
+            // see the load test's module doc for the evidence).
             let p = unsafe {
                 crate::signal_safety::with_signal_protection(|| {
-                    crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0)
+                    heap_bridge::gc_retry(
+                        vmctx_ptr,
+                        |p: &*mut u8| p.is_null(),
+                        || crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0),
+                    )
                 })
             }
             .map_err(JitError::Signal)?;
@@ -2805,38 +3940,29 @@ fn materialize_response_and_resume(
                     limit: MAX_EFFECT_RESPONSE_NODES,
                 });
             }
-            // SAFETY: Converting a Value back to a heap object in
-            // the nursery.
+            // SAFETY: Converting a Value back to a heap object in the
+            // nursery, with one GC-and-retry via the shared `gc_retry`
+            // helper (matching every other value_to_heap call site:
+            // primops.rs eitherDecode/parseISO8601, streaming.rs
+            // build_cons_cells/stream_element): `continuation` is already a
+            // registered rust_root (above), so the retry's collection
+            // evacuates it safely, and a transient nursery-full at
+            // response-materialization time is recoverable rather than
+            // fatal.
             let conv = unsafe {
                 crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                    heap_bridge::gc_retry(
+                        vmctx_ptr,
+                        |r: &Result<*mut u8, heap_bridge::BridgeError>| {
+                            matches!(r, Err(heap_bridge::BridgeError::NurseryExhausted))
+                        },
+                        || heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()),
+                    )
                 })
             }
             .map_err(JitError::Signal)?;
             match conv {
                 Ok(p) => p,
-                Err(heap_bridge::BridgeError::NurseryExhausted) => {
-                    // One GC-and-retry, matching every other value_to_heap
-                    // call site (primops.rs eitherDecode/parseISO8601,
-                    // streaming.rs build_cons_cells): `continuation` is
-                    // already a registered rust_root (above), so the
-                    // retry's collection evacuates it safely, and a
-                    // transient nursery-full at response-materialization
-                    // time is recoverable rather than fatal.
-                    unsafe {
-                        crate::signal_safety::with_signal_protection(|| {
-                            crate::host_fns::gc_trigger(vmctx_ptr)
-                        })
-                    }
-                    .map_err(JitError::Signal)?;
-                    unsafe {
-                        crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
-                        })
-                    }
-                    .map_err(JitError::Signal)?
-                    .map_err(JitError::HeapBridge)?
-                }
                 Err(e) => return Err(JitError::HeapBridge(e)),
             }
         }

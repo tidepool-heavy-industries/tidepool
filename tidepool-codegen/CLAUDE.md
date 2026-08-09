@@ -4,7 +4,7 @@ Compiles `CoreExpr` to Cranelift-backed state machines and drives the effect
 machine at the JIT↔Rust boundary. See the repo-root `CLAUDE.md` for the project
 map and locked decisions.
 
-## Nested child runs on a suspended machine (segment 40)
+## Nested child runs on a suspended machine
 
 A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host
 SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
@@ -30,6 +30,15 @@ full invariant is in the `jit_machine.rs` module docstring; the essentials:
 - `resume_suspended` NF-forces (A5) a data-kinded answer BEFORE consuming the
   continuation: a bottom (residual unforced thunk) is rejected as a retryable
   error WITHOUT consuming, so the caller can resume again with a fixed answer.
+
+A machine can ALSO hold multiple independently parked continuations in the
+continuation registry (realm machinery): each `ContinuationFrame` is a
+registered stowed root, `stowed_roots_count() == parked_count()` holds at
+quiescence (debug_asserted at every registry mutation), handled-prefix
+compatibility is exact equality enforced at entry, and the single-slot path
+above and the parked registry NEVER mix on one machine. Downstream consumers
+read `plans/post-restart/realm-lanes/continuation-parking-contract.md` —
+everything else in the registry is internal and free to churn.
 
 The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
 `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child
@@ -69,13 +78,17 @@ families:
 
 - **Shape/tag-mismatch traps** → `runtime_shape_trap` (`src/host_fns/errors.rs`),
   A value's constructor tag or heap shape didn't
-  match what was compiled. Three `ShapeTrapKind` callers: a case scrutinee
-  matching no alternative (`CaseMiss`, `emit_case_trap` in `src/emit/case.rs`), and
+  match what was compiled. Five `ShapeTrapKind` callers: a case scrutinee
+  matching no alternative (`CaseMiss`, `emit_case_trap` in `src/emit/case.rs`);
   the numeric-unbox guards for wrong Con arity (`BoxingArity`) / wrong literal
-  class (`LitClass`) in `src/emit/primop.rs`. The `kind` selects the breadcrumb
-  label (`[CASE TRAP]` / `[SHAPE TRAP: …]`); all three surface
-  `RuntimeError::CaseTrap` and print the enclosing fn + scrutinee tag + expected
-  alt tags. `emit_case_trap` emits no bare `trap` (so no SIGILL) — it
+  class (`LitClass`); and the address/byte-array unbox guards (`AddrKind`,
+  `ArrayKind`) that reject a non-address raw kind or an untagged payload
+  before any Addr#/array-consuming primop dereferences it (shared
+  `unwrap_boxing_chain`; pinned by `tests/ffi_strlen_unbox_hardening.rs` and
+  `tests/ffi_bytearray_unbox_hardening.rs`) — all in `src/emit/primop.rs`.
+  The `kind` selects the breadcrumb label (`[CASE TRAP]` / `[SHAPE TRAP: …]`);
+  all five surface `RuntimeError::CaseTrap` and print the enclosing fn +
+  scrutinee tag + expected alt tags. `emit_case_trap` emits no bare `trap` (so no SIGILL) — it
   CALLs the host fn, uses its poison return, and continues; if a poison/error
   already cascaded in it returns poison immediately, and a lazy poison-closure
   scrutinee is triggered to set the error flag.
@@ -97,7 +110,7 @@ language-level error reaches a signal.) Two variants are NOT emitted:
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
 handled by the eval oracle (`tidepool-eval/src/eval.rs:1544`) but NOT the JIT.
 The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
-(checked 2026-07-07), so this gap isn't exercised today; if the generator is
+(checked 2026-07-07, re-verified 2026-08-08: zero SeqOp references in tidepool-testing/src), so this gap is not exercised today; if the generator is
 extended to cover it, either implement `SeqOp` in the JIT or exclude it from
 generation explicitly.
 

@@ -16,6 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::{EngineConfig, SYSTEM_FRAMING};
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -87,6 +89,7 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
@@ -147,6 +150,7 @@ async fn forked_children_inherit_the_parent_framing_and_transcript_prefix() {
 
     driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one render->loop->forkAll(2 children)->finalize->render cycle");
 
     let reqs = requests.lock().unwrap();

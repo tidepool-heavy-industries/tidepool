@@ -5,11 +5,12 @@
 //!
 //! Provider select (OAuth default, `--replay <log>` for deterministic
 //! replay, `--api-key <ENV_VAR>` for a non-interactive API-key provider),
-//! engine config, a fresh run log, then drives
+//! engine config, a fresh run log, then `.await`s
 //! [`tidepool_harness::SelfHarnessDriver::run_loop`]. Multi-thread tokio
-//! runtime required: `run_loop` services
-//! each `runLLMTurn` hole via `block_in_place` + `Handle::current().block_on`
-//! (see `driver.rs`'s module doc).
+//! runtime required: the driver's turn loop is `async fn`, but the one place
+//! it still blocks a worker thread is the sync-blocking `OperatorGate` park
+//! (`tokio::task::block_in_place`, see `driver.rs`'s module doc) — that
+//! requires the multi-thread runtime flavor.
 //!
 //! Boots the operator GUI ([`tidepool_web::spawn_operator_server`]) and wires
 //! its [`tidepool_web::WebGate`] into the driver before `run_loop` — UNLESS
@@ -148,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         driver.set_gate(gate);
     }
 
-    driver.run_loop(&source, auto)?;
+    driver.run_loop(&source, auto).await?;
 
     Ok(())
 }

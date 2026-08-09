@@ -11,7 +11,8 @@
 //!   - `tidepool_mcp::preamble::EVAL_PRAGMAS` — the canonical eval dialect.
 //!   - `tidepool_mcp::preamble::decl_pragmas()` — EVAL_PRAGMAS +
 //!     `NoMonomorphismRestriction` (session decl modules generalize pure binds).
-//!   - `tidepool_runtime::session::binders::BINDER_PARSE_PRAGMAS` — a PARSE-ONLY
+//!   - the `LANGUAGE` block inside
+//!     `tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE` — a PARSE-ONLY
 //!     subset (no typecheck/rename, so type-inference-affecting extensions are
 //!     correctly absent).
 //!   - `tidepool_runtime::session::render::ModuleEnv::standalone_default()`'s
@@ -39,7 +40,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use tidepool_mcp::{decl_pragmas, EVAL_PRAGMAS};
-use tidepool_runtime::session::binders::BINDER_PARSE_PRAGMAS;
+use tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE;
 use tidepool_runtime::session::render::ModuleEnv;
 
 /// Parse a `{-# LANGUAGE A, B, C #-}` block (or a bare `A, B, C` extension
@@ -60,7 +61,16 @@ fn extension_set(pragma_text: &str) -> BTreeSet<&str> {
     set
 }
 
-/// `BINDER_PARSE_PRAGMAS` (parse-only) must be an exact SUBSET of
+/// Slice the leading `{-# LANGUAGE ... #-}` block out of a full module
+/// template (the rest is the module header and the `{{TURN}}` splice point).
+fn pragma_block_of(template: &str) -> &str {
+    let end = template
+        .find("#-}")
+        .expect("decl template must open with a LANGUAGE pragma block");
+    &template[..end + "#-}".len()]
+}
+
+/// The decl template's parse-only pragma block must be an exact SUBSET of
 /// `EVAL_PRAGMAS` (canonical eval dialect) — no extension present there that
 /// eval doesn't also carry. This is the "declared delta, not incidental"
 /// check: the excluded set is asserted exactly, so an unexplained shrink or
@@ -68,12 +78,12 @@ fn extension_set(pragma_text: &str) -> BTreeSet<&str> {
 #[test]
 fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
     let eval = extension_set(EVAL_PRAGMAS);
-    let binder = extension_set(BINDER_PARSE_PRAGMAS);
+    let binder = extension_set(pragma_block_of(DECL_TEMPLATE_SOURCE));
 
     let extra: Vec<_> = binder.difference(&eval).collect();
     assert!(
         extra.is_empty(),
-        "BINDER_PARSE_PRAGMAS carries extensions EVAL_PRAGMAS doesn't: {extra:?} — \
+        "the decl template carries extensions EVAL_PRAGMAS doesn't: {extra:?} — \
          a parse-only surface must never exceed the eval dialect"
     );
 
@@ -99,9 +109,9 @@ fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
     let actual_missing: BTreeSet<&str> = eval.difference(&binder).copied().collect();
     assert_eq!(
         actual_missing, expected_missing,
-        "BINDER_PARSE_PRAGMAS's gap from EVAL_PRAGMAS changed — update the \
-         documented delta (in this test AND binders.rs's haddock) if the \
-         change is intentional"
+        "the decl template's gap from EVAL_PRAGMAS changed — update the \
+         documented delta (in this test AND DECL_TEMPLATE_SOURCE's doc \
+         comment) if the change is intentional"
     );
 }
 

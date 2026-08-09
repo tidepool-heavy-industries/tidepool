@@ -290,6 +290,7 @@ pub fn classify_jit(e: &JitError) -> JitErrorClass {
         JitError::Signal(_) => JitErrorClass::Signal,
         JitError::EffectResponseTooLarge { .. } => JitErrorClass::Other,
         JitError::VarIdCollision(_) => JitErrorClass::Other,
+        JitError::IncompatibleHandledPrefix { .. } => JitErrorClass::Other,
     }
 }
 
