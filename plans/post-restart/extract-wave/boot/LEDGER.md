@@ -515,13 +515,46 @@ about what was EMITTED must DERIVE from the emission gate, never restate
 it — so it cannot diverge if `RepoEvent` later becomes row-polymorphic,
 which the vocabulary story makes plausible.
 
-`boot-vocab` is asked to honour it structurally rather than in prose:
-export the gate as a named predicate (`emits_helpers_for(eff,
-row_effects)`) called at `:273` and callable by any consumer, rather than
-documenting the rule and hoping. Same doctrine as the strict-mode
-unreachability requirement in `boot-targets`' lane: **a doc comment
-documents against a mistake; a shared predicate makes it unavailable.**
-The second consumer will not have worktree-wave standing behind them.
+`boot-vocab` honours it structurally rather than in prose: the gate is
+extracted as **`emits_helpers_for(eff, row_effects) -> bool`** (name
+PUBLISHED and closed by this TL; L4 keys on it), visibility private or
+`pub(crate)` — **never `pub`**, since an interface wider than its
+consumers is the same failure one level out. Called at `:273` and by any
+consumer, rather than documenting the rule and hoping. Same doctrine as
+the strict-mode unreachability requirement in `boot-targets`' lane: **a
+doc comment documents against a mistake; a shared predicate makes it
+unavailable.**
+
+`boot-vocab` owns the extraction PRE-FOLD (root's call): a trivial
+refactor of code that dev wrote this week, in its own file, provable a
+no-op by its own tests — and doing it here makes the cross-lane edit
+DISAPPEAR rather than shrink. L4 then lands exactly one term.
+
+**Why single-sourcing is not tidiness — root's framing, kept verbatim
+because it is sharper than "they could drift":** two copies agree today
+and **diverge silently the moment `RepoEvent` becomes
+`helpers_row_polymorphic` — which is not hypothetical, it is the exact
+state `boot-vocab`'s vocabulary-without-row story exists to enable.** The
+failure is a wrong preamble with **NO BUILD ERROR**, in precisely the
+mismatched (vocab-with / row-without) pairs item 0b's own tests construct.
+A sync comment is not a weaker mechanism here; it is a mechanism that
+fails SILENTLY in the one configuration this item was built to reach.
+
+**Convergence, worth recording as evidence the structure is right:** L4
+reasoned from "my hiding term must fire exactly when the helper loop
+emits" and reached the extraction; this TL reasoned from "a doc comment
+documents against a mistake, a shared predicate makes it unavailable" and
+reached the same place. Two directions, one structure — not a preference
+either side imported.
+
+**Doctrine refinement from L4's gate set:** their
+`vocab_only_repoevent_still_emits_its_gadt` pins that the discriminating
+gate tests the HELPER condition specifically, so it cannot pass for the
+wrong reason if the vocabulary split were broken outright. That is a guard
+against **a test passing for a reason other than the one it is named
+for** — the next refinement past "show the test by name". A named pass
+line proves the test RAN; this proves it tested the THING. Same failure
+family as this wave's characteristic one, caught a level deeper.
 
 **Fold cadence:** `boot-vocab` folds PROMPTLY when 0b is green, not
 batched behind its siblings — L4 needs the function on a shared base, and
