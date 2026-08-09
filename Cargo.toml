@@ -18,6 +18,7 @@ members = [
     "tidepool-repl",
     "tidepool-lsp",
     "tidepool-harness",
+    "tidepool-worktree",
     "tidepool-agent",
     "tidepool-web",
     "tidepool",
@@ -54,6 +55,7 @@ tidepool-optimize = { version = "0.1.0", path = "tidepool-optimize" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
 tidepool-testing = { path = "tidepool-testing" }
+tidepool-worktree = { path = "tidepool-worktree" }
 
 axum = "0.8"
 blake3 = "1"

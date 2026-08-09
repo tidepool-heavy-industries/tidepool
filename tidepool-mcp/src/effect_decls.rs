@@ -265,3 +265,11 @@ crate::fork_effect_def!(crate::effect_defs::effect_decl_projection);
 // Llm effect: `llm_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
+
+// Worktree / RepoEvent (PRD 19): `worktree_decl()` / `event_decl()`. These are
+// NOT in `build_base_stack`'s row — the dev-tree dogfood that would put them
+// there is on hold pending the agent lane. They exist as decls so a caller
+// that wants managed worktrees and typed repository events can build a row
+// containing them, which is what lane L4's acceptance harness does.
+crate::worktree_effect_def!(crate::effect_defs::effect_decl_projection);
+crate::event_effect_def!(crate::effect_defs::effect_decl_projection);

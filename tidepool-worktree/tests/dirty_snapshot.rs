@@ -1,0 +1,478 @@
+//! The untouched-source proof — LANE L2.
+//!
+//! Every test here runs against a REAL temporary repository built by
+//! [`tidepool_worktree::testing::TestRepo`] and driven by its scripted writer;
+//! there is no mock of git.
+//!
+//! `snapshot_source` calls `git::inspect::dirty_summary` (LANE L1's `pre_status`
+//! source) after its refuse-first checks. As of this writing that function is
+//! still `todo!("L1")` in this worktree, so every test below that reaches a
+//! SUCCESSFUL snapshot — everything except the three `refuses_*` tests — will
+//! panic with `not yet implemented: L1` rather than assert-fail. That is a
+//! blocked dependency, not a logic error in this lane; see
+//! `plans/post-restart/worktree-lanes/L2-receipt.md`. The three refusal tests
+//! return before `dirty_summary` is ever called and pass today.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use tidepool_worktree::snapshot::snapshot_source;
+use tidepool_worktree::testing::{fingerprint, TestRepo};
+use tidepool_worktree::{
+    GitCli, InProgressKind, WorktreeError, WorktreeId, TIDEPOOL_SNAPSHOT_REF_PREFIX,
+};
+
+/// Everything about the source that `allowDirtySnapshot` must leave alone,
+/// captured fresh (never cached) so a before/after comparison is honest.
+struct SourceState {
+    head: String,
+    branch: Option<String>,
+    index_bytes: Vec<u8>,
+    diff_cached: String,
+    diff: String,
+    fingerprint: BTreeMap<String, (Vec<u8>, u32)>,
+    untracked: Vec<String>,
+    branch_list: String,
+    reflog: String,
+}
+
+fn capture_source_state(git: &GitCli, path: &Path) -> SourceState {
+    let head = git
+        .try_run(path, &["rev-parse", "HEAD"])
+        .expect("rev-parse HEAD")
+        .trimmed()
+        .to_string();
+    let branch = git
+        .run(path, &["symbolic-ref", "--short", "HEAD"])
+        .ok()
+        .map(|o| o.trimmed().to_string());
+    let index_bytes = std::fs::read(path.join(".git").join("index")).expect("read .git/index");
+    let diff_cached = git
+        .try_run(path, &["diff", "--cached"])
+        .expect("diff --cached")
+        .stdout;
+    let diff = git.try_run(path, &["diff"]).expect("diff").stdout;
+    let status = git
+        .try_run(path, &["status", "--porcelain"])
+        .expect("status --porcelain")
+        .stdout;
+    let untracked: Vec<String> = status
+        .lines()
+        .filter(|l| l.starts_with("??"))
+        .map(|l| l.trim_start_matches("??").trim().to_string())
+        .collect();
+    let branch_list = git
+        .try_run(path, &["branch", "--list"])
+        .expect("branch --list")
+        .stdout;
+    let reflog = git
+        .try_run(path, &["reflog", "show", "HEAD"])
+        .expect("reflog show HEAD")
+        .stdout;
+
+    SourceState {
+        head,
+        branch,
+        index_bytes,
+        diff_cached,
+        diff,
+        fingerprint: fingerprint::working_tree(path),
+        untracked,
+        branch_list,
+        reflog,
+    }
+}
+
+/// Properties 1, 2, 3, 4, 5, 6, and 8 of the untouched-source proof, each
+/// asserted separately so a failure names exactly what moved. Property 7
+/// (ignored files) needs the snapshot receipt too, so callers assert it
+/// alongside this.
+fn assert_source_untouched(before: &SourceState, after: &SourceState) {
+    // 1. checked-out branch and HEAD.
+    assert_eq!(before.branch, after.branch, "checked-out branch moved");
+    assert_eq!(before.head, after.head, "HEAD moved");
+    // 2. the ordinary index, byte for byte.
+    assert_eq!(
+        before.index_bytes, after.index_bytes,
+        "ordinary .git/index bytes changed"
+    );
+    // 3. staged content.
+    assert_eq!(
+        before.diff_cached, after.diff_cached,
+        "staged content changed (git diff --cached)"
+    );
+    // 4. unstaged content.
+    assert_eq!(
+        before.diff, after.diff,
+        "unstaged content changed (git diff)"
+    );
+    // 5. working-tree file bytes and mode bits.
+    assert_eq!(
+        before.fingerprint, after.fingerprint,
+        "working-tree file bytes or mode bits changed"
+    );
+    // 6. untracked files: still untracked, still present, unmodified.
+    assert_eq!(
+        before.untracked, after.untracked,
+        "the set of untracked files changed"
+    );
+    // 8a. no new branch.
+    assert_eq!(
+        before.branch_list, after.branch_list,
+        "a branch appeared or disappeared (git branch --list)"
+    );
+    // 8b. no new HEAD reflog entry.
+    assert_eq!(
+        before.reflog, after.reflog,
+        "a new HEAD reflog entry appeared"
+    );
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).expect("chmod +x");
+}
+
+/// A deliberately messy source: a staged edit, an unstaged edit to a
+/// different tracked file, an untracked file, an ignored file, a tracked file
+/// whose executable bit was flipped without a content change, and a CLEAN
+/// submodule whose checked-out commit has moved past what the superproject
+/// recorded (a legitimate gitlink bump, not dirtiness).
+fn build_messy_repo() -> TestRepo {
+    let inner = TestRepo::init().expect("init inner (submodule source)");
+    inner
+        .writer()
+        .commit_file("inner.txt", "one\n", "inner init")
+        .expect("inner init commit");
+
+    let repo = TestRepo::init().expect("init outer");
+    let w = repo.writer();
+    w.commit_file("tracked.txt", "original\n", "init")
+        .expect("c1");
+    w.commit_file("other.txt", "original other\n", "c2")
+        .expect("c2");
+    w.write_file(".gitignore", "ignored.txt\n")
+        .expect("write .gitignore");
+    w.stage(".gitignore").expect("stage .gitignore");
+    repo.git()
+        .try_run(repo.path(), &["commit", "-q", "-m", "gitignore"])
+        .expect("commit .gitignore");
+    w.commit_file("exec.txt", "#!/bin/sh\necho hi\n", "add exec.txt")
+        .expect("commit exec.txt");
+
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                inner.path().to_str().expect("inner path is utf8"),
+                "sub",
+            ],
+        )
+        .expect("submodule add");
+    repo.git()
+        .try_run(repo.path(), &["commit", "-q", "-m", "add submodule"])
+        .expect("commit submodule addition");
+
+    // Advance the submodule's OWN checkout to a new, still-clean commit — a
+    // clean gitlink bump. The submodule's working tree and index end clean
+    // because `commit_file` writes, stages, and commits in one go.
+    repo.writer_at(repo.path().join("sub"))
+        .commit_file("inner.txt", "one\ntwo\n", "inner advance")
+        .expect("advance submodule checkout");
+
+    // Now make the source messy on top of that.
+    w.write_file("tracked.txt", "staged edit\n")
+        .expect("write tracked.txt");
+    w.stage("tracked.txt").expect("stage tracked.txt");
+    w.write_file("other.txt", "original other\nunstaged edit\n")
+        .expect("write other.txt");
+    w.write_file("untracked.txt", "brand new\n")
+        .expect("write untracked.txt");
+    w.write_file("ignored.txt", "must never be captured\n")
+        .expect("write ignored.txt");
+    #[cfg(unix)]
+    set_executable(&repo.path().join("exec.txt"));
+
+    // `inner`'s objects were cloned into `sub` at `submodule add` time; it is
+    // not needed after that.
+    drop(inner);
+    repo
+}
+
+#[test]
+fn dirty_source_untouched_after_snapshot() {
+    let repo = build_messy_repo();
+    let before = capture_source_state(repo.git(), repo.path());
+
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-messy");
+    let receipt = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect("snapshot succeeds against a dirty, non-conflicted, submodule-clean source");
+
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_source_untouched(&before, &after);
+
+    // 7. ignored files: still ignored, still present, NOT captured.
+    assert!(
+        repo.path().join("ignored.txt").exists(),
+        "ignored.txt must still be present in the source"
+    );
+    assert!(
+        repo.git()
+            .run(repo.path(), &["check-ignore", "ignored.txt"])
+            .is_ok(),
+        "ignored.txt must still be ignored by git"
+    );
+    assert!(
+        !receipt.captured_paths.iter().any(|p| p == "ignored.txt"),
+        "ignored.txt must not appear in captured_paths: {:?}",
+        receipt.captured_paths
+    );
+
+    for expected in [
+        "tracked.txt",
+        "other.txt",
+        "untracked.txt",
+        "exec.txt",
+        "sub",
+    ] {
+        assert!(
+            receipt.captured_paths.iter().any(|p| p == expected),
+            "expected {expected} to be captured, got {:?}",
+            receipt.captured_paths
+        );
+    }
+    assert_eq!(
+        receipt.captured_paths,
+        {
+            let mut sorted = receipt.captured_paths.clone();
+            sorted.sort();
+            sorted.dedup();
+            sorted
+        },
+        "captured_paths must be sorted and deduplicated"
+    );
+}
+
+#[test]
+fn snapshot_commit_content_matches_captured_working_tree() {
+    let repo = build_messy_repo();
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-content");
+    let receipt = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect("snapshot succeeds");
+
+    let scratch = tempfile::TempDir::new().expect("scratch dir");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                scratch.path().to_str().expect("scratch path is utf8"),
+                receipt.snapshot_commit.as_str(),
+            ],
+        )
+        .expect("check out the snapshot commit into a scratch worktree");
+
+    let source_fp = fingerprint::working_tree(repo.path());
+    let scratch_fp = fingerprint::working_tree(scratch.path());
+
+    // `sub` is a gitlink, not a regular file — the fingerprint only walks
+    // regular files, so its content is verified separately below.
+    for path in receipt
+        .captured_paths
+        .iter()
+        .filter(|p| p.as_str() != "sub")
+    {
+        let source_entry = source_fp.get(path);
+        assert!(
+            source_entry.is_some(),
+            "captured path {path} should be a real file in the source"
+        );
+        assert_eq!(
+            source_entry,
+            scratch_fp.get(path),
+            "captured path {path} differs in bytes or mode between the source and the snapshot checkout"
+        );
+    }
+
+    let submodule_head = repo
+        .git()
+        .try_run(&repo.path().join("sub"), &["rev-parse", "HEAD"])
+        .expect("submodule HEAD")
+        .trimmed()
+        .to_string();
+    let ls_tree = repo
+        .git()
+        .try_run(
+            repo.path(),
+            &["ls-tree", receipt.snapshot_commit.as_str(), "--", "sub"],
+        )
+        .expect("ls-tree sub")
+        .stdout;
+    assert!(
+        ls_tree.contains(&submodule_head),
+        "the snapshot's gitlink for sub must point at the submodule's checked-out commit \
+         {submodule_head}, got: {ls_tree}"
+    );
+
+    assert!(
+        !scratch_fp.contains_key("ignored.txt"),
+        "ignored.txt must be absent from the snapshot checkout"
+    );
+}
+
+#[test]
+fn snapshot_ref_lives_outside_refs_heads_and_never_in_branch_list() {
+    let repo = build_messy_repo();
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-ref-namespace");
+    let receipt = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect("snapshot succeeds");
+
+    assert!(
+        receipt
+            .snapshot_ref
+            .as_str()
+            .starts_with(TIDEPOOL_SNAPSHOT_REF_PREFIX),
+        "snapshot ref must live under {TIDEPOOL_SNAPSHOT_REF_PREFIX}: {}",
+        receipt.snapshot_ref.as_str()
+    );
+    assert!(
+        !receipt.snapshot_ref.as_str().starts_with("refs/heads/"),
+        "snapshot ref must not be a branch ref: {}",
+        receipt.snapshot_ref.as_str()
+    );
+
+    let branch_list = repo
+        .git()
+        .try_run(repo.path(), &["branch", "--list"])
+        .expect("branch --list")
+        .stdout;
+    assert!(
+        !branch_list.contains(worktree_id.as_str()),
+        "the snapshot must never appear in `git branch --list`: {branch_list}"
+    );
+
+    let reachable_from_heads = repo
+        .git()
+        .try_run(
+            repo.path(),
+            &[
+                "branch",
+                "--list",
+                "--contains",
+                receipt.snapshot_commit.as_str(),
+            ],
+        )
+        .expect("branch --contains");
+    assert!(
+        reachable_from_heads.stdout.trim().is_empty(),
+        "the snapshot commit must not be reachable from any branch: {}",
+        reachable_from_heads.stdout
+    );
+}
+
+#[test]
+fn refuses_when_source_is_mid_merge_and_leaves_it_untouched() {
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("f.txt", "base\n", "base")
+        .expect("base commit");
+    w.checkout_new_branch("feature").expect("branch feature");
+    w.commit_file("f.txt", "feature change\n", "feature commit")
+        .expect("feature commit");
+    w.checkout("main").expect("checkout main");
+    w.commit_file("f.txt", "main change\n", "main commit")
+        .expect("main commit");
+    let _ = repo
+        .git()
+        .run(repo.path(), &["merge", "--no-edit", "feature"]);
+    assert!(
+        repo.path().join(".git").join("MERGE_HEAD").exists(),
+        "test setup must actually produce a conflicted, in-progress merge"
+    );
+
+    let before = capture_source_state(repo.git(), repo.path());
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-merge");
+    let err = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect_err("a mid-merge source must be refused");
+    assert_eq!(
+        err,
+        WorktreeError::SourceOperationInProgress(InProgressKind::Merge)
+    );
+
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_source_untouched(&before, &after);
+}
+
+#[test]
+fn refuses_when_source_is_mid_rebase_and_leaves_it_untouched() {
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("f.txt", "base\n", "base")
+        .expect("base commit");
+    w.checkout_new_branch("feature").expect("branch feature");
+    w.commit_file("f.txt", "feature change\n", "feature commit")
+        .expect("feature commit");
+    w.checkout("main").expect("checkout main");
+    w.commit_file("f.txt", "main change\n", "main commit")
+        .expect("main commit");
+    w.checkout("feature").expect("checkout feature");
+    let _ = w.rebase_onto("main");
+    assert!(
+        repo.path().join(".git").join("rebase-apply").exists()
+            || repo.path().join(".git").join("rebase-merge").exists(),
+        "test setup must actually produce a conflicted, in-progress rebase"
+    );
+
+    let before = capture_source_state(repo.git(), repo.path());
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-rebase");
+    let err = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect_err("a mid-rebase source must be refused");
+    assert_eq!(
+        err,
+        WorktreeError::SourceOperationInProgress(InProgressKind::Rebase)
+    );
+
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_source_untouched(&before, &after);
+}
+
+#[test]
+fn refuses_dirty_submodule_and_leaves_source_untouched() {
+    let repo = build_messy_repo();
+    // Dirty the submodule's OWN working tree, beyond its already-clean
+    // gitlink bump — uncommitted content inside the submodule itself.
+    std::fs::write(
+        repo.path().join("sub").join("inner.txt"),
+        "dirtied in place\n",
+    )
+    .expect("dirty submodule content");
+
+    let before = capture_source_state(repo.git(), repo.path());
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let worktree_id = WorktreeId::from_raw("w-dirty-submodule");
+    let err = snapshot_source(repo.git(), repo.path(), &worktree_id, temp_index_dir.path())
+        .expect_err("a dirty submodule must be refused");
+    match err {
+        WorktreeError::DirtySubmoduleUnsupported(path) => {
+            assert_eq!(path, PathBuf::from("sub"));
+        }
+        other => panic!("expected DirtySubmoduleUnsupported, got {other:?}"),
+    }
+
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_source_untouched(&before, &after);
+}

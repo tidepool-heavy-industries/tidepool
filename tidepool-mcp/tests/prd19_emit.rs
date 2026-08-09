@@ -1,0 +1,190 @@
+//! PRD 19 surface gates: the generated `Tidepool.Effects` must actually carry
+//! the authored vocabulary that `Tidepool.Worktree` / `Tidepool.Event`
+//! re-export, and must carry the `ToJSON` instances its own `errors` block
+//! depends on.
+//!
+//! Each test here is a ONE-FAILURE-MODE gate and is named for the failure it
+//! catches, so a receipt can cite it individually — an aggregate count cannot
+//! distinguish "the guard held" from "the guard silently stopped existing".
+//!
+//! These are cheap string gates on generated source, deliberately: the real
+//! typecheck is GHC compiling `Tidepool.Worktree`/`Tidepool.Event` against this
+//! module, which is orders of magnitude slower and cannot run in the fast tier.
+//! What these catch is the specific regression of a name silently dropping out
+//! of the generated surface, which is exactly what a frozen re-export list
+//! would then fail on.
+
+fn worktree_and_event_module() -> String {
+    let decls = vec![
+        tidepool_mcp::console_decl(),
+        tidepool_mcp::worktree_decl(),
+        tidepool_mcp::event_decl(),
+    ];
+    tidepool_mcp::effects_module_source(&decls)
+}
+
+/// Emit the generated module for `scripts/prd19-alternative-gates.sh`, which
+/// needs the real source to run its three GHC gates against. `#[ignore]`d so it
+/// never runs as part of an ordinary test pass — it is a fixture producer, not
+/// a gate, and it does nothing without `PRD19_EMIT` set.
+#[test]
+#[ignore = "fixture producer for scripts/prd19-alternative-gates.sh"]
+fn emit_for_gates() {
+    let path = std::env::var("PRD19_EMIT").expect("PRD19_EMIT must name the output path");
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("create output dir");
+    }
+    std::fs::write(p, worktree_and_event_module()).expect("write generated module");
+}
+
+/// The `(<|>)` COLLISION IS OPEN — this gate pins the honest current state.
+///
+/// `Tidepool.Effects` has no export list, so it re-exports its own generated
+/// `(<|>)`, and the eval preamble imports both it and `Tidepool.Prelude` by
+/// default — so once RepoEvent is in a row, an author writing PRD 19's own
+/// `fmap Left e1 <|> fmap Right e2` hits an ambiguous occurrence. The fix is
+/// APPROVED and PRE-VERIFIED but ROUTED to another lane, because it must land
+/// on the AUTHOR-FACING imports (`preamble.rs`'s `eval_import_lines` and the
+/// Orchestrate module) keyed on boot-vocab's `emits_helpers_for`, and that
+/// function does not exist on this branch.
+///
+/// An earlier attempt put the hiding on the generated module's OWN Prelude
+/// import. That was mis-scoped — it governs name resolution inside
+/// `Tidepool.Effects` and nothing else — and it has been DELETED rather than
+/// shipped, because a term that looks like the fix and is not is worse than an
+/// honest absence: the next reader would find it, conclude the collision was
+/// handled, and be wrong.
+///
+/// This gate therefore asserts the module is UNCHANGED here, so that whoever
+/// lands the routed fix sees this test fail and knows to retire it. See
+/// `plans/post-restart/worktree-lanes/L4-receipt.md` §3b for the full reasoning
+/// and `verified/L4-hiding-term-retarget.patch` for the verified patch.
+#[test]
+fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
+    let src = worktree_and_event_module();
+    assert!(
+        src.contains("import Tidepool.Prelude hiding (error)\n"),
+        "the generated module's Prelude import must be byte-identical to its pre-PRD-19 form"
+    );
+    assert!(
+        !src.contains("hiding (error, (<|>))"),
+        "the mis-scoped hiding was deleted deliberately — the fix belongs on the \
+         AUTHOR-FACING imports and is routed, not landed here"
+    );
+    assert!(
+        src.contains("(<|>) ::"),
+        "the module still EXPORTS Event's (<|>), which is what makes the collision real"
+    );
+}
+
+/// The `errors WorktreeError` block templates a `ToJSON WorktreeError`
+/// instance whose arms serialize `DirtySummary`, `InProgressKind`,
+/// `GitFailureReceipt` and `WorktreeId`. If any of those four lacks its own
+/// `ToJSON`, the GENERATED MODULE DOES NOT COMPILE — and it fails for every
+/// row containing the Worktree decl, not just one. That is the regression this
+/// gate exists for; it was a real break, found by GHC, before these instances
+/// were added.
+#[test]
+fn worktree_error_payload_types_all_have_tojson_instances() {
+    let src = worktree_and_event_module();
+    for ty in [
+        "WorktreeId",
+        "InProgressKind",
+        "DirtySummary",
+        "GitFailureReceipt",
+    ] {
+        assert!(
+            src.contains(&format!("instance ToJSON {ty} where")),
+            "generated Tidepool.Effects is missing `instance ToJSON {ty}`, so the \
+             templated `ToJSON WorktreeError` instance cannot compile"
+        );
+    }
+}
+
+/// `Tidepool.Worktree`'s import list is frozen — every name below is one it
+/// re-exports, so a name dropping out of the generated module breaks that
+/// module's compile rather than degrading gracefully.
+#[test]
+fn generated_module_carries_the_authored_worktree_surface() {
+    let src = worktree_and_event_module();
+    for name in [
+        "fromCurrentRepository ::",
+        "fromRef ::",
+        "fromWorktree ::",
+        "allowDirtySnapshot ::",
+        "createWorktree ::",
+        "lookupWorktree ::",
+        "listWorktrees ::",
+        "worktreeBranch ::",
+        "worktreeHead ::",
+        "worktreeId ::",
+        "renderWorktreeError ::",
+        "renderWorktreeId ::",
+        "renderGitOid ::",
+        "renderBranchName ::",
+    ] {
+        assert!(
+            src.contains(name),
+            "generated Tidepool.Effects is missing `{name}`, which Tidepool.Worktree re-exports"
+        );
+    }
+}
+
+/// Same for `Tidepool.Event`, plus the interposition `withHandler` is built
+/// from. `pumpEff` recursing on the BODY only is what makes a subscription
+/// unable to re-enter its own handler, so its shape is load-bearing, not
+/// incidental — see plans/post-restart/worktree-lanes/L4-mechanism.md.
+#[test]
+fn generated_module_carries_the_authored_event_surface() {
+    let src = worktree_and_event_module();
+    for name in [
+        "commit ::",
+        "headChanged ::",
+        "(<|>) ::",
+        "withHandler ::",
+        "pumpEff ::",
+        "drainSubscription ::",
+        "data Event a = Event",
+        "instance Functor Event",
+        "data Observed a = Observed",
+        "data HeadChangeKind",
+        "data RepositoryEvent",
+    ] {
+        assert!(
+            src.contains(name),
+            "generated Tidepool.Effects is missing `{name}`, which Tidepool.Event re-exports \
+             or withHandler is built from"
+        );
+    }
+}
+
+/// `withHandler` interposes on the body's freer structure, which needs `Eff`'s
+/// own constructors and queue operations. `Control.Monad.Freer` re-exports the
+/// TYPE but not `Val`/`E`, `qApp`, or `tsingleton`, so without this import the
+/// pump cannot be written at all.
+#[test]
+fn generated_module_imports_freer_internal_for_the_pump() {
+    let src = worktree_and_event_module();
+    assert!(
+        src.contains("import Control.Monad.Freer.Internal (Eff(..), qApp, tsingleton)"),
+        "generated Tidepool.Effects must import Eff's constructors for pumpEff's interposition"
+    );
+}
+
+/// `worktreeHead` is a FRESH read and must be effectful. If it ever degraded to
+/// a pure accessor it would be returning recorded state — the seed commit —
+/// which looks like it works while leaving open exactly the cross-cycle gap it
+/// exists to close. `worktreeId` is the opposite case and must stay pure.
+#[test]
+fn worktree_head_is_effectful_and_worktree_id_is_pure() {
+    let src = worktree_and_event_module();
+    assert!(
+        src.contains("worktreeHead :: WorktreeHandle -> M GitOid"),
+        "worktreeHead must be a fresh, effectful read — not a pure accessor over recorded state"
+    );
+    assert!(
+        src.contains("worktreeId :: WorktreeHandle -> WorktreeId"),
+        "worktreeId must stay pure — the handle already carries its receipt"
+    );
+}

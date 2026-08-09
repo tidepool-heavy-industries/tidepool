@@ -3884,12 +3884,14 @@ dependencies = [
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
+ "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
+ "tidepool-worktree",
  "tokio",
  "tracing",
  "ureq",
@@ -4135,6 +4137,16 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tidepool-worktree"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
