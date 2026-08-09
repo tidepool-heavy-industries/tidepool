@@ -57,13 +57,13 @@ pub enum YieldError {
     /// Fatal signal during JIT execution (SIGILL, SIGSEGV, SIGBUS, SIGTRAP).
     #[error("{}", format_yield_signal(*.0))]
     Signal(i32),
-    /// A runtime error raised by host/JIT code via the RUNTIME_ERROR flag. Holds
-    /// the shared error set ONCE — DivisionByZero, Overflow, UserError(Msg),
-    /// Undefined, CaseTrap, BadPointer, TypeMetadata, UnresolvedVar, NullFunPtr,
-    /// BadFunPtrTag, HeapOverflow, StackOverflow, BlackHole, BadThunkState,
-    /// Cancelled — rather than re-declaring each variant + message (they were
-    /// duplicated verbatim from `RuntimeError`). `#[from]` derives
-    /// `From<RuntimeError>`; `transparent` forwards its Display unchanged.
+    /// A runtime error raised by host/JIT code via the RUNTIME_ERROR flag.
+    /// Wraps the shared `RuntimeError` set (DivisionByZero, Overflow,
+    /// UserError(Msg), Undefined, CaseTrap, BadPointer, TypeMetadata,
+    /// UnresolvedVar, NullFunPtr, BadFunPtrTag, HeapOverflow, StackOverflow,
+    /// BlackHole, BadThunkState, Cancelled) instead of redeclaring each
+    /// variant here. `#[from]` derives `From<RuntimeError>`; `transparent`
+    /// forwards its Display unchanged.
     #[error(transparent)]
     Runtime(#[from] crate::host_fns::RuntimeError),
 }
@@ -73,9 +73,9 @@ fn format_yield_signal(sig: i32) -> String {
     #[cfg(unix)]
     {
         let name = match sig {
-            // Case misses, div-by-zero, and bad `chr` now route through host
-            // calls that yield clean RuntimeErrors, so these signals mean a
-            // genuine fault (heap corruption / bad pointer / unguarded op), not a
+            // Case misses, div-by-zero, and bad `chr` route through host calls
+            // that yield clean RuntimeErrors, so a signal here means a genuine
+            // fault (heap corruption / bad pointer / unguarded op), not a
             // routine language-level error.
             libc::SIGILL => "SIGILL (illegal instruction — likely heap corruption or a bad code pointer)",
             libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
