@@ -142,3 +142,32 @@ nothing is rooted, so it carries no memory-safety claim — it pins the
 bound_root plumbing. F3 and F4 remain the cases carrying the safety claim.
 
 ## Step 3 — pending (lane B)
+
+## Step 6 — DEFERRED, and why
+
+One-line reason, as the spec requires: **no caller can supply a `RealmId` until
+step 4's `ResidentSession` conversion lands, so a realm-keyed `current` would be
+unreachable machinery — a parameter with exactly one possible value.**
+
+The longer form, so a later reader can check the judgment rather than take it:
+
+`BindingTable::current` is a flat `HashMap<BindingName, SessionVarId>` with no
+realm concept, and it lives as one field on `PersistentSession`
+(`persistent.rs:251`). Realm-scoping it means threading a `RealmId` through
+`BindingEntry` and filtering `resolve`/`iter_current`. Nothing above
+`BindingTable` knows what realm it is in until step 4 converts `ResidentSession`,
+so every call site — the REPL's five `resolve`/`iter_current` uses among them —
+would pass one constant realm. That is speculative machinery plus churn across
+the repl, with no behavior change and nothing able to exercise the new path.
+
+Deferring is cheap because of what step 6 is NOT. `SessionVarId`s are minted
+fresh per (re)bind, so ids stay collision-free and **a realm cannot corrupt
+another's binding**; what survives is that a `:bindings`-style view could report
+the wrong owner for a name two realms both bound. The verdict scores it exactly
+that way — "Lowest priority; it is a display bug, not a safety one" (§7 step 6).
+Step 5's pinning test covers the half that does carry safety, and it is landed.
+
+So this belongs WITH step 4, not before it: the conversion that gives callers a
+realm to name is the same conversion that makes a realm-filtered `resolve`
+reachable. Recorded here rather than dropped, so whoever picks up step 4 inherits
+it as part of that work.
