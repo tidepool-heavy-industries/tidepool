@@ -175,6 +175,37 @@ equally consistent with "the fix works" and "the collision was never
 reachable". Gate 1 removes that ambiguity by asserting the *specific*
 ambiguous-occurrence diagnostic, not merely that something failed.
 
+**Which list the predicate keys on — decided deliberately, because getting it
+wrong is silent.** Extract-wave's boot-vocab lane splits the generator into
+`effects_module_source_with_vocab(row_effects, vocab_effects, row)`, at which
+point "the row contains RepoEvent" stops being one predicate and becomes two.
+
+The conditional must key on **`vocab_effects`**. The hiding exists so an author
+can write `Event`'s `(<|>)` unqualified, and that operator is a generated
+HELPER: it is in the author's scope exactly when RepoEvent is in the
+VOCABULARY, whether or not the effect is in the sendable row. Both mismatched
+pairs go wrong under the other choice, and neither is a compile error in the
+generator:
+
+- vocab-with / row-without → `(<|>)` is still emitted, but the Prelude's is no
+  longer hidden, restoring the exact ambiguity the change exists to remove.
+- row-with / vocab-without → the Prelude's `(<|>)` is hidden while no
+  replacement is emitted, costing `Alternative` for nothing.
+
+These surface only as a wrong preamble, in precisely the mismatched pairs
+boot-vocab's own item-0b acceptance constructs. So the no-regression gate must
+cover a MISMATCHED pair, not only the matched one — a gate built solely from
+`effects_module_source_at` (which passes one list for both) cannot distinguish
+the two predicates at all and would pass under either.
+
+Status: the edit currently lives in `effects_module_source_at` (committed in
+`f37f0d17`, before the restructure was announced), keying on the single list
+that function has. The intent is recorded at the call site so the retarget is
+unambiguous. **Owed at retarget:** move the conditional into
+`effects_module_source_with_vocab`, key it on `vocab_effects`, and add the two
+mismatched-pair gates. Until those exist, the conditionality evidence below
+covers only the matched pair and is honestly weaker than it will be.
+
 Conditionality is additionally pinned in the fast tier by
 `repoevent_row_hides_the_prelude_alternative` and
 `non_repoevent_row_leaves_the_prelude_import_untouched` — the second is the

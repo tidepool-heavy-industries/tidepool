@@ -134,6 +134,19 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
     // pattern matching, and qualified `Control.Applicative` stays open. The
     // check is conditional so rows without the effect are byte-identical to
     // before. See plans/post-restart/worktree-lanes/L4-receipt.md.
+    //
+    // WHICH LIST THIS PREDICATE KEYS ON, once the vocabulary/row split lands
+    // (`effects_module_source_with_vocab(row_effects, vocab_effects, row)`):
+    // it must key on **vocab_effects**, NOT row_effects. The hiding exists so
+    // an author can write `Event`'s `(<|>)` unqualified, and that operator is a
+    // generated HELPER — it is in scope exactly when RepoEvent is in the
+    // VOCABULARY, regardless of whether the effect is in the sendable row.
+    // Key it on the row instead and both mismatched pairs go silently wrong:
+    // vocab-with / row-without still emits `(<|>)` but stops hiding the
+    // Prelude's, restoring the ambiguity; row-with / vocab-without hides the
+    // Prelude's `(<|>)` while emitting no replacement, costing `Alternative`
+    // for nothing. Neither is a compile error in the generator — they surface
+    // only as a wrong preamble.
     if effects.iter().any(|e| e.type_name == "RepoEvent") {
         out.push_str("import Tidepool.Prelude hiding (error, (<|>))\n");
     } else {
