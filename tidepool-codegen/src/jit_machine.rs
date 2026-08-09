@@ -2641,6 +2641,15 @@ impl JitEffectMachine {
     /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
     /// answer leaves the frame PARKED and still ROOTED and the caller can retry
     /// with a corrected answer.
+    ///
+    /// # Panics
+    /// Panics if the single `suspended_continuation` slot is occupied. The two
+    /// suspension paths must not be MIXED on one machine: a slot-held
+    /// continuation is unregistered, so driving a parked resume against it
+    /// would let this run's collections free the slot-held one. This is the L7
+    /// assert's sibling for the registry path, and it is why a caller one level
+    /// up (`ResidentSession::run_child`'s `ChildSuspended` wall) has to convert
+    /// its parent to the registry too rather than park only the child.
     pub fn resume_parked<U, H: DispatchEffect<U>>(
         &mut self,
         id: ContinuationId,
@@ -2649,6 +2658,12 @@ impl JitEffectMachine {
         user: &U,
         input: ResumeInput,
     ) -> Result<ParkedOutcome, JitError> {
+        assert!(
+            self.suspended_continuation.is_none(),
+            "resume_parked called while the single-slot continuation is occupied — \
+             the slot-held continuation is UNREGISTERED and this run's collections \
+             would free it. Convert the caller to the parked path; do not mix."
+        );
         // PEEK the frame — do NOT remove it yet (A5).
         let (realm, kind, suspend_tag) = match self.continuations.get(&id) {
             Some(frame) => (frame.realm, frame.kind, frame.suspend_tag),

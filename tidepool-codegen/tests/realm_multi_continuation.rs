@@ -651,6 +651,62 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// THE TWO PATHS MUST NOT MIX. A slot-held continuation is UNREGISTERED — the
+// single-slot path protects it by the temporal argument alone. Driving a parked
+// resume against it would run collections with an unrooted continuation live.
+//
+// This is what makes lifting the `ChildSuspended` wall a CONVERSION rather than
+// an addition: a caller one level up cannot park only the child and leave the
+// parent in the slot. The assert below is the mechanical form of that finding.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn parked_resume_while_the_slot_is_occupied_panics() {
+    in_test_thread(|| {
+        let table = adversarial_table();
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(11, 2), &table, 1 << 14)
+                .expect("compile_session");
+
+        // Park one continuation in the REGISTRY, then — through the nested-child
+        // door — suspend a second into the SLOT, reaching the mixed state.
+        let parked = park_fragment(&mut machine, &table, RealmId(0), "registry_park", 22, 3);
+        assert_rooting_receipt(&machine, 1);
+
+        let entry_out = machine
+            .run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG)
+            .expect("slot-path suspend");
+        assert!(matches!(
+            entry_out,
+            tidepool_codegen::jit_machine::SuspendableOutcome::Suspended { .. }
+        ));
+        assert!(machine.is_suspended(), "the slot now holds a continuation");
+        assert_eq!(
+            machine.parked_count(),
+            1,
+            "the registry park is untouched by the slot suspension"
+        );
+
+        // Resuming the PARKED one now must panic rather than silently run a
+        // collection with the slot-held continuation unrooted.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = machine.resume_parked(
+                parked,
+                &table,
+                &mut NoDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
+            );
+        }));
+        assert!(
+            r.is_err(),
+            "a parked resume with the slot occupied must panic — mixing the two              suspension paths leaves the slot-held continuation unprotected"
+        );
+    });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // The registry does not disturb the single-slot path's guard rail: an unknown
 // id is a clean error, and a resumed id is never reused.
 // ───────────────────────────────────────────────────────────────────────────
