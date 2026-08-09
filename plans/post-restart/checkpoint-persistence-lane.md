@@ -190,6 +190,12 @@ auto-imported and advertised surface, fixtures and docs move to ordinary
 `Generic` ADTs, and positional `f<n>` field generation is deleted — positions
 live only inside positional product nodes, never as a form-wide counter.
 
+The wizard fixture's prompt still instructs its answerer to ask the operator
+for "a 1-of-N choice, a text box, a yes/no". It names no old constructor, so
+it is not stale advertising — but that phrasing describes the widget-shaped
+builder, and under `askUser @T` the answerer needs an author-side ANSWER TYPE
+instead. Migrating that prompt is part of moving fixtures to `Generic` ADTs.
+
 generic-surface de-advertises the builder as part of the `askUser @T` swap
 (a model-facing surface must not offer two form APIs), so what remains here
 is migrating fixtures and deleting the implementation.
