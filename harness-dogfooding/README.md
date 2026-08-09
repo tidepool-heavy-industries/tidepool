@@ -7,23 +7,24 @@ vibes**: you write `render` / `loop` / `State` in plain Haskell, the runtime
 "smart agent" (a clean-context Claude session) authors and iterates the harness
 by hand — the manual precursor to autonomous distillation.
 
-Each subdirectory is one authored harness, following the two-file contract:
+Each subdirectory is one authored harness. The current examples follow the
+two-file layout:
 
 - `Harness.hs` — the config (Xmonad-like): re-exports the vocabulary + `render`
-  and defines `loop` (the one effectful piece; uses `runLLMTurn`, and — once it
-  lands — `askUser` for direct operator elicitation).
+  and defines `loop`, the one effectful piece. A loop may ask a resident model
+  for cognition, orchestrate typed subagents directly, or combine both.
 - `HarnessTypes.hs` — `State` + the answer ADTs + the pure `render`, with **no**
-  reference to `runLLMTurn`/`loop`, so the nested answerer can import the answer
-  types without pulling in the outer effect row (the harness/agent split).
+  reference to `loop` or runtime handles, so answerers and checkpoint codecs can
+  import durable vocabulary without pulling in the outer effect row.
 
 Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
-**Minimal effect surface, on purpose:** the agent inside has only `askUser`
-(typed forms: enum / int / text / bool) + `finalize`, plus `fork` as it lands.
-No fs / exec / http — we prove the loop on legible flows before adding capability
-breadth. Frictions hit while authoring/running these *are the roadmap* for the
-next harness helpers.
+**Minimal effect surfaces, on purpose:** the wizard's answerer has only
+`askUser` (typed forms) + `finalize`, plus `fork` as it lands. The development
+tree instead gives headless workers their native coding tools while Haskell
+owns typed orchestration. Frictions hit while authoring/running these *are the
+roadmap* for the next harness helpers.
 
 ## Harnesses
 
@@ -32,3 +33,9 @@ next harness helpers.
   draft wizard: the agent supplies per-step cognition, the operator supplies
   taste through forms, and the accumulating `draft` *is* a stream of change
   requests. Deliberately rough — the roughness is iteration fuel.
+- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for typed subagents,
+  retained worktrees, and lexical event handlers**. It unfolds an ordinary
+  recursive `DevPlan` into coding agents, pokes descendants when parent HEADs
+  move, then asks fresh integration agents to merge completed branches
+  bottom-up. It is intentionally tagged against PRD 18 and the forthcoming
+  narrow Worktree/Event PRD and will compile as those surfaces land.
