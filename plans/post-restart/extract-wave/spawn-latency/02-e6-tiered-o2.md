@@ -75,6 +75,61 @@ of their own for anything to reference) from the modules that actually DEFINE
 what's used (`Tidepool.Aeson.Value`, `.Scientific`, `Tidepool.Data.Text` —
 the real definers of `object`/`.=`/`Value`, correctly found reachable).
 
+### The soundness argument's one unenforced assumption — now enforced
+
+The argument above's last step rests on an EMPIRICAL absence: "this codebase
+defines no `{-# RULES #-}` anywhere (grep-confirmed empty), so `core2core`
+cannot introduce a genuinely NEW cross-module reference invisible at the
+desugared stage." True today, hand-verified — but nothing was enforcing it.
+A `{-# RULES #-}` pragma added to `haskell/lib` or `haskell/src` tomorrow
+would silently invalidate the soundness argument (a rewrite rule can splice
+in a call to an otherwise-unreferenced function during `core2core`, after
+the reachability walk has already run and decided what gets optimized) —
+and per the risk-profile finding below, no standing gate would catch the
+resulting mis-exclusion either.
+
+Closed with a guard, not left as an assumption: `tidepool-codegen/tests/
+e6_no_rules_pragma.rs`, quick tier (`cargo nextest run -p tidepool-codegen
+--test e6_no_rules_pragma`), a grep-shaped test over `haskell/lib`+`haskell/
+src` for a real `{-# RULES` pragma (a line whose FIRST token after trimming
+is `{-# RULES` — deliberately excludes `--`-comment/Haddock prose that
+merely *mentions* RULES pragmas, as this file's own commentary does; verified
+against a false positive on exactly that during development). Fails loudly,
+naming the reason, the day one is added. Positive-controlled: a real `{-#
+RULES "test-rule" forall x. id x = x #-}` appended to `Tidepool.FilePath.hs`
+made the test fail with the same message; reverted before commit.
+
+**Scope is home modules only, and the wave TL pushed on this specifically —
+this is not a shortcut, it needed checking, and it checks out.** The invariant
+E6 actually needs is not "no RULES pragmas exist" (that's a proxy) but
+**`core2core` cannot ADD a home-module cross-reference absent from desugared
+Core**. `canonicalizeDFlags` disables `Opt_FullLaziness`/`Opt_CprAnal` but
+never touches rewrite rules (grep-confirmed: no `Opt_EnableRewriteRules`
+reference in `GhcPipeline.hs`), so PACKAGE-defined RULES (base's fusion rules
+and friends) genuinely DO fire during `core2core` here — the guard's
+home-only scope has to answer for that, not just assert it. It does: a
+RULE's RHS is typechecked and scope-resolved at the RULE's OWN DEFINITION
+SITE. A package-defined RULE can therefore only name identifiers already in
+scope in that PACKAGE module — other package code — because home modules are
+supplied via `--include`/`importPaths` entirely outside package resolution
+and are invisible to a package's own build. A package RULE can rewrite one
+package call into another; it cannot conjure a reference to, say,
+`Tidepool.Aeson.Value` — it has no way to name it. Checked the two
+neighboring mechanisms the same argument has to survive: inlining a package
+function can't introduce a home reference either, because a package
+function's body can never contain one to begin with (same scope argument,
+one level down) — inlining only propagates references already present in the
+inlined body, never invents new ones; specialisation is the same shape
+(a local specialised copy of an already-referenced function, not a new
+external reference). And a rule that *eliminates* a reference doesn't
+threaten the invariant — elimination only makes the desugared-stage graph a
+strict superset of what's needed, and over-inclusion is already argued
+harmless above. So home-module scope for the guard is exactly coextensive
+with the actual risk, not a narrower, more convenient proxy for it — this
+reasoning (not just its conclusion) is in the guard's own doc comment, so a
+future reader evaluating a NEW mechanism (a simplifier pass, a flag change)
+can check it against the stated invariant rather than against the grep.
+
 ## Scope decision: `runNormalPipeline` only, `runSessionPipeline` untouched
 
 **This is a real scope reduction from "tier the whole pipeline," and it has a
@@ -262,16 +317,23 @@ function `real_core_corpus.rs`/`corpus_report` call, not a new mechanism.
   `kind=4 TypeMetadata` signature `runSessionPipeline`'s PHASE 3 comment
   predicts for this failure class, reproduced by name.
 
-Also worth recording: I had reasoned, before running this, that `load'`
-(PHASE 1, unconditional and untouched by this item's tier) gives every home
-module full -O2 exposed unfoldings before PASS 2 ever runs, so
-`resolveExternals`'s existing iface-unfolding fallback (built for PACKAGE
-externals) might transparently absorb a wrongly-excluded HOME module too.
-**Empirically it does not** — the poison sentinel fires exactly as
-documented. That fallback is not a safety net for this failure class in
-practice; the reachability computation is the only thing standing between a
-wrong exclusion and this failure, which is exactly why the item's gate bar
-is set where it is.
+### Risk-profile finding: there is no fallback safety net for this failure class
+
+I had reasoned, before running the experiment above, that `load'` (PHASE 1,
+unconditional and untouched by this item's tier) gives every home module
+full -O2 exposed unfoldings before PASS 2 ever runs, so `resolveExternals`'s
+existing iface-unfolding fallback (built for PACKAGE externals) might
+transparently absorb a wrongly-excluded HOME module too — a plausible safety
+story. **Tested, not assumed, and REFUTED**: the poison sentinel fires
+exactly as documented; it does not.
+
+**This is a property of E6's risk profile, not an anecdote about one failed
+hypothesis: the tier's reachability computation is the ONLY barrier between
+a wrong exclusion and silent-at-compile/loud-at-JIT corruption.** No
+fallback mechanism in the pipeline catches a wrong exclusion on its behalf.
+That is exactly why this item's gate bar sits where it does, and it applies
+identically to any future reachability-narrowing item over this same Core
+(D2's `RuntimeTypeClosure` in particular).
 
 **Summary, stated at the strength the evidence supports:** the detection
 instrument is real, decisive, and built on the same oracle the named gates
@@ -279,13 +341,21 @@ use — but it required constructing a probe; no existing named gate in the
 standing battery would have caught this specific fault as shipped. Report
 both halves; neither alone is the honest sentence.
 
+> **"detection power demonstrated" ≠ "the battery would have caught it."**
+
 ## Gate receipts (actual N/N, not the spec's placeholder counts — corrected
 mid-item by the wave TL: `26/26`/`24/24` were wrong, D1-A already moved the
 fidelity total to 30)
 
 - **`cargo nextest run` (quick tier, pure-Rust, unbrokered per the updated
-  throttle policy — `nice -n 15 cargo nextest run -j 4`):** **1874 tests run:
-  1874 passed (2 slow), 9 skipped.** Zero failures.
+  throttle policy — `nice -n 15 cargo nextest run -j 4`):** **1875 tests run:
+  1875 passed, 9 skipped.** Zero failures. (1874 before adding the RULES
+  guard below; +1 with it.)
+- **`tidepool-codegen::e6_no_rules_pragma::no_home_rules_pragmas_in_extract_relevant_haskell_source`**
+  (quick tier, included in the 1875 above; named separately per the
+  named-guard rule): **PASS**. Positive-controlled — a real RULES pragma
+  appended to `Tidepool.FilePath.hs` made it FAIL with the invariant-naming
+  message; reverted before commit, re-confirmed green.
 - **`extract-fidelity-test`** (`ghc-slots.sh detach` → `nix develop --command
   cabal test extract-fidelity-test`): **30/30 checks passed**, all
   pre-existing checks named in the log, including the four D1Defense checks
