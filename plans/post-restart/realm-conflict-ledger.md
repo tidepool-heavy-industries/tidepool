@@ -57,6 +57,12 @@ added a comment at `pipeline.rs:173` reading "256MB virtual reservation —
 demand-paged (PROT_NONE → committed on write)", which confirms the `leakcmp`
 lane's reserved-not-committed finding from an unrelated author.
 
+Z4 transfer proof: `cargo nextest run -p tidepool-codegen` → **684 passed, 0
+failed, 8 skipped** at `0dc93715` (pre-rebase this lane was 655/655; jit-chain-2
+contributes the additional 29). The two sibling lanes' four added tests
+(`realm_root_growth`, `realm_module_growth` ×2, `realm_leak_comparison`) all
+survive the fold green, so their measurements still hold on the new shape.
+
 **The lesson for the experiment is that prose anchors are the fragile thing,
 not code.** Three lanes' concurrent code edits to one 3400-line file cost zero
 minutes; the docs describing that file needed a full re-verification pass. A
