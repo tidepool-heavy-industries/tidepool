@@ -980,6 +980,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let effective = builder.ins().iadd(addr, idx);
+            let effective = emit_addr_deref_guard(sess.pipeline, builder, effective);
             let byte_val = builder.ins().load(types::I8, MemFlags::new(), effective, 0);
             let char_val = builder.ins().uextend(types::I64, byte_val);
             Ok(SsaVal::Raw(char_val, LIT_TAG_CHAR))
@@ -1768,6 +1769,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
             let word = builder.ins().uextend(types::I64, byte);
             Ok(SsaVal::Raw(word, LIT_TAG_WORD))
@@ -1788,6 +1790,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().ireduce(types::I8, val);
             builder.ins().store(MemFlags::trusted(), byte, ptr, 0);
             Ok(SsaVal::Raw(
@@ -1832,6 +1835,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 8);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let loaded = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 0);
             Ok(SsaVal::Raw(loaded, crate::layout::LIT_TAG_ADDR))
         }
@@ -1840,6 +1844,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().sextend(types::I64, byte);
             Ok(SsaVal::Raw(val, LIT_TAG_INT))
@@ -1850,6 +1855,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().uextend(types::I64, w32);
             Ok(SsaVal::Raw(val, LIT_TAG_WORD))
@@ -1860,6 +1866,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().uextend(types::I64, w32);
             Ok(SsaVal::Raw(val, LIT_TAG_CHAR))
@@ -1871,6 +1878,7 @@ pub fn emit_primop(
             let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().ireduce(types::I32, val);
             builder.ins().store(MemFlags::trusted(), w32, ptr, 0);
             Ok(SsaVal::Raw(
@@ -2672,6 +2680,95 @@ fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut Functio
         .ins()
         .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
     builder.inst_results(call)[0]
+}
+
+/// Guard a pointer immediately before it is DEREFERENCED by an in-JIT
+/// `load`/`store` — the class of `Addr#`-consuming primop that never calls a
+/// host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`, `WriteWord8OffAddr`,
+/// `IndexAddrOffAddr`, `IndexInt8OffAddr`, `IndexWord32OffAddr`,
+/// `IndexWideCharOffAddr`, `WriteWideCharOffAddr`), so nothing stands between
+/// a bad address and a raw memory access.
+///
+/// `unbox_addr`'s `Raw` branch trusts its *static* literal tag
+/// unconditionally — a compile-time label the emitter attaches when it KNOWS
+/// the value's provenance, not a runtime check on the VALUE — by design,
+/// since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
+/// `minusAddr#`) must be free to hold, and compute with, a null or
+/// out-of-range address WITHOUT tripping a trap; only an actual DEREFERENCE
+/// may reject one. But nothing validated the resulting VALUE anywhere on the
+/// path to that dereference: `IndexAddrArray`, for instance, loads whatever
+/// 8 bytes sit in a `ByteArray#` slot and returns them as `Raw(_,
+/// LIT_TAG_ADDR)` verbatim — a zero-filled slot (a perfectly legal
+/// `ByteArray#` payload; nothing requires a slot meant to hold an address to
+/// already contain one) round-trips as address 0 with no check anywhere.
+/// Every site above then dereferenced that address directly via a Cranelift
+/// `load`/`store` with `MemFlags::trusted()` — an uncaught SIGSEGV on a bad
+/// pointer, not the clean `RuntimeError` every other fault in this codegen
+/// surfaces. `FfiStrlen` and friends are NOT in this list: they call a host
+/// fn (`runtime_strlen`, ...) that self-checks via `check_ptr_invalid`.
+///
+/// Traps via the same `ShapeTrapKind::AddrKind` breadcrumb `unbox_addr`
+/// uses, so an invalid address is diagnosed identically whether it was
+/// rejected by static/heap-shape typing or reached here with the right
+/// shape and a bad value. Returns a pointer safe to dereference: `addr`
+/// unchanged when valid, or the poison buffer `runtime_shape_trap` returns
+/// when not — so the caller's subsequent load/store always targets real,
+/// owned memory.
+fn emit_addr_deref_guard(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    addr: Value,
+) -> Value {
+    let is_invalid = builder.ins().icmp_imm(
+        IntCC::UnsignedLessThan,
+        addr,
+        crate::host_fns::MIN_VALID_ADDR as i64,
+    );
+    let ok_block = builder.create_block();
+    builder.append_block_param(ok_block, types::I64);
+    let trap_block = builder.create_block();
+    builder.ins().brif(
+        is_invalid,
+        trap_block,
+        &[],
+        ok_block,
+        &[BlockArg::Value(addr)],
+    );
+
+    builder.switch_to_block(trap_block);
+    builder.seal_block(trap_block);
+    let trap_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_shape_trap",
+            Linkage::Import,
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+        )
+        .expect("declare runtime_shape_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+    // scrut_ptr passed as 0, matching emit_addr_raw_kind_trap above: `addr`
+    // is not necessarily a heap pointer (it may be an arbitrary integer), so
+    // passing it risks runtime_shape_trap dereferencing garbage in its own
+    // diagnostic dump.
+    let call = builder
+        .ins()
+        .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
+    let poison = builder.inst_results(call)[0];
+    builder.ins().jump(ok_block, &[BlockArg::Value(poison)]);
+
+    builder.switch_to_block(ok_block);
+    builder.seal_block(ok_block);
+    builder.block_params(ok_block)[0]
 }
 
 /// Walk through a chain of 1-field boxing-wrapper Cons (`I#`, `W#`, `D#`,

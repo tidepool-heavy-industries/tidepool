@@ -78,7 +78,7 @@ pub use errors::{
     runtime_oom, runtime_shape_trap, set_exec_context, set_first_cause, surface_error,
     take_runtime_error, RuntimeError, RuntimeErrorKind, ShapeTrapKind,
 };
-pub(crate) use errors::{SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
+pub(crate) use errors::{MIN_VALID_ADDR, SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
 
 pub use force::{deep_force, heap_force, trampoline_resolve};
 
