@@ -476,10 +476,10 @@ fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
     let path = scratch("truncated").join("checkpoint.json");
     let checkpoint = persistence::Checkpoint {
         generation: 1,
+        iteration: 1,
         state: serde_json::json!({"mode": "Deciding"}),
         compaction: Some("a summary".to_string()),
         harness_source: "fingerprint".to_string(),
-        iteration: 1,
     };
     persistence::save_checkpoint(&path, &checkpoint).expect("save_checkpoint");
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
@@ -664,8 +664,9 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
         &checkpoint_path,
         &persistence::Checkpoint {
             generation: 1,
+            iteration: 1,
             // Cannot decode against the reference harness's real `State`
-            // (which requires `lastDecision`/`loopCount`/`mode`/`notes`) —
+            // (which requires `lastDecision`/`mode`/`notes`) —
             // same shape of failure as a hand-edited or cross-version
             // checkpoint that slips past the fingerprint check.
             state: serde_json::json!({"totally": "not a State"}),
