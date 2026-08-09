@@ -34,14 +34,20 @@ from the PRD-dev window (file anchors verified against tree by root), and
   Fingerprint note: the checkpoint fingerprint is source-derived, so this is
   hygiene, not churn reduction — and the driver must persist the iteration
   count in the checkpoint ENVELOPE so restart behavior stays continuous.
-- **Checkpoint codec replacement is separately gated and wire-compatible
-  where possible.** The custom `GCheckpoint` interpreter targets the
-  CURRENT encoding (records→objects, lists→arrays, `Maybe`→value/null,
-  nullary constructors→strings, tagged sums as today) so old payloads stay
-  readable. Residual churn is source-fingerprint churn from editing
-  deriving clauses — needs the restore/discard story, not a data-wire
-  migration. Sequenced AFTER forms (forms are additive; persistence is a
-  replacement in the subsystem that produced both dogfood crashes).
+- **Checkpoint codec replacement is separately gated; wire-compat is the
+  DEFAULT, not a requirement** (Inanna, 2026-08-08: "json is fine as a
+  default but we can just break compat if it's cleaner/easier"). Target the
+  current encoding (records→objects, lists→arrays, `Maybe`→value/null,
+  nullary constructors→strings, tagged sums) where it falls out naturally;
+  where matching aeson's shape costs real complexity, break instead — the
+  cost of a break is old checkpoints unreadable → fresh session start,
+  which is cheap while dogfood is paused. A break must be LOUD (typed
+  decode error naming the codec change, discard-and-restart path), never a
+  silent misparse. Residual churn either way is source-fingerprint churn
+  from editing deriving clauses. Sequenced AFTER forms (forms are
+  additive; persistence is a replacement in the subsystem that produced
+  both dogfood crashes). Routed: extends the generic-surface lane's queue
+  post-swap (they hold the interpreter context).
 - **One-file harness prerequisite is explicit:** effect vocabulary available
   in scope ≠ effects present in M's row. Today the answerer compile omits
   the `RunLLMTurn` GADT/helpers entirely (see `haskell/lib/Tidepool/

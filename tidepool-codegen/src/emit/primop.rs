@@ -2639,58 +2639,308 @@ fn emit_boxing_wrapper_guard(
     builder.seal_block(unwrap_block);
 }
 
+/// Emit an unconditional `runtime_shape_trap(AddrKind)` call and return its
+/// poison value. Used when a `Raw` SSA value's *static* literal tag already
+/// proves — at emission time, no runtime check needed — that it isn't an
+/// address: only well-typed-Core-violating (i.e. compiler-bug) programs ever
+/// reach this. `scrut_ptr` is passed as 0 (not the raw value itself): the raw
+/// value is NOT a heap pointer — it may be an arbitrary integer — so passing
+/// it as `scrut_ptr` would risk `runtime_shape_trap` dereferencing garbage.
+/// 0 is below `MIN_VALID_ADDR`, so the host fn's `check_ptr_invalid` guard
+/// poisons immediately without ever reading through it.
+fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder) -> Value {
+    let trap_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_shape_trap",
+            Linkage::Import,
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+        )
+        .expect("declare runtime_shape_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+    let call = builder
+        .ins()
+        .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
+    builder.inst_results(call)[0]
+}
+
+/// Walk through a chain of 1-field boxing-wrapper Cons (`I#`, `W#`, `D#`,
+/// `Addr#`, `ByteArray#`, `Ptr#`, ... — the shapes GHC emits when an unboxed
+/// Core value is wrapped) starting from a `HeapPtr`, stopping at the first
+/// non-Con object. Each Con step is arity-guarded via
+/// [`emit_boxing_wrapper_guard`] (traps `BoxingArity` on `num_fields != 1`),
+/// so an arbitrary multi-field Con can never be silently unwrapped.
+///
+/// Returns the final (non-Con) heap value — NOT yet known to be a `TAG_LIT`
+/// of any particular class. This is the loop `unbox_addr` and
+/// `unbox_bytearray` used to duplicate independently; callers apply their
+/// own class-specific guard afterward (`unbox_addr`'s address-class check,
+/// `unbox_bytearray`'s array-class check) before reading the payload — the
+/// accepted literal classes and payload-offset adjustment genuinely differ
+/// per consumer, so only this shared traversal is factored out.
+fn unwrap_boxing_chain(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    v: Value,
+) -> Value {
+    let start_block = builder.create_block();
+    let next_block = builder.create_block();
+    builder.append_block_param(start_block, types::I64);
+    builder.append_block_param(next_block, types::I64);
+
+    builder.ins().jump(start_block, &[BlockArg::Value(v)]);
+
+    builder.switch_to_block(start_block);
+    let curr_v = builder.block_params(start_block)[0];
+    let tag = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), curr_v, 0);
+    let is_con = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
+    let con_block = builder.create_block();
+    builder.ins().brif(
+        is_con,
+        con_block,
+        &[],
+        next_block,
+        &[BlockArg::Value(curr_v)],
+    );
+
+    builder.switch_to_block(con_block);
+    builder.seal_block(con_block);
+    // Boxing wrappers have exactly one field; trap cleanly otherwise
+    // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
+    emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
+    let field0 = builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        curr_v,
+        layout::CON_FIELDS_OFFSET as i32,
+    );
+    builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+
+    builder.switch_to_block(next_block);
+    builder.seal_block(start_block);
+    builder.seal_block(next_block);
+    builder.block_params(next_block)[0]
+}
+
+/// Emit an unconditional `runtime_shape_trap(ArrayKind)` call and return its
+/// poison value. Used when a `Raw` SSA value's *static* literal tag already
+/// proves — at emission time — that it isn't a `ByteArray#`. `scrut_ptr` is
+/// passed as 0 for the same reason as [`emit_addr_raw_kind_trap`]: the raw
+/// value may be an arbitrary integer, not a heap pointer.
+fn emit_array_raw_kind_trap(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+) -> Value {
+    let trap_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_shape_trap",
+            Linkage::Import,
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+        )
+        .expect("declare runtime_shape_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::ArrayKind as i64);
+    let call = builder
+        .ins()
+        .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
+    builder.inst_results(call)[0]
+}
+
 /// Unbox an Addr# value recursively.
+///
+/// Only an explicitly address-kinded value may be read as an address:
+/// - `Raw` values must carry the static `LIT_TAG_ADDR` literal tag (set by
+///   the emitter itself when it produced the value) — anything else is
+///   rejected via [`emit_addr_raw_kind_trap`] without ever treating the raw
+///   bits as a pointer.
+/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons (as
+///   before), but the final payload MUST land on a `TAG_LIT` object whose
+///   `lit_tag` is one of the address-carrying classes (`String#`/`Addr#`/
+///   `ByteArray#`) before its payload is loaded as an address. A stray tag
+///   word or a Lit of an unrelated class (e.g. `Int#`) traps cleanly via
+///   `runtime_shape_trap` instead of being dereferenced — this is the fix
+///   for the escape described in codex-review-2026-08-08.md item 1, where a
+///   Con's single field was loaded and used as an address with no literal-
+///   tag check at all.
 fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
-        SsaVal::Raw(v, _) => v,
+        SsaVal::Raw(v, tag) => {
+            if tag == crate::layout::LIT_TAG_ADDR {
+                v
+            } else {
+                emit_addr_raw_kind_trap(pipeline, builder)
+            }
+        }
         SsaVal::HeapPtr(v) => {
-            let start_block = builder.create_block();
-            let next_block = builder.create_block();
-            builder.append_block_param(start_block, types::I64);
-            builder.append_block_param(next_block, types::I64);
+            let v_final = unwrap_boxing_chain(pipeline, builder, v);
 
-            builder.ins().jump(start_block, &[BlockArg::Value(v)]);
-
-            builder.switch_to_block(start_block);
-            let curr_v = builder.block_params(start_block)[0];
-            let tag = builder
+            // Guard the final load: v_final is only guaranteed NOT to be a
+            // 1-field Con wrapper — it could be a Thunk, Closure, or a Lit of
+            // an unrelated class (e.g. an Int#/Word# tag word that escaped
+            // case dispatch — the f137d34-shaped witness this hardens
+            // against). Require TAG_LIT and an address-carrying lit-tag
+            // before loading LIT_VALUE_OFFSET as an address.
+            let obj_tag = builder
                 .ins()
-                .load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder
+                .load(types::I8, MemFlags::trusted(), v_final, 0);
+            let not_lit = builder
                 .ins()
-                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+                .icmp_imm(IntCC::NotEqual, obj_tag, layout::TAG_LIT as i64);
+            let lit_tag =
+                builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
+            let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
 
-            let con_block = builder.create_block();
+            let is_string =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING as i64);
+            let is_addr_lit = builder.ins().icmp_imm(
+                IntCC::Equal,
+                lit_tag_ext,
+                crate::layout::LIT_TAG_ADDR as i64,
+            );
+            let is_ba = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_BYTEARRAY as i64);
+            let str_or_addr = builder.ins().bor(is_string, is_addr_lit);
+            let is_addr_class = builder.ins().bor(str_or_addr, is_ba);
+            let wrong_class = builder.ins().icmp_imm(IntCC::Equal, is_addr_class, 0);
+            let bad = builder.ins().bor(not_lit, wrong_class);
+
+            let load_block = builder.create_block();
+            builder.append_block_param(load_block, types::I64);
+            let addr_trap_block = builder.create_block();
             builder.ins().brif(
-                is_con,
-                con_block,
+                bad,
+                addr_trap_block,
                 &[],
-                next_block,
-                &[BlockArg::Value(curr_v)],
+                load_block,
+                &[BlockArg::Value(v_final)],
             );
 
-            builder.switch_to_block(con_block);
-            builder.seal_block(con_block);
-            // Boxing wrappers have exactly one field; trap cleanly otherwise
-            // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
-            emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
-            let field0 = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                curr_v,
-                layout::CON_FIELDS_OFFSET as i32,
-            );
-            builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+            builder.switch_to_block(addr_trap_block);
+            builder.seal_block(addr_trap_block);
+            let trap_fn = pipeline
+                .module
+                .declare_function(
+                    "runtime_shape_trap",
+                    Linkage::Import,
+                    &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+                )
+                .expect("declare runtime_shape_trap");
+            let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+            let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3, // align 8
+            ));
+            let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let kind = builder
+                .ins()
+                .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+            let call = builder
+                .ins()
+                .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
+            let poison = builder.inst_results(call)[0];
+            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
 
-            builder.switch_to_block(next_block);
-            builder.seal_block(start_block);
-            builder.seal_block(next_block);
-            let v_final = builder.block_params(next_block)[0];
+            builder.switch_to_block(load_block);
+            builder.seal_block(load_block);
+            let v_load = builder.block_params(load_block)[0];
 
             let raw_val =
                 builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
+                    .load(types::I64, MemFlags::trusted(), v_load, LIT_VALUE_OFFSET);
+            let needs_adj = builder.ins().bor(is_string, is_ba);
+            let adjusted = builder.ins().iadd_imm(raw_val, 8);
+            builder.ins().select(needs_adj, adjusted, raw_val)
+        }
+    }
+}
+
+/// Extract the raw ByteArray/boxed-array pointer from a `Lit` heap object
+/// recursively. Shared by every `ByteArray#`/`SmallArray#`/`Array#`-consuming
+/// primop (`sizeofByteArray#`, `indexWord8Array#`, `readSmallArray#`,
+/// `copyByteArray#`, ... — see the call sites in this file).
+///
+/// Only an explicitly array-kinded value may be read as a length-prefixed
+/// buffer pointer:
+/// - `Raw` values must carry the static `LIT_TAG_BYTEARRAY` literal tag (the
+///   shape `ResizeMutableByteArray` emits directly, without a `Lit` wrapper)
+///   — anything else is rejected via [`emit_array_raw_kind_trap`] without
+///   ever treating the raw bits as a pointer.
+/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons (via
+///   [`unwrap_boxing_chain`], shared with `unbox_addr`), but the final
+///   payload MUST land on a `TAG_LIT` object whose `lit_tag` is one of the
+///   array-carrying classes (`String#`/`ByteArray#`/`SmallArray#`/`Array#`)
+///   before its payload is loaded as a buffer pointer. A stray tag word or a
+///   Lit of an unrelated class (e.g. `Int#`) traps cleanly via
+///   `runtime_shape_trap` instead of being dereferenced — this closes the
+///   `unbox_addr`-shaped gap named in codex-review-2026-08-08.md item 1's
+///   follow-up: `unbox_bytearray` had its own con-unwrap loop with no final
+///   `TAG_LIT` check at all.
+///
+/// Note `Addr#` is deliberately NOT an accepted class here (unlike
+/// `unbox_addr`, which accepts `ByteArray#`): an `Addr#` literal's payload is
+/// a bare address with no length prefix, so reading it as `[len][data...]`
+/// would misinterpret arbitrary memory as a length — the two unbox functions
+/// share the traversal but not the accepted-class set.
+fn unbox_bytearray(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
+    match val {
+        SsaVal::Raw(v, tag) => {
+            if tag == crate::layout::LIT_TAG_BYTEARRAY {
+                v
+            } else {
+                emit_array_raw_kind_trap(pipeline, builder)
+            }
+        }
+        SsaVal::HeapPtr(v) => {
+            let v_final = unwrap_boxing_chain(pipeline, builder, v);
+
+            // Guard the final load: v_final is only guaranteed NOT to be a
+            // 1-field Con wrapper — it could be a Thunk, Closure, or a Lit of
+            // an unrelated class (e.g. an Int#/Word# tag word). Require
+            // TAG_LIT and an array-carrying lit-tag before loading
+            // LIT_VALUE_OFFSET as a buffer pointer.
+            let obj_tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), v_final, 0);
+            let not_lit = builder
+                .ins()
+                .icmp_imm(IntCC::NotEqual, obj_tag, layout::TAG_LIT as i64);
             let lit_tag =
                 builder
                     .ins()
@@ -2704,80 +2954,68 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
             let is_ba = builder
                 .ins()
                 .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_BYTEARRAY as i64);
-            let needs_adj = builder.ins().bor(is_string, is_ba);
-            let adjusted = builder.ins().iadd_imm(raw_val, 8);
-            builder.ins().select(needs_adj, adjusted, raw_val)
-        }
-    }
-}
-
-/// Extract the raw ByteArray pointer from a Lit(BYTEARRAY) heap object recursively.
-fn unbox_bytearray(
-    pipeline: &mut CodegenPipeline,
-    builder: &mut FunctionBuilder,
-    val: SsaVal,
-) -> Value {
-    match val {
-        SsaVal::Raw(v, _) => v,
-        SsaVal::HeapPtr(v) => {
-            let start_block = builder.create_block();
-            let next_block = builder.create_block();
-            builder.append_block_param(start_block, types::I64);
-            builder.append_block_param(next_block, types::I64);
-
-            builder.ins().jump(start_block, &[BlockArg::Value(v)]);
-
-            builder.switch_to_block(start_block);
-            let curr_v = builder.block_params(start_block)[0];
-            let tag = builder
+            let is_small_arr =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_SMALLARRAY as i64);
+            let is_arr = builder
                 .ins()
-                .load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_ARRAY as i64);
+            let str_or_ba = builder.ins().bor(is_string, is_ba);
+            let small_or_arr = builder.ins().bor(is_small_arr, is_arr);
+            let is_array_class = builder.ins().bor(str_or_ba, small_or_arr);
+            let wrong_class = builder.ins().icmp_imm(IntCC::Equal, is_array_class, 0);
+            let bad = builder.ins().bor(not_lit, wrong_class);
 
-            let con_block = builder.create_block();
+            let load_block = builder.create_block();
+            builder.append_block_param(load_block, types::I64);
+            let array_trap_block = builder.create_block();
             builder.ins().brif(
-                is_con,
-                con_block,
+                bad,
+                array_trap_block,
                 &[],
-                next_block,
-                &[BlockArg::Value(curr_v)],
+                load_block,
+                &[BlockArg::Value(v_final)],
             );
 
-            builder.switch_to_block(con_block);
-            builder.seal_block(con_block);
-            // Boxing wrappers have exactly one field; trap cleanly otherwise
-            // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
-            emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
-            let field0 = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                curr_v,
-                layout::CON_FIELDS_OFFSET as i32,
-            );
-            builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+            builder.switch_to_block(array_trap_block);
+            builder.seal_block(array_trap_block);
+            let trap_fn = pipeline
+                .module
+                .declare_function(
+                    "runtime_shape_trap",
+                    Linkage::Import,
+                    &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+                )
+                .expect("declare runtime_shape_trap");
+            let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+            let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3, // align 8
+            ));
+            let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let kind = builder
+                .ins()
+                .iconst(types::I64, crate::host_fns::ShapeTrapKind::ArrayKind as i64);
+            let call = builder
+                .ins()
+                .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
+            let poison = builder.inst_results(call)[0];
+            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
 
-            builder.switch_to_block(next_block);
-            builder.seal_block(start_block);
-            builder.seal_block(next_block);
-            let v_final = builder.block_params(next_block)[0];
+            builder.switch_to_block(load_block);
+            builder.seal_block(load_block);
+            let v_load = builder.block_params(load_block)[0];
 
             let raw_val =
                 builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
-            let lit_tag =
-                builder
-                    .ins()
-                    .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
-            let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
-
-            // ByteArray# should also adjust for LIT_TAG_STRING if passed one.
-            let is_string =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING as i64);
+                    .load(types::I64, MemFlags::trusted(), v_load, LIT_VALUE_OFFSET);
+            // ByteArray#/SmallArray#/Array# already point directly at
+            // `[len][data...]`; only a String# literal needs the +8 skip
+            // past its length prefix to line up with that same shape.
             let adjusted = builder.ins().iadd_imm(raw_val, 8);
             builder.ins().select(is_string, adjusted, raw_val)
         }

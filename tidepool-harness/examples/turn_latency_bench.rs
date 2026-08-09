@@ -28,6 +28,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
 use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
@@ -374,6 +375,25 @@ fn outcome_label(outcome: &TurnOutcome) -> &'static str {
     }
 }
 
+/// Pin the node's answer type to `Int` before its first turn.
+///
+/// `Finalize` is type-indexed and instantiated IN THE ROW, so a node with no
+/// answer contract compiles against `Finalize NoAnswer` — an uninhabited type
+/// that admits no answer at all. Every block this bench replays is
+/// `finalize @Int …`, so without this the row rejects it before any of the
+/// stages being measured runs (`'Finalize Int' is not a member of
+/// '[AskUser, Fork, Finalize NoAnswer]'`). `Int` needs no author module, so
+/// the contract carries no imports.
+fn pin_int_answer(harness: &Harness, node: NodeId) {
+    harness.set_answer_contract(
+        node,
+        Some(AnswerContract {
+            ty: "Int".to_string(),
+            imports: Vec::new(),
+        }),
+    );
+}
+
 async fn drive_one(
     harness: &Harness,
     collector: &Collector,
@@ -382,6 +402,7 @@ async fn drive_one(
 ) -> Result<(NodeId, u64, Duration, TurnOutcome), Box<dyn Error>> {
     let node = harness.create_root(&format!("{scenario}-{index}"), "Begin.")?;
     harness.force(node, Actor::Operator)?;
+    pin_int_answer(harness, node);
     let turn_marker = collector.begin_turn();
     let start = Instant::now();
     let outcome = harness.drive_turn(node).await?;
@@ -491,6 +512,7 @@ async fn scenario_retry(
     for i in 0..repeats {
         let node = harness.create_root(&format!("{scenario}-{i}"), "Begin.")?;
         harness.force(node, Actor::Operator)?;
+        pin_int_answer(&harness, node);
         let turn_marker = collector.begin_turn();
         let start = Instant::now();
         let outcome = harness.run_to_hole_or_done(node).await?;

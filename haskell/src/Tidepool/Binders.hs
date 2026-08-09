@@ -1,30 +1,20 @@
 {-# LANGUAGE LambdaCase #-}
 
--- | Binder-name extraction for Lane A (declaration accumulation).
+-- | Binder-name extraction for the turn/classify lanes.
 --
--- Given a Haskell source file containing top-level declarations, parse it with
--- GHC's own parser (NO typecheck) and report the binders each declaration
--- introduces as structured 'ExportItem's. The Rust runtime calls this via the
--- @--emit-binders@ mode so it never needs a Haskell parser of its own; the
--- selective re-export logic (which names a turn redefines) is driven by these
--- GHC-sourced names.
---
--- JSON boundary (written by 'emitBinders'):
---
--- > {"items":[{"kind":"value","name":"slug"},
--- >           {"kind":"type","name":"Foo","cons":["A","B"]}]}
+-- Given Haskell source, parse it with GHC's own parser (NO typecheck) and
+-- report the binders declarations introduce, or classify a single statement
+-- as bind\/expr\/decl. The Rust runtime never parses Haskell itself; these
+-- GHC-sourced names and verdicts are the only source.
 module Tidepool.Binders
   ( ExportItem(..)
-  , extractBinders
   , extractBindersNamed
   , exportItemName
-  , renderBindersJson
-  , emitBinders
     -- * Statement binders (session-eval bind-vs-expr classification)
   , StmtBinders(..)
   , extractStmtBinders
-  , renderStmtBindersJson
-  , emitStmtBinders
+  , classifyBlock
+  , renderVerdictsJson
     -- * Turn-mode rich result (--turn)
   , TurnOut(..)
   , BoundBinder(..)
@@ -39,7 +29,7 @@ import GHC.Hs
   , Sig(..), LSig, hsmodDecls )
 import GHC.Hs.Expr (StmtLR(..))
 import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
-import GHC.Driver.Session (importPaths, xopt_set)
+import GHC.Driver.Session (DynFlags, importPaths, xopt_set)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser (parseStatement, parseDeclaration)
 import GHC.Parser.Lexer (ParseResult(..), unP, initParserState)
@@ -61,7 +51,7 @@ import Data.Char (ord)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
-import Tidepool.Timing (timeSection, emitPhase, timePhase)
+import Tidepool.Timing (timeSection, emitPhase)
 
 -- | A binder a declaration introduces.
 --
@@ -76,39 +66,15 @@ data ExportItem
   deriving (Eq, Show)
 
 -- | Parse @path@ (with @includes@ on the search path) and collect the binders
--- of its top-level declarations. Parse-only: never typechecks, so a declaration
--- that references not-yet-defined names still yields its binders.
-extractBinders :: FilePath -> [FilePath] -> IO [ExportItem]
-extractBinders path includes = do
-  libdir <- getLibdir
-  runGhc (Just libdir) $ do
-    dflags <- getSessionDynFlags
-    _ <- setSessionDynFlags dflags { importPaths = importPaths dflags ++ includes }
-    target <- guessTarget path Nothing Nothing
-    setTargets [target]
-    _ <- depanal [] False
-    graph <- getModuleGraph
-    case mgModSummaries graph of
-      [] -> pure []
-      summaries -> do
-        let isOurs ms =
-              moduleNameString (moduleName (ms_mod ms)) == "SessionDecls"
-            chosen = case filter isOurs summaries of
-                       (s:_) -> s
-                       []    -> head summaries
-        pm <- parseModule chosen
-        let decls = hsmodDecls (unLoc (pm_parsed_source pm))
-        pure (concatMap declItems decls)
-
--- | Like 'extractBinders' but selects the module summary by an EXACT match on
--- @expectedModuleName@ rather than falling back to @head summaries@ when no
--- module named @SessionDecls@ is found. Used by @--turn@'s decl path: the
--- caller controls the name of the scratch module it just spliced and wrote
--- (via 'Main.extractModuleName' on the spliced source), so it can demand
--- exactly that summary instead of guessing at one. A missing match is a
+-- of its top-level declarations as structured 'ExportItem's, selecting the
+-- module summary by an EXACT match on @expectedModuleName@. Used by
+-- @--turn@'s decl path: the caller controls the name of the scratch module it
+-- just spliced and wrote (via 'Main.extractModuleName' on the spliced
+-- source), so it can demand exactly that summary. A missing match is a
 -- caller wiring bug — the module just written is not the module GHC parsed —
 -- and fails loudly rather than silently returning a different module's
--- binders.
+-- binders. Parse-only: never typechecks, so a declaration that references
+-- not-yet-defined names still yields its binders.
 extractBindersNamed :: FilePath -> [FilePath] -> String -> IO [ExportItem]
 extractBindersNamed path includes expectedModuleName = do
   libdir <- getLibdir
@@ -176,16 +142,6 @@ conDeclNames = \case
 occStr :: RdrName -> String
 occStr = occNameString . rdrNameOcc
 
--- | Extract binders from @path@ and write the JSON contract to @out@.
-emitBinders :: FilePath -> [FilePath] -> FilePath -> IO ()
-emitBinders path includes out = do
-  items <- extractBinders path includes
-  writeFile out (renderBindersJson items)
-
-renderBindersJson :: [ExportItem] -> String
-renderBindersJson items =
-  "{\"items\":[" ++ intercalate "," (map renderItem items) ++ "]}"
-
 renderItem :: ExportItem -> String
 renderItem (EValue n) =
   "{\"kind\":\"value\",\"name\":" ++ jsonString n ++ "}"
@@ -234,9 +190,13 @@ data StmtBinders = StmtBinders
   , sbBinders :: [String]
   } deriving (Eq, Show)
 
--- | Classify @src@ with GHC's own parser (parse-only, no typecheck) into one of
--- three kinds, letting GHC be the single authority for the decl/bind/expr split
--- (the Rust runtime never parses Haskell itself).
+-- | Classify @src@ against an already-obtained 'DynFlags' with GHC's own
+-- parser (parse-only, no typecheck), letting GHC be the single authority for
+-- the decl/bind/expr split (the Rust runtime never parses Haskell itself).
+-- Session-independent: takes no session action itself, so both
+-- 'extractStmtBinders' (one src, one session) and 'classifyBlock' (N srcs,
+-- one session) can share it — they cannot fork the verdict a src gets
+-- because there is exactly one place the parse happens.
 --
 -- DECLARATION CONTEXT FIRST, then statement context. A top-level declaration
 -- (@f x = e@, a signature @f :: T@, a bare @x = 5@) parses as a decl but FAILS
@@ -252,32 +212,52 @@ data StmtBinders = StmtBinders
 --     names ('collectLStmtBinders'); @BodyStmt@ (a bare expression) → @"expr"@.
 --   * else (both fail) → @"expr"@ (the runtime recompiles through the
 --     bare-expression path, where GHC re-parses and reports the real error).
---
--- @timing@ gates the 'tidepool-timing' stderr lines (see 'Tidepool.Timing');
--- this lane runs no GHC typecheck at all (parse-only), so its @ghc_session@
--- line isolates pure GHC-API/session boot cost, and what it labels
--- @typecheck@ is really just forcing the parse (see @PHASE_TYPECHECK@'s own
--- "Parse + rename + typecheck" doc in timing.rs) — no rename or typecheck
--- ever runs here, and that absence is itself the signal this lane exists to
--- surface.
-extractStmtBinders :: Bool -> String -> IO StmtBinders
-extractStmtBinders timing src = do
+classifyWithFlags :: DynFlags -> String -> StmtBinders
+classifyWithFlags dflags0 src = classifyTurn declRes stmtRes
+  where
+    dflags = foldl' xopt_set dflags0 stmtExtensions
+    popts  = initParserOpts dflags
+    loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
+    buf    = stringToStringBuffer src
+    -- Fresh parser state per attempt (the StringBuffer is immutable, so it
+    -- is safe to reuse; the mutable lexer state is not).
+    declRes = unP parseDeclaration (initParserState popts buf loc)
+    stmtRes = unP parseStatement   (initParserState popts buf loc)
+
+-- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a lane:
+-- it emits no phases of its own — a phase's owner has to be whatever knows it
+-- is a whole lane, and both surviving callers ('runTurnMode''s classify
+-- substep, and the block classify lane wrapping a batch of these) time it
+-- themselves. The 'evaluate' force stays: the caller's phase measures wall
+-- clock around this call, and an unforced thunk would let that phase measure
+-- nothing.
+extractStmtBinders :: String -> IO StmtBinders
+extractStmtBinders src = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    liftIO (evaluate (classifyWithFlags dflags src))
+
+-- | Classify a whole BLOCK of turns in one process: boot exactly ONE GHC
+-- session (unlike N calls to 'extractStmtBinders', which would boot N), then
+-- run 'classifyWithFlags' once per item against that single session's
+-- 'DynFlags'. This IS a whole lane — the @--classify@ CLI mode — so unlike
+-- the substep it DOES take the timing flag and emit its own phases:
+-- @startup@ around 'getLibdir', @ghc_session@ around 'getSessionDynFlags',
+-- and @classify@ around the N forced parses (one phase for the whole batch,
+-- not one per item). No @typecheck@ phase — that name was always a misnomer
+-- for a step that runs no typecheck, and it leaves with the lane that
+-- originated it rather than being carried forward here.
+classifyBlock :: Bool -> [String] -> IO [StmtBinders]
+classifyBlock timing srcs = do
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
-    (dflags0, sessionMs) <- timeSection getSessionDynFlags
+    (dflags, sessionMs) <- timeSection getSessionDynFlags
     liftIO (emitPhase timing "ghc_session" sessionMs)
-    let dflags = foldl' xopt_set dflags0 stmtExtensions
-        popts  = initParserOpts dflags
-        loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
-        buf    = stringToStringBuffer src
-        -- Fresh parser state per attempt (the StringBuffer is immutable, so it
-        -- is safe to reuse; the mutable lexer state is not).
-        declRes = unP parseDeclaration (initParserState popts buf loc)
-        stmtRes = unP parseStatement   (initParserState popts buf loc)
-    (sb, parseMs) <- timeSection (liftIO (evaluate (classifyTurn declRes stmtRes)))
-    liftIO (emitPhase timing "typecheck" parseMs)
-    pure sb
+    (sbs, classifyMs) <- timeSection (liftIO (mapM (evaluate . classifyWithFlags dflags) srcs))
+    liftIO (emitPhase timing "classify" classifyMs)
+    pure sbs
 
 -- | Combine the declaration- and statement-context parses into one verdict.
 -- Neither context alone is sufficient: a bare @sq 7@ parses (spuriously) as a
@@ -355,20 +335,20 @@ stmtExtensions =
   , QuasiQuotes
   ]
 
-renderStmtBindersJson :: StmtBinders -> String
-renderStmtBindersJson (StmtBinders kind binders) =
-  "{\"kind\":" ++ jsonString kind
-    ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
-
--- | Read the turn statement from @srcFile@, classify it, and write the JSON
--- contract to @out@. Mirrors 'emitBinders'. @timing@ threads
--- 'Tidepool.Timing.readTimingEnabled' down from the caller (read once at
--- process entry).
-emitStmtBinders :: Bool -> FilePath -> FilePath -> IO ()
-emitStmtBinders timing srcFile out = do
-  src <- readFile srcFile
-  sb  <- extractStmtBinders timing src
-  timePhase timing "write" (writeFile out (renderStmtBindersJson sb))
+-- | The @--classify@ CLI contract: one verdict per positional file, in argv
+-- order. @kind@ and @binders@ are verbatim the same shape a single
+-- 'StmtBinders' always rendered.
+--
+-- > {"verdicts":[{"kind":"bind","binders":["x"]},
+-- >              {"kind":"decl","binders":["sq"]},
+-- >              {"kind":"expr","binders":[]}]}
+renderVerdictsJson :: [StmtBinders] -> String
+renderVerdictsJson sbs =
+  "{\"verdicts\":[" ++ intercalate "," (map renderVerdict sbs) ++ "]}"
+  where
+    renderVerdict (StmtBinders kind binders) =
+      "{\"kind\":" ++ jsonString kind
+        ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
 
 --------------------------------------------------------------------------------
 -- Turn-mode rich result (--turn) — a tagged variant over the verdict
@@ -388,11 +368,11 @@ data BoundBinder = BoundBinder
 
 -- | The rich result of a @--turn@ run: a tagged variant over the verdict
 -- (see @plans/one-spawn-turn-protocol.md@). 'TDecl' never compiles — its
--- 'toDeclItems' come from a whole-module parse ('extractBinders' for a
--- decl-batch caller, 'extractBindersNamed' for a single @--turn@ decl turn
--- that spliced its own scratch module), not this module's statement parse,
--- because a decl-batch caller (@--turn-verdict decl@ over N declarations
--- joined into one module) has no single statement to parse. 'TBind'/'TExpr'
+-- 'toDeclItems' come from a whole-module parse ('extractBindersNamed' over
+-- the @--turn@ decl turn's own spliced scratch module), not this module's
+-- statement parse, because a decl-batch caller (@--turn-verdict decl@ over N
+-- declarations joined into one module) has no single statement to parse.
+-- 'TBind'/'TExpr'
 -- carry what the selected template variant actually compiled to. The
 -- wire-visible tag ('renderTurnOutJson' \/ the CBOR encoder) is
 -- @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these constructor names.

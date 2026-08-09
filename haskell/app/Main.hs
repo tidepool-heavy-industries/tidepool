@@ -29,10 +29,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Tidepool.Binders
-  ( emitBinders, emitStmtBinders, extractBinders, extractBindersNamed
-  , extractStmtBinders, exportItemName
+  ( extractBindersNamed
+  , extractStmtBinders, classifyBlock, exportItemName
   , StmtBinders(..), TurnOut(..), BoundBinder(..)
-  , renderTurnOutJson, renderBoundBinderJson, renderAskJson )
+  , renderTurnOutJson, renderBoundBinderJson, renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
   , stripMonadHead, isClosureType, renderType, splitTupleType )
@@ -61,15 +61,13 @@ main = do
   timing <- readTimingEnabled
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
-      -- Statement binder extraction (parse-only): bind-vs-expr + bound names
-      -- for one session-eval turn. Fast path, no Core pipeline.
-      | Just out <- argEmitStmtBinders args ->
-          timePhase timing "total" (runReportingDiags (emitStmtBinders timing file out))
-      -- Lane A: parse-only declaration binder extraction for the FIRST file.
-      | Just out <- argEmitBinders args     -> runReportingDiags (emitBinders file (argIncludes args) out)
+      -- Block classify lane: every positional file is one item, classified
+      -- in ONE GHC session boot. Checked before '--turn' since it reads the
+      -- FULL 'argFiles' list rather than just the head.
+      | argClassify args                    -> runClassifyMode timing args
       -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
       -- + rich-result emission, in one process. Checked before 'isSessionMode'
       -- since a bind/expr turn also carries --session-root/--inject-val.
@@ -108,11 +106,9 @@ data Args = Args
   , argDumpCore :: Bool
   , argAllClosed :: Bool
   , argTargetModuleOnly :: Bool
-  , argEmitBinders :: Maybe FilePath
   , argIncludes :: [FilePath]
   , argFiles :: [String]
   -- Wave 3b session-eval value binding:
-  , argEmitStmtBinders :: Maybe FilePath
   , argSessionBind :: Bool
   , argBindNames :: [String]
   , argBindGen :: Maybe Word64
@@ -125,20 +121,22 @@ data Args = Args
   , argTurnOut :: Maybe FilePath
   , argJsonOutput :: Maybe FilePath
   , argTurnVerdict :: Maybe String
+  -- --classify mode (block classify lane, plans/one-spawn-turn-protocol-phase-b.md):
+  , argClassify :: Bool
+  , argClassifyOut :: Maybe FilePath
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False False False Nothing [] []
-                     Nothing False [] Nothing Nothing [] Nothing
-                     False [] Nothing Nothing Nothing)
+parseArgs = go (Args Nothing Nothing False False False [] []
+                     False [] Nothing Nothing [] Nothing
+                     False [] Nothing Nothing Nothing
+                     False Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
     go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
     go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
-    go a ("--emit-binders" : out : rest) = go a { argEmitBinders = Just out } rest
-    go a ("--emit-stmt-binders" : out : rest) = go a { argEmitStmtBinders = Just out } rest
     go a ("--session-bind" : rest) = go a { argSessionBind = True } rest
     go a ("--bind-name" : n : rest) = go a { argBindNames = argBindNames a ++ [n] } rest
     go a ("--bind-gen" : g : rest) = go a { argBindGen = Just (read g) } rest
@@ -150,6 +148,8 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--turn-out" : out : rest) = go a { argTurnOut = Just out } rest
     go a ("--json-output" : out : rest) = go a { argJsonOutput = Just out } rest
     go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
+    go a ("--classify" : rest) = go a { argClassify = True } rest
+    go a ("--classify-out" : out : rest) = go a { argClassifyOut = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
@@ -470,17 +470,16 @@ runTurnMode :: Args -> FilePath -> IO ()
 runTurnMode args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
-  res <- try $ do
+  res <- timePhase timing "total" $ try $ do
     turnSrc   <- readFile path
     templates <- mapM parseTurnTemplate (argTurnTemplates args)
     mVerdict  <- traverse parseTurnVerdictArg (argTurnVerdict args)
-    -- The classify substep emits no phases. 'extractStmtBinders' times itself
-    -- as a whole lane — its @startup@\/@ghc_session@\/@typecheck@ lines
-    -- describe a process that does nothing else — so inside this mode they
-    -- would land beside the compile's own phases from the same process: two
-    -- @ghc_session@ lines, and a @typecheck@ that no typecheck produced. A
-    -- phase's owner has to be whatever knows it is a whole lane.
-    sb        <- maybe (extractStmtBinders False turnSrc) return mVerdict
+    -- 'extractStmtBinders' emits no phases of its own (a substep, not a
+    -- lane) — this mode times it as the single @classify@ phase, emitted
+    -- only on the branch that actually classifies. With @--turn-verdict@
+    -- supplied nothing is parsed, and an absent @classify@ row is the
+    -- honest report rather than a phantom 0ms line.
+    sb        <- maybe (timePhase timing "classify" (extractStmtBinders turnSrc)) return mVerdict
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (argOutDir args)
         bindersStr = intercalate ", " (sbBinders sb)
         -- Splice @tmplFile@ against the turn text, write the spliced module
@@ -531,7 +530,12 @@ runTurnMode args path = do
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
             warnTexts   = map T.pack (prWarnings result)
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts "__result" "result"
+        -- The Core binding to look up. Scaffold-reserved by default, but a
+        -- caller whose template names its own target says so with --target
+        -- (the same knob 'processSessionFile' honours). The output file base
+        -- stays "result" regardless — every Rust caller reads result.cbor.
+        let targetName = fromMaybe "__result" (argTarget args)
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
         let wrapped = T.pack spliced
         case selector of
           "bind" -> do
@@ -562,6 +566,22 @@ runTurnMode args path = do
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> putStrLn (renderDiagsJson [])
+
+-- | Block classify lane (@--classify@, plans/one-spawn-turn-protocol-phase-b.md):
+-- classify EVERY positional file in 'argFiles' with ONE GHC session boot
+-- ('classifyBlock'), in argv order, and write the verdicts to
+-- @--classify-out@. Serves @tidepool-repl@'s block runner, which segments a
+-- block into decl runs before compiling any item and so needs every verdict
+-- up front — one spawn for the whole block instead of one classify spawn per
+-- item.
+runClassifyMode :: Bool -> Args -> IO ()
+runClassifyMode timing args =
+  timePhase timing "total" $ runReportingDiags $ do
+    out      <- requireArg "--classify-out" (argClassifyOut args)
+    srcs     <- mapM readFile (argFiles args)
+    verdicts <- classifyBlock timing srcs
+    writeFile out (renderVerdictsJson verdicts)
+    hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
 
 -- | Parse one raw @--turn-template kind=file@ argument. Validated here (not in
 -- 'parseArgs', which stays total) so a malformed flag surfaces through

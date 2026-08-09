@@ -126,6 +126,23 @@ pub enum ShapeTrapKind {
     /// A numeric unbox landed on a literal of the wrong class (e.g. a `Double`
     /// payload forced by an `Int#` continuation).
     LitClass = 2,
+    /// An address-consuming primop (`strlen#`, `plusAddr#`, ...) received a
+    /// value that isn't explicitly address-kinded: either a `Raw` SSA value
+    /// whose static literal tag isn't `Addr#`, or — after unwrapping any
+    /// 1-field boxing wrapper — a heap payload that isn't a `TAG_LIT` of an
+    /// address-carrying class (`String#`/`Addr#`/`ByteArray#`). Guards
+    /// against a stray tag/int word being dereferenced as a pointer.
+    AddrKind = 3,
+    /// A `ByteArray#`/`SmallArray#`/`Array#`-consuming primop (`sizeofByteArray#`,
+    /// `indexWord8Array#`, `readSmallArray#`, ...) received a value that isn't
+    /// explicitly array-kinded: either a `Raw` SSA value whose static literal
+    /// tag isn't `ByteArray#`, or — after unwrapping any 1-field boxing
+    /// wrapper — a heap payload that isn't a `TAG_LIT` of an array-carrying
+    /// class (`String#`/`ByteArray#`/`SmallArray#`/`Array#`). Guards against a
+    /// stray tag/int word being read as a length-prefixed buffer pointer —
+    /// the `unbox_addr`/`AddrKind` fix's sibling for the analogous escape in
+    /// `unbox_bytearray` (codex-review-2026-08-08.md item 1 follow-up).
+    ArrayKind = 4,
 }
 
 impl ShapeTrapKind {
@@ -135,6 +152,8 @@ impl ShapeTrapKind {
         match kind {
             1 => "SHAPE TRAP: boxing-wrapper arity",
             2 => "SHAPE TRAP: literal class",
+            3 => "SHAPE TRAP: address kind",
+            4 => "SHAPE TRAP: array kind",
             _ => "CASE TRAP",
         }
     }

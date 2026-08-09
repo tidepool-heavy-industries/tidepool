@@ -97,7 +97,8 @@ pub enum BlockItem {
     /// routed directly to `run_def` with no cascade.
     Decl(DeclText),
     /// A bind statement (`x <- e` / `let x = e`) or bare expression — routed
-    /// to `run_eval`, which classifies bind vs expr internally via `classify_turn`.
+    /// to `run_eval`, which classifies bind vs expr from the block's precomputed
+    /// batch verdict (`run_block`'s one `classify_block` spawn for the whole block).
     Stmt(ExprText),
     /// An ambiguous item that needs the try-cascade: `run_block` attempts it
     /// as a declaration via `run_def` first; on a GHC parse error it falls
