@@ -260,6 +260,31 @@ Revised gates: matched → hides; mismatched vocab-only → does NOT hide and em
 no `(<|>)` (the DISCRIMINATING one — it fails under the `vocab_effects`
 predicate); non-RepoEvent → unchanged; superset violation → panics.
 
+RELOCATED (root, approved): the conditional does NOT belong in
+`effects_module_source_*`. Hiding inside the generated `Tidepool.Effects`
+governs only THAT module's body, while the ambiguity arises in the AUTHOR's
+module. It goes on the author-facing imports — `eval_import_lines`
+(`preamble.rs:61`) and the Orchestrate module (`preamble.rs:252`) — keyed on the
+same `emits_helpers_for`. Both files are `tidepool-mcp`, so the earlier
+`pub(crate)` visibility choice reaches the new site without widening, at a call
+site nobody had identified when that constraint was set.
+
+The blast radius is LARGER than first priced and the trade is unchanged.
+`Tidepool.Effects` has no export list, so it exports the generated `(<|>)`, and
+the eval preamble imports both it and `Tidepool.Prelude` by default — so the
+collision is in the DEFAULT vocabulary once RepoEvent is in the row, not only
+for an author who explicitly imports `Tidepool.Event`. The original pricing was
+therefore against the real surface all along, merely attributed to the wrong
+file. Rows without RepoEvent stay byte-identical.
+
+Gates required at landing: the authored-surface RED must be the
+DEFAULT-VOCABULARY case (RepoEvent in row, NO explicit `Tidepool.Event`
+import) — the explicit-import reproduction understates the radius, so the gate
+covers the worst case; non-RepoEvent-row BYTE-IDENTITY, proving conditionality
+rather than asserting it; and a MANDATORY named gate proving generated
+`Tidepool.Effects` compiles WITHOUT the old hiding before that hiding is
+deleted (compiles-WITH is not compiles-WITHOUT).
+
 SEQUENCING (root ruling): verification is split from landing. `d6fce023` is a
 WIP commit spanning seven files across four crates, so landing it on the base
 every lane rebases against would defeat the purpose of landing it early. The
