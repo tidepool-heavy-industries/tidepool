@@ -154,7 +154,8 @@ item 0b are largely independent of step 4's multi-target emission.
 ## Gates
 
 Every item passes the wave gates in `../OPERATIONAL.md`: hardened differential
-(floors intact), `corpus_report`, `extract-fidelity-test` 26/26, harness
+(floors intact), `corpus_report`, `extract-fidelity-test` 26/26 [**STALE — see
+below**], harness
 acceptance. Item 0 additionally needs a live-shaped receipt that the pre-model
 compile count actually dropped — a test or an instrumented run showing the
 extract-spawn count from launch to first model call, not an argument that it
@@ -162,3 +163,36 @@ should have.
 
 Receipts are per-binary pass/fail counts. Copy `../OPERATIONAL.md`'s Block
 section verbatim into every dev spec.
+
+---
+
+## CORRECTION 2026-08-09 — the `26/26` figure above is STALE
+
+`extract-fidelity-test` is **not** 26 checks. D1-A added four `D1Defense`
+checks; the total is 30 and will move again. The figure is left visible
+rather than deleted, so anyone holding a copy of this spec recognises what
+changed.
+
+**State the property, never the figure:** *every pre-existing check passes,
+named guards appear by name, report the actual N/N.* Any number is context,
+never a target.
+
+Why this matters more than staleness — a hardcoded count converts the
+denominator rule from a CHECK into a LOOKUP. The dev stops asking *"did
+everything run?"* and starts asking *"does it match the spec?"* Those are
+the same question **until something silently stops running**, which is the
+only case either question exists for. So a stale count does not merely go
+out of date: it **disables the rule that would have caught it going out of
+date**, and fails in the direction that looks correct.
+
+Worst on items that ADD tests — every item in this lane does. `boot-lazy`
+adds ConTags pins, `boot-targets` adds two multi-target pins, `boot-vocab`
+adds the `Member` negative test. Each moves its own total *because of its
+own work*; and if a check silently stopped running while the total landed
+back on a spec'd number, the truncated run would match the doc exactly.
+
+Contrast with `boot-count`'s `PRE_MODEL_EXTRACT_COMPILES = 4`, which is
+sound: it asserts a **property in code** that must change by a known
+amount, with a failure message naming the win condition — not a figure in
+prose for a human to reconcile against. The same number is correct in one
+place and a trap in the other.

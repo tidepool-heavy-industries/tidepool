@@ -156,4 +156,4 @@ scaffolding that goes load-bearing because nothing names it. So:
   a single named constant. Lower that constant to what you actually measure and
   report the before/after as numbers. If it does not drop by 2, you have not
   finished.
-- extract-fidelity-test 26/26
+- extract-fidelity-test — EVERY check passes; report the actual N/N (the total MOVES as checks are added; it is context, never a target)

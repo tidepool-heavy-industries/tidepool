@@ -102,7 +102,7 @@ re-check that specifically.
   `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh tidepool-codegen --run-ignored all -E 'test(haskell_suite_differential)'`.
   **`COMPARED_FLOOR` must not drop.**
 - `corpus_report` — same shape, `-E 'test(corpus_report)'`
-- extract-fidelity-test 26/26:
+- extract-fidelity-test — EVERY check passes; report the actual N/N (the total MOVES as checks are added; it is context, never a target):
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- bash -c 'cd haskell && cabal test extract-fidelity-test'`
 - harness acceptance: `scripts/battery-shard.sh tidepool-harness -E 'binary(/^acceptance_/)'`
 - **the item's receipt**: `acceptance_boot_compile_count` — drop its constant
