@@ -113,7 +113,19 @@ case "$mode" in
           # scripts/battery-shard.sh): held here, so they must not acquire a
           # second one. Set only after the slot is actually taken.
           export TIDEPOOL_GHC_SLOT="$f"
-          exec "$@"
+          # Start/exit markers instead of bare exec: an environment failure
+          # (e.g. ghc missing from the CALLER's PATH — hits run and detach
+          # alike) dies in milliseconds, and without markers that log is
+          # indistinguishable from a leg that ran. rc + duration make
+          # "never started" / "died instantly" / "ran" mechanically
+          # distinguishable in every log. The wrapper shell holds the flock
+          # fd until the command finishes, so slot discipline is unchanged.
+          echo "ghc-slots: acquired ${f##*.}, starting: $*" >&2
+          start_s=$SECONDS
+          "$@"
+          rc=$?
+          echo "ghc-slots: command exited rc=$rc after $((SECONDS - start_s))s" >&2
+          exit "$rc"
         fi
         exec {fd}>&-
       done
