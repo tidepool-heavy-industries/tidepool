@@ -3726,6 +3726,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "tidepool-bignum"
 version = "0.1.0"
 
