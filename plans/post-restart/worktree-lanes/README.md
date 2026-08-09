@@ -92,14 +92,19 @@ any other live lane. Log real conflicts at fold.
 - Git-behaviour acceptance against REAL temporary repositories driven by a
   scripted writer. Never a mock of git.
 - Receipts carry per-binary counts, never exit codes.
-- Receipts state COMPLETED vs CRATE TOTAL, not only the pass count. nextest's
-  DEFAULT FAIL-FAST plus an inherited red stops a run early while emitting REAL
-  pass lines — a receipt indistinguishable from a complete one, whose only tell
-  is completed-vs-total (root observed 198/877). Pass `--no-fail-fast`
-  EXPLICITLY on any run reaching `tidepool-runtime` until the worktree carries
-  battery fix `7d57cea5`; expect exactly one red
+- Receipts state STARTED vs RUN, not only the pass count. nextest's DEFAULT
+  FAIL-FAST plus an inherited red stops a run early while emitting REAL pass
+  lines — a receipt indistinguishable from a complete one, whose only tell is
+  that RUN is strictly less than STARTED (root observed 198/877). Pass
+  `--no-fail-fast` EXPLICITLY on any run reaching `tidepool-runtime` until the
+  worktree carries battery fix `7d57cea5`; expect exactly one red
   (`mock_stack_matches_production`) until that fix folds, and A/B anything else
   in your own worktree before calling it inherited.
+
+  Prefer started-vs-run over completed-vs-crate-total (credit L4): it is
+  visible in output you ALREADY HAVE — `Starting 7 tests`, `(1/7)`…`(7/7)`,
+  `7 tests run` — needing no extra flag and no advance knowledge of a crate
+  total, so the evidence and its own completeness check arrive together.
 
   This is the third member of one family: a gate passes BY NAME because an
   aggregate cannot tell you the guard ran; a number NAMES ITS INSTRUMENT
@@ -108,8 +113,17 @@ any other live lane. Log real conflicts at fold.
   a green result is not self-describing.
 
   `tidepool-worktree` is GHC-free and does not depend on `tidepool-runtime`, so
-  `-p tidepool-worktree` runs are outside this hazard — but state the
-  completion figure anyway; it costs nothing and survives a scope change.
+  `-p tidepool-worktree` runs are outside this hazard, and a targeted `-E`
+  filter is outside it by construction (fail-fast can only stop at a test in
+  the selected set). State the figure anyway; it costs nothing and survives a
+  scope change.
+- A GATE THAT CANNOT BUILD ITS OWN PRECONDITION MUST FAIL, never pass. A
+  red-baseline gate that fails to reconstruct the pre-fix state has not
+  established a red baseline, so passing would assert something never
+  demonstrated. Corollary: a RED result is no more self-describing than a green
+  one. Make a gate assert on the ARTIFACT it tests — capture the generated
+  source and check it before invoking the compiler — so a stale input and a
+  genuine failure produce different diagnoses instead of one mystery.
 
 ## Operational rules (verbatim in every dev spec)
 
