@@ -72,8 +72,15 @@ localized diffs and log it at fold):
   `timeout` process carrying `TIDEPOOL_EXTRACT=…` in its command line or
   environment, so it tracks how many AGENTS exist, not how much GHC runs.
   But matching on `comm` with the full binary name UNDER-counts to a constant
-  zero: Linux truncates `comm` to 15 characters, so `tidepool-extract-bin`
-  appears as `tidepool-extrac` and `grep tidepool-extract-bin` can NEVER match.
+  zero: a USERSPACE process's `comm` is capped at 15 characters
+  (`TASK_COMM_LEN` is 16 including the NUL — verified directly:
+  `/proc/<pid>/comm` for a live extract reads `tidepool-extrac`, length 15), so
+  `grep tidepool-extract-bin` can NEVER match.
+  Precision, because a naive check refutes the general form: `ps -eo comm=` DOES
+  show longer values — 39, 36, 33 characters — but every one of them is a
+  KERNEL thread (`nvidia-modeset/…`, `kworker/…`, `rcu_…`), which is a
+  different naming path. The 15-char cap holds for every binary we care about.
+  Anchor and stop at `extrac`; do not generalise past userspace.
   The correct instruments:
 
       ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (note: 15-char truncation)
