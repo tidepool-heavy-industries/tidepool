@@ -55,16 +55,41 @@ These are not advice. Two of them are the conditions the GO verdict was
 conditional on, and violating either reintroduces a silent-corruption class that
 the landing exists to close.
 
-**(a) Prefix compatibility.** Realms sharing a machine must have
-position-compatible handled prefixes — equal position-by-position up to the
-shorter of the two. An EMPTY handled prefix is compatible with anything (that is
-the outer driver: threshold 0, nothing handled, everything interposed). The
-machine enforces this at park time and refuses loudly; a consumer should not rely
-on the check to discover its own row-building bugs, but it will not silently
-misroute if it has one. Residual, stated rather than glossed: a prefix that is a
-strict EXTENSION of the established one is accepted, and a tag beyond the
-machine's actual handler stack then surfaces as `EffectError::UnhandledEffect` —
-a clean error, not a misroute.
+**(a) Prefix compatibility.** Non-empty handled prefixes on one machine must be
+EXACTLY EQUAL — same length, same names, same positions. An EMPTY handled prefix
+is compatible with anything (that is the outer driver: threshold 0, nothing
+handled, everything interposed, so it dispatches nothing and cannot misroute).
+The machine enforces this at ENTRY to the parked path — before the turn is
+driven, so a refusal means nothing ran — and refuses with
+`JitError::IncompatibleHandledPrefix`.
+
+Why equality rather than agreement-up-to-the-shorter-length, since the weaker
+rule looks sufficient and is not: with all non-empty prefixes equal, every tag
+that is ever DISPATCHED is below the common prefix length, and all realms agree
+on what sits at those positions — so no dispatched tag can reach a position
+realms disagree about. Accepting a strict EXTENSION breaks that. A declared
+prefix is metadata; it does not tell the machine how long the concrete `H`
+actually is, because a realm may simply have chosen a lower suspend threshold
+than `H` has handlers. An extending realm's tag sits below ITS OWN threshold, so
+it is dispatched rather than suspended, and if `H` has a handler at that position
+the request reaches the WRONG handler. Silently. That is the misroute this whole
+check exists to prevent, so extension is refused.
+
+**Residual, stated rather than glossed.** The check enforces agreement AMONG
+realms. It CANNOT verify a declared prefix against the opaque, monomorphized `H`
+— nothing at runtime can, since `H` is a type parameter, not data. A realm that
+declares a prefix its row does not actually have is still the caller's
+responsibility.
+
+**Consumer guidance that makes the residual structurally unreachable — derive,
+don't declare.** For an internal caller constructing realms from runtime code
+(which is what PRD 18's `Agent` effect is), derive the declared prefix from the
+SAME value that constructed `H`, rather than restating it at the park site. One
+source of truth means the declaration cannot disagree with the handler stack,
+because there is only one thing to be wrong. Under that discipline the
+lying-realm case is not a responsibility to discharge — it is unconstructible.
+The residual then applies only to third-party callers that hand-write a prefix,
+which do not exist today.
 
 **(b) The two suspension paths must not mix.** A continuation held in the single
 `suspended_continuation` slot is UNREGISTERED — protected only by the temporal
