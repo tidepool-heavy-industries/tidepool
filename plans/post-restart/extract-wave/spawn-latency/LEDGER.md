@@ -434,6 +434,40 @@ Supporting: `inject` measured **0 ms** at every sampled session turn — splicin
 live thin ifaces into the HPT is free. The interface direction has no measured
 overhead at the point where it would show up.
 
+**SCOPE OF THE REJECTION — DEPTH (amended 2026-08-08, wave TL's residual).**
+`ghc_setup` is setup + `depanal`, and `depanal` walks the module graph, which
+the `Lib.G<n>` chain GROWS. Every boot figure above was taken with that axis
+pinned at `Lib.G1` (the session vehicle's decl compiled once and never grew;
+top-level bindings flat at 1706–1709). **So the rejection is scoped: the server
+is rejected on boot cost FOR SESSIONS AT THE DEPTHS SAMPLED.** Depth-scaling of
+`ghc_setup` is the one measurement that could reopen it — and a repeated
+`depanal` over a growing graph would be a residency argument arriving through
+the one door the latency scoping did not close.
+
+Asserting part 1 at full strength while part 3 defers *because* that same axis
+is unmeasured would have been inconsistent. It is now scoped instead.
+
+**Why this is not a separate errand:** `ghc_setup`-vs-depth comes from the SAME
+vehicle and the SAME run as part 3's already-required `Lib.G<n>`
+compile-time-vs-generations measurement. It is one more column, not another
+experiment. Folded into that prerequisite rather than queued alongside it.
+
+**Design constraint that measurement must respect (from the data already in
+hand).** At a FLAT module graph, `ghc_setup` ranged **68→287 ms across five
+session turns — a 4.2x spread with zero module growth.** That is the noise
+floor. A depth sweep of 2–3 generations cannot clear it; the sweep needs
+roughly 8–10 generations before a trend is distinguishable from contention.
+This is also why option (1) was not "one run": no existing `tidepool-repl` test
+drives more than 2–3 sequential `repl.def(...)` calls, so the vehicle has to be
+built.
+
+**Prediction, recorded as a prediction and NOT as evidence:** `depanal` is a
+header-parse downsweep, O(n) in module count with a small constant, whereas
+E2's O(n²) concern is in the compile chain. If so, `ghc_setup`'s SHARE should
+SHRINK with depth as the denominator grows faster, hardening part 1. If the
+measurement contradicts this, that contradiction is the finding and part 1
+reopens.
+
 **SCOPE OF THE REJECTION, stated so it is not over-read:** rejected on the
 LATENCY argument. One persistent-server argument survives untouched because
 this measurement does not address it — **E4's per-process cache death** (the
