@@ -90,6 +90,29 @@ localized diffs and log it at fold):
   The MemAvailable floor is a soft guard and is NOT binding at 18 GB. If you see
   a floor rejection, that is real memory pressure, not this.
 
+  **USE `detach` FOR ANYTHING THAT MIGHT QUEUE — this is now the default for
+  GHC-heavy work, not an escape hatch:**
+
+      /home/inanna/dev/tidepool/scripts/ghc-slots.sh detach -- <cmd>
+
+  New session via `setsid`; prints pid + log path and returns instantly. Poll
+  the log across turns. Slot discipline is FULLY honoured — the detached child
+  is `run` itself, so it holds and releases the `flock`. This is not a bypass.
+
+  Why it exists (root's `bf3026af`, from this wave's finding): `ghc-slots.sh
+  run` has **no timeout and no give-up path** — `while :;` forever. Combined
+  with the environment's ~380s process kill and 3 slots shared across three
+  waves, "wrap every GHC-heavy invocation" was an **unsatisfiable triple**: a
+  fully compliant dev's attempt is not refused a slot, it is KILLED WHILE
+  QUEUED, making zero progress indefinitely. Measured queue ages reached 60
+  minutes — two orders of magnitude past the kill budget. `detach` decouples
+  the queue wait from the agent's process lifetime. It is also strictly better
+  than the old behaviour absent any kill: a dead pane no longer drops a queued
+  waiter.
+
+  If you launch a detached job and then abandon it, **reap it** — an orphaned
+  waiter holds a queue position nobody is waiting on, and relaunches stack.
+
   If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
   rather than bypassing the broker.
   **MEASURING actual load — the obvious commands are both wrong.**
