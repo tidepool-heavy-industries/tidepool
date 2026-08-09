@@ -193,7 +193,32 @@ what remains is landing, not deciding. It must CALL boot-vocab's
 copy, whatever the spelling. Carried at the call site in
 `tidepool-mcp/src/eval_prep.rs`, where whoever performs the move will meet it.
 
-**2. Remove the two `MonitorObservations` workarounds once `wt-seam` lands.**
+**2. DISCHARGED — the `MonitorObservations` workarounds are removed.**
+`wt-seam` landed both fixes (`reconcile` now returns
+`Result<Vec<Observed<RepositoryEvent>>, WorktreeError>`; `monitor.rs` contains
+zero `panic!`), verified by reading the merged code rather than the report.
+All four sites are gone — `grep -rn 'WORKAROUND(wt-seam)'` returns **zero** —
+along with the `registered` field, the membership check, the `next_event_id`
+counter, and the id-minting. An unregistered id is now a typed monitor failure
+mapped like every other one, which is what the authored surface always
+declared, and the `EventId` reaching Haskell is the JOURNALLED one, so
+`Observed.eventId` correlates with its journal row.
+
+Nothing was kept as belt-and-braces. The delete-when conditions made the
+removal mechanical rather than archaeological: each named exactly what to drop
+and what to keep (`register` itself is real wiring, not part of the
+workaround), and each stated "no test pins this field's behaviour; nothing goes
+with it" — which removed a blind search for tests that would otherwise have had
+to come out too.
+
+**The seven `withHandler` gates were RE-RUN against the changed adapter.** A
+prior green carries evidence about the code that produced it and nothing else;
+treating it as still valid after changing the thing under test is the
+receipt-that-looks-like-a-run hazard one level up. The change looked mechanical
+and was re-verified anyway.
+
+*(Original text of this obligation, for the record:)*
+**Remove the two `MonitorObservations` workarounds once `wt-seam` lands.**
 They exist only because the freshly-landed L3 monitor panics on an unregistered
 worktree id (`monitor.rs:273`) instead of returning the typed `EventSourceLost`
 the surface declares, and because `reconcile` returns no `EventId`, so
