@@ -381,10 +381,27 @@ look wrong. Point one at the claim that looks better than yours.
   Anchor and stop at `extrac`; do not generalise past userspace.
   The correct instruments:
 
-      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (note: 15-char truncation)
+      lslocks | grep tidepool-ghc                  # slot contention (WRITE / WRITE*)
+      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (15-char truncation)
       cat /proc/loadavg                            # actual load
 
-  Use both. A zero from a mistyped pattern reads exactly like a quiet box.
+  **BOTH `lslocks` AND `/proc/loadavg` ARE REQUIRED, AND HERE IS WHY — a reader
+  who learns only "there are two instruments" drops one under time pressure,
+  and the one they drop is the one that still works.** `lslocks` measures SLOT
+  CONTENTION. It **stopped being a proxy for box health** the moment we exempted
+  pure-Rust work and toolchain builds from the broker: that load is now
+  invisible to it *by construction*. Measured 23:34:54Z — **0 waiters at loadavg
+  50.33**, with 583% of rustc across 13 processes. The queue is healthy because
+  the work left the queue, not because the work stopped. Reading "0 waiters" as
+  a green light means launching into loadavg 50.
+  Form 4, caused by our own fix, one day later.
+
+  **QUOTE BOX NUMBERS WITH A TIMESTAMP.** They have a shelf life of MINUTES:
+  loadavg went 2 → 17 → 35 → 50 inside half an hour, and a "box is idle" passed
+  to two lanes was stale before it arrived. A number without a time is a state
+  claim that was only ever an observation.
+
+  A zero from a mistyped pattern reads exactly like a quiet box.
   **Bias toward fewer, better-batched runs.** This wave is the heaviest GHC
   consumer on the box, so the throttle bites hardest here.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
