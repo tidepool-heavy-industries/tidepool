@@ -5,7 +5,7 @@ a gate that exists to catch ONE specific failure mode is established only by
 **that test passing BY NAME with its own pass line**, never by the aggregate
 that contains it. A rename, an `#[ignore]`, a `cfg`, or an env-gated early
 return leaves the aggregate green while the guard never executed — so
-"45 tests run: 45 passed" cannot distinguish "the guard held" from "the guard
+"50 tests run: 50 passed" cannot distinguish "the guard held" from "the guard
 silently stopped existing".
 
 Cross-lane guards additionally name the base commit: **base proves the tree,
@@ -13,7 +13,12 @@ name proves execution — both, or neither is established.**
 
 ## Base commit
 
-`ea9837e10b7bf073e5c29b192063d2715e9b8785`
+`20086b2eaa5175accc8cb85be8e3e48c78c25a35`
+
+Every block below was re-run at this base after `worktreeHead` landed. The
+file deliberately carries ONE base rather than a per-section history: a
+certification against an older tree is not a certification of this one, and a
+reader should not have to work out which sections are current.
 
 Reproduce any block below with:
 
@@ -103,6 +108,27 @@ PASS tidepool-worktree::event_monitor unreachable_old_head_after_gc_yields_unkno
 PASS tidepool-worktree::event_monitor unrelated_history_on_the_same_branch_yields_unknown_change_rather_than_a_guess
 ```
 
+## Fresh reads — `worktreeHead` is not a cached field
+
+PRD 19 added `worktreeHead` so a resident spanning cycles can compare the
+current head against its checkpoint before re-registering, closing the window
+where `HEAD` moves while no subscription exists. A cached or stale answer
+silently reopens exactly that window, and nothing else would fail.
+
+| Gate | Failure mode it exists to catch |
+|---|---|
+| `worktree_head_is_a_fresh_read_distinct_from_source_head` | returning the seed commit instead of the current head — a subtly useless alias |
+| `worktree_head_reflects_movement_the_monitor_never_reconciled` | answering from the monitor's baseline, so the between-cycle gap stays hidden |
+| `worktree_head_on_detached_head_returns_the_commit` | assuming a symbolic ref and failing on a detached HEAD |
+| `worktree_head_of_a_lost_worktree_fails_consistently_with_lookup` | inventing a failure mode for a lost worktree instead of reusing `WorktreeLost` |
+
+```
+PASS tidepool-worktree::worktree_head worktree_head_is_a_fresh_read_distinct_from_source_head
+PASS tidepool-worktree::worktree_head worktree_head_reflects_movement_the_monitor_never_reconciled
+PASS tidepool-worktree::worktree_head worktree_head_on_detached_head_returns_the_commit
+PASS tidepool-worktree::worktree_head worktree_head_of_a_lost_worktree_fails_consistently_with_lookup
+```
+
 ## Still owed
 
 `withHandler`'s semantics (lane L4) are one-failure-mode gates too and are not
@@ -110,4 +136,4 @@ yet certified here — no-replay to a fresh subscription, broadcast to two
 handlers, in-order queueing when a handler suspends, drain-then-unregister,
 handler failure failing the enclosing scope, bounded-queue overflow failing
 loudly, and the rooting receipt `stowed_roots_count() == parked_count()`.
-`worktreeHead`'s fresh-read gate is likewise owed. Both lanes have the rule.
+That lane has the rule.
