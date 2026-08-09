@@ -39,7 +39,17 @@ them. L4 marked it as such in the source, not only in a receipt. A gate that
 looks like evidence and is not will be cited as evidence by someone who did not
 write it.
 
-**3. Say when your gates cannot settle the question at all.** Earlier in the
+**3. Prefer an AUTHORED-SURFACE gate to a GENERATOR-OUTPUT gate.** L4's gate 2
+compiles PRD 19's own example the way an author writes it. It caught that the
+approved `(<|>)` fix was MIS-SCOPED — hiding the operator inside the generated
+`Tidepool.Effects` governs only that module's body, while the ambiguity arises
+in the author's module, which does its own imports. A gate asserting on the
+generator's output STRING would have gone green, because the generator emitted
+exactly what it was asked to emit. The generator was correct and the design was
+wrong, and only a gate that exercises the authored surface can tell those apart.
+Where both kinds are available, the authored one is the real gate.
+
+**4. Say when your gates cannot settle the question at all.** Earlier in the
 same lane, the conditionality gates were built on an entry point that passes one
 list for both parameters, making them non-discriminating rather than merely
 incomplete — and the receipt said so. That distinction is the difference between
