@@ -241,35 +241,6 @@ struct PendingHole {
     raw_request: Value,
 }
 
-/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
-/// its resident `JitEffectMachine`, straight from
-/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
-/// instrumentation, this is a read-only view of counters that already exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeapSummary {
-    pub nursery_bytes: usize,
-    pub live_bytes: usize,
-    pub gc_count: u64,
-}
-
-/// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
-/// suspended) whether the pending hole is a fork and its prompt.
-#[derive(Debug, Clone)]
-pub struct NodeSummary {
-    pub node: NodeId,
-    pub parent: Option<NodeId>,
-    pub state: crate::tree::NodeState,
-    pub is_fork_hole: bool,
-    pub hole_prompt: Option<String>,
-    /// Set when this node is mid-`drive_answerer_to_value`, PARKED on the
-    /// operator-decision channel after exhausting its rung-1 auto-retry
-    /// (the escalation ladder's rung 2) — the node's [`crate::tree::NodeState`]
-    /// itself is unchanged (still `Running`: no hole was published, no event
-    /// was logged), so this is the harness's own in-memory signal the
-    /// observatory badges/pops up on. `None` otherwise.
-    pub awaiting_operator: bool,
-}
-
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
 /// answerer exhausted its auto-retry and is parked awaiting an operator
 /// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
@@ -368,16 +339,6 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
     out
 }
 
-/// A node's in-progress turn as it streams — the answer text and reasoning
-/// ("thinking") accumulated so far, before the turn completes and is logged.
-/// The observatory renders this so tokens appear live; it's cleared when the
-/// turn lands in the durable log.
-#[derive(Debug, Clone, Default)]
-pub struct LiveTurn {
-    pub text: String,
-    pub reasoning: String,
-}
-
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
 pub struct Harness {
@@ -402,15 +363,6 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Per-node streaming turn buffer (see [`LiveTurn`]). Present only while a
-    /// node's turn is actively streaming; the entry is removed when the turn
-    /// completes (its content is then in the log).
-    live_turns: Mutex<HashMap<NodeId, LiveTurn>>,
-    /// A "something changed" callback the web layer installs
-    /// ([`Self::set_notifier`]) so streaming deltas nudge the SSE stream to
-    /// re-render. `None` (unset) in tests / headless runs — the harness works
-    /// the same, just without live push.
-    notifier: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
     /// Compiled once, reused for every node's bootstrap.
     boot: Arc<compile::CompiledTurn>,
@@ -481,8 +433,6 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(boot),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
@@ -491,45 +441,13 @@ impl Harness {
         })
     }
 
-    /// Install the "changed" callback the web layer uses to nudge its SSE
-    /// stream when a streaming delta lands. Set once, at startup.
-    pub fn set_notifier(&self, f: impl Fn() + Send + Sync + 'static) {
-        let _ = self.notifier.set(Box::new(f));
-    }
-
-    /// Fire the installed notifier, if any (no-op otherwise).
-    fn notify(&self) {
-        if let Some(f) = self.notifier.get() {
-            f();
-        }
-    }
-
-    /// The node's in-progress streaming turn, if one is active — the
-    /// observatory renders this to show tokens/thinking as they arrive.
-    pub fn live_turn(&self, node: NodeId) -> Option<LiveTurn> {
-        self.live_turns.lock().get(&node).cloned()
-    }
-
-    /// Fold one streaming delta into the node's live-turn buffer.
-    fn apply_delta(&self, node: NodeId, delta: StreamDelta) {
-        let mut live = self.live_turns.lock();
-        let entry = live.entry(node).or_default();
-        match delta {
-            StreamDelta::Text(t) => entry.text.push_str(&t),
-            StreamDelta::Reasoning(r) => entry.reasoning.push_str(&r),
-        }
-    }
-
-    /// Drive one model turn on `node` with live streaming: deltas land in the
-    /// node's live-turn buffer (rendered token-by-token in the observatory)
-    /// while the complete turn is assembled, with a throttled `notify()`
-    /// nudging the SSE stream. On failure the partial buffer is dropped; on
-    /// success it's left intact for the caller to swap for the logged turn via
-    /// [`Self::finish_live_turn`], so the transcript never flickers empty.
-    /// Shared by the root turn loop and the fork/fanout answerer loops.
+    /// Drive one model turn via the provider over its `StreamSink` (see
+    /// `provider::StreamDelta`/`StreamSink`) — the sink is still wired so the
+    /// provider's own streaming path runs; nothing currently reads the
+    /// deltas past draining the channel. Shared by the root turn loop and the
+    /// fork/fanout answerer loops.
     async fn stream_turn(
         &self,
-        node: NodeId,
         transcript: &[Message],
         framing: Option<&str>,
     ) -> Result<engine::DrivenTurn, HarnessError> {
@@ -538,40 +456,13 @@ impl Harness {
         let drive_fut =
             engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, framing, Some(tx));
         tokio::pin!(drive_fut);
-        let mut last_notify: Option<std::time::Instant> = None;
         let result = loop {
             tokio::select! {
-                res = &mut drive_fut => {
-                    while let Ok(d) = rx.try_recv() {
-                        self.apply_delta(node, d);
-                    }
-                    break res;
-                }
-                Some(delta) = rx.recv() => {
-                    self.apply_delta(node, delta);
-                    if last_notify.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(120)) {
-                        self.notify();
-                        last_notify = Some(std::time::Instant::now());
-                    }
-                }
+                res = &mut drive_fut => break res,
+                Some(_delta) = rx.recv() => {}
             }
         };
-        match result {
-            Ok(d) => Ok(d),
-            Err(e) => {
-                self.live_turns.lock().remove(&node);
-                self.notify();
-                Err(e.into())
-            }
-        }
-    }
-
-    /// Clear the node's live-turn buffer and re-render — called right after the
-    /// turn is logged, so the transcript swaps the streaming buffer for the
-    /// durable turn in a single frame.
-    fn finish_live_turn(&self, node: NodeId) {
-        self.live_turns.lock().remove(&node);
-        self.notify();
+        result.map_err(Into::into)
     }
 
     /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
@@ -678,93 +569,6 @@ impl Harness {
     /// module — required for a value to cross between them via `resume`.
     pub fn cfg(&self) -> &EngineConfig {
         &self.cfg
-    }
-
-    /// A flat snapshot of the tree for the observatory tree pane, in DFS
-    /// (parent-before-child, creation order) order. Each entry carries enough
-    /// to render a node row: id, parent, state, and — when suspended —
-    /// whether the pending hole is a fork (so the pane can badge it).
-    ///
-    /// Unpaginated — reads the whole tree via [`NodeTree::node_ids_after`]
-    /// with no limit. Fine at R0 scale; [`Self::tree_snapshot_page`] is the
-    /// cursor-paged alternative for the protocol endpoint, usable at
-    /// 10³–10⁴ nodes.
-    pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
-        let (all_ids, _) = self.tree.node_ids_after(None, usize::MAX);
-        let mut stack: Vec<NodeId> = all_ids
-            .into_iter()
-            .filter(|n| self.tree.parent(*n) == Some(None))
-            .collect();
-        // DFS from roots, preserving child order.
-        stack.reverse();
-        let mut visit = stack;
-        let mut order = Vec::new();
-        while let Some(n) = visit.pop() {
-            order.push(n);
-            if let Some(children) = self.tree.children(n) {
-                for c in children.into_iter().rev() {
-                    visit.push(c);
-                }
-            }
-        }
-        order
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect()
-    }
-
-    /// Cursor-paged tree snapshot — no small-tree assumption; flat id order
-    /// (not the DFS parent/child order
-    /// `tree_snapshot` uses; a page is a slice of the id space, not a subtree).
-    /// Returns up to `limit` rows after `cursor`, plus the next cursor to page
-    /// with (`None` once exhausted). Built on [`NodeTree::node_ids_after`], the
-    /// one additive pagination primitive this leaf adds to `NodeTree`.
-    pub fn tree_snapshot_page(
-        &self,
-        cursor: Option<NodeId>,
-        limit: usize,
-    ) -> (Vec<NodeSummary>, Option<NodeId>) {
-        let (ids, next) = self.tree.node_ids_after(cursor, limit);
-        let nodes = ids
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect();
-        (nodes, next)
-    }
-
-    /// Build one node's summary row, or `None` if `n` doesn't exist (a benign
-    /// race with a concurrent tree mutation — callers filter these out).
-    fn node_summary(&self, n: NodeId) -> Option<NodeSummary> {
-        let state = self.tree.state(n)?;
-        let pending = self.pending_hole(n);
-        let is_fork = matches!(
-            pending.as_ref().map(|c| &c.routing),
-            Some(HoleRouting::Fork { .. })
-        );
-        let prompt = pending.as_ref().map(|c| c.prompt.clone());
-        Some(NodeSummary {
-            node: n,
-            parent: self.tree.parent(n).flatten(),
-            state,
-            is_fork_hole: is_fork,
-            hole_prompt: prompt,
-            awaiting_operator: self.escalations.lock().contains_key(&n),
-        })
-    }
-
-    /// `node`'s live heap/GC snapshot, straight off its resident
-    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
-    /// when `node` has no live session (never forced, terminal) or during the
-    /// transient mid-turn gap while its session runs on the blocking pool
-    /// (the same benign race [`Self::node_summary`] tolerates).
-    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
-        let sid = self.tree.session_of(node)?;
-        let stats = self.tree.registry().peek(sid, Session::heap_stats)??;
-        Some(HeapSummary {
-            nursery_bytes: stats.nursery_bytes,
-            live_bytes: stats.live_bytes,
-            gc_count: stats.gc_count,
-        })
     }
 
     /// Create a ROOT node as a thunk with the DEFAULT system framing
@@ -1032,13 +836,8 @@ impl Harness {
             )
         };
 
-        // Stream the provider call into `node`'s live-turn buffer (rendered
-        // token-by-token), then log the completed turn with its thinking and
-        // swap the buffer for the durable turn in one frame.
         let provider_started = std::time::Instant::now();
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         timing::record_stage(
             node.0,
             timing::NO_ROUND,
@@ -1054,7 +853,6 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -1134,9 +932,7 @@ impl Harness {
         };
 
         self.tree.turn_start(node, "model".to_string(), None)?;
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -1145,7 +941,6 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -1603,7 +1398,6 @@ impl Harness {
                 // than stranded `Running`. The failure is recorded as the turn's
                 // result so it shows in the transcript.
                 let _ = self.tree.node_done(node, format!("follow-up failed: {e}"));
-                self.finish_live_turn(node);
                 Err(e)
             }
         }
@@ -1656,20 +1450,6 @@ impl Harness {
             classified: pending.classified.clone(),
             table: convo.suspend_table.clone().unwrap_or_default(),
         })
-    }
-
-    /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
-    /// from the routing payload — what the observatory form pane renders. `None`
-    /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
-    pub fn pending_dialog_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
-        match self.pending_hole(node)?.routing {
-            // `dialogAsk :: Ui -> M Value` (typed at the Haskell surface): the
-            // payload is a well-formed `Ui` by construction, so a parse failure
-            // here means a genuine wire mismatch, not a model mistake. No
-            // boundary coercion — the type system guards the shape upstream.
-            HoleRouting::Dialog { ui } => serde_json::from_value(ui).ok(),
-            _ => None,
-        }
     }
 
     /// The SERVER-DERIVED `Ui` form (`uiof::ui_of`) for a
@@ -1974,19 +1754,6 @@ impl Harness {
             HarnessError::Resident(format!(
                 "node {node:?}: operator decision could not be delivered (its wait was already abandoned)"
             ))
-        })
-    }
-
-    /// The first node currently suspended on a Dialog (operator) hole, if any —
-    /// what the inspector focuses by default.
-    pub fn first_operator_hole(&self) -> Option<NodeId> {
-        let convos = self.convos.lock();
-        convos.iter().find_map(|(n, c)| {
-            matches!(
-                c.pending.as_ref().map(|p| &p.classified.routing),
-                Some(HoleRouting::Dialog { .. }) | Some(HoleRouting::Ask { .. })
-            )
-            .then_some(*n)
         })
     }
 
@@ -2466,9 +2233,7 @@ impl Harness {
                     convo.framing.clone(),
                 )
             };
-            let driven = self
-                .stream_turn(answerer, &transcript, framing.as_deref())
-                .await?;
+            let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
             self.tree.turn_delta_reasoned(
                 answerer,
                 turn_seq,
@@ -2477,7 +2242,6 @@ impl Harness {
                 Some(driven.usage),
                 driven.reasoning.clone(),
             )?;
-            self.finish_live_turn(answerer);
             {
                 let mut convos = self.convos.lock();
                 let convo = convos
@@ -3246,8 +3010,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(compile::CompiledTurn {
                 expr: CoreExpr { nodes: Vec::new() },
                 table: DataConTable::default(),
@@ -3289,8 +3051,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             boot: Arc::new(compile::CompiledTurn {
                 expr: boot_expr,
                 table: DataConTable::default(),

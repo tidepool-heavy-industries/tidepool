@@ -86,8 +86,8 @@ terminated).
 `convos: Mutex<HashMap<NodeId, NodeConvo>>` still holds everything a session
 checkout doesn't: the transcript, the pending hole, per-node framing, the
 answer contract, the turn lease. A read that needs the session's own state
-WITHOUT checking it out (decl-plane context for a session-aware compile,
-observatory heap stats) goes through `SessionRegistry::peek`, which succeeds
+WITHOUT checking it out (decl-plane context for a session-aware compile, the
+session's import module) goes through `SessionRegistry::peek`, which succeeds
 only when the machine is actually present in its slot (`Idle`/`Suspended` —
 not `Running`/`RunningChild`, checked out elsewhere).
 
