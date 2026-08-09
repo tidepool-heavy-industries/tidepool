@@ -13,6 +13,20 @@
 #                                               the calling pane dies). Prints pid +
 #                                               log path and returns immediately;
 #                                               poll the log across turns.
+#                                               ENVELOPE: detach is about surviving
+#                                               the WAIT, not running legs in
+#                                               PARALLEL — at most ONE brokered leg
+#                                               per dev at a time. Detach without
+#                                               that bound is WORSE than no detach:
+#                                               it converts the death-and-relaunch
+#                                               that capped a non-adopter's
+#                                               footprint into durable simultaneous
+#                                               holds (observed: one dev holding
+#                                               2 of 4 slots). Drain, don't kill:
+#                                               a killed GHC leg wastes the slot
+#                                               time already spent and frees the
+#                                               slot no sooner; kill only work
+#                                               that is known-void.
 #   scripts/ghc-slots.sh exclusive -- <cmd...>  acquire ALL slots (whole-box quiet:
 #                                               latency measurement, benchmarks)
 #
