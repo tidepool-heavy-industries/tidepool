@@ -320,6 +320,19 @@ data FormKind
 -- | Classify a field type. Order matters: @Maybe (Maybe a)@ must precede
 -- @Maybe a@, and the blessed containers must precede the @Generic@
 -- fall-through or their representations would win over their meanings.
+--
+-- Two kinds of equation belong here and no others: a type we implement
+-- SPECIALLY (a leaf, or a container whose meaning outranks its
+-- representation), and a shape whose failure we can explain better than GHC
+-- can. Everything else falls through to 'KGeneric', where ordinary instance
+-- resolution takes over and GHC reports a missing @Generic@ in its own words.
+--
+-- Do not add an equation just to produce a nicer message for a type that
+-- would otherwise reach GHC. An unrecognized type getting a standard GHC
+-- error is the intended outcome, not a gap. This family ROUTES; it does not
+-- decide what is supported. Grown into an exhaustive supported-type
+-- classifier it would reimplement instance resolution here — badly, and
+-- permanently out of date with the compiler that already does it.
 type family FieldKind (a :: Type) :: FormKind where
   FieldKind Text = 'KText
   FieldKind Int = 'KInt

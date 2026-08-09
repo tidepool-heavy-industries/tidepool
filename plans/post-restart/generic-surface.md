@@ -19,6 +19,18 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
 - DO NOT emit partial or invented type information anywhere a model reads
   (no `field :: ?`, no guessed types). Degrade to less detail, never to
   wrong detail.
+- DO NOT reimplement GHC (Inanna, 2026-08-08). Custom `TypeError`s and a
+  small routing family are leverage; an exhaustive "is this type supported"
+  classifier is a second, worse type checker that goes stale against the
+  real one. The classifying family (`FieldKind`) carries exactly two kinds
+  of equation: types we implement SPECIALLY, and shapes whose failure we
+  explain better than GHC can. Everything else falls through to the
+  `Generic` case and GHC reports it. An unrecognized type reaching a
+  standard GHC error is the CORRECT outcome, not a gap to close. This binds
+  the checkpoint interpreter in step 7 too: its supported set differs (lists
+  are legal there), so it gets its OWN small routing family — do not unify
+  them into one classifier, and do not grow either to cover types purely for
+  message quality.
 - DO NOT touch checkpoint persistence in this wave. `GCheckpoint` cutover
   is its own later gate (wire-compatible target; see anchor).
 - DO NOT proceed past the spike without reporting the GO/NO-GO verdict to
