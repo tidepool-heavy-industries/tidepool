@@ -259,6 +259,76 @@ filtered way, not the raw grep count, so it is apples-to-apples.
     guard mechanism and the hazard it closes are unchanged in the comments
     left behind.
 
+- `tidepool-codegen/src/` top-level-file pass (`old_space.rs`, `layout.rs`,
+  `nursery.rs`, `stack_map.rs`, `coverage.rs`, `context.rs`, `signal_safety.rs`,
+  `yield_type.rs`, `pipeline.rs`, `lower.rs`, `lib.rs`, `heap_bridge.rs`,
+  `datacon_env.rs`, `machine_state.rs`, `alloc.rs`, `debug.rs`,
+  `binding_table.rs`; commits `bbd0c488..00c0610e`, one per file that needed
+  changes — `layout.rs`, `coverage.rs`, `context.rs`, `lib.rs`, `alloc.rs`
+  needed none; `jit_machine.rs`, `effect_machine.rs`, `host_fns/`, `emit/` are
+  out of scope for this lane, already swept or owned by a parallel refactor).
+  Removed review-label/citation hits: `L8` + a `repo-review-2026-07-06/01-gc-
+  memory-safety.md` citation (`nursery.rs`), `D8` (`stack_map.rs`), `D7`
+  (`debug.rs`, `pipeline.rs` — lambda-registry incremental-rebuild docs/tests),
+  `D9` and a `kimi-r2 #9 rewrite` / `Wave-0 scaffold` citation
+  (`binding_table.rs`), `L5`/`M6` + a second `repo-review-2026-07-06/...`
+  citation (`lower.rs`), `T6 leaf N` harmonized to the bare `leaf N` numbering
+  `host_fns/mod.rs`'s already-completed pass uses (`machine_state.rs`), `M3`/
+  `M4` (`machine_state.rs`). Also condensed "used to"/"previously"/"the old
+  X"/"this replaces" narration: `heap_bridge.rs`'s `NonConvertibleValue` doc
+  (a stale claim about overloading `TAG_FORWARDED`) and `value_to_heap`'s
+  "differs from the old recursive version" ordering note; `old_space.rs`'s
+  `run_multi_bind`-corruption regression-test doc (see load-bearing item
+  below) and a "latent until the Wave-1.B bind path" aside; `datacon_env.rs`'s
+  "pre-prune"/"post-prune" narration on the shadowed-binder test; `signal_safety.rs`'s
+  "no longer emits bare traps" phrasing (present-tensed, no behavior claim
+  lost); `machine_state.rs`'s `install_session_buffer`/`reclaim_session_heap`/
+  `clear_gc_state`/`set_gc_state` docs (each cited "the free-fn doc this
+  replaces" or "mirrors the old X free fn" — those free functions no longer
+  exist in this crate, so the citations were dangling; replaced with
+  self-contained present-tense contracts) and its `CURRENT_MACHINE` thread-local
+  doc ("matching the correctness the per-thread thread-locals this replaces
+  already had"). Kept as-is (not archaeology): `#325` (`lower.rs`'s
+  non-Lam-crossing recursive-join test — a real, still-exercised regression
+  cited consistently across `emit/join.rs`, `emit/mod.rs`, `host_fns/cancel.rs`,
+  `host_fns/gc.rs`, and `tests/external_cancellation.rs`), `proptest_boundary_
+  roundtrip B5` (`heap_bridge.rs` — a live classification tag in that suite's
+  own taxonomy, `tests/proptest_boundary_roundtrip.rs` still names and asserts
+  on it directly), `#329`/`#340` (`machine_state.rs` — also cited in
+  `host_fns/mod.rs`'s already-swept doc and `jit_machine.rs`), `segment 40`
+  (`machine_state.rs` — same self-described `CLAUDE.md` section title kept in
+  the `host_fns/` pass), and `W4`/`self-iterating-harness W4`
+  (`heap_bridge.rs` — used pervasively and consistently as the current name
+  for the finalize-by-reference mechanism across `jit_machine.rs` (out of
+  scope, owned by a parallel refactor), several `tests/realm_*.rs` files, and
+  `tidepool-runtime/src/session/resident.rs`; a codename functioning as
+  current vocabulary, not a one-off review citation — left alone everywhere
+  in this lane's scope for consistency with the excluded file). Two items are
+  load-bearing enough to call out explicitly (invariant preserved in the
+  comment left behind, only the archaeology framing dropped):
+  - `tidepool-codegen/src/old_space.rs`'s
+    `test_tenure_same_root_twice_follows_forward`: **prior bug — tenuring the
+    same top-level root pointer twice in one call (e.g.
+    `(a, b) <- pure (dup, dup)`, both tuple fields the same heap object) hit
+    `measure_closure_bytes` returning 0 bytes for the second call's
+    already-forwarded root, so `tenure` rooted the raw `TAG_FORWARDED` stub
+    directly instead of following the forwarding pointer — the resulting
+    slot read back `heap tag: 255` instead of the tenured value. This
+    shipped and corrupted `run_multi_bind`.** Fixed by following the forward
+    pointer before rooting. The doc comment now states the invariant
+    ("tenuring the same root twice must follow the forward, not root the
+    stale stub") directly instead of narrating "before the fix"/"after the
+    fix"; the regression test itself (name and body) is unchanged.
+  - `tidepool-codegen/src/signal_safety.rs`'s fatal-signal-outside-JIT-
+    protection handler: **the stderr breadcrumb on this path is load-bearing
+    — a silent thread exit here previously presented to the embedder as an
+    unexplained HANG (the eval caller's request never returns), which cost a
+    full debugging session before `.tidepool/crash.log` was found to be the
+    actual signal.** The comment is condensed to state the invariant
+    ("without it, a silent thread exit presents as a HANG") without the
+    debugging-session anecdote; the `write(2)` call and crash-log path are
+    unchanged.
+
 ## Uncertain-keep list
 
 Populated during the per-module passes below as items are found where the
