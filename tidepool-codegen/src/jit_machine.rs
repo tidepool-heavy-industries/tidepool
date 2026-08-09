@@ -188,14 +188,41 @@ pub struct ContinuationFrame {
     suspend_tag: u64,
     /// Plain park vs value-plane binding park.
     kind: ParkKind,
+    /// The persistent root of a closure-valued `finalize`'s finalized value
+    /// (W4), tenured at park time. `Some` only for a frame parked while
+    /// suspended on a closure-valued finalize; taken via
+    /// [`JitEffectMachine::take_parked_finalized_root`], which leaves the
+    /// frame itself parked and rooted.
+    finalized_root: Option<crate::old_space::RootSlot>,
+    /// This frame's realm's cancel flag, cloned at park time so
+    /// [`JitEffectMachine::resume_parked`] installs it without a second
+    /// per-realm cancel-flag lookup.
+    cancel_flag: Arc<AtomicBool>,
+    /// The [`DataConTable`] this frame's continuation suspended against,
+    /// cloned once at park time (not per collection, not per resume) so a
+    /// resume decodes exclusively against the row it was compiled for — a
+    /// caller cannot resume a frame against a foreign table.
+    table: Arc<DataConTable>,
 }
 
 /// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
 /// [`ContinuationId`] a suspension parked under.
 #[derive(Debug)]
 pub enum ParkedOutcome {
-    /// The turn ran to completion; `Value` is the bridged result.
-    Completed(tidepool_eval::value::Value),
+    /// The turn ran to completion.
+    Completed {
+        /// The bridged result.
+        value: tidepool_eval::value::Value,
+        /// A1: the tenured root of a value-plane BIND's result, returned
+        /// INLINE in the same call that observed completion — `Some` exactly
+        /// when the park kind was [`ParkKind::Binding`], `None` for
+        /// [`ParkKind::Plain`]. A completed park leaves no frame in the
+        /// registry (a frame exists only while parked), so there is nowhere
+        /// for a machine-level stash to live between write and read; this is
+        /// what closes realm-checklist Item 3 — no window for a second
+        /// realm's completion to overwrite it before the caller reads it.
+        bound_root: Option<crate::old_space::RootSlot>,
+    },
     /// The turn suspended and its continuation was PARKED in the registry as a
     /// registered GC root. Resume it with [`JitEffectMachine::resume_parked`].
     Suspended {
@@ -222,7 +249,10 @@ enum ParkTarget {
 /// public outcome type the caller's entry returns. `id` is `Some` exactly when
 /// the park target was [`ParkTarget::Registry`].
 enum ParkedRaw {
-    Completed(tidepool_eval::value::Value),
+    Completed {
+        value: tidepool_eval::value::Value,
+        bound_root: Option<crate::old_space::RootSlot>,
+    },
     Suspended {
         request: tidepool_eval::value::Value,
         has_finalized_closure: bool,
@@ -234,7 +264,7 @@ impl ParkedRaw {
     /// Project onto the single-slot path's outcome type.
     fn into_suspendable(self) -> SuspendableOutcome {
         match self {
-            ParkedRaw::Completed(v) => SuspendableOutcome::Completed(v),
+            ParkedRaw::Completed { value, .. } => SuspendableOutcome::Completed(value),
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
@@ -252,7 +282,9 @@ impl ParkedRaw {
     /// Project onto the registry path's outcome type.
     fn into_parked(self) -> ParkedOutcome {
         match self {
-            ParkedRaw::Completed(v) => ParkedOutcome::Completed(v),
+            ParkedRaw::Completed { value, bound_root } => {
+                ParkedOutcome::Completed { value, bound_root }
+            }
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
@@ -356,6 +388,11 @@ pub struct JitEffectMachine {
     /// except in the window between a bind fragment completing and the caller
     /// taking it via [`Self::take_last_bound_root`]. A fork bind lands here on the
     /// eventual `resume`, not the initial (suspending) run.
+    ///
+    /// SLOT PATH ONLY (A1): the parked path never writes this field — its
+    /// `ParkedOutcome::Completed::bound_root` returns the tenured root inline
+    /// instead, so a second realm's completion cannot overwrite a first
+    /// realm's still-unread root (realm-checklist Item 3).
     last_bound_root: Option<crate::old_space::RootSlot>,
     /// W4 finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
@@ -365,6 +402,11 @@ pub struct JitEffectMachine {
     /// reference. Rides inside the machine (already `Send` under stow-XOR-run),
     /// like `last_bound_root`, because a `RootSlot` (`*mut *mut u8`) is `!Send`
     /// and cannot cross the eval-thread scope boundary as a bare value.
+    ///
+    /// SLOT PATH ONLY (A2): the parked path stashes this on the
+    /// [`ContinuationFrame`] instead (`ContinuationFrame::finalized_root`,
+    /// taken via [`Self::take_parked_finalized_root`]) — a frame exists for
+    /// the whole parked lifetime, so there is nowhere for a race to land.
     suspended_finalized_root: Option<crate::old_space::RootSlot>,
     /// REALM PROTOTYPE — the many-continuation generalization of
     /// `suspended_continuation`: every continuation parked by
@@ -394,6 +436,16 @@ pub struct JitEffectMachine {
     /// clean "unknown continuation" error rather than a silent aliasing of some
     /// later park.
     next_continuation_id: u64,
+    /// A3: per-realm cancel flags, lazily minted on first park-path run/resume
+    /// entry for a realm ([`Self::realm_cancel_flag`]). The parked entries
+    /// install a realm's own flag into [`MachineState`] instead of
+    /// `cancel_flag`, so cancelling one realm cannot abort a sibling realm's
+    /// run — cancellation is realm-scoped, not machine-scoped, because a
+    /// realm's continuation ids change on every re-suspension and cannot live
+    /// only on the frame. Never shrinks: a cancelled realm's flag is not
+    /// removed, only cleared (see [`Self::realm_cancel_handle`]'s doc for
+    /// whether a completed run clears it).
+    realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -663,6 +715,7 @@ impl JitEffectMachine {
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
+            realm_cancel_flags: HashMap::new(),
         })
     }
 
@@ -701,6 +754,7 @@ impl JitEffectMachine {
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
+            realm_cancel_flags: HashMap::new(),
         })
     }
 
@@ -711,6 +765,35 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
+    /// A3: obtain a clone-able cancellation handle scoped to ONE realm,
+    /// lazily minting that realm's flag on first request. Cancelling this
+    /// handle aborts only runs/resumes parked-path-entered under `realm` —
+    /// a sibling realm's run on the same machine is unaffected, because the
+    /// parked entries install the ACTIVE realm's flag into [`MachineState`]
+    /// (see [`Self::realm_cancel_flag`]), not the machine-level
+    /// [`Self::cancel_flag`].
+    ///
+    /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
+    /// completes — same discipline as the machine-level [`CancelHandle`]
+    /// (whose own doc says "call `reset` between runs if you intend to
+    /// reuse"): the caller decides when a realm is done retrying and calls
+    /// `CancelHandle::reset` explicitly.
+    pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
+        CancelHandle(self.realm_cancel_flag(realm))
+    }
+
+    /// A3: this realm's cancel flag, lazily minted on first park-path
+    /// run/resume entry for `realm`. Never removed once minted, so the same
+    /// `Arc` identity is returned for the machine's whole life — a
+    /// [`ContinuationFrame`] cloning it at park time and a later
+    /// [`Self::realm_cancel_handle`] call always observe the same flag.
+    fn realm_cancel_flag(&mut self, realm: RealmId) -> Arc<AtomicBool> {
+        self.realm_cancel_flags
+            .entry(realm)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
     /// Drain this machine's accumulated diagnostics. The machine-scoped
     /// sibling of the ambient `host_fns::drain_diagnostics` free-fn shim
     /// (per #340).
@@ -718,12 +801,28 @@ impl JitEffectMachine {
         self.machine_state.drain_diagnostics()
     }
 
-    /// Install per-run thread-local registries and return a drop guard.
+    /// Install per-run thread-local registries (using the machine-level
+    /// cancel flag) and return a drop guard. Every entry outside the parked
+    /// run/resume path calls this.
     ///
     /// For session machines: re-points the GC state at the retained heap
     /// buffer (if a GC has already run) OR at `nursery.start()` (first run
     /// only). For one-shot machines: always points at `nursery.start()`.
     pub(crate) fn install_registries(&mut self) -> RegistryGuard {
+        let flag = self.cancel_flag.clone();
+        self.install_registries_with_cancel_flag(flag)
+    }
+
+    /// Shared body of [`Self::install_registries`]: install per-run
+    /// thread-local registries using the given `cancel_flag` rather than
+    /// unconditionally `self.cancel_flag` — the parked run/resume entries
+    /// (A3) pass the ACTIVE realm's flag here instead, via
+    /// [`Self::realm_cancel_flag`], so cancelling one realm cannot abort a
+    /// sibling realm's run on the same machine.
+    fn install_registries_with_cancel_flag(
+        &mut self,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         self.machine_state
             .set_stack_map_registry(&self.pipeline.stack_maps);
@@ -738,7 +837,7 @@ impl JitEffectMachine {
                 .machine_state
                 .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
         }
-        self.machine_state.set_cancel_flag(self.cancel_flag.clone());
+        self.machine_state.set_cancel_flag(cancel_flag);
         // Make the aeson-`Value` constructor ids (JsonDecode) and the
         // Either/I#/Text ids (ParseISO8601) visible to those primops' host fns
         // for the duration of this run.
@@ -1005,7 +1104,15 @@ impl JitEffectMachine {
         );
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
-        let mut _guard = self.install_registries();
+        // A3: the parked path installs THAT realm's cancel flag (lazily
+        // minted) instead of the machine-level one; the slot path installs
+        // `self.cancel_flag`, byte-identical to before this method took a
+        // `park` argument.
+        let park_cancel_flag: Arc<AtomicBool> = match park {
+            ParkTarget::Slot => self.cancel_flag.clone(),
+            ParkTarget::Registry { realm, .. } => self.realm_cancel_flag(realm),
+        };
+        let mut _guard = self.install_registries_with_cancel_flag(park_cancel_flag.clone());
         // SAFETY: finalized JIT code pointer; calling convention per contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
@@ -1022,7 +1129,7 @@ impl JitEffectMachine {
         let yield_result = initial_step(&mut machine, "stepping main function");
         let finished = match drive_effect_loop(
             &mut machine,
-            &self.cancel_flag,
+            &park_cancel_flag,
             table,
             handlers,
             user,
@@ -1030,7 +1137,15 @@ impl JitEffectMachine {
             Some(suspend_tag),
             yield_result,
         ) {
-            Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced, park, suspend_tag),
+            Ok(outcome) => self.finish_suspendable(
+                &mut machine,
+                outcome,
+                bind_forced,
+                park,
+                suspend_tag,
+                table,
+                park_cancel_flag,
+            ),
             Err(e) => Err(e),
         };
         // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
@@ -1128,6 +1243,7 @@ impl JitEffectMachine {
             .suspended_continuation
             .take()
             .expect("suspended_continuation present (checked is_some above)");
+        let flag = self.cancel_flag.clone();
         self.resume_applied(
             continuation,
             table,
@@ -1137,6 +1253,7 @@ impl JitEffectMachine {
             input,
             bind_forced,
             ParkTarget::Slot,
+            flag,
         )
         .map(ParkedRaw::into_suspendable)
     }
@@ -1158,12 +1275,17 @@ impl JitEffectMachine {
         input: ResumeInput,
         bind_forced: Option<bool>,
         park: ParkTarget,
+        // A3: the flag to install for THIS run — `self.cancel_flag` for the
+        // slot path, or (`resume_parked`'s) already-cloned
+        // `ContinuationFrame::cancel_flag` for the registry path, so a
+        // resume never does a second `realm_cancel_flags` lookup.
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
         // Re-points GC state at the retained heap (heap `Some` → session buffer,
         // else nursery at the preserved cursor) — NOT a nursery reset.
-        let mut _guard = self.install_registries();
+        let mut _guard = self.install_registries_with_cancel_flag(cancel_flag.clone());
         // SAFETY: finalized JIT code pointer. The entry func is not re-called on
         // resume (the continuation is applied via `machine.resume`), but
         // CompiledEffectMachine needs a func_ptr for its own tail-call resolution.
@@ -1219,7 +1341,7 @@ impl JitEffectMachine {
         ) {
             Ok(yield_result) => match drive_effect_loop(
                 &mut machine,
-                &self.cancel_flag,
+                &cancel_flag,
                 table,
                 handlers,
                 user,
@@ -1227,7 +1349,15 @@ impl JitEffectMachine {
                 Some(suspend_tag),
                 yield_result,
             ) {
-                Ok(outcome) => self.finish_suspendable(&mut machine, outcome, bind_forced, park, suspend_tag),
+                Ok(outcome) => self.finish_suspendable(
+                    &mut machine,
+                    outcome,
+                    bind_forced,
+                    park,
+                    suspend_tag,
+                    table,
+                    cancel_flag,
+                ),
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -1246,16 +1376,24 @@ impl JitEffectMachine {
     ///
     /// `bind_forced` distinguishes a plain suspendable turn (`None` — bridge the
     /// `Done` pointer, byte-identical to the pre-W1b epilogue) from a VALUE-PLANE
-    /// BIND (`Some(forced)` — tenure the `Done` result into old-space, stash its
-    /// [`RootSlot`] on `self.last_bound_root`, and bridge the tenured value). The
-    /// bind branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
+    /// BIND (`Some(forced)` — tenure the `Done` result into old-space and bridge
+    /// the tenured value). On the slot path the tenured [`RootSlot`] is ALSO
+    /// stashed on `self.last_bound_root` (byte-identical to before this method
+    /// took a `park` argument); on the registry path it is returned INLINE via
+    /// `ParkedRaw::Completed::bound_root` instead — A1, closing
+    /// realm-checklist Item 3 (two realms' binds completing before either is
+    /// drained would otherwise overwrite one machine-level slot). The bind
+    /// branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
     /// have armed reclaim before this call (the guard's `*mut self.session` would
     /// alias) — see `run_fragment_and_bind`'s arm-last ordering.
     ///
     /// `park` selects where a SUSPENSION puts its continuation: the single
     /// `suspended_continuation` slot ([`ParkTarget::Slot`], every pre-existing
-    /// entry) or the continuation registry ([`ParkTarget::Registry`]). The
-    /// `Done` branch is identical for both.
+    /// entry) or the continuation registry ([`ParkTarget::Registry`]). `table`
+    /// and `park_cancel_flag` are only consulted on the registry path, to
+    /// populate the newly-parked [`ContinuationFrame`] (A3/A4) — the slot path
+    /// ignores both, unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn finish_suspendable(
         &mut self,
         machine: &mut CompiledEffectMachine,
@@ -1263,6 +1401,8 @@ impl JitEffectMachine {
         bind_forced: Option<bool>,
         park: ParkTarget,
         suspend_tag: u64,
+        table: &DataConTable,
+        park_cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
         match outcome {
             DriveOutcome::Done(done_ptr) => {
@@ -1309,7 +1449,9 @@ impl JitEffectMachine {
                             .old_space
                             .tenure(vmctx_ptr, nf_ptr, from_range)
                     };
-                    self.last_bound_root = Some(slot);
+                    if let ParkTarget::Slot = park {
+                        self.last_bound_root = Some(slot);
+                    }
                     // Bridge the TENURED (rooted, stable) value for the turn's
                     // rendered result. SAFETY: slot.current() is the live old-space
                     // pointer; forcing is a no-op on the already-NF Tier0 case.
@@ -1322,7 +1464,10 @@ impl JitEffectMachine {
                     .map_err(JitError::Signal)?;
                     let value =
                         crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                    return Ok(ParkedRaw::Completed(value));
+                    return Ok(ParkedRaw::Completed {
+                        value,
+                        bound_root: Some(slot),
+                    });
                 }
                 // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
                 // vmctx is valid for forcing thunks; signal protection guards
@@ -1336,7 +1481,10 @@ impl JitEffectMachine {
                 .map_err(JitError::Signal)?;
                 let value =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                Ok(ParkedRaw::Completed(value))
+                Ok(ParkedRaw::Completed {
+                    value,
+                    bound_root: None,
+                })
             }
             DriveOutcome::Suspended {
                 request,
@@ -1351,18 +1499,35 @@ impl JitEffectMachine {
                 // child GC as a persistent root, and hand the slot up so the
                 // harness can apply it by reference via `run_child`.
                 let has_finalized_closure = request_carries_closure_sentinel(&request);
+                // A2: on the slot path the tenured slot goes to
+                // `self.suspended_finalized_root` exactly as before (only
+                // written when `has_finalized_closure`, so an unrelated
+                // suspension never clobbers a stale value there); on the
+                // registry path it rides to `park_continuation` instead and
+                // lands on the frame — never on a machine-level field a
+                // second realm could overwrite.
+                let mut parked_finalized_root = None;
                 if has_finalized_closure {
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
-                    self.suspended_finalized_root = Some(slot);
+                    match park {
+                        ParkTarget::Slot => self.suspended_finalized_root = Some(slot),
+                        ParkTarget::Registry { .. } => parked_finalized_root = Some(slot),
+                    }
                 }
                 let id = match park {
                     ParkTarget::Slot => {
                         self.suspended_continuation = Some(continuation);
                         None
                     }
-                    ParkTarget::Registry { realm, kind } => {
-                        Some(self.park_continuation(continuation, realm, kind, suspend_tag))
-                    }
+                    ParkTarget::Registry { realm, kind } => Some(self.park_continuation(
+                        continuation,
+                        realm,
+                        kind,
+                        suspend_tag,
+                        park_cancel_flag,
+                        Arc::new(table.clone()),
+                        parked_finalized_root,
+                    )),
                 };
                 Ok(ParkedRaw::Suspended {
                     request,
@@ -2537,12 +2702,16 @@ impl JitEffectMachine {
     /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
     /// this registration is released by [`Self::resume_parked`], not by a guard
     /// at the end of the next child run.
+    #[allow(clippy::too_many_arguments)]
     fn park_continuation(
         &mut self,
         continuation: *mut u8,
         realm: RealmId,
         kind: ParkKind,
         suspend_tag: u64,
+        cancel_flag: Arc<AtomicBool>,
+        table: Arc<DataConTable>,
+        finalized_root: Option<crate::old_space::RootSlot>,
     ) -> ContinuationId {
         let mut cell = Box::new(continuation);
         let slot: *mut *mut u8 = &mut *cell;
@@ -2561,6 +2730,9 @@ impl JitEffectMachine {
                 realm,
                 suspend_tag,
                 kind,
+                finalized_root,
+                cancel_flag,
+                table,
             },
         );
         id
@@ -2642,6 +2814,11 @@ impl JitEffectMachine {
     /// answer leaves the frame PARKED and still ROOTED and the caller can retry
     /// with a corrected answer.
     ///
+    /// A4: the frame's own `table` (cloned at park time, see
+    /// [`ContinuationFrame::table`]) is what gets decoded against — this
+    /// method no longer accepts a caller-supplied table at all, so resuming a
+    /// frame against a foreign row is impossible by construction.
+    ///
     /// # Panics
     /// Panics if the single `suspended_continuation` slot is occupied. The two
     /// suspension paths must not be MIXED on one machine: a slot-held
@@ -2653,7 +2830,6 @@ impl JitEffectMachine {
     pub fn resume_parked<U, H: DispatchEffect<U>>(
         &mut self,
         id: ContinuationId,
-        table: &DataConTable,
         handlers: &mut H,
         user: &U,
         input: ResumeInput,
@@ -2691,18 +2867,47 @@ impl JitEffectMachine {
         // Read the GC-CURRENT pointer out of the cell: collections since the
         // park rewrote it in place through the registered slot.
         let continuation = *frame.cell;
+        // A3/A4: the frame's own cancel flag and table — no `realm_cancel_flags`
+        // or caller lookup needed, this IS the second-lookup avoidance the
+        // frame exists for.
+        let cancel_flag = frame.cancel_flag.clone();
+        let table = frame.table.clone();
+        // Any finalized root never taken via `take_parked_finalized_root` is
+        // dropped here with the frame; its persistent-root registration lives
+        // independently for the machine's life regardless (same as
+        // `take_finalized_root`'s doc), so this is not a leak — just an
+        // explicit acknowledgment rather than a silent field drop.
+        let _ = frame.finalized_root.take();
         drop(frame);
         self.resume_applied(
             continuation,
-            table,
+            &table,
             handlers,
             user,
             suspend_tag,
             input,
             kind.bind_forced(),
             ParkTarget::Registry { realm, kind },
+            cancel_flag,
         )
         .map(ParkedRaw::into_parked)
+    }
+
+    /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry
+    /// path (A2): take the persistent root of a PARKED frame's closure-valued
+    /// `finalize` payload, tenured at park time. The frame stays parked and
+    /// rooted — only the frame's own handle to the slot is cleared, not its
+    /// persistent-root registration, which lives for the machine's life
+    /// regardless (same as `take_finalized_root`'s doc). `None` unless `id`
+    /// names a frame that parked while suspended on a closure-valued
+    /// finalize, or its slot was already taken.
+    pub fn take_parked_finalized_root(
+        &mut self,
+        id: ContinuationId,
+    ) -> Option<crate::old_space::RootSlot> {
+        self.continuations
+            .get_mut(&id)
+            .and_then(|frame| frame.finalized_root.take())
     }
 
     /// Number of continuations currently parked in the registry. Equal to

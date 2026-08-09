@@ -237,11 +237,7 @@ fn disarm_gc_hazards() {
 /// this ever drops below, a parked continuation is unrooted and the next
 /// collection frees it.
 fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
-    assert_eq!(
-        machine.parked_count(),
-        expect,
-        "parked continuation count"
-    );
+    assert_eq!(machine.parked_count(), expect, "parked continuation count");
     assert_eq!(
         machine.stowed_roots_count(),
         expect,
@@ -275,7 +271,9 @@ fn park_entry(
             );
             id
         }
-        ParkedOutcome::Completed(_) => panic!("the entry should suspend at the ask, not complete"),
+        ParkedOutcome::Completed { .. } => {
+            panic!("the entry should suspend at the ask, not complete")
+        }
     }
 }
 
@@ -315,14 +313,13 @@ fn park_fragment(
             assert_eq!(expect_int(&request), req, "fragment ask payload");
             id
         }
-        ParkedOutcome::Completed(_) => panic!("the fragment should suspend at the ask"),
+        ParkedOutcome::Completed { .. } => panic!("the fragment should suspend at the ask"),
     }
 }
 
 /// Resume a parked continuation with an Int answer and deep-verify its result.
 fn resume_and_verify(
     machine: &mut JitEffectMachine,
-    table: &DataConTable,
     id: ContinuationId,
     answer: i64,
     expect_captured: i64,
@@ -330,14 +327,15 @@ fn resume_and_verify(
     match machine
         .resume_parked(
             id,
-            table,
             &mut NoDispatch,
             &(),
             ResumeInput::Answer(Value::Lit(Literal::LitInt(answer))),
         )
         .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
     {
-        ParkedOutcome::Completed(v) => assert_pair_result(&v, expect_captured, answer),
+        ParkedOutcome::Completed { value, .. } => {
+            assert_pair_result(&value, expect_captured, answer)
+        }
         ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
     }
 }
@@ -392,12 +390,9 @@ fn f1_two_parks_resumed_child_first() {
         arm_gc_hazards();
         let table = adversarial_table();
         // 2 KiB nursery: small enough that the fragment allocations collect.
-        let mut machine = JitEffectMachine::compile_session(
-            &build_suspending_parent(777, 5),
-            &table,
-            2048,
-        )
-        .expect("compile_session");
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(777, 5), &table, 2048)
+                .expect("compile_session");
 
         // Park A — the parent.
         let a = park_entry(&mut machine, &table, RealmId(0), 5);
@@ -413,12 +408,12 @@ fn f1_two_parks_resumed_child_first() {
         assert_eq!(machine.parked_ids(), vec![a, b]);
 
         // Resume B first — OUT OF ORDER relative to the park sequence.
-        resume_and_verify(&mut machine, &table, b, 6, 888);
+        resume_and_verify(&mut machine, b, 6, 888);
         assert_rooting_receipt(&machine, 1);
 
         // Then A. Its continuation has now survived: B's park, B's whole resume
         // run (which allocates and may collect), and B's teardown.
-        resume_and_verify(&mut machine, &table, a, 5, 777);
+        resume_and_verify(&mut machine, a, 5, 777);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();
@@ -437,12 +432,9 @@ fn f2_two_parks_resumed_parent_first() {
     in_test_thread(|| {
         arm_gc_hazards();
         let table = adversarial_table();
-        let mut machine = JitEffectMachine::compile_session(
-            &build_suspending_parent(4242, 11),
-            &table,
-            2048,
-        )
-        .expect("compile_session");
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(4242, 11), &table, 2048)
+                .expect("compile_session");
 
         let a = park_entry(&mut machine, &table, RealmId(0), 11);
         assert_rooting_receipt(&machine, 1);
@@ -450,11 +442,11 @@ fn f2_two_parks_resumed_parent_first() {
         assert_rooting_receipt(&machine, 2);
 
         // Parent first this time: B stays parked across A's whole resume run.
-        resume_and_verify(&mut machine, &table, a, 11, 4242);
+        resume_and_verify(&mut machine, a, 11, 4242);
         assert_rooting_receipt(&machine, 1);
         assert_eq!(machine.parked_ids(), vec![b]);
 
-        resume_and_verify(&mut machine, &table, b, 12, 3131);
+        resume_and_verify(&mut machine, b, 12, 3131);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();
@@ -480,12 +472,9 @@ fn f3_gc_and_heap_doubling_between_parks() {
         // first Cheney pass, tripping the doubling re-evacuate (live*4 >
         // size*3) — the same path continuation_gc_root.rs exercises. Every
         // doubling pass must re-evacuate and re-update BOTH parked roots.
-        let mut machine = JitEffectMachine::compile_session(
-            &build_suspending_parent(12345, 7),
-            &table,
-            2048,
-        )
-        .expect("compile_session");
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(12345, 7), &table, 2048)
+                .expect("compile_session");
 
         let a = park_entry(&mut machine, &table, RealmId(0), 7);
         let b = park_fragment(&mut machine, &table, RealmId(0), "child_b", 54321, 8);
@@ -519,9 +508,9 @@ fn f3_gc_and_heap_doubling_between_parks() {
         // The parks survived the collections as roots, not as luck.
         assert_rooting_receipt(&machine, 2);
 
-        resume_and_verify(&mut machine, &table, b, 8, 54321);
+        resume_and_verify(&mut machine, b, 8, 54321);
         assert_rooting_receipt(&machine, 1);
-        resume_and_verify(&mut machine, &table, a, 7, 12345);
+        resume_and_verify(&mut machine, a, 7, 12345);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();
@@ -540,12 +529,9 @@ fn f4_eight_parks_gc_between_each_shuffled_resume() {
     in_test_thread(|| {
         arm_gc_hazards();
         let table = adversarial_table();
-        let mut machine = JitEffectMachine::compile_session(
-            &build_suspending_parent(1000, 100),
-            &table,
-            2048,
-        )
-        .expect("compile_session");
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(1000, 100), &table, 2048)
+                .expect("compile_session");
 
         // Park 0 is the entry; parks 1..8 are suspending fragments. Captured
         // values are distinct so a cross-wired root shows as a wrong payload,
@@ -582,7 +568,7 @@ fn f4_eight_parks_gc_between_each_shuffled_resume() {
         let mut remaining = parks.len();
         for &idx in ORDER.iter() {
             let (id, captured, answer) = parks[idx];
-            resume_and_verify(&mut machine, &table, id, answer, captured);
+            resume_and_verify(&mut machine, id, answer, captured);
             remaining -= 1;
             assert_rooting_receipt(&machine, remaining);
         }
@@ -621,13 +607,8 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
                 Value::ThunkRef(tidepool_eval::value::ThunkId(0)),
             ],
         );
-        let err = match machine.resume_parked(
-            a,
-            &table,
-            &mut NoDispatch,
-            &(),
-            ResumeInput::Answer(bottom),
-        ) {
+        let err = match machine.resume_parked(a, &mut NoDispatch, &(), ResumeInput::Answer(bottom))
+        {
             Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
             Err(e) => e,
         };
@@ -642,7 +623,7 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
         force_gc_on(&mut machine, &table, "after_reject", 120);
         assert_rooting_receipt(&machine, 1);
 
-        resume_and_verify(&mut machine, &table, a, 3, 555);
+        resume_and_verify(&mut machine, a, 3, 555);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();
@@ -693,7 +674,6 @@ fn parked_resume_while_the_slot_is_occupied_panics() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = machine.resume_parked(
                 parked,
-                &table,
                 &mut NoDispatch,
                 &(),
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
@@ -724,7 +704,6 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
         let err = machine
             .resume_parked(
                 bogus,
-                &table,
                 &mut NoDispatch,
                 &(),
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
@@ -733,7 +712,7 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
         assert!(format!("{err}").contains("no continuation parked"));
 
         let a = park_entry(&mut machine, &table, RealmId(0), 1);
-        resume_and_verify(&mut machine, &table, a, 1, 1);
+        resume_and_verify(&mut machine, a, 1, 1);
         assert_rooting_receipt(&machine, 0);
 
         // The id is consumed; resuming it again is the same clean error (ids
@@ -741,7 +720,6 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
         let err = machine
             .resume_parked(
                 a,
-                &table,
                 &mut NoDispatch,
                 &(),
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
@@ -751,9 +729,16 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
 
         // And a plain fragment still runs — the machine was never "suspended".
         let frag = machine
-            .add_function("plain", &build_value_fragment(4321), &table, &ExternalEnv::new())
+            .add_function(
+                "plain",
+                &build_value_fragment(4321),
+                &table,
+                &ExternalEnv::new(),
+            )
             .expect("add plain fragment");
-        let v = machine.run_fragment_pure(frag).expect("plain fragment runs");
+        let v = machine
+            .run_fragment_pure(frag)
+            .expect("plain fragment runs");
         assert_eq!(expect_int(&v), 4321);
 
         drop(machine);

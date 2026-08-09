@@ -233,7 +233,7 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
         .expect("park entry")
     {
         ParkedOutcome::Suspended { id, .. } => id,
-        ParkedOutcome::Completed(_) => panic!("entry should suspend"),
+        ParkedOutcome::Completed { .. } => panic!("entry should suspend"),
     };
 
     // Park the rest as suspending fragments.
@@ -259,7 +259,7 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
             .expect("park fragment")
         {
             ParkedOutcome::Suspended { .. } => {}
-            ParkedOutcome::Completed(_) => panic!("fragment should suspend"),
+            ParkedOutcome::Completed { .. } => panic!("fragment should suspend"),
         }
     }
     assert_eq!(machine.parked_count(), PARKS_PER_MACHINE);
@@ -282,7 +282,6 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
         let _ = machine
             .resume_parked(
                 first,
-                table,
                 &mut NoDispatch,
                 &(),
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
@@ -329,13 +328,12 @@ fn report_cycle_scoped_drop_footprint() {
             let (vsz1, rss1) = mem_bytes();
             let maps1 = map_count();
 
-            println!("\n=== cycle-scoped drop: {CYCLES} machines, each with \
-                      {PARKS_PER_MACHINE} parked continuations + \
-                      {FRAGMENTS_PER_MACHINE} fragments ===");
             println!(
-                "{:<12} {:>12} {:>12}",
-                "", "VSZ (MiB)", "RSS (MiB)"
+                "\n=== cycle-scoped drop: {CYCLES} machines, each with \
+                      {PARKS_PER_MACHINE} parked continuations + \
+                      {FRAGMENTS_PER_MACHINE} fragments ==="
             );
+            println!("{:<12} {:>12} {:>12}", "", "VSZ (MiB)", "RSS (MiB)");
             println!("{:<12} {:>12.1} {:>12.1}", "baseline", mib(vsz0), mib(rss0));
             println!(
                 "{:<12} {:>12.1} {:>12.1}",
@@ -486,19 +484,18 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                 .expect("park")
             {
                 ParkedOutcome::Suspended { id, .. } => id,
-                ParkedOutcome::Completed(_) => panic!("should suspend"),
+                ParkedOutcome::Completed { .. } => panic!("should suspend"),
             };
             match machine
                 .resume_parked(
                     id,
-                    &table,
                     &mut NoDispatch,
                     &(),
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(9))),
                 )
                 .expect("resume")
             {
-                ParkedOutcome::Completed(v) => match &v {
+                ParkedOutcome::Completed { value, .. } => match &value {
                     Value::Con(cid, fields) if cid.0 == PAIR_ID.0 => {
                         assert_eq!(session_scaffold::expect_int(&fields[0]), 4321);
                         assert_eq!(session_scaffold::expect_int(&fields[1]), 9);
