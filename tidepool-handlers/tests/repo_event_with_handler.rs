@@ -331,6 +331,30 @@ fn observed_commits(log: &Arc<Mutex<Vec<EvRepositoryEvent>>>) -> Vec<String> {
 // The driver
 // ============================================================================
 
+/// FAIL LOUDLY when the environment cannot run these gates.
+///
+/// These gates drive a real extract + JIT + temp git repository; without
+/// `TIDEPOOL_EXTRACT` and GHC they can verify NOTHING. They previously
+/// `return`ed early, which nextest reports as a PASS — and a skip spelled as a
+/// pass is structurally indistinguishable from a real pass: it runs by name,
+/// emits a real PASS line, and counts toward started-vs-run. Seven of these
+/// gates once "passed" in 6ms apiece for exactly that reason. The root
+/// `CLAUDE.md` already required tests without `TIDEPOOL_EXTRACT` to fail loud;
+/// the early return was nonconforming, not a competing convention.
+///
+/// Safe because `scripts/battery.sh` derives `TIDEPOOL_EXTRACT` itself — this
+/// fires only on the direct-invocation mistake that used to yield a false green.
+fn require_ghc() {
+    assert!(
+        ghc_available(),
+        "TIDEPOOL_EXTRACT is unset or GHC is not on PATH. These gates drive a real \
+         extract + JIT against a real temporary git repository and can verify nothing \
+         without them — failing loudly rather than passing vacuously. Run through \
+         scripts/battery.sh, which derives TIDEPOOL_EXTRACT automatically, or set it \
+         to a built tidepool-extract-bin."
+    );
+}
+
 fn ghc_available() -> bool {
     if std::env::var("TIDEPOOL_EXTRACT").is_err() {
         let bin = repo_root().join("haskell").join("tidepool-extract");
@@ -647,10 +671,7 @@ fn in_test_thread(f: impl FnOnce() + Send + 'static) {
 ///   registers does.
 #[test]
 fn no_replay_of_events_observed_before_registration() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, log) = booted_repo();
         // The gap window: real movement with no subscription in existence.
@@ -726,10 +747,7 @@ fn no_replay_of_events_observed_before_registration() {
 /// handlers fire, each exactly once.
 #[test]
 fn one_commit_broadcasts_to_both_registered_handlers() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, _log) = booted_repo();
         let code = format!(
@@ -775,10 +793,7 @@ fn one_commit_broadcasts_to_both_registered_handlers() {
 /// the order git made them.
 #[test]
 fn queued_observations_invoke_in_order_across_a_handler_suspension() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, _log) = booted_repo();
         let code = format!(
@@ -829,10 +844,7 @@ fn queued_observations_invoke_in_order_across_a_handler_suspension() {
 /// statement after the scope, and before the id is spent.
 #[test]
 fn body_end_drains_before_it_unregisters() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, _log) = booted_repo();
         let code = format!(
@@ -877,10 +889,7 @@ fn body_end_drains_before_it_unregisters() {
 /// > forgotten.
 #[test]
 fn handler_failure_fails_the_enclosing_scope() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, _log) = booted_repo();
         let code = format!(
@@ -924,10 +933,7 @@ fn handler_failure_fails_the_enclosing_scope() {
 /// turns into a failure of the enclosing scope.
 #[test]
 fn bounded_queue_overflow_fails_loudly_rather_than_dropping_a_commit() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo, handler, _log) = booted_repo_with(EventConfig {
             queue_bound: 1,
@@ -1002,10 +1008,7 @@ fn bounded_queue_overflow_fails_loudly_rather_than_dropping_a_commit() {
 /// key with no ABA hazard.
 #[test]
 fn rooting_receipt_holds_across_an_interleaved_park_and_resume() {
-    if !ghc_available() {
-        eprintln!("skipping: GHC/TIDEPOOL_EXTRACT unavailable");
-        return;
-    }
+    require_ghc();
     in_test_thread(|| {
         let (repo_a, handler_a, _log_a) = booted_repo();
         let (_repo_b, handler_b, _log_b) = booted_repo();
