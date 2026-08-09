@@ -524,6 +524,10 @@ leaving the note visible rather than silently fixing the line.)
    changes absent fixture regeneration, which is a sequenced wave/root action.
 2. The pinned "id-stability" trio is **three DataConId guards** and observes no
    VarIds. `localVarId` determinism has no guard.
+2a. **CHECK A guards EMITTED constructors only.** A constructor the runtime
+   needs but the fragment never emits is invisible to it — which is exactly the
+   sibling-set case D2 must justify when it narrows the table. D1-A's defense is
+   real and is not a general metadata-completeness guarantee.
 3. `kind=4 TypeMetadata` has **at least two causes** — the signature does not
    identify one.
 4. The exempted rustc class has **no box-wide bound** (`nice -j4` is
