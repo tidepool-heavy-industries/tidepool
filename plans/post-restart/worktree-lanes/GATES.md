@@ -49,7 +49,49 @@ exactly what it was asked to emit. The generator was correct and the design was
 wrong, and only a gate that exercises the authored surface can tell those apart.
 Where both kinds are available, the authored one is the real gate.
 
-**4. Say when your gates cannot settle the question at all.** Earlier in the
+**4. CHECK DURATION AGAINST THE WORK CLAIMED.** The cheapest instrument there
+is, and in this wave the only one that caught a vacuous green. L4's seven-gate
+re-run returned 23/23 PASS, started == run, no truncation, correct count, every
+gate by name with a real pass line — and every one had SKIPPED. The harness
+early-returns and PASSES when `TIDEPOOL_EXTRACT` is unset, and it was unset.
+
+A skip spelled as a pass is structurally IDENTICAL to a pass, so it defeats
+every check layered above: named execution, real pass lines, started-vs-run,
+completion figures, named instruments. None of them can distinguish
+ran-and-held from skipped-and-passed. What gave it away was 0.006–0.011 s per
+gate against 9.2–16.6 s previously — a test driving real GHC → extract → JIT →
+a temp git repository cannot finish in 6 ms.
+
+So: know roughly what your gate SHOULD cost, and treat an unexplained
+order-of-magnitude drop as a finding rather than good luck. Report durations,
+because the next person's baseline is your reported timing — that is how this
+one was caught at all.
+
+REFINEMENT, found by applying this rule to this crate's own run: FAST IS NOT
+AUTOMATICALLY SUSPICIOUS. The check is duration against THE WORK THE GATE
+CLAIMS, not against some absolute floor. `tidepool-worktree`'s fastest gates run
+in 5–9 ms — `reconcile_on_unregistered_worktree_returns_worktree_not_registered`,
+`journal_open_reports_typed_failure_when_a_file_blocks_the_directory`, the
+`storage_errors` family — and every one of them SHOULD be that fast, because
+each tests an EARLY-RETURN or filesystem-failure path that by design never
+spawns git. A gate proving "this refuses before doing the work" is correctly
+cheap; if it were slow, THAT would be the finding.
+
+Root's ruling on the skip sites that prompted this: missing required
+environment FAILS LOUDLY, naming the variable. That was ALREADY the stated
+convention (root `CLAUDE.md`: tests without `TIDEPOOL_EXTRACT` "fail loud") —
+the skip-as-pass sites were nonconforming, not a competing style. Worth noting
+the shape: the rule existed and was silently violated, which is the expensive
+kind, because everyone assumes a stated rule is being followed.
+`TIDEPOOL_EXPENSIVE_TESTS` gating remains the sanctioned exception.
+`tidepool-worktree` was checked and is clean of the pattern.
+
+The hazard is a gate that is fast while claiming work it could not have done in
+the time — 6 ms for a gate driving GHC → extract → JIT → a temp repository.
+Applied as "fast = bad" this rule produces false alarms and gets ignored, which
+is worse than not having it.
+
+**5. Say when your gates cannot settle the question at all.** Earlier in the
 same lane, the conditionality gates were built on an entry point that passes one
 list for both parameters, making them non-discriminating rather than merely
 incomplete — and the receipt said so. That distinction is the difference between
@@ -161,6 +203,36 @@ PASS tidepool-worktree::event_monitor two_commits_between_polls_coalesce_into_on
 PASS tidepool-worktree::event_monitor unreachable_old_head_after_gc_yields_unknown_change
 PASS tidepool-worktree::event_monitor unrelated_history_on_the_same_branch_yields_unknown_change_rather_than_a_guess
 ```
+
+## State that must not disagree with itself (external review, 2026-08-09)
+
+Both were silent-disagreement defects: no build error, no failing test, and a
+system that looks correct until a restart reads the other half.
+
+| Gate | Failure mode it exists to catch |
+|---|---|
+| `journal_malformed_middle_row_fails_loudly_rather_than_being_skipped` | a corrupted middle receipt silently elided — the recovery contract tolerates only a torn FINAL row, and a quietly shorter journal deletes the evidence it exists to preserve |
+| `journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix` | WRONG-REASON GUARD: the gate above would also pass if every malformed row became fatal, which would break restart recovery rather than tighten it |
+| `binding_failed_bind_persist_rolls_back_in_memory_state` | memory holding a binding disk does not — isolation is enforced from this table, so a restart reads the unbound disk state and lets a SECOND agent bind the same worktree |
+| `binding_failed_settle_persist_rolls_back_in_memory_state` | the mirror: memory believing a worktree is rebindable while disk still says `Active` |
+
+```
+PASS tidepool-worktree::storage_errors binding_failed_bind_persist_rolls_back_in_memory_state
+PASS tidepool-worktree::storage_errors binding_failed_settle_persist_rolls_back_in_memory_state
+PASS tidepool-worktree::storage_errors journal_malformed_middle_row_fails_loudly_rather_than_being_skipped
+PASS tidepool-worktree::storage_errors journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix
+```
+
+Verified non-vacuous: the two binding gates carry a root-user skip arm (a
+`chmod 0o555` is unenforceable as root), so the run was checked for `SKIPPED`
+lines — zero, at uid 1000. Duration 14–23 ms each is plausible: these exercise
+filesystem-failure and early-return paths that never spawn git.
+
+RESIDUAL, flagged not fixed: those skip arms PASS when skipped, the same shape
+as the env-skip hazard root swept. Different cause — the environment cannot
+express the condition, rather than lacking a tool — and root's ruling was scoped
+to missing-env with this crate excluded, so changing the convention at submit
+time was not mine to do unilaterally.
 
 ## Fresh reads — `worktreeHead` is not a cached field
 

@@ -74,6 +74,11 @@ an event subscription.
 
 ## Fold obligations (TL checks these before folding, not from memory)
 
+STATUS: 1 and 3 reported discharged by L4 (see below); VERIFY ON THE MERGED
+RESULT at fold rather than on the report — the check is cheap and the whole
+point of writing it down was not to rely on recollection, including L4's. 2
+remains open until the relocation lands.
+
 1. **`WORKAROUND(wt-seam)` sites must be gone.** L4's adapter hardened around
    two seam defects in the landed monitor (`reconcile` panicking on an
    unregistered worktree; the journalled `EventId` unreachable to callers).
@@ -89,7 +94,11 @@ an event subscription.
    mechanism the named-gate rule exists against.
 3. **`UnwiredWorktreeRow` must be test-only.** A panicking stub that reaches a
    production row is the workaround-as-invariant hazard in its most literal
-   form.
+   form. REPORTED DISCHARGED: it lives only in
+   `tidepool-handlers/tests/repo_event_with_handler.rs`, an integration TEST
+   TARGET — not compiled into the library at all, which is stronger than
+   `#[cfg(test)]` (that still sits in the lib's source). Its panic names the
+   harness and its scope rather than reading like a runtime rule.
 
 ## Territory
 
@@ -116,8 +125,11 @@ any other live lane. Log real conflicts at fold.
   lines — a receipt indistinguishable from a complete one, whose only tell is
   that RUN is strictly less than STARTED (root observed 198/877). Pass
   `--no-fail-fast` EXPLICITLY on any run reaching `tidepool-runtime` until the
-  worktree carries battery fix `7d57cea5`; expect exactly one red
-  (`mock_stack_matches_production`) until that fix folds, and A/B anything else
+  worktree carries battery fix `7d57cea5`; expect exactly THREE sanctioned inherited reds
+  (`mock_stack_matches_production`,
+  `generic_deriving_337::sum_type_rejected_at_compile_time`,
+  `qq_fmt_brace_inside_hole_non_string_expr_still_works`; codex-review ledger
+  item 14) until their fixes fold, and A/B anything else
   in your own worktree before calling it inherited.
 
   Prefer started-vs-run over completed-vs-crate-total (credit L4): it is
