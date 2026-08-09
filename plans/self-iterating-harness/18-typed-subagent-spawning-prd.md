@@ -1184,6 +1184,16 @@ in a separate PRD. It can compose a `WorktreeHandle` with an `AgentHandle` into
 a higher-level worker run and later support hylo-shaped repository workflows.
 None of those git semantics belong to the Agent effect.
 
+> **Joint design target (Inanna, 2026-08-08):**
+> `harness-dogfooding/dev-tree/` is authored deliberately against this PRD
+> AND the forthcoming Worktree/Event PRD in unison — it unfolds a recursive
+> `DevPlan` into coding agents, pokes descendants when parent HEADs move,
+> and merges completed branches bottom-up with fresh integration agents.
+> It is the concrete acceptance pressure for both surfaces: when writing
+> the git PRD or shaping Agent's API details, check the decision against
+> what dev-tree needs to compile and run. It should typecheck as the
+> surfaces land, not be retrofitted afterward.
+
 ### Evaluation and recursive improvement
 
 After the orchestrator is useful for Tidepool development, evaluate resident
