@@ -208,6 +208,24 @@ Revised gates: matched → hides; mismatched vocab-only → does NOT hide and em
 no `(<|>)` (the DISCRIMINATING one — it fails under the `vocab_effects`
 predicate); non-RepoEvent → unchanged; superset violation → panics.
 
+SEQUENCING (root ruling): verification is split from landing. `d6fce023` is a
+WIP commit spanning seven files across four crates, so landing it on the base
+every lane rebases against would defeat the purpose of landing it early. The
+discriminating gate is instead verified NOW in a DISPOSABLE worktree checked
+out from extract-wave's ref and then discarded — nothing enters L4's diff, so
+its refusal to merge another wave's branch stands, while the evidence transfers
+under the receipt rules (gate named, base stated as `d6fce023`). The retarget
+lands as a small commit after boot-vocab folds up as a checkpoint. Net effect:
+the wrong-parameter risk is dead BEFORE the owed-retarget window opens, rather
+than being carried through it.
+
+Caution for that disposable worktree, since it is the same hazard class this
+wave spent a day on: a throwaway checkout is another worktree, so it needs
+`max-threads = 1` in its own `.config/nextest.toml` before running anything
+GHC-heavy, must invoke `ghc-slots.sh` by ABSOLUTE path (the slot registry is a
+box-wide arbiter; N worktree copies at N commits are N different arbiters), and
+must be `git worktree remove`d rather than leaked.
+
 Superseded reasoning follows.
 
 DECIDED (L4, SUPERSEDED): the predicate keys on **`vocab_effects`**, not `row_effects`.
