@@ -231,18 +231,37 @@ is runtime data, not a phantom-type state machine.
 
 ### Durable pokes and the resident inbox
 
-`pokeAgent` is the normal, non-blocking control operation. It accepts a typed
-message into a durable per-agent queue and returns once Tidepool has recorded
-it; it never waits for the child to act on it. When a turn is active, the
-adapter delivers the queued message as a steer when the backend permits. When
-the agent is idle, it starts (or queues) its next follow-up turn. If the child
-is temporarily unsteerable -- for example, parked in a generated tool call --
-the message remains queued until it is deliverable or the agent reaches a
-terminal state. It is never silently discarded.
+`pokeAgent` is the normal, non-blocking control operation. It accepts a tagged,
+typed message into a durable per-agent FIFO and returns once Tidepool has
+recorded it; it never waits for the child to act on it:
 
-This is deliberately one operation rather than a resident choosing between
-"steer" and "start a follow-up." Those are backend/lifecycle details; the
-resident's policy is simply to poke, perhaps with escalating urgency.
+```haskell
+data PokeMode = WhenSafe | InterruptCurrentTurn
+
+data Poke message = Poke
+  { mode    :: PokeMode
+  , message :: message
+  }
+```
+
+`WhenSafe` delivers the queued message as an active-turn steer when the backend
+permits, or starts/queues the agent's next follow-up turn when it is idle. If
+the child is temporarily unsteerable -- for example, parked in a generated
+tool call -- the message remains queued until it is deliverable or the agent
+reaches a terminal state.
+
+`InterruptCurrentTurn` asks the adapter to cancel any active turn, resolve or
+cancel its parked tool request cleanly, then deliver the typed message as a new
+turn. If the agent is already idle it behaves like `WhenSafe`. The poke remains
+non-blocking: interruption and redelivery progress through the runtime state
+machine after durable acceptance. A later lifecycle event reports what
+actually happened.
+
+This is deliberately one authored operation rather than separate steer,
+follow-up, and interrupt verbs. Those are delivery mechanics; the resident's
+policy is to send a typed message tagged with whether current work may continue.
+Raw force-cancel remains an internal runtime/administrative cleanup primitive.
+No accepted poke is silently discarded or implicitly coalesced.
 
 Residents can also receive typed messages from the operator, the driver, and
 other residents. The driver owns a durable inbox and schedules a new cycle on
@@ -351,8 +370,8 @@ workspace observation.
    whose handlers run in the parent's `M effs` environment.
 4. Derive tool names, schemas, dispatch, and result decoding from ordinary
    Generic records and ADTs.
-5. Preserve asynchronous orchestration, active steering, interruption,
-   progress observation, follow-up turns, and recursive delegation.
+5. Preserve asynchronous orchestration, tagged cooperative/interrupting
+   pokes, progress observation, follow-up turns, and recursive delegation.
 6. Reuse ChatGPT-authenticated Codex and its native coding harness rather than
    reproduce edit, command, session, and context machinery.
 7. Run each coding worker in a caller-selected workspace under an explicit
@@ -507,7 +526,7 @@ observeWorker worker = waitAgent worker >>= \case
     observeWorker worker
 
   AgentWentIdle -> do
-    pokeAgent worker (PleaseFinalize "Report your result or blocker now.")
+    pokeAgent worker (whenSafe (PleaseFinalize "Report your result or blocker now."))
     observeWorker worker
 
   AgentFinalized result receipt -> do
@@ -528,6 +547,12 @@ data AgentSpec effs tools input result
 data AgentHandle input result
 data AgentReference input result
 
+data PokeMode = WhenSafe | InterruptCurrentTurn
+data Poke input = Poke PokeMode input
+
+whenSafe    :: input -> Poke input
+interrupting :: input -> Poke input
+
 data AgentEvent result
   = AgentActivity AgentActivity
   | AgentWentIdle AgentIdleReceipt
@@ -543,16 +568,12 @@ spawnAgent
 
 pokeAgent
   :: AgentHandle input result
-  -> input
+  -> Poke input
   -> M effs ()
 
 waitAgent
   :: AgentHandle input result
   -> M effs (AgentEvent result)
-
-interruptAgent
-  :: AgentHandle input result
-  -> M effs ()
 
 releaseAgent
   :: AgentHandle input result
@@ -610,26 +631,25 @@ parTraverseAgents
 - `spawnAgent` creates a thread, installs its frozen tool contract, starts the
   initial turn, and returns after the thread/turn is accepted.
 - `pokeAgent` durably accepts a typed message without waiting for a response.
-  It steers an active turn when possible, starts/queues a follow-up when idle,
-  and otherwise retains the message until delivery is possible. A terminal or
-  released target produces an explicit typed failure/receipt, never a dropped
-  message.
+  `whenSafe` steers an active turn when possible, starts/queues a follow-up when
+  idle, and otherwise retains the message until delivery is possible.
+  `interrupting` first interrupts any active turn and then starts the message
+  as the next turn. A terminal or released target produces an explicit typed
+  failure/receipt, never a dropped message.
 - `waitAgent` returns the next observable event for that handle. Repeated calls
   drive a per-agent event stream. `AgentWentIdle` is an ordinary typed outcome:
   the resident may poke with escalating urgency, wait again, replace the agent,
   or stop. It is not an exception.
-- `interruptAgent` requests interruption of the current turn. It is idempotent
-  once the handle is terminal.
 - `releaseAgent` detaches/unsubscribes and releases hot runtime resources. It
   does not delete durable thread history.
 - `retainAgent` exempts a handle from automatic release at the current
   wave/loop boundary.
 
-Whether an active `pokeAgent` may reach a turn currently parked on a dynamic
-tool call is deliberately gated on the backend spike. The API remains useful if
-that scheduling combination is unsupported: Tidepool retains the poke and
-delivers it after the tool call or on the next turn, while the parent may also
-return relevant information through the outstanding tool call or interrupt.
+Whether a `whenSafe` poke may reach a turn currently parked on a dynamic tool
+call is deliberately gated on the backend spike. If unsupported, Tidepool
+retains it until the tool call resolves. An `interrupting` poke instead cancels
+the turn and safely resolves the outstanding tool request before beginning its
+message as a new turn.
 
 ## Servant-style agent eDSL
 
@@ -742,14 +762,10 @@ data AgentRuntime a where
     :: CompiledAgent
     -> AgentRuntime AgentId
 
-  SendInput
+  QueuePoke
     :: AgentId
+    -> PokeMode
     -> StructuralValue
-    -> AgentRuntime ()
-
-  StartFollowup
-    :: AgentId
-    -> Text
     -> AgentRuntime ()
 
   AwaitEvent
@@ -762,7 +778,7 @@ data AgentRuntime a where
     -> StructuralValue
     -> AgentRuntime ()
 
-  Interrupt
+  ForceInterrupt
     :: AgentId
     -> AgentRuntime ()
 
@@ -775,7 +791,7 @@ The public handler performs the typed work around this transport:
 
 - compile the tool record;
 - register Haskell dispatch closures with the resident runtime;
-- structurally encode outbound messages;
+- structurally encode and durably queue tagged outbound pokes;
 - structurally decode tool inputs and final results;
 - invoke handlers inside the parent `M effs` row;
 - encode handler results back to the child; and
@@ -849,14 +865,15 @@ or wait for another typed result, subject to its effect row.
 A handler failure must resolve the outstanding server request with an explicit
 tool error; it must never strand a pending call. The runtime records the
 failure, cancels any abandoned nested work, and lets the child or resident's
-bounded recovery policy decide whether to retry, continue, or interrupt.
+bounded recovery policy decide whether to retry, continue, send an interrupting
+poke, or stop.
 
 ### Structured completion
 
 V1 uses `turn/start.outputSchema` derived from the requested result type, then
 validates and decodes the terminal assistant value with Tidepool's structural
 Generic decoder. A malformed result does not become a typed success; the
-runtime may steer a correction or begin a bounded follow-up retry.
+runtime may enqueue a bounded corrective poke.
 
 A reserved generated `finish_task` dynamic tool may provide a stronger
 completion gate: it could reject malformed output while leaving the child
@@ -1089,8 +1106,8 @@ The initial advertised contract should remain compact:
 > Define an agent's callable tools as a Generic record parameterized by
 > `mode`; each field has type `mode :- Call Input Output` or `mode :- Notify
 > Input`. Build an `AgentSpec` with value-level instructions and `tool`
-> handlers, then use `spawnAgent`, `pokeAgent`, `waitAgent`, and
-> `interruptAgent`. Tool inputs, messages, and results are ordinary
+> handlers, then use `spawnAgent`, `pokeAgent`, and `waitAgent`. Tag each poke
+> `whenSafe` or `interrupting`. Tool inputs, messages, and results are ordinary
 > Generic ADTs. Agent use composes through normal `M effs` Haskell.
 
 One complete worker example may follow. Do not teach app-server, MCP, JSON
@@ -1139,10 +1156,10 @@ While the dynamic tool request remains outstanding:
   pending request, item events, and turn state; and
 - prove no pending Haskell task or server request leaks.
 
-Failure of steer-while-parked delays active `pokeAgent` delivery until the tool
-call resolves; it does not kill the design. Failure to safely
-interrupt/reclaim a parked request requires an adapter workaround before
-broader implementation.
+Failure of steer-while-parked delays `whenSafe` delivery until the tool call
+resolves; it does not kill the design. Failure to safely interrupt/reclaim a
+parked request blocks `interrupting` pokes and requires an adapter workaround
+before broader implementation.
 
 ### Spike 3 — concurrency and one-server ownership
 
@@ -1305,9 +1322,10 @@ increasing capability from unchanged workers.
 5. A generated tool call parks only its child while the parent executes an
    arbitrary permitted `M effs` handler and may recursively spawn another
    agent.
-6. Typed pokes are durably queued, steer active agents when possible, and
-   begin an idle agent's next turn; typed results are decoded only after
-   structural validation.
+6. Typed pokes are durably queued; `whenSafe` steers or follows up without
+   cancelling current work, while `interrupting` cancels the current turn and
+   delivers its message next. Typed results are decoded only after structural
+   validation.
 7. Every terminal result is paired with authoritative activity/workspace
    receipts.
 8. Each worker runs in its caller-assigned workspace and sandbox; spawning
@@ -1330,8 +1348,9 @@ before the dogfood resident becomes a durable surface:
 
 1. Whether `outputSchema` or a generated `finish_task` is the canonical
    terminal protocol.
-2. Whether an active `pokeAgent` is delivered during a parked tool request or
-   only after it resolves, and how that ordering is exposed.
+2. Whether a `whenSafe` poke is delivered during a parked tool request or only
+   after it resolves, and how that ordering is exposed. `interrupting` retains
+   its cancel-then-deliver semantics either way.
 3. The first semantic `ModelPolicy` vocabulary and where exact model pinning
    lives for benchmarks.
 4. Whether durable named specialists are needed in the first dogfood or all
