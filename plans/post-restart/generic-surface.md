@@ -192,18 +192,22 @@ children's merge-bases. Four things must happen at that boundary:
    Three outcomes, and the middle one is the trap:
    - **Still segfaults** (`runtime_strlen`, bad pointer `0x1`) → real,
      2-line repro straight to root, as agreed.
-   - **Traps cleanly** — a poison+breadcrumb case-trap naming the bad
-     unbox, rather than a segfault → ALSO real, same repro, same
-     escalation. This is what a surviving defect looks like AFTER the
-     `strlen-hardening` codegen dev folds (typed-address-only
-     `unbox_addr`, `TAG_LIT` gate, negative tests; spawned off root's tip,
-     may land before this rebase). A changed signature here means the
-     hardening is WORKING — it does not mean a new or different bug. Do
-     not report it as one.
+   - **Traps cleanly** — a `ShapeTrapKind::AddrKind` poison+breadcrumb
+     trap naming the bad unbox, rather than a segfault → ALSO real, same
+     repro, same escalation. This IS the expected surviving-defect
+     signature now: `strlen-hardening` folded into root's tip
+     (`1d3543c6`), so this rebase inherits it. A changed signature here
+     means the hardening is WORKING — not a new or different bug. Do not
+     report it as one.
+     The hole it closed was real memory-unsafety, not hypothetical: that
+     dev stash-A/B'd its fix and the one-field negative test SIGSEGV'd on
+     old code.
    - **PASSES** → proves the REPRO MOVED, not that the defect was fixed;
      ConTags never touched this path. Record as informational. Do NOT
      claim discharge, and do not remove the exact-rendering assertions on
-     the strength of it.
+     the strength of it. A sibling `unbox_bytearray` gap of the SAME shape
+     is still open in a follow-up dev, so the defect CLASS is not closed
+     even once this particular repro stops reproducing.
    The hardening fix is not this lane's work — only its failure shape is.
 3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
    resolved-`render` decision; root updated the checkpoint bullet. Keep
