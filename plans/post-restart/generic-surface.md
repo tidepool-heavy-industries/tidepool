@@ -71,6 +71,12 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
     time already spent while freeing the slot no sooner than finishing —
     kill only known-void work (wrong branch, wrong command, already
     superseded), otherwise drain it and read the result.
+  - **Watching a detached run: poll the PID, not a log marker.**
+    `ghc-slots.sh detach` echoes the full command into its log, so any
+    sentinel string inside that command is present from the log's FIRST
+    line — `until grep -q "===DONE===" log` fires instantly and reports a
+    still-running job as finished. Poll `kill -0 <pid>` instead, or match a
+    marker at line start that the command text cannot contain.
   - **Name the INSTRUMENT beside any number.** A receipt states what
     produced a count, not only the count. An instrument that identifies its
     referent structurally (an in-code counter, a test that fails on

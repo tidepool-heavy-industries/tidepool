@@ -80,6 +80,11 @@ forms recursion guard, or any invented finiteness guard.
     time already spent while freeing the slot no sooner than finishing —
     kill only known-void work (wrong branch, wrong command, already
     superseded), otherwise drain it and read the result.
+  - **Watching a detached run: poll the PID, not a log marker.**
+    `ghc-slots.sh detach` echoes the full command into its log, so a
+    sentinel inside that command matches from the log's first line and a
+    marker-grep watcher reports a still-running job as done. Poll
+    `kill -0 <pid>`.
   - **Name the INSTRUMENT beside any number.** A receipt states what
     produced a count, not only the count. An instrument that identifies its
     referent structurally (an in-code counter, a test that fails on
