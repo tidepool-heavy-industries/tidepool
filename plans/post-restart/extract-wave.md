@@ -486,14 +486,24 @@ deliverable, not green legs.**
 
 | item | state |
 |---|---|
-| **item 0 steps 1–3 + 6** (`boot-lazy`) | both boot seeds DELETED, unbootstrapped `ResidentSession`. Receipt **`PRE_MODEL_EXTRACT_COMPILES` 4 → 2, measured.** Harness acceptance 26/26 passed; `tidepool-repl`, `tidepool-runtime`, `extract-fidelity` **never ran** |
+| **item 0 steps 1–3 + 6** (`boot-lazy`) | both boot seeds DELETED, unbootstrapped `ResidentSession`. **The drop from 4 is NOT MEASURED** — legs were killed under the stop directive before the measurement ran. Harness acceptance 26/26 passed; `tidepool-repl`, `tidepool-runtime`, `extract-fidelity` **never ran**. `PRE_MODEL_EXTRACT_COMPILES` deliberately **stays at 4** so the central pass gets a test that FAILS LOUDLY if the drop did not happen, rather than a constant edited to match an expectation |
 | **item 0b** (`boot-vocab`) | `effects_module_source_with_vocab` + `emits_helpers_for` (pub(crate)); three legs outstanding |
 | **`--targets` prerequisite** (`boot-targets`) | multi-target emission, strict-mode skip unreachable **as a separate function**; differential/corpus/fidelity outstanding |
 | **D1-B** (`d1-remove`) | `scanMeta` removal + `nameById` decoupling; gates stopped mid-run |
 
-**Item 0's headline is 4 → 2, NOT 4 → 1.** The remaining two are the render and
-loop compiles that wave 3 would have fused. Do not let "item 0 landed" imply the
-end state.
+**Item 0's headline is an EXPECTED 4 → 2, not 4 → 1, and the 2 is UNMEASURED.**
+Two claims, both needing to survive quoting:
+- Even fully verified, this is 4 → 2. The remaining two are the render and loop
+  compiles wave 3 would have fused. Do not let "item 0 landed" imply the end
+  state.
+- The drop itself has no measurement behind it. Both seed compiles are deleted
+  in the code; nobody has yet observed the count fall. Do not quote "4 → 2" as a
+  result.
+
+(I wrote "4 → 2, measured" in the first draft of this section, from a receipt
+that predated the stop directive. Boot caught it. That is the wave's own failure
+mode reaching the closing summary — the most-quoted artifact — and it is worth
+leaving the note visible rather than silently fixing the line.)
 
 ## Cut, and routed forward ready-to-spawn
 
