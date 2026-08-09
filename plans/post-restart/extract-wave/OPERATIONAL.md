@@ -51,19 +51,45 @@ localized diffs and log it at fold):
   The box hit load average **92**: the operator's SSH sessions died and a dev
   pane died in the same window. Seven concurrent `tidepool-extract` compiles
   were observed — nextest's `ghc-heavy` cap is **per-run, not box-wide**, so
-  parallel worktrees multiply it. The 3-slot semaphore is now the box-wide
-  governor for ALL heavy work, not just GHC-extract work.
-  **Wrap EVERY heavy invocation** in the broker, absolute path, NEVER
-  exclusive:
-  `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
-  This now includes, and did not before:
-  - `cargo nextest run` — **ANY tier, including the quick pure-Rust tier**
-  - `cargo check --workspace`, `cargo build --workspace`
-  - `cargo clippy --workspace`
-  - anything spawning extracts outside the battery scripts
-  EXEMPT: single-crate `cargo check -p <X>`, file edits, greps.
-  `scripts/battery.sh` / `scripts/battery-shard.sh` already self-acquire —
-  do NOT wrap them; that is unchanged.
+  parallel worktrees multiply it.
+
+  **THROTTLE V2 SUPERSEDES V1 (root, 2026-08-08). READ THIS, NOT THE HISTORY
+  ABOVE.** V1 routed 2-minute quick tiers and clippy through the same 3-slot
+  FIFO as 30-minute shards, which manufactured a 44-deep queue and a priority
+  inversion. V2 splits heavy work in two by KIND:
+
+  **(a) Pure-Rust heavy work EXITS the slot queue.** Do NOT broker-wrap
+  `cargo check/build --workspace`, quick-tier `cargo nextest run`, or
+  `cargo clippy`. Instead bound and deprioritise it:
+
+      export CARGO_BUILD_JOBS=4
+      nice -n 15 cargo <cmd>            # nextest additionally: -j 4
+
+  Rationale worth keeping: a queue cannot govern what it cannot see, but the
+  scheduler can. Unbrokered `rustc` was measured at 564% across 4 procs — the
+  box's largest consumer — so it is handled by deprioritisation, not queueing.
+
+  **(b) GHC-heavy work STAYS slot-brokered**, absolute path, NEVER exclusive:
+
+      /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
+
+  That means anything spawning `tidepool-extract`, any `cabal test`, and any
+  `--ignore-default-filter` run. With the small jobs gone, the queue belongs to
+  these.
+
+  `scripts/battery.sh` / `scripts/battery-shard.sh` self-acquire — do NOT wrap
+  them. Unchanged across both versions.
+  EXEMPT entirely: single-crate `cargo check -p <X>`, file edits, greps.
+
+  **The spin is fixed at the mechanism level** (root's `2d72434e`, live at the
+  absolute path above — verified): waiters kernel-block with jittered `flock -w`
+  rotation instead of sleep-polling, so a blocked waiter costs ~zero CPU
+  (43 sleep-pollers were measured burning 1.2 cores). No action needed; new
+  invocations get it automatically.
+
+  The MemAvailable floor is a soft guard and is NOT binding at 18 GB. If you see
+  a floor rejection, that is real memory pressure, not this.
+
   If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
   rather than bypassing the broker.
   **MEASURING actual load — the obvious commands are both wrong.**
@@ -92,9 +118,12 @@ localized diffs and log it at fold):
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
 - NEVER run bare `scripts/battery.sh` — this environment hard-kills background
   processes at ~380s and the full battery is hours. Use:
-  - tier 1 `cargo nextest run` (pure-Rust) — **MUST be broker-wrapped under the
-    throttle directive above. It is NOT "safe unattended"; that phrasing is
-    WITHDRAWN as of 24f6d7a7.**
+  - tier 1 `cargo nextest run` (pure-Rust) — under THROTTLE V2 this is
+    **case (a): do NOT broker-wrap it.** Run it as
+    `export CARGO_BUILD_JOBS=4; nice -n 15 cargo nextest run -j 4`.
+    (Two superseded phrasings, recorded so a stale copy is recognisable:
+    "safe unattended" was WITHDRAWN at 24f6d7a7; "MUST be broker-wrapped" was
+    v1 and is superseded by v2.)
   - tier 2 `scripts/battery.sh -p <crate> -E 'test(<name>)'`;
   - tier 3 `scripts/battery-shard.sh <crate>`;
   - tier 4 `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh <crate> ...`,
