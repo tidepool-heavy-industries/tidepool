@@ -15,7 +15,8 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelfHarnessState {
     /// Between loops: no `loop` fragment executing. The driver's next step
-    /// is `render(state, lastCompaction)` followed by a fresh `loop state`.
+    /// is composing the system prompt (`render(state)` plus runtime-owned
+    /// compaction/loop-metadata framing) followed by a fresh `loop state`.
     Idle,
     /// `loop state` is running as a suspendable fragment on the outer
     /// (Harness-monad) resident session.

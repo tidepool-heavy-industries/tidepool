@@ -92,14 +92,15 @@ fn map_run_error(ctx: &str, msg: String) -> DriverError {
 /// persists and threads into the NEXT cycle's `prior_state`.
 #[derive(Debug, Clone)]
 pub struct CycleOutcome {
-    /// `render(state, lastCompaction)`'s text BEFORE this cycle's `loop` ran
-    /// — the prompt the loop's `runLLMTurn` answerer(s) implicitly worked
-    /// under.
+    /// [`SelfHarnessDriver::render_framing`]'s composed text BEFORE this
+    /// cycle's `loop` ran — the prompt the loop's `runLLMTurn` answerer(s)
+    /// implicitly worked under.
     pub prompt_before: String,
     /// `loop`'s returned `State`, serialized ([`state_cross::state_out`]).
     pub state_json: Json,
-    /// `render(state, lastCompaction)`'s text AFTER this cycle's `loop`
-    /// completed — reflects the new `State` reaching the next render.
+    /// [`SelfHarnessDriver::render_framing`]'s composed text AFTER this
+    /// cycle's `loop` completed — reflects the new `State` reaching the next
+    /// render.
     pub prompt_after: String,
     /// The runtime-owned emergency compaction turn's `Text`, if this
     /// cycle's answerer session crossed the configured context-window
@@ -359,6 +360,16 @@ pub struct SelfHarnessDriver {
     /// increases by exactly one per committed cycle and stays monotonic
     /// across a restart (restore adopts the reloaded generation first).
     checkpoint_generation: u64,
+    /// The number of loop cycles completed so far — a runtime fact, NOT part
+    /// of the authored `State` (`plans/self-iterating-harness/
+    /// 15-generic-surface-wave.md`, "Runtime context is the runtime's job").
+    /// `0` before any cycle has completed. Incremented once per successful
+    /// [`Self::run_one_cycle`], right after that cycle's `loop` completes;
+    /// fed into [`Self::render_framing`]'s composed loop-metadata line and
+    /// persisted in the checkpoint envelope ([`Self::commit_checkpoint`]) —
+    /// never in `state_json` — so a restart resumes counting from the right
+    /// number ([`Self::restore`]).
+    iteration: u64,
     /// The operator-input seam: the driver blocks on this for `askUser`
     /// form presentation
     /// ([`Self::drive_answerer_to_finalize`]) and the between-loops human
@@ -392,6 +403,7 @@ impl SelfHarnessDriver {
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
             checkpoint_generation: 0,
+            iteration: 0,
             gate: Arc::new(StdinGate),
         }
     }
@@ -520,11 +532,20 @@ impl SelfHarnessDriver {
     }
 
     /// The latest compaction summary the driver holds (`self.last_compaction`)
-    /// — what the next render receives as `lastCompaction`. Reflects a
+    /// — what the next [`Self::render_framing`] call composes in. Reflects a
     /// reload from [`Self::checkpoint_path`] after [`Self::restore`] runs, or
     /// the most recent mid-loop compaction. `None` before any has fired.
     pub fn last_compaction(&self) -> Option<&str> {
         self.last_compaction.as_deref()
+    }
+
+    /// The number of loop cycles this driver has completed — the runtime's
+    /// own loop-metadata counter (see [`Self::iteration`]'s field doc), NOT
+    /// read from `state_json`. Reflects a reload from
+    /// [`Self::checkpoint_path`] after [`Self::restore`] runs, or the count
+    /// after the most recent [`Self::run_one_cycle`].
+    pub fn iteration(&self) -> u64 {
+        self.iteration
     }
 
     /// Bootstrap the outer `PersistentSession<Threadless>` (via
@@ -647,14 +668,15 @@ impl SelfHarnessDriver {
 
     /// Run ONE `render` → `loop` → (service each `runLLMTurn` hole) →
     /// `render` cycle: bootstrap the outer session if needed, render the
-    /// pre-loop prompt, run `loop state` as a suspendable fragment
+    /// pre-loop prompt ([`Self::render_framing`] — the author's `render`
+    /// output composed with the prior compaction summary and the
+    /// loop-iteration count), run `loop state` as a suspendable fragment
     /// (servicing every `runLLMTurn` hole via
     /// [`Self::service_runllm_hole`]), serialize the returned `State`
-    /// ([`state_cross::state_out`]), and render the post-loop prompt.
-    /// `prior_state` is `None` only for the very first cycle (mirrors
-    /// `render`'s `Maybe Text` compaction argument being `Nothing`
-    /// pre-history). The `lastCompaction` fed to `render` is NOT a
-    /// parameter — it is `self.last_compaction`, the latest
+    /// ([`state_cross::state_out`]), advance `self.iteration`, and render
+    /// the post-loop prompt. `prior_state` is `None` only for the very
+    /// first cycle. The compaction summary fed to [`Self::render_framing`]
+    /// is NOT a parameter — it is `self.last_compaction`, the latest
     /// emergency-compaction `Text` if one has fired, carried forward
     /// automatically across repeated calls (by [`Self::run_loop`], or by a
     /// caller driving cycles by hand — see `acceptance_selfharness.rs`),
@@ -722,6 +744,12 @@ impl SelfHarnessDriver {
             let (value, table) = self.run_loop_fragment(prior_state)?;
             let state_json = state_cross::state_out(&value, &table);
 
+            // This cycle's `loop` completed — advance the runtime's OWN
+            // iteration counter (never part of authored `State`) before the
+            // post-loop render, so `prompt_after` (and the next cycle's
+            // `prompt_before`) report the count of loops completed so far.
+            self.iteration += 1;
+
             // Any MID-LOOP compaction that fired during this loop has already
             // set `self.cycle_compaction` (and `self.last_compaction`) IN PLACE —
             // the loop CONTINUED under the summary rather than aborting. `None` if
@@ -731,7 +759,8 @@ impl SelfHarnessDriver {
             // to the next render regardless of which cycle produced it: this
             // cycle's if one fired, else the prior cycle's (unchanged). Render
             // `prompt_after` against it so the summary reaches the very next render
-            // (02-runtime.md: `render`'s `Maybe Text`).
+            // (02-runtime.md; the compaction summary is composed by
+            // `render_framing`, not threaded through the author's `render`).
             let next_compaction = self.last_compaction.clone();
             let prompt_after =
                 self.render_framing(Some(&state_json), next_compaction.as_deref())?;
@@ -793,11 +822,13 @@ impl SelfHarnessDriver {
 
     /// Reload the checkpoint at [`Self::checkpoint_path`], if one is there
     /// yet, returning its `State` JSON (or `None` for a first-ever run — no
-    /// checkpoint has been committed). Restores `self.last_compaction` and
-    /// `self.checkpoint_generation` from the same record, so the first
-    /// render after a restart feeds the same `lastCompaction` the prior
-    /// process distilled, and the next commit continues the generation
-    /// sequence rather than restarting it at 1.
+    /// checkpoint has been committed). Restores `self.last_compaction`,
+    /// `self.checkpoint_generation`, and `self.iteration` from the same
+    /// record, so the first render after a restart feeds the same
+    /// compaction summary the prior process distilled, the next commit
+    /// continues the generation sequence rather than restarting it at 1,
+    /// and the loop-metadata count resumes at the right number instead of
+    /// resetting to `0`.
     ///
     /// `source`'s fingerprint identifies the harness file THIS process just
     /// loaded. A restored checkpoint whose fingerprint disagrees does not
@@ -816,6 +847,7 @@ impl SelfHarnessDriver {
         };
         self.last_compaction = checkpoint.compaction;
         self.checkpoint_generation = checkpoint.generation;
+        self.iteration = checkpoint.iteration;
         if checkpoint.harness_source != source.fingerprint {
             self.emit(Event::HarnessSourceChanged {
                 restored_fingerprint: checkpoint.harness_source,
@@ -826,14 +858,16 @@ impl SelfHarnessDriver {
     }
 
     /// Commit the checkpoint for a cycle that just completed successfully:
-    /// `state` (that cycle's own returned `State`) and `self.last_compaction`
+    /// `state` (that cycle's own returned `State`), `self.last_compaction`
     /// (the compaction summary in force at this same moment — a mid-loop
     /// compaction already updated it in place, so a cycle that compacted and
-    /// one that didn't commit through the same path) go into one
-    /// [`persistence::Checkpoint`], written atomically under the next
-    /// generation. Called once, at the end of [`Self::run_one_cycle`]'s
-    /// success path — the ONLY place a checkpoint is written, so a state and
-    /// a summary read back together are always from the same generation.
+    /// one that didn't commit through the same path), and `self.iteration`
+    /// (already advanced by [`Self::run_one_cycle`] before this call) go
+    /// into one [`persistence::Checkpoint`], written atomically under the
+    /// next generation. Called once, at the end of [`Self::run_one_cycle`]'s
+    /// success path — the ONLY place a checkpoint is written, so a state, a
+    /// summary, and an iteration count read back together are always from
+    /// the same generation.
     fn commit_checkpoint(
         &mut self,
         source: &HarnessSource,
@@ -845,6 +879,7 @@ impl SelfHarnessDriver {
             state: state.clone(),
             compaction: self.last_compaction.clone(),
             harness_source: source.fingerprint.clone(),
+            iteration: self.iteration,
         };
         persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
         self.checkpoint_generation = generation;
@@ -1479,48 +1514,61 @@ impl SelfHarnessDriver {
         Ok(None)
     }
 
-    /// Evaluate `render(state, lastCompaction)` against the outer session
-    /// and return its `Text` result — the next loop's system prompt.
+    /// Evaluate `render(state)` against the outer session, then compose the
+    /// full system message the answerer works under — author output first,
+    /// then the prior compaction summary (if any), then the loop-iteration
+    /// count. (Capability/finalization instructions are appended by the
+    /// caller that builds `self.answerer_framing`, via
+    /// [`ANSWERER_FRAMING_SUFFIX`].) `render` itself takes only `State`
+    /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+    /// context is the runtime's job") — the compaction summary and the
+    /// iteration count are runtime facts the AUTHOR no longer states.
     /// Runtime-invoked at loop boundaries ONLY (02-runtime.md LOCKED).
     /// `state_json` is `None` only for the very first cycle — then the render
     /// splice references `Loaded.initialState` directly (no JSON to decode),
-    /// per [`state_cross::state_in`].
+    /// per [`state_cross::state_in`]. `last_compaction` is the
+    /// runtime-carried summary to compose in (`self.last_compaction`, not
+    /// itself decoded from any Haskell splice); `self.iteration` supplies the
+    /// loop count.
     pub fn render_framing(
         &mut self,
         state_json: Option<&Json>,
         last_compaction: Option<&str>,
     ) -> Result<String, DriverError> {
         let state_decl = state_cross::state_in(state_json);
-        let compaction_decl = match last_compaction {
-            None => "__selfHarnessCompaction :: Maybe Text\n__selfHarnessCompaction = Nothing"
-                .to_string(),
-            Some(s) => format!(
-                "__selfHarnessCompaction :: Maybe Text\n__selfHarnessCompaction = Just {}",
-                state_cross::haskell_string_literal(s)
-            ),
-        };
-        let helpers = format!("{state_decl}\n{compaction_decl}\n");
         let code = format!(
-            "pure ({q}.render __selfHarnessState __selfHarnessCompaction)",
+            "pure ({q}.render __selfHarnessState)",
             q = state_cross::LOADED_QUALIFIER
         );
-        let compiled = self.compile_outer(&code, &helpers)?;
+        let compiled = self.compile_outer(&code, &state_decl)?;
         let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
         let outcome = outer
             .session
             .run("render", &compiled.expr, &compiled.table)
             .map_err(|e| map_run_error("render run failed", e.to_string()))?;
-        match outcome {
+        let author_text = match outcome {
             ResidentOutcome::Completed { result, .. } => match result.to_json() {
-                Json::String(s) => Ok(s),
-                other => Err(DriverError::Session(format!(
-                    "render did not yield Text, got {other:?}"
-                ))),
+                Json::String(s) => s,
+                other => {
+                    return Err(DriverError::Session(format!(
+                        "render did not yield Text, got {other:?}"
+                    )))
+                }
             },
-            ResidentOutcome::Suspended { .. } => Err(DriverError::Session(
-                "render suspended unexpectedly — render must be a pure function".into(),
-            )),
+            ResidentOutcome::Suspended { .. } => {
+                return Err(DriverError::Session(
+                    "render suspended unexpectedly — render must be a pure function".into(),
+                ))
+            }
+        };
+
+        let mut framing = author_text;
+        if let Some(summary) = last_compaction {
+            framing.push_str("\n\nSummary of the prior window:\n");
+            framing.push_str(summary);
         }
+        framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
+        Ok(framing)
     }
 
     /// Runtime-owned MID-LOOP emergency compaction with IN-PLACE relief
@@ -1550,8 +1598,8 @@ impl SelfHarnessDriver {
     ///    holes continue under the smaller window.
     /// 3. Records the summary as `self.cycle_compaction` (this cycle's, for
     ///    [`CycleOutcome::compaction`]) and `self.last_compaction` (carried to
-    ///    the NEXT [`Self::render_framing`]'s `Maybe Text`, and persisted for
-    ///    restart durability).
+    ///    the NEXT [`Self::render_framing`] call to compose in, and
+    ///    persisted for restart durability).
     /// 4. Emits [`Event::CompactionTrigger`] with its payload (summary, pre/post
     ///    context size, node).
     fn maybe_compact_answerer(&mut self) -> Result<(), DriverError> {
@@ -1630,8 +1678,9 @@ impl SelfHarnessDriver {
         Ok(())
     }
 
-    /// Record `summary` as the latest compaction (`self.last_compaction`, fed
-    /// to the next render's `Maybe Text`) — in-memory only. The loop
+    /// Record `summary` as the latest compaction (`self.last_compaction`,
+    /// composed into the next [`Self::render_framing`] call) — in-memory
+    /// only. The loop
     /// CONTINUES under this summary immediately, but it does not reach disk
     /// on its own: [`Self::commit_checkpoint`] picks up whatever
     /// `self.last_compaction` holds at the cycle's own commit boundary, so a

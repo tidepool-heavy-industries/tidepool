@@ -44,8 +44,7 @@ loop st = do
       \with your own values filled in."
   pure
     st
-      { loopCount = loopCount st + 1
-      , ideas = ideas st ++ addedIdeas c
+      { ideas = ideas st ++ addedIdeas c
       , draft = appendDelta (draft st) (draftDelta c)
       , phase = if advance c then nextPhase (phase st) else phase st
       }

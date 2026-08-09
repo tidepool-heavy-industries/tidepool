@@ -124,10 +124,14 @@ fn source() -> HarnessSource {
         .expect("reference harness source loads")
 }
 
-/// State + summary persist to one checkpoint after a cycle, and a FRESH
-/// driver (simulating a restart) restores BOTH from the same generation —
-/// advancing loopCount/mode from where the killed process left off, rather
-/// than starting over from `initialState`. A third cycle (no restart in
+/// State + summary + iteration count persist to one checkpoint after a
+/// cycle, and a FRESH driver (simulating a restart) restores ALL THREE from
+/// the same generation — advancing mode from where the killed process left
+/// off, rather than starting over from `initialState`, AND resuming the
+/// loop-iteration count at the right number rather than resetting to 0 (the
+/// iteration count lives in the checkpoint ENVELOPE, never in `State`
+/// itself — `plans/self-iterating-harness/15-generic-surface-wave.md`,
+/// "Runtime context is the runtime's job"). A third cycle (no restart in
 /// between) asserts generation keeps increasing within one process too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
@@ -157,11 +161,9 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         .run_one_cycle(&harness_source, None)
         .expect("cycle 1 (initialState)");
     assert_eq!(
-        outcome1
-            .state_json
-            .get("loopCount")
-            .and_then(|v| v.as_i64()),
-        Some(1)
+        driver1.iteration(),
+        1,
+        "the driver's iteration count must advance after cycle 1"
     );
     assert_eq!(
         outcome1.state_json.get("mode").and_then(|v| v.as_str()),
@@ -175,6 +177,10 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         .expect("cycle 1 committed a checkpoint");
     assert_eq!(cp1.generation, 1);
     assert_eq!(cp1.state, outcome1.state_json);
+    assert_eq!(
+        cp1.iteration, 1,
+        "the checkpoint envelope must carry cycle 1's iteration count"
+    );
     drop(driver1);
 
     // --- "restart": brand-new driver, brand-new agent, nothing in-process
@@ -189,6 +195,15 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     assert_eq!(
         restored, outcome1.state_json,
         "restored state must equal exactly what cycle 1 committed"
+    );
+    // THE round-trip: `restore` alone (no cycle run yet) must resume the
+    // iteration count at exactly what cycle 1 committed, not reset it to 0 —
+    // the count lives in the checkpoint envelope, restored independently of
+    // `State`.
+    assert_eq!(
+        driver2.iteration(),
+        1,
+        "a restored driver must resume counting from the persisted iteration, not 0"
     );
 
     // What `SelfHarnessDriver::run_loop` does: run the next cycle against the
@@ -213,14 +228,9 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     );
 
     assert_eq!(
-        outcome2
-            .state_json
-            .get("loopCount")
-            .and_then(|v| v.as_i64()),
-        Some(2),
-        "loopCount must continue from the persisted 1, not reset to 0 after 1, \
-         got {:?}",
-        outcome2.state_json
+        driver2.iteration(),
+        2,
+        "the iteration count must continue from the restored 1, not reset to 0"
     );
     assert_eq!(
         outcome2.state_json.get("mode").and_then(|v| v.as_str()),
@@ -236,6 +246,10 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         "generation must increase by exactly one per committed cycle, across a restart"
     );
     assert_eq!(cp2.state, outcome2.state_json);
+    assert_eq!(
+        cp2.iteration, 2,
+        "the checkpoint envelope must carry the continued iteration count across a restart"
+    );
 
     // A third cycle, same process, no restart — generation keeps climbing.
     let _ = driver2
@@ -437,9 +451,10 @@ fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
     let path = scratch("truncated").join("checkpoint.json");
     let checkpoint = persistence::Checkpoint {
         generation: 1,
-        state: serde_json::json!({"loopCount": 1}),
+        state: serde_json::json!({"mode": "Deciding"}),
         compaction: Some("a summary".to_string()),
         harness_source: "fingerprint".to_string(),
+        iteration: 1,
     };
     persistence::save_checkpoint(&path, &checkpoint).expect("save_checkpoint");
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));

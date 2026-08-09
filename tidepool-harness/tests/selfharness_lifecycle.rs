@@ -168,10 +168,9 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         driver.lifecycle()
     );
     assert_eq!(
-        cycle2.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "the recovered cycle must run loop from a fresh bootstrap, got {:?}",
-        cycle2.state_json
+        driver.iteration(),
+        1,
+        "the recovered cycle must run loop from a fresh bootstrap"
     );
     assert_eq!(
         cycle2.state_json.get("mode").and_then(|v| v.as_str()),
@@ -229,14 +228,11 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         driver.lifecycle()
     );
 
-    let second = driver
+    driver
         .run_one_cycle(&harness_source, None)
         .expect("a working extract binary lets the driver recover from the fresh Failed");
     assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
-    assert_eq!(
-        second.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-    );
+    assert_eq!(driver.iteration(), 1);
 }
 
 /// When recovery from a `Failed` cycle cannot itself rebuild a usable outer

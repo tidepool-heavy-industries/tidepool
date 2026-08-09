@@ -18,7 +18,9 @@ use crate::tree::NodeId;
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event {
     /// A `render` → `loop` boundary: a fresh loop is starting, having just
-    /// evaluated `render(state, lastCompaction)` for its system prompt.
+    /// composed its system prompt (`SelfHarnessDriver::render_framing`: the
+    /// author's `render(state)` output plus the prior compaction summary and
+    /// the loop-iteration count).
     LoopBoundary,
     /// An Agent turn started while servicing a `runLLMTurn` hole.
     TurnStart { node: NodeId },

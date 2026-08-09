@@ -50,10 +50,10 @@ pub enum PersistenceError {
 
 /// The one durable record a restart reads: a completed cycle's `State`,
 /// the compaction summary in force at that same cycle, a monotonic
-/// generation counter, and a fingerprint of the harness source that
-/// produced it. Written as a whole at one commit boundary — never assembled
-/// from two separately-timed writes — so a state and a summary read back
-/// together are always from the same generation.
+/// generation counter, a fingerprint of the harness source that produced
+/// it, and the loop-iteration count. Written as a whole at one commit
+/// boundary — never assembled from two separately-timed writes — so a state
+/// and a summary read back together are always from the same generation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Monotonic, incremented by one per committed cycle. `0` never appears
@@ -69,6 +69,12 @@ pub struct Checkpoint {
     /// [`crate::selfharness::harness_source::HarnessSource::fingerprint`] of
     /// the source that produced this generation.
     pub harness_source: String,
+    /// The number of loop cycles completed as of this generation — a
+    /// runtime fact, not part of the authored `State` (see
+    /// `plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+    /// context is the runtime's job"). `0` before any cycle has completed;
+    /// incremented by one per completed cycle, alongside `generation`.
+    pub iteration: u64,
 }
 
 /// Default checkpoint path: `<cache_dir>/selfharness/checkpoint.json`. A
@@ -222,9 +228,10 @@ mod tests {
     fn checkpoint(generation: u64) -> Checkpoint {
         Checkpoint {
             generation,
-            state: serde_json::json!({"loopCount": generation, "mode": "Deciding"}),
+            state: serde_json::json!({"mode": "Deciding"}),
             compaction: Some("a summary".to_string()),
             harness_source: "fingerprint-abc".to_string(),
+            iteration: generation,
         }
     }
 

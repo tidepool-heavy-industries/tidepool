@@ -27,13 +27,14 @@ import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
--- | Durable memory threaded through 'loop' and read by 'render'.
+-- | Durable memory threaded through 'loop' and read by 'render'. Carries no
+-- loop-iteration counter — that is a runtime fact, tracked in the checkpoint
+-- envelope and composed into the system message by the driver.
 data State = State
-  { target    :: Text    -- ^ what is under examination
-  , phase     :: Phase
-  , loopCount :: Int
-  , ideas     :: [Text]   -- ^ surfaced idea bullets, accumulated across loops
-  , draft     :: Text     -- ^ the running change-request draft
+  { target :: Text    -- ^ what is under examination
+  , phase  :: Phase
+  , ideas  :: [Text]   -- ^ surfaced idea bullets, accumulated across loops
+  , draft  :: Text     -- ^ the running change-request draft
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -55,26 +56,26 @@ initialState =
   State
     { target = "tidepool itself — the self-iterating harness and its runtime"
     , phase = Framing
-    , loopCount = 0
     , ideas = []
     , draft = ""
     }
 
--- | @render :: State -> Maybe Text -> Text@. The answerer's working brief: the
--- subject, the phase and its instruction, the brainstorm so far, and a nudge to
--- consult the operator with @askUser@.
-render :: State -> Maybe Text -> Text
-render st lastCompaction =
+-- | @render :: State -> Text@. The answerer's working brief: the subject, the
+-- phase and its instruction, the brainstorm so far, and a nudge to consult
+-- the operator with @askUser@. Domain policy only — the driver composes this
+-- output with the prior compaction summary, the loop-iteration count, and
+-- capability/finalization instructions.
+render :: State -> Text
+render st =
   [fmt|You are a feature-brainstorming thought-partner in a self-iterating loop.
 Subject under examination: {target st}.
-Current phase: {phaseLine} (loop {loopCount st}).
+Current phase: {phaseLine}.
 
 {phaseInstruction}
 
 {ideasBlock}
 
 {draftBlock}
-{compactionBlock}
 
 When you need the operator's direction or taste, ASK THEM with a typed form
 (askUser): a 1-of-N choice, a text box, a yes/no. Fold what they tell you into
@@ -107,6 +108,3 @@ the Contribution you finalize.|]
     draftBlock
       | T.null (draft st) = "Draft: (empty)" :: Text
       | otherwise = "Draft so far:\n" <> draft st
-    compactionBlock = case lastCompaction of
-      Nothing -> ""
-      Just summary -> "\n\nSummary of the prior window:\n" <> summary

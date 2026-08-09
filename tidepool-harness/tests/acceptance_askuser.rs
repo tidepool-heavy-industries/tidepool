@@ -139,9 +139,9 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     // the returned `State`.
     let state = &outcome.state_json;
     assert_eq!(
-        state.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "loopCount must advance across the loop boundary, got {state:?}"
+        driver.iteration(),
+        1,
+        "the driver's iteration count must advance across the loop boundary"
     );
     let decision = state
         .get("lastDecision")

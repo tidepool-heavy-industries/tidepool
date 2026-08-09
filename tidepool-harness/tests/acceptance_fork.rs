@@ -166,9 +166,9 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         "loop must advance Observing -> Deciding, got {state:?}"
     );
     assert_eq!(
-        state.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "loopCount must increment across the loop boundary, got {state:?}"
+        driver.iteration(),
+        1,
+        "the driver's iteration count must increment across the loop boundary"
     );
 
     // The POST-loop render reflects the new state — the value that

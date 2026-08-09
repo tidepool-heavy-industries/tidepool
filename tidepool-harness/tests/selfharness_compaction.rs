@@ -227,7 +227,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         "both holes' answers must fold into State — the loop continued past compaction"
     );
 
-    // (2) The compaction Text reaches the NEXT render's `Maybe Text`.
+    // (2) The compaction Text reaches the NEXT render_framing composition.
     assert!(
         outcome
             .prompt_after
