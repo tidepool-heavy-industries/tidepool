@@ -2,8 +2,9 @@
 //! event. The header pins toolchain identity; replay is EFFECT-RESPONSE
 //! SUBSTITUTION (re-run logged sources with logged responses injected), so
 //! `Effect` events MUST record the response — a missing response breaks
-//! restoration. Segment 30 implements the writer and the replayer;
-//! this module is the wire contract.
+//! restoration. This module is the wire contract; the sibling `writer`/
+//! `reader` submodules and `crate::replay` implement the writer and the
+//! replayer against it.
 //!
 //! Layout: [`LogHeader`] is the file's first line, unwrapped. Every
 //! subsequent line is an [`EventRecord`] — the writer-assigned monotonic
