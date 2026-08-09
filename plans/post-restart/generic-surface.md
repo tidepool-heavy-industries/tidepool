@@ -26,11 +26,11 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
   of equation: types we implement SPECIALLY, and shapes whose failure we
   explain better than GHC can. Everything else falls through to the
   `Generic` case and GHC reports it. An unrecognized type reaching a
-  standard GHC error is the CORRECT outcome, not a gap to close. This binds
-  the checkpoint interpreter in step 7 too: its supported set differs (lists
-  are legal there), so it gets its OWN small routing family — do not unify
-  them into one classifier, and do not grow either to cover types purely for
-  message quality.
+  standard GHC error is the CORRECT outcome, not a gap to close. This also
+  binds the checkpoint interpreter in the successor lane: its supported set
+  differs (lists and recursion are legal there), so it gets its OWN small
+  routing family — do not unify them into one classifier, and do not grow
+  either to cover types purely for message quality.
 - DO NOT touch checkpoint persistence in this wave. `GCheckpoint` cutover
   is its own later gate (wire-compatible target; see anchor).
 - DO NOT proceed past the spike without reporting the GO/NO-GO verdict to
@@ -105,8 +105,11 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
    the value-defined-alternatives channel; type-defined structure and
    value-defined options are DIFFERENT primitives, keep both surfaces
    one-paragraph small.
-5. **Migration + deletion** (PRD step 6): fixtures/docs to Generic ADTs,
-   builder de-advertised then deleted per the PRD's migration rules.
+5. ~~**Migration + deletion** (PRD step 6)~~ — HANDED OFF with the
+   checkpoint work; see step 7. The builder is DE-ADVERTISED as part of the
+   swap in step 4 (it must not be reachable from model-facing text once
+   `askUser @T` exists), but migrating fixtures and deleting the
+   implementation ride the successor lane.
 6. **Parallel early devs** (independent of the spike, may start
    immediately):
    a. Runtime-context refactor: authored `render :: State -> Text`; the
