@@ -1,8 +1,11 @@
+pub mod apply;
 pub mod case;
 pub mod expr;
 pub mod free_vars_index;
 pub mod join;
 pub mod primop;
+
+pub(crate) use apply::FunctionImports;
 
 use cranelift_codegen::ir::{FuncRef, SigRef, Value};
 use rustc_hash::FxHashMap;
@@ -119,6 +122,16 @@ pub struct EmitSession<'a> {
     /// the four `EmitSession` construction sites in `emit/expr.rs` builds
     /// this from its own `tree` right there, so the two can never drift.
     pub free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex,
+    /// Per-function cache of the `FuncRef`s the application protocol imports
+    /// (`heap_force`/`debug_app_check`/`trampoline_resolve`/`debug_app_return`;
+    /// see `apply::FunctionImports`). A `FuncRef` from `declare_func_in_func`
+    /// is only valid inside the specific Cranelift `Function` it was declared
+    /// into, so this cache lives here rather than anywhere longer-lived: like
+    /// `free_vars_idx`, it is fresh at every one of the four `EmitSession`
+    /// construction sites (one per Cranelift `Function` built) and is dropped
+    /// with the session at the end of that function's emission, never reused
+    /// across functions.
+    pub(crate) function_imports: FunctionImports,
 }
 
 /// SSA value with boxed/unboxed tracking.
@@ -287,7 +300,7 @@ impl ScopedEnv {
         }
     }
 
-    /// Iterate over all entries (for declare_env, compute_captures, etc.)
+    /// Iterate over all entries (for compute_captures etc.)
     pub fn iter(&self) -> impl Iterator<Item = (&VarId, &SsaVal)> {
         self.inner.iter()
     }
@@ -445,21 +458,6 @@ impl EmitContext {
             current_fn: prefix.clone(),
             prefix,
             letrec_states: Vec::new(),
-        }
-    }
-
-    /// Re-declare all heap pointers currently in the environment as needing
-    /// stack map entries. Should be called after switching to a new block
-    /// (e.g., merge blocks, join points, case alternatives) to ensure
-    /// liveness is tracked correctly across block boundaries.
-    pub fn declare_env(&self, builder: &mut cranelift_frontend::FunctionBuilder) {
-        // Collect and sort keys for deterministic IR output (useful for debugging/tests)
-        let mut keys: Vec<_> = self.env.keys().collect();
-        keys.sort_by_key(|v| v.0);
-        for &k in keys {
-            if let Some(SsaVal::HeapPtr(v)) = self.env.get(&k) {
-                builder.declare_value_needs_stack_map(*v);
-            }
         }
     }
 

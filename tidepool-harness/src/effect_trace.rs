@@ -62,6 +62,7 @@ impl<H: DispatchEffect<CapturedOutput>> DispatchEffect<CapturedOutput> for Traci
             Ok(Response::Stream(_)) => serde_json::json!("<stream>"),
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         };
+        tracing::info!(tag, req = %req, resp = %resp, "effect dispatched");
         if let Ok(mut t) = self.trace.lock() {
             t.push(EffectRecord { tag, req, resp });
         }

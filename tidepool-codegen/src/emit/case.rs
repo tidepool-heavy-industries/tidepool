@@ -127,7 +127,6 @@ pub fn emit_case(
     args.builder.switch_to_block(merge_block);
     let result = args.builder.block_params(merge_block)[0];
     args.builder.declare_value_needs_stack_map(result);
-    args.ctx.declare_env(args.builder);
 
     // 6. Restore case binder
     args.ctx.env.restore(*binder, old_case_binder);
@@ -292,7 +291,6 @@ fn emit_data_dispatch(
         // For a wrapper alt block both predecessors (the Lit branch above and
         // the con-tag branch just emitted) are now wired, so sealing is safe.
         args.builder.seal_block(alt_block);
-        args.ctx.declare_env(args.builder);
 
         // Bind pattern variables \u2014 do NOT force thunked fields.
         // In Haskell, case alt binders are lazy. Thunked Con fields
@@ -364,7 +362,6 @@ fn emit_data_dispatch(
 
     // Default or trap
     if let Some(alt) = default_alt {
-        args.ctx.declare_env(args.builder);
         let result = EmitContext::emit_node(
             EmitArgs {
                 ctx: args.ctx,
@@ -568,7 +565,6 @@ fn emit_lit_dispatch(
         // Emit alt body
         args.builder.switch_to_block(alt_block);
         args.builder.seal_block(alt_block);
-        args.ctx.declare_env(args.builder);
         let result = EmitContext::emit_node(
             EmitArgs {
                 ctx: args.ctx,
@@ -596,7 +592,6 @@ fn emit_lit_dispatch(
 
     // Default or trap
     if let Some(alt) = default_alt {
-        args.ctx.declare_env(args.builder);
         let result = EmitContext::emit_node(
             EmitArgs {
                 ctx: args.ctx,

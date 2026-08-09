@@ -640,6 +640,61 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
     ptr
 }
 
+/// The one gc-trigger-then-retry policy for every nursery allocation on the
+/// effect-response / stowed-continuation path: run `alloc` once; if `exhausted`
+/// says the result reports nursery exhaustion, trigger exactly one collection
+/// and run `alloc` a second time, returning whatever that second attempt
+/// produces (success or a terminal exhaustion). `gc_trigger`'s collection
+/// includes heap doubling up to the configured cap, so one retry is the
+/// established sufficient policy — the risk this class of bug lives in is a
+/// call site skipping the retry entirely or retrying without every live value
+/// rooted, not needing more than one cycle.
+///
+/// Generic over the allocation's return shape (`Result<*mut u8, BridgeError>`
+/// from `value_to_heap`, or a raw `*mut u8` where null means exhausted from
+/// `bump_alloc_from_vmctx`/`host_alloc_gc`-style call sites) via the
+/// `exhausted` predicate.
+///
+/// # Safety
+/// `vmctx` must be a valid, live `VMContext` for the duration of both calls to
+/// `alloc`. Every heap pointer the caller holds live ACROSS this call must
+/// already be a registered GC root (`register_rust_root`/
+/// `register_persistent_root`/`register_stowed_root`) — the retry's
+/// collection can move it. This function performs no rooting of its own.
+pub(crate) unsafe fn gc_retry<T>(
+    vmctx: *mut VMContext,
+    exhausted: impl Fn(&T) -> bool,
+    mut alloc: impl FnMut() -> T,
+) -> T {
+    let first = alloc();
+    if !exhausted(&first) {
+        return first;
+    }
+    GC_RETRY_FIRED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    crate::host_fns::gc_trigger(vmctx);
+    alloc()
+}
+
+/// Process-wide count of `gc_retry` exhaustion branches actually taken (the
+/// first attempt reported nursery exhaustion, so a `gc_trigger` + second
+/// attempt ran). Test-only observable: proves a retry-protected call site was
+/// not just reached but genuinely exercised its retry, as opposed to the
+/// first attempt happening to succeed. Not part of the public API.
+static GC_RETRY_FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only: how many times `gc_retry`'s exhaustion-and-retry branch has run
+/// in this process. Not part of the public API.
+#[doc(hidden)]
+pub fn gc_retry_fired_count() -> usize {
+    GC_RETRY_FIRED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Test-only: reset the `gc_retry` fired counter. Not part of the public API.
+#[doc(hidden)]
+pub fn reset_gc_retry_fired_count() {
+    GC_RETRY_FIRED.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(test)]
 mod tests {
     // SAFETY: All unsafe blocks in tests call value_to_heap/heap_to_value with

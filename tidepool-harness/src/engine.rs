@@ -141,7 +141,7 @@ pub struct ClassifiedHole {
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
-    match con_name(request, table) {
+    let hole = match con_name(request, table) {
         Some("RunLLMTurnWith") => {
             let (prompt, payload) = decode_prompt_payload(request, table);
             ClassifiedHole {
@@ -202,7 +202,9 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 prompt,
             }
         }
-    }
+    };
+    tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
+    hole
 }
 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
@@ -495,7 +497,8 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         Answer by evaluating `finalize @{ty} (value :: {ty})` in a single \
+         Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
+         WHOLE expression with `:: M {ty}` — in a single \
          ```haskell block — this ends your turn and hands the value back to the \
          loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
          bind its result, then `finalize`.)"
@@ -1084,6 +1087,9 @@ pub async fn drive_model_turn(
         reasoning_items,
     } = provider.complete_boxed(req, sink).await?;
     let block = extract_last_haskell_block(&text);
+    if let Some(r) = reasoning.as_deref().filter(|r| !r.is_empty()) {
+        tracing::info!("model reasoning:\n{r}");
+    }
     Ok(DrivenTurn {
         reply: text,
         usage,

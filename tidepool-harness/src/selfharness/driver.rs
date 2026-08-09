@@ -250,10 +250,16 @@ State each loop). Each request below asks you for ONE typed value.\n\
 \n\
 Your ONLY runnable output is a single fenced ```haskell block containing one \
 expression of type `M a`. To gather operator input across turns, evaluate a \
-typed form: `askUser :: Form a -> M a` (`import Tidepool.Form`), built \
-applicatively from `enumField`/`intField`/`textField`/`boolField` — it BLOCKS \
+typed form: `askUser :: Form a -> M a` (`import Tidepool.Form`) — it BLOCKS \
 for a human operator and returns the decoded typed value directly (a bad \
-submission re-prompts internally; there is no `Either` to unwrap). A value you \
+submission re-prompts internally; there is no `Either` to unwrap). The field \
+builders (each takes a display LABEL; field keys are auto-generated — there \
+is no key argument):\n\
+  textField :: Text -> Form Text\n\
+  intField  :: Text -> Form Int\n\
+  boolField :: Text -> Form Bool\n\
+  enumField :: Text -> [(Text, a)] -> Form a  -- label, then (choice-label, value) pairs\n\
+Compose them applicatively: `(,) <$> enumField … <*> textField …`. A value you \
 bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
 on it.\n\
 \n\
@@ -263,10 +269,11 @@ delegate; `import Tidepool.Fork`). Each sub-answerer independently answers \
 one brief and cannot itself fork or gather operator input — it must resolve \
 its own brief directly. Combine the results and `finalize` as usual.\n\
 \n\
-When you have the answer, COMMIT it by evaluating `finalize @T (value :: T)` \
-— this ends your turn and hands the typed value back to the loop. `T` is the \
-type named in the request. Do not call any other effect to answer; `finalize` \
-is how you resolve the request.";
+When you have the answer, COMMIT it by evaluating `(finalize @T value :: M T)` \
+— annotate the WHOLE expression with `:: M T` (an inner `value :: T` \
+annotation is not sufficient). This ends your turn and hands the typed value \
+back to the loop. `T` is the type named in the request. Do not call any other \
+effect to answer; `finalize` is how you resolve the request.";
 
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {

@@ -330,6 +330,7 @@ fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::Ef
 /// and first errors, which is what the model needs to fix its Haskell. UTF-8
 /// safe (truncates on a char boundary).
 fn truncate_ghc_error(msg: &str) -> String {
+    tracing::warn!("compile error (fed back to model as corrective turn):\n{msg}");
     const CAP: usize = 3000;
     if msg.chars().count() <= CAP {
         msg.to_string()
@@ -3133,6 +3134,7 @@ impl Harness {
         });
         convo.turn_seq += 1;
         drop(convos);
+        tracing::info!(node = node.0, "user turn to model:\n{content}");
         self.tree
             .turn_delta(node, turn, Role::User, content.to_string(), None)?;
         Ok(())

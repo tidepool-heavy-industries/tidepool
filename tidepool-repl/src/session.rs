@@ -1038,7 +1038,8 @@ impl Session {
         // deep-forces + tenures it. (`run_fragment_and_bind` takes a `forced`
         // bool; the tier is the source of truth — derive the flag here, expand
         // the same tier back to a `BoundValue` via `bound_value`.)
-        let env = self.core.seed_external_env();
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let env = self.core.seed_external_env(&referenced);
         let fid = match self
             .core
             .add_fragment_session("repl_bind", &turn.expr, &env)
@@ -1146,7 +1147,8 @@ impl Session {
             self.publish_cancel();
         }
 
-        let env = self.core.seed_external_env();
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let env = self.core.seed_external_env(&referenced);
         let fid = match self
             .core
             .add_fragment_session("repl_multi_bind", &turn.expr, &env)
@@ -1300,7 +1302,8 @@ impl Session {
             }
             self.publish_cancel();
         }
-        let env = self.core.seed_external_env();
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let env = self.core.seed_external_env(&referenced);
         let fid = match self.core.add_fragment_session("repl_ref", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
@@ -1445,7 +1448,8 @@ impl Session {
             self.publish_cancel();
         }
 
-        let env = self.core.seed_external_env();
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let env = self.core.seed_external_env(&referenced);
         let fid = match self.core.add_fragment_session("repl_it", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => {

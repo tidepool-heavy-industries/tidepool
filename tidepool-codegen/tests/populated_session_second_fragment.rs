@@ -42,7 +42,20 @@
 //! setup here, not an assertion — a wrong table on this path is invisible to
 //! this file, and catching it needs a fragment that reaches one of those four
 //! consumers.
+//!
+//! `wrap_with_datacon_env_binds_only_referenced_constructors_from_populated_table`
+//! below closes that gap for exactly one of the four: `wrap_with_datacon_env`
+//! itself. It calls the function directly against an accumulated (bootstrap +
+//! turn-2) table and asserts on the prune's own observable — the exact set of
+//! bound constructor wrappers — rather than on an end-to-end run result. That
+//! distinction matters specifically here: before the constructor-wrapper
+//! prune, the wrap set was always the full table regardless of what the
+//! fragment referenced, so a run-result assertion alone cannot tell an
+//! over-inclusive wrap set from a correct one. `normalize`, `lit_wrappers` and
+//! the primop id bundles remain open — this file does not give them the same
+//! direct treatment.
 
+use tidepool_codegen::datacon_env::wrap_with_datacon_env;
 use tidepool_codegen::effect_machine::ConTags;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
@@ -400,6 +413,67 @@ fn successive_fragments_track_the_growing_session_table() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The constructor-wrapper prune's own observable, against a populated table
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Build a fragment free in exactly `vars`, in order: `Var(vars[0])`, or an
+/// `App` chain over all of `vars` when there is more than one.
+fn fragment_referencing(vars: &[VarId]) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let node_indices: Vec<usize> = vars.iter().map(|v| b.push(CoreFrame::Var(*v))).collect();
+    let mut indices = node_indices.into_iter();
+    let mut acc = indices.next().expect("fragment_referencing needs >=1 var");
+    for n in indices {
+        acc = b.push(CoreFrame::App { fun: acc, arg: n });
+    }
+    b.build()
+}
+
+/// The prune's own observable, isolated from the run machinery: which
+/// constructor wrappers `wrap_with_datacon_env` binds for a fragment compiled
+/// against a POPULATED / accumulated table, not a fresh one.
+///
+/// This is the axis every other gate in this area was blind to. The
+/// differential replays, the quick tier, and `datacon_env`'s own unit tests
+/// all exercise a single fragment against a FRESH table — never a table that
+/// is a strict superset of what the fragment mentions. And the run-result
+/// assertions elsewhere in this file cannot distinguish an over-inclusive
+/// wrap set from a correctly-pruned one: before the prune, `wrap_with_datacon_env`
+/// always bound the entire table, and the run still classified correctly
+/// because the extra wrappers were simply unreferenced dead code. Only
+/// inspecting the bound set itself catches a wrong referenced-set computation.
+#[test]
+fn wrap_with_datacon_env_binds_only_referenced_constructors_from_populated_table() {
+    let boot = bootstrap_table();
+    let mut session = boot.clone();
+    merge_table(&mut session, &turn2_table());
+    assert_eq!(
+        session.iter().count(),
+        9,
+        "sanity: accumulated table has all 9 constructors (7 bootstrap + 2 turn-2-only)"
+    );
+
+    // Reference one bootstrap constructor (C1) and both turn-2-only
+    // constructors (BOX2, WRAP2). Leave PAIR_ID/VAL_ID/E_ID/UNION_ID/LEAF_ID/
+    // NODE_ID unreferenced — they must NOT be bound.
+    let referenced = [VarId(C1.0), VarId(BOX2.0), VarId(WRAP2.0)];
+    let fragment = fragment_referencing(&referenced);
+
+    let wrapped = wrap_with_datacon_env(fragment, &session);
+
+    let actual: std::collections::BTreeSet<u64> = wrapped.wraps.iter().map(|w| w.tag.0).collect();
+    let expected: std::collections::BTreeSet<u64> = [C1.0, BOX2.0, WRAP2.0].into_iter().collect();
+
+    assert_eq!(
+        actual, expected,
+        "wrap_with_datacon_env must bind exactly the constructors the fragment \
+         references from the ACCUMULATED table — any set difference here is a \
+         referenced-set regression that only shows up against a populated \
+         session table, not a fresh one"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────

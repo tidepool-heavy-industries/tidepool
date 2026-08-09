@@ -24,12 +24,47 @@ context window.
 6. Dogfood launch (release-profile binaries) once the golden_path verdict
    and the open-intermittent triage below permit.
 
+## Next-wave lanes (decided 2026-08-08, spawn as current lanes close)
+
+Three-lane cap; dogfood is PAUSED (Inanna), so no redeploy is owed until
+she resumes — the harness fixes ship in the next natural redeploy.
+
+- [`generic-surface.md`](generic-surface.md) — the `deriving (Generic)`
+  author-contract wave (askUser @T, choose/chooseMany, Form retirement).
+  Spike-gated; may spawn first as a lane closes.
+- [`extract-wave.md`](extract-wave.md) — now carries item 0 (one-compile
+  bootstrap Track 1) and 0b (nameable effect vocabulary). Still gated on
+  Phase B.
+- [`realm-spike.md`](realm-spike.md) — Track 2 GO/NO-GO, own parallel
+  lane BY DESIGN as a merge-conflict-cost experiment (conflict ledger is
+  a deliverable).
+
+Composed gate for this wave-set closed 2026-08-08: section 4 differential
+re-run field-identical to baseline (tested=349 compared=312
+closure_skip=34 mismatch=0 eval_jit_diverge=3, same three names). GHC
+slots restored to 3.
+
 Also queued: retire-or-wire decision on the observatory-orphan API cluster
 (Harness::first_operator_hole / live_turn / pending_dialog_ui /
 tree_snapshot / tree_snapshot_page — pub, zero callers; architectural
 call, fits harness-lifecycle's scope).
 
 ## Open threads that gate or shadow the dogfood
+
+- **finalize-template ambiguity — cause RESOLVED (2026-08-08), fix in
+  flight (`finalize-template-pin`).** The ambiguous-`ToJSON a0` on the
+  template's `toJSON _r` is GHC's defaulting ANCHOR rule: defaulting
+  fires only when the constraint set contains a standard-class anchor
+  (numeric, or Show/Eq/Ord under `ExtendedDefaultRules` — a relaxation of
+  the anchor requirement, never its removal). A solitary user-defined
+  class (`ToJSON` alone) is never eligible; the default list's contents
+  are irrelevant. Discriminator: plain `IO` fails identically to
+  `Eff <row>` — refuting d82cf099's recorded hypothesis (untouchability
+  under the row implication), which this entry supersedes. Fix direction:
+  supply an ANCHOR (e.g. a `Show` constraint riding alongside in the
+  pinned wrapper) rather than a hard type pin — additive, keeps bare
+  `askUser` turns compiling; hard pin pre-approved as fallback. The
+  prompt's annotated-shape stopgap (d82cf099) is correct either way.
 
 - **Intermittent garbage con_tag** (`selfharness_compaction`, open):
   `YieldError::UnexpectedConTag` with a raw-pointer-shaped tag + fast-abort
@@ -63,3 +98,75 @@ call, fits harness-lifecycle's scope).
   occurred TWICE (a TL, then a leaf) — detection is priority 1; merge
   teardown half-fails on already-pruned worktrees (1.1G orphan dir cleaned
   by hand); stale orphaned panes from the first TL death still need reaping.
+- exo wishlist NEW (2026-08-08, CORRECTED same day): the "duplicate
+  spawn / silent child birth" report was a MISDIAGNOSIS that cost a live
+  agent — the dev saw its own command line in `ps`, reported itself as a
+  twin, and root killed the ledger child on provenance evidence
+  (byte-identical spec, exo tmux ancestry, spawn window) that was
+  consistent with BOTH hypotheses and discriminated nothing. Exactly one
+  pane ever existed; `%241`'s pane_pid was the killed claude's parent.
+  Recovery: WIP snapshot 6b2f5e9d + replacement dev; nothing lost but
+  the hour. The TWO CONFIRMED defects, both sharper than the misdiagnosis:
+  1. **No agent self-identity token** — a dev cannot distinguish itself
+     from a hypothetical duplicate (`ps` shows its own cmdline; nothing
+     in env/prompt names its own PID or pane). Give spawned agents a
+     self-id (pane id + PID in env) so "is this me?" is answerable.
+  2. **`pane_alive` tracks the PANE, not the AGENT** — `tree` reported
+     the node alive/busy with fresh timestamps an HOUR after its claude
+     died, because the pane's zsh survives. A watchdog reading the
+     ledger alone will never see this death class; `ListAgents` (which
+     dropped the node) was the correct source. Liveness must track the
+     agent process, not the pane shell.
+  Root-side kill-protocol lesson (recorded in memory): before killing a
+  "duplicate", VERIFY THE PREMISE — enumerate panes/processes and count;
+  discriminate by pane_pid parentage, never by spec identity (both twins
+  and the real child carry the identical generated spec by construction).
+  SHARPENED post-recovery: the same agent ALSO reported "two mechanisms
+  coexisting in eval_prep.rs" — only one ever existed. Two confident
+  misperceptions from one agent in one window. The general rule: **an
+  agent's report about its own environment is not evidence** — not about
+  processes, not about its own tree's contents; both are independently
+  checkable (ps parentage, grep) and all three parties (dev, TL, root)
+  skipped the cheap check. Also: the dead node stays alive/busy in the
+  exo tree even after pane teardown — there is NO operator lever to
+  tombstone a node whose pane is gone (third confirmed liveness gap).
+  NAMED PATTERN (harness-lifecycle's framing, 3 confirmed instances +
+  1 retracted): **self-reports about environment and filesystem state
+  are the class that keeps being wrong — and the cheapest class to
+  verify.** Confirmed: the phantom twin; the phantom coexisting
+  mechanism; the TL's addendum's phantom helper. RETRACTED fourth: the
+  "dev's isolation claim contradicted by the filesystem" was the TL's
+  OWN unverified inference — the 15:00:52 rewrite was the tail of an
+  in-flight run predating the export; the dev then proved isolation
+  properly (variable printed through the real wrapper, new file inside
+  the worktree, unchanged mtime outside). The retraction is the
+  pattern eating its own author, which strengthens the rule: standing
+  rule, environment/filesystem claims get MEASUREMENTS (a dir that
+  exists, an mtime that didn't move, an in-flight-run check before
+  reading an mtime as a write-source), never prose — every level,
+  root and TL included.
+  REFINEMENT (cherry-pick episode, same day): a CHECK can test the
+  wrong property while looking rigorous. "67 insertions, 0 deletions,
+  tests-only, compile-checked standalone" — every word true, and the
+  commit still wasn't separable: additive hunks sit on context another
+  commit created (diffstat shape ≠ separability), and a tests-only
+  tree COMPILES fine against behavior it would fail at RUNTIME. The
+  settling check for any separability claim: `git cherry-pick` onto a
+  throwaway branch at the target base + test RUN. The conflict alone
+  surfaces entanglement in seconds.
+  WATCHDOG VERDICT (end-to-end, timed): agent killed ~21:00 → ledger
+  alive/busy, watchdog SILENT for 30 min (the human caught it by
+  looking); pane killed ~21:30 (deliberate reclaim) → watchdog fired
+  immediately. It detects PANE death, not AGENT death — and misses
+  exactly the shape a `kill <claude-pid>` produces, i.e. every CAUSED
+  death. ListAgents dropped the node within a minute of the real kill:
+  the signal exists, the watchdog reads the wrong source (should read
+  peer-list membership, or both). Second: a deliberate hand-teardown is
+  indistinguishable from a death — the correct reclaim generated a
+  false alarm; needs an "expected teardown" marker. The earlier
+  "silent child death is covered by the watchdog now" claim is
+  OPTIMISTIC — covered only when the pane dies with the agent.
+  The earlier "cross-written status.children" residue is discounted
+  (single agent's own status file); the transient ListAgents/tree
+  disagreement stands, with the trust direction INVERTED from the
+  original note: ListAgents was right, the ledger was wrong.

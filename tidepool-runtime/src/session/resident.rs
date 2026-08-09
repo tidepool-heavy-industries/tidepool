@@ -330,11 +330,13 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        // Seed the env from the session's live value bindings so this turn can
-        // reference an earlier `x <- e` (the value plane's Var-miss resolution).
-        // Empty until the first bind materializes, so a value-plane-free session
-        // behaves exactly as before.
-        let env = self.core.seed_external_env();
+        // Seed the env from the session's live value bindings this turn's
+        // fragment actually references (D9), so it can resolve an earlier
+        // `x <- e` (the value plane's Var-miss resolution). Empty until the
+        // first bind materializes AND this fragment references one, so a
+        // value-plane-free session behaves exactly as before.
+        let referenced = tidepool_repr::free_vars::free_vars(expr);
+        let env = self.core.seed_external_env(&referenced);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core
@@ -372,7 +374,8 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        let env = self.core.seed_external_env();
+        let referenced = tidepool_repr::free_vars::free_vars(expr);
+        let env = self.core.seed_external_env(&referenced);
         let jit_codegen_started = std::time::Instant::now();
         let func_id = self
             .core

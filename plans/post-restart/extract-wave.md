@@ -5,6 +5,36 @@ over-collection chain's root plus the declaration-path cluster. MUST wait
 for the one-spawn-turn Phase B TL to land (single owner of
 writeWholeModuleClosed at every point in time).
 
+## Item 0 (FIRST): one-compile bootstrap, Track 1
+
+`plans/post-restart/one-compile-bootstrap.md` Track 1 is the confirmed
+recipe — unbootstrapped `ResidentSession` constructor over the
+already-lazy `PersistentSession`, first real run boots the machine
+(mirror the REPL), DELETE both boot seeds, render+loop in one extract
+invocation (needs Phase B's multi-binder — hence the gate above),
+answerer boots from the model's first block. Supersedes D7's
+cache-interim (step 2 of the fix ladder below) if it lands first.
+Keep separate source-level capability rows regardless.
+
+## Item 0b: nameable effect vocabulary (one-file-harness prerequisite)
+
+Effect vocabulary available in scope ≠ effects present in M's row. Today
+the answerer compile omits the `RunLLMTurn` GADT/helpers entirely
+(`haskell/lib/Tidepool/Harness.hs` module haddock). Make stable effect
+types/helpers nameable in EVERY compile, with `Member` controlling
+executability — this is the recorded prerequisite for the one-file
+harness (see `plans/self-iterating-harness/15-generic-surface-wave.md`);
+the one-file cut itself lands only after this exists and typechecks the
+answerer path.
+
+## Coexistence note (Inanna, 2026-08-08)
+
+The realm-machine spike (`realm-spike.md`) runs as a PARALLEL lane
+deliberately not partitioned away from this lane's runtime files — it is
+an experiment in merge-conflict cost. Do not pre-negotiate file
+boundaries with it; resolve conflicts at fold and log anything
+non-mechanical.
+
 ## The measured motivation (jit-chain's experiment, 2026-08-09, pre-wrap on
 ## real session Core — size all absolute wins from THESE figures)
 
@@ -76,3 +106,54 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - Correctness gates: hardened differential (floors), corpus_report,
   extract-fidelity-test 26/26, harness acceptance. E6 additionally needs
   the full set with zero tolerance.
+
+## D7 (measured live, 2026-08-08 dogfood): boot pays FOUR extract compiles
+## (~96s) before the first model call
+
+Clean-cache wizard launch decomposition (release, box under moderate load;
+extract_spawn 14-33s each):
+
+1. ~15s — outer session boot seed (`driver.rs` bootstrap): full-template
+   compile of `pure (toJSON (0 :: Int))` purely to seed the
+   RunLLMTurn-only stack's ConTags.
+2. ~15s — the answerer `Harness::new`'s own boot seed: the SAME trivial
+   compile for the answerer stack.
+3. ~30s — `compile_outer` of the render framing (`Loaded.render …`).
+4. ~30s — `compile_outer` of the loop body (`Loaded.loop …`,
+   sites=[(0,"Contribution")]) — only after this does the first model
+   turn fire.
+
+The two boot seeds are CONSTANT per (decl-list, stack) — identical source
+every launch. `compile_turn` is deliberately cache-free ("turns are
+one-shot"), which is right for turns and wrong for boot seeds: a
+content-addressed disk cache of the two seeds' (CBOR, table) — or
+precomputed ConTags shipped without GHC at all — removes ~30s of every
+launch. Render/loop compiles (3)+(4) are per-cycle and belong to the
+existing D1/D2/E1 work. Sequencing unchanged (after Phase B); this entry
+just pins the measured boot shape so the win is sized honestly.
+
+### D7 revised (Inanna's design question, same day): the seeds shouldn't exist
+
+"Why do we need boot seeds at all?" — answer: we don't, structurally.
+`Session::bootstrap` is program-shaped at construction (needs expr+table
+to bring up the machine), and at boot no real program exists yet, so a
+fake one (`pure (toJSON 0)`) is manufactured to fit the API slot. The
+seed is scaffolding become load-bearing.
+
+Fix ladder, in order of principle:
+1. **Eliminate** (the mechanism fix): each session's FIRST REAL compile
+   (outer: render; answerer node: the model's first block) already
+   yields the (expr, table) bootstrap consumes — defer machine
+   construction to first turn, or make construction not demand a
+   program. Seeds stop existing. Touches Session::bootstrap
+   (tidepool-runtime/harness) + both boot sites; sequence after
+   driver-async's fold (driver.rs) — candidate first item of the
+   extract wave.
+2. **Cache** (interim, hour-sized): seed source is constant per
+   (decl-list, stack) — content-addressed disk cache of (CBOR, table),
+   zero GHC per launch. Land whenever; superseded harmlessly by 1.
+3. One extract invocation for both seeds: strictly weaker than either;
+   only if 1 hits a deep blocker.
+
+The two-rows fact stays real either way (positional union tags per row);
+only the per-launch GHC cost for constant artifacts is the defect.

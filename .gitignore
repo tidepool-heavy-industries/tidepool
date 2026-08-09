@@ -84,3 +84,9 @@ viz/index.html
 haskell/test-session/work/
 haskell/test-fidelity/work/
 examples/guess/haskell/Game_cbor/
+
+# per-worktree XDG_CACHE_HOME target. Harness tests write the real
+# ~/.cache/tidepool/selfharness/ unless XDG_CACHE_HOME is redirected, which
+# clobbers live dogfood state; every lane exports XDG_CACHE_HOME="$PWD/.cache"
+# before harness runs, so the dir appears in every worktree.
+.cache/

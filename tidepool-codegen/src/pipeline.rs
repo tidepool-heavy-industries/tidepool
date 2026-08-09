@@ -5,6 +5,7 @@ use cranelift_codegen::Context;
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::debug::LambdaRegistry;
@@ -81,7 +82,20 @@ pub struct CodegenPipeline {
     /// Stores (func_id, func_size, raw_maps).
     pending_stack_maps: Vec<(FuncId, u32, Vec<RawStackMap>)>,
     /// Lambda name registry: (func_id, name). Populated during define_function.
+    /// Never truncated — `lambda_registry`/`lambda_registry_built_upto` below
+    /// track how much of this has already been folded into the accumulated
+    /// registry, so a fresh `build_lambda_registry` call only walks the tail.
     lambda_names: Vec<(FuncId, String)>,
+    /// Accumulated code-ptr -> name registry, shared via `Rc` with whatever
+    /// thread-local slot last installed it (`debug::set_lambda_registry`).
+    /// `build_lambda_registry` extends this in place (D7): once the previous
+    /// run's thread-local handle is dropped (refcount back to 1), extending
+    /// is `Rc::make_mut` + insert of only the NEW entries, not a rebuild of
+    /// the whole session's lambda history.
+    lambda_registry: Rc<LambdaRegistry>,
+    /// How many of `lambda_names`'s entries are already folded into
+    /// `lambda_registry`.
+    lambda_registry_built_upto: usize,
     /// Boxed-literal wrapper constructor ids (I#/W#/C#/F#/D#) for this compile,
     /// set by the JIT entry point from the DataConTable. Transported here so
     /// `compile_expr` can stamp it onto every `EmitSession` without threading
@@ -171,6 +185,8 @@ impl CodegenPipeline {
             stack_maps: StackMapRegistry::new(),
             pending_stack_maps: Vec::new(),
             lambda_names: Vec::new(),
+            lambda_registry: Rc::new(LambdaRegistry::new()),
+            lambda_registry_built_upto: 0,
             lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
             blocks_emitted: 0,
@@ -301,15 +317,33 @@ impl CodegenPipeline {
         self.lambda_names.push((func_id, name));
     }
 
-    /// Build a LambdaRegistry from all registered lambdas.
-    /// Must be called after `finalize()` so code pointers are available.
-    pub fn build_lambda_registry(&self) -> LambdaRegistry {
-        let mut registry = LambdaRegistry::new();
-        for (func_id, name) in &self.lambda_names {
-            let ptr = self.module.get_finalized_function(*func_id) as usize;
-            registry.register(ptr, name.clone());
+    /// Return the accumulated `LambdaRegistry`, incrementally extended with
+    /// any lambdas registered since the last call (D7).
+    ///
+    /// Must be called after `finalize()` so code pointers are available for
+    /// the newly-registered entries. Once resolved, a JIT function's code
+    /// pointer never moves (the `ArenaMemoryProvider` reservation is stable
+    /// for the pipeline's lifetime), so entries folded in on an earlier call
+    /// stay valid forever and never need re-resolving.
+    ///
+    /// `Rc::make_mut` extends in place (O(new entries)) when this is the only
+    /// outstanding handle — true whenever the previous run's thread-local
+    /// install has already been cleared (`debug::clear_lambda_registry`,
+    /// called from `RegistryGuard::drop` before the next run starts). It
+    /// falls back to a clone-then-extend only if a handle is still
+    /// outstanding (e.g. a nested child run compiling new lambdas while the
+    /// parent's registry handle is still installed) — correctness-preserving,
+    /// just not O(1)/O(new) in that rarer reentrant case.
+    pub fn build_lambda_registry(&mut self) -> Rc<LambdaRegistry> {
+        if self.lambda_registry_built_upto < self.lambda_names.len() {
+            let registry = Rc::make_mut(&mut self.lambda_registry);
+            for (func_id, name) in &self.lambda_names[self.lambda_registry_built_upto..] {
+                let ptr = self.module.get_finalized_function(*func_id) as usize;
+                registry.register(ptr, name.clone());
+            }
+            self.lambda_registry_built_upto = self.lambda_names.len();
         }
-        registry
+        Rc::clone(&self.lambda_registry)
     }
 }
 
@@ -318,6 +352,7 @@ mod tests {
     use super::*;
     use cranelift_codegen::ir::InstBuilder;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use std::collections::HashMap;
 
     #[test]
     fn test_empty_pipeline() {
@@ -490,5 +525,103 @@ mod tests {
         assert_eq!(pipeline.interned_name_count(), 12);
         let (ptr_a4, _) = pipeline.intern_name("foo");
         assert_eq!(ptr_a1, ptr_a4, "rehashing must not move the interned bytes");
+    }
+
+    /// Declares, defines and registers a trivial constant-returning function
+    /// named `name` in `pipeline`, without finalizing. Shared by the D7
+    /// incremental-registry tests below, which need to control exactly when
+    /// `finalize`/`build_lambda_registry` runs relative to registration.
+    fn define_trivial_lambda(pipeline: &mut CodegenPipeline, name: &str, ret: i64) -> FuncId {
+        let func_id = pipeline.declare_function(name).unwrap();
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let val = builder.ins().iconst(types::I64, ret);
+        builder.ins().return_(&[val]);
+        builder.finalize();
+        pipeline.define_function(func_id, &mut ctx).unwrap();
+        pipeline.register_lambda(func_id, name.to_string());
+        func_id
+    }
+
+    /// D7: across several "turns" (declare/define/register a few lambdas,
+    /// finalize, then read the registry — the same shape `add_function` +
+    /// `install_registries` drive per session turn), the incremental
+    /// `build_lambda_registry` must contain exactly what a from-scratch
+    /// rebuild over the FULL lambda history so far would contain. This is the
+    /// observable-equivalence proof D7 requires: the incremental path must
+    /// never diverge from the old full-rebuild semantics, only its cost.
+    #[test]
+    fn build_lambda_registry_incremental_matches_full_rebuild() {
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+        // Independent shadow of the old `lambda_names: Vec<(FuncId, String)>`
+        // accumulation, used only to compute the reference full rebuild — it
+        // does not touch `pipeline`'s own bookkeeping.
+        let mut lambda_names_shadow: Vec<(FuncId, String)> = Vec::new();
+
+        for turn in 0..4usize {
+            for i in 0..3usize {
+                let name = format!("turn{turn}_lambda{i}");
+                let func_id = define_trivial_lambda(&mut pipeline, &name, (turn * 10 + i) as i64);
+                lambda_names_shadow.push((func_id, name));
+            }
+            pipeline.finalize().unwrap();
+
+            // Reference: the OLD algorithm, walking the ENTIRE history every
+            // turn, computed independently of the incremental path's state.
+            let mut full_rebuild: HashMap<usize, String> = HashMap::new();
+            for (func_id, name) in &lambda_names_shadow {
+                let ptr = pipeline.module.get_finalized_function(*func_id) as usize;
+                full_rebuild.insert(ptr, name.clone());
+            }
+
+            let incremental = pipeline.build_lambda_registry();
+            assert_eq!(
+                incremental.len(),
+                full_rebuild.len(),
+                "turn {turn}: incremental registry size diverged from full rebuild"
+            );
+            for (ptr, name) in &full_rebuild {
+                assert_eq!(
+                    incremental.lookup(*ptr),
+                    Some(name.as_str()),
+                    "turn {turn}: incremental registry missing/mismatched entry for {name}"
+                );
+            }
+
+            // Simulate the run boundary: the thread-local handle this run
+            // would have installed is dropped here (RegistryGuard::drop calls
+            // clear_lambda_registry), so the next turn's build_lambda_registry
+            // call sees refcount 1 and extends in place rather than cloning.
+            drop(incremental);
+        }
+    }
+
+    /// D7: a call to `build_lambda_registry` with no new lambdas registered
+    /// since the last call (i.e. a run that compiles nothing new — the common
+    /// case once a session has already declared everything the fragment
+    /// needs) must return the SAME accumulated contents, not an empty or
+    /// partial registry. This is the amortized-O(1) no-op path.
+    #[test]
+    fn build_lambda_registry_stable_across_calls_with_no_new_lambdas() {
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+        let func_id = define_trivial_lambda(&mut pipeline, "only_lambda", 7);
+        pipeline.finalize().unwrap();
+
+        let first = pipeline.build_lambda_registry();
+        let ptr = pipeline.get_function_ptr(func_id) as usize;
+        assert_eq!(first.lookup(ptr), Some("only_lambda"));
+        drop(first);
+
+        // No new registrations, no new finalize — just re-read the registry,
+        // as a run with nothing new to compile would.
+        let second = pipeline.build_lambda_registry();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second.lookup(ptr), Some("only_lambda"));
     }
 }

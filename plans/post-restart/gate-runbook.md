@@ -16,6 +16,15 @@ ONCE here, not per-fold (test-economy policy). Run detached under
   `resident_session::nested_child_runs_while_parent_suspended_then_resumes`
   (NurseryExhausted class reopened, load-correlated). Anything else red is
   NEW.
+- **Never-green WORKS probes (triaged 2026-08-08, jit-chain-2; fixes are
+  haskell/-side, queued to the phase-b lane after its core lands):**
+  `jit_surface::works_from_json_float` (extract translator lacks a
+  dedicated `decodeFloat_Int#` 2-result split — Translate.hs ~2070, loud
+  landmine working as designed) and
+  `jit_surface::qq_fmt_brace_inside_hole_non_string_expr_still_works`
+  (`Tidepool.QQ.HsMeta.Translate.toExp` lacks let-in). Both were committed
+  with unexecuted "green" claims (the deferred-gate window let them
+  through); neither ever passed. Not regressions; do not re-triage.
 - **Contention produces watchdog timeouts, not wrong values** — a timeout
   under load re-run in isolation is diagnosis, not noise-tolerance. The
   converse: a SUB-100ms assertion failure is never contention — do not
@@ -55,9 +64,13 @@ scripts/ghc-slots.sh run -- bash -c '
 #    don't chase; anything else is new).
 
 # 4. Expensive differential gate (one deliberate run)
+# NOTE (2026-08-08): the suite is a test BINARY in tidepool-codegen —
+# the original "-p tidepool-testing -E 'test(...)'" spelling matches
+# NOTHING (0 run, 135 skipped, exit 0: the exact zero-tests trap this
+# runbook's own counts rule exists to catch, and it caught it).
 TIDEPOOL_EXPENSIVE_TESTS=1 scripts/ghc-slots.sh run -- \
-  cargo nextest run --ignore-default-filter -p tidepool-testing \
-  -E 'test(haskell_suite_differential)' --run-ignored all --no-fail-fast
+  cargo nextest run --ignore-default-filter -p tidepool-codegen \
+  -E 'binary(haskell_suite_differential)' --run-ignored all --no-fail-fast
 # Baseline counters: tested=349 compared=312 closure_skip=34 mismatch=0
 # both_error=0 jit_only_error=0 eval_jit_diverge=3 skipped=1; floor=300.
 

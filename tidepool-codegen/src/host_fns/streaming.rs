@@ -18,9 +18,7 @@ use crate::machine_state::current_machine;
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{error_poison_ptr, push_diagnostic, runtime_error_with_msg, runtime_oom};
-use super::gc::{
-    gc_trigger, host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots,
-};
+use super::gc::{host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots};
 
 /// A parked effect-response stream: the element producer (the iterator IS
 /// the cursor — no offset bookkeeping), the list constructor tags, and an
@@ -181,17 +179,18 @@ unsafe fn build_cons_cells(
     let mut elem: *mut u8 = std::ptr::null_mut();
     register_rust_root(vmctx, &mut elem as *mut *mut u8);
     for v in items.iter().rev() {
-        elem = match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
+        let converted = crate::heap_bridge::gc_retry(
+            vmctx,
+            |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
+                matches!(r, Err(crate::heap_bridge::BridgeError::NurseryExhausted))
+            },
+            || crate::heap_bridge::value_to_heap(v, &mut *vmctx),
+        );
+        elem = match converted {
             Ok(p) => p,
             Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
-                gc_trigger(vmctx);
-                match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        truncate_rust_roots(vmctx, mark);
-                        return runtime_oom();
-                    }
-                }
+                truncate_rust_roots(vmctx, mark);
+                return runtime_oom();
             }
             Err(_) => {
                 truncate_rust_roots(vmctx, mark);
@@ -486,15 +485,16 @@ unsafe extern "C" fn stream_element(vmctx: *mut VMContext, thunk: *mut u8) -> *m
     };
 
     // Materialize with one GC-and-retry (value is GC-inert Rust data).
-    match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+    let converted = crate::heap_bridge::gc_retry(
+        vmctx,
+        |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
+            matches!(r, Err(crate::heap_bridge::BridgeError::NurseryExhausted))
+        },
+        || crate::heap_bridge::value_to_heap(&value, &mut *vmctx),
+    );
+    match converted {
         Ok(p) => p,
-        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
-            gc_trigger(vmctx);
-            match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
-                Ok(p) => p,
-                Err(_) => runtime_oom(),
-            }
-        }
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => runtime_oom(),
         Err(e) => {
             let msg = format!("stream element materialization failed: {e}");
             push_diagnostic(msg.clone());
