@@ -90,6 +90,51 @@ where the time is.
 - CAVEAT (carry with the number): "single-digit-to-low-teens percent
   reachable" — the table is 164–166, NOT "hundreds vs dozens".
 
+### CORRECTION to the Phase-B re-aim (extract-wave TL, 2026-08-08)
+
+From spawn-latency's code audit, verified independently against
+`GhcPipeline.hs` on the merged tree. Two of the three clauses above are
+**unsound as stated**. What the rows actually bracket:
+
+- `sessionT0` ~117, `load' Nothing LoadAllTargets` ~174, `sessionT1` +
+  `emitPhase "ghc_session"` ~180/181. **`load'` is INSIDE the `ghc_session`
+  bracket**, and it parses, typechecks AND core2cores every home module.
+- The `typecheck` (~219) and `core` (~220) rows sum only the SECOND loop
+  (~191–216), whose own comment says it plainly: "each summary's own
+  `parseModule`/`typecheckModule` redoes its typecheck independently of
+  `load'`".
+
+Therefore:
+
+1. **"26–32% session boot" is not boot.** It is setup + depanal + a full first
+   compile of every home module. Half the double compile has been sitting in a
+   row labelled "session boot" the whole time.
+2. **The typecheck refutation does not follow.** "Under 6% typecheck" measures
+   ONE of the TWO typechecks; the other is inside `ghc_session`. The standing
+   home-module typecheck suspicion is NOT refuted by this evidence — it is
+   unmeasured. Treat it as OPEN.
+3. **C1 is upgraded** from "read skeptically against the breakdown" to
+   confirmed-in-code; only its SIZE is unknown. The breakdown did not refute
+   C1, it partly concealed it.
+4. E6 and D1 stay promoted. 60–66% in the second loop's core2core ALONE is
+   ample warrant, and nothing here weakens it.
+
+**Bracket design consequence:** `load'` needs no internal decomposition. Its
+ENTIRE cost is the double compile's cost, because the second loop independently
+redoes both halves. One new phase row around `load'` (leaving `ghc_session` =
+setup + depanal) answers C1 directly.
+
+### SCOPE CAVEAT on every Phase-B number (same audit)
+
+`runSessionPipeline` (`GhcPipeline.hs` ~326) emits **zero** `emitPhase` calls.
+`runPipelineSession` (~106) routes there whenever `isSessionScopeActive`
+(`Session.hs` ~173: true iff any `Val.G<n>` iface is injected). So the 60/26/6
+split was measured **only on the non-session path** — turn-1-shaped extracts.
+Turns 2+, which carry E2's O(n²) `Lib.Gn` chain and are the ones that compound
+over a dogfood session, are UNMEASURED. Any lane citing the Phase-B breakdown
+should read it as "turn 1", not "a turn"; the persistent-extractor decision
+must not be taken on the normal-path numbers alone.
+
 ## Items (D/C/E numbering from the campaign; all green-lit on merit —
 ## correctness gates required, benchmarks optional)
 
