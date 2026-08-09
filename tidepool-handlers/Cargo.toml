@@ -17,6 +17,7 @@ tidepool-repr.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
+tidepool-worktree.workspace = true
 inventory.workspace = true
 frunk.workspace = true
 # Native deps moved from tidepool/Cargo.toml
