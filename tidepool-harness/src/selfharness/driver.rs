@@ -534,7 +534,7 @@ impl SelfHarnessDriver {
         self.last_compaction.as_deref()
     }
 
-    /// Bootstrap the outer `PersistentSession<Threadless>` (via
+    /// Register the outer `PersistentSession<Threadless>` (via
     /// [`crate::harness::Session`]) and splice `source`'s whole module body
     /// ([`HarnessSource`]) as a plain `--include`d module (NOT the session
     /// decl plane — see [`HarnessSource`]'s module doc for why: a static
@@ -543,7 +543,10 @@ impl SelfHarnessDriver {
     /// author-defined types crossing between them get the same DataConId),
     /// compiled against [`outer_decls`]/[`tidepool_mcp::runllmturn_decl`] —
     /// so `Harness = M` resolves to the literal `Eff '[RunLLMTurn]` row
-    /// (02-runtime.md LOCKED). No-op if already bootstrapped.
+    /// (02-runtime.md LOCKED). No-op if already bootstrapped. The outer
+    /// session's machine comes up lazily, on its first real compile (the
+    /// pre-loop `render`) — see [`crate::harness::ResidentSession::unbootstrapped`]
+    /// — so this pays no GHC extract compile of its own.
     fn bootstrap(&mut self, source: &HarnessSource) -> Result<(), DriverError> {
         if self.outer.is_some() {
             return Ok(());
@@ -556,33 +559,6 @@ impl SelfHarnessDriver {
         )
         .map_err(|e| DriverError::Session(format!("outer engine config: {e}")))?;
         outer_cfg.include.push(source.source_dir.clone());
-
-        // A trivial effectful seed carrying the RunLLMTurn-only stack's
-        // ConTags (mirrors `Harness::new`'s own boot seed).
-        let outer_stack = outer_cfg
-            .turn_target(None)
-            .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
-            .stack;
-        let boot_src = engine::template_turn_for(
-            &outer_decls(),
-            &outer_stack,
-            "pure (toJSON (0 :: Int))",
-            "",
-            "",
-        );
-        // The outer session has no answerer node id (it is the single loop
-        // driver, not a tree node) — NO_NODE/NO_ROUND, same convention as
-        // `Harness::new`'s own boot compile. `NodeId(0)` is a real, live node
-        // id, never a sentinel.
-        let boot = compile::compile_turn(
-            &outer_cfg.extract_bin,
-            &boot_src,
-            "result",
-            &outer_cfg.include,
-            timing::NO_NODE,
-            timing::NO_ROUND,
-        )
-        .map_err(|e| DriverError::Session(format!("outer bootstrap compile: {e}")))?;
 
         let handler_cfg = tidepool_handlers::HandlerConfig {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -597,9 +573,7 @@ impl SelfHarnessDriver {
         let stack: crate::harness::BoxedStack =
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
 
-        let session = crate::harness::Session::bootstrap(
-            &boot.expr,
-            boot.table,
+        let session = crate::harness::Session::unbootstrapped(
             stack,
             outer_cfg.suspend_tag,
             outer_cfg.effect_names.clone(),
@@ -607,8 +581,7 @@ impl SelfHarnessDriver {
             outer_cfg.include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             None,
-        )
-        .map_err(|e| DriverError::Session(format!("outer bootstrap: {e}")))?;
+        );
 
         self.outer = Some(OuterSession {
             session,

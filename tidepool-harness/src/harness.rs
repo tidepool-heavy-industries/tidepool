@@ -411,9 +411,6 @@ pub struct Harness {
     /// re-render. `None` (unset) in tests / headless runs — the harness works
     /// the same, just without live push.
     notifier: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
-    /// The Haskell that seeds a fresh session's ConTags (the 10-effect stack).
-    /// Compiled once, reused for every node's bootstrap.
-    boot: Arc<compile::CompiledTurn>,
     /// A just-created root's opening prompt PLUS its optional per-node framing
     /// (the system message override — [`NodeConvo::framing`]), staged between
     /// `create_root`/`create_root_framed` and `force` (a thunk node has no
@@ -440,7 +437,7 @@ pub struct Harness {
 
 impl Harness {
     /// Build a harness over `writer` (a fresh log past its header), the engine
-    /// config, and a signed-in provider. Compiles the bootstrap seed once.
+    /// config, and a signed-in provider.
     pub fn new(
         writer: LogWriter,
         cfg: EngineConfig,
@@ -452,20 +449,6 @@ impl Harness {
         // construction — a failed/skipped sweep just leaves stale dirs on
         // disk a little longer.
         sweep_stale_run_dirs();
-        // A trivial effectful seed carrying the full effect-stack ConTags.
-        let boot_stack = cfg.turn_target(None)?.stack;
-        let boot_src = engine::template_turn(&cfg, &boot_stack, "pure (toJSON (0 :: Int))", "", "");
-        // No real answerer node exists yet (this is the one-time boot compile) —
-        // NO_NODE/NO_ROUND. `NodeId(0)` is a real, live node id, never a sentinel.
-        let boot = compile::compile_turn(
-            &cfg.extract_bin,
-            &boot_src,
-            "result",
-            &cfg.include,
-            timing::NO_NODE,
-            timing::NO_ROUND,
-        )
-        .map_err(|e| HarnessError::Compile(e.to_string()))?;
         // The fork-child compile config: this node's row minus the
         // fork-spawning effects, so a child cannot fork (see `child_cfg`).
         let child_cfg = EngineConfig::from_decls(
@@ -483,7 +466,6 @@ impl Harness {
             convos: Mutex::new(HashMap::new()),
             live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
-            boot: Arc::new(boot),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
@@ -801,10 +783,13 @@ impl Harness {
         Ok(node)
     }
 
-    /// Force a thunk node: emit `Forced`, bootstrap its resident session, seed
-    /// its transcript with the opening prompt. Returns the node's session id.
+    /// Force a thunk node: emit `Forced`, register its (as-yet machine-less)
+    /// resident session, seed its transcript with the opening prompt. Returns
+    /// the node's session id. The node's session machine comes up lazily, on
+    /// its first REAL turn (`ResidentSession::unbootstrapped` — see that
+    /// constructor's doc) — `force` itself pays no GHC extract compile.
     pub fn force(&self, node: NodeId, actor: Actor) -> Result<(), HarnessError> {
-        // Bootstrap a fresh resident session for this node, keeping a handle to
+        // Register a fresh resident session for this node, keeping a handle to
         // its effect-trace buffer so per-turn effects can be logged.
         let (stack, effect_trace) = self.build_stack();
         // Give the node its OWN decl plane so declarations accumulate across its
@@ -814,9 +799,7 @@ impl Harness {
         // separate node with a separate plane. Degrades to no accumulation
         // (`None`) if the session root cannot be created.
         let lib = self.node_decl_plane(node);
-        let session = ResidentSession::bootstrap(
-            &self.boot.expr,
-            self.boot.table.clone(),
+        let session = ResidentSession::unbootstrapped(
             stack,
             self.cfg.suspend_tag,
             self.cfg.effect_names.clone(),
@@ -824,8 +807,7 @@ impl Harness {
             self.cfg.include.clone(),
             DEFAULT_NURSERY_SIZE,
             lib,
-        )
-        .map_err(|e| HarnessError::Resident(e.to_string()))?;
+        );
 
         // Register with the tree AND the session registry it owns (emits
         // Forced before the session is visible, then mints the SessionId and
@@ -3201,7 +3183,6 @@ mod tests {
     use super::*;
     use crate::log::{Event, LogHeader, LogReader};
     use crate::provider::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
-    use tidepool_repr::{CoreExpr, CoreFrame, Literal, TreeBuilder};
 
     /// Never actually called: `flush_effects` touches `self.tree`,
     /// `self.convos`, and `self.cfg.effect_names` only, so a `Harness` built
@@ -3224,9 +3205,9 @@ mod tests {
 
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a
     /// real `tidepool-extract` compile) — every field is filled directly with
-    /// an inert placeholder, since `flush_effects` never reads `boot`,
-    /// `provider`, or the seed/escalation maps. This keeps `flush_effects`'
-    /// unit coverage in the pure-Rust fast tier.
+    /// an inert placeholder, since `flush_effects` never reads `provider` or
+    /// the seed/escalation maps. This keeps `flush_effects`' unit coverage in
+    /// the pure-Rust fast tier.
     fn test_harness() -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let writer = LogWriter::create(
@@ -3248,11 +3229,6 @@ mod tests {
             convos: Mutex::new(HashMap::new()),
             live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
-            boot: Arc::new(compile::CompiledTurn {
-                expr: CoreExpr { nodes: Vec::new() },
-                table: DataConTable::default(),
-                asks: AsksSidecar::default(),
-            }),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
@@ -3263,9 +3239,10 @@ mod tests {
     /// Like [`test_harness`] but keeps the log's tempdir alive and returns its
     /// path, for a test that reads the durable log back after driving the
     /// harness — `test_harness`'s own tempdir is dropped (and the file
-    /// unlinked) before it returns. Uses the same trivial single-`Lit` boot
-    /// expr [`fake_session`] does, so `Harness::force` (which bootstraps
-    /// from `self.boot`, unlike `fake_session`) succeeds without GHC/extract.
+    /// unlinked) before it returns. `Harness::force` needs no GHC/extract
+    /// compile at all now (it registers an [`ResidentSession::unbootstrapped`]
+    /// session — the machine comes up on the node's first real turn), so this
+    /// fixture no longer needs to fabricate a boot expr either.
     fn test_harness_with_log() -> (Harness, std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
@@ -3279,9 +3256,6 @@ mod tests {
         )
         .unwrap();
         let provider: Arc<dyn DynModelProvider> = Arc::new(UnusedProvider);
-        let mut b = TreeBuilder::new();
-        b.push(CoreFrame::Lit(Literal::LitInt(0)));
-        let boot_expr = b.build();
         let harness = Harness {
             run_id: generate_run_id(),
             tree: NodeTree::new(writer),
@@ -3291,11 +3265,6 @@ mod tests {
             convos: Mutex::new(HashMap::new()),
             live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
-            boot: Arc::new(compile::CompiledTurn {
-                expr: boot_expr,
-                table: DataConTable::default(),
-                asks: AsksSidecar::default(),
-            }),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
@@ -3304,22 +3273,16 @@ mod tests {
         (harness, path, dir)
     }
 
-    /// A trivially-bootstrapped `Session` for tests that only need
-    /// `NodeTree::force` to have SOME machine to register — never actually
-    /// run. A single `Lit` node is a valid (if useless) boot expr for
-    /// `JitEffectMachine::compile_session`, so this needs no GHC/extract, only
-    /// the pure-Rust codegen path — keeping these tests in the fast tier.
-    /// `Harness::build_stack`'s LLM handler captures `Handle::current()`, so
-    /// the CALLER must run inside a tokio runtime (`#[tokio::test]`) even
-    /// though nothing here is actually awaited.
+    /// A machine-less `Session` for tests that only need `NodeTree::force` to
+    /// have SOME session to register — never actually run a turn.
+    /// `NodeTree::force` accepts any `Session` regardless of whether its
+    /// machine is live, so this needs no boot expr, no GHC/extract, and
+    /// cannot fail. `Harness::build_stack`'s LLM handler captures
+    /// `Handle::current()`, so the CALLER must run inside a tokio runtime
+    /// (`#[tokio::test]`) even though nothing here is actually awaited.
     fn fake_session(harness: &Harness) -> Session {
         let (stack, _trace) = harness.build_stack();
-        let mut b = TreeBuilder::new();
-        b.push(CoreFrame::Lit(Literal::LitInt(0)));
-        let expr = b.build();
-        ResidentSession::bootstrap(
-            &expr,
-            DataConTable::default(),
+        ResidentSession::unbootstrapped(
             stack,
             0,
             vec![],
@@ -3328,7 +3291,6 @@ mod tests {
             DEFAULT_NURSERY_SIZE,
             None,
         )
-        .expect("trivial single-literal boot expr bootstraps")
     }
 
     fn insert_convo(harness: &Harness, node: NodeId, effect_trace: EffectTrace) {
