@@ -62,15 +62,45 @@ SIZE unknown — the breakdown partly CONCEALED C1 rather than refuting it.
 This does not weaken E6 or D1: 60–66% in the SECOND loop's `core2core` alone is
 ample warrant. Ordering unchanged.
 
-**Bracket-design decision (mine, a deliberate deviation from the amendment's
-wording).** The amendment says "one new phase row around `load'` — leaving
-`ghc_session` = setup + depanal". I am keeping `ghc_session`'s span EXACTLY as
-it is today (setup + depanal + `load'`) and nesting the new `load` row inside
-it. Narrowing `ghc_session` would redefine an existing phase name's meaning and
-make every historical 26–32% figure incomparable to the new ones — the
-`classify_extract` tombstone's failure mode precisely. `setup + depanal` is
-recoverable as `ghc_session − load`, so nothing is lost and comparability
-survives. `load'` is NOT decomposed internally, per the amendment.
+**Bracket design — SETTLED as a partition (third option; supersedes both
+earlier proposals).** Two flat, non-overlapping rows replacing the compile
+lane's `ghc_session`:
+
+    ghc_setup   session DynFlags setup + guessTarget/setTargets + depanal
+    ghc_load    load', and nothing else
+
+Neither narrowing (wave TL's first wording) nor nesting (mine) was right.
+Narrowing would have left a name meaning less than it used to — the
+`classify_extract` tombstone's failure mode. Nesting violates a DOCUMENTED
+invariant I had not checked: `tidepool-harness/src/timing.rs:25`, *"Stages are
+FLAT and non-nesting: a collector sums by `stage` and never has to reason about
+containment"*, with `EXTRACT_PHASES` (timing.rs ~133) an ordered flat list — a
+nested `load` row makes every flat-sum consumer double-count `load'`, silently,
+because both rows are individually correct. The partition satisfies all three
+constraints at once: flat contract holds, historical `ghc_session` is exactly
+`ghc_setup + ghc_load` (recovered by the addition a flat-sum collector already
+performs), and `load'` gets its own unambiguous row. `load'` is NOT decomposed
+internally.
+
+**Consumer finding that shapes the retirement.** `PHASE_GHC_SESSION` must NOT
+be deleted: `haskell/src/Tidepool/Binders.hs:257` (`classifyBlock`, the
+`--classify` lane) is a SECOND emission site, bracketing `getSessionDynFlags`
+alone — no depanal, no `load'`. So the name already denotes two spans differing
+by orders of magnitude across two lanes. That is NOT a defect: the `extract.` /
+`classify.` prefixes disambiguate for collectors and timing.rs ~37 documents
+exactly that hazard. It is a sharp edge worth naming — the prefix is the only
+thing keeping the two readable apart — so the compile lane retires the row with
+a doc tombstone naming its successors AND stating the classify lane keeps it.
+
+**Added C1 done criterion (Inanna via root, wave spec `fa552226`).** The same
+commit that fixes the brackets retires
+`plans/self-iterating-harness/11-turn-latency-contract.md`: replacement written
+at `11-extract-timing-contract.md` (a NEW path, so a naive citation of the old
+one fails loudly rather than silently resolving to stale numbers), old file
+deleted, all references updated. Re-grepped list: `one-spawn-turn-protocol.md`
+:28, `spawn-latency/00-spec.md`:16, `turn_latency_bench.rs`:8, `timing.rs`:29.
+`plans/post-restart/extract-wave.md`:81 also cites it but is the wave TL's file
+— left to its owner, dev explicitly told not to touch it.
 
 **C1 second finding — the session path emits NO timing at all.**
 `runSessionPipeline` (`GhcPipeline.hs:326-…`) has zero `emitPhase` calls.
