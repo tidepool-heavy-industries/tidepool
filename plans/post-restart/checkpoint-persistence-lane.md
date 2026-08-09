@@ -64,6 +64,13 @@ forms recursion guard, or any invented finiteness guard.
   - Commit with `--no-verify`. Never `git add -A`. Repo-root `tmp/` is
     protected.
   - Grep/Read over LSP; do not start per-worktree rust-analyzer.
+  - **Pass `--no-fail-fast` EXPLICITLY; report COMPLETED vs CRATE TOTAL.**
+    nextest defaults to fail-fast, so one red stops a run early while still
+    emitting real pass lines with names and timings — a receipt
+    indistinguishable from a complete one (observed: 198 of 877, 679 never
+    run). Completed-vs-total is the only tell, so a pass count without its
+    denominator is not a coverage claim. Applies until the worktree carries
+    battery fix `7d57cea5`.
   - **One brokered leg per agent at a time; drain, don't kill.**
     `ghc-slots.sh detach -- <cmd>` exists to survive the QUEUE WAIT, not to
     parallelize. Before it, a queued run died at the ~380s kill and that
