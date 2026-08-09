@@ -96,6 +96,28 @@ This supersedes the `ghc-slots.sh run --` spelling in the operational block
 below and in every dev spec in this directory. The absolute path and the
 never-`exclusive` rule are unchanged.
 
+**At most ONE brokered (slot-taking) leg per agent at a time.** `detach` exists
+to survive the queue wait, NOT to enable parallelism. The trap is
+counterintuitive and worth stating: a dev that adopts `detach` and launches
+several legs concurrently is *worse for the queue than one that never adopted
+it*. Under plain `run` the ~380s kill destroyed a queued leg and forced a
+relaunch — ugly, but it capped that dev's footprint as a side effect. `detach`
+removes the death, converting self-limiting churn into durable simultaneous
+holds. Observed on this box: one dev holding two of four slots.
+
+**Corollary: drain, don't kill.** A killed GHC leg wastes the slot time already
+spent and frees the slot no sooner — you pay and get nothing. Kill only known-
+void work (wrong commit, superseded by a fix, testing something since deleted).
+
+**Why the absolute path is a correctness rule, not tidiness.** Slots are 6 as
+of `4958ada6`, but only parent-path invocations see slot4/slot5. Measured on
+this box: `/home/inanna/dev/tidepool/scripts/ghc-slots.sh` lists 6 slots; a
+worktree's own `scripts/ghc-slots.sh` lists 3. Invoking the worktree copy
+queues you behind a wall that does not exist — contending for 3 while 6 are
+live. Same reason the slot count must never be read from a worktree copy (the
+per-worktree number is the nextest `ghc-heavy` cap; they are different numbers
+answering different questions).
+
 **Enqueue hold (root, 2026-08-08): RELEASED.** It was held so extract-wave's
 twice-killed-while-queued dev got the next free slot; that dev acquired and
 completed clean on its first post-fix attempt. Slot-taking work resumes — via
