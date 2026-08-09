@@ -67,6 +67,21 @@ order-of-magnitude drop as a finding rather than good luck. Report durations,
 because the next person's baseline is your reported timing — that is how this
 one was caught at all.
 
+REFINEMENT, found by applying this rule to this crate's own run: FAST IS NOT
+AUTOMATICALLY SUSPICIOUS. The check is duration against THE WORK THE GATE
+CLAIMS, not against some absolute floor. `tidepool-worktree`'s fastest gates run
+in 5–9 ms — `reconcile_on_unregistered_worktree_returns_worktree_not_registered`,
+`journal_open_reports_typed_failure_when_a_file_blocks_the_directory`, the
+`storage_errors` family — and every one of them SHOULD be that fast, because
+each tests an EARLY-RETURN or filesystem-failure path that by design never
+spawns git. A gate proving "this refuses before doing the work" is correctly
+cheap; if it were slow, THAT would be the finding.
+
+The hazard is a gate that is fast while claiming work it could not have done in
+the time — 6 ms for a gate driving GHC → extract → JIT → a temp repository.
+Applied as "fast = bad" this rule produces false alarms and gets ignored, which
+is worse than not having it.
+
 **5. Say when your gates cannot settle the question at all.** Earlier in the
 same lane, the conditionality gates were built on an entry point that passes one
 list for both parameters, making them non-discriminating rather than merely
