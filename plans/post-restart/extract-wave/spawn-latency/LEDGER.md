@@ -85,12 +85,20 @@ internally.
 **Consumer finding that shapes the retirement.** `PHASE_GHC_SESSION` must NOT
 be deleted: `haskell/src/Tidepool/Binders.hs:257` (`classifyBlock`, the
 `--classify` lane) is a SECOND emission site, bracketing `getSessionDynFlags`
-alone — no depanal, no `load'`. So the name already denotes two spans differing
-by orders of magnitude across two lanes. That is NOT a defect: the `extract.` /
-`classify.` prefixes disambiguate for collectors and timing.rs ~37 documents
-exactly that hazard. It is a sharp edge worth naming — the prefix is the only
-thing keeping the two readable apart — so the compile lane retires the row with
-a doc tombstone naming its successors AND stating the classify lane keeps it.
+alone — no depanal, no `load'`. So the name TODAY denotes two spans differing by
+orders of magnitude across two lanes, disambiguated only by the `extract.` /
+`classify.` prefix (timing.rs ~37 documents exactly that hazard).
+
+**The partition ELIMINATES that ambiguity rather than documenting it** — a
+result of this item worth recording as such. After the change `ghc_session` has
+exactly ONE emitter (`classifyBlock`), the compile lane having moved to
+`ghc_setup`/`ghc_load`, and the prefix stops being load-bearing for that name.
+The tombstone is therefore written in the strong form — *"`ghc_session` now
+denotes exactly one span … the compile lane's former use is succeeded by
+`ghc_setup` + `ghc_load`"* — not as a residual exception a later reader must
+respect. Same principle that made the partition beat nesting: eliminate an
+ambiguity rather than annotate it. Carried into C1's receipts, since a diff
+that reads as "renamed a timing row" would otherwise hide it.
 
 **Added C1 done criterion (Inanna via root, wave spec `fa552226`).** The same
 commit that fixes the brackets retires
