@@ -1888,9 +1888,8 @@ impl EmitContext {
         // stack, but case-ALT body emission still re-enters `emit_node`
         // natively (emit_node → emit_case/dispatch → emit_node), so deeply
         // case-nested programs grow the call stack ~one large frame per level.
-        // That is the ~2 MiB cliff measured in plans/stack-safety.md. The
-        // production/proptest path already runs emit on a large worker stack;
-        // this `maybe_grow` is the cheap interim guarantee for any path where
+        // The production/proptest path already runs emit on a large worker
+        // stack; this `maybe_grow` is the cheap guarantee for any path where
         // that discipline slips — if the remaining red zone is below 64 KiB it
         // allocates a fresh 4 MiB segment and continues there. Cost is ~nil
         // when there is ample stack, so it is left unconditional.
