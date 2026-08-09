@@ -18,17 +18,34 @@ use std::process::Command;
 use super::render::ExportItem;
 use super::SessionError;
 
+/// The LANGUAGE pragma block for parse-only declaration binder extraction —
+/// deliberately a SUBSET of `tidepool_mcp::preamble::EVAL_PRAGMAS` (the
+/// canonical eval-dialect extension set; this crate sits BELOW tidepool-mcp
+/// in the workspace dependency graph and cannot import it directly). Only
+/// syntax-affecting extensions belong here: this pass parses but never
+/// typechecks or renames, so extensions that only change type-inference/
+/// instance-resolution behaviour (`FlexibleContexts`, `UndecidableInstances`,
+/// `ExtendedDefaultRules`, `DeriveGeneric`/`DeriveAnyClass`, …) or scoping
+/// (`NoImplicitPrelude`, since nothing here needs Prelude names in scope)
+/// are correctly absent. `tidepool-mcp`'s `pragma_set_consistency` test
+/// asserts this is an exact SUBSET of `EVAL_PRAGMAS` with no extras (an
+/// extension here that eval doesn't also carry would parse dialect
+/// bare/session-decl code differently than eval does — the one-dialect
+/// invariant this pin protects).
+pub const BINDER_PARSE_PRAGMAS: &str =
+    "GADTs, OverloadedStrings, TypeOperators, DataKinds, \
+     ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, \
+     MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, \
+     DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, \
+     QuasiQuotes";
+
 /// Wrap raw declaration text into a parseable module. The binder extractor only
 /// *parses* (it does not typecheck or rename), so no imports are needed — a
 /// qualified reference like `T.toLower` parses fine without `import qualified … as
 /// T`. The pragma block matches the eval surface so GADT/where syntax etc. parses.
 fn wrap_decls(decl_text: &str) -> String {
     format!(
-        "{{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, \
-         ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, \
-         MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, \
-         DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, \
-         QuasiQuotes #-}}\n\
+        "{{-# LANGUAGE {BINDER_PARSE_PRAGMAS} #-}}\n\
          module SessionDecls where\n{decl_text}\n"
     )
 }

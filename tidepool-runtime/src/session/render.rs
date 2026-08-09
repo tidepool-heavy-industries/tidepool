@@ -276,16 +276,22 @@ impl ModuleEnv {
             // (runtime can't see mcp) blocks sharing the list, so it is
             // mirrored here; the sole intentional divergence is
             // `NoImplicitPrelude` (standalone relies on the implicit Prelude,
-            // via its plain-toolchain imports below). `OverloadedRecordDot` +
-            // `DuplicateRecordFields` were MISSING — record-dot (`h.path`, a
-            // core idiom) compiled live but not here (friction #28).
+            // via its plain-toolchain imports below) — every other extension
+            // in `decl_pragmas` must appear here too. `test_standalone_default_
+            // tracks_decl_pragmas` (below) asserts the set equality (modulo
+            // that one documented delta) so this can't drift silently again —
+            // it caught `DeriveGeneric`/`DeriveAnyClass` missing here
+            // (generic-surface wave, 2026-08-08), the same drift class as the
+            // `OverloadedRecordDot`/`DuplicateRecordFields` gap fixed earlier
+            // (friction #28).
             pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
                       FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, \
                       PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, \
                       LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, \
                       ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \
                       NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, \
-                      DeriveTraversable, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}"
+                      DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, \
+                      DuplicateRecordFields, OverloadedRecordDot #-}"
                 .to_string(),
             imports: vec![
                 "import qualified Tidepool.Data.Text as T".to_string(),

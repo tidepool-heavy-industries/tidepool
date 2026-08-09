@@ -4,10 +4,12 @@
 //! stand-in), that a harness-shaped module:
 //!
 //!   1. compiles with `--harness-profile` and NO `{-# LANGUAGE ... #-}` block
-//!      of its own (the standard extension set arrives as GHC FLAGS, applied
-//!      only to the target module — see
-//!      `Tidepool.GhcPipeline.harnessProfileExtensions` /
-//!      `applyHarnessProfile`);
+//!      of its own (the standard extension set arrives via one LANGUAGE
+//!      pragma line SPLICED onto a scratch copy of the source — see
+//!      `Main.spliceHarnessProfilePragma` in `haskell/app/Main.hs` — never a
+//!      GHC flag: a compilation-request cache keys on rendered source bytes,
+//!      not CLI flags, so a flags-based profile would be invisible to any
+//!      future cached caller);
 //!   2. actually exercises the collision hazard the wave exists to fix: it
 //!      derives `Generic` on a local type and round-trips it through
 //!      `Tidepool.Harness.Prelude`'s `gFrom`/`gTo`, with `Tidepool.Prelude`'s
@@ -101,6 +103,11 @@ fn run_extract(harness_profile: bool) -> (bool, String) {
 /// against `Tidepool.Prelude`'s wholesale `Control.Lens` re-export.
 #[test]
 fn harness_profile_compiles_pragma_free_generic_module() {
+    assert!(
+        !FIXTURE_SOURCE.contains("LANGUAGE"),
+        "the fixture itself must carry no LANGUAGE pragma block — that's the \
+         whole claim under test"
+    );
     if !extract_available() {
         eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
         return;

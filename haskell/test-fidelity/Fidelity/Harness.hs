@@ -61,7 +61,7 @@ extractBinding tag modName src target = do
   createDirectoryIfMissing True dir
   writeFile path src
   r <- try $ do
-    res <- runPipeline False path [dir, "lib"]
+    res <- runPipeline path [dir, "lib"]
     cm  <- translateModuleClosed (prHscEnv res) (prBinds res) target
     _   <- evaluate (length (nodeList cm))
     pure cm
