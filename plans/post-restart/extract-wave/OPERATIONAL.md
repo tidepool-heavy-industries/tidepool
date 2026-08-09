@@ -263,6 +263,35 @@ localized diffs and log it at fold):
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
+- **EVERY RECEIPT CARRIES A DENOMINATOR: `N passed / M total` per leg.** A
+  count without a denominator cannot distinguish a completed run from a
+  truncated one. Three ways a leg looks done without being done, all found in
+  one day, all on the MANDATED tier:
+
+  | variant | appearance | reality |
+  |---|---|---|
+  | never started | instant exit, clean log | ran nothing (PATH lacked GHC) |
+  | queued, killed | log shows only "all slots busy" | ran nothing |
+  | **fail-fast truncated** | **real PASS lines, names, timings** | **198/877 — 23%** |
+
+  The first two are visible in the log. **The third looks exactly like a run**
+  and answers YES to every sweep question; the only tell is the denominator.
+  `--no-fail-fast` is NOT in the battery scripts (verified), so any inherited
+  red truncates the mandated tier silently. Pass it explicitly on gate legs, and
+  check the completed count against the crate total before banking a receipt.
+  Check log CONTENT, never exit status: an environment failure exits in
+  milliseconds and reads as a fast pass.
+
+- **A COMMENT SAYING "THIS CAN DRIFT" IS NOT A MITIGATION** (boot). It is a
+  recorded decision to keep a mechanism that fails silently, and it reads as
+  diligence while providing none. Live proof: `eval_harness.rs:387` documents
+  that `EFFECT_NAMES` can drift from production and cites the prior instance
+  (`f1a480e6`) — then it drifted again (`Fork`). The comment is evidence that
+  hand-maintenance was already tried and already failed. Derive from the source;
+  do not restate it and annotate the restatement. Same family as a sync comment
+  standing in for a shared predicate: documentation substituting for a
+  mechanism.
+
 - NAMED-GUARD RULE (wave-wide, from spawn-latency, 2026-08-08): **if a gate
   exists to catch ONE specific failure mode, the receipt must show that
   specific test passing by name, with its own pass line — not the aggregate
