@@ -299,6 +299,21 @@ where
         self.core.machine().map(|m| m.heap_stats())
     }
 
+    /// Recompute the `ExternalEnv` a fragment compiling `expr` would be
+    /// seeded with — the same `free_vars(expr)` then `seed_external_env`
+    /// computation [`Self::run`]/[`Self::run_bind`] perform internally
+    /// (resident.rs:338-339, :377-378), exposed as a read-only query rather
+    /// than a field. `run`/`run_bind` build this env and hand it straight to
+    /// `add_fragment_session`, so it's otherwise unobservable — this exists so
+    /// the VarId-keyed cross-realm isolation property (a fragment's env
+    /// contains only the SessionVarIds it actually references, never another
+    /// scope's) can be asserted directly against the exact env a fragment
+    /// would compile against.
+    pub fn seed_external_env_for(&self, expr: &CoreExpr) -> ExternalEnv {
+        let referenced = tidepool_repr::free_vars::free_vars(expr);
+        self.core.seed_external_env(&referenced)
+    }
+
     fn next_cont_id(&self) -> String {
         format!(
             "{}_{}",
