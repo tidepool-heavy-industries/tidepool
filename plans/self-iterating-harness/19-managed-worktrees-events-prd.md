@@ -496,11 +496,7 @@ and `withHandler`. Keep choreography in residents and ordinary libraries.
 2. Durable Agent handles across resident cycles, distinct from durable
    worktree IDs.
 3. Exact Git hook protocol, environment-scoped `core.hooksPath` strategy,
-   authentication token, and timeout. See
-   [`../post-restart/worktree-lanes/L5-exomonad-decision-record.md`](../post-restart/worktree-lanes/L5-exomonad-decision-record.md)
-   for the adapted transport shape (bind + permissions, bounded read with
-   timeout, half-close framing) and the crate-vs-copied-lines question this
-   lane leaves open for whoever picks the hook adapter up.
+   authentication token, and timeout.
 4. Richer events: dirty/clean, conflicts, checks, branch movement, and external
    file changes. Add only when a real resident needs them.
 5. Cross-process Exomonad orchestration beyond this reviewed integration lane.
