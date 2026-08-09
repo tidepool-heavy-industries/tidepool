@@ -35,6 +35,7 @@ pub mod journal;
 pub mod monitor;
 pub mod registry;
 pub mod snapshot;
+pub mod testing;
 
 pub use binding::{AgentRef, Binding, BindingState};
 pub use create::{
