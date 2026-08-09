@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Counted-semaphore lock for GHC-heavy work (extract builds, --ignore-default-filter
-# nextest runs). Replaces bare `flock /tmp/tidepool-ghc.lock <cmd>`.
+# Counted-semaphore lock for GHC-heavy TEST work (--ignore-default-filter
+# nextest runs and anything that FANS OUT extract compiles). Replaces bare
+# `flock /tmp/tidepool-ghc.lock <cmd>`.
+#
+# TOOLCHAIN BUILDS ARE OUT OF SCOPE (reclassified 2026-08-09): a
+# `cabal build tidepool-extract-bin` is ONE bounded GHC chain — run it
+# UNBROKERED as `nice -n 15 cabal build -j4 ...` (the same envelope as
+# pure-Rust cargo work), at most one per lane. The queue exists to cap
+# extract FAN-OUT; a 3-minute build queuing behind an 88-minute suite was
+# the V2 priority inversion surviving one category over. Long suite runs
+# should SHARD their acquisitions (-E per binary/group, battery-shard
+# discipline) so no single hold runs to an hour where receipts allow.
 #
 #   scripts/ghc-slots.sh run -- <cmd...>        acquire ONE of N slots, run, release
 #   scripts/ghc-slots.sh detach -- <cmd...>     same, but in its OWN SESSION via
