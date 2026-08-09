@@ -25,9 +25,44 @@ Mechanical resolutions are logged and moved past.
 
 | Z2 | 2026-08-08 | `merge` into `root.realm-spike` | `root.realm-spike.leakcmp` | 2 files: `plans/post-restart/spike-notes/realm-leak-comparison.md`, `tidepool-codegen/tests/realm_leak_comparison.rs` | Clean. Second lane to add a file under `spike-notes/` and a file under `tidepool-codegen/tests/` — same two directories `lifetime` had already written to. Sibling files in a shared directory do not conflict; only same-file hunks do. Worth stating, since directory-level overlap is what timid partitioning usually optimizes against. |
 
+| Z3 | 2026-08-08 | `git rebase root.realm-spike` (proto lane, before `submit_branch`) | `root.realm-spike.proto` | rebased 3 commits over Z1+Z2; overlap was `tidepool-codegen/src/jit_machine.rs` (both sides) and `tidepool-codegen/tests/` (sibling files) | Clean, 0 minutes. **The sharpest data point of the experiment: the first case where two lanes edited the SAME FILE concurrently and substantially.** `lifetime` added two accessors before `is_suspended`; `proto` added ~330 lines to the same `impl` block — registry types above the struct, two fields inside it, new methods after `run_child_fragment_pure` — plus a parameter change to `finish_suspendable` and two call sites. Zero conflicts, because the hunks landed in different regions of a 3400-line file. Same-file overlap is not same-hunk overlap, and the timidity this experiment tests conflates them. (Transcribed from the proto branch, which stays unmerged — the parent cannot observe a child's own rebase.) |
+
 ## Running tally
 
 - Conflicting folds: 0
-- Zero-conflict folds: 2
+- Zero-conflict folds: 3 (Z1, Z2 folds; Z3 rebase)
+- Same-file concurrent edits: 1 (Z3, `jit_machine.rs`) — still zero conflicts
 - Total resolution minutes: 0
 - Sides dropped: 0
+
+## Reading of the experiment (TL)
+
+Four lanes, three of which edited `tidepool-codegen/src/jit_machine.rs`
+concurrently, produced **zero conflicts and zero resolution minutes**. The
+lane was launched to test whether we are too timid about merge conflicts; on
+this evidence, we are.
+
+The mechanism is worth naming precisely, because the wrong lesson is "conflicts
+don't happen." What actually happened:
+
+1. **Same-file is not same-hunk.** `jit_machine.rs` is 3400 lines. Three lanes
+   appended to different regions — an accessor block, a struct's field list, a
+   new method cluster — and git resolved all of it positionally.
+2. **Additive-sibling specs did the real work.** Every lane was scoped to add
+   rather than restructure, which is the discipline
+   `recursive-tl-dev-review-loop` already prescribes. The cheap outcome here is
+   evidence FOR that spec discipline, not evidence that spec discipline is
+   unnecessary.
+3. **The one predicted collision is the one nobody hit.** `proto` identified
+   `resident.rs:196` as a Track-1 site where lifting the `ChildSuspended` wall
+   WILL collide with the extract wave — and correctly did not touch it, because
+   step 5 was optional and it ran out of budget, not because it was avoiding the
+   file. So the experiment did not actually test a restructuring-vs-restructuring
+   overlap. That remains unmeasured.
+
+Honest bound on the conclusion: this measures **additive concurrent work on one
+large file**, which is cheap. It does not measure two lanes rewriting the same
+function, or a lane rebasing across another's signature change to a
+widely-called function. `proto` did change `finish_suspendable`'s signature and
+that still cost nothing — but it had only two call sites, both in the same file.
+The timidity worth keeping is about shared narrow interfaces, not shared files.
