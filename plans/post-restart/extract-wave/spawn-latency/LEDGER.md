@@ -269,10 +269,56 @@ was chosen as a constructor **only `recordDC` supplies** — a claim about
 metadata SOURCES. That is not the same as being **emitted**, which is what CHECK
 A keys on. The two can come apart.
 
-**(3) is HELD** until the mutation is re-run with B downgraded and its output
-names CHECK A. If it names B, the site is re-chosen to a genuinely emitted
-DataCon — and that is a finding about the original site selection, recorded as
-such, not a quiet re-siting.
+**(3) was HELD** until the mutation was re-run with B downgraded and its output
+named CHECK A.
+
+### RESOLVED — both legs name CHECK A, verified under the NEW shape
+
+**Two legs, two constructors, two call sites, both naming CHECK A.** That is the
+load-bearing line: one site firing could be a property of that site; **two
+independent sites firing is a property of the check.**
+
+- knob (`TIDEPOOL_TEST_DROP_DC`), `GHC.Internal.Base.:|` — run against the
+  binary with all three changes applied. `CHECK A ... FAILED`, EXIT=1, output
+  dir empty.
+- physical deletion (worker-path `recordDC`), `GHC.Num.Integer.IS` — same
+  message shape, `DELETED_LEG_EXIT=1`, output dir empty. `git status` restore
+  proof captured in the same run, scoped and full-repo, both empty.
+
+Mechanism established rather than asserted: `:|` is genuinely EMITTED (confirmed
+via `TIDEPOOL_DUMP_CLOSED` as a real `Con`/`DataAlt` in closed Core), unlike
+`(#,#)` which desugars into chained primops and never reaches the wire. So
+dropping its only `recordDC` supplier removes it from metadata while it is still
+on the wire — precisely CHECK A's contract. That converts "the test happens to
+fire A" into "the test fires A for the reason CHECK A exists".
+
+**Still PROVISIONAL, to confirm against the diff at fold:** the dev's argument
+that the physical-deletion leg needs no re-run rests on all three changes
+touching only `collectReachableConDCs` and B's severity, leaving CHECK A's path
+invariant. Sound conditional on that premise — which is a claim about code on
+its branch that I cannot see. **A mechanism claim from someone closer to the
+code is input, not verification.** If the diff shows any of the three touching
+CHECK A's path, that leg is re-run at fold.
+
+### Blast radius of the downgrade — bounded structurally, not by search
+
+**CHECK B is NEW to this item** (the codex review's finding was that the defense
+did not exist). So nothing predating this landing can depend on its fatality,
+and the downgrade's blast radius is exactly the tests this item wrote: the four
+`Fidelity.D1Defense` checks and the two mutation legs.
+
+Stronger than "only negative tests are at risk", because it does not stake the
+claim on a grep being exhaustive — a search can silently return a plausible
+wrong answer, so **do not stake a claim on a search when another route exists.**
+The grep (Haskell `exitFailure` hits are all runner plumbing; Rust `is_err()`
+sites assert runtime/JIT errors) is corroboration, not foundation.
+
+**Receipt must attribute re-runs to the right cause:** two mutation legs plus
+the D1Defense group on account of the DOWNGRADE; `corpus_report`, acceptance,
+quick tier and fidelity on account of `--no-fail-fast` and confirming the four
+previously-failing acceptance tests now pass. Different reasons — a receipt that
+does not say which applies to which lets a later reader assume the downgrade
+forced all of it and over-estimate its blast radius.
 
 ## Denominators, and "keep in sync" is not a guard
 
