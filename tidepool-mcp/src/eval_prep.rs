@@ -158,10 +158,15 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
 /// vocabulary-only effect breaks the compile at the DEFINITION site, the
 /// opposite of the goal. A row-POLYMORPHIC helper (`foo :: Member E effs =>
 /// A -> Eff effs B`, [`EffectDecl::helpers_row_polymorphic`]) typechecks
-/// regardless of the row and fails at the intended USE site instead — so a
-/// vocabulary-only effect's helpers are emitted ONLY when it declares itself
-/// row-polymorphic. Concretely: emit an effect's helpers when it is in
-/// `row_effects` OR `helpers_row_polymorphic` is `true`.
+/// regardless of the row and fails at the intended USE site instead. The
+/// exact gate is [`emits_helpers_for`] — any consumer asking "were this
+/// effect's helpers actually emitted" (e.g. to decide whether a generated
+/// import needs a `hiding` clause for a name one of those helpers would
+/// otherwise shadow) MUST call it rather than restate the condition: it is
+/// keyed on `row_effects`, NOT `vocab_effects` (the two agree for a
+/// helpers_row_polymorphic-true effect but diverge for every other one, and
+/// the superset invariant above means a vocab-with/row-without effect's
+/// helpers are never emitted).
 ///
 /// **A vocabulary-only PARAMETERIZED effect (non-empty `type_params`) is
 /// rejected loudly** — `Finalize <hole type>`-shaped effects have no
@@ -265,13 +270,10 @@ pub fn effects_module_source_with_vocab(
         out.push_str(&format!("type M = Eff {}\n\n", row_type(row_effects, row)));
     }
 
-    // Thin effect helpers (send-wrappers and recipes) — emitted for an effect
-    // in the row (its `-> M x` helpers only typecheck there) OR one that
-    // declares its helpers row-polymorphic (`Member E effs =>`, typechecks
-    // regardless of the row — see `EffectDecl::helpers_row_polymorphic`).
+    // Thin effect helpers (send-wrappers and recipes) — see emits_helpers_for
+    // for the exact gate.
     for eff in &effects {
-        let in_row = row_effects.iter().any(|r| r.type_name == eff.type_name);
-        if !(in_row || eff.helpers_row_polymorphic) {
+        if !emits_helpers_for(eff, row_effects) {
             continue;
         }
         for h in eff.helpers {
@@ -280,6 +282,26 @@ pub fn effects_module_source_with_vocab(
         }
     }
     out
+}
+
+/// THE gate for whether [`effects_module_source_with_vocab`] emits an
+/// effect's `helpers` — in the row, or declared safe everywhere via
+/// [`EffectDecl::helpers_row_polymorphic`]. Exported so a consumer asking
+/// "was this effect's helper actually emitted" (e.g. deciding whether a
+/// generated import needs a `hiding` clause for a name one of those helpers
+/// would otherwise shadow) calls the real gate instead of restating it — a
+/// restated copy can silently diverge the moment an effect's
+/// `helpers_row_polymorphic` flag changes; this one cannot, because it IS
+/// what `effects_module_source_with_vocab` calls.
+///
+/// Keyed on `row_effects`, deliberately NOT `vocab_effects` — see
+/// [`effects_module_source_with_vocab`]'s doc comment for why they diverge.
+/// `pub(crate)`, not `pub`: its only known consumers (this module, and
+/// worktree-wave's L4 in `tidepool-mcp` itself) are in-crate — widen only
+/// when an out-of-crate consumer actually needs it.
+#[must_use]
+pub(crate) fn emits_helpers_for(eff: &EffectDecl, row_effects: &[EffectDecl]) -> bool {
+    row_effects.iter().any(|r| r.type_name == eff.type_name) || eff.helpers_row_polymorphic
 }
 
 /// Does eval source splice a tidepool quasi-quoter? Exact token match:
