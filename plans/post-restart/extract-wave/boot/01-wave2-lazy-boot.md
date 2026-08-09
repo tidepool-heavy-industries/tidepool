@@ -1,11 +1,14 @@
 # Wave 2 — `boot-lazy`: item 0 steps 1–3 (+6)
 
-**Status: HELD** on the wave TL's go-signal (waiting on `root.harness-lifecycle`
-folding into `root.extract-wave`, which brings the async `SelfHarnessDriver`).
-Every anchor below is re-derived against the POST-async file
-(`git show root.harness-lifecycle:<path>`), NOT against the pre-async copy in
-this worktree. Do not start before the go-signal, and re-verify each anchor
-after the base merge — a fold shifts lines.
+**Status: GO** (2026-08-09). The base merge has landed —
+`root.extract-wave` @ `2e34ed10` (which carries `harness-lifecycle`'s async
+driver rewrite, the F2 registry unification, and the F2/phase-b conflict
+resolution) is merged into this branch at `83cf03c7`.
+
+Every line number below was re-derived by grep **in this worktree, after that
+merge**, not carried over from an earlier read. They drifted twice already
+during the hold; a line number is only true against a named commit. Re-grep
+before you trust any of them.
 
 ## Goal
 
@@ -31,8 +34,10 @@ has ruled the cache interim OFF for this lane.
 | `tidepool-repl/src/session.rs` | 975, 1105, 1257, 1327, 1469, 2002 | the REPL's bootstrap-from-first-real-compile. **This is the pattern to mirror.** |
 | `tidepool-harness/src/harness.rs` | 416 | the `boot: Arc<compile::CompiledTurn>` field. |
 | `tidepool-harness/src/harness.rs` | 444–486 | `Harness::new` — builds `boot_src` (457), `compile_turn` (460), stores it (486). **Seed #2.** |
-| `tidepool-harness/src/harness.rs` | 806–827 | `force()` — the ONLY production consumer of `self.boot` (817–819). |
-| `tidepool-harness/src/harness.rs` | 3251, 3294 | test fixtures fabricating a `boot` field; 3320 `fake_session`. |
+| `tidepool-harness/src/harness.rs` | 806 | `force()` — the ONLY production consumer of `self.boot`; its `ResidentSession::bootstrap` call is at 817–819. |
+| `tidepool-harness/src/harness.rs` | 3251, 3294 | test fixtures fabricating a `boot` field. |
+| `tidepool-harness/src/harness.rs` | 3315 | `fake_session` (its `ResidentSession::bootstrap` at 3320). |
+| `tidepool-harness/src/harness.rs` | 3012, 3068 | `checkout_run` / `run_checked_out` — the CURRENT session-ownership API. |
 | `tidepool-harness/src/selfharness/driver.rs` | 547 | `SelfHarnessDriver::bootstrap` (still sync post-async). |
 | `tidepool-harness/src/selfharness/driver.rs` | 566–588 | `boot_src` + `compile_turn`. **Seed #1.** |
 | `tidepool-harness/src/selfharness/driver.rs` | 600 | `crate::harness::Session::bootstrap(&boot.expr, boot.table, …)`. |
@@ -48,7 +53,26 @@ has ruled the cache interim OFF for this lane.
   byte-identical to pre-async apart from `async` on their callers.
 
 So the hook does not move: **the first real run is still where the machine
-should boot.** Recorded because the wave TL asked specifically.
+should boot.** Recorded because the wave TL asked specifically. Re-confirmed
+after the `2e34ed10` base merge: every `driver.rs` anchor held to the line.
+
+## Session ownership changed under this spec — read before you start
+
+`take_session` / `put_session` **no longer exist** (zero occurrences under
+`tidepool-harness/src/`, verified post-merge). Ownership is now
+`checkout_run` / `run_checked_out` over `SessionRegistry`
+(`harness.rs` 3012 and 3068; `registry.rs` ~150).
+`tidepool-harness/CLAUDE.md`'s ownership section (~lines 51–71) is current
+again — **read it first.**
+
+**Root's standing instruction, in force, verbatim: if your work produces a
+compile error naming `take_session` or `put_session`, convert the call site —
+never restore the methods.** That loud failure is the merge design working.
+
+This interacts with the fixture work in step 3: the three `boot`-fabrication
+sites now sit in a file whose session handling was rewritten around them.
+Re-read them before deciding the `#[cfg(test)]` shape — the right answer may
+have gotten simpler.
 
 ## Steps
 
