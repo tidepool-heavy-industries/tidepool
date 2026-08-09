@@ -480,8 +480,9 @@ managed worktree, and a real commit/HEAD transition.
 - **Handler/realm:** repeated callbacks, suspension, queue/drain/failure rules,
   and bounded overflow behavior.
 - **Durability:** restart lookup, loss reporting, and never-delete policy.
-- **Exomonad:** execute the human-guided decision record, prototype/extract the
-  chosen UDS/watcher seam if warranted, and retain comparative receipts.
+- **Exomonad migration/review:** execute the human-guided property review,
+  implement the selected guarantees Tidepool-natively, and retain comparative
+  receipts while moving Exo workflows onto dev-tree.
 - **Dogfood:** make `dev-tree/` compile and exercise parent poke -> native
   rebase -> child head event -> bottom-up LLM merge in a disposable repository.
 
@@ -489,7 +490,8 @@ managed worktree, and a real commit/HEAD transition.
 
 Converge only after receipt suites exist. Keep the public vocabulary small:
 creation/specification, lookup, workspace conversion, `commit`, `headChanged`,
-and `withHandler`. Keep choreography in residents and ordinary libraries.
+`worktreeHead`, and `withHandler`. Keep choreography in residents and ordinary
+libraries.
 
 ## Acceptance criteria
 
@@ -510,16 +512,14 @@ and `withHandler`. Keep choreography in residents and ordinary libraries.
 8. Polling remains correct without hooks; a hook adapter is only a wake-up.
 9. `dev-tree/Harness.hs` typechecks and proves parent-to-child typed rebase
    pokes plus bottom-up LLM-led integration in a disposable repository.
-10. The human-guided Exomonad integration decision record is complete and its
-    adopted behavior has Tidepool-local tests/receipts.
+10. The human-guided Exomonad migration/review record is complete and each
+    retained reliability property has Tidepool-local tests/receipts.
 
 ## Deferred questions
 
-1. GC/archive/delete interface and retention budget.
-2. Durable Agent handles across resident cycles, distinct from durable
-   worktree IDs.
-3. Exact Git hook protocol, environment-scoped `core.hooksPath` strategy,
+1. Exact Git hook protocol, environment-scoped `core.hooksPath` strategy,
    authentication token, and timeout.
-4. Richer events: dirty/clean, conflicts, checks, branch movement, and external
+2. Richer events: dirty/clean, conflicts, checks, branch movement, and external
    file changes. Add only when a real resident needs them.
-5. Cross-process Exomonad orchestration beyond this reviewed integration lane.
+3. GC/archive/delete interface and retention budget for durable agents and
+   worktrees, once measurement justifies one.
