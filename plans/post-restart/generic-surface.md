@@ -132,6 +132,24 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
    REPLACEMENT rather than an addition — forms were sequenced ahead of it
    precisely because they are additive.
 
+   **The current codec has CONFIRMED silent-corruption paths** (external
+   review, 2026-08-08). These are the concrete case for the
+   loudness-as-a-test requirement — not a hypothetical risk to guard
+   against, a list of live defects to fix and pin:
+   - `Nothing`, `Just x` and unit all collapse to `null` (`render.rs:127`).
+   - Three different constructor encodings emitted, while Haskell expects
+     `tag` (~`render.rs:259`).
+   - `Maybe` null-decode loses `Just ()` and nested `Just Nothing`.
+   - `ToJSON ()` emits `null` while `FromJSON ()` accepts only `[]`.
+   - Sentinel STRINGS instead of errors at depth limits.
+   - Scientific components defaulting to zero.
+
+   Golden-test matrix, derived from that list: nested `Maybe`, unit,
+   non-finite numbers, mixed-constructor sums, recursion, unknown fields,
+   depth overflow. Each case must produce either a correct round trip or a
+   LOUD typed decode error naming the codec change. A silent misparse is
+   the one unacceptable outcome, and "loud" is a test, not an intention.
+
 ## VERIFY
 
 - `cargo check --workspace` after every fold; quick tier
@@ -162,9 +180,21 @@ children's merge-bases. Four things must happen at that boundary:
    product literal is fine, literal-vs-literal sums are fine, `show` of a
    derived sum is fine, all 12 types render correctly individually. ONLY
    derived-sum vs sum-literal traps. Its shape tests assert exact
-   RENDERINGS instead, so coverage is unchanged either way. If the `==`
-   form still traps on the fixed tip it is a real bug with a 2-line repro,
-   and that repro goes straight to root.
+   RENDERINGS instead, so coverage is unchanged either way.
+
+   **What this re-run can and cannot prove** (external review, 2026-08-08 —
+   the original "probably ConTags" reading was wrong). The crash path is
+   not `KnownSymbol`; it is a tag-as-address escape into `FfiStrlen`
+   (`primop.rs:1976` accepts unvalidated raw SSA; ~`2642` unwraps a
+   one-field constructor and loads an address payload without requiring a
+   literal tag; `0x1` is consistent with an unboxed tag word). **ConTags
+   does not touch that path.** Therefore:
+   - Still traps → real, 2-line repro straight to root, as agreed.
+   - PASSES → this proves the REPRO MOVED, not that the defect was fixed.
+     Record it as informational. Do NOT claim discharge, and do not remove
+     the exact-rendering assertions on the strength of it.
+   The hardening fix (typed-address-only `unbox_addr`, `TAG_LIT` gate,
+   negative tests) is routed to a separate codegen dev — not this lane.
 3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
    resolved-`render` decision; root updated the checkpoint bullet. Keep
    BOTH.
