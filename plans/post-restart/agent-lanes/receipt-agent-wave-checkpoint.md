@@ -26,6 +26,7 @@ time, never concurrent).
 | `cargo clippy --workspace` | **rc=0** | `/tmp/tidepool-ghc-detach.1xl6Md.log` |
 | `cargo fmt --all -- --check` | **rc=0** (cheap, run directly — not slot-taking) | — |
 | `cargo check --workspace --all-targets` @ `9266b00d` | **rc=0**, 0 errors | `/tmp/tidepool-ghc-detach.KApx1W.log` |
+| `cargo check --workspace --all-targets` @ `f07d9e3a` | **rc=0**, 0 errors | `/tmp/tidepool-ghc-detach.b8G8s0.log` |
 
 **Why the fourth row exists.** Root's tip advanced mid-verification
 (`f0d1f6cb`, strict classify-verdict deserialization), so this branch was
@@ -41,6 +42,18 @@ not compile test targets, so it would never have touched
 `agent_mode_encoding.rs` or `agent_structural_codec.rs` — exactly where a
 `tidepool-runtime` change could bite. The earlier rows were run before that
 commit landed and are retained as the record of the pre-rebase tree.
+
+The fifth row is the same discipline applied a second time: root's tip
+advanced again to `bb8606cc` (wave-1.5 dogfood observability), which is a real
+code commit touching `tidepool-harness` and `tidepool-runtime/src/session/mod.rs`.
+Rebased and re-checked rather than resubmitting on a stale sha. **`f07d9e3a` is
+the row that validates the tree actually being handed up**; the rows above it
+are history.
+
+Root's tip moved three times during this submit. Each time the question asked
+was "did *code* move", not "did the tip move" — the docs-only advance
+(`1cd82195` and siblings) was folded into the handoff without a re-check,
+while the two code advances each got one.
 
 Clippy emitted exactly two warnings, both `large size difference between
 variants`, in `tidepool-codegen` (lib) and `tidepool-harness` (lib). **Zero
