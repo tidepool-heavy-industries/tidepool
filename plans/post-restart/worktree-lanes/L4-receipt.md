@@ -206,6 +206,20 @@ unambiguous. **Owed at retarget:** move the conditional into
 mismatched-pair gates. Until those exist, the conditionality evidence below
 covers only the matched pair and is honestly weaker than it will be.
 
+**The failure mode this owed item has, stated because it is the dangerous
+kind.** Where the edit currently sits it is correct-but-non-discriminating: the
+old entry point passes the same list twice, so it cannot misbehave today AND
+cannot fail loudly tomorrow. Moved mechanically by someone who does not read
+the call-site comment, it would simply end up silently keyed on the wrong
+thing. There is no build error and no failing test waiting to catch that — only
+a wrong preamble in the mismatched pairs. So this item is carried in three
+places on purpose: the call-site comment (reaches the person doing the move),
+this receipt, and the `[READY]` note at submit (reaches the fold, rather than
+arriving after it). Independently recorded by worktree-wave in
+`plans/post-restart/worktree-lanes/GATES.md` (`f24a9974`), which makes it
+durable outside this worktree — but it remains this lane's to complete or to
+hand over explicitly, not something the external record discharges.
+
 Conditionality is additionally pinned in the fast tier by
 `repoevent_row_hides_the_prelude_alternative` and
 `non_repoevent_row_leaves_the_prelude_import_untouched` — the second is the
