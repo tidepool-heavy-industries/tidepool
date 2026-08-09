@@ -23,8 +23,26 @@ Recipe (Codex's, endorsed):
 2. First real run compiles the machine entry directly (mirror REPL).
 3. Delete both seed compiles.
 4. Emit render + loop from ONE extract invocation — `compile_turn` is
-   single-target today (`{target}.cbor`, compile.rs:95); multi-target is
-   Phase B's multi-binder machinery.
+   single-target today (`{target}.cbor`, compile.rs:95).
+
+   > **CORRECTED 2026-08-08 (codex review item 10; verified by the
+   > extract-wave TL).** This step previously read "multi-target is Phase B's
+   > multi-binder machinery". **That machinery does not exist.** Phase B
+   > explicitly DEFERRED the `writeWholeModuleClosed` work to a successor
+   > (`one-spawn-turn-protocol-phase-b.md:99`), and the writer still accepts
+   > exactly ONE target: `writeWholeModuleClosed … -> String -> String -> IO …`
+   > takes a single `targetName` (`Main.hs:333`), and the CLI has `--target`
+   > (one name) and `--all-closed`, no `--targets` (`Main.hs:136/138`).
+   > Consequence: all four boot compiles are still live (answerer seed
+   > `harness.rs:455`, outer seed `driver.rs:560`, render, loop).
+   >
+   > **The route:** `--all-closed` already proves ONE `runPipeline` invocation
+   > can translate several top-level binders (`Main.hs:185`). Adapt that loop
+   > into a STRICT explicit-target mode (e.g. `--targets render,loop`) rather
+   > than inventing multi-target extraction from scratch. Unlike the
+   > fixture-oriented `--all-closed`, it MUST fail if EITHER requested target
+   > fails, and MUST preserve per-target asks/warnings. This is a prerequisite
+   > work item inside item 0, on the `Main.hs` writer side.
 5. Outer machine boots from render; loop lands as the second JIT
    function in the same machine.
 6. Answerer session created lazily; its first model-written block boots

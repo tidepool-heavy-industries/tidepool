@@ -48,8 +48,23 @@ in both lanes proceeds concurrently.
 recipe — unbootstrapped `ResidentSession` constructor over the
 already-lazy `PersistentSession`, first real run boots the machine
 (mirror the REPL), DELETE both boot seeds, render+loop in one extract
-invocation (needs Phase B's multi-binder — hence the gate above),
-answerer boots from the model's first block. Supersedes D7's
+invocation, answerer boots from the model's first block.
+
+> **PREMISE CORRECTED 2026-08-08** (codex review item 10; verified). This
+> entry previously said render+loop "needs Phase B's multi-binder". **No such
+> machinery exists** — Phase B deferred the `writeWholeModuleClosed` work to a
+> successor and the writer still takes ONE `targetName` (`Main.hs:333`; CLI has
+> `--target`/`--all-closed`, no `--targets`). Building a STRICT explicit-target
+> mode by adapting the `--all-closed` loop (`Main.hs:185`) is a PREREQUISITE
+> work item inside item 0. It must fail if EITHER target fails and must
+> preserve per-target asks/warnings. Full detail in
+> `one-compile-bootstrap.md`'s step 4.
+>
+> **Sequencing (extract-wave TL's call, reported to root):** the hard
+> dependency is step 4's, not steps 1–3's. Seed deletion does not consume
+> multi-target, so wave 2 (`boot-lazy`, in flight) continues; `--targets`
+> lands as its own item before wave 3 (`boot-onecompile`), which cannot start
+> without it. Supersedes D7's
 cache-interim (step 2 of the fix ladder below) if it lands first.
 Keep separate source-level capability rows regardless.
 
@@ -126,6 +141,39 @@ setup + depanal) answers C1 directly.
 
 ### SCOPE CAVEAT on every Phase-B number (same audit)
 
+### C1 DONE CRITERION: retire `11-turn-latency-contract.md` (Inanna, via root)
+
+The doc is judged no-longer-useful — its numbers are turn-1-only and its rows
+are mislabeled, both established by the audit below. It is NOT deleted out from
+under this lane, because this lane cites it and C1 rewrites the very
+instrumentation it describes. Instead **C1 retires it**, so the doc dies at the
+moment its replacement exists and there is no window where the measurement
+machinery is undocumented.
+
+The SAME commit that fixes the phase brackets (rows mean what their names say;
+the session path emits phases) must:
+
+1. either replace the doc with a short current contract, or fold the contract
+   statement into C1's receipts;
+2. DELETE the stale file;
+3. update every reference. The full list as of 2026-08-08 — note two are in
+   CODE, not docs:
+   - `plans/one-spawn-turn-protocol.md:28`
+   - `plans/post-restart/extract-wave.md:81` (this file's own citation)
+   - `plans/post-restart/extract-wave/spawn-latency/00-spec.md:16`
+   - `tidepool-harness/examples/turn_latency_bench.rs:8`
+   - `tidepool-harness/src/timing.rs:29`
+
+`timing.rs:29` sits in the flat-stages passage that governs the `ghc_setup` /
+`ghc_load` partition, so C1 is editing that file anyway — the reference update
+lands naturally in the same change rather than as separate bookkeeping. Re-grep
+before landing; this list is dated.
+
+Until C1 lands, the doc STANDS, carrying root's correction header (03d33d1b) so
+nobody cites it naively.
+
+### SCOPE CAVEAT on every Phase-B number (same audit)
+
 `runSessionPipeline` (`GhcPipeline.hs` ~326) emits **zero** `emitPhase` calls.
 `runPipelineSession` (~106) routes there whenever `isSessionScopeActive`
 (`Session.hs` ~173: true iff any `Val.G<n>` iface is injected). So the 60/26/6
@@ -160,6 +208,55 @@ must not be taken on the normal-path numbers alone.
   reachable Core; sibling sets where rendering needs them; target/result +
   boundary + session-bound types). THE chain root — shrinks the table,
   wrapper chain, and CBOR for free.
+  **CROSS-LANE HAZARD (extract-wave TL, 2026-08-08 — D2 MUST handle this or it
+  breaks boot).** `ConTags::try_from(&DataConTable)`
+  (`tidepool-codegen/src/effect_machine.rs` ~203) requires ALL FIVE freer
+  scaffolding constructors — `Control.Monad.Freer.Val`, `.E`,
+  `Data.OpenUnion.Union`, `Data.FTCQueue.Leaf`, `.Node`
+  (`tidepool-repr/src/freer_names.rs` ~23–43) — and `?`s out if any is
+  missing. They are NOT in `wiredInDataCons` (`Translate.hs` ~2737, verified:
+  list/bool/char/unit/numeric/tuple/ordering only). For a PURE machine-entry
+  term — `pure (…)`, which is what BOTH the seed being deleted and item 0's
+  render entry are — only `Val` is reachable; `E`/`Union`/`Leaf`/`Node` are
+  not.
+  **SUPPLIER CORRECTED (spawn-latency, verified by this TL) — the first
+  attribution in this note was WRONG and dangerously so.** It said the five
+  ride in on `tyconMeta = collectDataCons tycons`. They cannot:
+  `tycons` is `mg_tcs` (a module's OWN TyCons) and the five live in the
+  freer-simple PACKAGE (`Control.Monad.Freer`, `Data.OpenUnion`,
+  `Data.FTCQueue`), which is NOT vendored under `haskell/` — verified, no
+  such source in the tree. An external package's TyCons never enter a home
+  module's `mg_tcs`, and `type M = Eff '[…]` defines a synonym, not a
+  datacon-carrying TyCon.
+  The real supplier is `collectTransitiveDCons` — the binder-TYPE closure
+  (`Translate.hs` ~1094–1129). It seeds from `idType` of every top-level
+  binder and `closeTyCons` expands through newtype reprs AND
+  `dataConOrigArgTys` field types. From any binder mentioning `Eff`: `Eff`'s
+  datacons are `Val`/`E`; `E`'s field types are `Union effs b` and
+  `FTCQueue (Eff effs) b a`, so the closure reaches the `Union` and
+  `FTCQueue` TyCons, yielding `Union` and `Leaf`/`Node`. All five, **from the
+  TYPE alone** — reachability-independent. `isGhcCompilerTyCon` does not
+  filter them.
+  **Why the correction changes what D2 protects.** Under the wrong story the
+  five ride on Core reachability, so a dev protects them by preserving the
+  home-TyCon sweep. Under the true story they are immune to any narrowing of
+  reachable Core and break ONLY if `RuntimeTypeClosure` replaces
+  `collectTransitiveDCons` — which is live, since this spec lists
+  "target/result + boundary + session-bound types" among D2's roots, reading
+  exactly like a binder-type-closure replacement. A dev following the wrong
+  warning would preserve `tyconMeta`, replace `transitiveMeta`, and ship the
+  precise break while believing they had complied.
+  **The guard is unchanged and correct under both stories:** carry the five as
+  mandatory roots, unconditionally — not "if reachable", not "if the effect
+  row is non-empty" — with a test pinning them through narrowing on a PURE
+  entry term specifically. Treat it as a D2 correctness requirement on par
+  with D1's hard fail.
+  Still traced from code, NOT measured. D2's first step is an empirical
+  attribution: dump a `meta.cbor` for a pure entry and attribute the five to a
+  source, settling it rather than leaving it argued.
+  **When D2 lands, the mandatory-roots set becomes a named, tested artifact
+  with a permanent home in the codegen or extract docs** (root's call) — not
+  folklore recoverable only from this note.
 - **C1** GHC compiles every home module twice per extract (load'
   LoadAllTargets + unconditional second parse/typecheck/core2core loop —
   GhcPipeline.hs ~165/~184; session path ~366/~387). Leading suspect for
