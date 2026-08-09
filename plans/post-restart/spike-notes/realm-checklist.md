@@ -13,12 +13,22 @@ source file was modified to produce this doc.
 **Anchor verification note:** this doc was originally written against
 `b6da8035` and rebased across root's `jit-chain-2` → `harness-interaction-surface`
 fold. Every anchor below was re-read and corrected (where drifted) against
-the post-rebase tree at `root.realm-spike` commit `feb0e0ff` (this branch's
-own commit on top is `9f4312d5`). One correction was substantive, not just a
-line-number shift: the fold's "D9" change narrowed `BindingTable::seed_external_env`
-from an unconditional every-live-binding sweep to a referenced-VarId
-intersection, which changes part of Item 2's finding — noted inline where
-it applies.
+the post-rebase tree at `root.realm-spike` commit `feb0e0ff`. One correction
+was substantive, not just a line-number shift: the fold's "D9" change
+narrowed `BindingTable::seed_external_env` from an unconditional
+every-live-binding sweep to a referenced-VarId intersection, which changes
+part of Item 2's finding — noted inline where it applies.
+
+**Method lesson worth recording plainly, not just implying:** the
+re-verification pass also caught one anchor (`resident.rs:159` in Item 5,
+now corrected to `:155`/`:163`) that was WRONG BEFORE THE REBASE — it
+pointed at a doc-comment line, not the struct/field it was actually citing
+evidence for. The rebase didn't cause this; re-deriving every citation from
+scratch caught a pre-existing imprecision that the original spec's
+"spot-check ten anchors" instruction had missed. That is a direct argument
+for full re-verification over sampling after a rebase of this size, not
+just for this doc — a spot-check finds drift, but it doesn't find a claim
+that was never right in the first place.
 
 ---
 
@@ -138,10 +148,18 @@ live:    HashMap<SessionVarId, BindingEntry>  // every still-rooted binding, inc
 It lives as ONE field on `PersistentSession` (`tidepool-runtime/src/session/persistent.rs:251`
 `bindings: BindingTable`) — one instance per session, i.e. one per machine.
 
-**Post-rebase correction, not just a line-number fix:** the fold this lane
-rebased across (`harness-interaction-surface`, landing what its own tests
-call "D9") changed `seed_external_env`'s actual behavior, not just its
-position. Pre-fold, `seed_external_env` walked `live.values()`
+**Post-rebase correction, not just a line-number fix — dated finding:** this
+paragraph and the two after it were re-derived against the tree AFTER this
+lane's rebase across `harness-interaction-surface` (verified at
+`root.realm-spike` commit `feb0e0ff`; see the conflict ledger's Z6 entry for
+the full rebase chain). They were NOT carried over from the pre-rebase
+version of this doc; a reader should treat them as current against the
+post-jit-chain-2 tree, not as a stale claim that merely survived a
+line-number fixup.
+
+The fold (landing what its own tests and commit message call "D9",
+`git show 5d070690`) changed `seed_external_env`'s actual behavior, not just
+its position. Pre-fold, `seed_external_env` walked `live.values()`
 unconditionally — every live binding in the whole session, no matter what
 the compiling fragment referenced. Post-fold it takes a `referenced: &[VarId]`
 slice and only seeds the intersection with `live`
@@ -162,12 +180,42 @@ binding is also referenced"* — and `binding_table.rs:286-300`'s
 `seed_external_env_narrows_to_only_referenced_bindings` proves the
 narrowing directly.
 
-This closes most of what would otherwise have been the sharper half of
-this item's hazard (below): since `SessionVarId`s are minted fresh per
-bind, an unrelated realm's fragment essentially never has that id in its
-own free-variable set, so the narrowed `ExternalEnv` no longer hands one
-realm's bindings to another's compiled fragment just because they share a
-machine. `add_fragment_session`/`add_child_fragment_session`
+**Deliberate, but deliberate for a different reason than realm isolation —
+checked, not assumed.** The narrowing landed as commit `5d070690` ("fix
+(codegen,runtime,repl): narrow seed_external_env to referenced bindings"),
+whose own message states the motivation plainly: pre-fold,
+`seed_external_env` "inserted EVERY live session binding into a fresh
+`ExternalEnv` on every fragment compile, proportional to total live
+bindings regardless of what the fragment touches" — a compile-time cost
+problem that gets worse as a session accumulates bindings, nothing to do
+with realm isolation or cross-realm safety. So this is NOT an incidental
+side effect that could vanish if someone touches unrelated code near it —
+it's a deliberate, tested change — but it was deliberately solving a
+DIFFERENT problem than the one this checklist cares about. The commit's own
+test (`session_seed_external_env_root_retention.rs`, referenced in its
+message) pins "narrowing the seed doesn't narrow GC-root retention," not
+"narrowing the seed keeps realm B's bindings out of realm A's compiled
+fragment." Nothing in the test suite exercises two independent binding
+scopes sharing one table, because that scenario doesn't exist yet — it's
+exactly what the realm design would introduce. **Practical consequence for
+the verdict:** the property this item leans on (VarId-keyed cross-realm
+isolation) currently holds only as a corollary of fresh-id minting plus this
+narrowing, and nothing pins that corollary directly. If the realm design
+relies on it, land a test that states the property in its own terms (two
+scopes, colliding local names, assert neither's `ExternalEnv` ever contains
+the other's `SessionVarId`) rather than inferring it from D9's own
+proportional-cost-focused tests, which could be satisfied by a future change
+(e.g. a per-fragment env cache keyed differently) that reintroduces the leak
+while still passing every test D9 added.
+
+**Which half is which, stated once for quoting:** the VarId-keyed
+`seed_external_env` layer is now CLOSE TO FREE for realm purposes — narrowed
+by a deliberate, tested (if differently-motivated) change, needing only a
+dedicated pinning test before the verdict can lean on it. The display-name
+`current`/`resolve` layer (next paragraph) is UNCHANGED and stays REAL — no
+narrowing, no realm concept, still a flat last-bind-wins map.
+
+`add_fragment_session`/`add_child_fragment_session`
 (`persistent.rs:436-453`, `:457-474`) both still funnel into
 `JitEffectMachine::add_function` (`jit_machine.rs:1291`), which resolves
 whatever `ExternalEnv` it's handed exactly as before — this pathway is
@@ -376,12 +424,16 @@ from `run_with_entry`, `run_suspendable_with_entry`,
 cleared after," which is the right shape; it's just always fed `self`'s
 one Arc.
 
-It is observed at exactly two safepoints. Re-checked directly against the
-post-rebase tree (the fold changed `host_fns/gc.rs` by 11 lines, but the
-change is entirely in `host_alloc_gc`'s alloc-retry consolidation around
-line 1165 — an unrelated allocator-path refactor into a shared
-`heap_bridge::gc_retry` helper; the cancellation safepoint below is
-byte-identical to the pre-rebase read, same lines, same logic):
+It is observed at exactly two safepoints. **Checked-and-cleared false
+alarm, recorded rather than dropped silently:** the rebase go-signal flagged
+`host_fns/gc.rs` changing by 11 lines as worth an actual re-read for this
+item, since the cancel flag is observed at the GC safepoint. Re-read
+directly against the post-rebase tree rather than trusting the diffstat —
+the 11-line change is entirely in `host_alloc_gc`'s alloc-retry
+consolidation around line 1165, an unrelated allocator-path refactor into a
+shared `heap_bridge::gc_retry` helper. The cancellation safepoint itself is
+byte-identical to the pre-rebase read, same lines, same logic — the
+question was worth asking, and the answer is no impact:
 
 - The effect-dispatch boundary inside `drive_effect_loop`
   (`jit_machine.rs:2652`: `if cancel_flag.load(Relaxed) { … Cancelled … }`),
@@ -565,7 +617,7 @@ new dynamic-dispatch layer — either way, new machinery, not a field move.
 | # | Item | Machine-global or per-computation (today) | Cost rating |
 |---|------|---------------------------------------------|--------------|
 | 1 | `pending` (suspension bookkeeping) | Machine-global (`Option`/`usize` singletons); GC-root list side is already N-ready | **REAL** |
-| 2 | Binding/decl planes | Machine-global `current` (display-name) map, no realm key; `seed_external_env`'s VarId-keyed sweep is already narrowed by D9 (post-rebase finding) | **REAL** (narrower post-D9) |
+| 2 | Binding/decl planes | Two halves: `current` (display-name) map is machine-global, unchanged, no realm key; `seed_external_env` (VarId-keyed) is deliberately narrowed by D9 (commit `5d070690`, motivated by compile cost, not realm isolation) | **REAL** for `current`; VarId half close to **FREE** pending a dedicated pinning test |
 | 3 | Finalized + bound root slots | Machine-global (single `Option<RootSlot>` × 2); window closed today by sequencing, not luck | **MECHANICAL** |
 | 4 | Cancellation | Machine-global (one `Arc<AtomicBool>` per machine); re-install pattern already per-run | **MECHANICAL** |
 | 5 | Effect roster + suspend threshold | Threshold is per-call at the JIT API but session-cached to one value; handler dispatch is type-monomorphized to one row | **REAL** |
