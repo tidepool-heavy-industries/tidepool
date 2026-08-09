@@ -97,7 +97,7 @@ language-level error reaches a signal.) Two variants are NOT emitted:
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
 handled by the eval oracle (`tidepool-eval/src/eval.rs:1544`) but NOT the JIT.
 The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
-(checked 2026-07-07), so this gap isn't exercised today; if the generator is
+(checked 2026-07-07, re-verified 2026-08-08: zero SeqOp references in tidepool-testing/src), so this gap is not exercised today; if the generator is
 extended to cover it, either implement `SeqOp` in the JIT or exclude it from
 generation explicitly.
 
