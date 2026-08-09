@@ -64,6 +64,20 @@ fn extract_available() -> bool {
             .is_ok()
 }
 
+/// Panic loudly instead of skipping (which nextest reports as PASS) when
+/// `TIDEPOOL_EXTRACT` isn't reachable. This GHC-tier suite is excluded from
+/// the default nextest filter, so this only fires on a direct
+/// `--ignore-default-filter` invocation missing the environment.
+fn require_extract() {
+    if !extract_available() {
+        panic!(
+            "TIDEPOOL_EXTRACT not set — this GHC-tier test cannot run vacuously. Set \
+             TIDEPOOL_EXTRACT (or run inside `nix develop`), or run via scripts/battery.sh, \
+             which derives it."
+        );
+    }
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -363,12 +377,7 @@ impl Drop for ChildGuard {
 /// finishing."
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    require_extract();
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
     let cache_home = scratch.path().join("xdg-cache");
