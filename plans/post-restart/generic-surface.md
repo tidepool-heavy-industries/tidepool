@@ -71,12 +71,17 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
     time already spent while freeing the slot no sooner than finishing —
     kill only known-void work (wrong branch, wrong command, already
     superseded), otherwise drain it and read the result.
-  - **Watching a detached run: poll the PID, not a log marker.**
-    `ghc-slots.sh detach` echoes the full command into its log, so any
-    sentinel string inside that command is present from the log's FIRST
-    line — `until grep -q "===DONE===" log` fires instantly and reports a
-    still-running job as finished. Poll `kill -0 <pid>` instead, or match a
-    marker at line start that the command text cannot contain.
+  - **Watching a detached run: read the log RAW, and poll the PID.**
+    Two traps, both hit in one session. (a) `ghc-slots.sh detach` echoes the
+    whole command into its log, so a sentinel inside that command matches
+    from line one — a `grep -q "===DONE===" log` watcher reports a running
+    job as finished. Poll `kill -0 <pid>`. (b) A noise filter can remove the
+    SIGNAL: `grep -v "^ghc-slots: acquired"` strips the one line reporting
+    acquisition, leaving the earlier "all slots busy — blocking" line to be
+    misread as current state. The log is two lines; read it whole. `fuser`
+    on the slot files does NOT show flock holders here and will report every
+    slot free while all six are held — scan `/proc/*/fd` for the slot paths
+    instead, or just look at the process's own descendants.
   - **Name the INSTRUMENT beside any number.** A receipt states what
     produced a count, not only the count. An instrument that identifies its
     referent structurally (an in-code counter, a test that fails on
