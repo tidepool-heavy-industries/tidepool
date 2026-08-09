@@ -34,7 +34,7 @@ use tidepool_repr::PrimOpKind;
 ///
 /// This is a runtime *domain* error, routed through the same `runtime_error`
 /// machinery as a Haskell `error` call — NOT a bare Cranelift `trap` (`ud2` →
-/// SIGILL), which used to crash the whole process on a divide by zero instead
+/// SIGILL), which would crash the whole process on a divide by zero instead
 /// of yielding a catchable error.
 fn emit_div_zero_check(
     sess: &mut EmitSession,
@@ -2682,12 +2682,12 @@ fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut Functio
 /// so an arbitrary multi-field Con can never be silently unwrapped.
 ///
 /// Returns the final (non-Con) heap value — NOT yet known to be a `TAG_LIT`
-/// of any particular class. This is the loop `unbox_addr` and
-/// `unbox_bytearray` used to duplicate independently; callers apply their
-/// own class-specific guard afterward (`unbox_addr`'s address-class check,
-/// `unbox_bytearray`'s array-class check) before reading the payload — the
-/// accepted literal classes and payload-offset adjustment genuinely differ
-/// per consumer, so only this shared traversal is factored out.
+/// of any particular class. Shared by `unbox_addr` and `unbox_bytearray`;
+/// each applies its own class-specific guard afterward (`unbox_addr`'s
+/// address-class check, `unbox_bytearray`'s array-class check) before
+/// reading the payload — the accepted literal classes and payload-offset
+/// adjustment genuinely differ per consumer, so only this traversal is
+/// shared.
 fn unwrap_boxing_chain(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -2778,15 +2778,14 @@ fn emit_array_raw_kind_trap(
 ///   the emitter itself when it produced the value) — anything else is
 ///   rejected via [`emit_addr_raw_kind_trap`] without ever treating the raw
 ///   bits as a pointer.
-/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons (as
-///   before), but the final payload MUST land on a `TAG_LIT` object whose
-///   `lit_tag` is one of the address-carrying classes (`String#`/`Addr#`/
-///   `ByteArray#`) before its payload is loaded as an address. A stray tag
-///   word or a Lit of an unrelated class (e.g. `Int#`) traps cleanly via
-///   `runtime_shape_trap` instead of being dereferenced — this is the fix
-///   for the escape described in codex-review-2026-08-08.md item 1, where a
-///   Con's single field was loaded and used as an address with no literal-
-///   tag check at all.
+/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons, but the
+///   final payload MUST land on a `TAG_LIT` object whose `lit_tag` is one of
+///   the address-carrying classes (`String#`/`Addr#`/`ByteArray#`) before its
+///   payload is loaded as an address. A stray tag word or a Lit of an
+///   unrelated class (e.g. `Int#`) traps cleanly via `runtime_shape_trap`
+///   instead of being dereferenced: without this check, a Con's single field
+///   could be loaded and used as an address with no literal-tag validation
+///   at all.
 fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
         SsaVal::Raw(v, tag) => {
@@ -2802,9 +2801,8 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
             // Guard the final load: v_final is only guaranteed NOT to be a
             // 1-field Con wrapper — it could be a Thunk, Closure, or a Lit of
             // an unrelated class (e.g. an Int#/Word# tag word that escaped
-            // case dispatch — the f137d34-shaped witness this hardens
-            // against). Require TAG_LIT and an address-carrying lit-tag
-            // before loading LIT_VALUE_OFFSET as an address.
+            // case dispatch). Require TAG_LIT and an address-carrying
+            // lit-tag before loading LIT_VALUE_OFFSET as an address.
             let obj_tag = builder
                 .ins()
                 .load(types::I8, MemFlags::trusted(), v_final, 0);
@@ -2904,10 +2902,10 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
 ///   array-carrying classes (`String#`/`ByteArray#`/`SmallArray#`/`Array#`)
 ///   before its payload is loaded as a buffer pointer. A stray tag word or a
 ///   Lit of an unrelated class (e.g. `Int#`) traps cleanly via
-///   `runtime_shape_trap` instead of being dereferenced — this closes the
-///   `unbox_addr`-shaped gap named in codex-review-2026-08-08.md item 1's
-///   follow-up: `unbox_bytearray` had its own con-unwrap loop with no final
-///   `TAG_LIT` check at all.
+///   `runtime_shape_trap` instead of being dereferenced: without this check,
+///   the final payload could be read as a buffer pointer with no `TAG_LIT`
+///   validation at all — the same class of gap `unbox_addr` above guards
+///   against.
 ///
 /// Note `Addr#` is deliberately NOT an accepted class here (unlike
 /// `unbox_addr`, which accepts `ByteArray#`): an `Addr#` literal's payload is
@@ -3112,10 +3110,10 @@ fn unbox_numeric(
             //   * F64 double unbox → DOUBLE only;
             //   * F32 float  unbox → FLOAT only.
             // Anything else is rejected: a pointer-valued STRING / BYTEARRAY /
-            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS — the original
-            // f137d34 witness Str("")), a non-Lit object, OR a numeric lit of
-            // the wrong float/integer class (e.g. a DOUBLE response forced by an
-            // Int# continuation — witness Double(3.5), whose IEEE-754 bits would
+            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS, e.g.
+            // `Str("")`), a non-Lit object, OR a numeric lit of the wrong
+            // float/integer class (e.g. a DOUBLE response forced by an Int#
+            // continuation — `Double(3.5)`, whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
             // runtime_shape_trap (kind LitClass) instead; the poison object it
             // returns is loaded from below, but the pending RuntimeError is
