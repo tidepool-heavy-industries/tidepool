@@ -233,6 +233,46 @@ vocabulary-without-row story wants. This is the discipline the parking contract
 imposes on handled prefixes, for the same reason: one source of truth makes the
 disagreeing case unconstructible rather than a responsibility to discharge.
 
+**Ownership topology, as ratified.** Sharing the condition means touching
+boot-vocab's helper-emission loop, which is a larger claim than "add a
+conditional hiding term" and was flagged upward as one rather than folded into
+the word "retarget". Resolution: **boot-vocab extracts the condition in its own
+lane, pre-fold; this lane lands ONLY the hiding term, keyed on whatever
+function boot-vocab exposes.** That makes the cross-lane edit vanish rather
+than merely making it reviewable. The condition is never restated locally —
+not even if boot-vocab's spelling is inconvenient — because the single-source
+property is the entire point and survives only by calling their expression.
+
+If boot-vocab were to decline single-sourcing, the ratified default is that a
+"keep in sync" comment is not an acceptable substitute here: a comment is
+precisely the mechanism that fails silently when the two copies diverge, since
+the divergence produces a wrong preamble rather than a build error.
+
+### Verification, done BEFORE landing
+
+Root split verification from landing so the reversal would not ship unverified.
+The four gates ran in a DISPOSABLE `git worktree` at `d6fce023` (extract-wave's
+boot-vocab ref), which was then removed — nothing from another wave's branch
+entered this lane's diff.
+
+Hazards handled in that scratch tree, because a disposable worktree is still a
+worktree: its `.config/nextest.toml` was CHECKED at `max-threads = 1` (not
+assumed); everything was invoked through the absolute
+`/home/inanna/dev/tidepool/scripts/ghc-slots.sh`, never the throwaway's own
+copy, since the slot registry is a box-wide arbiter and N copies at N commits
+are N arbiters; and all runs used `detach`, so a queue wait could not kill them.
+
+| Gate | What it establishes |
+|---|---|
+| `mismatched_vocab_only_repoevent_does_not_hide_the_prelude_alternative` | THE DISCRIMINATING ONE — fails under the superseded `vocab_effects` predicate |
+| `matched_repoevent_row_and_vocab_hides_the_prelude_alternative` | passes under EITHER predicate; labelled in-source as **not** evidence for the choice |
+| `vocab_only_repoevent_still_emits_its_gadt` | wrong-reason guard: without it the discriminating gate would also pass if the vocabulary split were broken outright |
+| `row_effect_absent_from_the_vocabulary_panics` | pins why only ONE mismatched pair exists, so the hazard space stays documented rather than remembered |
+
+The gates use synthetic `EffectDecl`s rather than this lane's real
+declarations, so they need only boot-vocab's code and test the GENERATOR's
+behaviour, which is the thing in question.
+
 Status: the edit currently lives in `effects_module_source_at` (committed in
 `f37f0d17`, before the restructure was announced), keying on the single list
 that function has. The intent is recorded at the call site so the retarget is
