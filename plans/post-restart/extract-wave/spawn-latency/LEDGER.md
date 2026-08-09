@@ -179,6 +179,44 @@ requirement in their dev spec, the same way D1 got one:
   it) turns at least one named gate RED. An all-green run with no demonstrated
   detection power is not acceptance — it is the E6 analogue of a vacuous
   mutation test.
+- **D2, MANDATORY-ROOTS HAZARD (cross-lane, from boot's ConTags audit; wave
+  spec `df458ebc`).** `ConTags::try_from` (`effect_machine.rs` ~203) requires
+  ALL FIVE freer scaffolding constructors — `Control.Monad.Freer.Val`/`.E`,
+  `Data.OpenUnion.Union`, `Data.FTCQueue.Leaf`/`.Node` — and fails machine
+  construction if any is absent. They are NOT in `wiredInDataCons`
+  (`Translate.hs` ~2737, verified). On a PURE entry term (`pure (…)`, which is
+  what item 0's boot path compiles first) only `Val` is reachable in Core, so a
+  reachability-narrowed table captures none of the other four and boots
+  nothing — surfacing as `MissingConTags` far from the diff.
+
+  **REQUIREMENT:** carry the five as mandatory roots UNCONDITIONALLY — not "if
+  reachable", not "if the effect row is non-empty" — plus a test pinning them
+  through narrowing **on a pure entry term specifically** (a test over an
+  effectful term passes while the real path breaks).
+
+  **Supplier correction (mine, code-traced, reported upward).** The wave spec
+  attributes their presence to `tyconMeta = collectDataCons tycons`. That
+  cannot be right: `mg_tcs` is a module's OWN TyCons, the five live in the
+  freer-simple PACKAGE, and freer-simple is not vendored under `haskell/` — so
+  the home-TyCon sweep can never supply them. The actual route is
+  `collectTransitiveDCons` (`Translate.hs` ~1094-1129): seeded from binder
+  `idType`s, `closeTyCons` expands through `dataConOrigArgTys`, so from any
+  binder typed `Eff …` it reaches `Eff`'s cons `Val`/`E`, then through `E`'s
+  field types the `Union` and `FTCQueue` TyCons, yielding `Union`/`Leaf`/
+  `Node`. **They ride on the binder TYPE, not on Core reachability.**
+
+  Why the correction matters: the two stories point D2 at different things to
+  protect. Under the spec's story a dev preserves the home-TyCon sweep; under
+  the traced story the five are reachability-independent and break only if
+  `RuntimeTypeClosure` replaces the binder-type closure — which is exactly what
+  "target/result + boundary + session-bound types" reads like. A dev following
+  the spec's framing could preserve `tyconMeta`, replace `transitiveMeta`, and
+  ship the break while believing they had heeded the warning.
+
+  NOT YET MEASURED. The D2 dev's FIRST step, before any design, is to dump a
+  `meta.cbor` for a pure entry and attribute the five to a source empirically.
+  The guard above is adopted regardless, being correct under either story.
+
 - **D2.** "Fragment-reachable" is a label over a measurement taken pre-wrap on
   real session Core. D1's hard fail guards constructors that are EMITTED but
   absent from metadata — it does NOT guard a constructor the RUNTIME needs that
