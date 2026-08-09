@@ -540,3 +540,21 @@ libraries.
    file changes. Add only when a real resident needs them.
 3. GC/archive/delete interface and retention budget for durable agents and
    worktrees, once measurement justifies one.
+
+## Addendum — decisions locked pre-flight (Inanna + root, 2026-08-09)
+
+3. **Atomic coupled spawn is the transaction.** One authored call —
+   `run <- spawnAgent spec task` — yields `WorkerRun { agent, worktree }`
+   with no observable state where one exists without the other. Any
+   partial failure (allocation, binding, backend acceptance) surfaces as
+   ONE typed error with no half-state; a durable saga state machine
+   (Allocating → WorktreeReady → Bound → ThreadAccepted → Running, plus
+   failed/orphaned + restart reconciliation) lives entirely BEHIND the
+   call. Retain-first makes reconciliation cheap: every crash state is
+   re-discoverable by ID; recovery is rebind-or-mark-lost, never cleanup.
+4. **Coupled-only public surface.** `createWorktree` leaves the public
+   vocabulary (internal plumbing only). `spawnAgent` accepts either a
+   `WorktreeSpec` (allocate + bind) or an existing UNBOUND worktree
+   handle (bind — the retained-worktree rebind rule already stated
+   above), which covers replacement and integration agents. Revisit only
+   if a real resident needs an agent-less worktree.

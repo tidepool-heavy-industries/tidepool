@@ -312,3 +312,13 @@ set had never been seen on any routine path. Morning triage owns 3-7's
 routing. HAZARD note: git stash is SHARED across all worktrees on this
 box — A/B stashers must push/pop LIFO immediately; prefer diff-to-patch
 plus checkout for A/B legs.
+
+### Item 14 decision (Inanna + root, 2026-08-09, pre-flight)
+
+**Symmetric lossless support, both directions.** Today writing a
+payload-carrying sum to JSON is compile-banned (Value.hs) while reading
+one is quietly allowed (FromJSON.hs) — direction asymmetry nobody chose.
+Checkpoints need these types to round-trip, so: support both sides,
+losslessly, with round-trip tests; retire the reject-at-compile-time
+pinning tests as part of the same change. Owner: checkpoint-persistence
+lane (Chain A).
