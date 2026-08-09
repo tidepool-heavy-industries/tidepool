@@ -72,6 +72,25 @@ and stable worktree IDs. What still never crosses a cycle boundary is
 unchanged and reinforced: an attached Haskell handle, a parked continuation, or
 an event subscription.
 
+## Fold obligations (TL checks these before folding, not from memory)
+
+1. **`WORKAROUND(wt-seam)` sites must be gone.** L4's adapter hardened around
+   two seam defects in the landed monitor (`reconcile` panicking on an
+   unregistered worktree; the journalled `EventId` unreachable to callers).
+   `wt-seam` fixes both in `tidepool-worktree`. Before folding L4,
+   `grep -rn 'WORKAROUND(wt-seam)'` must return NOTHING — four sites were
+   marked with delete-when conditions. A workaround that outlives its defect is
+   indistinguishable from a real invariant to the next reader, and will be
+   defended as one.
+2. **Gate 2 (`prd_example_compiles_unqualified_with_the_fix`) must be GREEN by
+   the relocation landing**, not skipped. It is correctly RED until then — a red
+   gate pinning an unlanded fix is evidence, not debt, and it is what fails
+   loudly if the relocation lands wrongly. An `#[ignore]` here is the exact
+   mechanism the named-gate rule exists against.
+3. **`UnwiredWorktreeRow` must be test-only.** A panicking stub that reaches a
+   production row is the workaround-as-invariant hazard in its most literal
+   form.
+
 ## Territory
 
 Rust work is overwhelmingly NEW modules. Do NOT touch `resident.rs` pending /
