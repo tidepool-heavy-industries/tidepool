@@ -189,12 +189,22 @@ children's merge-bases. Four things must happen at that boundary:
    one-field constructor and loads an address payload without requiring a
    literal tag; `0x1` is consistent with an unboxed tag word). **ConTags
    does not touch that path.** Therefore:
-   - Still traps → real, 2-line repro straight to root, as agreed.
-   - PASSES → this proves the REPRO MOVED, not that the defect was fixed.
-     Record it as informational. Do NOT claim discharge, and do not remove
-     the exact-rendering assertions on the strength of it.
-   The hardening fix (typed-address-only `unbox_addr`, `TAG_LIT` gate,
-   negative tests) is routed to a separate codegen dev — not this lane.
+   Three outcomes, and the middle one is the trap:
+   - **Still segfaults** (`runtime_strlen`, bad pointer `0x1`) → real,
+     2-line repro straight to root, as agreed.
+   - **Traps cleanly** — a poison+breadcrumb case-trap naming the bad
+     unbox, rather than a segfault → ALSO real, same repro, same
+     escalation. This is what a surviving defect looks like AFTER the
+     `strlen-hardening` codegen dev folds (typed-address-only
+     `unbox_addr`, `TAG_LIT` gate, negative tests; spawned off root's tip,
+     may land before this rebase). A changed signature here means the
+     hardening is WORKING — it does not mean a new or different bug. Do
+     not report it as one.
+   - **PASSES** → proves the REPRO MOVED, not that the defect was fixed;
+     ConTags never touched this path. Record as informational. Do NOT
+     claim discharge, and do not remove the exact-rendering assertions on
+     the strength of it.
+   The hardening fix is not this lane's work — only its failure shape is.
 3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
    resolved-`render` decision; root updated the checkpoint bullet. Keep
    BOTH.
