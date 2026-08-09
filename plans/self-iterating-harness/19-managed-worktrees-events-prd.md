@@ -433,12 +433,17 @@ No runtime primitive knows what a rebase, merge, development tree, or
 integration policy is. The only hard runtime behavior is single-writer
 assignment and accurate repository observation.
 
-Pokes are fire-and-forget (decision: Inanna, 2026-08-08). A `sendMessage`
-poke to an agent with no steerable turn surfaces PRD 18's typed runtime
-error to the SENDING resident's handler — loud, not lost — and any retry,
-`followupTask`, or replacement policy is authored code in the resident.
-There is no runtime delivery queue and no auto-enqueue on idle agents;
-PRD 18's message semantics stand unmodified.
+Poke semantics are PRD 18's `pokeAgent`, whose revision is authoritative
+(superseding this document's earlier fire-and-forget note — that note
+described the pre-revision system and wrongly froze it as a decision):
+a poke is accepted into a durable per-agent queue, remains queued until
+deliverable, and is never silently discarded; delivery to an idle agent
+starts or queues a follow-up turn. `sendMessage`/`followupTask` no longer
+exist as separate operations. What stays authored policy in the resident
+is REACTION — what to do about an unacknowledged poke, a superseded plan,
+or a worker whose queue keeps growing — not delivery mechanics. The
+handler in the example above therefore just pokes; the runtime owns
+delivery.
 
 **Cycle shape (updated to PRD 18's revised summary, 2026-08-08):** agents
 may CONTINUE RUNNING between resident cycles — their stable identities and
