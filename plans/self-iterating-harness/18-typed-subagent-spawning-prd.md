@@ -1016,6 +1016,18 @@ Schema, subprocesses, Generic representation classes, or the Rust adapter.
 
 ## Falsification spikes
 
+> **Approach revision (Inanna, 2026-08-08):** external research (ChatGPT node)
+> found the app-server surface viable across these questions. Do NOT run this
+> battery as an exhaustive pre-gate — build the adapter on pinned
+> `codex-codes`, plug it into the vertical core, and debug as we go. The five
+> spikes below are demoted to a checklist of behaviors to confirm
+> opportunistically during bring-up (park duration, steer/interrupt while
+> parked, correlation, completion protocol, config isolation). Record observed
+> behavior as fixtures when a question actually gets answered; do not spend
+> tokens proving each in isolation first. Version pinning (CLI + crate
+> together) stays mandatory — it is cheap and is what makes debug-as-we-go
+> safe.
+
 The app-server backend is a GO/NO-GO gate for the full surface. Run these
 against the pinned locally authenticated Codex CLI and `gpt-5.6-terra` (or the
 closest model returned by `model/list`).
@@ -1093,14 +1105,27 @@ spawn one worker
 
 Run these branches eagerly through Exomonad:
 
-1. **Generic/JIT gate.** Prove one minimal tool record plus nested input/result
-   ADTs and one selector-aware `TypeError` through the real extract/JIT path.
-2. **Codex backend gate.** Run the five app-server falsification spikes with a
-   Rust-only driver. Pin Codex CLI and `codex-codes`; generate a version-matched
-   protocol-schema fixture.
+1. **Generic/JIT gate.** The Generic metadata substrate is already proven (see
+   the dependency-status note; the forms surface itself is PRD 14's — the old
+   `Form` builder is dropped for the derived-generic path there, and this
+   PRD's message/tool interpreter is separate by design per wave 15). The
+   remaining delta is exactly two proofs: (a) the Servant-style mode encoding
+   (`mode :- Call …` — a type-family application in an HKD field position,
+   with the flattened `Tool m input output` record as the named fallback) and
+   (b) a list/recursive container round-tripping through the structural codec
+   on the real extract/JIT — the polarity forms rejects and this interpreter
+   requires. One dev-sized spike reusing the generic-surface spike harness.
+2. **Codex backend gate.** Per the approach revision above: bring up the
+   adapter on pinned `codex-codes` and debug against the vertical core
+   directly, confirming the spike checklist opportunistically. Pin Codex CLI
+   and `codex-codes`; generate a version-matched protocol-schema fixture.
 3. **Realm landing/integration.** Land the cycle-scoped multi-continuation
    machine with the realm verdict's handled-prefix and suspension-path
    constraints, then freeze the internal park/resume seam used by Agent.
+   Sequencing (Inanna, 2026-08-08): the realm lands FIRST — this wave spawns
+   after it, not around it. Freezing the park/resume seam is a named
+   deliverable at the realm-build fold, not something to reverse-engineer
+   here.
 
 Any NO-GO stops convergence and routes to the named substrate repair. No
 agent-authored JSON schema, synchronous subprocess wrapper, or immortal realm
