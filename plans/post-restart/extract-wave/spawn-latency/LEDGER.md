@@ -145,15 +145,35 @@ count. No item below is sized off a spawn-count argument.
 | 3 | `d2-runtime-closure` | D2 — `RuntimeTypeClosure` | The chain root. Sequenced after D1 because D1's hard fail is what makes a reachability-narrowed table safe to ship. |
 | 4 | as capacity | C2/E5, E1–E4 | Sized honestly against the measurement, not against the old model. |
 
-**WAVE 2 HELD (2026-08-08, throttle incident).** Not held on readiness — wave 1
-is nearly done and wave 2's specs are written. Held because the broker is
-starving: 44 waiters against a 3-slot box-wide cap, with the cap multiplied on
-the supply side (a slot governs HOLDERS, not compiles, so 3 slots × nextest's
-per-run `ghc-heavy` cap of 3 is a ceiling of 9). Spawning two more devs would
-add waiters to a queue already ~15x capacity and deepen the starvation my own
-`d1-defense` is sitting in. Wave 2 spawns when the queue drains or root changes
-the cap — whichever first. Recorded as a decision rather than left implicit,
-since "the devs are ready" would otherwise read as a reason to spawn.
+**WAVE 2 HELD — on DEPENDENCY, which was always the real constraint.**
+
+Correction of my own reasoning, kept visible rather than rewritten. I held wave
+2 on box conditions: "44 waiters against a 3-slot cap, ~15x capacity". **That
+number was fiction** — it came from `pgrep -fc "ghc-slots.sh"`, which matches
+every agent session whose command line mentions the script. Kernel truth via
+`lslocks | grep tidepool-ghc` (WRITE = holder, WRITE* = blocked waiter) at the
+same moment: **4 holders, 3 waiters** against 4 slots. A healthy queue, never a
+15x one.
+
+The same args-grep-counts-agents trap I had diagnosed for
+`pgrep -fc tidepool-extract` one message earlier — and I committed it on the
+ADJACENT instrument in the very message where I was being careful about the
+first. Applying a lesson to one instrument and not its neighbour is the specific
+failure worth remembering.
+
+**But the hold stands, because the queue was never the binding constraint.**
+Both wave-2 devs are blocked on wave 1 FOLDING, by dependency:
+
+- `d1-remove` deletes `scanMeta`, which is only safe once `d1-defense`'s hard
+  fail exists — that is the whole reason D1 was split A/B.
+- `e6-tiered-o2` edits `canonicalizeDFlags` in `GhcPipeline.hs`, the file
+  `c1-timing` owns until it folds.
+
+So the box-conditions justification was both WRONG and REDUNDANT. Had I spawned
+on the corrected numbers, I would have created two devs that immediately
+conflict with unfolded wave-1 work. The right decision survived the bad
+reasoning, which is luck, not method — the dependency argument is the one that
+should have been load-bearing all along.
 
 Waves 1 and 2 are file-disjoint within themselves (`GhcPipeline.hs`/`Timing.hs`
 vs `Translate.hs`/`Main.hs`/`test-fidelity/`) so they run in parallel.
