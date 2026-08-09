@@ -317,6 +317,33 @@ function `real_core_corpus.rs`/`corpus_report` call, not a new mechanism.
   `kind=4 TypeMetadata` signature `runSessionPipeline`'s PHASE 3 comment
   predicts for this failure class, reproduced by name.
 
+> **AMENDMENT (spawn-latency, 2026-08-09, post-fold — wave `ff06349c`). DO NOT
+> READ THIS SECTION AS "kind=4 ⇒ mis-tiering".** The demonstration above is
+> valid for the fault it injected, and nothing in E6's conclusion changes. But
+> `kind=4 TypeMetadata` now has **at least TWO distinct known causes**, so the
+> inference from SIGNATURE to CAUSE is unsound.
+>
+> The second cause: `Translate.isTypeMetadataVar` (`Translate.hs:2868`) matches
+> on OCCURRENCE-NAME PREFIX ONLY — `["$trModule","$krep","$tc","krep$",
+> "tr$Module"]` — with no RHS inspection. GHC's float-out/CSE gives
+> Generic-deriving's `KnownSymbol` dictionary backing strings (plain `Addr#`
+> literals for `"Two"`, `"main"`, …) those same prefixes, so a **load-bearing
+> literal is poisoned as `ERROR_SENTINEL`** and dies downstream with `kind=4`
+> plus a bad-pointer `0x0`. That is the generic-surface `==` crash, being fixed
+> by a root dev.
+>
+> So someone hitting `kind=4` later and consulting this receipt could
+> misattribute a prefix-poisoning bug to tiering, or the reverse. **Check
+> `isTypeMetadataVar`'s state at the base you are testing against before
+> attributing a `kind=4` to E6.**
+>
+> Two taxonomy instances stacked: a NAME-SHAPE CONVENTION trusted to establish
+> what the RHS actually is, and — downstream of it, and the one that reaches
+> this document — a SYMPTOM trusted to establish its CAUSE. The receipt was
+> accurate when written and became over-diagnostic when the world gained a
+> second cause. That is a receipt aging badly rather than being written badly,
+> which is its own failure mode: nothing in the artifact changed.
+
 ### Risk-profile finding: there is no fallback safety net for this failure class
 
 I had reasoned, before running the experiment above, that `load'` (PHASE 1,

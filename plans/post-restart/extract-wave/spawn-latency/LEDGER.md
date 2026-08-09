@@ -442,6 +442,40 @@ remember why.
 > mechanism that just broke, reintroduced by the item whose whole purpose is
 > narrowing that table.*
 
+## `kind=4 TypeMetadata` is AMBIGUOUS — binding on D2, and it aged E6's receipt
+
+A root dev is fixing the generic-surface `==` crash, root-caused to
+`Translate.isTypeMetadataVar` (`Translate.hs:2868`), which matches on
+OCCURRENCE-NAME PREFIX ONLY (`$trModule`/`$krep`/`$tc`/`krep$`/`tr$Module`) with
+no RHS inspection. Float-out/CSE gives Generic-deriving's `KnownSymbol` backing
+strings those same prefixes, so a load-bearing `Addr#` literal is poisoned as
+`ERROR_SENTINEL` and dies with `kind=4` plus bad-pointer `0x0`.
+
+**So `kind=4 TypeMetadata` now has at least TWO distinct causes**, and E6's
+receipt — which records it as "the exact signature the PHASE 3 comment predicts"
+— is now over-diagnostic. Amended in place at `02-e6-tiered-o2.md`; E6's
+conclusion is unchanged and its demonstration remains valid for the fault it
+injected. Only the inference from SIGNATURE to CAUSE is unsound.
+
+Worth naming the failure mode precisely, because it is new: **the receipt was
+accurate when written and became over-diagnostic when the world gained a second
+cause.** Nothing in the artifact changed. That is a receipt AGEING badly rather
+than being written badly — distinct from the four forms, and not preventable by
+writing it more carefully at the time. The only defense is that a later reader
+re-checks the world rather than the document.
+
+**BINDING ON D2:** D2 narrows the very table this poisoning path feeds. If D2's
+verification surfaces a `kind=4`, the FIRST question is *which of the two* — and
+the root dev's fix may land between D2's spawn and its gates, changing the
+answer mid-item. D2's spec must say: the signature is ambiguous; check
+`isTypeMetadataVar`'s state at the base you are testing against before
+attributing anything to reachability narrowing.
+
+**Also expect MECHANICAL conflict** in `Translate.hs` at `d1-remove`'s and D2's
+folds — the root dev's diff is surgical and confined to `isTypeMetadataVar`
+plus tests, while ours are in different functions (`collectUsedDataCons` /
+`collectDataCons`). Log anything non-mechanical.
+
 ## THE GATE BAR I SPECIFIED FOR THREE ITEMS COULD NOT SEE THEM
 
 Verified by me, independently by the wave TL, and ruled at `b9c37c57`:
