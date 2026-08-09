@@ -155,8 +155,8 @@ surface here — it drifts. Module map:
   one exception is `formqq-parser-test`, which unit-tests
   `Tidepool.FormQQ.Parse` directly host-side and so lists it under
   `other-modules` with `lib` on its own `hs-source-dirs` — that dependency is
-  real and expected to stay in sync, unlike the old blanket list this passage
-  used to describe.
+  real and expected to stay in sync. (Doc-history note on this passage's
+  prior wording: `plans/decision-archive/haskell.md`.)
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 
@@ -213,8 +213,6 @@ has the fix — `isLocal`/`localCallees`/`localCallers` (filtering on whether
 `.tidepool/lib/LspGraph.hs` has `transitiveLocalCallers`/`transitiveLocalCallees`
 composing that filter with the cycle-safe `walk` engine. **Default to the
 `transitiveLocal*` variants for any call-graph question** — the unscoped ones
-are for when external call sites are genuinely part of the question. (This
-scoping was already solved once, dated "2026-07-01, from the chart-noise
-finding" in `Lsp.hs`, and got silently re-derived from scratch in a later
-session purely because it wasn't written down anywhere a fresh session would
-see it before diving in — that's the reason this note exists.)
+are for when external call sites are genuinely part of the question. (Why
+this note exists — a prior fix silently re-derived from scratch because it
+wasn't written down: `plans/decision-archive/haskell.md`.)

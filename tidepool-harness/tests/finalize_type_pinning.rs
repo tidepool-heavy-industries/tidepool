@@ -33,7 +33,7 @@
 //! for the env recipe).
 
 use tidepool_harness::compile;
-use tidepool_harness::engine::{template_turn_for, EngineConfig};
+use tidepool_harness::engine::{answerer_hole_card, template_turn_for, EngineConfig};
 use tidepool_harness::{answerer_decls, load_harness_source};
 
 fn extract_available() -> bool {
@@ -277,5 +277,164 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
         second.is_ok(),
         "the second compile must see the NEW definition (MkFooNew), got: {:?}",
         second.err().map(|e| e.to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// finalize-template-pin: the answerer prompt prescribes a `finalize` shape
+// that must actually compile against a pinned row with NO annotation the
+// model has to discover. See `plans/post-restart/dev/finalize-template-pin.md`.
+//
+// `_r <- __user; paginateResult 4096 (toJSON _r)` is the shared eval template
+// (`tidepool-mcp/src/eval_prep.rs`); `finalize`'s free result tyvar `a`
+// (`finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs
+// a`) left `_r` ambiguous there — `toJSON`/`ToWire` are ordinary library
+// classes with no superclass, and GHC's defaulting (even under
+// `ExtendedDefaultRules`, even with the explicit `default (Int, Double,
+// Text)` already in the preamble) only fires when the ambiguous variable's
+// constraint set carries at least one class from GHC's own fixed "standard"
+// set (the GHC User's Guide's `ExtendedDefaultRules` section states rule 3
+// as relaxed to "at least one of the classes Ci is numeric, or is Show, Eq,
+// or Ord" — a relaxation of the anchor requirement, never its removal). A
+// solitary `ToJSON a0` never qualifies. Confirmed empirically, not by
+// reasoning about the docs: a minimal `IO`-do-block repro and a real
+// `freer-simple` `Eff`-row repro with an identical custom class fail
+// IDENTICALLY under identical pragmas — ruling out the `Eff`-row/
+// `MonoLocalBinds`/implication explanation a working hypothesis had assumed
+// — and adding a bare `Num` constraint on the SAME otherwise-ambiguous tyvar,
+// nothing else changed, makes defaulting fire. `template_turn_for` supplies
+// that missing anchor (`__anchor :: P.Show a => a -> a; __anchor = P.id`,
+// additive — it never forces `_r`'s type) only when compiling against a real
+// (non-`NoAnswer`) `Finalize T` row.
+
+/// Reuse the KNOWN-VALID `Decision` record literal from [`GOOD_DECISION`]
+/// (rather than re-deriving `Decision`'s field names) as the value plugged
+/// into shapes recovered from the answerer prompt below.
+const A_DECISION: &str =
+    "Decision { action = \"observe\", rationale = \"because\", confidence = High }";
+
+/// Pull the backtick-quoted `finalize` shape out of
+/// [`answerer_hole_card`]'s "Answer by evaluating `...`" sentence — the
+/// prompt text an answerer turn actually receives for a pinned hole. This is
+/// a DERIVATION (parse the live prompt), not a retyped copy: if
+/// `answerer_hole_card`'s template ever changes shape (drops the inner `::
+/// {ty}`, adds an outer `:: M {ty}`, anything), this function reflects it
+/// and the caller's `assert_eq!` against the last-known shape (not this
+/// function) is what tracks the drift instead of silently going stale.
+fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
+    let card = answerer_hole_card("answer the loop's request", Some(ty), imports);
+    const MARKER: &str = "evaluating `";
+    let start = card.find(MARKER).unwrap_or_else(|| {
+        panic!("answerer_hole_card must prescribe a `finalize` shape via \"evaluating `...`\", got: {card}")
+    }) + MARKER.len();
+    let rest = &card[start..];
+    let end = rest
+        .find('`')
+        .unwrap_or_else(|| panic!("unterminated backtick-quoted shape in: {card}"));
+    let shape = rest[..end].to_string();
+    assert!(
+        shape.contains("finalize"),
+        "expected a `finalize`-shaped prescription, got: {shape:?}"
+    );
+    shape
+}
+
+/// Assertion 1 — drift-proofing: the shape `answerer_hole_card` (the per-hole
+/// answerer prompt) actually prescribes today, DERIVED from the live prompt
+/// text rather than retyped, must compile against the pinned row it is
+/// prescribed for. This is what keeps prompt and template from silently
+/// diverging again — it stays green as long as whatever the prompt currently
+/// says compiles, whatever that shape is.
+///
+/// The `assert_eq!` against today's known shape is the drift SIGNAL (a
+/// failure here means the prompt's wording changed — go re-read it and
+/// update this literal, not just make the assertion pass); the compile
+/// below is the actual claim, applied to whatever shape is live right now.
+#[test]
+fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let imports = vec!["HarnessTypes".to_string()];
+    let shape = prescribed_finalize_shape("Decision", &imports);
+    assert_eq!(
+        shape, "finalize @Decision (value :: Decision)",
+        "the answerer prompt's prescribed shape changed — re-read \
+         `engine::answerer_hole_card` and update this pinned literal"
+    );
+    // `value` is the prompt's placeholder identifier for "a real Decision" —
+    // substitute a real one, keeping the REST of the derived snippet
+    // byte-for-byte what the prompt actually says.
+    let code = shape.replacen("value", &format!("({A_DECISION})"), 1);
+    let result = compile_turn(&code, "HarnessTypes", Some("Decision"));
+    assert!(
+        result.is_ok(),
+        "the answerer prompt's own prescribed shape ({code:?}) must compile \
+         against the Decision-pinned row it names — got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+/// Assertion 2 — the fix's actual claim, mutation-closed: bare `finalize @T
+/// value`, with NO annotation of any kind (no inner `:: T` on the argument,
+/// no outer `:: M T` on the whole expression — the shape the ORIGINAL
+/// dogfood-recovered prompt text prescribed verbatim, and the one no
+/// argument-side annotation can ever fix, since it is `finalize`'s RESULT
+/// tyvar that's ambiguous, not its argument's), compiles through the real
+/// turn path against a pinned `Finalize T` row.
+///
+/// Pinned regardless of what the prompt currently prescribes (today's tree
+/// still has the inner `(value :: T)` annotation — see the shape above) —
+/// this is the claim the fix must hold even if the prompt's own wording
+/// drifts. Revert `template_turn_for`'s anchor routing
+/// (`tidepool-harness/src/engine.rs`) or `template_haskell_impl`'s
+/// `anchor_result` handling (`tidepool-mcp/src/eval_prep.rs`) and this test
+/// goes RED with GHC's "Ambiguous type variable 'a0' ... arising from a use
+/// of 'toJSON' ... (ToJSON a0)" — the exact defect this pins.
+#[test]
+fn bare_finalize_with_no_annotation_compiles_when_pinned() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let code = format!("finalize @Decision ({A_DECISION})");
+    let result = compile_turn(&code, "HarnessTypes", Some("Decision"));
+    assert!(
+        result.is_ok(),
+        "bare `finalize @T value`, with no annotation of any kind, must \
+         compile against a pinned Finalize row — got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+/// The case that distinguishes `__anchor` from the REJECTED hard pin (`_r ::
+/// T`). A bare, non-bind `askUser form` turn — gathering operator input with
+/// no `finalize` in the same block, a real shape (elicit now, finalize on a
+/// LATER turn) — leaves the block's result concretely `M Int` (`intField`'s
+/// own type), which already has both `Show` and `ToJSON` instances and needs
+/// no defaulting at all. `__anchor` is `id` under an ADDITIVE `Show`
+/// constraint, so it resolves trivially against that concrete `Int` and
+/// changes nothing observable.
+///
+/// A hard pin would instead unify the block's result type against the row's
+/// `Decision` (`_r :: Decision`) and reject this compile outright — `Int` is
+/// not `Decision` — even though the turn never touches `finalize`. Compiled
+/// against a `Decision`-pinned row specifically (not `Finalize NoAnswer`) so
+/// the anchor is actually active for this compile, proving the additive
+/// claim rather than a compile that never exercised it.
+#[test]
+fn bare_non_bind_askuser_form_compiles_when_pinned() {
+    if !extract_available() {
+        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let code = "askUser (intField \"Count\")";
+    let result = compile_turn(code, "HarnessTypes", Some("Decision"));
+    assert!(
+        result.is_ok(),
+        "a bare non-bind `askUser form` turn (no finalize in the block) must \
+         still compile against a Decision-pinned row — got: {:?}",
+        result.err().map(|e| e.to_string())
     );
 }

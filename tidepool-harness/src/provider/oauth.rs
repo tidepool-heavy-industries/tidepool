@@ -54,8 +54,8 @@ use openai_auth::{OAuthClient, OAuthConfig as InnerOAuthConfig, TokenSet};
 
 use crate::provider::paths::{secrets_dir, write_secret};
 use crate::provider::{
-    Message, ModelProvider, ProviderError, Role, StreamDelta, StreamSink, TurnRequest,
-    TurnResponse, Usage,
+    Message, ModelProvider, ProviderError, ReasoningItem, Role, StreamDelta, StreamSink,
+    TurnRequest, TurnResponse, Usage,
 };
 
 /// Extract the `chatgpt_account_id` claim from an access-token JWT, decoded
@@ -506,14 +506,18 @@ fn installation_id() -> String {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).clone()
 }
 
-/// One conversational `TurnRequest` message → one Responses-API `input`
-/// item. Only user/assistant reach here: the Codex backend rejects
+/// One conversational `TurnRequest` message → its Responses-API `input`
+/// item(s): any encrypted reasoning items the provider surfaced for this
+/// message (see [`Message::reasoning_items`]), verbatim and in original
+/// order, followed by the message item itself — stateless Responses usage
+/// requires echoing prior reasoning back in the next call's input, in
+/// position. Only user/assistant reach here: the Codex backend rejects
 /// `role: "system"` in `input` (`400 "System messages are not allowed"`) —
 /// system content rides the top-level `instructions` field instead (see
 /// [`codex_responses`]). User carries an `input_text` content part;
 /// assistant carries `output_text` (the Responses API distinguishes the two
 /// by direction).
-fn to_input_item(m: &Message) -> serde_json::Value {
+fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
     let (role, content_type) = match m.role {
         Role::User => ("user", "input_text"),
         Role::Assistant => ("assistant", "output_text"),
@@ -521,11 +525,13 @@ fn to_input_item(m: &Message) -> serde_json::Value {
         // Fall back to a user `input_text` rather than emit a rejected role.
         Role::System => ("user", "input_text"),
     };
-    serde_json::json!({
+    let mut items: Vec<serde_json::Value> = m.reasoning_items.iter().map(|r| r.0.clone()).collect();
+    items.push(serde_json::json!({
         "type": "message",
         "role": role,
         "content": [{ "type": content_type, "text": m.content }],
-    })
+    }));
+    items
 }
 
 /// Reasoning effort for the Codex `/responses` call. `medium` reliably makes
@@ -566,7 +572,7 @@ async fn codex_responses(
         .messages
         .iter()
         .filter(|m| m.role != Role::System)
-        .map(to_input_item)
+        .flat_map(to_input_items)
         .collect();
     let mut body = serde_json::json!({
         "model": cfg.model,
@@ -649,6 +655,9 @@ struct SseAcc {
     /// Text carried in the terminal `response.completed` output array — a
     /// fallback used only when no `output_text.delta`s arrived.
     completed_text: Option<String>,
+    /// Encrypted reasoning items (`type: "reasoning"`) carried in the same
+    /// terminal output array, verbatim — see [`extract_reasoning_items`].
+    reasoning_items: Vec<ReasoningItem>,
     usage: Usage,
     error: Option<String>,
 }
@@ -693,6 +702,7 @@ impl SseAcc {
                         u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                 }
                 self.completed_text = extract_output_text(v.pointer("/response/output"));
+                self.reasoning_items = extract_reasoning_items(v.pointer("/response/output"));
             }
             Some("response.failed") => {
                 self.error = Some(
@@ -735,6 +745,7 @@ impl SseAcc {
             text,
             usage: self.usage,
             reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
+            reasoning_items: self.reasoning_items,
         })
     }
 }
@@ -771,6 +782,21 @@ fn extract_output_text(output: Option<&serde_json::Value>) -> Option<String> {
         }
     }
     (!s.is_empty()).then_some(s)
+}
+
+/// Every `type: "reasoning"` item in a Responses `output` array, verbatim and
+/// in original order — the encrypted-content payload `include:
+/// ["reasoning.encrypted_content"]` requests, kept opaque (never parsed or
+/// reshaped) so it can be echoed straight back into the next request's
+/// `input`.
+fn extract_reasoning_items(output: Option<&serde_json::Value>) -> Vec<ReasoningItem> {
+    let Some(arr) = output.and_then(|o| o.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+        .map(|item| ReasoningItem(item.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -897,17 +923,39 @@ mod tests {
     }
 
     #[test]
-    fn to_input_item_maps_role_to_content_direction() {
-        let user = to_input_item(&Message {
+    fn to_input_items_maps_role_to_content_direction() {
+        let user = to_input_items(&Message {
             role: Role::User,
             content: "hi".into(),
+            reasoning_items: Vec::new(),
         });
-        assert_eq!(user["role"], "user");
-        assert_eq!(user["content"][0]["type"], "input_text");
-        let asst = to_input_item(&Message {
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["role"], "user");
+        assert_eq!(user[0]["content"][0]["type"], "input_text");
+        let asst = to_input_items(&Message {
             role: Role::Assistant,
             content: "yo".into(),
+            reasoning_items: Vec::new(),
         });
-        assert_eq!(asst["content"][0]["type"], "output_text");
+        assert_eq!(asst.len(), 1);
+        assert_eq!(asst[0]["content"][0]["type"], "output_text");
+    }
+
+    #[test]
+    fn to_input_items_echoes_reasoning_before_the_message_it_informed() {
+        let item = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-blob",
+        });
+        let m = Message {
+            role: Role::Assistant,
+            content: "the answer".into(),
+            reasoning_items: vec![ReasoningItem(item.clone())],
+        };
+        let items = to_input_items(&m);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], item);
+        assert_eq!(items[1]["type"], "message");
     }
 }

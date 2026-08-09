@@ -15,6 +15,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -22,7 +24,7 @@ use tidepool_harness::provider::{
 };
 use tidepool_harness::{
     answerer_decls, load_harness_source, DriverError, Harness, HarnessSource, LogObserver,
-    SelfHarnessDriver, SelfHarnessState,
+    NodeState, SelfHarnessDriver, SelfHarnessState,
 };
 
 fn extract_available() -> bool {
@@ -97,6 +99,7 @@ impl ModelProvider for FlakyProvider {
                 output_tokens: 10,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -137,6 +140,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {
@@ -148,7 +152,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     );
     let harness_source = source();
 
-    let cycle1 = driver.run_one_cycle(&harness_source, None);
+    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
     assert!(
         cycle1.is_err(),
         "the scripted first model call fails, so the cycle must error"
@@ -161,6 +165,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
 
     let cycle2 = driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("the cycle after a failure must re-bootstrap and succeed");
     assert!(
         matches!(driver.lifecycle(), SelfHarnessState::Idle),
@@ -193,6 +198,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {
@@ -210,7 +216,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         "TIDEPOOL_EXTRACT",
         "/nonexistent/tidepool-extract-bin-fresh-bootstrap-test",
     );
-    let first = driver.run_one_cycle(&harness_source, None);
+    let first = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -231,6 +237,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
 
     let second = driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect("a working extract binary lets the driver recover from the fresh Failed");
     assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
     assert_eq!(
@@ -251,6 +258,7 @@ async fn poisoned_driver_refuses_entry_points() {
         );
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
         FlakyProvider {
@@ -264,6 +272,7 @@ async fn poisoned_driver_refuses_entry_points() {
 
     driver
         .run_one_cycle(&harness_source, None)
+        .await
         .expect_err("the scripted first model call fails, so the cycle must error");
     assert!(matches!(
         driver.lifecycle(),
@@ -278,7 +287,7 @@ async fn poisoned_driver_refuses_entry_points() {
         "TIDEPOOL_EXTRACT",
         "/nonexistent/tidepool-extract-bin-poisoned-test",
     );
-    let recovery = driver.run_one_cycle(&harness_source, None);
+    let recovery = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -294,15 +303,128 @@ async fn poisoned_driver_refuses_entry_points() {
     );
 
     assert!(matches!(
-        driver.run_one_cycle(&harness_source, None),
+        driver.run_one_cycle(&harness_source, None).await,
         Err(DriverError::Poisoned(_))
     ));
     assert!(matches!(
-        driver.run_loop(&harness_source, true),
+        driver.run_loop(&harness_source, true).await,
         Err(DriverError::Poisoned(_))
     ));
     assert!(matches!(
-        driver.restore(&harness_source),
+        driver.restore(&harness_source).await,
         Err(DriverError::Poisoned(_))
     ));
+}
+
+/// F1's ghost-node repro: `retire_answerer` (called at the end of every
+/// `run_loop_fragment`, regardless of whether the cycle succeeds or fails —
+/// see the `result = ...; self.retire_answerer(); result` shape) must
+/// TERMINALIZE the per-loop answerer node it retires, not just drop the
+/// harness's convenience `NodeConvo`/session — a forever-loop retires one
+/// answerer per cycle, so a `terminate_node` that silently no-ops (or a bare
+/// session drop with no tree transition) would leave one ghost
+/// `Running`/`Suspended` node behind PER CYCLE, growing without bound.
+///
+/// Drives TWO cycles on one driver — the same fail-then-recover shape as
+/// `errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers` above
+/// (cheap: cycle 1's scripted provider failure still forces + retires an
+/// answerer node before the failing model call, with no GHC compile for its
+/// own turn; only cycle 2 runs a real compile+finalize) — and asserts every
+/// node either cycle created is terminal (`Done` or `Cancelled`) once its
+/// cycle completes. decision_block's scripted reply never forks, so each
+/// cycle creates exactly one node (the loop's answerer).
+///
+/// Mutation: revert `SelfHarnessDriver::retire_answerer`'s body to
+/// `self.agent.drop_session(node)`-equivalent (no tree terminalization) —
+/// this test must go RED (a retired-but-not-terminalized answerer node stays
+/// `Running`/`Suspended`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_answerer_nodes_are_terminal_across_cycles() {
+    if !extract_available() {
+        eprintln!(
+            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
+        );
+        return;
+    }
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let provider = FlakyProvider {
+        calls: AtomicU32::new(0),
+        fail_first: 1,
+        reply: decision_block("observe", "Medium"),
+    };
+    let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "selfharness-lifecycle-ghost-node-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let harness = Arc::new(Harness::new(writer, agent_cfg, dyn_provider).expect("agent boots"));
+    let mut driver = SelfHarnessDriver::new(harness.clone(), Arc::new(LogObserver));
+    let harness_source = source();
+
+    let mut seen_before: Vec<_> = harness.tree().node_ids_after(None, usize::MAX).0;
+    let mut retired_nodes = Vec::new();
+
+    // Cycle 1: the scripted first model call fails — but `retire_answerer`
+    // still runs (it is called unconditionally after
+    // `run_loop_fragment_inner`), so this already-forced answerer node must
+    // still be retired terminally.
+    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
+    assert!(
+        cycle1.is_err(),
+        "the scripted first model call must fail this cycle"
+    );
+    let (after_cycle1, _) = harness.tree().node_ids_after(None, usize::MAX);
+    let new_in_cycle1: Vec<_> = after_cycle1
+        .iter()
+        .copied()
+        .filter(|id| !seen_before.contains(id))
+        .collect();
+    assert_eq!(
+        new_in_cycle1.len(),
+        1,
+        "cycle 1 must create exactly one node (the loop's answerer), got {new_in_cycle1:?}"
+    );
+    retired_nodes.extend(new_in_cycle1);
+    seen_before = after_cycle1;
+
+    // Cycle 2: the model call now succeeds — a real GHC-compiled turn +
+    // finalize, same as `errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers`.
+    driver
+        .run_one_cycle(&harness_source, None)
+        .await
+        .expect("cycle 2 (after the recovered driver) must succeed");
+    let (after_cycle2, _) = harness.tree().node_ids_after(None, usize::MAX);
+    let new_in_cycle2: Vec<_> = after_cycle2
+        .iter()
+        .copied()
+        .filter(|id| !seen_before.contains(id))
+        .collect();
+    assert_eq!(
+        new_in_cycle2.len(),
+        1,
+        "cycle 2 must create exactly one node (the loop's answerer), got {new_in_cycle2:?}"
+    );
+    retired_nodes.extend(new_in_cycle2);
+
+    for node in &retired_nodes {
+        let state = harness.tree().state(*node);
+        assert!(
+            matches!(
+                state,
+                Some(NodeState::Done) | Some(NodeState::Cancelled { .. })
+            ),
+            "retired answerer node {node:?} must be terminal, got {state:?}"
+        );
+    }
 }
