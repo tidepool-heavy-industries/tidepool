@@ -127,6 +127,23 @@ never on a claim about original intent you have not read.
 the named-guard rule, the denominator rule, the holder rule, and the instrument
 rules below — each is this rule applied to one artifact.
 
+**THE FOUR FORMS A TRUSTED ARTIFACT FAILS IN** (root's taxonomy, complete as of
+2026-08-09 — every one found in this wave, most in our own scaffolding):
+
+1. **A guard can under-cover its name.** The "pinned id-stability" trio: three
+   DataConId guards, zero VarId coverage.
+2. **A number can mis-name its instrument.** "50 waiters" that were agent
+   sessions; "43 pollers burning 1.2 cores" that were not pollers.
+3. **A citation can lack a referent entirely.** "The three pinned tests",
+   load-bearing in three documents, enumerated in none.
+4. **A correct artifact can be cited for a property it never had.**
+   `haskell_suite_differential` / `corpus_report` — sound JIT-vs-eval
+   differentials, cited as extractor coverage, never invoking the extractor.
+
+Form 4 is the hardest to see, because auditing the artifact finds nothing wrong
+with it. The defect lives in the *citation*, not the thing cited — so check what
+you are relying on it FOR, not whether it works.
+
 
 - Commit with `git commit --no-verify`. NEVER `git add -A` — stage explicit
   paths only.
