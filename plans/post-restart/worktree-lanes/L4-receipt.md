@@ -410,6 +410,58 @@ made — it is not evidence the collision is resolved.** Nothing today is broken
 by it, because RepoEvent is deliberately not in the base server row; it breaks
 when the dogfood puts it there.
 
+### The first fix was MIS-SCOPED, and the authored-surface gate caught it
+
+The conditional first landed in `effects_module_source_at` — i.e. on the
+Prelude import INSIDE the generated `Tidepool.Effects`. That governs name
+resolution within that module's own body and NOTHING ELSE. An author's module
+performs its own `import Tidepool.Prelude`, so the fix did not touch the scope
+it was approved to fix. GHC said so precisely, placing both offending imports
+in the probe:
+
+```
+Ambiguous occurrence '<|>'
+   either 'Tidepool.Event.<|>'    imported from 'Tidepool.Event'   at AltGate.hs:4
+       or 'Tidepool.Prelude.<|>'  imported from 'Tidepool.Prelude' at AltGate.hs:5
+```
+
+**Why the gate caught it and a cheaper gate would not have.** Gate 2 compiles
+PRD 19's own example the way an AUTHOR writes it. A gate asserting on the
+generator's output string would have gone GREEN — the generator emitted exactly
+what it was asked to emit; the ask was wrong. General rule, now doctrine:
+**prefer authored-surface gates to generator-output gates wherever both are
+available**, because a generator faithfully serving a wrong ask produces a
+green gate.
+
+**The evidence was in hand and the inference was not drawn.** The positive
+typecheck probe compiled only because `hiding ((<|>))` was written BY HAND, in
+the probe — author-side. That the workaround had to go author-side WAS the
+evidence that the fix belonged author-side. It was recorded as a caveat and
+moved past. Noticing that a workaround you wrote is evidence about where the
+real fix belongs is the habit this lane is meant to carry forward.
+
+**Blast radius is larger than the reproduction suggests.** `Tidepool.Effects`
+has no export list, so it re-exports its own generated `(<|>)`, and the eval
+preamble imports both `Tidepool.Prelude` and `Tidepool.Effects` by default.
+Once RepoEvent is in the row the collision therefore arises in the DEFAULT EVAL
+VOCABULARY — an author need not `import Tidepool.Event` at all. The gate below
+must reproduce that default-vocabulary case, not the explicit-import one.
+
+**Approved resolution** (root, via worktree-wave): move the conditional to the
+AUTHOR-FACING imports — `eval_import_lines` (`preamble.rs:61`) and the
+Orchestrate module (`preamble.rs:252`) — keyed on the same derived predicate,
+and DELETE the `eval_prep.rs` term, which is not what fixes the author problem
+and would otherwise sit there looking like the fix. `emits_helpers_for` reaches
+the new site at `pub(crate)` without widening, since both files are
+`tidepool-mcp`: the visibility constraint accepted earlier turns out to have
+been right for a call site nobody had identified yet.
+
+The deletion is gated, not assumed: a NAMED gate must prove the generated
+module compiles WITHOUT its own hiding first. Compiles-WITH is not
+compiles-WITHOUT, and the module declares `infixl 3 <|>` and defines the
+operator alongside the imported one — whether GHC calls that ambiguous is a
+fact to establish by compiling, not to predict.
+
 **Not crossed:** `workspaceOf`, any `Workspace` type, and any coupling to an
 agent handle remain absent. `harness-dogfooding/dev-tree/Harness.hs` is
 unedited. The dev-tree dogfood compile (PRD acceptance 9) was not attempted.
