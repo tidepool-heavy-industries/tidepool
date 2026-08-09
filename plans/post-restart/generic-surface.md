@@ -85,7 +85,19 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
       extension set as GHC flags. Bring root the open decision: remove
       the conflicting generic `render` from the unqualified Tidepool
       prelude vs hide it (a special prelude must not become a
-      compatibility bucket).
+      compatibility bucket). RESOLVED — removal approved; see the anchor.
+7. **`GCheckpoint` cutover** (added to this queue by root 2026-08-08,
+   sequenced AFTER the `askUser` swap, since this lane holds the interpreter
+   context). The custom checkpoint interpreter replaces the aeson-derived
+   encoding. **One constraint RELAXED from the anchor as first written
+   (Inanna):** wire-compatibility with today's encoding is the DEFAULT, not
+   a requirement. Where matching aeson's shape costs real complexity, BREAK
+   instead — breaking is cheap while dogfood is paused. A break must be
+   LOUD: a typed decode error naming the codec change, leading to
+   discard-and-restart. A silent misparse is the one unacceptable outcome.
+   This is the subsystem that produced both dogfood crashes, and it is a
+   REPLACEMENT rather than an addition — forms were sequenced ahead of it
+   precisely because they are additive.
 
 ## VERIFY
 
