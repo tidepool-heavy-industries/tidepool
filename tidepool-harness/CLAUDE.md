@@ -14,10 +14,12 @@ Module map:
 - `registry` — `SessionRegistry<M>`: the `Idle | Running | RunningChild |
   Suspended` slot machine + atomic checkout/restore, including nested-child
   checkout (segment 40, landed — `checkout_child`/`RunningChild`).
-- `harness` — `Harness`: the orchestrator. Owns a `NodeTree<()>` for tree
-  bookkeeping and a separate `convos` map holding the real resident sessions
-  (see Machine lifecycle below); drives the turn loop, hole classification,
-  fork/fanout registration, elaborator proposal confirm/reject.
+- `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
+  `SessionRegistry<Session>` is the one place a resident session lives (see
+  Machine lifecycle below); a separate `convos` map holds everything ELSE
+  per-node (transcript, pending hole, framing, turn lease). Drives the turn
+  loop, hole classification, fork/fanout registration, elaborator proposal
+  confirm/reject.
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
   the last fenced Haskell block, classify a suspension (`AskWith`/
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
@@ -39,27 +41,55 @@ Module map:
   partner) and `uiOf` (server-derived mechanical forms from a compiled
   `DataConTable`, no Haskell Generic machinery).
 
-## Machine lifecycle — `convos`, not the registry, on the harness's live path
+## Machine lifecycle — the registry is the one session-lifecycle truth
 
-`SessionRegistry<M>`'s checkout/restore discipline is fully built and tested
-(`registry.rs`), but it is UNUSED ON THE HARNESS'S LIVE PATH: `Harness`
-instantiates its `tree` field as `NodeTree<()>` (`M = ()`), so that internal
-registry never holds a live session. This is not dead code to delete — its
-removal, if ever warranted, is a separate follow-up, and the design it
-embodies may still be worth preserving. Do not claim "all machine access
-goes through the registry" — it doesn't, today.
+`Harness` instantiates its `tree` field as `NodeTree<Session>` (`Session =
+ResidentSession<BoxedStack, CapturedOutput>`), so `NodeTree::force`'s
+caller-supplied machine IS the real resident session — the tree's internal
+`SessionRegistry<Session>` (`registry.rs`) is the ONLY place a session lives.
+There is no second, hand-rolled take/put discipline: a turn-owning method
+checks a node's machine OUT via `Harness::checkout_run`/`checkout_resume`/
+`checkout_child` (thin wrappers over `SessionRegistry::checkout_run`/
+`checkout_resume`/`checkout_child` that resolve the node's `SessionId` via
+`NodeTree::session_of` and map a refusal through `HarnessError::from_checkout`
+— the one place a `CheckoutError` becomes a node-scoped error), runs the turn
+on the blocking pool via `Harness::run_checked_out`, and restores it
+`Idle`/`Suspended{hole}` based on the machine's OWN post-call state
+(`Session::is_idle`/`pending_continuation`) — not a guess from the turn's
+domain result, so an errored `run`/`resume` still restores correctly. A
+`checkout_child` (nested child run against a suspended continuation — the
+`run_child` discipline: an answer value crosses via a non-consuming child run
+against the TARGET's own suspended session) keeps that session `Suspended` on
+the SAME hole throughout, whether the child run succeeds or fails.
 
-The real resident sessions live in `Harness::convos: Mutex<HashMap<NodeId,
-NodeConvo>>`, where `NodeConvo.session: Option<Session>` holds the actual
-handle. `Harness::take_session`/`put_session` implement their own
-take-out/put-back discipline directly against `convos` (mirroring the
-stowed-XOR-running shape by hand: `take_session` moves the session out for
-the turn's duration, every public method that could observe the gap holds
-the `convos` lock across the take, `put_session` restores it after). The
-`NodeTree<()>` is the tree/state/log bookkeeping half of the design (node
-creation, forcing, hole publication, turn/done/cancel logging — but NOT
-effect logging, see Replay below) — a real mechanism, just not the one
-gating machine access.
+`Checkout` is panic-safe: if a checkout is dropped without an explicit
+restore (a panic unwinding between checkout and restore, before the machine
+was ever moved off the checkout via `take()`), `Drop` restores it `Idle`
+rather than leaving the registry slot wedged `Running` forever. The one case
+`Drop` cannot cover is a machine already moved onto the blocking pool via
+`take()`: if that task panics (`JoinError`), the machine is genuinely gone —
+`run_checked_out` calls `Harness::terminate_node` instead of trying to
+restore a machine it does not have.
+
+`Harness::terminate_node` is the ONE retirement path: idempotently
+terminalize the tree entry (`NodeTree::node_cancelled`, skipped if already
+`Done`/`Cancelled`), remove the session from the registry
+(`SessionRegistry::remove`, dropping the machine), and remove the node's
+`convos` entry. `cancel`, a failed fork/fanout child's cleanup, the
+`JoinError` path above, and the self-iterating harness's `retire_answerer`
+all retire a node through it — there is no second way to retire one. A busy
+node (`CheckoutError::Running`/`RunningChild`) surfaces as
+`HarnessError::TurnInFlight`, never `NoSession` — that variant is reserved
+for a node that genuinely has no session (never forced, or already
+terminated).
+
+`convos: Mutex<HashMap<NodeId, NodeConvo>>` still holds everything a session
+checkout doesn't: the transcript, the pending hole, per-node framing, the
+answer contract, the turn lease. A read that needs the session's own state
+WITHOUT checking it out (decl-plane context for a session-aware compile,
+observatory heap stats) goes through `SessionRegistry::peek`, which succeeds
+only when the machine is actually present in its slot (`Idle`/`Suspended` —
+not `Running`/`RunningChild`, checked out elsewhere).
 
 ## Replay — turn substitution + crash-replay tree reconstruction, NOT effect replay
 
@@ -69,9 +99,16 @@ Two independent pieces, both in `replay.rs`:
   previously-recorded assistant `TurnDelta` replies back in order instead of
   calling a live model — a CI run re-drives the same golden path with zero
   API calls.
-- **Crash-replay** (`fold_tree_state`): folds a log's events into the
-  terminal per-node `NodeState` + tree structure, so a `kill -9`'d process
-  restores a browsable history tree from the durable log alone.
+- **Offline log inspection** (`fold_tree_state`/`FoldedTree`): folds a log's
+  events into the terminal per-node `NodeState` + tree structure, so a
+  finished or crashed run's browsable history tree can be reconstructed from
+  the durable log alone — an inspection tool, in the same family as
+  `tail -f log.jsonl`. It is NOT the startup recovery path: that is the
+  generation-tagged `persistence::Checkpoint` the driver restores from at
+  boot (`SelfHarnessDriver::restore`) — a second recovery source folding the
+  log at startup would be dual lifecycle machinery, the thing this lane
+  exists to remove. `golden_path`'s crash-replay assertion (a killed
+  process's log folds back to the terminal tree) is what pins this contract.
 
 **`Event::Effect` IS written by the live turn loop; effect-response
 SUBSTITUTION on replay is what remains out of scope.** The writer
@@ -137,12 +174,41 @@ is reused across holes whose types differ), and its turns compile with:
   qualified-aliased: the turn uses the ordinary `build_preamble`.
 
   The tyvar shape is load-bearing and unchanged: `v` first (so `finalize @T x`
-  binds it), `a` free (so the template's `toJSON _r` defaults it rather than
-  demanding `ToJSON T`), `Member` a real constraint (so the dictionary rides as
-  the leading value arg `Translate.hs` re-applies when head-swapping to
-  `finalizeSited`). Extract is untouched by the indexing — `asks.json` records
-  the site type exactly as before, and `v` is erased in Core, so `FinalizeWith`
-  keeps its arity and `Finalize` its positional union tag.
+  binds it), `a` genuinely free (`finalize :: forall v a effs. Member
+  (Finalize v) effs => v -> Eff effs a` never constrains `a` to anything —
+  `finalize` diverges, it never returns), `Member` a real constraint (so the
+  dictionary rides as the leading value arg `Translate.hs` re-applies when
+  head-swapping to `finalizeSited`). Extract is untouched by the indexing —
+  `asks.json` records the site type exactly as before, and `v` is erased in
+  Core, so `FinalizeWith` keeps its arity and `Finalize` its positional union
+  tag.
+
+  `a` being free does NOT mean the shared template's `toJSON _r`/`toWire _r`
+  "defaults it" — GHC's defaulting (even under `ExtendedDefaultRules`, even
+  with the explicit `default (Int, Double, Text)` already in the eval
+  preamble) only fires when the ambiguous variable's constraint set carries
+  at least one class from GHC's own fixed "standard" set (the GHC User's
+  Guide's `ExtendedDefaultRules` section states rule 3 as relaxed to "at
+  least one of the classes Ci is numeric, or is Show, Eq, or Ord" — a
+  relaxation of the anchor requirement, never its removal). `ToJSON`/`ToWire`
+  are ordinary library classes with no superclass, so a solitary `ToJSON a0`
+  never qualifies — `_r <- __user; … (toJSON _r)` is ambiguous by construction
+  whenever a turn's block terminates in `finalize`, confirmed empirically (a
+  minimal `IO` repro and a real `freer-simple` `Eff`-row repro with an
+  identical custom class fail IDENTICALLY under identical pragmas — not an
+  `Eff`-row/`MonoLocalBinds`/implication effect). `template_turn_for`
+  (`engine.rs`) supplies the missing anchor instead: a turn compiled against a
+  real (non-`NoAnswer`) `Finalize T` row routes through
+  `tidepool_mcp::template_haskell_anchored`, which routes `_r` through a
+  generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
+  rendering it — additive (`id` never forces `_r`'s type), so an
+  already-concretely-typed result (an ordinary eval, or an answerer turn that
+  suspends on `askUser` without finalizing) is unaffected, and only
+  `finalize`'s genuinely-ambiguous `_r` newly resolves (picking the first
+  candidate in the existing `default (Int, Double, Text)` list with both
+  `Show` and `ToJSON`/`ToWire` instances — observed to be `Int`, not `()`).
+  Every other caller of the shared template (`tidepool_mcp::template_haskell`)
+  is untouched.
 
   `EngineConfig::turn_target` resolves one turn's compile target, returning a
   `TurnTarget { include, stack }` derived from a SINGLE `tidepool_mcp::RowArgs`
@@ -197,9 +263,10 @@ into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
 — consume it, never redefine it there: `present_form(&FormSpec) ->
-Submission` and `await_continue()`, both SYNC-BLOCKING by design (the driver
-already runs its turn loop via `block_in_place`/`block_on`, not `async fn`).
-`SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`, defaulting to
+Submission` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
+`OperatorGate` contract) even though the driver's turn loop is `async fn` and
+`.await`s the `Harness` directly. `SelfHarnessDriver` holds
+`gate: Arc<dyn OperatorGate>`, defaulting to
 `StdinGate` (headless: reads one JSON line per form, one line per continue)
 and overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
 parks on a channel instead. `between_loops_gate` (the human-clicks-continue

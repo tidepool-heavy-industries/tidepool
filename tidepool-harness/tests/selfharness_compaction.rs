@@ -27,6 +27,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -132,6 +134,7 @@ impl ModelProvider for InPlaceProbeProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -160,6 +163,7 @@ impl ModelProvider for InPlaceProbeProvider {
                 output_tokens: 50,
             },
             reasoning: None,
+            reasoning_items: Vec::new(),
         })
     }
 }
@@ -174,6 +178,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let second_hole = Arc::new(Mutex::new(None));
     let provider: Arc<dyn DynModelProvider> = Arc::new(InPlaceProbeProvider {
@@ -200,6 +205,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("one two-hole cycle with a mid-loop compaction");
 
     // (1) The mid-loop compaction produced its Text.
@@ -295,6 +301,7 @@ impl ModelProvider for MultiRoundProvider {
                     output_tokens: 5,
                 },
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -309,6 +316,7 @@ impl ModelProvider for MultiRoundProvider {
                 text: "```haskell\n(finalize @Text (\"blue\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             });
         }
 
@@ -328,12 +336,14 @@ impl ModelProvider for MultiRoundProvider {
                 text: "thinking about fruit...".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         } else {
             Ok(TurnResponse {
                 text: "```haskell\n(finalize @Text (\"apple\" :: Text) :: M ())\n```".to_string(),
                 usage,
                 reasoning: None,
+                reasoning_items: Vec::new(),
             })
         }
     }
@@ -349,6 +359,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
         eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
         return;
     }
+    let _cache_guard = support::isolate_cache();
 
     let saw_summarize = Arc::new(Mutex::new(false));
     let provider: Arc<dyn DynModelProvider> = Arc::new(MultiRoundProvider {
@@ -379,6 +390,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
 
     let outcome = driver
         .run_one_cycle(&source, None)
+        .await
         .expect("two-hole cycle, multi-round first hole, NO compaction");
 
     assert!(

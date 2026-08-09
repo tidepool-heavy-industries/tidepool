@@ -70,6 +70,7 @@ pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, Provi
         text,
         usage,
         reasoning: None,
+        reasoning_items: Vec::new(),
     })
 }
 
@@ -107,10 +108,12 @@ mod tests {
                 Message {
                     role: Role::System,
                     content: "be terse".into(),
+                    reasoning_items: Vec::new(),
                 },
                 Message {
                     role: Role::User,
                     content: "hi".into(),
+                    reasoning_items: Vec::new(),
                 },
             ],
             max_tokens: None,

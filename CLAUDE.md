@@ -32,6 +32,15 @@ The Key Decisions Reference section below is the source of truth for all archite
 > (`~/.exo/roles/devswarm/context/root.md`), loaded each session. This file is
 > codebase truth; that file is process truth.
 
+### Decision Archive
+
+Doc-history asides (why a note exists, superseded wording) that used to live
+inline in a `CLAUDE.md` file now live in `plans/decision-archive/`, one file
+per source doc, with a one-line pointer left at each extraction site. This
+does NOT apply to the Key Decisions Reference below — those stay here,
+verbatim, as the authoritative contracts layer; nothing load-bearing moves
+to the archive.
+
 ---
 
 ## Project Structure

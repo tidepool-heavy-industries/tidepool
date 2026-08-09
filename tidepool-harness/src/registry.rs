@@ -117,6 +117,21 @@ impl<M> SessionRegistry<M> {
         matches!(self.slots.lock().get(&id), Some(Slot::Idle(_)))
     }
 
+    /// Read-only access to the machine WITHOUT checking it out — only
+    /// succeeds when the machine is actually present in its slot (`Idle` or
+    /// `Suspended`; a `Running`/`RunningChild` machine is out on a turn, so
+    /// there is nothing here to borrow). Used for cheap metadata reads (decl-
+    /// plane context, heap stats) that must not disturb the checkout
+    /// discipline or race a real checkout — the lock is held only for the
+    /// duration of `f`.
+    pub fn peek<R>(&self, id: SessionId, f: impl FnOnce(&M) -> R) -> Option<R> {
+        match self.slots.lock().get(&id) {
+            Some(Slot::Idle(m)) => Some(f(m)),
+            Some(Slot::Suspended { machine, .. }) => Some(f(machine)),
+            _ => None,
+        }
+    }
+
     /// The hole a session is suspended on, if any. A session with a nested
     /// child mid-run (`RunningChild`) is still suspended on its hole.
     pub fn pending_hole(&self, id: SessionId) -> Option<HoleId> {
@@ -322,6 +337,26 @@ impl<M> Checkout<'_, M> {
     }
 }
 
+/// Panic safety net: if a `Checkout` is dropped while it still owns the
+/// machine (an explicit `restore_idle`/`restore_suspended`/`abandon` never
+/// ran — e.g. a panic unwound through the turn between checkout and
+/// restore), restore it as `Idle` rather than leaving the slot `Running`
+/// forever. `restore_idle`/`restore_suspended`/`abandon` all `take()` the
+/// machine first, so `Drop` sees `None` and does nothing on every explicit
+/// exit path — this only fires on the unwound case.
+///
+/// This does NOT cover [`Checkout::take`]: once the machine has been moved
+/// off the checkout (e.g. onto a blocking thread), `Drop` has nothing to
+/// restore — a caller that loses the machine that way (a `JoinError`) must
+/// retire the session explicitly instead (the harness's `terminate_node`).
+impl<M> Drop for Checkout<'_, M> {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            self.registry.restore_idle(self.id, machine);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +538,61 @@ mod tests {
         let id = SessionId(6);
         reg.insert_idle(id, FakeMachine { turns: 0 });
         assert_eq!(err(reg.checkout_child(id)), CheckoutError::NotSuspended(id));
+    }
+
+    #[test]
+    fn peek_reads_idle_and_suspended_but_not_running() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(10);
+        reg.insert_idle(id, FakeMachine { turns: 3 });
+        assert_eq!(reg.peek(id, |m| m.turns), Some(3));
+
+        let co = reg.checkout_run(id).expect("idle -> run");
+        assert_eq!(
+            reg.peek(id, |m| m.turns),
+            None,
+            "a checked-out (Running) machine has nothing to peek"
+        );
+        co.restore_suspended(hole("scont_peek"));
+        assert_eq!(
+            reg.peek(id, |m| m.turns),
+            Some(3),
+            "a suspended machine is still present in its slot"
+        );
+
+        assert_eq!(reg.peek(SessionId(999), |m: &FakeMachine| m.turns), None);
+    }
+
+    /// Closes step 5: a `Checkout` dropped WITHOUT an explicit restore (a
+    /// panic unwinding between checkout and restore) must not leave the slot
+    /// `Running` forever — `Drop` restores it `Idle`, with the machine's
+    /// mutations from before the panic intact.
+    #[test]
+    fn dropping_a_checkout_without_restoring_recovers_idle() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(11);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut co = reg.checkout_run(id).expect("idle -> run");
+            co.machine().turns += 1;
+            panic!("simulated turn panic between checkout and restore");
+        }));
+        assert!(result.is_err(), "the closure must have panicked");
+
+        assert!(
+            reg.is_idle(id),
+            "a Checkout dropped by an unwinding panic must restore Idle, not leave the slot wedged"
+        );
+        let mut co = reg
+            .checkout_run(id)
+            .expect("the session must be usable again after the panic");
+        assert_eq!(
+            co.machine().turns,
+            1,
+            "the machine's pre-panic mutation survived the Drop-recovery round trip"
+        );
+        co.restore_idle();
     }
 
     #[test]

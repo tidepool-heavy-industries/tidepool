@@ -120,6 +120,15 @@ The near-term product is a working orchestrator for Tidepool's own software
 development. The held-out recursive-improvement evaluation follows once that
 orchestrator is useful and observable.
 
+> **Endgame (Inanna, 2026-08-08):** the current Exomonad swarm is
+> ultimately hosted on this substrate — dev-tree replaces it for
+> Tidepool's own development. Exo's MCP sidecar and message routing go
+> unused in that future: they exist to drive interactive sessions, and
+> this PRD drives headless agents directly through the backend adapter,
+> which is simpler and strictly better. No Exomonad machinery is ported
+> (see PRD 19's endgame note); typed spawning + worktree events + the
+> resident loop are the whole orchestration story.
+
 Codex already has a maintained headless server with the primitives this design
 requires:
 
