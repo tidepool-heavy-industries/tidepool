@@ -344,7 +344,7 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
-    /// Unique per-construction run identity (F3 fix), scoping this
+    /// Unique per-construction run identity, scoping this
     /// instance's node decl-plane directories to
     /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
     /// sharing the same cache root (a different process, or a second
@@ -1004,8 +1004,8 @@ impl Harness {
         )?;
 
         // The BIND/BINDDISCARD templates' imports: user imports + the decl
-        // module + current Val modules (mirrors what `run_bind_turn` used to
-        // merge) — just the user imports when the node has no decl plane.
+        // module + current Val modules — just the user imports when the node
+        // has no decl plane.
         let bind_imports = match &bind_ctx {
             Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
                 (_, true) => imports.to_string(),
@@ -1778,17 +1778,30 @@ impl Harness {
         })
     }
 
+    /// The first node currently suspended on a Dialog (operator) hole, if any —
+    /// what the inspector focuses by default.
+    pub fn first_operator_hole(&self) -> Option<NodeId> {
+        let convos = self.convos.lock();
+        convos.iter().find_map(|(n, c)| {
+            matches!(
+                c.pending.as_ref().map(|p| &p.classified.routing),
+                Some(HoleRouting::Dialog { .. }) | Some(HoleRouting::Ask { .. })
+            )
+            .then_some(*n)
+        })
+    }
+
     /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
-    /// path leaves it `Running` with a live resident session (the leak external
-    /// review flagged: only the success path used to terminalize + drop the
-    /// child's session; a provider/join/log fault inside
-    /// `drive_answerer_to_value`, or a `resume_parent` failure after,
-    /// propagated via `?` and orphaned the child). Scoped to the fork/fanout
-    /// callers deliberately — NOT baked into `drive_answerer_to_value` itself,
-    /// which is also called in-context with `answerer == the main node`,
-    /// where cancelling "the child" would kill the live agent. `terminate_node`
-    /// is idempotent, so this is safe to repeat even against the internal
-    /// abort paths that already retired the child (cap-exhaustion /
+    /// path leaves it `Running` with a live resident session: every fallible
+    /// step after forcing the child (a provider/join/log fault inside
+    /// `drive_answerer_to_value`, or a `resume_parent` failure after) must
+    /// route through this explicit cleanup instead of propagating via `?`
+    /// and orphaning the child. Scoped to the fork/fanout callers
+    /// deliberately — NOT baked into `drive_answerer_to_value` itself, which
+    /// is also called in-context with `answerer == the main node`, where
+    /// cancelling "the child" would kill the live agent. `terminate_node` is
+    /// idempotent, so this is safe to repeat even against the internal abort
+    /// paths that already retired the child (cap-exhaustion /
     /// `ChildSuspended`).
     fn cleanup_failed_child(&self, child: NodeId) {
         let _ = self.terminate_node(child, "fork child failed");
@@ -2178,10 +2191,9 @@ impl Harness {
             .and_then(|c| c.suspend_table.clone())
             .unwrap_or_default();
         let value = engine::json_answer_to_value(&submission, &table)?;
-        // `resume_parent` logs the Consumed attempt itself, once, only after
-        // the resume actually succeeds — logging it here too used to
-        // double-log every mechanical dialog answer (fixed: single source of
-        // truth for the Consumed record).
+        // `resume_parent` logs the Consumed attempt itself, exactly once,
+        // only after the resume actually succeeds — the single source of
+        // truth for the Consumed record; this call site must not log again.
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -2195,9 +2207,9 @@ impl Harness {
     /// no single child of a fan can consume the whole node's turn budget).
     /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
     ///
-    /// CAP EXHAUSTION does NOT return straight out anymore (the old
-    /// mid-fan hard-failure that leaked a `Running` answerer and wedged the
-    /// parent) — it runs the escalation ladder via
+    /// CAP EXHAUSTION never returns straight out: a hard-failure here would
+    /// leak a `Running` answerer and wedge the parent, so it instead runs
+    /// the escalation ladder via
     /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
     /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
     /// an unrelated resident/routing error) unwinds out of this loop; on
@@ -2945,8 +2957,8 @@ impl Harness {
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
-    /// in-place compaction relief (02-runtime.md LOCKED: "replace its
-    /// context with the summary so the loop CONTINUES", NO loop-abort). The
+    /// in-place compaction relief: replace the context with the summary so
+    /// the loop CONTINUES, never a loop-abort. The
     /// accumulated exchange is collapsed to one User-role message carrying
     /// `summary` as prior-window context; the node's running [`Usage`] is reset
     /// (`node_usage` now reflects only the small compacted window, so the
