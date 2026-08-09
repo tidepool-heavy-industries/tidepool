@@ -98,3 +98,12 @@ folds.
 - No remote pushes except harness-interaction-surface.
 - No gpt-5.6-terra usage.
 - Dogfood findings beyond small obvious fixes: recorded, not acted on.
+
+## Late additions (Inanna, pre-boarding)
+
+- TOKEN ECONOMY: weekly limits near. No speculative work; idle-time code
+  tracing BELAYED (codex does it later); reports lean, receipts complete;
+  message overhead minimal.
+- env-skip-fail dev live: missing-env test skips convert to loud failures
+  (ruling: the stated fail-loud convention was already the law; skip-as-pass
+  sites nonconforming). Duration-vs-work-claimed adopted as doctrine.
