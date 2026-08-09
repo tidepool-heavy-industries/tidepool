@@ -42,27 +42,37 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
+/// failed, from any underlying error with a `Display` impl (`std::io::Error`
+/// for I/O, `serde_json::Error` for a corrupt record).
+fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
+    WorktreeError::StorageFailure {
+        path: path.to_path_buf(),
+        detail: detail.to_string(),
+    }
+}
+
 /// Write `bytes` to `path` crash-safely: a temp file in the SAME directory,
 /// fsynced, then renamed over the target. A torn write cannot land at `path`
 /// — either the old content is still there or the new content is, never a
 /// partial file — and a sibling record in the same directory is never
 /// touched by writing this one.
-fn write_atomic(path: &Path, bytes: &[u8]) {
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorktreeError> {
+    // The path is always built by `record_path`, which always joins onto a
+    // directory — there is no caller-supplied path that could lack a parent.
     let dir = path.parent().expect("record path has a parent directory");
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-        .unwrap_or_else(|e| panic!("create temp file in {}: {e}", dir.display()));
-    tmp.write_all(bytes)
-        .unwrap_or_else(|e| panic!("write temp file for {}: {e}", path.display()));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
+    tmp.write_all(bytes).map_err(|e| storage_failure(path, e))?;
     tmp.as_file()
         .sync_all()
-        .unwrap_or_else(|e| panic!("fsync temp file for {}: {e}", path.display()));
-    tmp.persist(path)
-        .unwrap_or_else(|e| panic!("rename temp file into {}: {e}", path.display()));
+        .map_err(|e| storage_failure(path, e))?;
+    tmp.persist(path).map_err(|e| storage_failure(path, e))?;
     // Best-effort directory fsync so the rename itself survives a crash; not
     // fatal if the platform does not support fsync on a directory handle.
     if let Ok(dirf) = fs::File::open(dir) {
         let _ = dirf.sync_all();
     }
+    Ok(())
 }
 
 /// Whether the recorded `cwd` still holds a real git working tree. A plain
@@ -162,11 +172,8 @@ impl WorktreeRegistry {
     /// never-dirty-the-source invariant.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root)
-            .unwrap_or_else(|e| panic!("create registry root {}: {e}", root.display()));
-        let canonical_root = root
-            .canonicalize()
-            .unwrap_or_else(|e| panic!("canonicalize registry root {}: {e}", root.display()));
+        fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
+        let canonical_root = root.canonicalize().map_err(|e| storage_failure(&root, e))?;
 
         let git = GitCli::new();
         if let Ok(toplevel) = inspect::work_tree(&git, &canonical_root) {
@@ -180,9 +187,8 @@ impl WorktreeRegistry {
             }
         }
 
-        fs::create_dir_all(canonical_root.join(RECORDS_DIR)).unwrap_or_else(|e| {
-            panic!("create records dir under {}: {e}", canonical_root.display())
-        });
+        let records_dir = canonical_root.join(RECORDS_DIR);
+        fs::create_dir_all(&records_dir).map_err(|e| storage_failure(&records_dir, e))?;
 
         Ok(Self {
             root: canonical_root,
@@ -203,21 +209,30 @@ impl WorktreeRegistry {
     /// (the snapshot lane writes `snapshot_ref` after creation).
     pub fn put(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
-        write_atomic(&self.record_path(&receipt.worktree_id), &bytes);
-        Ok(())
+        write_atomic(&self.record_path(&receipt.worktree_id), &bytes)
     }
 
     /// Read one row back. `Ok(None)` when the id was never registered — which
     /// is distinct from [`WorktreeError::WorktreeLost`] (registered, gone from
     /// disk), and the distinction matters: one is a typo, the other is data loss.
+    ///
+    /// A record that fails to deserialize is a [`WorktreeError::StorageFailure`],
+    /// not `Ok(None)`: records are written via [`write_atomic`], so a crash
+    /// mid-write cannot land a torn file at this path — a corrupt record here
+    /// means something else went wrong (bit rot, a hand edit, a filesystem
+    /// fault), and collapsing that into "never registered" would hide it
+    /// behind the exact typo/data-loss distinction this function's contract
+    /// is careful to keep apart.
     pub fn get(&self, id: &WorktreeId) -> Result<Option<WorktreeReceipt>, WorktreeError> {
         let path = self.record_path(id);
         match fs::read(&path) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                panic!("corrupt registry record {}: {e}", path.display())
-            }))),
+            Ok(bytes) => {
+                let receipt =
+                    serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
+                Ok(Some(receipt))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => panic!("read registry record {}: {e}", path.display()),
+            Err(e) => Err(storage_failure(&path, e)),
         }
     }
 
@@ -226,18 +241,15 @@ impl WorktreeRegistry {
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         let dir = self.root.join(RECORDS_DIR);
         let mut receipts = Vec::new();
-        for entry in
-            fs::read_dir(&dir).unwrap_or_else(|e| panic!("read records dir {}: {e}", dir.display()))
-        {
-            let entry = entry.expect("read records dir entry");
+        for entry in fs::read_dir(&dir).map_err(|e| storage_failure(&dir, e))? {
+            let entry = entry.map_err(|e| storage_failure(&dir, e))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = fs::read(&path)
-                .unwrap_or_else(|e| panic!("read registry record {}: {e}", path.display()));
-            let receipt: WorktreeReceipt = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|e| panic!("corrupt registry record {}: {e}", path.display()));
+            let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
+            let receipt: WorktreeReceipt =
+                serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
             receipts.push(receipt);
         }
         receipts.sort_by(|a, b| {

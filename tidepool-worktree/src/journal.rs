@@ -43,16 +43,25 @@ pub struct JournalEntry {
     pub recorded_at_ms: i64,
 }
 
+/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
+/// failed, from any underlying error with a `Display` impl (`std::io::Error`
+/// for I/O, `serde_json::Error` for a corrupt record).
+fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
+    WorktreeError::StorageFailure {
+        path: path.to_path_buf(),
+        detail: detail.to_string(),
+    }
+}
+
 /// Append-only, crash-safe, restart-durable.
 ///
 /// Filesystem errors on open/append (missing directory permissions, a full
-/// disk) are treated as environment failures and panic with a clear message,
-/// the same way [`crate::testing::TestRepo`] treats its own `TempDir`/`fs`
-/// setup — [`WorktreeError`] is frozen scaffold and has no variant that fits
-/// "the journal file itself could not be written", and inventing one by
-/// repurposing an unrelated variant would mislead a caller matching on it.
-/// The one recoverable-by-design failure — a torn final row — is handled
-/// explicitly below and never reaches a panic.
+/// disk) surface as [`WorktreeError::StorageFailure`] naming the journal
+/// path, so a resident driving many worktrees can fail the one cycle that hit
+/// the fault rather than aborting and taking every other worktree's in-flight
+/// work with it. The one recoverable-by-design failure — a torn final row —
+/// is handled explicitly below and never reaches an error the caller has to
+/// act on.
 #[derive(Debug)]
 pub struct EventJournal {
     path: PathBuf,
@@ -64,7 +73,7 @@ impl EventJournal {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).expect("create event journal directory");
+                fs::create_dir_all(parent).map_err(|e| storage_failure(parent, e))?;
             }
         }
         // Ensure the file exists so a fresh journal has something to read.
@@ -72,14 +81,32 @@ impl EventJournal {
             .create(true)
             .append(true)
             .open(&path)
-            .expect("create event journal file");
+            .map_err(|e| storage_failure(&path, e))?;
 
-        let file = File::open(&path).expect("open event journal file for read");
+        let file = File::open(&path).map_err(|e| storage_failure(&path, e))?;
         let reader = BufReader::new(file);
 
         let mut entries = Vec::new();
         for (idx, line) in reader.lines().enumerate() {
-            let line = line.expect("read event journal line");
+            let line = match line {
+                Ok(l) => l,
+                // `io::ErrorKind::InvalidData` here means `read_line` decoded
+                // non-UTF-8 bytes — the same torn-write shape as a truncated
+                // JSON row below (a crash mid-`writeln!` cutting a multi-byte
+                // character), so it gets the same treatment: log and skip
+                // rather than refuse to open the journal. Any OTHER error
+                // (permission denied, a genuine read fault) is not explained
+                // by a torn write and propagates as a real storage failure.
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                    eprintln!(
+                        "tidepool-worktree: event journal {} line {} unreadable (invalid utf-8), skipping: {err}",
+                        path.display(),
+                        idx + 1
+                    );
+                    continue;
+                }
+                Err(err) => return Err(storage_failure(&path, err)),
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -127,9 +154,10 @@ impl EventJournal {
             .create(true)
             .append(true)
             .open(&self.path)
-            .expect("open event journal file for append");
-        writeln!(file, "{line}").expect("write event journal entry");
-        file.sync_all().expect("fsync event journal file");
+            .map_err(|e| storage_failure(&self.path, e))?;
+        writeln!(file, "{line}").map_err(|e| storage_failure(&self.path, e))?;
+        file.sync_all()
+            .map_err(|e| storage_failure(&self.path, e))?;
 
         self.entries.push(entry);
         Ok(cursor)

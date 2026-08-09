@@ -28,6 +28,16 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
 
+/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
+/// failed, from any underlying error with a `Display` impl (`std::io::Error`
+/// for I/O, `serde_json::Error` for a corrupt record).
+fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
+    WorktreeError::StorageFailure {
+        path: path.to_path_buf(),
+        detail: detail.to_string(),
+    }
+}
+
 /// An opaque agent identity. Deliberately a string newtype and not a typed
 /// agent handle: the coupled-spawn seam is on hold, and coupling this module to
 /// a handle type that has not been designed yet would have to be undone.
@@ -106,22 +116,18 @@ impl BindingTable {
     /// every persisted binding into memory.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root)
-            .unwrap_or_else(|e| panic!("create bindings root {}: {e}", root.display()));
+        fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
 
         let mut bindings = Vec::new();
-        for entry in fs::read_dir(&root)
-            .unwrap_or_else(|e| panic!("read bindings root {}: {e}", root.display()))
-        {
-            let entry = entry.expect("read bindings dir entry");
+        for entry in fs::read_dir(&root).map_err(|e| storage_failure(&root, e))? {
+            let entry = entry.map_err(|e| storage_failure(&root, e))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = fs::read(&path)
-                .unwrap_or_else(|e| panic!("read binding record {}: {e}", path.display()));
-            let mut rows: Vec<Binding> = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|e| panic!("corrupt binding record {}: {e}", path.display()));
+            let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
+            let mut rows: Vec<Binding> =
+                serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
             bindings.append(&mut rows);
         }
 
@@ -134,7 +140,7 @@ impl BindingTable {
 
     /// Rewrite the on-disk file for `worktree` from the current in-memory
     /// rows, crash-safely (temp file in the same directory, fsync, rename).
-    fn persist(&self, worktree: &WorktreeId) {
+    fn persist(&self, worktree: &WorktreeId) -> Result<(), WorktreeError> {
         let rows: Vec<&Binding> = self
             .bindings
             .iter()
@@ -142,16 +148,16 @@ impl BindingTable {
             .collect();
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
         let path = self.path_for(worktree);
+        // `path_for` always joins onto `self.root`, so this always has a parent.
         let dir = path.parent().expect("binding path has a parent directory");
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)
-            .unwrap_or_else(|e| panic!("create temp binding file in {}: {e}", dir.display()));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
         tmp.write_all(&bytes)
-            .unwrap_or_else(|e| panic!("write temp binding file for {}: {e}", path.display()));
+            .map_err(|e| storage_failure(&path, e))?;
         tmp.as_file()
             .sync_all()
-            .unwrap_or_else(|e| panic!("fsync temp binding file for {}: {e}", path.display()));
-        tmp.persist(&path)
-            .unwrap_or_else(|e| panic!("rename temp binding file into {}: {e}", path.display()));
+            .map_err(|e| storage_failure(&path, e))?;
+        tmp.persist(&path).map_err(|e| storage_failure(&path, e))?;
+        Ok(())
     }
 
     /// Bind an agent to a worktree.
@@ -177,7 +183,7 @@ impl BindingTable {
             state: BindingState::Active,
             bound_at_ms: now_ms,
         });
-        self.persist(worktree);
+        self.persist(worktree)?;
         Ok(())
     }
 
@@ -196,7 +202,7 @@ impl BindingTable {
             .rposition(|b| &b.worktree == worktree && b.state == BindingState::Active);
         if let Some(i) = idx {
             self.bindings[i].state = state;
-            self.persist(worktree);
+            self.persist(worktree)?;
         }
         Ok(())
     }

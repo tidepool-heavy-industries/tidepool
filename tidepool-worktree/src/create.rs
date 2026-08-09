@@ -206,9 +206,10 @@ impl WorktreeManager {
         let id = self.registry.mint_id()?;
         let resolved = self.resolve_source(spec, &id)?;
 
-        fs::create_dir_all(&self.worktree_root).unwrap_or_else(|e| {
-            panic!("create worktree root {}: {e}", self.worktree_root.display())
-        });
+        fs::create_dir_all(&self.worktree_root).map_err(|e| WorktreeError::StorageFailure {
+            path: self.worktree_root.clone(),
+            detail: e.to_string(),
+        })?;
         let cwd = self.worktree_root.join(id.as_str());
         let branch = BranchName::from_raw(format!(
             "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
