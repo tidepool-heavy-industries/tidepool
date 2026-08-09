@@ -442,6 +442,52 @@ remember why.
 > mechanism that just broke, reintroduced by the item whose whole purpose is
 > narrowing that table.*
 
+## THE GATE BAR I SPECIFIED FOR THREE ITEMS COULD NOT SEE THEM
+
+Verified by me, independently by the wave TL, and ruled at `b9c37c57`:
+
+    haskell_suite_differential   0 refs to Command/extract/compile_haskell;
+                                 replays 350 frozen .cbor from suite_cbor/
+    corpus_report                replays 128 frozen .cbor from corpus_cbor/
+
+**Neither invokes the extractor.** They are JIT-vs-eval differentials over
+pre-generated CBOR, producing identical results whether the extractor is correct
+or catastrophically broken. So for every item that changes what the extractor
+EMITS — E6 (tiering), D1-B (removing a metadata source), D2 (narrowing the
+table) — they are structurally incapable of detecting the regression. I named
+the hardened differential with `COMPARED_FLOOR` as **the** gate for extractor
+changes in all three specs. It was the wrong instrument in all three.
+
+**These are correct instruments cited without their prerequisite.**
+`haskell/CLAUDE.md` documents that fixtures must be REGENERATED after serializer
+changes; the wave gate list omitted that, so we ran a JIT differential and read
+it as extractor coverage. Same shape as the pinned trio, one level up — and
+found the same way, by someone relying on it rather than auditing it.
+
+**The honest coverage set for extractor changes:**
+
+1. **The item's own hard fail** where it has one (D1's CHECK A is D1-B's primary
+   detector — the A/B split exists precisely to provide it).
+2. **`extract-fidelity-test`** — real pipeline end to end. KNOWN HOLE, found
+   today: its fixtures (erasure symmetry, recognizer qualification,
+   unboxed-tuple arity, D1 defense) never touch JSON/Aeson, so Aeson-touching
+   extractor behaviour is uncovered. A thin set with an unstated hole is worse
+   than a thin set.
+3. **harness acceptance** — spawns real extracts end to end. The strongest real
+   signal, and the reason it costs ~1845s.
+
+**FIXTURE REGENERATION IS A SEQUENCED WAVE-LEVEL ACTION, never a lane's call**
+(ruled). Shared directories, other lanes in flight, redeploy-class blast radius
+— and booby-trapped for the well-intentioned: `haskell/CLAUDE.md` warns that
+pruning `*_u<n>.cbor` from `suite_cbor` drops `compared` below
+`COMPARED_FLOOR`, so a naive regeneration **breaks the very floor it was meant
+to protect.** Route requests upward.
+
+Consequence taken: the hardened differential is DROPPED from D1-B's gate list
+(zero signal for it, ~900s of contended slot), with the reason recorded in its
+receipt so a missing differential line does not read as convenience. D2's spec
+inherits the corrected set.
+
 ## Reliance finds gaps that audits do not — shapes how D2's spec is written
 
 Four guards this wave turned out to cover less than their names, and **all four
