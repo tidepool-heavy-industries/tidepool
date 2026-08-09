@@ -28,12 +28,9 @@ use std::os::unix::fs::PermissionsExt;
 /// __result` expression compile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_expr_verdict_skips_declaration_probe() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let real_extract =
-        std::env::var("TIDEPOOL_EXTRACT").expect("extract_available() installs TIDEPOOL_EXTRACT");
+        std::env::var("TIDEPOOL_EXTRACT").expect("require_extract() installs TIDEPOOL_EXTRACT");
 
     // A logging, delegating wrapper: record every invocation's argv, then
     // exec the real extract so the turn actually runs to completion.

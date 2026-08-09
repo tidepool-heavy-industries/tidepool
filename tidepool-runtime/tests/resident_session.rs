@@ -400,7 +400,7 @@ fn run_child_on_idle_session_is_not_suspended() {
 /// error here, not a raw panic — see `on_eval_thread`).
 #[test]
 fn retryable_resume_failure_does_not_wedge_the_session() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
 
     let (t1_expr, t1_table) = compile_turn(

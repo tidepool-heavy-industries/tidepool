@@ -21,12 +21,12 @@
 //! split falls where it does.
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
-//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
-//! cleanly when the extractor is unreachable, matching every other
-//! `tidepool-runtime/tests/*_generic_deriving*` file.
+//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Panics
+//! loudly (see `require_extract`) when the extractor is unreachable, matching
+//! every other `tidepool-runtime/tests/*_generic_deriving*` file.
 
 use serde_json::json;
-use tidepool_testing::eval_harness::{extract_available, EvalHarness};
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 
 /// Shared header for the standalone (no-effects) diagnostics fixtures: just
 /// enough to bring `Tidepool.Agent.Contract` and the shared `Question`/
@@ -47,18 +47,13 @@ const SHARED_TYPES: &str =
     "data Question = Question { questionText :: Text } deriving (Generic, FromJSON, ToJSON, AgentSchema)\n\
      data Decision = Decision { approved :: Bool } deriving (Generic, ToJSON)\n";
 
-fn run_pure(source: &str, target: &str) -> Option<serde_json::Value> {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
-    Some(
-        EvalHarness::new()
-            .with_stdlib()
-            .run_pure(source, target)
-            .expect("compile_and_run_pure failed")
-            .to_json(),
-    )
+fn run_pure(source: &str, target: &str) -> serde_json::Value {
+    require_extract();
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(source, target)
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 // ---------------------------------------------------------------------------
@@ -115,10 +110,7 @@ fn console_stack() -> frunk::HList!(tidepool_testing::eval_harness::mock::MockCo
 /// typecheck-only proof.
 #[test]
 fn dynamic_dispatch_executes_on_real_jit() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = worker_tools_module(
         "result :: M Value\n\
          result = case compileTools workerTools of\n\
@@ -145,10 +137,7 @@ fn dynamic_dispatch_executes_on_real_jit() {
 /// leaf case that could silently diverge from `Call`'s.
 #[test]
 fn notify_endpoint_dispatches_through_the_same_path() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = worker_tools_module(
         "result :: M Value\n\
          result = case compileTools workerTools of\n\
@@ -188,13 +177,12 @@ fn single_traversal_invariant_declaration_and_dispatch_keys_match() {
          \x20 Left _ -> False\n\
          \x20 Right compiled -> map dtdName (declarations compiled) == dispatchNames compiled\n",
     );
-    if let Some(v) = run_pure(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "declaration key set must equal dispatch key set"
-        );
-    }
+    let v = run_pure(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "declaration key set must equal dispatch key set"
+    );
 }
 
 /// The invariant test above only proves the two lists are equal for a
@@ -209,13 +197,12 @@ fn single_traversal_invariant_names_are_the_expected_two() {
          \x20 Left _ -> []\n\
          \x20 Right compiled -> dispatchNames compiled\n",
     );
-    if let Some(v) = run_pure(&src, "result") {
-        assert_eq!(
-            v,
-            json!(["ask_parent", "report_progress"]),
-            "selector -> snake_case, field order preserved"
-        );
-    }
+    let v = run_pure(&src, "result");
+    assert_eq!(
+        v,
+        json!(["ask_parent", "report_progress"]),
+        "selector -> snake_case, field order preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -229,10 +216,7 @@ fn single_traversal_invariant_names_are_the_expected_two() {
 /// WORSE (e.g. starts leaking `Rep`) is caught.
 #[test]
 fn compile_fail_tools_record_missing_generic() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n{SHARED_TYPES}\n\
          data BadTools mode = BadTools\n\
@@ -278,10 +262,7 @@ fn compile_fail_tools_record_missing_generic() {
 /// input`.
 #[test]
 fn compile_fail_unsupported_endpoint_type() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n{SHARED_TYPES}\n\
          data BadTools2 mode = BadTools2\n\
@@ -319,10 +300,7 @@ fn compile_fail_unsupported_endpoint_type() {
 /// buys it for free, so it's pinned too.
 #[test]
 fn compile_fail_multi_constructor_call_input() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n\
          data Verdict = Yes | No deriving (Generic, FromJSON, AgentSchema)\n\
@@ -373,25 +351,24 @@ fn compiletools_time_duplicate_wire_name() {
          \x20 Left err -> renderToolCompileError err\n\
          \x20 Right _ -> \"unexpectedly compiled\"\n"
     );
-    if let Some(v) = run_pure(&src, "result") {
-        let msg = v.as_str().expect("result is Text");
-        assert!(
-            msg.contains("DupTools"),
-            "must name the record, got:\n{msg}"
-        );
-        assert!(
-            msg.contains("askParent") && msg.contains("ask_parent"),
-            "must name both selectors, got:\n{msg}"
-        );
-        assert!(
-            msg.contains("\"ask_parent\""),
-            "must name the colliding wire name, got:\n{msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("rename"),
-            "must suggest the smallest fix, got:\n{msg}"
-        );
-    }
+    let v = run_pure(&src, "result");
+    let msg = v.as_str().expect("result is Text");
+    assert!(
+        msg.contains("DupTools"),
+        "must name the record, got:\n{msg}"
+    );
+    assert!(
+        msg.contains("askParent") && msg.contains("ask_parent"),
+        "must name both selectors, got:\n{msg}"
+    );
+    assert!(
+        msg.contains("\"ask_parent\""),
+        "must name the colliding wire name, got:\n{msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("rename"),
+        "must suggest the smallest fix, got:\n{msg}"
+    );
 }
 
 /// "a normalized name violates backend identifier rules" — also only
@@ -411,21 +388,20 @@ fn compiletools_time_invalid_identifier() {
          \x20 Left err -> renderToolCompileError err\n\
          \x20 Right _ -> \"unexpectedly compiled\"\n"
     );
-    if let Some(v) = run_pure(&src, "result") {
-        let msg = v.as_str().expect("result is Text");
-        assert!(
-            msg.contains("UnderscoreTools"),
-            "must name the record, got:\n{msg}"
-        );
-        assert!(
-            msg.contains("_askParent"),
-            "must name the selector, got:\n{msg}"
-        );
-        assert!(
-            msg.contains("lowercase letter"),
-            "must state the identifier rule that was violated, got:\n{msg}"
-        );
-    }
+    let v = run_pure(&src, "result");
+    let msg = v.as_str().expect("result is Text");
+    assert!(
+        msg.contains("UnderscoreTools"),
+        "must name the record, got:\n{msg}"
+    );
+    assert!(
+        msg.contains("_askParent"),
+        "must name the selector, got:\n{msg}"
+    );
+    assert!(
+        msg.contains("lowercase letter"),
+        "must state the identifier rule that was violated, got:\n{msg}"
+    );
 }
 
 /// A well-formed record compiles and dispatches without hitting either
@@ -440,19 +416,18 @@ fn compiletools_time_well_formed_record_compiles() {
          \x20 Left err -> Left (renderToolCompileError err)\n\
          \x20 Right compiled -> Right (synopsis compiled)\n",
     );
-    if let Some(v) = run_pure(&src, "result") {
-        // The runtime's generic eval-result rendering for a top-level ADT
-        // value (not routed through the in-language `ToJSON` class) is
-        // `{"constructor": ..., "fields": [...]}` — a different convention
-        // from `Tidepool.Aeson.Value.ToJSON`'s hand-rolled `Either` instance
-        // (`{"Left"/"Right": ...}`), since `result` here is never `toJSON`'d.
-        let obj = v
-            .as_object()
-            .expect("Either Text Text encodes as a tagged object");
-        assert_eq!(
-            obj.get("constructor").and_then(|c| c.as_str()),
-            Some("Right"),
-            "well-formed WorkerTools must compile, got:\n{v}"
-        );
-    }
+    let v = run_pure(&src, "result");
+    // The runtime's generic eval-result rendering for a top-level ADT
+    // value (not routed through the in-language `ToJSON` class) is
+    // `{"constructor": ..., "fields": [...]}` — a different convention
+    // from `Tidepool.Aeson.Value.ToJSON`'s hand-rolled `Either` instance
+    // (`{"Left"/"Right": ...}`), since `result` here is never `toJSON`'d.
+    let obj = v
+        .as_object()
+        .expect("Either Text Text encodes as a tagged object");
+    assert_eq!(
+        obj.get("constructor").and_then(|c| c.as_str()),
+        Some("Right"),
+        "well-formed WorkerTools must compile, got:\n{v}"
+    );
 }

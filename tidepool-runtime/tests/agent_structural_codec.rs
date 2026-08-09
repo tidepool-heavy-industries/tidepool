@@ -10,24 +10,21 @@
 //! code that actually executed, not merely typechecked.
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
-//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
-//! cleanly when the extractor is unreachable.
+//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Panics
+//! loudly (see `require_extract`) when the extractor is unreachable.
 
 use serde_json::json;
-use tidepool_testing::eval_harness::EvalHarness;
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 
-fn run(source: &str, target: &str) -> Option<serde_json::Value> {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
-    Some(
-        EvalHarness::new()
-            .with_stdlib()
-            .run_pure(source, target)
-            .expect("compile_and_run_pure failed")
-            .to_json(),
-    )
+/// Compile + run a full module PURE on the JIT, returning the target binding's
+/// JSON. Panics loudly when the extractor is unavailable.
+fn run(source: &str, target: &str) -> serde_json::Value {
+    require_extract();
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(source, target)
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}\n\
@@ -44,13 +41,12 @@ fn worker_result_completed_round_trips() {
          result :: Bool\n\
          result = roundTrips (Completed \"done\" [\"caveat one\", \"caveat two\"])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "Completed with a non-empty list round-trips"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "Completed with a non-empty list round-trips"
+    );
 }
 
 /// Shape 1, the sibling constructor: `Blocked` round-trips too — both
@@ -63,9 +59,8 @@ fn worker_result_blocked_round_trips() {
          result :: Bool\n\
          result = roundTrips (Blocked \"waiting on review\" [\"evidence a\", \"evidence b\", \"evidence c\"])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "Blocked round-trips");
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(true), "Blocked round-trips");
 }
 
 /// Edge case: an EMPTY list field round-trips — empty containers are where
@@ -77,13 +72,12 @@ fn worker_result_empty_list_round_trips() {
          result :: Bool\n\
          result = roundTrips (Completed \"done\" [])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "Completed with an empty caveats list round-trips"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "Completed with an empty caveats list round-trips"
+    );
 }
 
 /// The wire shape itself, not just the round-trip boolean: `Completed` and
@@ -97,13 +91,12 @@ fn worker_result_encodes_to_uniform_tagged_shape() {
          result :: Value\n\
          result = encodeS (Completed \"done\" [\"c1\"])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!({"tag": "Completed", "fields": ["done", ["c1"]]}),
-            "Completed encodes with fields in declaration order"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!({"tag": "Completed", "fields": ["done", ["c1"]]}),
+        "Completed encodes with fields in declaration order"
+    );
 }
 
 /// Shape 2 (genuinely recursive ADT, recursion through a list): a single
@@ -115,9 +108,8 @@ fn plan_leaf_round_trips() {
          result :: Bool\n\
          result = roundTrips (Step \"leaf\")\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "Step leaf round-trips");
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(true), "Step leaf round-trips");
 }
 
 /// Edge case: recursion through an EMPTY list — `Seq []` — round-trips. This
@@ -131,9 +123,8 @@ fn plan_empty_seq_round_trips() {
          result :: Bool\n\
          result = roundTrips (Seq [])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "Seq [] round-trips");
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(true), "Seq [] round-trips");
 }
 
 /// Edge case: a value nested at least two levels deep — `Seq` containing a
@@ -146,9 +137,8 @@ fn plan_nested_depth_two_round_trips() {
          result :: Bool\n\
          result = roundTrips (Seq [Step \"a\", Seq [Step \"b\", Step \"c\"]])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(true), "a two-level-deep Seq round-trips");
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(true), "a two-level-deep Seq round-trips");
 }
 
 /// The wire shape for the nested-depth-two `Plan`, reconstructed by code
@@ -161,22 +151,21 @@ fn plan_nested_depth_two_encodes_correctly() {
          result :: Value\n\
          result = encodeS (Seq [Step \"a\", Seq [Step \"b\", Step \"c\"]])\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!({
-                "tag": "Seq",
-                "fields": [[
-                    {"tag": "Step", "fields": ["a"]},
-                    {"tag": "Seq", "fields": [[
-                        {"tag": "Step", "fields": ["b"]},
-                        {"tag": "Step", "fields": ["c"]}
-                    ]]}
-                ]]
-            }),
-            "nested Seq encodes with real recursive structure, not a truncation"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!({
+            "tag": "Seq",
+            "fields": [[
+                {"tag": "Step", "fields": ["a"]},
+                {"tag": "Seq", "fields": [[
+                    {"tag": "Step", "fields": ["b"]},
+                    {"tag": "Step", "fields": ["c"]}
+                ]]}
+            ]]
+        }),
+        "nested Seq encodes with real recursive structure, not a truncation"
+    );
 }
 
 /// Loud rejection, not silent coercion: an unrecognized tag decodes to
@@ -190,13 +179,12 @@ fn unknown_tag_is_a_loud_decode_error() {
          \x20 Left _  -> True\n\
          \x20 Right _ -> False\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "an unrecognized tag must decode to Left, not a default Plan"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "an unrecognized tag must decode to Left, not a default Plan"
+    );
 }
 
 /// Loud rejection: a field-count mismatch (one field where `Step` expects
@@ -211,11 +199,10 @@ fn wrong_field_count_is_a_loud_decode_error() {
          \x20 Left _  -> True\n\
          \x20 Right _ -> False\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(true),
-            "a field-count mismatch must decode to Left, not a truncated/padded Plan"
-        );
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(true),
+        "a field-count mismatch must decode to Left, not a truncated/padded Plan"
+    );
 }
