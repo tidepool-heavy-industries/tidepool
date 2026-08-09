@@ -232,20 +232,22 @@ children's merge-bases. Four things must happen at that boundary:
    one-field constructor and loads an address payload without requiring a
    literal tag; `0x1` is consistent with an unboxed tag word). **ConTags
    does not touch that path.** Therefore:
-   Outcome, now settled:
-   - **Still fails** — CONFIRMED 2026-08-09, A/B'd cold-cache by dev-4 (red
-     with and without its diff). The `==` form is a real defect and the
-     repro is with root.
-   - **The trigger is NOT the comparison.** dev-2's original isolation
-     ("literal-vs-literal sums are fine") is REFUTED. A literal `SumShape`
-     carrying two or more `VariantShape`s dies on ENCODE alone — no `==`,
-     no derived value, no list result:
-     `encodeShape (SumShape "E" [VariantShape "A" UnitShape, VariantShape "B" UnitShape])`
-     → `[JIT] runtime_error kind=4 (TypeMetadata)` + `runtime_strlen: bad
-     pointer 0x0`. A ONE-variant literal sum is green, literal products with
-     two and six fields are green, and the same multi-variant sum DERIVED is
-     green. Building the multi-variant sum LITERAL is the trigger. Repro in
-     a comment in `tidepool-runtime/tests/generic_form_wire.rs`.
+   Outcome, settled by a preserved run:
+   - **Still fails** — reproduced on this tip (HEAD `c19cdade`), state
+     preserved: `[JIT] runtime_error kind=4 (TypeMetadata)` +
+     `runtime_strlen: bad pointer 0x0` + `[CASE TRAP] main_lambda_128`.
+     The `==` form is a real defect; repro is with root.
+   - **The trigger is the COMPARISON, per dev-2's original isolation.** An
+     intermediate report characterized it as a multi-variant sum LITERAL
+     dying on encode alone; that did NOT reproduce here. Run directly on
+     this tip, `encodeShape (SumShape "E" [VariantShape "A" UnitShape,
+     VariantShape "B" UnitShape])` PASSES in 0.235s with correct JSON, as
+     does the one-variant control. What fails is
+     `formShape @Two == SumShape "Two" [...]` — derived sum compared
+     against a literal.
+
+     The characterization flipped twice across two well-argued dev reports.
+     What settled it was a preserved failing run, not a better argument.
    - Work around it by asserting from RUST on the returned `Value` (what
      `generic_form_wire` does) rather than comparing against a Haskell
      literal. Do not delete the failing test — it is the tracking pin.

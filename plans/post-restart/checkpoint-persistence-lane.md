@@ -167,20 +167,30 @@ do not confuse the two.
    application. Do not re-attempt prescriptive "add `deriving (Generic)`"
    text; it needs a typechecker plugin.
 
-**Known trap — BUILDING a multi-variant sum literal.** A literal
-`SumShape` with two or more `VariantShape`s dies on encode with
-`[JIT] runtime_error kind=4 (TypeMetadata)` + `runtime_strlen: bad pointer
-0x0` — no `==`, no derived value, no list result required. One-variant
-literal sums, literal products (two and six fields), and the same
-multi-variant sum DERIVED are all green, so building the literal is the
-trigger, not comparing against it. Confirmed 2026-08-09 and escalated to
-root; repro in a comment in `tidepool-runtime/tests/generic_form_wire.rs`.
+**Known trap — `==` between a DERIVED sum and a hand-written literal.**
+`formShape @T == SumShape "T" [...]` dies with `[JIT] runtime_error kind=4
+(TypeMetadata)` + `runtime_strlen: bad pointer 0x0` + `[CASE TRAP]`.
+Reproduced 2026-08-09 and escalated to root; the failing test
+(`generic_form_roundtrip::derived_sum_shape_equals_its_literal`) is the
+tracking pin and must not be deleted.
 
-**This lane will hit it immediately.** A golden matrix does not merely
-compare against expected literals, it CONSTRUCTS them, and mixed-constructor
-sums are one of its required cases. Assert from RUST on the returned `Value`
-(see `generic_form_wire`) rather than comparing against a Haskell literal.
-Escalate a fresh signature to root; do not design around it silently.
+Constructing the literal is NOT the trigger: a multi-variant sum literal
+encodes fine on its own (0.235s, correct JSON), as does a one-variant one.
+An intermediate report claimed otherwise and did not reproduce. Assert from
+RUST on the returned `Value` (see `generic_form_wire`) rather than comparing
+against a Haskell literal, and escalate a fresh signature rather than
+designing around it.
+
+**Before trusting ANY green from a GHC-heavy test: export
+`TIDEPOOL_EXTRACT`.** `tidepool_testing::eval_harness::extract_available()`
+checks that ENV VAR ONLY — never `$PATH` — and `eval_result` returns `None`
+when it is unset, so the test body never runs and the summary prints a clean
+`PASS`. Having `tidepool-extract` on `$PATH` does not help. A with-packages
+GHC must also be on `$PATH` or every such test fails with
+`ghc: readCreateProcess: posix_spawnp: does not exist`, which is a third
+outcome distinct from both the skip and the defect. Ten green runs of a test
+that never compiled anything is a real thing that happened during this wave,
+on both sides of a cross-check.
 
 ## Form-builder deletion
 
