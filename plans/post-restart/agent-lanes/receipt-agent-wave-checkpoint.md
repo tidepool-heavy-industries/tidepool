@@ -25,6 +25,22 @@ time, never concurrent).
 | `cargo check --workspace` | **rc=0**, clean | `/tmp/tidepool-ghc-detach.bOAuNT.log` |
 | `cargo clippy --workspace` | **rc=0** | `/tmp/tidepool-ghc-detach.1xl6Md.log` |
 | `cargo fmt --all -- --check` | **rc=0** (cheap, run directly — not slot-taking) | — |
+| `cargo check --workspace --all-targets` @ `9266b00d` | **rc=0**, 0 errors | `/tmp/tidepool-ghc-detach.KApx1W.log` |
+
+**Why the fourth row exists.** Root's tip advanced mid-verification
+(`f0d1f6cb`, strict classify-verdict deserialization), so this branch was
+rebased again and re-verified rather than submitted on the earlier sha. That
+commit touches no file in this wave's diff — but it modifies
+`tidepool-runtime/src/session/turn.rs`, and both of this wave's test binaries
+compile against that crate. A file-overlap argument would have said "no
+conflict, ship it", and this swarm has already ruled that argument
+insufficient on its own.
+
+`--all-targets` was used deliberately: a plain `cargo check --workspace` does
+not compile test targets, so it would never have touched
+`agent_mode_encoding.rs` or `agent_structural_codec.rs` — exactly where a
+`tidepool-runtime` change could bite. The earlier rows were run before that
+commit landed and are retained as the record of the pre-rebase tree.
 
 Clippy emitted exactly two warnings, both `large size difference between
 variants`, in `tidepool-codegen` (lib) and `tidepool-harness` (lib). **Zero
