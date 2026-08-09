@@ -1008,10 +1008,10 @@ fn topo_sort_deferred_simple(
 
     // Kahn's algorithm: a min-heap over `NodeIndex` breaks ties among
     // simultaneously-ready nodes by earliest original position (`NodeIndex`
-    // order == original `deferred_simple` order, by construction above) —
-    // reproducing the prior hand-rolled sort's left-to-right, resolve-as-
-    // soon-as-ready behavior exactly (see the golden tests pinning chain/
-    // diamond/independent/cycle/self-reference shapes).
+    // order == original `deferred_simple` order, by construction above),
+    // giving left-to-right, resolve-as-soon-as-ready ordering (see the
+    // golden tests pinning chain/diamond/independent/cycle/self-reference
+    // shapes).
     let n = order_graph.node_count();
     let mut in_degree = vec![0usize; n];
     for nx in order_graph.node_indices() {
@@ -3358,11 +3358,10 @@ pub(crate) fn ensure_heap_ptr(
 mod topo_sort_golden_tests {
     //! Golden tests pinning `topo_sort_deferred_simple`'s exact output order —
     //! including its tie-break among independent bindings and its behavior on
-    //! a genuine cycle — BEFORE it is replaced by a petgraph-backed
-    //! implementation. Each test's expected order was derived by hand-tracing
-    //! the current implementation (see the reasoning left in each test's
-    //! comment), not copied from a run, so a divergence here is a real
-    //! behavior change, not a stale golden value.
+    //! a genuine cycle. Each test's expected order was derived by hand-tracing
+    //! the implementation (see the reasoning left in each test's comment), not
+    //! copied from a run, so a divergence here is a real behavior change, not
+    //! a stale golden value.
     use super::*;
 
     /// Build a tiny tree of `Var`/`Lit` "rhs" fragments, one per binder, in
@@ -3486,15 +3485,14 @@ mod topo_sort_golden_tests {
     }
 
     #[test]
-    fn diamond_ties_break_by_input_order_within_a_pass() {
+    fn diamond_ties_break_by_input_order() {
         // a -> {c, b} -> d (both b and c depend only on a; d depends on
-        // both). Fed as [a, c, b, d]: in a SINGLE pass, `a` resolves first
-        // (pushed into `sorted`), then `c` (dep {a} already in `sorted`),
-        // then `b` (dep {a} already in `sorted`) — note `c` is checked
-        // before `b` only because it appears first in `remaining`, not
-        // because of any dependency between them — then `d` (deps {b,c}
-        // BOTH already pushed earlier in this same pass) all resolve in one
-        // pass, in exactly the input order.
+        // both). Fed as [a, c, b, d]: `a` has in-degree 0 and resolves
+        // first, which frees both `c` and `b`; the min-heap then pops `c`
+        // before `b` purely because `c` has the earlier `NodeIndex` (input
+        // order), not because of any dependency between them. `d` only
+        // becomes ready once both are resolved. Net result: exactly the
+        // input order.
         let deps: &[(&'static str, &'static [&'static str])] =
             &[("a", &[]), ("c", &["a"]), ("b", &["a"]), ("d", &["b", "c"])];
         let (tree, vars) = build_bindings(deps);
