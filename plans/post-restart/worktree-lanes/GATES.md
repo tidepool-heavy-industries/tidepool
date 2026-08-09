@@ -155,6 +155,16 @@ merge has no alternative spelling while `Maybe`/list fallbacks have
 | green | the PRD's example still needing a hand-added `hiding` to compile |
 | no-regression | the hiding being applied unconditionally, silently costing every other row its Alternative `<|>` |
 
+The edit's target moved mid-flight: the region now lives in
+`effects_module_source_with_vocab(row_effects, vocab_effects, row)`, with
+`effects_module_source_at` reduced to a delegation (extract-wave's boot-vocab
+lane, so the vocabulary/row distinction is explicit in code rather than only
+in reasoning). That split makes "the row contains RepoEvent" TWO possible
+predicates, and picking the wrong one is not a compile error — it silently
+produces the wrong preamble in exactly the mismatched (row, vocab) pairs
+boot-vocab's tests construct. The no-regression gate therefore has to cover a
+MISMATCHED pair, not only a matched one.
+
 Owed by lane L4; not yet certified here.
 
 ## Still owed
