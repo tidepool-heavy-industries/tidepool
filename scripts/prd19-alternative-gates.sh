@@ -56,9 +56,15 @@ fi
 mkdir -p "$WORK/probe"
 cat > "$WORK/probe/AltGate.hs" <<'EOF'
 {-# LANGUAGE OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, GADTs, OverloadedRecordDot #-}
+-- THE DEFAULT-VOCABULARY CASE, deliberately. There is NO `import Tidepool.Event`
+-- here: `Tidepool.Effects` has no export list, so it re-exports its own
+-- generated `(<|>)`, and the eval preamble imports both it and
+-- `Tidepool.Prelude` by DEFAULT. So an author hits this collision without
+-- importing anything extra. An earlier version of this probe imported
+-- Tidepool.Event explicitly, which understated the blast radius — the gate must
+-- reproduce the worst case, not the one first stumbled into.
 module AltGate where
-import Tidepool.Worktree
-import Tidepool.Event
+import Tidepool.Effects
 import Tidepool.Prelude
 
 merged :: WorktreeHandle -> WorktreeHandle
@@ -91,15 +97,37 @@ fail() { echo "FAIL  $1 -- $2"; status=1; }
 # ---- GATE 1: RED BASELINE -------------------------------------------------
 # Revert ONLY the hiding term, reproducing the pre-fix generated module.
 mkdir -p "$WORK/gen_prefix/Tidepool"
-sed 's|^import Tidepool.Prelude hiding (error, (<|>))$|import Tidepool.Prelude hiding (error)|' \
-  "$WORK/gen/Tidepool/Effects.hs" > "$WORK/gen_prefix/Tidepool/Effects.hs"
+# NB: a `sed` s/// here is a trap — every usable delimiter (`|`, `/`, `,`) either
+# appears in `(<|>)` or in the import path, and a delimiter collision fails with
+# an opaque "unknown option to `s'" rather than a wrong result. Python does a
+# literal string replace with no metacharacter surface at all.
+python3 - "$WORK/gen/Tidepool/Effects.hs" "$WORK/gen_prefix/Tidepool/Effects.hs" <<'PYEOF'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+fixed   = "import Tidepool.Prelude hiding (error, (<|>))"
+prefix  = "import Tidepool.Prelude hiding (error)"
+assert fixed in s, "emitted module does not carry the conditional hiding"
+open(dst, "w").write(s.replace(fixed, prefix, 1))
+PYEOF
 if ! grep -q '^import Tidepool.Prelude hiding (error)$' "$WORK/gen_prefix/Tidepool/Effects.hs"; then
   fail "alternative_collision_is_real_without_the_fix" \
        "could not reconstruct the pre-fix import line; the emitted module may not carry the conditional hiding"
 else
   out="$(compile "$WORK/od1" -i"$WORK/gen_prefix" -ihaskell/lib -i"$WORK/probe" "$WORK/probe/AltGate.hs")"
-  if echo "$out" | grep -q "Ambiguous occurrence" && echo "$out" | grep -q "<|>"; then
+  # WRONG-REASON GUARD: it is not enough that SOME ambiguity about `<|>` appears.
+  # If Tidepool.Effects itself fails to compile without the hiding (its `infixl 3
+  # <|>` and definition sit alongside the imported operator), this gate would go
+  # green while proving something entirely different — that the GENERATED module
+  # cannot build, not that the AUTHOR's example is ambiguous. So require the
+  # diagnostic to be located in the probe.
+  if echo "$out" | grep -q "Ambiguous occurrence" \
+     && echo "$out" | grep -q "<|>" \
+     && echo "$out" | grep -q "AltGate.hs:"; then
     pass "alternative_collision_is_real_without_the_fix"
+  elif echo "$out" | grep -q "Ambiguous occurrence"; then
+    fail "alternative_collision_is_real_without_the_fix" \
+         "ambiguity found but NOT in the probe — the generated module itself may not compile without the hiding, which is a different fact: $out"
   else
     fail "alternative_collision_is_real_without_the_fix" \
          "expected an ambiguous-occurrence diagnostic for <|>; got: ${out:-<clean compile>}"
@@ -107,11 +135,40 @@ else
 fi
 
 # ---- GATE 2: GREEN --------------------------------------------------------
-out="$(compile "$WORK/od2" -i"$WORK/gen" -ihaskell/lib -i"$WORK/probe" "$WORK/probe/AltGate.hs")"
-if [ -z "$out" ]; then
-  pass "prd_example_compiles_unqualified_with_the_fix"
+# Assert on the ARTIFACT THIS GATE COMPILES before invoking GHC. A red result is
+# no more self-describing than a green one: without this, "stale module" and
+# "the fix is mis-scoped" are one indistinguishable mystery.
+gen_import="$(grep -m1 '^import Tidepool.Prelude' "$WORK/gen/Tidepool/Effects.hs")"
+if [ "$gen_import" != "import Tidepool.Prelude hiding (error, (<|>))" ]; then
+  fail "prd_example_compiles_unqualified_with_the_fix" \
+       "the module this gate compiled does NOT carry the fix — its import line is: ${gen_import:-<none found>}"
 else
-  fail "prd_example_compiles_unqualified_with_the_fix" "$out"
+  out="$(compile "$WORK/od2" -i"$WORK/gen" -ihaskell/lib -i"$WORK/probe" "$WORK/probe/AltGate.hs")"
+  if [ -z "$out" ]; then
+    pass "prd_example_compiles_unqualified_with_the_fix"
+  else
+    fail "prd_example_compiles_unqualified_with_the_fix" \
+         "the compiled module DID carry the fix (${gen_import}) and GHC still objected: $out"
+  fi
+fi
+
+# ---- GATE 4: IS THE GENERATED MODULE'S OWN HIDING LOAD-BEARING? -----------
+# Compile the STRIPPED Tidepool.Effects alone, with no probe. If it builds, that
+# hiding does nothing for the module itself and is dead weight once the real
+# author-side fix lands; if it fails, the hiding is load-bearing and must stay.
+# Recorded as a fact either way rather than reasoned about — the module declares
+# `infixl 3 <|>` and defines the operator alongside the imported one, and
+# whether GHC calls that ambiguous is not something to predict.
+cat > "$WORK/probe/EffOnly.hs" <<'EOF'
+module EffOnly where
+import Tidepool.Effects ()
+EOF
+out="$(compile "$WORK/od4" -i"$WORK/gen_prefix" -ihaskell/lib -i"$WORK/probe" "$WORK/probe/EffOnly.hs")"
+if [ -z "$out" ]; then
+  pass "generated_module_compiles_without_its_own_hiding"
+else
+  fail "generated_module_compiles_without_its_own_hiding" \
+       "the eval_prep hiding is LOAD-BEARING — do NOT delete it. First diagnostic: $(echo "$out" | head -3)"
 fi
 
 # ---- GATE 3: NO REGRESSION ------------------------------------------------

@@ -159,6 +159,26 @@ alone are exactly the buried-assertion shape this rule cannot certify.
 
 Base commit for the runs: TODO.
 
+### `UnwiredWorktreeRow` — confirmed test-only, checked rather than asserted
+
+The acceptance harness's row must contain the Worktree effect, because the
+frozen `RepoEvent` helpers are written against `WorktreeId` / `WorktreeHandle` /
+`renderGitOid`. Rather than create `handlers/worktree.rs` (a sibling lane's
+file), the harness declares a local `UnwiredWorktreeRow` that PANICS if a
+worktree verb is ever dispatched — none is. A panicking stub that escaped into
+a production row would be the workaround-indistinguishable-from-an-invariant
+hazard in its most literal form, so both conditions were verified:
+
+- **Genuinely test-only.** It exists solely in
+  `tidepool-handlers/tests/repo_event_with_handler.rs` — an integration TEST
+  TARGET, so it is not compiled into the library at all. That is a stronger
+  guarantee than `#[cfg(test)]`, which still lives inside the lib's source.
+- **Its panic reads as scaffolding, not as an invariant.** The message is
+  "a Worktree verb was dispatched: this harness owns the RepoEvent effect only,
+  and its worktree handles are plain data" — it names the harness and states
+  the scope, so a reader who hits it learns it is a test-row limitation rather
+  than a runtime rule they have violated.
+
 ## 3a. Open obligations this lane hands forward
 
 Two items outlive this receipt. Both are carried at their CODE SITES as well as
@@ -255,11 +275,30 @@ no honest `pure` is a lie in the type system.
 Gates, each named and run separately (`scripts/prd19-alternative-gates.sh`,
 run wrapped):
 
-| Gate | Name |
-|---|---|
-| RED baseline — the collision is real without the fix, and the diagnostic is specifically the ambiguity | `alternative_collision_is_real_without_the_fix` |
-| GREEN — the PRD's example compiles UNQUALIFIED with the fix | `prd_example_compiles_unqualified_with_the_fix` |
-| NO-REGRESSION — a non-RepoEvent row still resolves `Alternative`'s `(<|>)` | `alternative_still_resolves_in_a_non_repoevent_row` |
+| Gate | Name | Status |
+|---|---|---|
+| RED baseline — the collision is real without the fix, the diagnostic is specifically the ambiguity, AND it is located in the probe | `alternative_collision_is_real_without_the_fix` | PASS |
+| GREEN — the PRD's example compiles UNQUALIFIED with the fix | `prd_example_compiles_unqualified_with_the_fix` | **RED — correctly so, see below** |
+| NO-REGRESSION — a non-RepoEvent row still resolves `Alternative`'s `(<|>)` | `alternative_still_resolves_in_a_non_repoevent_row` | PASS |
+| Licences the `eval_prep.rs` deletion — the generated module compiles WITHOUT its own hiding | `generated_module_compiles_without_its_own_hiding` | PASS |
+
+**The green gate is CORRECTLY RED and stays red until the relocation lands.**
+That is the honest state, not debt. A red gate pinning an unlanded fix is
+EVIDENCE: it is the thing that fails loudly if the relocation lands wrongly,
+and suppressing or `#[ignore]`-ing it to get a clean board would destroy the
+exact signal it exists to carry — which is the precise mechanism the named-gate
+rule was written against. Its failure message is self-describing thanks to the
+artifact assertion: "the compiled module DID carry the fix … and GHC still
+objected", so it reports a mis-scoped fix rather than a stale artifact.
+
+**Gate 1 carries a location guard, added after it was found capable of passing
+for the wrong reason.** Requiring only "an ambiguity mentioning `(<|>)`" would
+also have gone green if the GENERATED module failed to compile without the
+hiding — a different fact entirely, and a live possibility since the module
+declares `infixl 3 <|>` beside the imported operator. The gate now requires the
+diagnostic to sit in the PROBE. It still passes, so the red baseline is
+genuine. This hazard surfaced only because the deletion licence forced the
+compiles-WITHOUT question to be asked at all.
 
 The RED baseline is load-bearing and is why the script reconstructs the
 pre-fix source rather than just compiling the fixed one: a green compile is
