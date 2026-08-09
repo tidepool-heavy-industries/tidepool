@@ -9,6 +9,7 @@ module Tidepool.Translate
   , collectTransitiveDCons
   , emittedConIds
   , collectReachableConDCs
+  , collectReachableConDCsRaw
   , wiredInDataCons
   , mergeMetaPreserving
   , dcToMeta
@@ -1086,7 +1087,24 @@ emittedConIds = foldl' step Set.empty
 collectReachableConDCs :: [CoreBind] -> [DataCon]
 collectReachableConDCs binds =
   filter (\dc -> not (isGhcCompilerDC dc) && not (isUnboxedTupleDataCon dc))
-    (Map.elems (foldl' goBind Map.empty binds))
+    (collectReachableConDCsRaw binds)
+
+-- | The UNFILTERED walk 'collectReachableConDCs' filters. Kept as a separate
+-- export because it has a second consumer with a different filtering need:
+-- 'Main.assertMetaCoversEmitted's CHECK A name lookup must NOT inherit CHECK
+-- B's exclusions. B's filters are about what B should ASSERT ON (GHC-internal
+-- and unboxed-tuple constructors are legitimately never in the metadata); A's
+-- name map is about NAMING WHATEVER ACTUALLY FAILED, and a multi-element
+-- unboxed tuple CAN be emitted (see ~2088-2090: 'recordDC dc' then
+-- 'FDataAlt (varId (dataConWorkId dc))' for the heap-box case) -- filtering
+-- it out of A's map would print "<name unresolvable>" for exactly the
+-- constructor CHECK A most needs named. Every future CHECK-B-motivated
+-- exclusion added to 'collectReachableConDCs' must NOT be added here, or it
+-- silently degrades CHECK A's diagnostic one constructor at a time. One
+-- source, two consumers, two different filtering needs -- do not re-merge them.
+collectReachableConDCsRaw :: [CoreBind] -> [DataCon]
+collectReachableConDCsRaw binds =
+  Map.elems (foldl' goBind Map.empty binds)
   where
     ins m dc = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc m
     goBind m (NonRec _ rhs) = goE m rhs

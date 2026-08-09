@@ -43,7 +43,7 @@ import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -366,7 +366,16 @@ assertMetaCoversEmitted :: String -> Seq.Seq FlatNode -> [CoreBind] -> [DCMeta] 
 assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
   let allMetaIds = Set.fromList (map dcmId allMeta)
       reachableMeta = map dcToMeta (collectReachableConDCs reachBinds)
-      nameById = Map.fromList [ (dcmId m, dcmQualName m) | m <- reachableMeta ]
+      -- Deliberately NOT built from 'reachableMeta': CHECK A's name lookup
+      -- must not inherit CHECK B's exclusions. See
+      -- 'Tidepool.Translate.collectReachableConDCsRaw's haddock -- B's
+      -- filters are about what B should assert on, A's map is about naming
+      -- whatever actually failed, and a multi-element unboxed tuple CAN be
+      -- emitted (Translate.hs ~2088-2090), so filtering it out here would
+      -- print "<name unresolvable>" for exactly the constructor CHECK A
+      -- most needs named.
+      nameById = Map.fromList
+        [ (dcmId m, dcmQualName m) | m <- map dcToMeta (collectReachableConDCsRaw reachBinds) ]
       nameOf vid = maybe "<name unresolvable>" T.unpack (Map.lookup vid nameById)
       missingEmitted = Set.toList (emittedConIds nodes `Set.difference` allMetaIds)
   when (not (null missingEmitted)) $ error $
@@ -402,17 +411,22 @@ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts t
       ++ "\nDefine them in your source or use equivalent inline definitions."
   else return ()
 
-  -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
+  -- Write metadata: merge TyCon-derived + translation-derived + transitive + wired-in.
+  -- D1 part B (plans/post-restart/extract-wave/spawn-latency/00-spec.md): the
+  -- former 'scanMeta = collectUsedDataCons reachBinds' re-ran the full
+  -- translator over every reachable RHS purely to rediscover 'tsUsedDCs',
+  -- which the authoritative translation above already returns as 'usedDCs'.
+  -- Safe to remove only because 'assertMetaCoversEmitted' CHECK A below now
+  -- hard-fails if the narrowed metadata omits anything actually emitted.
   let tyconMeta = collectDataCons tycons
       usedMeta = map dcToMeta (Map.elems usedDCs)
-      scanMeta = collectUsedDataCons reachBinds
       transitiveMeta = collectTransitiveDCons reachBinds
       wiredInMeta = wiredInDataCons
       -- Highest priority first; mergeMetaPreserving keeps colliding
       -- (same-varId, different-qualified-name) entries distinct so the
       -- loader rejects them loudly instead of one silently winning.
       allMeta = mergeMetaPreserving
-                  [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
+                  [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
       hasIO = targetBindingHasIO binds targetName
 
   assertMetaCoversEmitted targetName nodes reachBinds allMeta
