@@ -184,22 +184,21 @@ children's merge-bases. Four things must happen at that boundary:
    tier alone. This is what CONFIRMS the 29 dissolved instead of assuming
    it. Anything surviving is a genuinely new finding.
 
-   **Also re-run the full `tidepool-runtime` shard.** A cold-cache A/B on
-   this lane's own tip found **7 failures that pre-exist any of this
-   lane's work** — a crate root's 166/166 harness census never covered, so
-   they have never been characterized. Same-or-dissolved after rebase
-   decides whether they were stale-base like the harness 29 or are real
-   and go to root:
-   `effect_stack::mock_stack_lockstep::mock_stack_matches_production`
-   (EXPLAINED — mock drift: `Fork` was added to `standard_decls` and the
-   hand-written test mock was not updated; fix dev in flight, so expect 7
-   to become 6),
-   `generic_deriving_337::sum_type_rejected_at_compile_time`,
-   `jit_surface::qq_fmt_brace_inside_hole_non_string_expr_still_works`,
-   `jit_surface::works_from_json_float`,
-   `nullary_sum_generic_deriving::mixed_nullary_sum_still_rejected_at_compile_time`,
-   `render::user_union_normalize::user_defined_union_survives_effectful_normalize`,
-   `stdlib_regressions_02_medium::works_int_prism_floors_not_truncates`.
+   **Also re-run the full `tidepool-runtime` shard.** This crate was never
+   covered by the harness census, so its reds were uncharacterized for most
+   of this wave. They are now enumerated at root: **ledger item 14's
+   addendum is the source of truth for which reds are sanctioned** — read
+   that list, do not compare against a count, and do not trust the frozen
+   enumeration a spec like this one would otherwise carry (it goes stale the
+   moment a fix folds). A red not on that list gets the normal A/B.
+
+   Two of this lane's suspicions are settled and should not be re-opened:
+   `user_union_normalize` is A/B-confirmed pre-existing on root's tip, so
+   the theory that removing the `render` export caused it is dead; and
+   `generic_deriving_337::sum_type_rejected_at_compile_time` is a design
+   decision held by Inanna (the FromJSON-side compile-time sum rejection was
+   never implemented — the comment was inherited from `Value.hs` where it IS
+   true), not a defect for this lane.
 
    **Run it COLD** (`rm -rf $PWD/.cache`, rebuild `tidepool-extract-bin`).
    A warm-cache run of two of those binaries reported 12/12 PASS while the
