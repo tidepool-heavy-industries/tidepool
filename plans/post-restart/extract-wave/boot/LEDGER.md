@@ -168,7 +168,22 @@ branch are not.
 
 **Record the landed shape here at fold**, so a later reader knows the
 unreachability was deliberate and does not tidy it into a flag.
-_Shape landed: pending._
+
+**Shape landed — SEPARATE FUNCTION** (the strongest of the two acceptable
+shapes; reported by `boot-targets`, **to be re-verified by this TL at
+fold**):
+
+- `translateTargetClosed` has **no catch/skip branch at all** — it is not
+  a shared traversal carrying a boolean.
+- `--all-closed`'s try-and-skip lives entirely in a DIFFERENT function,
+  `processFile`'s own `(_, True) -> do` arm, **which never calls
+  `translateTargetClosed`**.
+
+So strict mode does not decline to skip; there is no skip in its call
+graph to decline. The `if strict then error else skip` regression this
+requirement was written against cannot be reached by a refactor that
+"removes duplication", because there is no duplicated branch to merge —
+the two behaviours never share a function.
 
 ### 2b. Named-guard receipt rule (wave-wide, `19b8dca9`) — pushed to all devs
 
