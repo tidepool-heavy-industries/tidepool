@@ -64,6 +64,15 @@ forms recursion guard, or any invented finiteness guard.
   - Commit with `--no-verify`. Never `git add -A`. Repo-root `tmp/` is
     protected.
   - Grep/Read over LSP; do not start per-worktree rust-analyzer.
+  - **One brokered leg per agent at a time; drain, don't kill.**
+    `ghc-slots.sh detach -- <cmd>` exists to survive the QUEUE WAIT, not to
+    parallelize. Before it, a queued run died at the ~380s kill and that
+    death capped a non-adopter's footprint; detach removes the death, so
+    several detached legs become durable simultaneous slot holds. Batch
+    verification into ONE acquisition. And a killed GHC leg wastes the slot
+    time already spent while freeing the slot no sooner than finishing —
+    kill only known-void work (wrong branch, wrong command, already
+    superseded), otherwise drain it and read the result.
   - **Name the INSTRUMENT beside any number.** A receipt states what
     produced a count, not only the count. An instrument that identifies its
     referent structurally (an in-code counter, a test that fails on
