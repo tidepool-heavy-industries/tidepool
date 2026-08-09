@@ -4110,6 +4110,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-worktree"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "time"
 version = "0.3.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
