@@ -118,6 +118,16 @@ localized diffs and log it at fold):
   report.** Fixing a number is not evidence about its neighbours, and the
   feeling of having just been careful is actively misleading.
 
+  **KNOW THE NOISE FLOOR BEFORE CLAIMING A TREND** (spawn-latency, measured).
+  On this box, `ghc_setup` ranged **68 → 287 ms across five turns at a FLAT
+  module graph** — a 4.2x spread with zero growth in the thing being varied. So
+  a small-N sweep of an ms-scale quantity cannot distinguish a real trend from
+  contention: clearing that floor for `depanal`-vs-depth needs ~8–10
+  generations, not 2–3. Before reporting "X grows with Y", state the spread of
+  X at constant Y. RATIOS survive contention far better than absolutes — C1's
+  arm ratio moved <2 pp across a loadavg swing of ~11→~34 while absolutes swung
+  ~40% — so prefer a ratio when one is available, and say which you are quoting.
+
   **NAME THE INSTRUMENT ALONGSIDE ANY NUMBER IN A RECEIPT** (boot). A reader
   must be able to check what a figure counts rather than trust its label. Prefer
   counting AT THE SOURCE, inside the code path, over pattern-matching process

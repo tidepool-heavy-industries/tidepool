@@ -306,12 +306,27 @@ did not.
    UNMEASURED, not refuted here. If it ever becomes the reason to build a
    server it must be measured and argued on its own terms, never smuggled back
    in on the boot argument, which is closed.
-   **Residual flagged by this TL, being checked:** `ghc_setup` contains
-   `depanal`, which walks a module graph the `Lib.G<n>` chain GROWS. The
-   sampled sessions were pinned at `Lib.G1`, so boot's constancy in generation
-   depth is unverified — and a repeated `depanal` over a growing graph is
-   itself a residency argument. Either measure `ghc_setup` against depth, or
-   scope the rejection to the depths sampled.
+   **Residual flagged by this TL, now RESOLVED AS SCOPED (`abd00d60`):**
+   `ghc_setup` contains `depanal`, which walks a module graph the `Lib.G<n>`
+   chain GROWS; the sampled sessions were pinned at `Lib.G1`. So the rejection
+   is scoped — **the server is rejected on boot cost FOR SESSIONS AT THE DEPTHS
+   SAMPLED**, with depth-scaling of `ghc_setup` named as the one measurement
+   that could reopen it. A repeated `depanal` over a growing graph would be a
+   residency argument arriving through the one door the latency scoping did not
+   close — the same shape as E4's, and named as precisely.
+   Why scoped rather than measured now: at a FLAT module graph (top-level
+   bindings 1706–1709 throughout), `ghc_setup` ranged **68 → 287 ms across five
+   turns — a 4.2x spread with zero module growth.** That is the noise floor; a
+   2–3 generation sweep cannot clear it, distinguishing a depanal trend needs
+   ~8–10 generations, and no existing `tidepool-repl` test drives more than 2–3
+   sequential `repl.def(...)` calls. The depth column is therefore folded into
+   part 3's ALREADY-REQUIRED `Lib.G<n>` compile-time-vs-generations measurement
+   — same vehicle, same run, one more column — not queued as a second errand.
+   Recorded as a PREDICTION, explicitly not as evidence: `depanal` is a
+   header-parse downsweep, O(n) in module count with a small constant, whereas
+   E2's O(n²) lives in the compile chain — so `ghc_setup`'s SHARE should shrink
+   with depth. If the measurement contradicts it, that contradiction is the
+   finding and part 1 reopens on its own terms.
 2. **NEITHER FIRST — C1's own fix is promoted ahead of both.** ~96–97% of a
    turn is two back-to-back full compiles of the same module set INSIDE ONE
    PROCESS, so no persistence architecture recovers any of it. Removing the
