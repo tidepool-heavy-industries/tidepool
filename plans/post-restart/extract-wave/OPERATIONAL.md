@@ -97,6 +97,19 @@ about a NEIGHBOUR of the claim:
 | whether a suite ran | a count, with no denominator |
 | what the code does | a comment above it |
 | the canonical rules | a worktree copy frozen at fork |
+| what a tool is FOR | what it was observed doing |
+
+**A distinct sub-case worth naming** (spawn-latency), because it is not an
+instrument returning a plausible wrong answer — it is consulting the wrong KIND
+of source: **when a claim is about PURPOSE, the source of truth is the
+documented contract, not observed behaviour.** Behaviour tells you what
+something does; only the contract tells you what it is for, and *"it does not
+currently do X"* is not evidence that X is out of scope. Worked example: the
+claim "the broker exists to cap extract spawns, so a `cabal build` is out of
+scope" was refuted by `ghc-slots.sh:2`, which names "extract builds" as its
+FIRST in-scope category — one `sed` from being checked, never consulted.
+Corollary for arguing scope changes: argue the reclassification on its merits,
+never on a claim about original intent you have not read.
 
 "Verify more" is unactionable. This is checkable in the moment, and it subsumes
 the named-guard rule, the denominator rule, the holder rule, and the instrument
