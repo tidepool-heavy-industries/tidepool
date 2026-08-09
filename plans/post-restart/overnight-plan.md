@@ -134,3 +134,9 @@ folds.
   answer is authority regardless of the word "testing".
 - Ledger state-table (state/fixed-by/verified-on/next) + PRD 14 status
   truing: MORNING items.
+- NO LIVE-MODEL TURNS IN TESTS/AUTOMATED CODE (Inanna): committed test
+  suites use replay/mock providers only (ReplayProvider exists for this).
+  Live-model legs — dogfood smoke, agent-core lane 1's real-worker
+  demonstration — are DELIBERATE, manually-triggered runs by root/a lane
+  with receipts, never wired into suites, battery tiers, or anything that
+  runs on invocation. Morning: fold this into CLAUDE.md/testing docs.
