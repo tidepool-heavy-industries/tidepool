@@ -98,6 +98,14 @@ any other live lane. Log real conflicts at fold.
 - Every GHC-heavy run goes through
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
   (absolute path). NEVER `exclusive` mode.
+- THROTTLE (root, 2026-08-08, active until root lifts it — the box hit load
+  average 92 and took the operator's SSH down): the wrapper now covers MORE
+  than GHC. Wrap `cargo check`/`build --workspace`, `cargo nextest run` at ANY
+  tier including the quick pure-Rust one, and `cargo clippy --workspace`.
+  Exempt: single-crate `cargo check -p <crate>`, edits, greps, and temp-repo
+  git operations. A slot wait over 15 minutes is starvation — report it, never
+  bypass the wrapper. A bypassed run on an overloaded box is the exact failure
+  this exists to prevent.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before any tidepool-harness
   test shard (persistent per-worktree, not mktemp).
 - Spawns pass an explicit `model: sonnet` (or `opus` for sub-TLs);

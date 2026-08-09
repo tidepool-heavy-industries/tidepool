@@ -23,8 +23,13 @@ reader should not have to work out which sections are current.
 Reproduce any block below with:
 
 ```bash
-cargo nextest run -p tidepool-worktree -E 'test(=<exact_name>)'
+/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- \
+  cargo nextest run -p tidepool-worktree -E 'test(=<exact_name>)'
 ```
+
+The slot wrapper is required while root's throttle is active — it covers
+`cargo nextest run` at any tier, not only GHC-heavy work. Drop it only once
+root lifts the throttle.
 
 ## Retention — retain-first is a locked decision
 
