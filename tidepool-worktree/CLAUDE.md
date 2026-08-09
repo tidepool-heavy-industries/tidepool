@@ -1,0 +1,75 @@
+# tidepool-worktree — managed worktrees, durable registry, typed repository events
+
+The Rust substrate for [PRD 19](../plans/self-iterating-harness/19-managed-worktrees-events-prd.md).
+Everything here is *git truth*: creating retained worktrees, recording them so a
+restart still finds them, snapshotting a dirty source without touching it,
+observing HEAD movement, journalling what was observed. No effects, no JIT, no
+Haskell, no agents — that separation is what lets every behaviour be tested
+against a real temporary repository.
+
+See the root `CLAUDE.md` for the project map and
+`plans/post-restart/worktree-lanes/README.md` for the lane split.
+
+## Module map
+
+| Module | Owns | Lane |
+|---|---|---|
+| `id.rs` | opaque newtypes (`WorktreeId`, `EventId`, `GitOid`, `BranchName`, `GitRef`, `SubscriptionId`) | scaffold (frozen) |
+| `error.rs` | `WorktreeError` + `DirtySummary` + `GitFailureReceipt` | scaffold (frozen) |
+| `git.rs` | the ONLY `git` subprocess call site + `inspect::` helpers | scaffold (frozen) |
+| `registry.rs` | durable `WorktreeReceipt` storage, restart lookup | L1 |
+| `create.rs` | `WorktreeSpec`/`WorktreeManager` — creation, lookup, listing | L1 (+ L2 for the dirty path) |
+| `binding.rs` | one worktree, one agent — the binding state machine | L1 |
+| `snapshot.rs` | temp-index synthetic commit + the untouched-source proof | L2 |
+| `monitor.rs` | poll/reconcile, coalesced deltas, honest classification | L3 |
+| `journal.rs` | durable append-only event journal (no replay) | L3 |
+
+## Rules that are not negotiable here
+
+**No git workflow verbs.** No `rebase`, `merge`, `cherry_pick`, conflict
+resolution, or branch promotion. PRD 19's boundary is creation, lookup,
+inspection, events. The git work belongs to coding agents using their native
+tools, and the runtime observes what the repository became. Adding a workflow
+verb is a design regression, not a convenience.
+
+**Never dirty the source.** The registry root, worktree root, journal, and any
+temporary index all live OUTSIDE the source working tree. Managed branches use
+`TIDEPOOL_BRANCH_PREFIX`; snapshot commits use `TIDEPOOL_SNAPSHOT_REF_PREFIX`,
+deliberately outside `refs/heads/` so they never appear in an operator's
+`git branch`.
+
+**Retain first.** No deletion, no GC, no retention policy. A worktree a human
+removed by hand becomes `WorktreeError::WorktreeLost`; it is never silently
+recreated. Deferred question 1 in the PRD owns any future conversation about
+this — it is not an implementation gap to close on your own initiative.
+
+**One `git` call site.** Everything goes through `GitCli`, which scrubs
+`GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` and friends out of the inherited
+environment. A module that spawns `Command::new("git")` itself has bypassed the
+scrub, the failure-receipt shape, and the temp-index discipline at once.
+
+**Reconciled inspection is the only source of truth.** Not hook payloads, not
+filesystem notifications, not an agent's account of what it did. Hooks, when
+they exist, are a wake-up that causes a read; they are never the read.
+
+**Observations are coalesced deltas.** The event stream is a sequence of state
+deltas, not a movement log. Classification degrades to `UnknownChange` rather
+than guessing. Never invent causal attribution to an agent or a model.
+
+**The journal never replays.** A subscription registered now starts at the
+journal's current end. Traceability and restart diagnosis read the journal;
+handlers do not.
+
+## Testing
+
+Git-behaviour tests run against REAL temporary repositories — `tempfile::TempDir`,
+`git init`, real commits — driven by a scripted writer (plain git commands
+standing in for a coding agent). Never a mock of git. A mock proves the mock
+agrees with your model of git, which is exactly the thing in doubt.
+
+```bash
+cargo nextest run -p tidepool-worktree      # pure Rust, no GHC — the fast tier
+```
+
+This crate is GHC-free by construction, so it stays in the fast default tier
+and needs no `TIDEPOOL_EXTRACT`.
