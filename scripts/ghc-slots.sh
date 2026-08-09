@@ -3,6 +3,16 @@
 # nextest runs). Replaces bare `flock /tmp/tidepool-ghc.lock <cmd>`.
 #
 #   scripts/ghc-slots.sh run -- <cmd...>        acquire ONE of N slots, run, release
+#   scripts/ghc-slots.sh detach -- <cmd...>     same, but in its OWN SESSION via
+#                                               setsid: the queue wait is not charged
+#                                               against the caller's process lifetime
+#                                               (the environment kills processes at
+#                                               ~380s — a queued `run` under contention
+#                                               dies WHILE WAITING; detach survives,
+#                                               acquires, runs, and releases even if
+#                                               the calling pane dies). Prints pid +
+#                                               log path and returns immediately;
+#                                               poll the log across turns.
 #   scripts/ghc-slots.sh exclusive -- <cmd...>  acquire ALL slots (whole-box quiet:
 #                                               latency measurement, benchmarks)
 #
@@ -55,7 +65,7 @@ mode="${1:-}"
 shift || true
 [ "${1:-}" = "--" ] && shift
 if [ -z "$mode" ] || [ $# -eq 0 ]; then
-  echo "usage: ghc-slots.sh run|exclusive -- <cmd...>" >&2
+  echo "usage: ghc-slots.sh run|detach|exclusive -- <cmd...>" >&2
   exit 2
 fi
 
@@ -83,6 +93,15 @@ case "$mode" in
         announced=1
       fi
     done
+    ;;
+  detach)
+    # New session so a process-group-scoped kill of the caller cannot reach the
+    # queued waiter. The detached child is `run` itself: it holds the flock fd
+    # once acquired and releases on exit, so slot discipline is fully honored.
+    log="${TIDEPOOL_GHC_DETACH_LOG:-$(mktemp /tmp/tidepool-ghc-detach.XXXXXX.log)}"
+    setsid nohup "$0" run -- "$@" >"$log" 2>&1 </dev/null &
+    echo "ghc-slots: detached pid=$! log=$log"
+    echo "$!"
     ;;
   exclusive)
     await_memory
