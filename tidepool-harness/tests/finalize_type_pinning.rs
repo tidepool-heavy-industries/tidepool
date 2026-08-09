@@ -32,17 +32,11 @@
 //! GHC on PATH (`--ignore-default-filter` to run; see `tests/golden_path.rs`
 //! for the env recipe).
 
+mod support;
+
 use tidepool_harness::compile;
 use tidepool_harness::engine::{answerer_hole_card, template_turn_for, EngineConfig};
 use tidepool_harness::{answerer_decls, load_harness_source};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -99,10 +93,7 @@ const GOOD_DECISION: &str = "(finalize @Decision (Decision { action = \"observe\
 /// `:: M ()` spelling every existing answerer writes survives.
 #[test]
 fn correctly_typed_finalize_still_compiles_when_pinned() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let result = compile_turn(GOOD_DECISION, "HarnessTypes", Some("Decision"));
     assert!(
         result.is_ok(),
@@ -122,10 +113,7 @@ fn correctly_typed_finalize_still_compiles_when_pinned() {
 /// so the trap reported a plausible-looking field count).
 #[test]
 fn wrong_typed_finalize_is_a_compile_error() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let wrong = [
         ("Text", "(finalize @Text (\"oops\" :: Text) :: M ())"),
         (
@@ -158,10 +146,7 @@ fn wrong_typed_finalize_is_a_compile_error() {
 /// the row names.
 #[test]
 fn wrong_typed_finalize_compiles_when_the_row_names_text() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let result = compile_turn(
         "(finalize @Text (\"oops\" :: Text) :: M ())",
         "",
@@ -182,10 +167,7 @@ fn wrong_typed_finalize_compiles_when_the_row_names_text() {
 /// live, before it gave up and substituted a tuple.
 #[test]
 fn pinned_finalize_needs_the_type_in_scope() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let err = compile_turn(GOOD_DECISION, "", Some("Decision"))
         .err()
         .map(|e| e.to_string())
@@ -220,10 +202,7 @@ fn answer_contract_puts_the_type_in_scope() {
 /// itself isn't caching stale bytecode for the author module either.
 #[test]
 fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let dir = tempfile::tempdir().expect("temp dir for the author module");
     let module_path = dir.path().join("AuthorType.hs");
 
@@ -352,10 +331,7 @@ fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
 /// below is the actual claim, applied to whatever shape is live right now.
 #[test]
 fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let imports = vec!["HarnessTypes".to_string()];
     let shape = prescribed_finalize_shape("Decision", &imports);
     assert_eq!(
@@ -394,10 +370,7 @@ fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
 /// of 'toJSON' ... (ToJSON a0)" — the exact defect this pins.
 #[test]
 fn bare_finalize_with_no_annotation_compiles_when_pinned() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let code = format!("finalize @Decision ({A_DECISION})");
     let result = compile_turn(&code, "HarnessTypes", Some("Decision"));
     assert!(
@@ -425,10 +398,7 @@ fn bare_finalize_with_no_annotation_compiles_when_pinned() {
 /// claim rather than a compile that never exercised it.
 #[test]
 fn bare_non_bind_askuser_form_compiles_when_pinned() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let code = "askUser (intField \"Count\")";
     let result = compile_turn(code, "HarnessTypes", Some("Decision"));
     assert!(

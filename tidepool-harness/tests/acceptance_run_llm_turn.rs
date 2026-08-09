@@ -11,6 +11,8 @@
 //!   - bottom answer does not consume -> run_llm_turn_bottom_answer_...
 //!     (this one surfaced a production-path finding — see its doc comment)
 
+mod support;
+
 use std::sync::Arc;
 
 use serde_json::json;
@@ -20,14 +22,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::{Harness, HoleRouting, Ui};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -119,12 +113,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
 ///      parent, and the node completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_end_to_end_type_retry_and_answer() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rc.jsonl");
@@ -331,12 +320,7 @@ fn decision_lib_dir() -> tempfile::TempDir {
 /// assertions as `run_llm_turn_end_to_end_type_retry_and_answer`, condensed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_nested_adt_type_retry_and_answer() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rc-nested.jsonl");
@@ -459,10 +443,7 @@ async fn run_llm_turn_nested_adt_type_retry_and_answer() {
 /// the one that eventually consumes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available");
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("bottom.jsonl");
@@ -613,10 +594,7 @@ async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
 /// the completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dialog_mechanical_answer_completes_and_logs_consistently() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available");
-        return;
-    }
+    support::require_extract();
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("dialog.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
@@ -673,10 +651,7 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
 /// immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dialog_prose_answer_resumes_directly_without_elaboration() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available");
-        return;
-    }
+    support::require_extract();
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("dialog_prose.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
@@ -713,10 +688,7 @@ async fn dialog_prose_answer_resumes_directly_without_elaboration() {
 /// "no live session".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn follow_up_after_dialog_resume_to_done() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available");
-        return;
-    }
+    support::require_extract();
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("followup.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
@@ -777,12 +749,7 @@ async fn follow_up_after_dialog_resume_to_done() {
 /// `answer_run_llm_turn` again) resumes the continuation to completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_second_sequential_hole_carries_its_type() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rc-second-hole.jsonl");

@@ -24,14 +24,6 @@ use tidepool_harness::{
     SelfHarnessDriver, Submission,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -105,12 +97,7 @@ fn askuser_reply() -> RecordedReply {
 /// EXTRACTED executed Haskell for that turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn askuser_operator_form_round_trip_and_ws4_log() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(

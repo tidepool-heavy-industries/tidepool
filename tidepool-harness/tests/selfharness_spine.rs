@@ -20,14 +20,6 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -73,12 +65,7 @@ fn reply(content: &str) -> RecordedReply {
 /// boundary and be visible to the NEXT `render` call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     // The nested answerer: the SCOPED `answerer_decls()` stack (gui + finalize

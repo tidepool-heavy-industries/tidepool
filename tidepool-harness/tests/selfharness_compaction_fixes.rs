@@ -31,14 +31,6 @@ use tidepool_harness::{
     Observer, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -198,10 +190,7 @@ fn make_driver(
 /// against it and does not escape the runaway guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_summarize_turn_counts_against_inference_cap() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let (mut driver, source) = make_driver(&scratch("c2"), 600, Arc::new(LogObserver));
@@ -231,10 +220,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
 /// would otherwise never have been committed by `run_one_cycle` at all).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     // Both drivers share the SAME checkpoint path — that IS the restart.
@@ -286,10 +272,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
 /// + node, emitted after the summary exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c4_compaction_trigger_event_carries_payload() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let observer = Arc::new(CaptureObserver::default());
