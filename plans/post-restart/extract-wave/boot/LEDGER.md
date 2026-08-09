@@ -484,6 +484,52 @@ not evidence that the seam changed.
 
 ## Fold conflicts
 
+### OWNERSHIP CHANGE: `effects_module_source_with_vocab` has an EXTERNAL consumer
+
+Item 0b's restructure moved the whole body of `effects_module_source_at`
+into `effects_module_source_with_vocab(row_effects, vocab_effects, row)`,
+leaving the old name a one-line delegation (`boot-vocab`, `d6fce023`).
+worktree-wave's **L4** is now a consumer of that function, adding a
+conditional `hiding (error, (<|>))` to the generated import line when
+`RepoEvent` is present.
+
+**They found a real bug on first reading.** The hiding predicate must key
+on `row_effects`, NOT `vocab_effects` — helper emission is gated at `:273`
+on `in_row || eff.helpers_row_polymorphic`, and `RepoEvent` is not
+row-polymorphic, so its `(<|>)` helper exists exactly when `RepoEvent` is
+in the ROW. The superset assert at `:177` means the only constructible
+mismatch is vocab-with / row-without, where the helper is NOT emitted —
+so hiding there would hide the Prelude's `Alternative` while emitting no
+replacement, leaving a name resolving to nothing.
+
+**Be clear-eyed about the direction.** Making the vocab/row distinction
+explicit is right — it is where 0b's acceptance lives — but it CREATED A
+NEW WAY TO BE WRONG. Before, there was no `vocab_effects` to key on
+mistakenly. Every consumer now faces a choice it did not previously have,
+and the first external one got it wrong, caught only because another wave
+happened to be reading. That is not an argument against the design; it is
+an argument that the design owes its consumers more than it used to.
+
+**Standing rule on this function, agreed by both waves:** a predicate
+about what was EMITTED must DERIVE from the emission gate, never restate
+it — so it cannot diverge if `RepoEvent` later becomes row-polymorphic,
+which the vocabulary story makes plausible.
+
+`boot-vocab` is asked to honour it structurally rather than in prose:
+export the gate as a named predicate (`emits_helpers_for(eff,
+row_effects)`) called at `:273` and callable by any consumer, rather than
+documenting the rule and hoping. Same doctrine as the strict-mode
+unreachability requirement in `boot-targets`' lane: **a doc comment
+documents against a mistake; a shared predicate makes it unavailable.**
+The second consumer will not have worktree-wave standing behind them.
+
+**Fold cadence:** `boot-vocab` folds PROMPTLY when 0b is green, not
+batched behind its siblings — L4 needs the function on a shared base, and
+cherry-picking `d6fce023` fails inspection (a WIP commit spanning seven
+files across four crates). Nothing is blocked meanwhile: L4 verifies
+against `d6fce023` in a disposable checkout. Prompt-when-green, NOT hurry
+the work — verification is not cut to fold sooner.
+
 **Known fold points, flagged before the fact:**
 
 1. `tidepool-mcp/src/eval_prep.rs` — `harness-lifecycle` adds
