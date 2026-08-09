@@ -50,6 +50,27 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
   - Commit with `--no-verify`. Never `git add -A`. Repo-root `tmp/` is
     protected.
   - Grep/Read over LSP; do not start per-worktree rust-analyzer.
+  - **Inherited-red is established by A/B, never by argument.** A red test
+    you did not cause is a normal thing to inherit and a fine thing to
+    report — and it is also the most convenient available excuse, so it
+    carries a proof obligation. In YOUR OWN worktree: `git stash`, run,
+    unstash, run. Same command both legs.
+    - Make both legs CACHE-CONSISTENT (clear `$PWD/.cache` before each, or
+      confirm both actually recompile). A change that alters a source
+      fingerprint invalidates the compile cache, so a naive A/B measures
+      cold-vs-warm rather than your diff. This is the trap a dev falls into
+      while honestly trying to comply.
+    - "The failing test file is not in my diff" is INVALID for a change to
+      a global surface — a prelude, a pragma list, an effect row, a shared
+      wire type. Everything that compiles through it is downstream whether
+      or not its own file appears.
+    - Comparing two states that BOTH contain your changes rules out the
+      other change, not yours.
+    - Report per-red SIGNATURES plus an explicit pre-existence claim, not
+      bare counts. Your own new tests are never covered by inherited-red.
+    Measured in this wave: the two devs given this instruction produced
+    sound baselines; the one who was not produced a plausible argument that
+    was wrong.
 
 ## READ FIRST
 
