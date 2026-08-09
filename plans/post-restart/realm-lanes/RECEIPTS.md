@@ -141,7 +141,64 @@ F1/F2.** A1 exercises the completion path, where no continuation is parked and
 nothing is rooted, so it carries no memory-safety claim — it pins the
 bound_root plumbing. F3 and F4 remain the cases carrying the safety claim.
 
-## Step 3 — pending (lane B)
+## Step 3 — the prefix-compatibility check (verdict §7 step 3, ENFORCED CONSTRAINT 1)
+
+`JitEffectMachine::established_prefix` + `check_prefix_compatible`, threaded
+through `ContinuationFrame` / `ParkTarget::Registry` and the three public parked
+entries. Refusal is `JitError::IncompatibleHandledPrefix { established, incoming,
+position }` — naming both prefixes and the disagreeing position.
+
+| claim | receipt |
+|---|---|
+| Whole crate | `cargo nextest run -p tidepool-codegen` → **708 tests run: 708 passed, 8 skipped** |
+| Targeted 5-binary set | **27 tests run: 27 passed** |
+| `realm_prefix_compat.rs` | **9 tests run: 9 passed** (7 original + 2 gap-closing) |
+| fmt / clippy | clean, except the pre-existing `ResponsePlan` `large_enum_variant` (verified byte-identical at the shared base `cd0f4002`, out of scope) |
+
+**A placement gap was found on review and fixed before merge.** As first
+submitted, the check ran inside `finish_suspendable`'s `Suspended` arm — so it
+fired only when a turn SUSPENDED, and a parked-path run that COMPLETED was never
+checked at all. That inverts the check's value: a turn completing without
+suspending is precisely a turn whose every effect was *handled*, i.e. dispatched
+positionally through the machine's single `H`, which is exactly the misroute
+surface §5 describes. The check was covering the realms whose unhandled tags went
+up to the caller and never reached a handler, and missing the ones whose effects
+actually went through the handler stack.
+
+The gap was inherited from this TL's lane spec, which took the verdict's phrase
+"at park time" literally instead of reasoning about where the hazard lands. Not a
+dev error — the implementation was faithful to what it was given.
+
+Fixed by moving both the check and the establishing write into
+`enter_parked_path`, called at the TOP of `run_fragment_suspendable_parked` and
+`resume_parked`, before the machine is driven. A refusal now means **nothing
+ran**, not merely nothing parked. Establishment also had to move: `H` is fixed
+for the machine's life whether or not anything suspends, so establishing only on
+suspension left a realm that ran-and-completed with a non-empty prefix never
+recording what `H` is — after which an incompatible realm would park
+successfully because nothing was established. The two tests that close it are
+`refused_disagreeing_completing_run_never_executes` and
+`establishment_on_completion_then_refuses_disagreeing`.
+
+## Negative control, RE-PROVEN a third time (after lane B's edits)
+
+Lane B added a `&[]` argument at each existing parked call site — the falsifier
+edited again, so its green is again unearned until shown killable. Under the
+control:
+
+`-E 'binary(realm_multi_continuation) or binary(realm_per_realm_fields) or
+binary(realm_prefix_compat)'` → **5 passed, 11 failed**, with F3
+(`ContinuationId(1)`), F4 (`ContinuationId(3)`) and A5-parked
+(`ContinuationId(0)`) dying on tag 221 — **the same three ids and the same tag as
+both prior runs.** Diff reviewed first: pure `&[]` additions, zero assertions
+touched.
+
+## Both enforced constraints, with a demonstrating refusal each
+
+| constraint | enforcement | demonstrating test |
+|---|---|---|
+| 1 — position-compatible handled prefixes | `enter_parked_path` at entry, typed refusal, machine untouched | `refused_disagreeing_a_then_b`, `refused_disagreeing_b_then_a`, `refused_disagreeing_completing_run_never_executes` |
+| 2 — the two suspension paths must not mix | L7 assert on the run entries + its sibling on `resume_parked` | `parked_resume_while_the_slot_is_occupied_panics` |
 
 ## Step 6 — DEFERRED, and why
 

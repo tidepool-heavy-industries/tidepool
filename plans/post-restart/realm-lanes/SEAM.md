@@ -4,10 +4,9 @@ Written for the typed-subagent wave (PRD 18), whose `Agent` effect consumes this
 machinery, so it reads the seam from a contract instead of reverse-engineering
 `jit_machine.rs` internals. Sequenced to spawn after the realm landing.
 
-STATUS: invariants and the internal/public split are FROZEN as of step 2.
-The signature table is filled at fold — lane B (step 3) is changing the park
-entries' signature right now, and freezing a signature hours before it changes
-would be worse than useless.
+STATUS: FROZEN. Invariants and the internal/public split settled at step 2; the
+signature table (§4) filled at fold, once step 3 had settled the parked entries'
+signature. This is the contract that ships.
 
 ---
 
@@ -117,7 +116,81 @@ Do not depend on any of this; it will move without notice.
 
 ## 4. Signature table
 
-FILLED AT FOLD. Lane B (step 3) is currently changing the parked run entries'
-signature to carry the realm's handled prefix; this table names the exact
-functions and types once that has settled, so the frozen contract is the one that
-actually ships.
+All on `JitEffectMachine` (`tidepool-codegen/src/jit_machine.rs`). `U` is the
+user context, `H: DispatchEffect<U>` the handler stack.
+
+**Enter the parked path — run a turn under a realm.**
+
+```rust
+pub fn run_suspendable_parked<U, H: DispatchEffect<U>>(
+    &mut self, table: &DataConTable, handlers: &mut H, user: &U,
+    suspend_tag: u64, realm: RealmId, handled_prefix: &[String],
+) -> Result<ParkedOutcome, JitError>
+
+pub fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
+    &mut self, func_id: FuncId, table: &DataConTable, handlers: &mut H, user: &U,
+    suspend_tag: u64, realm: RealmId, kind: ParkKind, handled_prefix: &[String],
+) -> Result<ParkedOutcome, JitError>
+```
+
+`handled_prefix` is the realm's handled effect names for tags
+`[0, suspend_tag)`, in position order — the caller builds the decls row, so it
+has them. It is checked and, if this is the first non-empty prefix, ESTABLISHED
+**at entry, before the machine is driven at all**. That placement is the
+contract, not an implementation detail: an incompatible realm never executes a
+single effect against a foreign handler stack, whether it would go on to suspend
+or to complete. (Checking only at suspension would miss exactly the realms whose
+effects all got dispatched — the misroute surface.)
+
+**Resume by identity.**
+
+```rust
+pub fn resume_parked<U, H: DispatchEffect<U>>(
+    &mut self, id: ContinuationId, handlers: &mut H, user: &U, input: ResumeInput,
+) -> Result<ParkedOutcome, JitError>
+```
+
+No `table`, no `suspend_tag`, no `handled_prefix` — the frame replays all three.
+A consumer *cannot* resume a frame against a foreign effect row.
+
+**Enumerate and inspect.**
+
+```rust
+pub fn parked_count(&self) -> usize
+pub fn parked_ids(&self) -> Vec<ContinuationId>          // ascending
+pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId>
+pub fn stowed_roots_count(&self) -> usize                // the rooting receipt
+pub fn take_parked_finalized_root(&mut self, id: ContinuationId)
+    -> Option<crate::old_space::RootSlot>                // frame stays parked + rooted
+pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle
+```
+
+**Outcome.**
+
+```rust
+pub enum ParkedOutcome {
+    Completed { value: Value, bound_root: Option<RootSlot> },
+    Suspended { id: ContinuationId, request: Value, has_finalized_closure: bool },
+}
+```
+
+`bound_root` is `Some` exactly for `ParkKind::Binding`, returned INLINE rather
+than stashed on the machine — a completed park leaves no frame, so there is
+nowhere for a per-frame slot to live and no window for a second realm's
+completion to overwrite it.
+
+**Refusal.**
+
+```rust
+JitError::IncompatibleHandledPrefix { established: Vec<String>, incoming: Vec<String>, position: usize }
+```
+
+Raised before anything runs or mutates; the machine is left byte-for-byte
+unchanged, so a consumer may catch it, correct the row, and retry.
+
+**Cancellation is per REALM, not per machine and not per park** — a realm's
+continuation ids change on every re-suspension, so a handle scoped to an id would
+not survive its own realm. Cancelling one realm's handle cannot abort a sibling
+realm's run on the same machine. A cancelled realm's flag is NOT auto-cleared;
+call `CancelHandle::reset` when done retrying (same discipline as the
+machine-level handle).
