@@ -49,7 +49,25 @@ exactly what it was asked to emit. The generator was correct and the design was
 wrong, and only a gate that exercises the authored surface can tell those apart.
 Where both kinds are available, the authored one is the real gate.
 
-**4. Say when your gates cannot settle the question at all.** Earlier in the
+**4. CHECK DURATION AGAINST THE WORK CLAIMED.** The cheapest instrument there
+is, and in this wave the only one that caught a vacuous green. L4's seven-gate
+re-run returned 23/23 PASS, started == run, no truncation, correct count, every
+gate by name with a real pass line — and every one had SKIPPED. The harness
+early-returns and PASSES when `TIDEPOOL_EXTRACT` is unset, and it was unset.
+
+A skip spelled as a pass is structurally IDENTICAL to a pass, so it defeats
+every check layered above: named execution, real pass lines, started-vs-run,
+completion figures, named instruments. None of them can distinguish
+ran-and-held from skipped-and-passed. What gave it away was 0.006–0.011 s per
+gate against 9.2–16.6 s previously — a test driving real GHC → extract → JIT →
+a temp git repository cannot finish in 6 ms.
+
+So: know roughly what your gate SHOULD cost, and treat an unexplained
+order-of-magnitude drop as a finding rather than good luck. Report durations,
+because the next person's baseline is your reported timing — that is how this
+one was caught at all.
+
+**5. Say when your gates cannot settle the question at all.** Earlier in the
 same lane, the conditionality gates were built on an entry point that passes one
 list for both parameters, making them non-discriminating rather than merely
 incomplete — and the receipt said so. That distinction is the difference between

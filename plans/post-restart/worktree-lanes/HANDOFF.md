@@ -118,6 +118,25 @@ Both errors above came from reasoning about a relayed signature that was
 accurate about SHAPE and silent about what decides the answer. **"Read the
 committed function" has to mean read it, not read about it.**
 
+## The four checks a green result cannot make for you
+
+Each was earned by something that got through the previous ones:
+
+1. **A gate passes BY NAME** — an aggregate cannot say the guard ran.
+2. **A number NAMES ITS INSTRUMENT** — a count cannot say what counted it.
+   (This caught a fleet-cost claim that was ~3× wrong.)
+3. **A receipt states COMPLETION** (started-vs-run) — a pass list cannot say the
+   run finished. Fail-fast plus an inherited red truncates at ~23% while
+   emitting real pass lines.
+4. **DURATION IS CHECKED AGAINST THE WORK CLAIMED** — none of the above can say
+   the guard did its work. A suite that skips on a missing environment and
+   spells the skip as a PASS is structurally identical to a pass: named
+   execution, real pass lines, started == run, correct count, all satisfied,
+   all vacuous. Only an implausible runtime (0.006 s for a gate that drives
+   GHC → extract → JIT → a temp repository) exposes it.
+
+Report your durations. The next person's baseline is your reported timing.
+
 ## Known gaps and deferred questions
 
 - PRD deferred questions 1–5 stand (GC/retention interface, durable agent
