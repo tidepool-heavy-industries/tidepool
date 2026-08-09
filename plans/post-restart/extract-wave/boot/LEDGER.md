@@ -295,9 +295,56 @@ them.
 
 ### Item 0 — one-compile bootstrap (Track 1)
 
-- **Fix-ladder rung:** rung 1 (Eliminate) attempted. _Not yet resolved._
-- **Blocker (if any downgrade to rung 2):** _none recorded._
-- **Receipts:** _pending._
+- **Fix-ladder rung:** rung 1 (Eliminate). No downgrade taken; none
+  contemplated. Root ruled the rung-2 cache interim explicitly OFF.
+- **Blocker (if any downgrade to rung 2):** _none._
+
+#### `boot-count` — FOLDED (branch `…boot.boot-count` @ `7cd52183`)
+
+The live-shaped receipt, landed FIRST so item 0's win is an A/B against a
+committed red line rather than an after-the-fact assertion.
+
+- `EXTRACT_SPAWNS` process-global counter in
+  `tidepool-harness/src/compile.rs` (incremented at `compile_turn`'s
+  `cmd.output()`), `extract_spawn_count()` / `reset_extract_spawn_count()`.
+- `tidepool-harness/tests/acceptance_boot_compile_count.rs` as its OWN
+  test binary, asserting against `PRE_MODEL_EXTRACT_COMPILES` — verified
+  present at `= 4` post-fold, with a failure message naming the wave's win
+  condition so a future dev knows whether it got better or worse.
+- **Spawn-site survey** (the part that makes the number honest): only
+  `compile.rs::compile_turn` is reachable before the first model call —
+  four spawns, being `Harness::new`'s boot seed,
+  `SelfHarnessDriver::bootstrap`'s boot seed, `compile_outer(render)`, and
+  `compile_outer(loop)`. `tidepool-runtime`'s `run_turn` /
+  `classify_block` / `compile_session_turn` and `compile_haskell_salted`
+  (the MCP eval path) are post-model-only or never reached by the driver.
+
+**Receipts (named-guard rule honoured):**
+
+| leg | result |
+|---|---|
+| `acceptance_boot_compile_count` (own pass line) | PASS, 1/1, twice — pre-rebase 115.4s and post-rebase re-verify 65.5s |
+| **measured pre-model extract-spawn count** | **4**, both runs |
+| harness acceptance aggregate (11 other `acceptance_*`) | 25 passed, 0 failed, 0 skipped |
+| tier-1 nextest (pure Rust) | 1862 passed, 9 skipped, 0 failed |
+| check / clippy / fmt | clean before and after both rebases |
+| transfer proof | tested @ HEAD `7cd52183` |
+
+**The D7 figure is now MEASURED, not inherited.** Four was the live-dogfood
+observation the plan carried; it is now an instrument reading, and item 0's
+drop is checkable against it.
+
+Declared deviations, both accepted: an unrelated nextest-cap cherry-pick
+taken mid-session under a do-now directive (later absorbed by the parent's
+own copy at rebase); and skipping a full aggregate re-sweep after rebases
+per the batch-not-re-sweep guidance, having re-verified the affected test
+standalone.
+
+**Instrument note, carried as doctrine:** this counter counts spawns **at
+the source, inside the code path**, which is why its number is trustworthy
+in a week when three separate external-observation instruments were each
+wrong in a different direction. An in-code counter establishes its
+referent; an external pattern match asserts one.
 
 ### Item 0b — nameable effect vocabulary
 
