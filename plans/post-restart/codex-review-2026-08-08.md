@@ -36,9 +36,14 @@ address-carrying class, routing failures through a new
 `ShapeTrapKind::AddrKind` poison+breadcrumb trap. Covers every
 Addr#-consuming primop via the shared helper. The one-field negative test
 SIGSEGV'd on pre-fix code (stash A/B) — real memory-safety hole, not
-hypothetical. Suite 687/687. **Follow-up spawned:** `unbox_bytearray` has
-a structurally analogous but separate gap (own duplicated con-unwrap
-loop, no final `TAG_LIT` check) — same fix pattern applies.
+hypothetical. Suite 687/687. **Follow-up also landed**
+(bytearray-hardening, 4e2920e9, folded same day): `unbox_bytearray`'s
+analogous gap closed with `ShapeTrapKind::ArrayKind`, the con-unwrap
+traversal deduplicated into a shared `unwrap_boxing_chain` (final
+class-checks kept separate — accepted literal classes genuinely differ),
+all array-consuming primops covered, and a second independent stash-A/B
+SIGSEGV proof. Suite 690/690. **The tag-as-pointer class is now closed on
+both unbox paths** (`unbox_numeric` already had an equivalent guard).
 
 ## 2. Compile cache cannot key GHC flags — CONFIRMED gap
 **Owner: generic-surface (design input to dev-1's Harness.Prelude profile)**
