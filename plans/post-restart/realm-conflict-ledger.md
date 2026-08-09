@@ -18,21 +18,37 @@ Mechanical resolutions are logged and moved past.
 |---|------|-----------|------|------------|------------|---------|---------------|
 | C1 | 2026-08-08 | `git rebase root.realm-spike` (proto lane, second rebase — onto the jit-chain-2 fold) | `plans/post-restart/realm-conflict-ledger.md` | Two overlapping hunks in THIS file: both sides wrote a `Z3` row, and both rewrote the running tally. The TL had transcribed proto's Z3 (correctly, and better worded) and appended a "Reading of the experiment" section; proto's original commit still carried its own wording of the same row. | Took the TL's side wholesale — it already contained proto's content, so proto's side was strictly redundant. Nothing was dropped: the surviving text is a superset. | 2 | No — TL's row is a transcription of proto's, plus analysis proto did not have. |
 | C2 | 2026-08-08 | `git rebase root.realm-spike` (proto lane, THIRD rebase — onto `0dc93715`, the TL's own post-jit-chain-2 rebase) | `plans/post-restart/realm-conflict-ledger.md` | Same file, worse: both sides had independently written a row numbered **Z4** for DIFFERENT events (the TL's rebase of `root.realm-spike`; proto's rebase of `root.realm-spike.proto`), and both had rewritten the "Honest bound" paragraph of the reading section. Two overlapping hunks, neither side redundant this time. | Renumbered proto's row to **Z5** and kept both — they document different rebases. Took the TL's revised "Honest bound" (a superset of proto's, since it accounts for the TL's own Z4) and grafted proto's two unique points as a named addendum rather than interleaving them. | 6 | No — both rows and both analyses survive. |
+| C3 | 2026-08-08 | `git rebase root.realm-spike` (checklist lane, second rebase — onto `7ec1dd6c`, the TL's fold of C1/C2 + proto's Z5) | `plans/post-restart/realm-conflict-ledger.md` | Same file, third time: this lane had independently written its OWN row numbered **Z5** (for the checklist lane's rebase, a different event from proto's Z5 already in the table), plus its own drift-analysis subsection and its own full rewrite of the "Running tally" block — all three overlapping the TL's post-C1/C2 versions of the same regions. | Renumbered the checklist lane's row to **Z6** (proto's Z5 stands; it was folded first). Kept the TL's "Running tally" as the base (it already accounts for C1/C2 and proto's Z5) and updated its counts/bullets to add the checklist lane's Z6 contribution rather than overwriting. Table-row insertion point moved out of the conflict hunk entirely (a plain, non-conflicting edit to the `Zero-conflict folds` table) so a future fourth writer lands a clean insert instead of a fourth numbering collision. | 5 | No — both Z5(proto) and Z6(checklist) rows, both drift analyses, and both tally authors' bullets survive. |
 
-**TL sign-off on C1/C2 (required by the recording rule).** Both resolutions
-reviewed against the pre-conflict text of each side: nothing was dropped, so
-neither needed a stop-and-ask. Proto's two corrections to the TL's own analysis
-are ACCEPTED as factually right — the claim that proto skipped step 5 because it
-"ran out of budget" was the TL's inference and proto never said it; the real
-reason was proto's own mixed-path finding turning that work into a whole-session
-conversion. The softening of "zero conflicts" to "zero CODE conflicts" is
-likewise correct now that C1/C2 exist.
+**TL sign-off on C1/C2/C3 (required by the recording rule).** All three
+resolutions reviewed against the pre-conflict text of each side: nothing was
+dropped in any of them, so none needed a stop-and-ask. Proto's two corrections
+to the TL's own analysis (in C1/C2) are ACCEPTED as factually right — the claim
+that proto skipped step 5 because it "ran out of budget" was the TL's inference
+and proto never said it; the real reason was proto's own mixed-path finding
+turning that work into a whole-session conversion. The softening of "zero
+conflicts" to "zero CODE conflicts" is likewise correct now that C1/C2/C3
+exist.
 
-Worth stating plainly because it is the funniest and most useful result here:
-**the only artifact four concurrent lanes ever collided on was this file — the
-document describing the collisions.** Two agents appending prose rows to one
-small shared table conflicted twice; three agents appending ~330, ~90, and ~30
-lines of Rust to one 3400-line source file conflicted zero times.
+Worth stating plainly because it is now the sharpest and most repeated result
+here: **the only artifact this lane's four-plus concurrent agents have EVER
+collided on is this file — the document describing the collisions — and it has
+now happened three times running (C1, C2, C3).** Two agents appending prose
+rows to one small shared table conflicted three times in a row; three agents
+appending ~330, ~90, and ~30 lines of Rust to one 3400-line source file
+conflicted zero times. The pattern is strong enough now to state as a
+conclusion, not an anecdote: **the counter is a shared mutable cell nobody
+owns.** `Z<n>`/`C<n>` is a plain incrementing integer that every writer reads,
+increments, and appends against independently, with no lock, no reservation,
+and no author field distinguishing "the next number" from "the number I
+happened to see last." Rust's borrow checker enforces exclusive access to a
+mutable cell; this ledger's numbering scheme has no equivalent, so every
+concurrent writer picks the same next integer by construction, every time,
+regardless of how careful any individual agent is. The fix is not "be more
+careful" (three careful agents already collided three times) — it is giving
+the counter an actual owner, e.g. requiring `merge`/`rebase --continue` to
+mint the next `Z`/`C` number atomically at fold time rather than letting each
+lane pre-assign one before it knows who else is in flight.
 
 ## Zero-conflict folds
 
@@ -43,6 +59,7 @@ lines of Rust to one 3400-line source file conflicted zero times.
 | Z3 | 2026-08-08 | `git rebase root.realm-spike` (proto lane, before `submit_branch`) | `root.realm-spike.proto` | rebased 3 commits over Z1+Z2; overlap was `tidepool-codegen/src/jit_machine.rs` (both sides) and `tidepool-codegen/tests/` (sibling files) | Clean, 0 minutes. **The sharpest data point of the experiment: the first case where two lanes edited the SAME FILE concurrently and substantially.** `lifetime` added two accessors before `is_suspended`; `proto` added ~330 lines to the same `impl` block — registry types above the struct, two fields inside it, new methods after `run_child_fragment_pure` — plus a parameter change to `finish_suspendable` and two call sites. Zero conflicts, because the hunks landed in different regions of a 3400-line file. Same-file overlap is not same-hunk overlap, and the timidity this experiment tests conflates them. (Transcribed from the proto branch, which stays unmerged — the parent cannot observe a child's own rebase.) |
 | Z4 | 2026-08-08 | `git rebase harness-interaction-surface` (tip cd0f4002; jit-chain-2 folded into it) | `root.realm-spike` (this lane) | 6 commits replayed. Incoming diff in this lane's territory: `jit_machine.rs` +90/-, `pipeline.rs` +149, `stack_map.rs` +163, `gc.rs` +11, `binding_table.rs` +91, `datacon_env.rs` +259, a NEW `emit/apply.rs` (+403) extracted from `emit/expr.rs` (-356), plus a D9 signature change with call sites in `tidepool-runtime` and `tidepool-repl` | **Clean, 0 minutes, 0 conflicts.** Root sent this specifically because jit-chain-2 "restructures your exact territory" — and it did, including an extraction refactor. Still nothing to resolve. | 0 | no |
 | Z5 | 2026-08-08 | `git rebase root.realm-spike` (proto lane, second rebase — onto the jit-chain-2 fold, tip `cd0f4002`) | `root.realm-spike.proto` | `tidepool-codegen/src/jit_machine.rs` (both sides), plus jit-chain-2's `emit/apply.rs` (+403, extracted from `expr.rs`), `pipeline.rs` (+149), `stack_map.rs` (+163), `host_fns/gc.rs` | **Zero conflicts on the CODE side**, in the case the experiment most wanted: not additive-vs-additive but **additive-vs-RESTRUCTURING**. jit-chain-2 refactored `jit_machine.rs` (63 insertions / 27 deletions — a ConTags re-resolve in `install_registries`, a `gc_retry` consolidation in the stream-tail path) while proto had ~330 lines outstanding against the same `impl`. Still no overlap: jit-chain-2 rewrote existing function BODIES, proto added new types, fields, and methods. Restructuring and accretion touch disjoint regions almost by construction. The only conflicts this rebase produced (C1, then C2 when it was repeated onto `0dc93715`) were in this ledger file — prose, not code. |
+| Z6 | 2026-08-08 | `git rebase root.realm-spike` (checklist child lane, three hops: onto `f6680cbc` mid-flight, then `feb0e0ff` once Z4's transfer-proof commit landed, then `7ec1dd6c` once C1/C2 + proto's Z5 folded) | `root.realm-spike.checklist` (this lane) | 1 file this lane owns: `plans/post-restart/spike-notes/realm-checklist.md`, plus this ledger (see C3 above for the third hop's conflict) | **Clean on the doc-content hops** (0 conflicts, 0 minutes) — a prose-only doc rebasing across a restructuring fold in code it cites but never edits. The third hop conflicted, but only in THIS ledger file (C3), never in the owned doc. |
 
 ### Z4 anchor drift (the real cost of this rebase)
 
@@ -84,14 +101,71 @@ minutes; the docs describing that file needed a full re-verification pass. A
 conflict ledger that only counted git conflicts would have recorded this rebase
 as free.
 
+### Z6 anchor-drift re-verification (independent measurement of Z4's cost, from the doc-author side)
+
+Root's Z4 entry above measured drift on a sample of symbols root chose to
+check. This lane independently re-verified EVERY anchor actually cited in
+`realm-checklist.md` (not a sample) against the post-rebase tree at
+`root.realm-spike` commit `feb0e0ff`, per the checklist's own "spot-check
+ten, then check them ALL after a rebase this size" instruction. Findings:
+
+- **Confirms Z4's shape.** `jit_machine.rs` drift was zero up to line ~217
+  (struct fields), +6 from ~471 to ~1183 (a `#313 defense`-adjacent addition
+  before that zone), +19 more (→+25 total) from ~1183 to ~1616, and +45 total
+  from ~2149 onward (the `enter_nested_child`/`run_child_fragment`/
+  `drive_effect_loop` region Z4 already flagged). `resident.rs` was +3
+  uniformly from `ChildSuspended`'s raise site (:509→:512) onward, but its
+  earlier third (`pending` field, `ChildSuspended`'s own definition, the
+  zero-copy doc comment) had ZERO drift — not `+3` as a blanket assumption
+  would have guessed. Lesson: drift is not a single delta per file; it steps
+  at each real insertion point, and assuming a uniform offset from one
+  sampled symbol would have mis-anchored several citations in this same
+  file.
+- **One anchor was wrong before the rebase too**, unmasked only by doing a
+  full re-check instead of trusting the original: `resident.rs:159` (cited
+  twice, for "`ResidentSession<H, O>` is generic over `H`") pointed at a
+  doc-comment line, not the struct declaration (:155) or the `handlers: H`
+  field (:163) it was actually citing evidence for. The rebase didn't cause
+  this — re-deriving every anchor from scratch caught a pre-existing
+  imprecision that spot-checking ten anchors the first time had missed.
+- **One correction was semantic, not positional — the sharper of the two
+  things flagged for re-read.** The fold's D9 change narrowed
+  `BindingTable::seed_external_env` from an unconditional every-live-binding
+  sweep to a referenced-`VarId` intersection (`binding_table.rs:193-201`,
+  with its own test suite stating the narrowing explicitly at
+  `binding_table.rs:259-262`). This directly falsified part of Item 2's
+  original finding (that the env sweep leaked every realm's bindings into
+  every fragment) — the doc's Item 2 section was rewritten, not just
+  re-numbered, and its cost rating narrowed from "REAL, unqualified" to
+  "REAL but only for the display-name `current` layer; the VarId-keyed half
+  is now close to FREE as a side effect of unrelated work." The OTHER
+  flagged risk (Item 4's cancellation safepoint, given `gc.rs` changed by 11
+  lines) turned out to be a false alarm on inspection: the 11-line diff was
+  entirely `host_alloc_gc`'s alloc-retry consolidation (~line 1164),
+  unrelated to the cancellation safepoint, which read byte-identical to the
+  pre-rebase version.
+
+This is a second data point for the same lesson Z4 already drew: the
+re-verification cost is real and does not scale with conflict count (Z6's
+underlying rebase had zero conflicts and zero git-visible cost — the C3
+conflict logged above is a separate event, on the ledger itself, not on the
+thing Z6 measures) — it scales with how many prose claims cite line numbers,
+and once with how carefully the ORIGINAL claim was checked. Sampling symbols
+to estimate drift (as Z4's table did) is a fine cost estimate; it is not a
+substitute for re-reading every anchor a document actually relies on, because
+drift is non-uniform within a file and because a small fraction of
+"line-number" corrections turn out to be semantic corrections wearing a
+line-number's clothes.
 
 ## Running tally
 
-- Conflicting folds: 2 (C1, C2 — both this DOC file, never code)
-- Zero-conflict folds: 5 (Z1, Z2 folds; Z3, Z4, Z5 rebases)
+- Conflicting folds: 3 (C1, C2, C3 — all this DOC file, never code)
+- Zero-conflict folds: 6 (Z1, Z2 folds; Z3, Z4, Z5, Z6 rebases)
 - Same-file concurrent edits: 3 (Z3 `jit_machine.rs`; Z4 and Z5 the same file vs an incoming restructuring fold) — still zero CODE conflicts
-- Total resolution minutes: 8 (C1 2, C2 6)
-- **Anchor-drift re-verification cost: real but unmeasured in minutes** (Z4) — the largest non-conflict cost the experiment has found
+- Total resolution minutes: 13 (C1 2, C2 6, C3 5)
+- **Anchor-drift re-verification cost: real but unmeasured in minutes** (Z4, Z6) — the largest non-conflict cost the experiment has found, now measured twice (once from the code side, once from a downstream doc-author's full re-check) with the same conclusion
+- One anchor-drift correction was semantic rather than positional (Z6, Item 2's `seed_external_env` narrowing) — the sharpest single data point so far for "a clean rebase is not a free rebase for prose that cites code"
+- **Ledger-numbering collisions: 3 (C1, C2, C3), all on this table's own counter, none on the code it records** — see the "shared mutable cell nobody owns" analysis above C3; strong enough now to treat as this lane's second headline finding alongside the code-conflict-cost result
 - Sides dropped: 0
 
 ## Reading of the experiment (TL)
