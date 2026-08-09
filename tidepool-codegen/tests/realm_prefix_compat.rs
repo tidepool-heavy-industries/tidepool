@@ -1,21 +1,32 @@
 //! Enforced constraint 1 (realm-lanes/B-prefix-compat, verdict §7 step 3):
-//! parking a realm whose handled prefix disagrees position-by-position with
-//! the machine's established prefix, up to the shorter length, must be
-//! refused loudly at park time and must leave the machine untouched.
+//! entering the parked path with a realm whose handled prefix disagrees
+//! position-by-position with the machine's established prefix, up to the
+//! shorter length, must be refused loudly BEFORE the machine is driven at
+//! all, and must leave the machine untouched.
 //!
 //! `DispatchEffect` is positional over an `HList` and the suspend test is
 //! `tag >= suspend_tag`; both are correct only relative to ONE effect row
 //! whose handled effects occupy a contiguous low prefix. The machine cannot
 //! introspect its own handler stack (`H` is a compile-time monomorphized type
 //! parameter), so it tracks an ESTABLISHED prefix instead — set from the
-//! first non-empty handled prefix any realm parks with, and monotonic
-//! thereafter (never cleared, including on resume).
+//! first non-empty handled prefix any realm ENTERS the parked path with, and
+//! monotonic thereafter (never cleared, including on resume).
+//!
+//! The check runs at ENTRY, not at park: a parked-path turn that COMPLETES
+//! without ever suspending still dispatches every one of its effects through
+//! the machine's single `H`, exactly the same as one that suspends — that is
+//! precisely the misroute surface the check exists to close, so checking
+//! only realms that suspend (and only after they have already run) would
+//! miss it entirely. `refused_disagreeing_completing_run_never_executes` and
+//! `establishment_on_completion_then_refuses_disagreeing` below are the
+//! cases that pin this.
 //!
 //! This file does not exercise dispatch itself (that machinery is unchanged
 //! by this lane) — `handled_prefix` here is pure metadata threaded through
-//! the park path, so every fragment reuses the same ASK_TAG=0 suspending
-//! shape `realm_multi_continuation.rs`/`realm_per_realm_fields.rs` use, and
-//! only the `handled_prefix` argument varies between cases.
+//! the park path, so most fragments reuse the same ASK_TAG=0 suspending
+//! shape `realm_multi_continuation.rs`/`realm_per_realm_fields.rs` use
+//! (varying only the `handled_prefix` argument), except the two cases above
+//! which use a non-suspending fragment on purpose.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
@@ -144,6 +155,29 @@ fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
         binder: VarId(1),
         rhs: captured,
         body: e,
+    });
+    b.build()
+}
+
+/// A parked-path turn that COMPLETES immediately without ever suspending:
+/// `Val (C1 n)` — the freer-simple `Val` case (an immediate pure result), the
+/// same union encoding `build_suspending_parent`'s continuation body returns
+/// on ITS `Val` branch, just taken from the very first step instead of after
+/// a resume. The suspendable driver expects every step's `Done` value in this
+/// Val/E union shape — a bare `C1 n` (no `Val` wrapper) is not driveable
+/// through `run_fragment_suspendable_parked` at all, which is why this is a
+/// distinct builder from `session_scaffold::build_value_fragment` (built for
+/// the plain, non-suspendable `run_fragment_pure` path instead).
+fn build_completing_value(n: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let lit = b.push(CoreFrame::Lit(Literal::LitInt(n)));
+    let c1 = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![lit],
+    });
+    b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![c1],
     });
     b.build()
 }
@@ -565,6 +599,170 @@ fn established_prefix_survives_resume_to_completion() {
             other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
         }
         // The refused attempt must not have parked anything.
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The gap the check's original placement missed: a parked-path run whose
+// turn COMPLETES without ever suspending dispatches every one of its effects
+// through the machine's single `H`, the same as a realm that suspends. If
+// the check only ran at park time (inside the suspend arm), an incompatible
+// realm that happens to complete would run start to finish, unchecked. The
+// check must run at ENTRY, before the machine is driven, so this can never
+// happen — and it must ALSO establish at entry (not defer to a park that
+// never comes), or a realm that completes with a non-empty prefix is never
+// recorded, and a later disagreeing park is wrongly accepted.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The case that would have caught the original gap: on a machine with an
+/// established prefix, attempt a parked run — one that would COMPLETE, not
+/// suspend, if it were allowed to run at all — with a disagreeing prefix. It
+/// must be refused before it runs, and the machine must be untouched.
+#[test]
+#[serial]
+fn refused_disagreeing_completing_run_never_executes() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine = new_machine(&table);
+
+        let row_a = owned(&["FileIO", "Proc"]);
+        let a = park_fragment(&mut machine, &table, RealmId(0), "a", 1, 1, &row_a);
+        assert_rooting_receipt(&machine, 1);
+
+        let before_ids = machine.parked_ids();
+        let before_parked = machine.parked_count();
+        let before_roots = machine.stowed_roots_count();
+
+        // `build_completing_value` never suspends — an immediate `Val (C1 n)`
+        // — so if the entry check did not run before the drive, this would
+        // COMPLETE successfully, proving nothing wrong. With the check at
+        // entry it must never run at all.
+        let func_id = machine
+            .add_function(
+                "completing_disagreeing",
+                &build_completing_value(999),
+                &table,
+                &ExternalEnv::new(),
+            )
+            .expect("add non-suspending fragment");
+        let row_b = owned(&["FileIO", "Memory"]);
+        let err = machine
+            .run_fragment_suspendable_parked(
+                func_id,
+                &table,
+                &mut NoDispatch,
+                &(),
+                ASK_TAG,
+                RealmId(1),
+                ParkKind::Plain,
+                &row_b,
+            )
+            .expect_err("a disagreeing prefix must be refused even for a completing turn");
+        match err {
+            JitError::IncompatibleHandledPrefix {
+                established,
+                incoming,
+                position,
+            } => {
+                assert_eq!(established, row_a);
+                assert_eq!(incoming, row_b);
+                assert_eq!(position, 1);
+            }
+            other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
+        }
+
+        // The machine is untouched: nothing ran, so nothing changed.
+        assert_eq!(machine.parked_ids(), before_ids, "parked_ids unchanged");
+        assert_eq!(
+            machine.parked_count(),
+            before_parked,
+            "parked_count unchanged"
+        );
+        assert_eq!(
+            machine.stowed_roots_count(),
+            before_roots,
+            "stowed_roots_count unchanged"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        resume_and_verify(&mut machine, a, 1, 1);
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+/// The subtle (1)-and-(2) interaction: a realm that runs a non-suspending
+/// parked turn with a non-empty prefix DOES establish it, even though it
+/// never parks a frame — so a later disagreeing park is still refused.
+#[test]
+#[serial]
+fn establishment_on_completion_then_refuses_disagreeing() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine = new_machine(&table);
+        assert_rooting_receipt(&machine, 0);
+
+        let row_a = owned(&["FileIO", "Proc"]);
+        let func_id = machine
+            .add_function(
+                "completing_establisher",
+                &build_completing_value(42),
+                &table,
+                &ExternalEnv::new(),
+            )
+            .expect("add non-suspending fragment");
+        match machine
+            .run_fragment_suspendable_parked(
+                func_id,
+                &table,
+                &mut NoDispatch,
+                &(),
+                ASK_TAG,
+                RealmId(0),
+                ParkKind::Plain,
+                &row_a,
+            )
+            .expect("a non-suspending turn with a non-empty prefix must be allowed to complete")
+        {
+            ParkedOutcome::Completed { value, .. } => assert_eq!(expect_int(&value), 42),
+            ParkedOutcome::Suspended { .. } => panic!("build_completing_value never suspends"),
+        }
+        // Nothing was parked — a completing turn leaves no frame — but the
+        // prefix must still be established.
+        assert_rooting_receipt(&machine, 0);
+
+        let row_b = owned(&["FileIO", "Memory"]);
+        let err = try_park_fragment(&mut machine, &table, RealmId(1), "b_refused", 1, 1, &row_b)
+            .expect_err(
+            "the established prefix from the completed run must still refuse a disagreeing park",
+        );
+        match err {
+            JitError::IncompatibleHandledPrefix {
+                established,
+                incoming,
+                position,
+            } => {
+                assert_eq!(established, row_a);
+                assert_eq!(incoming, row_b);
+                assert_eq!(position, 1);
+            }
+            other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
+        }
+        assert_rooting_receipt(&machine, 0);
+
+        // A subsequent COMPATIBLE park still succeeds against the prefix the
+        // completed run established.
+        let c = park_fragment(&mut machine, &table, RealmId(2), "c", 7, 7, &row_a);
+        assert_rooting_receipt(&machine, 1);
+        resume_and_verify(&mut machine, c, 7, 7);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();

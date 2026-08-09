@@ -102,11 +102,12 @@ pub enum JitError {
     EffectResponseTooLarge { nodes: usize, limit: usize },
     #[error("VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression; set TIDEPOOL_VARID_CHECK=0 only to bypass for bisection.")]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
-    /// Refused at park time (never a machine invariant violation — a
-    /// caller/configuration error, so `Err`, not a panic): the realm's
-    /// handled-effect prefix disagrees, at `position`, with the prefix the
-    /// machine already established from an earlier park. See
-    /// [`JitEffectMachine::check_prefix_compatible`].
+    /// Refused at ENTRY to the parked path, before the machine is driven at
+    /// all (never a machine invariant violation — a caller/configuration
+    /// error, so `Err`, not a panic): the realm's handled-effect prefix
+    /// disagrees, at `position`, with the prefix the machine already
+    /// established from an earlier entry. See
+    /// [`JitEffectMachine::enter_parked_path`].
     #[error(
         "realm handled-effect prefix disagrees with the machine's established prefix at \
          position {position}: established {established:?}, incoming {incoming:?}"
@@ -218,9 +219,11 @@ pub struct ContinuationFrame {
     /// caller cannot resume a frame against a foreign table.
     table: Arc<DataConTable>,
     /// This realm's handled prefix — the effect names for tags
-    /// `[0, suspend_tag)`, in position order — captured at park time and
-    /// replayed unchanged on every re-park of the same realm (a resume that
-    /// suspends again). See [`JitEffectMachine::check_prefix_compatible`].
+    /// `[0, suspend_tag)`, in position order — checked (and possibly
+    /// establishing) at ENTRY to the parked path
+    /// ([`JitEffectMachine::enter_parked_path`]), stored here purely so
+    /// [`JitEffectMachine::resume_parked`] can replay it through that same
+    /// entry check on a re-suspension.
     handled_prefix: Arc<[String]>,
 }
 
@@ -264,8 +267,9 @@ enum ParkTarget {
     Registry {
         realm: RealmId,
         kind: ParkKind,
-        /// This realm's handled prefix, checked against the machine's
-        /// established prefix immediately before the park it would produce.
+        /// This realm's handled prefix, already checked (and possibly
+        /// established) at entry to the parked path — carried here only to
+        /// be stored on the frame if this run suspends.
         handled_prefix: Arc<[String]>,
     },
 }
@@ -475,12 +479,15 @@ pub struct JitEffectMachine {
     /// introspect its own handler stack (`H` is a compile-time monomorphized
     /// type parameter, not runtime data), so this is the machine's runtime
     /// record of what `H` is, in its stead. Set from the first NON-EMPTY
-    /// handled prefix any realm parks with ([`Self::park_continuation`]);
-    /// `None` until then. MONOTONIC — never cleared or overwritten
-    /// afterward, including on resume: every realm on a machine is driven
-    /// through the same single `H` for the machine's whole life, so a realm
-    /// that resumed and completed does not release the constraint. See
-    /// [`Self::check_prefix_compatible`].
+    /// handled prefix any realm ENTERS the parked path with
+    /// ([`Self::enter_parked_path`], called before the machine is driven —
+    /// deliberately not deferred to an actual park, since a realm whose turn
+    /// completes without ever suspending still dispatches every effect
+    /// through `H`); `None` until then. MONOTONIC — never cleared or
+    /// overwritten afterward, including on resume: every realm on a machine
+    /// is driven through the same single `H` for the machine's whole life,
+    /// so a realm that resumed and completed does not release the
+    /// constraint. See [`Self::check_prefix_compatible`].
     established_prefix: Option<Arc<[String]>>,
 }
 
@@ -1430,10 +1437,12 @@ impl JitEffectMachine {
     /// entry) or the continuation registry ([`ParkTarget::Registry`]). `table`
     /// and `park_cancel_flag` are only consulted on the registry path, to
     /// populate the newly-parked [`ContinuationFrame`] (A3/A4) — the slot path
-    /// ignores both, unchanged. On the registry path a SUSPENSION also runs
-    /// [`Self::check_prefix_compatible`] against `park`'s `handled_prefix`
-    /// before anything else in this method's `Suspended` arm mutates —
-    /// enforced constraint 1 (realm-lanes/B-prefix-compat).
+    /// ignores both, unchanged. Enforced constraint 1 (realm-lanes/B-prefix-
+    /// compat) is checked and established at ENTRY to the parked path
+    /// ([`Self::enter_parked_path`], called from the public
+    /// `run_fragment_suspendable_parked`/`resume_parked` entries) — by the
+    /// time this method runs, that check has already passed, regardless of
+    /// whether the turn is about to complete or suspend.
     #[allow(clippy::too_many_arguments)]
     fn finish_suspendable(
         &mut self,
@@ -1532,15 +1541,6 @@ impl JitEffectMachine {
                 request_ptr,
                 continuation,
             } => {
-                // ENFORCED CONSTRAINT 1: refuse a position-incompatible realm
-                // BEFORE anything below mutates — no finalized-closure tenure,
-                // no id minted, no root registered, no frame inserted,
-                // established prefix unchanged. Registry-path only: the slot
-                // path has no realm concept and no established prefix to
-                // check against.
-                if let ParkTarget::Registry { handled_prefix, .. } = &park {
-                    self.check_prefix_compatible(handled_prefix)?;
-                }
                 // W4 finalize-by-reference: when the bridged request carries a
                 // CLOSURE_SENTINEL placeholder, its value field (field 1 of the
                 // request Con) is a live closure with no data representation.
@@ -2793,17 +2793,46 @@ impl JitEffectMachine {
         Ok(())
     }
 
+    /// Enter the parked path with `incoming` — a realm's handled prefix.
+    /// Checks it against the machine's established prefix
+    /// ([`Self::check_prefix_compatible`]) and, if compatible, ESTABLISHES it
+    /// when this is the first non-empty prefix to enter.
+    ///
+    /// `H` is fixed for the machine's life regardless of whether the
+    /// entering turn goes on to suspend or complete, so establishing must
+    /// happen HERE — at entry, before the machine is driven at all — not at
+    /// park: a realm that runs a turn to completion without ever suspending
+    /// dispatches every one of its effects through `H` exactly the same as
+    /// one that suspends, so establishing only on suspension would leave
+    /// such a realm's non-empty prefix never recorded, after which an
+    /// incompatible realm could park successfully because nothing was
+    /// established.
+    ///
+    /// Called at the TOP of every parked-path entry
+    /// ([`Self::run_fragment_suspendable_parked`], [`Self::resume_parked`]),
+    /// before anything is driven — a refusal here leaves the machine
+    /// untouched because nothing has run yet, which is a strictly easier
+    /// property to hold than checking after a run has already suspended.
+    fn enter_parked_path(&mut self, incoming: &Arc<[String]>) -> Result<(), JitError> {
+        self.check_prefix_compatible(incoming)?;
+        if self.established_prefix.is_none() && !incoming.is_empty() {
+            self.established_prefix = Some(incoming.clone());
+        }
+        Ok(())
+    }
+
     /// Park a suspended continuation into the registry as a registered GC root
     /// and mint its [`ContinuationId`]. The heap-stable `Box` cell is the same
     /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
     /// this registration is released by [`Self::resume_parked`], not by a guard
     /// at the end of the next child run.
     ///
-    /// The caller MUST have already checked `handled_prefix` via
-    /// [`Self::check_prefix_compatible`] — this method performs no check of
-    /// its own, only the establishing write: if the machine has not yet
-    /// established a prefix and `handled_prefix` is non-empty, this park
-    /// BECOMES the establishing one.
+    /// The caller has already checked AND established `handled_prefix` via
+    /// [`Self::enter_parked_path`] at entry to the parked path — before the
+    /// machine was driven at all. This method performs no check or establish
+    /// of its own; `handled_prefix` is stored on the new frame purely so a
+    /// later [`Self::resume_parked`] can replay it through that same entry
+    /// check.
     #[allow(clippy::too_many_arguments)]
     fn park_continuation(
         &mut self,
@@ -2816,9 +2845,6 @@ impl JitEffectMachine {
         finalized_root: Option<crate::old_space::RootSlot>,
         handled_prefix: Arc<[String]>,
     ) -> ContinuationId {
-        if self.established_prefix.is_none() && !handled_prefix.is_empty() {
-            self.established_prefix = Some(handled_prefix.clone());
-        }
         let mut cell = Box::new(continuation);
         let slot: *mut *mut u8 = &mut *cell;
         // SAFETY: `slot` is the address of the Box's inner cell — a stable heap
@@ -2887,11 +2913,14 @@ impl JitEffectMachine {
     ///
     /// `handled_prefix` is this realm's handled prefix — the effect names for
     /// tags `[0, suspend_tag)`, in position order (the caller builds the
-    /// decls row, so it has the names). If this turn suspends, it is checked
-    /// against the machine's established prefix immediately before the park
-    /// ([`Self::check_prefix_compatible`]); a disagreement refuses the park
-    /// with `JitError::IncompatibleHandledPrefix` and leaves the machine
-    /// untouched. Ignored entirely if this turn completes instead.
+    /// decls row, so it has the names). Checked against the machine's
+    /// established prefix, and established if this is the first non-empty
+    /// prefix to enter, BEFORE the machine is driven at all
+    /// ([`Self::enter_parked_path`]) — an incompatible realm never executes a
+    /// single effect against a foreign handler stack, whether or not it
+    /// would go on to suspend or complete. A disagreement refuses with
+    /// `JitError::IncompatibleHandledPrefix` and leaves the machine
+    /// untouched (nothing has run yet).
     ///
     /// # Panics
     /// Panics on a non-session machine.
@@ -2907,6 +2936,8 @@ impl JitEffectMachine {
         kind: ParkKind,
         handled_prefix: &[String],
     ) -> Result<ParkedOutcome, JitError> {
+        let handled_prefix: Arc<[String]> = Arc::from(handled_prefix);
+        self.enter_parked_path(&handled_prefix)?;
         self.run_suspendable_shared(
             func_id,
             table,
@@ -2917,7 +2948,7 @@ impl JitEffectMachine {
             ParkTarget::Registry {
                 realm,
                 kind,
-                handled_prefix: Arc::from(handled_prefix),
+                handled_prefix,
             },
         )
         .map(ParkedRaw::into_parked)
@@ -2930,8 +2961,10 @@ impl JitEffectMachine {
     ///
     /// Resumes in ANY order: the registry imposes none. A re-suspension parks
     /// again under a FRESH id in the same realm, replaying the frame's own
-    /// `handled_prefix` — re-checked against the (unchanged) established
-    /// prefix at that new park, same as any other park.
+    /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
+    /// to establish) via [`Self::enter_parked_path`] at the TOP of this
+    /// method, before the continuation is driven at all — same discipline as
+    /// [`Self::run_fragment_suspendable_parked`]'s entry check.
     ///
     /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
     /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
@@ -2978,6 +3011,14 @@ impl JitEffectMachine {
                 ))))
             }
         };
+        // Entry check, BEFORE the continuation is driven at all (same
+        // discipline as run_fragment_suspendable_parked). The established
+        // prefix is monotonic, so this frame's own prefix — already checked
+        // compatible when it first parked — stays compatible forever; this
+        // re-confirmation is a no-op in practice, kept for the same
+        // before-anything-runs discipline rather than because it can newly
+        // disagree.
+        self.enter_parked_path(&handled_prefix)?;
         if let ResumeInput::Answer(val) = &input {
             answer_force_nf(val).map_err(|reason| {
                 JitError::Effect(EffectError::Handler(format!(
