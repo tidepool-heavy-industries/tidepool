@@ -1,9 +1,23 @@
-# Spec: extract-side latency wave TL (respawn AFTER Phase B lands)
+# Spec: extract-side latency wave TL
+
+**GATE OPEN (2026-08-08): Phase B is FOLDED at a45fa843** — single
+ownership of writeWholeModuleClosed is yours. Detail in
+`plans/one-spawn-turn-protocol-phase-b.md`.
+
+**WIRE BREAK IN EFFECT (from Phase B):** `--emit-stmt-binders`/
+`--emit-binders` no longer exist; the Rust side requires an extract
+supporting `--classify`. The DEPLOYED server/extract pair on this box is
+still the old consistent pair and dogfood is PAUSED — do not run
+`scripts/redeploy.sh` yourself; root owns the redeploy at dogfood
+resume. Your test runs build the repo extract fresh (battery scripts),
+so this does not affect your lanes. Stale-skew now fails LOUD as
+VersionSkew naming the flag (phase-b pinned it against the old binary's
+exact output) — if you ever see a `parse error on input '<-'` flavored
+failure in a session context, that diagnosis path is already fixed;
+suspect something else.
 
 Owns the extract-side half of the latency program: the metadata
-over-collection chain's root plus the declaration-path cluster. MUST wait
-for the one-spawn-turn Phase B TL to land (single owner of
-writeWholeModuleClosed at every point in time).
+over-collection chain's root plus the declaration-path cluster.
 
 ## Structure (Inanna, 2026-08-08): one TL, TWO SUB-TLs, each with devs
 
