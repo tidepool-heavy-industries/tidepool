@@ -47,6 +47,18 @@ from a complete run. The only tell is completed-vs-total (observed 198/877).
 worktree does not carry the battery fix `7d57cea5`. So until a rebase brings
 it: **pass `--no-fail-fast` explicitly.**
 
+**Sanctioned inherited reds are THREE** (2026-08-09, ledgered as
+codex-review item 14, corrected form). Anything else red gets the standard
+cache-consistent A/B:
+
+1. `mock_stack_matches_production`
+2. `generic_deriving_337::sum_type_rejected_at_compile_time`
+3. `qq_fmt_brace_inside_hole_non_string_expr_still_works`
+
+#2 is adjacent to this wave's own claims — see
+`inheritance-for-agent-core.md` §8 on the vendored `FromJSON` sum rejection,
+which that test pins and which may therefore have moved.
+
 Two notes specific to this wave's runs:
 
 - A targeted `-E 'binary(<name>)'` run selects a single binary, so it excludes

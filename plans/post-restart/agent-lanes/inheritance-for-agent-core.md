@@ -177,6 +177,23 @@ the lying-realm residual is unconstructible rather than merely unlikely.
   non-nullary constructor** ("single-constructor records only"). Neither
   `WorkerResult` nor `Plan` could derive through them. That is why the codec is
   hand-rolled on base `GHC.Generics`.
+
+  **RE-VERIFY THIS BEFORE RELYING ON IT.** It was true when measured (see
+  `receipt-structural-codec.md`, which read
+  `haskell/lib/Tidepool/Aeson/Value.hs` and `FromJSON.hs` directly), but as of
+  2026-08-09 `generic_deriving_337::sum_type_rejected_at_compile_time` is a
+  sanctioned inherited red — and that test asserts precisely that
+  `data S = A Int | B Int deriving (Generic, FromJSON)` must NOT compile. Its
+  being red means either sum types now *do* derive through the vendored
+  default, or they still fail and only the diagnostic text moved. **Which of
+  those is true was not established here**, and the two have opposite
+  consequences: under the first, the hand-rolled codec's central rationale is
+  stale and the vendored path may be usable; under the second, nothing changes.
+  Read the current state of that machinery rather than either receipt.
+
+  Note this does NOT touch gate 1(b)'s result. That gate asked whether lists
+  and recursion survive the real JIT, and the answer transfers regardless of
+  which codec you build on.
 - **Model skew in the fixtures.** `phase4-live-turn.jsonl` was recorded with
   **`gpt-5.6-terra`**. Overnight policy is **`gpt-5.4-mini` only** (see §9), so
   a fresh run will not reproduce that transcript turn-for-turn — a weaker model
