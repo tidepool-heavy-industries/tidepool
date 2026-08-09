@@ -149,7 +149,29 @@ rules below — each is this rule applied to one artifact.
   scheduler can. Unbrokered `rustc` was measured at 564% across 4 procs — the
   box's largest consumer — so it is handled by deprioritisation, not queueing.
 
-  **(b) GHC-heavy work STAYS slot-brokered**, absolute path, NEVER exclusive:
+  **(a2) TOOLCHAIN BUILDS ARE ALSO OUT OF THE QUEUE** (root, `efd1630a`,
+  2026-08-09). `cabal build tidepool-extract-bin` and kin run **unbrokered**
+  under the same envelope pure-Rust got:
+
+      nice -n 15 cabal build -j4        # at most ONE per lane
+
+  Why: a build is one GHC chain with cappable internal parallelism and a
+  footprint knowable in advance — bounded and deprioritizable, unlike a test
+  fan-out. Leaving it in the queue reproduced the exact short-behind-long
+  inversion V2 was created to remove: a 2–5 minute build stuck behind an
+  88-minute 877-test suite, both holding one undifferentiated slot.
+  Note this is a **reclassification**, not a correction: `ghc-slots.sh:2` names
+  "extract builds" as an in-scope category, and it was.
+
+  **SHARD YOUR ACQUISITIONS.** A long suite run must scope with `-E` (per
+  binary or group) so no single hold runs toward an hour where the receipts
+  allow it. The measured argument: of six holders sampled, the 18-minute one was
+  `battery-shard … -E 'binary(…)'` and the 89-minute one was a bare
+  `--ignore-default-filter -p <crate>`. Six slots held for an hour behave like
+  zero, and raising the slot count does not fix hold time.
+
+  **(b) EXTRACT-FANNING work STAYS slot-brokered**, absolute path, NEVER
+  exclusive:
 
       /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
 
