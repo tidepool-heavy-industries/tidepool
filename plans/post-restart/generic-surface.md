@@ -19,20 +19,16 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
 - DO NOT emit partial or invented type information anywhere a model reads
   (no `field :: ?`, no guessed types). Degrade to less detail, never to
   wrong detail.
-- DO NOT reimplement GHC (Inanna, 2026-08-08). Custom `TypeError`s and a
-  small routing family are leverage; an exhaustive "is this type supported"
-  classifier is a second, worse type checker that goes stale against the
-  real one. The classifying family (`FieldKind`) carries exactly two kinds
-  of equation: types we implement SPECIALLY, and shapes whose failure we
-  explain better than GHC can. Everything else falls through to the
-  `Generic` case and GHC reports it. An unrecognized type reaching a
-  standard GHC error is the CORRECT outcome, not a gap to close. This also
-  binds the checkpoint interpreter in the successor lane: its supported set
-  differs (lists and recursion are legal there), so it gets its OWN small
-  routing family — do not unify them into one classifier, and do not grow
-  either to cover types purely for message quality.
-- DO NOT touch checkpoint persistence in this wave. `GCheckpoint` cutover
-  is its own later gate (wire-compatible target; see anchor).
+- DO NOT reimplement GHC. Custom `TypeError`s and a small routing family
+  are leverage; an exhaustive "is this type supported" classifier is a
+  second, worse type checker that goes stale against the real one. The
+  classifying family (`FieldKind`) carries exactly two kinds of equation:
+  types implemented SPECIALLY, and shapes whose failure we explain better
+  than GHC can. Everything else falls through to the `Generic` case and GHC
+  reports it. An unrecognized type reaching a standard GHC error is the
+  CORRECT outcome, not a gap to close.
+- DO NOT touch checkpoint persistence in this wave — it is the successor
+  lane's, and its scope is bug-fix plus wiring, not a new interpreter.
 - DO NOT proceed past the spike without reporting the GO/NO-GO verdict to
   root. The spike is a gate, not a first step.
 - DO NOT advertise implementation classes, wire values, or the old field
@@ -68,9 +64,6 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
       other change, not yours.
     - Report per-red SIGNATURES plus an explicit pre-existence claim, not
       bare counts. Your own new tests are never covered by inherited-red.
-    Measured in this wave: the two devs given this instruction produced
-    sound baselines; the one who was not produced a plausible argument that
-    was wrong.
 
 ## READ FIRST
 
@@ -122,15 +115,12 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
       the conflicting generic `render` from the unqualified Tidepool
       prelude vs hide it (a special prelude must not become a
       compatibility bucket). RESOLVED — removal approved; see the anchor.
-7. **HANDED OFF — `GCheckpoint` cutover + Form-builder deletion.** Cut
-   from this queue (Inanna, 2026-08-08): lanes that accumulate separable
-   work run too long, and appending these to a live lane was the textbook
-   case. They ride a fresh lane on the post-fold tip instead, so everything
-   this lane built sits underneath them rather than beside them. Spec:
-   [`checkpoint-codec-lane.md`](checkpoint-codec-lane.md) — carries the
-   GCheckpoint constraints, the confirmed silent-corruption target list,
-   the golden matrix, and the five interpreter facts a fresh dev would
-   otherwise rediscover.
+7. **HANDED OFF — checkpoint persistence + Form-builder deletion.** Cut
+   from this queue; they ride a fresh lane on the post-fold tip. Spec:
+   [`checkpoint-persistence-lane.md`](checkpoint-persistence-lane.md) — carries that lane's
+   confirmed scope (bug-fix + wiring, no new interpreter), the live
+   round-trip defects, the golden matrix, and the interpreter facts a fresh
+   dev would otherwise rediscover.
 
    **This lane ends at: rebase + gate, then the `askUser @T` swap +
    `choose`/`chooseMany`, then submit.** Those are coupled to context this

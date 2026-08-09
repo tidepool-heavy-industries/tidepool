@@ -198,30 +198,15 @@ Rules frozen with it:
 
 ## Corrections found during implementation
 
-The spike's verdict held — GO was right, and the risky thing (Symbol
-metadata reflection under the JIT) really is retired. But two of its
-specifics did not survive contact with the implementation. Both are
-corrected in place above; recorded here so the pattern is visible.
+Two specifics below did not survive implementation and are corrected in
+place above.
 
-- **The recursion guard must be a `Bool` the interpreter DISPATCHES on, not
-  a `Constraint` beside an extended path.** The scaffold's `VisitedCheck` —
-  a `Constraint` sitting next to an unguarded `(a ': seen)` — does not stop
-  anything. Instance heads match on the generic REPRESENTATION, not on the
-  path, so an erroring path is carried along as an opaque type and the next
-  level down is demanded anyway: GHC unrolls forever, 60s+ of CPU and no
-  error. `Occurs a seen :: Bool`, reduced to select between two instances
-  where the refusing one asks for nothing further, is what actually halts
-  the descent. See `Tidepool.Form.Check`.
+- **The recursion guard is a `Bool` the interpreter DISPATCHES on, not a
+  `Constraint` beside an extended path.** Instance heads match on the
+  generic REPRESENTATION, not on the path, so an erroring path is carried
+  along as an opaque type and the next level is demanded anyway — GHC
+  unrolls without terminating. `Occurs a seen :: Bool`, reduced to select
+  between two instances where the refusing one asks for nothing further,
+  halts the descent. See `Tidepool.Form.Check`.
 - **Metadata proxies are real `Proxy` constructors, not `undefined`** —
-  finding 3 above, corrected.
-
-The shared cause is worth naming, because it is cheap to repeat. Each
-spike probe verified a mechanism in ISOLATION: `VisitedCheck` against an
-explicit type-level list, `undefined` against the JIT. Both probes were
-sound and both conclusions were too broad. A family that computes correctly
-standing alone says nothing about the position it must occupy inside
-instance selection, and an engine that tolerates a bottom says nothing
-about its differential oracle.
-
-A spike proves the risky thing is possible. It does not establish that the
-shape sketched while proving it is the shape that works.
+  finding 3 above.

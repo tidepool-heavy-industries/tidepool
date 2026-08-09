@@ -19,6 +19,19 @@ from the PRD-dev window (file anchors verified against tree by root), and
   `GFormDecode` (UI optional/sum semantics). Supported sets differ BY
   DESIGN; no single codec class whose supported-type set is the
   intersection. All invisible behind `deriving (Generic)`.
+
+  **Bound on this decision.** Sharing a traversal substrate does not mean
+  sharing constraints. Before importing a rule from the forms interpreter
+  into another consumer, ask what the rule protects: the forms rules serve
+  a UI rendered to a human and a compile error read by an author. A
+  consumer with neither inherits neither.
+
+  `GCheckpoint` is SUPERSEDED under that bound — persistence needs no new
+  interpreter. `genericToJSON`/`genericParseJSON` already work off
+  `Generic` alone, so the author contract is a wiring change; what is
+  broken is round-trip correctness in the existing path. Scope:
+  [`../post-restart/checkpoint-persistence-lane.md`](../post-restart/checkpoint-persistence-lane.md).
+
 - **Runtime options are a first-wave primitive, not a future edge case.**
   `askUser @T` covers type-defined structure only; choices that exist as
   runtime values (the wizard's converging phase selects among accumulated
@@ -34,14 +47,17 @@ from the PRD-dev window (file anchors verified against tree by root), and
   Fingerprint note: the checkpoint fingerprint is source-derived, so this is
   hygiene, not churn reduction — and the driver must persist the iteration
   count in the checkpoint ENVELOPE so restart behavior stays continuous.
-- **Checkpoint codec replacement is separately gated and wire-compatible
-  where possible.** The custom `GCheckpoint` interpreter targets the
-  CURRENT encoding (records→objects, lists→arrays, `Maybe`→value/null,
-  nullary constructors→strings, tagged sums as today) so old payloads stay
-  readable. Residual churn is source-fingerprint churn from editing
-  deriving clauses — needs the restore/discard story, not a data-wire
-  migration. Sequenced AFTER forms (forms are additive; persistence is a
-  replacement in the subsystem that produced both dogfood crashes).
+- **Checkpoint persistence is separately gated.** Scope is bug-fix plus
+  wiring: fix the confirmed round-trip defects in the existing
+  serialization path, and move persistence onto
+  `genericToJSON`/`genericParseJSON` so authored types need only
+  `deriving (Generic)`. Wire compatibility is the DEFAULT, not a
+  requirement — where matching the current shape costs real complexity,
+  break instead, provided the break is a typed decode error and never a
+  silent misparse. Residual churn is source-fingerprint churn from editing
+  deriving clauses, which needs the restore/discard story, not a data-wire
+  migration. Sequenced AFTER forms: forms are additive, persistence is a
+  repair in the subsystem that produced both dogfood crashes.
 - **One-file harness prerequisite is explicit:** effect vocabulary available
   in scope ≠ effects present in M's row. Today the answerer compile omits
   the `RunLLMTurn` GADT/helpers entirely (see `haskell/lib/Tidepool/
