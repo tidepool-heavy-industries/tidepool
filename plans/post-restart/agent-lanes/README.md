@@ -5,6 +5,33 @@ TL spec: [`../agent-wave.md`](../agent-wave.md). Design authority:
 This directory is the wave's plan/receipt namespace. Worktree-wave owns
 `../worktree-lanes/`; do not write there.
 
+## Receipt rule (swarm-wide, effective 2026-08-08 — binds every spec in this directory)
+
+**A gate that exists to catch ONE specific failure mode passes BY NAME, with
+its own pass line.** Never report only the aggregate that contains it.
+
+A rename, an `#[ignore]`, a `cfg`, or an env-gated early return each leave a
+green aggregate with the guard never executed — so "N/N passed" is compatible
+with the one test you actually cared about not having run. A label never
+establishes what its name implies.
+
+Two companions:
+
+- **Cross-lane guards also name the base commit they ran on.** Base proves the
+  tree, name proves execution; both, or neither is established.
+- **A cross-lane guard must sit INSIDE the guarded lane's gate set.** A guard
+  that only runs in the guarding lane's suite does not protect the lane it
+  names.
+
+Applied to this wave's own gates, the tests that need named pass lines are the
+ones asserting a *specific* failure is caught: the codec's loud-rejection pair,
+the isolation checker's new-database-sidecar case, `compileTools`' single-
+traversal invariant, and every diagnostics compile-fail fixture. For compile-
+fail fixtures, "it failed to compile" is the weakest possible evidence —
+show each failed for *its own reason* (the asserted message text), since a
+fixture passing on an unrelated error is exactly what this rule exists to
+catch.
+
 ## Wave 1 lanes
 
 | Lane | Owns | Deliverable |
