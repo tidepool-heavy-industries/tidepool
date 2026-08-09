@@ -89,7 +89,7 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --ignore-default-filter -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
+cargo nextest run --ignore-default-filter --no-fail-fast -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
 run_status=$?
 set -e
 

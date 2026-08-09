@@ -97,7 +97,7 @@ echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --workspace --ignore-default-filter "$@" 2> >(tee "$tmp_log" >&2)
+cargo nextest run --workspace --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2)
 run_status=$?
 set -e
 
