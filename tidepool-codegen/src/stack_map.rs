@@ -34,7 +34,7 @@ pub struct StackMapRegistry {
     entries: BTreeMap<usize, StackMapInfo>,
     /// Known JIT function address ranges `(start, end)`.
     ///
-    /// INVARIANT (D8): sorted by `start` AND pairwise disjoint (no two
+    /// INVARIANT: sorted by `start` AND pairwise disjoint (no two
     /// ranges overlap or touch) — maintained by `insert_disjoint_range` on
     /// every `register()` call, never by a one-off/lazy sort. This is what
     /// makes the `contains_address` binary search *correct*, not just fast:
@@ -95,7 +95,7 @@ impl StackMapRegistry {
 
     /// Check if an address falls within the known JIT code region.
     /// Used by the frame walker to determine when to stop walking, on every
-    /// frame of every stack walk — i.e. inside GC. D8: this is a binary
+    /// frame of every stack walk — i.e. inside GC. This is a binary
     /// search over `ranges`, relying on the sorted+disjoint invariant
     /// documented on that field. `partition_point` finds how many ranges have
     /// `start <= addr`; the only one that could possibly contain `addr` is
