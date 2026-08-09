@@ -281,9 +281,14 @@ mod tests {
         assert_eq!(cp1.iteration, 1);
         save_checkpoint(&path, &cp1).expect("save cycle 1");
 
-        // THE point: a bare reload — no cycle run in between, exactly what
-        // `SelfHarnessDriver::restore` does before threading anything into
-        // `render`/`loop` — must yield the PERSISTED iteration, not 0.
+        // THE point: a bare reload — no cycle run in between — must yield the
+        // PERSISTED iteration, not 0. This covers the ENVELOPE half of restart
+        // continuity: that `iteration` survives the write/read round trip at
+        // all. That the driver then RESUMES from it is a separate claim,
+        // covered end-to-end by `tidepool-web/tests/crash_recovery.rs` (which
+        // kills a process mid-turn and asserts the iteration continues 1 -> 3
+        // across the restart) and at the driver level by
+        // `selfharness_persistence`. Do not read this test as proving those.
         let restored = load_checkpoint(&path)
             .expect("load after cycle 1")
             .expect("cycle 1's checkpoint is on disk");
