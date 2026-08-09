@@ -9,7 +9,6 @@ module Tidepool.Translate
   , collectTransitiveDCons
   , emittedConIds
   , collectReachableConDCs
-  , isErrorVar
   , wiredInDataCons
   , mergeMetaPreserving
   , dcToMeta
@@ -1076,33 +1075,22 @@ emittedConIds = foldl' step Set.empty
 -- proves anything if the two are computed by genuinely different code.
 -- Collects (a) every 'Var' naming a data-constructor WORKER
 -- ('isDataConWorkId_maybe') and (b) every 'DataAlt' scrutinized by a 'Case'.
--- Same 'isGhcCompilerDC' filter as 'collectUsedDataCons', so the two sets
--- are directly comparable.
+--
+-- Two filters, both CATEGORICAL (type-level facts, not translator-behaviour
+-- facts — excluding them costs no independence): the same 'isGhcCompilerDC'
+-- filter 'collectUsedDataCons' applies, so the two sets are comparable; and
+-- 'isUnboxedTupleDataCon', since an unboxed tuple has no runtime heap
+-- representation at all and can never require metadata (multi-return
+-- primop/FFI results built from one are always split apart before they'd
+-- reach the wire — see the @Case@ desugarings around line 2000).
 collectReachableConDCs :: [CoreBind] -> [DataCon]
 collectReachableConDCs binds =
-  filter (not . isGhcCompilerDC) (Map.elems (foldl' goBind Map.empty binds))
+  filter (\dc -> not (isGhcCompilerDC dc) && not (isUnboxedTupleDataCon dc))
+    (Map.elems (foldl' goBind Map.empty binds))
   where
     ins m dc = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc m
     goBind m (NonRec _ rhs) = goE m rhs
     goBind m (Rec pairs)    = foldl' (\m' (_, rhs) -> goE m' rhs) m pairs
-    -- A call headed by 'isErrorVar' (error/patError/noMethodBindingError/…)
-    -- whose message the AUTHORITATIVE translator can extract statically
-    -- (see 'extractErrorMessage') has every OTHER argument DISCARDED,
-    -- never translated — including the implicit HasCallStack-derived
-    -- 'PushCallStack'/'EmptyCallStack' construction GHC inserts at (nearly)
-    -- every such call site. Recursing into those args here would flag that
-    -- deliberate, pre-existing elision as a "divergence" it isn't. This is
-    -- the one narrow, already-established exception (mirroring a fixed,
-    -- named set of error-family intrinsics the real translator already
-    -- special-cases, not a general excuse) — everything else is walked in
-    -- full. Approximation, not exact: a call whose message ISN'T statically
-    -- extractable (e.g. @error (show x)@) has its args translated normally
-    -- by the real translator, so skipping them here can in principle miss a
-    -- genuine divergence buried in such an argument; that's an accepted,
-    -- much narrower gap than the alternative of firing on every ordinary
-    -- @error "literal"@/partial-pattern call.
-    goE m expr
-      | Just v <- errCallHead expr, isErrorVar v = m
     goE m expr = case expr of
       Var v      -> maybe m (ins m) (isDataConWorkId_maybe v)
       Lit{}      -> m
@@ -1116,11 +1104,6 @@ collectReachableConDCs binds =
       Coercion{} -> m
     goAlt m (Alt (DataAlt dc) _ rhs) = goE (ins m dc) rhs
     goAlt m (Alt _ _ rhs)            = goE m rhs
-    errCallHead (App f _)  = errCallHead f
-    errCallHead (Cast e _) = errCallHead e
-    errCallHead (Tick _ e) = errCallHead e
-    errCallHead (Var v)    = Just v
-    errCallHead _          = Nothing
 
 -- | Record field labels for a constructor (from GHC's @dataConFieldLabels@), in
 -- field order. Empty for positional (non-record) constructors. The Rust renderer
