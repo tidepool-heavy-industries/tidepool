@@ -1,9 +1,9 @@
-//! `ResidentSession` — the `Retention::Persistent` end-state (segment 20).
+//! `ResidentSession` — the `Retention::Persistent` end-state.
 //!
-//! The E2 stow engine's oneshot path (`SessionEngine`) drives one turn and
-//! DROPS its machine when the turn completes (the `FnOnce` body owns the
-//! machine and consumes it). A RESIDENT session keeps the machine across turns:
-//! a completed turn returns the `JitEffectMachine` to its session slot so the
+//! The stow engine's oneshot path (`SessionEngine`) drives one turn and DROPS
+//! its machine when the turn completes (the `FnOnce` body owns the machine
+//! and consumes it). A RESIDENT session keeps the machine across turns: a
+//! completed turn returns the `JitEffectMachine` to its session slot so the
 //! next turn re-enters the SAME heap and sees prior effect-plane state.
 //!
 //! This is the "end-state registry" entry the engine docstring names —
@@ -12,15 +12,16 @@
 //! The oneshot `FnOnce` path in `engine.rs` is untouched; the stateless eval
 //! server keeps driving it.
 //!
-//! # Why turns can run on a fresh thread each time (E2's gift)
+//! # Why turns can run on a fresh thread each time
 //!
 //! `tidepool-repl` pins its machine to one parked worker thread because its
-//! ask-suspend mechanism parks a blocked thread. E2 removed that need at the
-//! ask boundary: [`JitEffectMachine::resume_suspended`] re-installs the
-//! machine's per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry,
-//! cancel flag) and re-points GC state at the RETAINED session heap on ANY
-//! thread. So a resident session drives each turn on a fresh eval thread and
-//! moves the machine back afterward — no parked worker, no pinning. The
+//! ask-suspend mechanism parks a blocked thread. The threadless suspend
+//! mechanism removes that need at the ask boundary:
+//! [`JitEffectMachine::resume_suspended`] re-installs the machine's
+//! per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry, cancel
+//! flag) and re-points GC state at the RETAINED session heap on ANY thread.
+//! So a resident session drives each turn on a fresh eval thread and moves
+//! the machine back afterward — no parked worker, no pinning. The
 //! stowed-XOR-running discipline (`unsafe impl Send for JitEffectMachine`)
 //! holds because the machine is in exactly one place at a time: owned by the
 //! session slot when idle/suspended, moved onto the eval thread for the
@@ -31,12 +32,12 @@
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
 //! [`JitEffectMachine::run_fragment_suspendable`] — the composition of the
-//! fragment plane (C2 session re-entry) with E2 threadless suspension. An `Ask`
+//! fragment plane's session re-entry with threadless suspension. An `Ask`
 //! mid-fragment stows the continuation on the machine and yields
 //! `Suspended`; [`ResidentSession::resume`] re-enters and drives the fragment
 //! to completion.
 //!
-//! # Nested child runs (segment 40)
+//! # Nested child runs
 //!
 //! A suspended session REJECTS a new TOP-LEVEL turn (see
 //! [`ResidentError::Suspended`]) but ACCEPTS a nested CHILD run
@@ -45,7 +46,7 @@
 //! parent's stowed continuation is registered as a GC root
 //! ([`JitEffectMachine::run_child_fragment`]). The child does not consume the
 //! parent's continuation; the session stays suspended on its hole across the
-//! child run. The L7 `suspended_continuation.is_none()` asserts in
+//! child run. The `suspended_continuation.is_none()` asserts in
 //! `jit_machine.rs` stay intact for the plain entries; the child entry moves the
 //! continuation into a registered stowed root for its duration (so those asserts
 //! still pass) — see the jit_machine module docstring for the full invariant.
@@ -108,12 +109,12 @@ pub enum ResidentError {
     #[error("session is suspended on continuation {0}; resume, abort, or run a child before a new top-level run")]
     Suspended(String),
     /// A `run_child` was attempted on an idle (not-suspended) session — a
-    /// nested child requires a suspended parent by construction (segment 40).
+    /// nested child requires a suspended parent by construction.
     #[error("session is not suspended; a nested child run requires a suspended parent")]
     NotSuspended,
-    /// A nested child fragment itself suspended at an `Ask`. R0 is single-level
-    /// sequential-isolated nesting — the machine holds exactly one stowed
-    /// continuation, so a child cannot suspend while the parent already is.
+    /// A nested child fragment itself suspended at an `Ask`. Nesting is
+    /// single-level and sequential-isolated — the machine holds exactly one
+    /// stowed continuation, so a child cannot suspend while the parent already is.
     #[error("nested child suspended at an ask; R0 supports single-level nesting only")]
     ChildSuspended,
     /// A `resume`/`abort` referenced a continuation id that is not the one this
@@ -160,7 +161,7 @@ pub struct ResidentSession<H, O> {
     /// The shared persistent-session core (machine + accumulated table + the two
     /// planes), driven through the threadless suspend mechanism. The harness does
     /// not (yet) accumulate on the decl/value planes — they sit empty here until
-    /// W1b turns them on — but the machine lifecycle + table merge + fragment-run
+    /// enabled — but the machine lifecycle + table merge + fragment-run
     /// primitives all live in the core, shared with the repl's parked-thread
     /// session.
     core: PersistentSession<Threadless>,
@@ -220,7 +221,7 @@ where
     // them into a struct would just move the arity, not remove it.
     ///
     /// `lib` is the decl plane: pass `Some` to accumulate declarations across
-    /// turns (the harness, once W1b turns it on), or `None` for a value-only
+    /// turns (once the harness enables it), or `None` for a value-only
     /// session. The boot table seeds the accumulated session table.
     #[allow(clippy::too_many_arguments)]
     pub fn bootstrap(
@@ -359,7 +360,7 @@ where
     }
 
     /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
-    /// session's live value bindings that `expr` actually references (D9), so
+    /// session's live value bindings that `expr` actually references, so
     /// the fragment can resolve an earlier `x <- e` at a Var-miss. Empty until
     /// the first bind materializes AND this fragment references one, so a
     /// value-plane-free session behaves exactly as before.
@@ -747,27 +748,46 @@ where
             }
         }
         let ask_tag = self.core.ask_tag();
-        // `resume_suspended` consumes the machine's stowed continuation as soon
-        // as it is entered (`.take()`), so the OLD hole is spent regardless of
-        // the re-entry's outcome — clear `pending` up front. `classify` re-arms
-        // it with a FRESH hole if the re-entry suspends again; an error leaves
-        // the session idle (the spent continuation cannot be resumed twice).
-        self.pending = None;
-        // A bind re-entry drives the tenure-on-completion variant. `forced` is
-        // Copy so it (not the borrowed `bind`) is what crosses into the eval
-        // closure; `bind` stays here for the post-run materialize.
+        // The machine is authoritative on whether the stowed continuation was
+        // actually consumed: `resume_suspended{,_binding}` NF-force a
+        // data-kinded answer BEFORE taking the continuation (A5), and on a
+        // retryable rejection (a bottom in the answer) leave it stowed so the
+        // caller can retry — `pending` must NOT be cleared here, or a
+        // retryable failure wedges the session (`is_idle()` lies `true` while
+        // the machine is still suspended). `classify` (below, on `Ok`) is the
+        // sole owner of `pending` on a real outcome.
         let forced = bind.map(|(b, _)| matches!(b.tier, ValueTier::Tier0Data));
-        let outcome =
-            self.on_eval_thread(move |machine, table, handlers, captured| match forced {
-                Some(forced) => machine
-                    .resume_suspended_binding(table, handlers, captured, ask_tag, input, forced),
-                None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
-            })?;
-        // A bind that completed on this re-entry tenured its result — bind it.
-        if let (Some((binder, gen)), SuspendableOutcome::Completed(_)) = (bind, &outcome) {
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| match forced {
+            Some(forced) => {
+                machine.resume_suspended_binding(table, handlers, captured, ask_tag, input, forced)
+            }
+            None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
+        });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Reconcile against the machine's ground truth: if it is no
+                // longer suspended, the continuation WAS consumed before this
+                // run failed (a genuine mid-run error) — the old hole is
+                // spent and the session goes idle. If it is still suspended,
+                // this was a retryable rejection (e.g. A5's NF-force) — the
+                // same hole stays pending, untouched.
+                if !self.core.machine().is_some_and(|m| m.is_suspended()) {
+                    self.pending = None;
+                }
+                return Err(e);
+            }
+        };
+        // A completed bind materializes AFTER `classify` has already retired
+        // `pending` for this hole, so a materialize failure here — a second,
+        // different door onto the same wedge class — cannot leave `pending`
+        // stuck on a hole the machine no longer recognizes as suspended.
+        let completed = matches!(outcome, SuspendableOutcome::Completed(_));
+        let resident_outcome = self.classify(outcome);
+        if let (Some((binder, gen)), true) = (bind, completed) {
             self.materialize_binder(binder, gen)?;
         }
-        Ok(self.classify(outcome))
+        Ok(resident_outcome)
     }
 
     /// Materialize a completed bind's tenured root into the value plane at `gen`

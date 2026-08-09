@@ -22,9 +22,7 @@ use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t_on_wide_multiline_signature_does_not_crash() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Same TYPE shape as the real repro (steer cascade: pure rule -> local

@@ -226,8 +226,8 @@ pub fn compile_haskell_salted(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     // Register varId → name pairs so runtime unresolved-variable errors can
-    // name the symbol (friction #12); same on the cache-hit path above and the
-    // session-turn reader (session/turn.rs).
+    // name the symbol; same on the cache-hit path above and the session-turn
+    // reader (session/turn.rs).
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     // Only store in cache if deserialization succeeded
@@ -320,8 +320,8 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     Ok(EvalResult::new(value, table, warnings.warnings))
 }
 
-/// The outcome of driving a turn that may SUSPEND at the ask boundary (E2
-/// threadless suspension). On [`SuspendableRun::Suspended`] the machine's heap
+/// The outcome of driving a turn that may SUSPEND at the ask boundary
+/// (threadless suspension). On [`SuspendableRun::Suspended`] the machine's heap
 /// is retained (session machinery) and the whole `JitEffectMachine` — plus the
 /// `DataConTable` — is handed back so the caller can stow it as data (no parked
 /// thread) and resume it later, on any thread, via [`resume_suspended_turn`].
@@ -362,7 +362,7 @@ pub enum ResumedRun {
 /// Compile `source` and drive it until it COMPLETES or SUSPENDS at `ask_tag`
 /// (the `Ask` union tag). Sibling of [`compile_and_run_cancellable`] that, at an
 /// ask boundary, hands the machine back as data instead of blocking a thread —
-/// the substrate for E2 threadless session suspension. The machine is compiled
+/// the substrate for threadless session suspension. The machine is compiled
 /// as a SESSION machine so its heap is retained across the suspension (the drive
 /// itself is byte-identical to the one-shot path for a turn that never asks).
 #[allow(clippy::too_many_arguments)]
@@ -547,8 +547,8 @@ mod tests {
         assert!(expr.nodes.len() >= 2);
     }
 
-    /// H / Wave-0.3: the extractor captures the GHC-inferred type of the eval's
-    /// top expression (the `__user` binding) and threads it out as
+    /// The extractor captures the GHC-inferred type of the eval's top
+    /// expression (the `__user` binding) and threads it out as
     /// `MetaWarnings::captured_type`. A module whose `__user` is `[1,2,3] :: [Int]`
     /// must report `[Int]` (GHC's `ppr` rendering of the list type).
     #[test]

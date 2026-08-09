@@ -8,7 +8,7 @@
 //! The fix runs `drive` on a detached task and observes `context.ct`, so the turn
 //! always resolves its own state.
 //!
-//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); skips cleanly otherwise.
+//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -26,10 +26,7 @@ use tokio_util::sync::CancellationToken;
 /// still readable and a fresh run is accepted (not busy-rejected).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_midturn_preserves_heap_and_unwedges() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Bind a value into the session heap.
@@ -65,10 +62,7 @@ async fn cancel_midturn_preserves_heap_and_unwedges() {
 /// a normal COMPUTE turn and assert it produces its value (not a spurious abort).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_does_not_poison_next_turn() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Bootstrap the resident machine (publishes its cancel handle).
@@ -94,10 +88,7 @@ async fn cancel_does_not_poison_next_turn() {
 /// must recover the session the same way, not wedge it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_during_resume_preserves_session() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Suspend on an `ask`.

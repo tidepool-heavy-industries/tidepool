@@ -35,8 +35,14 @@
 //! assert!(out.is_ok());
 //! ```
 //!
-//! Guard suites that need GHC with [`extract_available`] (or the builder's
-//! [`EvalHarness::with_extract_env`]) so they skip cleanly outside `nix develop`.
+//! Guard suites that need GHC with [`require_extract`], which panics loudly
+//! (naming the fix) rather than silently `return`ing — a silent skip reports
+//! as a nextest PASS, defeating every downstream receipt check. GHC-heavy
+//! tests are excluded from the default nextest filter for exactly this
+//! reason; [`require_extract`] only ever fires on a direct
+//! `--ignore-default-filter` invocation missing the environment, which is a
+//! caller error, not a legitimate skip. [`extract_available`] remains for the
+//! rare caller that branches on toolchain presence without a bare skip.
 
 use std::path::{Path, PathBuf};
 
@@ -150,6 +156,22 @@ pub fn extract_env() -> bool {
 /// an already-set `TIDEPOOL_EXTRACT` implies.
 pub fn extract_available() -> bool {
     extract_env()
+}
+
+/// Panic loudly if the GHC-tier toolchain isn't reachable, instead of the
+/// caller silently `return`ing (which nextest reports as a PASS). This is the
+/// standard guard for a GHC-heavy integration test: such tests are excluded
+/// from the default nextest filter, so this only ever fires on a direct
+/// `--ignore-default-filter` invocation missing the environment — a caller
+/// error, not a legitimate skip.
+pub fn require_extract() {
+    if !extract_available() {
+        panic!(
+            "TIDEPOOL_EXTRACT not set and no working tidepool-extract toolchain found — \
+             this GHC-tier test cannot run vacuously. Set TIDEPOOL_EXTRACT (or run inside \
+             `nix develop`) or run via scripts/battery.sh, which derives it."
+        );
+    }
 }
 
 /// Run `f` on a fresh thread with the JIT eval stack size ([`EVAL_STACK_SIZE`]).
@@ -381,38 +403,37 @@ impl EvalHarness {
 /// as a hand-maintained GADT preamble, plus matching stub handlers and a
 /// ready-made [`mock::min_stack`] `frunk` HList.
 ///
-/// This is a STATIC mirror of the real stack, not a derivation — it exists so
-/// callers can compile a self-contained module without wiring
-/// `with_effects_module()`/`Tidepool.Orchestrate`. Because it's hand-maintained,
-/// it CAN drift from `tidepool_mcp::base_effects!` (that's exactly what
-/// happened when the SG effect was cut and Lsp/Time were added — see f1a480e6).
-/// `mock_stack_matches_production` (this crate's test suite, `tests/` dir)
-/// pins [`EFFECT_NAMES`] against `tidepool_mcp::standard_decls()` so a future
-/// cut/add/reorder fails loud here instead of silently going stale again.
+/// The GADT preamble text and stub handlers below are a STATIC mirror of the
+/// real stack, not a derivation — it exists so callers can compile a
+/// self-contained module without wiring `with_effects_module()`/
+/// `Tidepool.Orchestrate`. Because *those* are hand-maintained, they CAN
+/// drift from `tidepool_mcp::base_effects!` (that's exactly what happened
+/// when the SG effect was cut and Lsp/Time were added — see f1a480e6).
+/// [`EFFECT_NAMES`] itself is no longer part of that hand-maintained surface:
+/// it's computed straight from `tidepool_mcp::standard_decls()` (this crate
+/// already depends on `tidepool-mcp` as a normal dependency), so it cannot
+/// independently drift. `mock_stack_matches_production` (this crate's test
+/// suite, `tests/` dir) still pins it against `tidepool_mcp::standard_decls()`
+/// as a regression guard against a future hand-maintained list creeping back in.
 pub mod mock {
     use std::collections::HashMap;
+    use std::sync::LazyLock;
 
     use tidepool_bridge_derive::FromCore;
     use tidepool_bridge_effects::{FileMeta, Proc};
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
     use tidepool_eval::value::Value;
 
-    /// The base MCP effect names, in stack order, as mirrored by this module.
-    /// `mock_stack_matches_production` asserts this equals
-    /// `tidepool_mcp::standard_decls()`'s type names.
-    pub const EFFECT_NAMES: &[&str] = &[
-        "Console",
-        "KV",
-        "Fs",
-        "Http",
-        "Exec",
-        "Lsp",
-        "Llm",
-        "Git",
-        "Time",
-        "Ask",
-        "RunLLMTurn",
-    ];
+    /// The base MCP effect names, in stack order — derived directly from
+    /// `tidepool_mcp::standard_decls()`, not hand-copied, so this list cannot
+    /// drift from production on its own. `mock_stack_matches_production`
+    /// pins it against a second, independent call to the same function.
+    pub static EFFECT_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        tidepool_mcp::standard_decls()
+            .into_iter()
+            .map(|d| d.type_name)
+            .collect()
+    });
 
     /// The standard MCP module preamble: LANGUAGE pragmas, `module Expr`, the
     /// common imports, the base-stack GADT declarations, and `type M = Eff '[…]`.

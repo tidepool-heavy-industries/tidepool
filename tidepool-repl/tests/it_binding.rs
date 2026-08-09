@@ -5,8 +5,8 @@
 //! a bare final EXPRESSION binds its value to `it` (rebinding every such
 //! turn, GHCi parity); a trailing bind (`x <- e` / `_ <- e`) does NOT bind
 //! `it`; a result over `truncate::HUGE_CEILING` collapses to a header
-//! instead of a partial dump. Each test guards on `extract_available()` and
-//! skips cleanly otherwise.
+//! instead of a partial dump. Each test guards on `require_extract()` and
+//! panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -15,9 +15,7 @@ use common::*;
 /// (`length it`, `take 2 it`), and shows up in `:bindings`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bare_expr_binds_it_and_is_usable_next_turn() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("[1,2,3,4,5] :: [Int]").await;
@@ -52,9 +50,7 @@ async fn bare_expr_binds_it_and_is_usable_next_turn() {
 /// CASE 2 — `it` rebinds on every bare expression (latest-wins, GHCi parity).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_rebinds_on_next_bare_expression() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("10 :: Int").await.expect_ok("first bare expr");
@@ -72,9 +68,7 @@ async fn it_rebinds_on_next_bare_expression() {
 /// `it` with no prior bare expression in the session is a scope error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trailing_named_bind_does_not_bind_it() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (5 :: Int)")
@@ -94,9 +88,7 @@ async fn trailing_named_bind_does_not_bind_it() {
 /// whole `do`-block statement that yields `()` — see `Session::run_bind_discard`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discard_bind_does_not_bind_it() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("_ <- pure (5 :: Int)")
@@ -118,10 +110,7 @@ async fn discard_bind_does_not_bind_it() {
 /// stack, like the no-double-execution suite below).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discard_bind_runs_its_effect_both_forms() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "discard-effect", false);
 
@@ -167,9 +156,7 @@ async fn discard_bind_runs_its_effect_both_forms() {
 /// discard bind mints no session value, unlike a real `x <- e` bind).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discard_bind_introduces_no_binding_either_form() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let before = repl
@@ -212,10 +199,7 @@ async fn discard_bind_introduces_no_binding_either_form() {
 /// render — would double-increment it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn effectful_bare_expression_runs_its_effect_exactly_once() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "it", false);
 
@@ -249,9 +233,7 @@ async fn effectful_bare_expression_runs_its_effect_exactly_once() {
 /// `it` (usable next turn), and the full value is fetchable via `:stub 0`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn huge_value_is_header_only_bound_to_it_and_stub_fetchable() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // 40_000 chars renders well past HUGE_CEILING (RESULT_BUDGET * 8 = 32_768).
@@ -317,9 +299,7 @@ async fn huge_value_is_header_only_bound_to_it_and_stub_fetchable() {
 /// `it` must bind to a live, uncorrupted value usable on the next turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bare_expr_towire_identity_alias_renders_and_binds() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl

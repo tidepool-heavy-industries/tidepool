@@ -27,14 +27,6 @@ use tidepool_harness::{
     NodeState, SelfHarnessDriver, SelfHarnessState,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -134,12 +126,7 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 /// own "already suspended" guard instead of completing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
@@ -173,10 +160,9 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         driver.lifecycle()
     );
     assert_eq!(
-        cycle2.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "the recovered cycle must run loop from a fresh bootstrap, got {:?}",
-        cycle2.state_json
+        driver.iteration(),
+        1,
+        "the recovered cycle must run loop from a fresh bootstrap"
     );
     assert_eq!(
         cycle2.state_json.get("mode").and_then(|v| v.as_str()),
@@ -192,12 +178,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
 /// since `Failed` discarded nothing to rebuild but is itself recoverable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
@@ -235,15 +216,12 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         driver.lifecycle()
     );
 
-    let second = driver
+    driver
         .run_one_cycle(&harness_source, None)
         .await
         .expect("a working extract binary lets the driver recover from the fresh Failed");
     assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
-    assert_eq!(
-        second.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-    );
+    assert_eq!(driver.iteration(), 1);
 }
 
 /// When recovery from a `Failed` cycle cannot itself rebuild a usable outer
@@ -252,12 +230,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
 /// `DriverError::Poisoned` instead of attempting to run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poisoned_driver_refuses_entry_points() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let mut driver = driver_over(
@@ -340,12 +313,7 @@ async fn poisoned_driver_refuses_entry_points() {
 /// `Running`/`Suspended`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_answerer_nodes_are_terminal_across_cycles() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(

@@ -1,4 +1,4 @@
-//! Lane A — session declaration accumulation (plan §5.0).
+//! Session declaration accumulation.
 //!
 //! A [`SessionLib`] accumulates user declarations as **source text** across
 //! turns. Each `define` turn:
@@ -7,14 +7,14 @@
 //!   2. appends a [`render::DeclTurn`] to the ordered log and bumps the
 //!      [`Generation`];
 //!   3. regenerates the whole `Tidepool.Session.Lib.G<g>` module as a pure
-//!      function of the log (selective re-export, plan §3) and writes it
-//!      atomically into the session include tree.
+//!      function of the log (selective re-export) and writes it atomically
+//!      into the session include tree.
 //!
 //! Later turns see prior declarations by importing `Tidepool.Session.Lib.G<g>`
-//! through the **existing** batch-compile pipeline ([`crate::compile_haskell`])
-//! with the session dir on the include path at highest precedence. The value
-//! and type planes (Waves 1/3) are out of scope here — this lane ships standalone
-//! as a usable declaration REPL.
+//! through the batch-compile pipeline ([`crate::compile_haskell`]) with the
+//! session dir on the include path at highest precedence. The value and type
+//! planes are handled elsewhere; this module is a standalone, usable
+//! declaration REPL on its own.
 
 pub mod engine;
 pub mod persistent;
@@ -84,12 +84,17 @@ fn derive_stdlib_include() -> Vec<std::path::PathBuf> {
 /// (`u64::MAX`) here: none of this crate's call sites have an answerer node or
 /// round of their own to attribute to (that context lives one layer up, in
 /// `tidepool-harness`). `NodeId(0)` is a REAL, LIVE node id — never pass bare
-/// `0`, only the sentinel.
+/// `0`, only the sentinel. Rendered as `"bootstrap"`/`"-"` (mirroring
+/// `tidepool_harness::timing::render_node`/`render_round`) rather than the raw
+/// `u64::MAX` — this is the SECOND of the two emitters that shape (a back-dep
+/// from `tidepool-harness` would cycle, so this one duplicates the rendering
+/// by hand too) — so a `18446744073709551615` never reaches a console here
+/// either.
 fn record_turn_stage(stage: &str, elapsed: std::time::Duration, bytes: u64) {
     tracing::debug!(
         target: "tidepool_harness::timing",
-        node = u64::MAX,
-        round = u64::MAX,
+        node = "bootstrap",
+        round = "-",
         stage,
         ms = elapsed.as_millis() as u64,
         bytes,
@@ -120,8 +125,7 @@ pub enum SessionError {
     MalformedDiagnostics(String),
 }
 
-/// [`crate::CompileError`] → [`SessionError`], preserving the split the
-/// deleted `binders::extract_binders` had: an environment problem stays
+/// [`crate::CompileError`] → [`SessionError`]: an environment problem stays
 /// `Io`, a stale/skewed extractor stays `MalformedDiagnostics`, and every
 /// user-Haskell-shaped rejection collapses into `BinderExtraction`.
 fn compile_error_to_session_error(e: crate::CompileError) -> SessionError {
@@ -251,7 +255,7 @@ impl SessionLib {
     /// Source text of the most recent declaration turn that introduces a
     /// value/function named `name` (via `ExportItem::Value`). Returns `None` if
     /// no such declaration exists. Used by `:i <name>` to surface
-    /// session-defined function/value definitions (#318).
+    /// session-defined function/value definitions.
     #[must_use]
     pub fn decl_value_source(&self, name: &str) -> Option<&str> {
         self.log
@@ -269,7 +273,7 @@ impl SessionLib {
 
     /// The replayable decl half of a `:program` notebook repaint: turn source
     /// texts in log order, with fully-superseded turns dropped so a name
-    /// redefined across separate turns emits only its LATEST definition (#320)
+    /// redefined across separate turns emits only its LATEST definition
     /// instead of overlapping clauses GHC would reject. See
     /// [`DeclLog::replayable_sources`] for the exact latest-wins rule (it mirrors
     /// the eval-time module scoping).
@@ -282,7 +286,7 @@ impl SessionLib {
     /// turns (all generations, not just the current one). Used by the eval
     /// assembler to hide session-defined names from the Prelude import so a
     /// user function named `over`/`view`/etc. resolves unambiguously to the
-    /// session decl rather than the Prelude re-export (BUG-7).
+    /// session decl rather than the Prelude re-export.
     #[must_use]
     pub fn decl_value_names(&self) -> Vec<&str> {
         // Latest-wins with retraction: a name removed by a later retraction turn
@@ -333,7 +337,7 @@ impl SessionLib {
 
     /// A cache salt unique to `(session, generation)`. Threaded into
     /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
-    /// don't collide and a generation bump invalidates correctly (plan §3 R6).
+    /// don't collide and a generation bump invalidates correctly.
     #[must_use]
     pub fn cache_salt(&self) -> String {
         format!("session:{}:gen:{}", self.id, self.log.generation())
@@ -347,7 +351,7 @@ impl SessionLib {
     /// classified together as this turn's introduced names.
     ///
     /// Empty / whitespace-only `decl_text` is a **no-op**: returns the current
-    /// generation without bumping it (RE-1 fix).
+    /// generation without bumping it.
     ///
     /// Syntactically-invalid declarations are rejected here (GHC's parser fails →
     /// `SessionError::BinderExtraction`) and the log is left untouched.
@@ -390,10 +394,10 @@ impl SessionLib {
     ///
     /// Always shadows wildcard-imported names (`Library`, `Tidepool.Prelude`,
     /// …) with this session's own decl heads — GHCi parity for ANY session
-    /// decl, pure or genuine (ledger #36): `f x = …` at the prompt always
-    /// shadows an imported `f`, and a pure `let`/`<-` bind promoted into a
-    /// decl (`tidepool-repl`'s `try_pure_bind_as_decl`) shadows exactly the
-    /// same way, so pure and effectful binds stay interchangeable.
+    /// decl, pure or genuine: `f x = …` at the prompt always shadows an
+    /// imported `f`, and a pure `let`/`<-` bind promoted into a decl
+    /// (`tidepool-repl`'s `try_pure_bind_as_decl`) shadows exactly the same
+    /// way, so pure and effectful binds stay interchangeable.
     pub fn define_batch(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
         self.define_batch_with_vals(decl_texts, &[], &[])
     }

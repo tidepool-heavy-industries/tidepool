@@ -12,6 +12,8 @@
 //! suspended session (no forked child, no second model turn) and resumes it →
 //! the program completes.
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,14 +24,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::tree::NodeState;
 use tidepool_harness::{Harness, HoleRouting, TurnOutcome, Ui};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -63,12 +57,7 @@ fn verdict_lib_dir() -> tempfile::TempDir {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mechanical_choice_answer_resumes_run_llm_turn_to_completion() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("uiof.jsonl");

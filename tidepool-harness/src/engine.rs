@@ -135,9 +135,9 @@ pub struct ClassifiedHole {
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
-///   `ask schema prompt`). The old `payload.get("ui")` → `Dialog` probe is
-///   gone (dead once `dialogAsk` was deleted) — a Dialog hole is no longer
-///   PRODUCED, though the variant and its consumers still exist.
+///   `ask schema prompt`). A Dialog hole is never PRODUCED here — no
+///   `payload` probe routes to it — though the `HoleRouting::Dialog` variant
+///   and its consumers still exist.
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -210,22 +210,40 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
 /// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
 /// mismatch — the caller falls back to the plain-Ask routing.
+///
+/// TWO Haskell surfaces ride this one constructor, and they are told apart
+/// by decode rather than by a second routing arm: `askUser @T`
+/// (`Tidepool.Form`) sends a bare
+/// [`crate::selfharness::operator::FormShape`] — exactly the JSON
+/// `selfharness::operator`'s module docs specify — and the de-advertised
+/// applicative builder sends a flat `{"fields": [...]}` spec. A bare shape
+/// cannot decode as a `FormSpec` (`fields` is required there), so trying the
+/// flat wire first is unambiguous; a shape is lifted into
+/// [`crate::selfharness::operator::FormSpec::shape`] for the gate to render.
 fn decode_askuser_spec(
     request: &Value,
     table: &DataConTable,
 ) -> Option<crate::selfharness::operator::FormSpec> {
+    use crate::selfharness::operator::{FormShape, FormSpec};
+
     let Value::Con(_, fields) = request else {
         return None;
     };
     let field = fields.first()?;
     let json = tidepool_runtime::value_to_json(field, table, 0);
-    serde_json::from_value(json).ok()
+    if let Ok(spec) = serde_json::from_value::<FormSpec>(json.clone()) {
+        return Some(spec);
+    }
+    let shape: FormShape = serde_json::from_value(json).ok()?;
+    Some(FormSpec {
+        fields: Vec::new(),
+        shape: Some(shape),
+    })
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
 /// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
-/// its shape (identical to what `AskWith` used to carry for this family) is
-/// documented once.
+/// this shape is documented once rather than at every call site.
 fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
     let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
     let ty = asks.type_of(site).map(str::to_string);
@@ -452,18 +470,36 @@ pub fn assemble_request(
     }
 }
 
+/// A names-only type-shape line to append to a hole card, or an empty string
+/// when there is nothing to show: no table (the caller couldn't reach one —
+/// see call sites), or [`crate::uiof::type_synopsis`] degraded all the way to
+/// the bare type name (already stated elsewhere in the card, so repeating it
+/// here would add nothing). See `plans/post-restart/dev/hole-card-type-synopsis.md`:
+/// names only, never an invented/partial shape.
+fn type_shape_line(ty: &str, table: Option<&DataConTable>) -> String {
+    match table.map(|t| crate::uiof::type_synopsis(t, ty)) {
+        Some(synopsis) if synopsis != ty => format!("Its shape: `{synopsis}`\n\n"),
+        _ => String::new(),
+    }
+}
+
 /// Render a hole card as a user-turn message: the prompt plus a `resume :: T`
 /// signature the answerer fills. This is what a fork/return answerer sees as
-/// its task.
-pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
+/// its task. `table` is the [`DataConTable`] the hole's type was classified
+/// from (when the caller has one in hand) — used only to render a names-only
+/// shape synopsis, never to invent field types.
+pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -> String {
     match ty {
-        Some(ty) => format!(
-            "A parent computation is suspended and needs a typed answer.\n\n\
-             {prompt}\n\n\
-             Answer by evaluating `resume expr` where:\n\n\
-             ```haskell\nresume :: {ty} -> M {ty}\n```\n\n\
-             Your ```haskell block's value must be of type `{ty}`."
-        ),
+        Some(ty) => {
+            let shape = type_shape_line(ty, table);
+            format!(
+                "A parent computation is suspended and needs a typed answer.\n\n\
+                 {prompt}\n\n\
+                 Answer by evaluating `resume expr` where:\n\n\
+                 ```haskell\nresume :: {ty} -> M {ty}\n```\n\n\
+                 {shape}Your ```haskell block's value must be of type `{ty}`."
+            )
+        }
         None => format!(
             "A parent computation is suspended and needs an answer.\n\n{prompt}\n\n\
              Answer by evaluating `resume expr` in a ```haskell block."
@@ -481,8 +517,27 @@ pub fn hole_card(prompt: &str, ty: Option<&str>) -> String {
 /// (`crate::harness::AnswerContract`) — say so, because a model that believes
 /// `{ty}` is out of scope stops trying to build one and finalizes whatever does
 /// compile instead (e.g. a `Text`/tuple) rather than the real type.
-pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) -> String {
+///
+/// Prescribes bare `finalize @{ty} value`, with no outer `:: M {ty}`
+/// annotation — the earlier "annotate the WHOLE expression" wording was a
+/// stopgap for the ambiguous-`a0` defect; `__anchor` (`template_turn_for`)
+/// fixed that at the source, and
+/// `finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
+/// proves the bare shape compiles for a pinned `Finalize T` row. The
+/// annotated form still compiles too (a relaxation, not a prohibition) — it
+/// is simply no longer necessary to prescribe.
+///
+/// `table` is the [`DataConTable`] the hole's answer type was resolved from,
+/// when the caller has one in hand — used only to render a names-only shape
+/// synopsis (see [`hole_card`]), never to invent field types.
+pub fn answerer_hole_card(
+    prompt: &str,
+    ty: Option<&str>,
+    imports: &[String],
+    table: Option<&DataConTable>,
+) -> String {
     let ty = ty.unwrap_or("A");
+    let shape = type_shape_line(ty, table);
     let scope = if imports.is_empty() {
         String::new()
     } else {
@@ -497,11 +552,10 @@ pub fn answerer_hole_card(prompt: &str, ty: Option<&str>, imports: &[String]) ->
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the \
-         WHOLE expression with `:: M {ty}` — in a single \
+         {shape}Answer by evaluating `finalize @{ty} value` in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope} (To gather operator input first, evaluate a `askUser` form; \
-         bind its result, then `finalize`.)"
+         loop.{scope} (To gather operator input first, evaluate `askUser @T` for \
+         a type in scope; bind its result, then `finalize`.)"
     )
 }
 
@@ -549,12 +603,11 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
 /// and routed to `template_haskell`'s `imports` field.
 ///
-/// No implicit import is added here anymore (the old always-on `Tidepool.Ui
-/// hiding (prose, code)` was for `dialogAsk`, now deleted): `Tidepool.Form`
-/// is already auto-imported by the turn preamble when `AskUser` is in the
-/// compiling stack (`preamble::pragmas_and_imports`), and an Agent-stack turn
-/// (which has no `AskUser`) must NOT get it force-imported — Tidepool.Form
-/// would fail to resolve there (it depends on `askUserRaw`).
+/// No implicit import is added here: `Tidepool.Form` is already
+/// auto-imported by the turn preamble when `AskUser` is in the compiling
+/// stack (`preamble::pragmas_and_imports`), and an Agent-stack turn (which
+/// has no `AskUser`) must NOT get it force-imported — `Tidepool.Form` would
+/// fail to resolve there (it depends on `askUserRaw`).
 pub fn split_imports(block: &str) -> (String, String) {
     let mut imports: Vec<String> = Vec::new();
     let mut body = Vec::new();
@@ -623,8 +676,8 @@ pub struct EngineConfig {
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
-    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer (B1 widen):
-    /// each of the N children gets this budget independently, so one
+    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
+    /// children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
     /// way a single shared cap would. Plain fork/return-control answerers
     /// still use `max_turns`.
@@ -632,8 +685,8 @@ pub struct EngineConfig {
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
     /// The context-window budget (in tokens) the runtime watches for MID-LOOP
-    /// emergency compaction (self-iterating-harness, 02-runtime.md
-    /// Compaction). DISTINCT from [`Self::max_tokens`], which is the ~2048
+    /// emergency compaction (self-iterating-harness). DISTINCT from
+    /// [`Self::max_tokens`], which is the ~2048
     /// per-turn *output* cap — this is the whole answerer session's
     /// accumulated *context* size, summed across its turns. At ~80% of this,
     /// the driver forces a compact-to-text summary of the answerer transcript
@@ -731,8 +784,7 @@ impl EngineConfig {
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
     /// driver uses this for its `Eff '[RunLLMTurn]`-only compile
     /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
-    /// to the literal single-effect row 02-runtime.md locks in, rather than
-    /// the full Agent stack.
+    /// to that literal single-effect row rather than the full Agent stack.
     pub fn from_decls(
         decls: Vec<tidepool_mcp::EffectDecl>,
         prelude_dir: PathBuf,
@@ -1189,7 +1241,7 @@ fn retarget_result_binder(src: &str) -> String {
 /// `tidepool_mcp::eval_prep`'s `template_haskell_impl` end-line computation
 /// exactly (an empty block is 1 line; a trailing newline doesn't count as an
 /// extra line).
-fn content_line_count(code: &str) -> usize {
+pub(crate) fn content_line_count(code: &str) -> usize {
     if code.is_empty() {
         1
     } else if code.ends_with('\n') {
@@ -1317,9 +1369,9 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
 }
 
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
-/// `Value` (F3's RAW-value rule for a `runLLMTurnFanout` resume — the
-/// same "hand back the native representation, not an Aeson wrapper"
-/// discipline a single fork's `unsafeCoerce` relies on). `items` must
+/// `Value` for a `runLLMTurnFanout` resume — the same "hand back the native
+/// representation, not an Aeson wrapper" discipline a single fork's
+/// `unsafeCoerce` relies on. `items` must
 /// already be in declaration order; `table` only needs to know the
 /// always-wired-in `:`/`[]` constructors (any `DataConTable` from the same
 /// compiled program qualifies — `DataConId`s are stable hashes, not
@@ -1386,6 +1438,122 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    // -- hole card type synopsis --------------------------------------------
+
+    use tidepool_repr::{DataCon, DataConId};
+
+    fn nullary_dc(id: u64, name: &str, tag: u32, type_name: &str) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some(format!("{type_name}.{name}")),
+            type_name: type_name.to_string(),
+        }
+    }
+
+    fn record_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        let dc = DataCon {
+            id: DataConId(1),
+            name: "Contribution".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Contribution.Contribution".to_string()),
+            type_name: "Contribution".to_string(),
+        };
+        table.insert(dc.clone());
+        table.set_field_labels(
+            dc.id,
+            vec![
+                "addedIdeas".to_string(),
+                "draftDelta".to_string(),
+                "advance".to_string(),
+            ],
+        );
+        table
+    }
+
+    fn nullary_sum_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        table.insert(nullary_dc(3, "Abort", 3, "Verdict"));
+        table.insert(nullary_dc(1, "Advance", 1, "Verdict"));
+        table.insert(nullary_dc(2, "Hold", 2, "Verdict"));
+        table
+    }
+
+    #[test]
+    fn hole_card_renders_record_selector_names() {
+        let table = record_table();
+        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        assert!(
+            card.contains("Contribution { addedIdeas, draftDelta, advance }"),
+            "{card}"
+        );
+    }
+
+    #[test]
+    fn answerer_hole_card_renders_nullary_sum_in_tag_order() {
+        let table = nullary_sum_table();
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
+        assert!(card.contains("Advance | Hold | Abort"), "{card}");
+    }
+
+    /// Mutation-close the degrade path at the hole-card level: an unsupported
+    /// shape (here, a type the table has no constructors for) must NOT add a
+    /// partial/invented shape line — the card falls back to naming the type
+    /// alone (already stated elsewhere in the card text).
+    #[test]
+    fn hole_card_unsupported_shape_adds_no_shape_line() {
+        let table = DataConTable::new();
+        let card = hole_card("answer this", Some("Mystery"), Some(&table));
+        assert!(
+            !card.contains("Its shape:"),
+            "an unsupported shape must not render a shape line: {card}"
+        );
+    }
+
+    #[test]
+    fn hole_card_with_no_table_adds_no_shape_line() {
+        let card = hole_card("answer this", Some("Contribution"), None);
+        assert!(!card.contains("Its shape:"), "{card}");
+    }
+
+    /// Derived from the table, not hardcoded: a renamed field changes what
+    /// the hole card shows.
+    #[test]
+    fn hole_card_shape_follows_table_field_rename() {
+        let table = record_table();
+        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        assert!(card.contains("addedIdeas"), "{card}");
+
+        let mut renamed = DataConTable::new();
+        let dc = DataCon {
+            id: DataConId(1),
+            name: "Contribution".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Contribution.Contribution".to_string()),
+            type_name: "Contribution".to_string(),
+        };
+        renamed.insert(dc.clone());
+        renamed.set_field_labels(
+            dc.id,
+            vec![
+                "ideasAdded".to_string(),
+                "deltaDraft".to_string(),
+                "advance".to_string(),
+            ],
+        );
+        let renamed_card = hole_card("answer this", Some("Contribution"), Some(&renamed));
+        assert!(renamed_card.contains("ideasAdded"), "{renamed_card}");
+        assert!(!renamed_card.contains("addedIdeas"), "{renamed_card}");
     }
 
     #[test]

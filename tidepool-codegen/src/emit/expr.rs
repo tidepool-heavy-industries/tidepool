@@ -413,18 +413,17 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
         EmitFrame::Var(vid) => match args.ctx.env.get(&vid).copied() {
             Some(v) => Ok(v),
             None => {
-                // Session re-entry (Wave 1, component C): a Var that misses the
-                // local env but is seeded in the ExternalEnv resolves to the
-                // value held in its stable, GC-updated root slot — the GHCi-style
-                // "reference a value bound in a prior fragment" path. Checked
-                // FIRST, before the error-sentinel / unresolved-var-trap
-                // handling: a session binder reaches codegen as an external
-                // `NVar(stableVarId)` (0xFE-tagged under Option C), but the
-                // override is keyed on ExternalEnv MEMBERSHIP, not on the tag —
-                // the tag is incidental (plans/ghci-implementation-plan.md
-                // §2/§3). Resolution emits a fresh LOAD from the slot per
-                // fragment (never a baked pointer snapshot — the GC moves the
-                // value and rewrites *slot; see `SsaVal::from_external_slot`).
+                // Session re-entry: a Var that misses the local env but is
+                // seeded in the ExternalEnv resolves to the value held in its
+                // stable, GC-updated root slot — the GHCi-style "reference a
+                // value bound in a prior fragment" path. Checked FIRST, before
+                // the error-sentinel / unresolved-var-trap handling: a session
+                // binder reaches codegen as an external `NVar(stableVarId)`
+                // (0xFE-tagged), but the override is keyed on ExternalEnv
+                // MEMBERSHIP, not on the tag — the tag is incidental.
+                // Resolution emits a fresh LOAD from the slot per fragment
+                // (never a baked pointer snapshot — the GC moves the value and
+                // rewrites *slot; see `SsaVal::from_external_slot`).
                 if let Some(slot) = args.ctx.external_env.get(vid) {
                     crate::coverage::hit("var:external_env");
                     return Ok(SsaVal::from_external_slot(args.builder, slot));
@@ -1009,10 +1008,10 @@ fn topo_sort_deferred_simple(
 
     // Kahn's algorithm: a min-heap over `NodeIndex` breaks ties among
     // simultaneously-ready nodes by earliest original position (`NodeIndex`
-    // order == original `deferred_simple` order, by construction above) —
-    // reproducing the prior hand-rolled sort's left-to-right, resolve-as-
-    // soon-as-ready behavior exactly (see the golden tests pinning chain/
-    // diamond/independent/cycle/self-reference shapes).
+    // order == original `deferred_simple` order, by construction above),
+    // giving left-to-right, resolve-as-soon-as-ready ordering (see the
+    // golden tests pinning chain/diamond/independent/cycle/self-reference
+    // shapes).
     let n = order_graph.node_count();
     let mut in_degree = vec![0usize; n];
     for nx in order_graph.node_indices() {
@@ -1039,7 +1038,7 @@ fn topo_sort_deferred_simple(
     // A true cycle leaves its members permanently at in-degree > 0; append
     // them last, in original relative order (never resolved to `false`, and
     // `node_indices()` walks in insertion == original order) — the `cycle`
-    // Known-Limit fallback, matching the old `sorted.extend(remaining)` tail.
+    // Known-Limit fallback.
     for nx in order_graph.node_indices() {
         if !resolved[nx.index()] {
             order.push(nx);
@@ -1194,8 +1193,8 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
     // Propagate session bindings into the lambda's own function context so a
-    // Var-miss inside the body can resolve them (Wave 1, component C). Empty in
-    // the one-shot path. See the `external_env` per-function-Value invariant.
+    // Var-miss inside the body can resolve them. Empty in the one-shot path.
+    // See the `external_env` per-function-Value invariant.
     inner_emit.external_env = args.ctx.external_env.clone();
     inner_emit.lambda_counter = args.ctx.lambda_counter;
     inner_emit.current_fn = lambda_name.clone();
@@ -1678,9 +1677,8 @@ pub fn compile_expr(
     };
 
     let mut emit_ctx = EmitContext::new(name.to_string());
-    // Seed session-scoped external bindings for Var-miss resolution (Wave 1,
-    // component C). Empty for the one-shot path; cloned into nested function
-    // contexts below. Unused by emission until Wave 1 wires the resolution.
+    // Seed session-scoped external bindings for Var-miss resolution. Empty
+    // for the one-shot path; cloned into nested function contexts below.
     emit_ctx.external_env = external_env.clone();
 
     // Carried from the pipeline (set by the JIT entry point from the
@@ -1717,15 +1715,14 @@ pub fn compile_expr(
 }
 
 impl EmitContext {
-    /// Check if a binding's RHS references an error sentinel (tag ERROR_SENTINEL_TAG).
     /// GHC Core hoists `error "..."` into let bindings that are only forced on
-    /// impossible branches. Since our JIT is strict, we must not evaluate these
-    /// eagerly. Returns true if the RHS free vars contain an error sentinel.
-    /// Check if the RHS is a direct error call: either a bare error Var,
-    /// or an App chain whose head function is an error Var.
-    /// This is more precise than the old free-vars check, which would
-    /// poison any binding that CONTAINED an error reference anywhere
-    /// (e.g., in a case branch fallback), even if the main path was valid.
+    /// impossible branches; since the JIT is strict, such bindings must not be
+    /// evaluated eagerly. True when the RHS at `rhs_idx` is a direct error
+    /// call: a bare error Var, an App chain whose head function is an error
+    /// Var, or (for an unlifted-type CAF) a case whose scrutinee bottoms. More
+    /// precise than a free-vars scan, which would poison any binding that
+    /// CONTAINED an error reference anywhere (e.g. in a case branch fallback)
+    /// even when the main path is valid.
     fn rhs_is_error_call(tree: &CoreExpr, rhs_idx: usize) -> bool {
         let mut idx = rhs_idx;
         loop {
@@ -1891,9 +1888,8 @@ impl EmitContext {
         // stack, but case-ALT body emission still re-enters `emit_node`
         // natively (emit_node → emit_case/dispatch → emit_node), so deeply
         // case-nested programs grow the call stack ~one large frame per level.
-        // That is the ~2 MiB cliff measured in plans/stack-safety.md. The
-        // production/proptest path already runs emit on a large worker stack;
-        // this `maybe_grow` is the cheap interim guarantee for any path where
+        // The production/proptest path already runs emit on a large worker
+        // stack; this `maybe_grow` is the cheap guarantee for any path where
         // that discipline slips — if the remaining red zone is below 64 KiB it
         // allocates a fresh 4 MiB segment and continues there. Cost is ~nil
         // when there is ample stack, so it is left unconditional.
@@ -2453,11 +2449,11 @@ impl EmitContext {
         }
 
         // Phase 2.5: collect simple bindings. The topo-sorted Phase 3c loop binds
-        // each lazily (a thunk) \u2014 or eagerly when it is trivially resolvable now.
-        // An error-call RHS (`error \u2026` / `raise#` / `case error of {}`) is
-        // non-trivial, so it thunkifies \u2192 forced only on demand \u2192 throws exactly
-        // as the old poison closure did (error-reporting parity verified). This
-        // also subsumes Gap A: a Var alias is a trivially-resolvable RHS in 3c.
+        // each lazily (a thunk) — or eagerly when it is trivially resolvable now
+        // (a Var alias is trivially resolvable, so it takes this eager path
+        // too). An error-call RHS (`error …` / `raise#` / `case error of {}`)
+        // is non-trivial, so it thunkifies → forced only on demand → throws
+        // with the same error-reporting behavior as evaluation.
         let deferred_simple: Vec<(VarId, usize)> =
             simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
 
@@ -2762,10 +2758,10 @@ impl EmitContext {
 
         // Phase 3c: bind deferred simple bindings in TOPOLOGICAL order (deps
         // first). Lazy-default: thunkify the RHS, EXCEPT when it is trivially
-        // resolvable now \u2014 a WHNF / strict-primop expr (`is_trivial_field`) all
-        // of whose free vars are already in env \u2014 which we evaluate eagerly
-        // (fast path, no thunk; this subsumes the old Var-alias-to-bound Gap A
-        // case). Topo order guarantees each binding's deferred-simple deps are
+        // resolvable now — a WHNF / strict-primop expr (`is_trivial_field`) all
+        // of whose free vars are already in env — which we evaluate eagerly
+        // instead (fast path, no thunk; a Var alias RHS takes this path too).
+        // Topo order guarantees each binding's deferred-simple deps are
         // already in env, so `emit_thunk` captures them rather than dropping;
         // a true cycle (the `cycle` Known-Limit) leaves a dep unbound and
         // resolves to unresolved-on-force, unchanged. The post-step then fills
@@ -2793,9 +2789,9 @@ impl EmitContext {
                 // emitted as null placeholder slots and patched by
                 // `letrec_post_simple_step` when the awaited binder lands
                 // (the same pending-capture machinery the Lam pre-alloc knot
-                // uses). Previously these were silently DROPPED by the
-                // capture filter → unresolved_var_trap on force (the `cycle`
-                // Known-Limit, now fixed).
+                // uses). Without this, such a capture would be silently
+                // DROPPED by the capture filter, hitting unresolved_var_trap
+                // on force instead.
                 let promised: FxHashSet<VarId> = fvs
                     .iter()
                     .filter(|v| !args.ctx.env.contains_key(v) && letrec_binders.contains(v))
@@ -3070,8 +3066,8 @@ struct DeferredConDep {
     remaining_deps: FxHashSet<VarId>,
     /// Whether the fields have already been stored. An EXPLICIT done flag: an
     /// unfilled zero-field Con is otherwise indistinguishable from a completed
-    /// one (the old code emptied `field_indices` as a "done" sentinel). Phase 3c
-    /// fills once and sets this; phase 3d skips deps already `filled`.
+    /// one, so `field_indices` being empty can't serve as the sentinel. Phase
+    /// 3c fills once and sets this; phase 3d skips deps already `filled`.
     filled: bool,
 }
 
@@ -3362,11 +3358,10 @@ pub(crate) fn ensure_heap_ptr(
 mod topo_sort_golden_tests {
     //! Golden tests pinning `topo_sort_deferred_simple`'s exact output order —
     //! including its tie-break among independent bindings and its behavior on
-    //! a genuine cycle — BEFORE it is replaced by a petgraph-backed
-    //! implementation. Each test's expected order was derived by hand-tracing
-    //! the current implementation (see the reasoning left in each test's
-    //! comment), not copied from a run, so a divergence here is a real
-    //! behavior change, not a stale golden value.
+    //! a genuine cycle. Each test's expected order was derived by hand-tracing
+    //! the implementation (see the reasoning left in each test's comment), not
+    //! copied from a run, so a divergence here is a real behavior change, not
+    //! a stale golden value.
     use super::*;
 
     /// Build a tiny tree of `Var`/`Lit` "rhs" fragments, one per binder, in
@@ -3490,15 +3485,14 @@ mod topo_sort_golden_tests {
     }
 
     #[test]
-    fn diamond_ties_break_by_input_order_within_a_pass() {
+    fn diamond_ties_break_by_input_order() {
         // a -> {c, b} -> d (both b and c depend only on a; d depends on
-        // both). Fed as [a, c, b, d]: in a SINGLE pass, `a` resolves first
-        // (pushed into `sorted`), then `c` (dep {a} already in `sorted`),
-        // then `b` (dep {a} already in `sorted`) — note `c` is checked
-        // before `b` only because it appears first in `remaining`, not
-        // because of any dependency between them — then `d` (deps {b,c}
-        // BOTH already pushed earlier in this same pass) all resolve in one
-        // pass, in exactly the input order.
+        // both). Fed as [a, c, b, d]: `a` has in-degree 0 and resolves
+        // first, which frees both `c` and `b`; the min-heap then pops `c`
+        // before `b` purely because `c` has the earlier `NodeIndex` (input
+        // order), not because of any dependency between them. `d` only
+        // becomes ready once both are resolved. Net result: exactly the
+        // input order.
         let deps: &[(&'static str, &'static [&'static str])] =
             &[("a", &[]), ("c", &["a"]), ("b", &["a"]), ("d", &["b", "c"])];
         let (tree, vars) = build_bindings(deps);

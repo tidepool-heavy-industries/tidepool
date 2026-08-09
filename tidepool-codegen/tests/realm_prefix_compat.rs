@@ -53,10 +53,9 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 use serial_test::serial;
 
-#[allow(dead_code)]
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-use session_scaffold::expect_int;
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+use session_scaffold_expect::expect_int;
 
 // ─── freer-simple constructor IDs — identical shape to
 //     realm_multi_continuation.rs's synthetic effect stack. ────────────────
@@ -174,7 +173,7 @@ fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
 /// a resume. The suspendable driver expects every step's `Done` value in this
 /// Val/E union shape — a bare `C1 n` (no `Val` wrapper) is not driveable
 /// through `run_fragment_suspendable_parked` at all, which is why this is a
-/// distinct builder from `session_scaffold::build_value_fragment` (built for
+/// distinct builder from `session_scaffold_value::build_value_fragment` (built for
 /// the plain, non-suspendable `run_fragment_pure` path instead).
 fn build_completing_value(n: i64) -> CoreExpr {
     let mut b = TreeBuilder::new();

@@ -1,4 +1,5 @@
 pub mod console;
+pub mod event;
 pub mod exec;
 pub mod fs;
 pub mod git;
@@ -8,8 +9,10 @@ pub mod llm;
 pub mod lsp;
 pub mod meta;
 pub mod time;
+pub mod worktree;
 
 pub use console::*;
+pub use event::*;
 pub use exec::*;
 pub use fs::*;
 pub use git::*;
@@ -19,3 +22,4 @@ pub use llm::*;
 pub use lsp::*;
 pub use meta::*;
 pub use time::*;
+pub use worktree::*;

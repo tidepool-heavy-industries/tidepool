@@ -1,10 +1,9 @@
-//! `State` crossing at a loop boundary — the SERIALIZED channel
-//! (02-runtime.md "Two monads over one resident heap"), distinct from the
-//! in-heap `run_child` channel `service_runllm_hole` uses within a loop.
-//! `State` is any author-defined `(ToJSON s, FromJSON s) => s` (LOCKED,
-//! 02-runtime.md), so crossing it is NOT a fixed-schema JSON bridge — it
-//! reuses the same two mechanisms already proven for other typed/opaque
-//! values crossing the Rust/Haskell boundary:
+//! `State` crossing at a loop boundary — the SERIALIZED channel across two
+//! monads sharing one resident heap, distinct from the in-heap `run_child`
+//! channel `service_runllm_hole` uses within a loop. `State` is any
+//! author-defined `(ToJSON s, FromJSON s) => s`, so crossing it is NOT a
+//! fixed-schema JSON bridge — it reuses the same two mechanisms already
+//! proven for other typed/opaque values crossing the Rust/Haskell boundary:
 //!
 //! - **outbound** (`state_out`): render an evaluated `Value` to
 //!   `serde_json::Value` via [`tidepool_runtime::value_to_json`] — the same
@@ -20,6 +19,13 @@
 //!   splices a reference to the harness's own `initialState` instead of a
 //!   decode — there is no prior JSON to decode yet.
 //!
+//! The prior compaction summary and the loop-iteration count are NOT
+//! spliced into Haskell at all: `driver::SelfHarnessDriver::render_framing`
+//! calls the author's `render :: State -> Text` with only the state, then
+//! composes those runtime facts onto its `Text` result in Rust (see
+//! `plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+//! context is the runtime's job").
+//!
 //! # Why `__selfHarnessState`, not `state`, and `Loaded.` qualification
 //!
 //! A turn's default preamble always brings `Tidepool.Prelude` into scope
@@ -32,8 +38,8 @@
 //! this for the harness module's OWN names by importing its decl-plane
 //! module QUALIFIED as [`LOADED_QUALIFIER`] (`Loaded.render`, `Loaded.loop`,
 //! `Loaded.State`, `Loaded.initialState`) rather than unqualified; this
-//! module's own splice avoids it for `state`/`compaction` specifically by
-//! using collision-unlikely names instead.
+//! module's own splice avoids it for `state` specifically by using a
+//! collision-unlikely name instead.
 
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
@@ -57,8 +63,7 @@ pub(crate) const STATE_DECODE_SENTINEL: &str = "TIDEPOOL_STATE_DECODE_FAILED: ";
 /// `tidepool_runtime::value_to_json(value, table, 0)`. Called once per loop
 /// boundary, after `loop state` completes with a new `State`; the result is
 /// what the driver persists (survives a restart) and what the NEXT
-/// `render(state, lastCompaction)` call receives after being re-spliced by
-/// [`state_in`].
+/// `render(state)` call receives after being re-spliced by [`state_in`].
 pub fn state_out(value: &Value, table: &DataConTable) -> Json {
     tidepool_runtime::value_to_json(value, table, 0)
 }
@@ -69,10 +74,9 @@ pub fn state_out(value: &Value, table: &DataConTable) -> Json {
 /// source text to prepend to the next `loop`/`render` turn (mirrors
 /// `tidepool_mcp::eval_prep::input_binding_source`'s splice shape, targeting
 /// a typed `State` rather than a bare `Aeson.Value`). `None` only for the
-/// very first loop, before any `State` has been produced (mirrors
-/// `render`'s `Maybe Text` compaction argument being `Nothing` pre-history)
-/// — that case references the harness's own `initialState` instead of
-/// decoding anything.
+/// very first loop, before any `State` has been produced — that case
+/// references the harness's own `initialState` instead of decoding
+/// anything.
 pub fn state_in(state_json: Option<&Json>) -> String {
     match state_json {
         None => format!(
@@ -99,11 +103,10 @@ pub fn state_in(state_json: Option<&Json>) -> String {
 
 /// Render `s` as a double-quoted Haskell `Text` literal (via
 /// `OverloadedStrings`, always on in a harness turn's default pragma set).
-/// Shared by [`state_in`] and `driver::render_framing`'s compaction splice.
-/// Reuses the input-lane escaper
-/// ([`tidepool_mcp::escape_haskell_string`]) for the body rather than
-/// hand-rolling the same escape table, so every generated Haskell string
-/// literal (eval `input`, `State`, compaction) escapes control chars
+/// Used by [`state_in`] for the spliced `State` JSON literal. Reuses the
+/// input-lane escaper ([`tidepool_mcp::escape_haskell_string`]) for the body
+/// rather than hand-rolling the same escape table, so every generated
+/// Haskell string literal (eval `input`, `State`) escapes control chars
 /// identically.
 pub(crate) fn haskell_string_literal(s: &str) -> String {
     format!("\"{}\"", tidepool_mcp::escape_haskell_string(s))

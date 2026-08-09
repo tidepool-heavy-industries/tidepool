@@ -154,7 +154,7 @@ impl SsaVal {
 
     /// Resolve a seeded session binding (from [`ExternalEnv`]) to a `HeapPtr` at
     /// the current Var-miss site by **loading the live heap pointer from its
-    /// stable root slot** (Wave 1, component C — GHCi-style session re-entry).
+    /// stable root slot** (GHCi-style session re-entry).
     ///
     /// A session binding is carried in [`ExternalEnv`] as a stable
     /// `root_slot: *mut *mut u8` — the GC-updated persistent root the binding
@@ -216,7 +216,7 @@ impl TailCtx {
 /// This is deliberately NOT a [`ScopedEnv`]. A `ScopedEnv` maps to `SsaVal`,
 /// i.e. Cranelift `Value`s — which are **per-function** SSA values; reusing one
 /// across separately-compiled fragments would leak an SSA value across a
-/// function boundary (a Wave-1 miscompile/UB trap). A seeded binding is instead
+/// function boundary (miscompile / UB). A seeded binding is instead
 /// carried here as a stable slot address and, at the Var-miss site, lowered to a
 /// **fresh `load` from that slot each fragment** — never a shared SSA `Value`.
 /// Cloning this map across nested function contexts is therefore safe (raw slot
@@ -243,10 +243,10 @@ impl ExternalEnv {
     /// Seed a session binding to its stable root slot. `insert` itself is safe —
     /// it only stores the slot address in a map and never dereferences it, so
     /// there is no immediate UB. The requirement that `slot` be a non-null,
-    /// persistently-rooted slot (Wave 1.A) whose `*slot` references a tenured
-    /// heap value, and that it outlive every fragment compiled against this env,
-    /// is a **Wave 1.B correctness invariant**, enforced where the slot is loaded
-    /// and used (the Var-miss `load` site), not here.
+    /// persistently-rooted slot whose `*slot` references a tenured heap value,
+    /// and that it outlive every fragment compiled against this env, is
+    /// enforced where the slot is loaded and used (the Var-miss `load` site),
+    /// not here.
     pub fn insert(&mut self, var: VarId, slot: *mut *mut u8) -> Option<*mut *mut u8> {
         self.0.insert(var, slot)
     }
@@ -355,10 +355,10 @@ pub struct EmitContext {
     /// address**, NOT a heap pointer directly — see [`ExternalEnv`]'s doc for
     /// why that distinction is the GC-staleness invariant), consulted at
     /// Var-miss sites (`expr.rs`'s Var-miss arm) to resolve a reference to a
-    /// value bound in a *prior* JIT fragment (the ghci-session re-entry path;
-    /// Wave 1, component C). `compile_expr` seeds it from its `external_env`
-    /// argument and clones it into nested function contexts. Empty for the
-    /// one-shot eval path and all current one-shot callers.
+    /// value bound in a *prior* JIT fragment (the ghci-session re-entry path).
+    /// `compile_expr` seeds it from its `external_env` argument and clones it
+    /// into nested function contexts. Empty for the one-shot eval path and
+    /// all current one-shot callers.
     pub external_env: ExternalEnv,
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,

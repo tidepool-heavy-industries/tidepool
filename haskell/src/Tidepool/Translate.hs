@@ -51,7 +51,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
 import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
-import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy)
+import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
@@ -2950,10 +2950,34 @@ isNospecVar v =
 -- These have no runtime semantics and no unfoldings; emit as error VarId.
 -- These vars can appear deep inside resolved unfoldings (e.g. Typeable infrastructure)
 -- and are not reported by resolveExternals as unresolved.
+--
+-- The name prefix ALONE is not sufficient: GHC's float-out/CSE can name a
+-- perfectly ordinary, LOAD-BEARING top-level binding with the same
+-- convention. Confirmed case (2026-08-09, `formShape @Two == literal`
+-- reproduction): a `deriving (Generic)` type's `Datatype`/`Constructor`
+-- `KnownSymbol` dictionaries (what `datatypeName`/`conName` read) are built
+-- from plain `Addr#` string-literal constants for the type/constructor/
+-- module name; GHC's simplifier floats those literals out under binder names
+-- like `$tcTwo_u...`/`$trModule_u...` — reusing the EXACT prefix convention
+-- genuine (and genuinely dead here) `Typeable` `TyCon`/`Module` bindings use,
+-- because both are synthesized by the same desugaring machinery. Poisoning
+-- that binder replaces a real string literal with an error sentinel; forcing
+-- it later (e.g. via `unpackCString#`) reaches a runtime bad-pointer trap
+-- instead of returning "Two".
+--
+-- A genuine `$tc<T>`/`$trModule`/`$krep...`/`$trName...` binding always has
+-- a BOXED, LIFTED type (`TyCon`, `Module`, `KindRep`, `TrName`, ...) — never
+-- an unlifted primitive. The floated-literal case above has type `Addr#`.
+-- Requiring the type NOT be unlifted is a shape check on what the binding
+-- structurally CAN be (not a tighter name regex, which is the same class of
+-- fix as the bug: still deciding purely from the name), so it holds
+-- regardless of the exact unique/counter GHC's float-out picks.
 isTypeMetadataVar :: Id -> Bool
 isTypeMetadataVar v =
   let name = occNameString (nameOccName (idName v))
-  in any (`isPrefixOf` name) ["$trModule", "$krep", "$tc", "krep$", "tr$Module"]
+      namePrefixMatches =
+        any (`isPrefixOf` name) ["$trModule", "$krep", "$tc", "krep$", "tr$Module"]
+  in namePrefixMatches && not (isUnliftedType (idType v))
 
 isDataTextEmptyVar :: Id -> Bool
 isDataTextEmptyVar v =

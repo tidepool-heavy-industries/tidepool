@@ -1,0 +1,67 @@
+diff --git a/tidepool-mcp/src/eval_prep.rs b/tidepool-mcp/src/eval_prep.rs
+index 7271deb1..503a0fdb 100644
+--- a/tidepool-mcp/src/eval_prep.rs
++++ b/tidepool-mcp/src/eval_prep.rs
+@@ -168,6 +168,21 @@ pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) ->
+ /// well-defined spelling without a row application (there's no default `v`
+ /// to spell `data Finalize v a where` at outside a row's [`crate::RowArgs`]
+ /// entry), so this is a construction-site error, not a half-working emission.
++/// Are `eff`'s helpers emitted into the generated module for this row?
++///
++/// A row-CLOSED helper (`foo :: A -> M B`, the default) only typechecks when
++/// its effect is in the row; a row-POLYMORPHIC one typechecks regardless. This
++/// is the SINGLE source of truth for that question: the helper loop gates on
++/// it, and so does the `(<|>)` hiding term, which must track exactly whether
++/// `Tidepool.Event`'s operator is actually in the author's scope. Two
++/// restatements of this condition would diverge the moment an effect's
++/// row-polymorphism changed, and the divergence would surface only as a wrong
++/// preamble — no build error, no failing typecheck.
++fn emits_helpers_for(eff: &EffectDecl, row_effects: &[EffectDecl]) -> bool {
++    let in_row = row_effects.iter().any(|r| r.type_name == eff.type_name);
++    in_row || eff.helpers_row_polymorphic
++}
++
+ pub fn effects_module_source_with_vocab(
+     row_effects: &[EffectDecl],
+     vocab_effects: &[EffectDecl],
+@@ -207,7 +222,29 @@ pub fn effects_module_source_with_vocab(
+     // warning. This is the home every eval + repl session imports.
+     out.push_str("{-# OPTIONS_GHC -Wno-orphans #-}\n");
+     out.push_str("module Tidepool.Effects where\n");
+-    out.push_str("import Tidepool.Prelude hiding (error)\n");
++    // PRD 19: `Tidepool.Event`'s `(<|>)` merges two event sources into ONE
++    // subscription, and `Tidepool.Prelude` re-exports `Control.Applicative`'s
++    // `(<|>)`. Both unqualified is an ambiguous occurrence — resolved at NAME
++    // RESOLUTION, before typechecking, so the operators' differing types cannot
++    // disambiguate it — and it fires on PRD 19's own worked example.
++    //
++    // DERIVED, NOT DECLARED: `(<|>)` is a RepoEvent HELPER, so it is in the
++    // author's scope exactly when RepoEvent's helpers are EMITTED. That is the
++    // same `in_row || helpers_row_polymorphic` condition the helper loop below
++    // applies, and this reuses it rather than restating it — a restatement is a
++    // second source of truth that diverges the moment RepoEvent becomes
++    // row-polymorphic, which is precisely what the vocabulary-without-row story
++    // wants. Keying on `vocab_effects` instead would hide the Prelude's `(<|>)`
++    // for a vocabulary-only RepoEvent while emitting no replacement, costing
++    // `Alternative` for nothing.
++    let emits_event_alternative = effects.iter().any(|e| {
++        e.type_name == "RepoEvent" && emits_helpers_for(e, row_effects)
++    });
++    if emits_event_alternative {
++        out.push_str("import Tidepool.Prelude hiding (error, (<|>))\n");
++    } else {
++        out.push_str("import Tidepool.Prelude hiding (error)\n");
++    }
+     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
+     out.push_str("import qualified Tidepool.Data.Text as T\n");
+     out.push_str("import qualified Data.Map.Strict as Map\n");
+@@ -270,8 +307,7 @@ pub fn effects_module_source_with_vocab(
+     // declares its helpers row-polymorphic (`Member E effs =>`, typechecks
+     // regardless of the row — see `EffectDecl::helpers_row_polymorphic`).
+     for eff in &effects {
+-        let in_row = row_effects.iter().any(|r| r.type_name == eff.type_name);
+-        if !(in_row || eff.helpers_row_polymorphic) {
++        if !emits_helpers_for(eff, row_effects) {
+             continue;
+         }
+         for h in eff.helpers {

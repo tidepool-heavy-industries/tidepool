@@ -43,12 +43,14 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 use serial_test::serial;
 
-// The shared scaffold carries helpers this file does not need; `#[path]`
-// inclusion makes them look dead here.
-#[allow(dead_code)]
 #[path = "support/session_scaffold.rs"]
 mod session_scaffold;
-use session_scaffold::{build_value_fragment, C1};
+#[path = "support/session_scaffold_expect.rs"]
+mod session_scaffold_expect;
+#[path = "support/session_scaffold_value.rs"]
+mod session_scaffold_value;
+use session_scaffold::C1;
+use session_scaffold_value::build_value_fragment;
 
 const VAL_ID: DataConId = DataConId(10);
 const E_ID: DataConId = DataConId(11);
@@ -498,8 +500,8 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
             {
                 ParkedOutcome::Completed { value, .. } => match &value {
                     Value::Con(cid, fields) if cid.0 == PAIR_ID.0 => {
-                        assert_eq!(session_scaffold::expect_int(&fields[0]), 4321);
-                        assert_eq!(session_scaffold::expect_int(&fields[1]), 9);
+                        assert_eq!(session_scaffold_expect::expect_int(&fields[0]), 4321);
+                        assert_eq!(session_scaffold_expect::expect_int(&fields[1]), 9);
                     }
                     other => panic!("expected Pair, got {other:?}"),
                 },

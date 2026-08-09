@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Counted-semaphore lock for GHC-heavy work (extract builds, --ignore-default-filter
-# nextest runs). Replaces bare `flock /tmp/tidepool-ghc.lock <cmd>`.
+# Counted-semaphore lock for GHC-heavy TEST work (--ignore-default-filter
+# nextest runs and anything that FANS OUT extract compiles). Replaces bare
+# `flock /tmp/tidepool-ghc.lock <cmd>`.
+#
+# TOOLCHAIN BUILDS ARE OUT OF SCOPE (reclassified 2026-08-09): a
+# `cabal build tidepool-extract-bin` is ONE bounded GHC chain — run it
+# UNBROKERED as `nice -n 15 cabal build -j4 ...` (the same envelope as
+# pure-Rust cargo work), at most one per lane. The queue exists to cap
+# extract FAN-OUT; a 3-minute build queuing behind an 88-minute suite was
+# the V2 priority inversion surviving one category over. Long suite runs
+# should SHARD their acquisitions (-E per binary/group, battery-shard
+# discipline) so no single hold runs to an hour where receipts allow.
 #
 #   scripts/ghc-slots.sh run -- <cmd...>        acquire ONE of N slots, run, release
 #   scripts/ghc-slots.sh detach -- <cmd...>     same, but in its OWN SESSION via
@@ -13,6 +23,17 @@
 #                                               the calling pane dies). Prints pid +
 #                                               log path and returns immediately;
 #                                               poll the log across turns.
+#                                               GUARANTEE BOUND: detach survives
+#                                               the CALLING PANE dying (setsid).
+#                                               It does NOT survive box-level
+#                                               kill events (observed 2026-08-09:
+#                                               an overnight event took every
+#                                               detached waiter and job with it).
+#                                               A detached job is not durable —
+#                                               on any long gap, verify the job
+#                                               actually ran (log start/exit
+#                                               markers) before trusting a
+#                                               conclusion built on it.
 #                                               ENVELOPE: detach is about surviving
 #                                               the WAIT, not running legs in
 #                                               PARALLEL — at most ONE brokered leg
@@ -113,7 +134,19 @@ case "$mode" in
           # scripts/battery-shard.sh): held here, so they must not acquire a
           # second one. Set only after the slot is actually taken.
           export TIDEPOOL_GHC_SLOT="$f"
-          exec "$@"
+          # Start/exit markers instead of bare exec: an environment failure
+          # (e.g. ghc missing from the CALLER's PATH — hits run and detach
+          # alike) dies in milliseconds, and without markers that log is
+          # indistinguishable from a leg that ran. rc + duration make
+          # "never started" / "died instantly" / "ran" mechanically
+          # distinguishable in every log. The wrapper shell holds the flock
+          # fd until the command finishes, so slot discipline is unchanged.
+          echo "ghc-slots: acquired ${f##*.}, starting: $*" >&2
+          start_s=$SECONDS
+          "$@"
+          rc=$?
+          echo "ghc-slots: command exited rc=$rc after $((SECONDS - start_s))s" >&2
+          exit "$rc"
         fi
         exec {fd}>&-
       done

@@ -38,6 +38,7 @@ fn sample_spec() -> FormSpec {
                 kind: FieldKind::Int,
             },
         ],
+        shape: None,
     }
 }
 

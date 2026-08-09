@@ -31,10 +31,7 @@ use common::*;
 /// A Text bind as the ONLY binding works (no prior binding ⇒ no Val injection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_alone_control() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("s <- pure (T.pack \"hi\")").await;
@@ -65,10 +62,7 @@ async fn text_bind_alone_control() {
 /// pinned the bug to library-function resolution, not a generic second-bind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn box_second_bind_replica() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
@@ -95,10 +89,7 @@ async fn box_second_bind_replica() {
 /// that ignores the binding. Now yields the value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eff_ref_pure_const_with_binding_live() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
@@ -120,10 +111,7 @@ async fn eff_ref_pure_const_with_binding_live() {
 /// CONTROL: the SAME Eff reference run with NO binding live works (plain path).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eff_ref_pure_const_no_binding_control() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("pure (123 :: Int)").await;
@@ -140,10 +128,7 @@ async fn eff_ref_pure_const_no_binding_control() {
 /// bind is a Text. Was: "Could not find module Val.G1" + kind=4; now passes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_headline_faithful() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
@@ -194,10 +179,7 @@ async fn text_bind_headline_faithful() {
 /// Same-name rebind: `x <- Int` then `x <- Text`. Same root cause (fixed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_rebind_same_name() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
@@ -234,10 +216,7 @@ async fn text_rebind_same_name() {
 /// the length/round-trip assertions are the value-correctness gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_longer_with_prior() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("n <- pure (0 :: Int)").await;

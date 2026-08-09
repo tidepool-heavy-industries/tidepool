@@ -277,6 +277,23 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
+    /// Log a just-compiled turn's extracted types on `node` (the `asks.json`
+    /// site → type table, plus a value-plane bind's bound name/type, when
+    /// either is non-empty). Requires `Running`.
+    pub fn turn_extracted(
+        &self,
+        node: NodeId,
+        asks: Vec<(u32, String)>,
+        bound: Option<(String, String)>,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        inner.require_running(node)?;
+        inner
+            .writer
+            .append(Event::TurnExtracted { node, asks, bound })?;
+        Ok(())
+    }
+
     /// Log one effect request/response pair on `node`. Requires `Running`.
     pub fn effect(
         &self,
@@ -422,12 +439,12 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
-    /// Log an OPERATOR-SPLICED message on `node` (F2's `turn_spliced` kind,
-    /// now built) — distinct from [`Self::turn_delta`] so a genuine operator
-    /// interjection is never mistaken for a modeled turn when auditing
-    /// history. Same non-terminal, forced-state guard as `turn_delta`
-    /// (`Running` or `Suspended`): a splice needs a live transcript to land
-    /// in, exactly like a turn delta does.
+    /// Log an OPERATOR-SPLICED message on `node` (the `turn_spliced` kind) —
+    /// distinct from [`Self::turn_delta`] so a genuine operator interjection
+    /// is never mistaken for a modeled turn when auditing history. Same
+    /// non-terminal, forced-state guard as `turn_delta` (`Running` or
+    /// `Suspended`): a splice needs a live transcript to land in, exactly
+    /// like a turn delta does.
     pub fn turn_spliced(
         &self,
         node: NodeId,
@@ -622,6 +639,7 @@ mod tests {
             LogEvent::NodeCreated { node, .. }
             | LogEvent::Forced { node, .. }
             | LogEvent::TurnStart { node, .. }
+            | LogEvent::TurnExtracted { node, .. }
             | LogEvent::Effect { node, .. }
             | LogEvent::HolePublished { node, .. }
             | LogEvent::HoleAnswerAttempt { node, .. }

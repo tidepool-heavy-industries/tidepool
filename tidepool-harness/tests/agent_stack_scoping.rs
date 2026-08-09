@@ -28,17 +28,11 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH (run inside
 //! `nix develop`; see `haskell/CLAUDE.md`).
 
+mod support;
+
 use tidepool_harness::compile;
 use tidepool_harness::engine::{template_turn_for, EngineConfig};
 use tidepool_harness::selfharness::answerer_decls;
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -113,10 +107,7 @@ fn compile_pinned(
 /// finalizes.
 #[test]
 fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(answerer_decls(), "(runLLMTurn @Int \"go\" :: M Int)", "");
     let err = match result {
@@ -177,10 +168,7 @@ fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
 /// answers directly).
 #[test]
 fn fork_child_leaf_row_cannot_fork() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     // The leaf child row: the answerer row minus the fork-spawning effects.
     let leaf = vec![tidepool_mcp::askuser_decl(), tidepool_mcp::finalize_decl()];
@@ -217,10 +205,7 @@ fn fork_child_leaf_row_cannot_fork() {
 /// against the answerer stack.
 #[test]
 fn finalize_compiles_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_pinned(
         answerer_decls(),
@@ -242,10 +227,7 @@ fn finalize_compiles_in_the_answerer_stack() {
 /// sub-answerers, then finalize).
 #[test]
 fn askuser_raw_compiles_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(answerer_decls(), "askUserRaw (toJSON (0 :: Int))", "");
     assert!(
@@ -263,10 +245,7 @@ fn askuser_raw_compiles_in_the_answerer_stack() {
 /// the same arm and is exercised by `acceptance_fork`.)
 #[test]
 fn fork_all_compiles_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(
         answerer_decls(),
@@ -289,10 +268,7 @@ fn fork_all_compiles_in_the_answerer_stack() {
 /// row — which is the capability boundary the scoped stack exists to enforce.
 #[test]
 fn ask_is_a_compile_error_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(answerer_decls(), "(ask SStr \"x\" :: M Value)", "");
     let err = match result {
@@ -317,10 +293,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 /// UNDECLARED in its compile, not merely unreachable.
 #[test]
 fn base_effect_is_a_compile_error_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(answerer_decls(), "(httpGet \"http://x\" :: M Value)", "");
     let err = match result {
@@ -342,10 +315,7 @@ fn base_effect_is_a_compile_error_in_the_answerer_stack() {
 /// `Ask`/`Finalize` are not declared in that compile at all.
 #[test]
 fn ask_is_a_compile_error_in_the_harness_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(harness_only_decls(), "(ask SStr \"x\" :: M Value)", "");
     let err = match result {
@@ -364,10 +334,7 @@ fn ask_is_a_compile_error_in_the_harness_stack() {
 /// `finalize` is likewise rejected in the harness-only stack.
 #[test]
 fn finalize_is_a_compile_error_in_the_harness_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(harness_only_decls(), "(finalize @Int 1 :: M ())", "");
     let err = match result {
@@ -388,10 +355,7 @@ fn finalize_is_a_compile_error_in_the_harness_stack() {
 /// rather than a broken compile setup.
 #[test]
 fn run_llm_turn_compiles_in_the_harness_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(
         harness_only_decls(),

@@ -1190,10 +1190,10 @@ result = do
 "#;
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let user_lib = manifest.parent().unwrap().join(".tidepool").join("lib");
-    if !user_lib.join("Library.hs").exists() {
-        eprintln!("Skipping: .tidepool/lib/Library.hs not found");
-        return;
-    }
+    assert!(
+        user_lib.join("Library.hs").exists(),
+        ".tidepool/lib/Library.hs not found"
+    );
     use tidepool_testing::eval_harness::mock::{MockAsk, MockConsole, MockKv};
     let result = harness()
         .with_effects_module()

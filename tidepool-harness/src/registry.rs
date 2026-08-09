@@ -1,4 +1,4 @@
-//! Session registry — the resident-machine lifecycle guardian (segment 20).
+//! Session registry — the resident-machine lifecycle guardian.
 //!
 //! A `HashMap<SessionId, Slot<M>>` where `Slot` (defined in [`crate::tree`]) is
 //! `Idle(M) | Running | Suspended { machine, hole }`. Every machine access goes
@@ -8,8 +8,8 @@
 //! side-channel access while running).
 //!
 //! Generic over the machine handle `M` so this crate stays free of the JIT
-//! dependency — segment 20's `tidepool-runtime::session::ResidentSession` is the
-//! `M` the harness instantiates.
+//! dependency — `tidepool-runtime::session::ResidentSession` is the `M` the
+//! harness instantiates.
 //!
 //! # Lifecycle transitions are atomic at the dispatch boundary
 //!
@@ -28,7 +28,8 @@
 //! # Segment boundary
 //!
 //! A `Suspended` session REJECTS a new-turn checkout ([`CheckoutError::Suspended`])
-//! — nested child runs on a stowed continuation are segment 40's job. Here a
+//! — nested child runs on a stowed continuation are handled elsewhere
+//! ([`SessionRegistry::checkout_child`]). Here a
 //! suspended session accepts only a resume/abort checkout keyed by its hole.
 
 use std::collections::HashMap;
@@ -61,7 +62,8 @@ pub enum CheckoutError {
     /// A new TOP-LEVEL turn was attempted on a suspended session. A suspended
     /// session accepts only a resume/abort of its pending hole
     /// (`checkout_resume`) or a nested child run against it (`checkout_child`,
-    /// segment 40) — never a fresh top-level turn while suspended.
+    /// [`SessionRegistry::checkout_child`]) — never a fresh top-level turn while
+    /// suspended.
     #[error("session {session} is suspended on {hole:?}; resume or abort it first")]
     Suspended { session: SessionId, hole: HoleId },
     /// A resume/abort referenced a hole that is not the one this session is
@@ -144,7 +146,8 @@ impl<M> SessionRegistry<M> {
 
     /// Check a machine OUT for a new turn: `Idle → Running`, moving the machine
     /// onto the returned [`Checkout`]. Refuses a running or suspended session
-    /// (the latter is segment 40's boundary). The lock is released with the slot
+    /// (the latter is [`SessionRegistry::checkout_child`]'s job). The lock is
+    /// released with the slot
     /// left `Running`; the caller runs the turn, then restores via the
     /// `Checkout`.
     pub fn checkout_run(&self, id: SessionId) -> Result<Checkout<'_, M>, CheckoutError> {
@@ -217,7 +220,7 @@ impl<M> SessionRegistry<M> {
     }
 
     /// Check a machine OUT for a NESTED CHILD run against its suspended parent
-    /// (segment 40): `Suspended{hole} → RunningChild{hole}`, keeping the hole so
+    /// `Suspended{hole} → RunningChild{hole}`, keeping the hole so
     /// the parent stays suspended. The child restores via
     /// [`Checkout::restore_suspended`] with the SAME hole. Refuses a session
     /// that is not suspended, already running, or running another child.
@@ -414,7 +417,7 @@ mod tests {
         co.restore_suspended(hole("scont_1"));
         assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
 
-        // A NEW run is rejected while suspended (segment-20 boundary).
+        // A NEW run is rejected while suspended.
         assert_eq!(
             err(reg.checkout_run(id)),
             CheckoutError::Suspended {
@@ -466,7 +469,7 @@ mod tests {
         );
     }
 
-    /// Segment 40: a suspended session hosts a nested child run
+    /// A suspended session hosts a nested child run
     /// (`Suspended → RunningChild → Suspended`), and while the child is mid-run
     /// the parent's resume/abort and a new top-level run are all rejected
     /// cleanly (sequential-isolated). After the child restores, the parent is

@@ -9,7 +9,7 @@
 //! assert graceful error → run a known-good turn → assert the session survived.
 //!
 //! Requires the Wave-3b session-aware `tidepool-extract` (`TIDEPOOL_EXTRACT` +
-//! with-packages GHC libdir); skips cleanly otherwise. stderr noise like
+//! with-packages GHC libdir); panics loudly otherwise. stderr noise like
 //! `Could not find module …Val.G…` is expected and ignored.
 
 mod common;
@@ -20,9 +20,7 @@ use common::*;
 /// reference to the genuinely-bound `x` must still resolve.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn undefined_var_then_recover() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // root a real binding first so the session has live state to survive with.
@@ -42,9 +40,7 @@ async fn undefined_var_then_recover() {
 /// must succeed on the same session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn type_error_then_recover() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval("pure (True + (1 :: Int))").await;
@@ -61,9 +57,7 @@ async fn type_error_then_recover() {
 /// is also exercised.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bad_decl_then_recover() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // `data = oops` — not a valid declaration.
@@ -103,9 +97,7 @@ async fn bad_decl_then_recover() {
 /// that IF forcing crashes the binary, the other cases still run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bind_of_bottom_is_lazy_then_clean_on_force() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Lazy bind: no error at bind (the decl `x = error "boom"` isn't forced).
@@ -135,9 +127,7 @@ async fn bind_of_bottom_is_lazy_then_clean_on_force() {
 /// sharp edge). `countDeep` is collision-free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deep_recursion_yields_cleanly() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("countDeep n = if n == (0 :: Int) then (0 :: Int) else 1 + countDeep (n - 1)")
@@ -160,9 +150,7 @@ async fn deep_recursion_yields_cleanly() {
 /// and the session must remain usable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_and_whitespace_eval() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Empty: graceful (we don't assert error-vs-ok, only that it doesn't panic).
@@ -187,9 +175,7 @@ async fn empty_and_whitespace_eval() {
 /// anything.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_bind_leaves_no_state() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // A good pure bind first (a lazy decl `k = 5`).
@@ -226,9 +212,7 @@ async fn failed_bind_leaves_no_state() {
 /// scope with NO close — and still reach the final assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_without_close_does_not_hang() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     {
         let repl = Repl::new();
         let t = repl.eval("pure (1 :: Int)").await;

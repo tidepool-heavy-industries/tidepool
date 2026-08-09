@@ -4,7 +4,7 @@
 -- | The self-iterating harness's own orchestration monad
 -- (self-iterating-harness WS-B, @plans\/self-iterating-harness\/07-impl-orchestration.md@):
 -- an authored module (see @examples\/harness\/Harness.hs@, the target
--- contract) writes @render :: State -> Maybe Text -> Text@ and @loop ::
+-- contract) writes @render :: State -> Text@ and @loop ::
 -- State -> Harness State@ against 'Harness', driven by the
 -- @tidepool-selfharness@ runtime.
 --

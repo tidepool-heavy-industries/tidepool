@@ -26,14 +26,6 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -78,12 +70,7 @@ fn reply(content: &str) -> RecordedReply {
 /// the outer/nested-Agent State boundary all compose end to end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
@@ -170,9 +157,9 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         "loop must advance Observing -> Deciding, got {state:?}"
     );
     assert_eq!(
-        state.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "loopCount must increment across the loop boundary, got {state:?}"
+        driver.iteration(),
+        1,
+        "the driver's iteration count must increment across the loop boundary"
     );
 
     // The POST-loop render reflects the new state — the value that

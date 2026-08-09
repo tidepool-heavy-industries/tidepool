@@ -185,20 +185,14 @@ pokeChildren
   -> Harness ()
 pokeChildren parentPlan children observed =
   for_ children $ \child ->
-    pokeAgent (liveAgent child) (RebaseWhenSafe
+    pokeAgent (liveAgent child) (whenSafe (RebaseWhenSafe
       { upstreamNode = nodeName parentPlan
       , upstreamHead = renderGitOid (newHead (payload observed))
-      })
+      }))
 
--- TODO(PRD 18): this dogfood wants the typed "poke" behavior discussed after
--- the initial PRD: steer an active turn at its next safe boundary, or enqueue a
--- follow-up turn when the durable agent is idle.  It must never silently drop
--- the message.  'sendMessage' is the intended compact authored spelling.
-pokeAgent
-  :: AgentHandle DevMessage WorkerResult
-  -> DevMessage
-  -> Harness ()
-pokeAgent = sendMessage
+-- TODO(PRD 18): 'whenSafe' is the cooperative tag. Escalation code may instead
+-- use 'interrupting' with a typed FinishAndCommit message; there is no separate
+-- authored interrupt operation.
 
 runTree :: PreparedNode -> Harness FinishedNode
 runTree tree = withLiveNode tree finishTree

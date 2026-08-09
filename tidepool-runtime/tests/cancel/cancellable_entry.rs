@@ -6,7 +6,7 @@
 //! If the abort never landed, this test would hang; the assertion is that it
 //! returns a `Cancelled` error instead of looping forever.
 //!
-//! Requires `TIDEPOOL_EXTRACT` (GHC→Core extractor); skips cleanly otherwise.
+//! Requires `TIDEPOOL_EXTRACT` (GHC→Core extractor); panics loudly otherwise.
 
 use std::path::Path;
 use std::time::Duration;
@@ -29,10 +29,7 @@ boom = pure $! go (0 :: Int)
 
 #[test]
 fn watchdog_cancels_pure_runaway_via_on_ready_handle() {
-    if !eval_harness::extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    eval_harness::require_extract();
     let pp = tidepool_testing::eval_harness::prelude_path();
     let include: Vec<&Path> = vec![pp.as_path()];
     let mut handlers = frunk::hlist![];

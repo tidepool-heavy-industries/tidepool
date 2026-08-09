@@ -13,8 +13,8 @@
 //!      and the broken module is named in the brick note.
 //!
 //! Needs the with-packages GHC + `tidepool-extract` (on PATH or `TIDEPOOL_EXTRACT`).
-//! Skips (passes) when the toolchain is absent so a bare `cargo test` on a
-//! checkout without it does not fail.
+//! Panics loudly when the toolchain is absent (see `require_extract`) rather
+//! than skipping as a silent pass.
 
 use std::path::{Path, PathBuf};
 use tidepool_effect::DispatchEffect;
@@ -33,7 +33,7 @@ impl DispatchEffect<()> for MockDispatcher {
     }
 }
 
-use tidepool_testing::eval_harness::extract_available;
+use tidepool_testing::eval_harness::require_extract;
 
 fn prelude_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -104,10 +104,7 @@ fn eval_good_verb(include: &[&Path]) -> Result<serde_json::Value, String> {
 
 #[test]
 fn broken_lib_module_is_contained_and_healthy_eval_still_runs() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (no toolchain)");
-        return;
-    }
+    require_extract();
 
     let fixture = LibFixture::new();
     let lib_dir = fixture.0.clone();
@@ -160,10 +157,7 @@ fn broken_lib_module_is_contained_and_healthy_eval_still_runs() {
 
 #[test]
 fn healthy_lib_layer_is_a_noop() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (no toolchain)");
-        return;
-    }
+    require_extract();
 
     // A lib dir where every re-export compiles → no isolation, no note.
     let dir = std::env::temp_dir().join(format!(

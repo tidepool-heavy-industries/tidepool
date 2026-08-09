@@ -19,7 +19,7 @@
 //! Legacy mapping (honored by [`init_logging`] for back-compat):
 //! - `TIDEPOOL_TRACE=calls` → `tidepool::calls=trace`
 //! - `TIDEPOOL_TRACE=scope` → `tidepool::calls=trace,tidepool::scope=trace`
-//! - `TIDEPOOL_TRACE=heap`  → calls+scope+heap at trace (preserves the old
+//! - `TIDEPOOL_TRACE=heap`  → calls+scope+heap at trace (preserves the
 //!   `heap >= scope >= calls` ordering)
 //! - `TIDEPOOL_TRACE_EFFECTS=1` → `tidepool::effects=debug`
 //! - `TIDEPOOL_FP_DEBUG=1` → `tidepool::fp=debug`
@@ -36,8 +36,8 @@ thread_local! {
     // Rc, not an owned LambdaRegistry: `CodegenPipeline` keeps its own Rc to
     // the same accumulated registry (see `build_lambda_registry`) and extends
     // it in place via `Rc::make_mut` between runs. Installing/clearing here is
-    // then a refcount bump/drop (O(1)), not a clone of the whole map — the
-    // thing that made the per-run rebuild quadratic in session length (D7).
+    // then a refcount bump/drop (O(1)), not a clone of the whole map, which
+    // would make the per-run rebuild quadratic in session length.
     static LAMBDA_REGISTRY: RefCell<Option<Rc<LambdaRegistry>>> = const { RefCell::new(None) };
 }
 
@@ -104,7 +104,7 @@ pub fn set_lambda_registry(registry: Rc<LambdaRegistry>) -> Option<Rc<LambdaRegi
 /// This only drops the thread-local's *handle* (an `Rc` clone) to the
 /// registry a run installed — it does not touch `CodegenPipeline`'s own copy,
 /// which is the accumulating source of truth across the pipeline's whole
-/// lifetime (D7). Dropping this handle is exactly what lets the next
+/// lifetime. Dropping this handle is exactly what lets the next
 /// `build_lambda_registry` call extend the shared registry in place via
 /// `Rc::make_mut` instead of falling back to a clone: once this is the only
 /// remaining reference, the refcount is back to 1.
@@ -377,7 +377,7 @@ pub fn init_logging() {
             }
         }
 
-        // Legacy TIDEPOOL_TRACE — preserve old `heap >= scope >= calls`
+        // Legacy TIDEPOOL_TRACE — preserve the `heap >= scope >= calls`
         // ordering: a higher level enables all lower targets.
         match std::env::var("TIDEPOOL_TRACE").as_deref() {
             Ok("calls") => {

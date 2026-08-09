@@ -15,7 +15,7 @@
 //! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
 //! through the shared harness (`common::*`), multi-turn. Requires the Wave-3b
 //! session-aware `tidepool-extract` (`TIDEPOOL_EXTRACT` + with-packages GHC
-//! libdir); skips cleanly otherwise. stderr noise like `Could not find module
+//! libdir); panics loudly otherwise. stderr noise like `Could not find module
 //! …Val.G…` is expected and ignored.
 
 mod common;
@@ -44,9 +44,7 @@ fn binding_entry<'a>(meta: &'a serde_json::Value, name: &str) -> Option<&'a serd
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_when_never_opened_is_graceful() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     // No prior run. Reset must NOT panic; it acks and opens a fresh session.
     let t = repl.reset().await;
@@ -69,9 +67,7 @@ async fn reset_when_never_opened_is_graceful() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_is_fresh() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
     repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
 
@@ -95,9 +91,7 @@ async fn reset_is_fresh() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_clears_both_planes_and_is_reusable() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Environment: define g; bind v (a pure bind → also lands in the decl
@@ -175,9 +169,7 @@ async fn reset_clears_both_planes_and_is_reusable() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_after_gc_rebuilds() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("a <- pure (5 :: Int)").await.expect_ok("bind a");
@@ -211,9 +203,7 @@ async fn reset_after_gc_rebuilds() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bindings_shape() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Pure binds under the GHCi-environment model: routed into the decl plane
@@ -259,9 +249,7 @@ async fn bindings_shape() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn type_and_info_are_implemented() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // `:t` returns the inferred type — no longer a stub.
@@ -293,9 +281,7 @@ async fn type_and_info_are_implemented() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_meta_command_is_clean_error() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":nope").await;
@@ -312,9 +298,7 @@ async fn unknown_meta_command_is_clean_error() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bindings_on_fresh_session() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":bindings").await;
@@ -353,9 +337,7 @@ async fn bindings_on_fresh_session() {
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reference_path_type_metadata_trap() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("g x = x + (1 :: Int)").await.expect_ok("def g");
@@ -392,9 +374,7 @@ async fn reference_path_type_metadata_trap() {
 /// session reproduces the same value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn program_repaint_round_trips() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("dbl x = x * (2 :: Int)")
@@ -433,9 +413,7 @@ async fn program_repaint_round_trips() {
 /// (notebook-frame display truthfulness — the value doesn't recompute).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_reports_stale_binds() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("factor x = x * (2 :: Int)")

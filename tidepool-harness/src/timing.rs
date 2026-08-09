@@ -221,16 +221,48 @@ pub fn classify_stage_name(phase: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Sentinel rendering — the ONE place [`NO_NODE`]/[`NO_ROUND`] become words
+// instead of raw `u64::MAX`, so every emitter through [`record_stage`]
+// benefits without patching call sites one by one.
+// ---------------------------------------------------------------------------
+
+/// Render a stage's `node` value for display: [`NO_NODE`] as the word
+/// `"bootstrap"` (a boot/outer-session compile with no answerer node of its
+/// own), else the decimal node id.
+pub fn render_node(node: u64) -> String {
+    if node == NO_NODE {
+        "bootstrap".to_string()
+    } else {
+        node.to_string()
+    }
+}
+
+/// Render a stage's `round` value for display: [`NO_ROUND`] as `"-"` (this
+/// stage is not inside a numbered answerer round), else the decimal round
+/// index.
+pub fn render_round(round: u64) -> String {
+    if round == NO_ROUND {
+        "-".to_string()
+    } else {
+        round.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Emitter
 // ---------------------------------------------------------------------------
 
 /// Emit one stage event. `bytes` is the stage's payload size where one is
-/// meaningful (source length, CBOR length), `0` otherwise.
+/// meaningful (source length, CBOR length), `0` otherwise. `node`/`round`
+/// render through [`render_node`]/[`render_round`] — [`NO_NODE`]/[`NO_ROUND`]
+/// never reach a consumer as a raw `u64::MAX`.
 pub fn record_stage(node: u64, round: u64, stage: &str, elapsed: Duration, bytes: u64) {
+    let node_label = render_node(node);
+    let round_label = render_round(round);
     tracing::debug!(
         target: "tidepool_harness::timing",
-        node,
-        round,
+        node = node_label.as_str(),
+        round = round_label.as_str(),
         stage,
         ms = elapsed.as_millis() as u64,
         bytes,
@@ -305,6 +337,21 @@ impl ExtractTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_node_renders_no_node_as_bootstrap_not_u64_max() {
+        assert_eq!(render_node(NO_NODE), "bootstrap");
+        assert_eq!(render_node(NO_NODE), "bootstrap".to_string());
+        assert!(!render_node(NO_NODE).contains("18446744073709551615"));
+        assert_eq!(render_node(7), "7");
+    }
+
+    #[test]
+    fn render_round_renders_no_round_as_a_dash_not_u64_max() {
+        assert_eq!(render_round(NO_ROUND), "-");
+        assert!(!render_round(NO_ROUND).contains("18446744073709551615"));
+        assert_eq!(render_round(3), "3");
+    }
 
     #[test]
     fn parses_timing_lines_and_ignores_noise() {

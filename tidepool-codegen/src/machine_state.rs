@@ -2,14 +2,14 @@
 //! (callers holding a `vmctx`) or via the per-thread [`CURRENT_MACHINE`] slot
 //! (vmctx-less host fns and the external ambient shims).
 //!
-//! Homes the state that used to live in per-thread `thread_local!` cells: the
-//! external-cancellation flag, the JSON decode constructor ids, the stack-map
-//! registry pointer, the call-depth counter (T6 leaf 1), the first-cause
-//! runtime error, diagnostics, and parked-stream registry (T6 leaf 2), and the
-//! GC state + GC root registries (T6 leaf 3: `GC_STATE`, `RUST_ROOTS`,
-//! `PERSISTENT_ROOTS`). Each `JitEffectMachine` owns one `MachineState`
-//! inline; `install_registries` points the run's `VMContext.machine_state` at
-//! it and installs it as this thread's [`CURRENT_MACHINE`].
+//! Homes all per-machine ambient state in one place, owned inline by each
+//! `JitEffectMachine`: the external-cancellation flag, the JSON decode
+//! constructor ids, the stack-map registry pointer, and the call-depth
+//! counter (leaf 1); the first-cause runtime error, diagnostics, and
+//! parked-stream registry (leaf 2); and the GC state + GC root registries
+//! (leaf 3: `GC_STATE`, `RUST_ROOTS`, `PERSISTENT_ROOTS`).
+//! `install_registries` points the run's `VMContext.machine_state` at it and
+//! installs it as this thread's [`CURRENT_MACHINE`].
 //!
 //! ## GC-cluster reach (leaf 3): vmctx only, never `CURRENT_MACHINE`
 //!
@@ -67,22 +67,21 @@ pub struct MachineState {
     diagnostics: RefCell<Vec<String>>,
     parked_streams: RefCell<HashMap<StreamId, ParkedStream>>,
     stream_next_id: Cell<u64>,
-    /// Bumped once per actual collection (`perform_gc`). `deep_force` (M3,
-    /// repo-review-2026-07-06/01-gc-memory-safety.md) reads this to
-    /// invalidate its address-keyed visited set whenever a GC could have
+    /// Bumped once per actual collection (`perform_gc`). `deep_force` reads
+    /// this to invalidate its address-keyed visited set whenever a GC could have
     /// relocated (or freed, then let something else reuse the address of)
     /// an object it recorded — an address-only check with no way to detect
     /// staleness would risk a false "already visited" hit after a
     /// collection reuses a since-vacated address for an unrelated object.
     gc_generation: Cell<u64>,
     gc_state: RefCell<Option<GcState>>,
-    /// Run-scoped GC roots (mirrors the old `RUST_ROOTS` thread-local):
-    /// heap-pointer slots registered by Rust host-fn frames the JIT frame
-    /// walker cannot see. Cleared every `clear_run_scratch`/`clear_gc_state`.
+    /// Run-scoped GC roots (`RUST_ROOTS`): heap-pointer slots registered by
+    /// Rust host-fn frames the JIT frame walker cannot see. Cleared every
+    /// `clear_run_scratch`/`clear_gc_state`.
     rust_roots: RefCell<Vec<*mut *mut u8>>,
-    /// Session-scoped GC roots (mirrors the old `PERSISTENT_ROOTS`
-    /// thread-local): tenured bindings' stable slots. Survive across runs;
-    /// cleared only at machine teardown (`free_session_heap`).
+    /// Session-scoped GC roots (`PERSISTENT_ROOTS`): tenured bindings'
+    /// stable slots. Survive across runs; cleared only at machine teardown
+    /// (`free_session_heap`).
     persistent_roots: RefCell<Vec<*mut *mut u8>>,
     /// STOWED GC roots (segment 40): the suspended continuation slot(s) of a
     /// parent turn parked at a typed yield (`runLLMTurn`/`Ask`), registered
@@ -248,7 +247,7 @@ impl MachineState {
     /// `unresolved_var_trap`) that replace any earlier cause rather than
     /// preserving it.
     ///
-    /// Same `try_borrow_mut` defense as [`Self::set_first_cause`] (M4) — this
+    /// Same `try_borrow_mut` defense as [`Self::set_first_cause`] — this
     /// writer has the identical stuck-RefCell hazard as its sibling.
     pub(crate) fn set_runtime_error_overwrite(&self, cause: RuntimeError) {
         if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
@@ -268,7 +267,7 @@ impl MachineState {
             .and_then(|mut e| e.take())
     }
 
-    /// Same `try_borrow` defense as [`Self::take_runtime_error`] (M4). Falls
+    /// Same `try_borrow` defense as [`Self::take_runtime_error`]. Falls
     /// back to `true` (conservatively "yes, treat this as an error") rather
     /// than panicking — a caller asking this is about to gate on the answer,
     /// and if the cell is unreadable because something is mid-write on a
@@ -333,7 +332,7 @@ impl MachineState {
         self.parked_streams.borrow_mut().remove(&id);
     }
 
-    // --- GC generation counter (M3) --------------------------------------
+    // --- GC generation counter --------------------------------------------
 
     /// Bump the generation counter. Called once per actual collection
     /// (`perform_gc`), never for a no-op `gc_trigger` that finds no work.
@@ -349,7 +348,7 @@ impl MachineState {
         self.gc_generation.get()
     }
 
-    // --- GC state (T6 leaf 3) --------------------------------------------
+    // --- GC state (leaf 3) ------------------------------------------------
     // `set_gc_state`/`clear_gc_state` are `pub`: bare-VMContext test
     // harnesses (e.g. proptest_parked_registry.rs) own a MachineState, wire
     // `vmctx.machine_state` at it, and drive GC state directly — same
@@ -358,8 +357,7 @@ impl MachineState {
     // `RegistryGuard::drop`, `JitEffectMachine::drop`, `make_session_vmctx`)
     // are all in this crate and hold `self.machine_state`/a guard pointer.
 
-    /// Set the active GC region for this machine. Mirrors the old
-    /// `GC_STATE.with(|cell| *cell.borrow_mut() = Some(GcState { .. }))` body.
+    /// Set the active GC region for this machine.
     pub fn set_gc_state(&self, start: *mut u8, size: usize) {
         *self.gc_state.borrow_mut() = Some(GcState {
             active_start: start,
@@ -368,8 +366,7 @@ impl MachineState {
         });
     }
 
-    /// Install a retained session heap buffer as the active GC region (see
-    /// the free-fn doc this replaces, `host_fns::gc::install_session_buffer`).
+    /// Install a retained session heap buffer as the active GC region.
     pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u64>) {
         let start = buffer.as_mut_ptr() as *mut u8;
         let size = buffer.len() * 8;
@@ -382,8 +379,7 @@ impl MachineState {
 
     /// Reclaim the live heap buffer + high-water cursor from this machine's
     /// GC state, called from `RegistryGuard::drop` BEFORE `clear_run_scratch`
-    /// takes the `GcState`. See the free-fn doc this replaces for the
-    /// `(buffer, cursor)` contract. `(None, 0)` when there's no `GcState`
+    /// takes the `GcState`. Returns `(None, 0)` when there's no `GcState`
     /// installed (e.g. a run that never reached GC setup).
     pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u64>>, usize) {
         match self.gc_state.borrow_mut().as_mut() {
@@ -406,7 +402,7 @@ impl MachineState {
     }
 
     /// Clear this machine's GC state and run-scoped rust roots. One-shot
-    /// teardown path (mirrors the old `clear_gc_state` free fn).
+    /// teardown path.
     pub fn clear_gc_state(&self) {
         self.gc_state.borrow_mut().take();
         self.clear_rust_roots();
@@ -455,7 +451,7 @@ impl MachineState {
         *self.gc_state.borrow_mut() = Some(state);
     }
 
-    // --- rust roots (run-scoped GC roots, T6 leaf 3) ----------------------
+    // --- rust roots (run-scoped GC roots, leaf 3) --------------------------
 
     pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) {
         self.rust_roots.borrow_mut().push(slot);
@@ -480,7 +476,7 @@ impl MachineState {
         out.extend(self.rust_roots.borrow().iter().copied());
     }
 
-    // --- persistent roots (session-scoped GC roots, T6 leaf 3) ------------
+    // --- persistent roots (session-scoped GC roots, leaf 3) ---------------
 
     pub(crate) fn register_persistent_root(&self, slot: *mut *mut u8) {
         self.persistent_roots.borrow_mut().push(slot);
@@ -667,10 +663,10 @@ thread_local! {
     /// (server.rs spawns one per eval, up to `MAX_CONCURRENT_EVALS`
     /// concurrently, and a suspended eval keeps its thread + machine +
     /// `RegistryGuard` alive across the suspension) — so per-thread reach is
-    /// per-eval reach, matching the correctness the per-thread thread-locals
-    /// this replaces already had. A process-global slot would be a
-    /// cancellation regression here: two machines CAN be live at once, and a
-    /// global pointer would let one eval's abort land on another's machine.
+    /// per-eval reach, which is the correctness this cell must preserve. A
+    /// process-global slot would be a cancellation regression here: two
+    /// machines CAN be live at once, and a global pointer would let one
+    /// eval's abort land on another's machine.
     ///
     /// State itself still lives on [`MachineState`], owned per-machine; this
     /// cell is only the reach path for code that has no `vmctx` to follow.
@@ -757,16 +753,15 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
 
-    /// `runtime_error` still relies on `try_borrow_mut` defenses: a fault +
+    /// `runtime_error` relies on `try_borrow_mut` defenses: a fault +
     /// `siglongjmp` while something holds it mutably borrowed would leave it
     /// PERMANENTLY marked as mutably borrowed (`RefCell` has no "unpoison"
     /// once a guard's release never runs). We reproduce that exact `RefCell`
     /// state directly — hold a live `borrow_mut()` guard across the calls
     /// under test — rather than actually raising a signal; `signal_safety.rs`
-    /// separately covers signal delivery/recovery itself. `gc_state` no
-    /// longer has this hazard class — see the `gc_state_take_put_back_*`
-    /// tests below, which exercise the take/put-back discipline that
-    /// replaced its own `try_borrow_mut` defenses.
+    /// separately covers signal delivery/recovery itself. `gc_state` avoids
+    /// this hazard class entirely via a take/put-back discipline instead —
+    /// see the `gc_state_take_put_back_*` tests below.
     #[test]
     fn stuck_runtime_error_cell_does_not_panic() {
         let ms = MachineState::new();
@@ -777,7 +772,7 @@ mod tests {
         // set_first_cause / set_runtime_error_overwrite: silently no-op, not a panic.
         ms.set_first_cause(RuntimeError::Cancelled);
         ms.set_runtime_error_overwrite(RuntimeError::Cancelled);
-        // take_runtime_error (already fixed pre-M4): None, not a panic.
+        // take_runtime_error: None, not a panic.
         assert_eq!(ms.take_runtime_error(), None);
     }
 

@@ -73,8 +73,7 @@ pub unsafe fn clear_rust_roots(vmctx: *mut VMContext) {
     }
 }
 
-/// Register a SESSION-SCOPED GC root slot (Wave 1.A, component D) on the
-/// machine `vmctx` belongs to.
+/// Register a SESSION-SCOPED GC root slot on the machine `vmctx` belongs to.
 ///
 /// Unlike [`register_rust_root`] (run-scoped, cleared every `RegistryGuard`
 /// drop), a persistent root survives across runs and is cleared only by
@@ -206,13 +205,13 @@ pub extern "C" fn write_barrier(vmctx: *mut VMContext, slot: *mut *mut u8) {
 pub(crate) struct GcState {
     pub active_start: *mut u8,
     pub active_size: usize,
-    /// `Vec<u64>`, not `Vec<u8>` (L8, repo-review-2026-07-06/01-gc-memory-
-    /// safety.md) — see `SessionState::heap`'s doc (jit_machine.rs) for why.
+    /// `Vec<u64>`, not `Vec<u8>` — see `SessionState::heap`'s doc
+    /// (jit_machine.rs) for why.
     pub active_buffer: Option<Vec<u64>>,
 }
 
 /// A zeroed byte buffer at least `size` bytes, 8-byte aligned by
-/// construction (L8: backed by `Vec<u64>`, not `Vec<u8>` — see
+/// construction (backed by `Vec<u64>`, not `Vec<u8>` — see
 /// `GcState::active_buffer`'s doc for why).
 fn alloc_aligned_zeroed(size: usize) -> Vec<u64> {
     vec![0u64; size.div_ceil(8)]
@@ -596,18 +595,17 @@ unsafe fn verify_remembered_slots(
 /// scan and validates every object:
 /// - known tag (a FORWARDED header surviving into to-space is corruption);
 /// - header size consistent with the tag (for Cons: `24 + 8*num_fields`
-///   EXACTLY — catches the u16 size-wrap class, S3-C1/C2);
-/// - Lit tags within the known set (catches constant drift, S3-C3);
+///   EXACTLY — catches the u16 size-wrap class);
+/// - Lit tags within the known set (catches constant drift);
 /// - thunk state bytes valid;
 /// - every pointer field classifies as [`FieldPtrVerdict::Ok`] via
 ///   [`classify_field_ptr`] — a pointer into a `retired` range is a dangling
 ///   evacuation and fails loudly here instead of as a SIGSEGV collections
 ///   later. BLACKHOLE capture slots are checked too, as defense-in-depth
 ///   alongside the general field walk: `for_each_pointer_field` traces
-///   `THUNK_UNEVALUATED`/`THUNK_BLACKHOLE` captures identically (the S3-C6
-///   skip was fixed in `raw.rs`, 2026-06-11), so a from-space capture here
-///   would now be caught by the main Cheney scan too — this check just
-///   guards the invariant a second way rather than covering a live gap.
+///   `THUNK_UNEVALUATED`/`THUNK_BLACKHOLE` captures identically, so a
+///   from-space capture here is also caught by the main Cheney scan — this
+///   check just guards the invariant a second way, not a live gap.
 ///
 /// `retired` covers every space THIS collection evacuated OUT of: the
 /// original nursery, and, on the heap-doubling path, the intermediate
@@ -773,8 +771,7 @@ unsafe fn verify_heap_post_gc(
                 // zeroed) and Phase 3a fills code pointers — any GC point
                 // between (the next binding's pre-alloc, a capture's
                 // ensure_heap_ptr) sees this state. Same allowance as null Con
-                // fields below. (Was a fail — it made HEAP_VERIFY false-positive
-                // on any letrec caught mid-construction, field-hit 2026-07-10.)
+                // fields below; the verifier must not fail on it.
                 for i in 0..nc {
                     check_field(
                         off,
@@ -811,9 +808,9 @@ unsafe fn verify_heap_post_gc(
                     }
                     l::THUNK_BLACKHOLE => {
                         // for_each_pointer_field traces THUNK_BLACKHOLE
-                        // captures identically to THUNK_UNEVALUATED (S3-C6
-                        // fixed in raw.rs, 2026-06-11) — this is a second,
-                        // redundant check on the same invariant, not a gap.
+                        // captures identically to THUNK_UNEVALUATED — this is
+                        // a second, redundant check on the same invariant,
+                        // not a gap.
                         let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
                         for i in 0..n {
                             check_field(
@@ -869,9 +866,9 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
         // (`reclaim_session_heap`, `clear_run_scratch`, `free_session_heap`)
         // already treats an empty cell as the ordinary "no GC state" case.
         if let Some(mut state) = ms.take_gc_state() {
-            // M3 (deep_force): a real collection is about to run — bump
-            // so callers holding an address-keyed cache across this call
-            // (e.g. deep_force's visited set) know to invalidate it.
+            // A real collection is about to run — bump the generation
+            // counter so callers holding an address-keyed cache across this
+            // call (e.g. deep_force's visited set) know to invalidate it.
             ms.bump_gc_generation();
             let from_start = state.active_start;
             let from_size = state.active_size;
@@ -889,8 +886,8 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
             // Append Rust-registered roots (from apply_cont_heap k2_stack, etc.)
             ms.extend_rust_roots(&mut root_slots);
 
-            // Append session-scoped persistent roots (Wave 1.A, component D).
-            // These survive across runs and are cleared only at machine drop.
+            // Append session-scoped persistent roots. These survive across
+            // runs and are cleared only at machine drop.
             ms.extend_persistent_roots(&mut root_slots);
 
             // Append stowed roots (segment 40): the parent's suspended
@@ -923,8 +920,10 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 }
             }
 
-            // Test-only one-shot fault injection (see `arm_gc_fault`): this
-            // is exactly the window that used to hold a live `RefMut<GcState>`.
+            // Test-only one-shot fault injection (see `arm_gc_fault`), fired
+            // here to exercise the extract-then-siglongjmp design above: a
+            // fault in this window must find the `GcState` cell empty
+            // (owned by this frame), never a live borrow.
             maybe_raise_gc_fault(GcFaultPoint::DuringCopy);
 
             // SAFETY: root_slots point to valid stack locations from walk_frames.
@@ -1088,8 +1087,7 @@ static GC_TRIGGER_LAST_VMCTX: AtomicUsize = AtomicUsize::new(0);
 pub enum GcFaultPoint {
     None,
     /// After the `GcState` is taken out of its cell and to-space is
-    /// allocated, immediately before `cheney_copy` — the window that used to
-    /// hold a live `RefMut<GcState>`.
+    /// allocated, immediately before `cheney_copy`.
     DuringCopy,
     /// After `cheney_copy` returns and before the `GcState` is put back.
     AfterCopy,
@@ -1174,8 +1172,8 @@ mod tests {
     use super::*;
     use crate::layout;
 
-    /// The verifier must FIRE on a corrupted heap (size-wrap Con, the S3-C2
-    /// shape) and stay SILENT on a healthy one.
+    /// The verifier must FIRE on a corrupted heap (a size-wrap Con) and stay
+    /// SILENT on a healthy one.
     #[test]
     fn test_heap_verifier_fires_and_passes() {
         // Healthy to-space: one Lit(Int) + one 1-field Con pointing at it.
@@ -1201,7 +1199,7 @@ mod tests {
             let retired = [(fake_from, fake_from_end)];
             verify_heap_post_gc(base, 56, &retired); // silent
 
-            // Corruption 1 (S3-C2 shape): num_fields says 4 but size says 32.
+            // Corruption 1 (size-wrap Con): num_fields says 4 but size says 32.
             *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 4;
             let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
             assert!(
@@ -1223,7 +1221,6 @@ mod tests {
         }
     }
 
-    /// L8 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
     /// `alloc_aligned_zeroed`'s buffer must be 8-byte aligned regardless of
     /// size (including a size that ISN'T already a multiple of 8 — the
     /// rounding-up path), and `as_bytes_mut`'s byte view must cover the

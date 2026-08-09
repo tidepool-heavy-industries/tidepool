@@ -11,6 +11,12 @@
 -- module compiles under ANY effect row, including the self-iterating
 -- harness's nested answerer turn (@Eff '[Ask, Finalize]@, no @RunLLMTurn@).
 --
+-- 'State' carries no loop-iteration counter and 'render' takes no
+-- compaction argument — those are runtime facts, composed by the driver
+-- into the full system message alongside this module's output (see
+-- @plans\/self-iterating-harness\/15-generic-surface-wave.md@, "Runtime
+-- context is the runtime's job").
+--
 -- Why this is its own module rather than living in 'Harness' alongside
 -- 'loop': the nested answerer imports these types (to build a typed
 -- @finalize \@Decision (...)@ reply) but must NOT thereby pull in 'loop'
@@ -36,8 +42,7 @@ module HarnessTypes
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
--- `render` is this module's OWN export (the LOCKED `render :: State -> Maybe
--- Text -> Text` signature, 02-runtime.md) — hidden here since
+-- `render` is this module's OWN export — hidden here since
 -- `Tidepool.Prelude` also exports an unrelated `render` (`Tidepool.Render`).
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
@@ -50,7 +55,6 @@ import Tidepool.QQ (fmt)
 -- @runLLMTurn -> State -> (serialized across the loop boundary) -> render@.
 data State = State
   { mode         :: Mode
-  , loopCount    :: Int
   , notes        :: [Text]
   , lastDecision :: Maybe Decision
   }
@@ -90,19 +94,19 @@ data Confidence = Low | Medium | High
 -- persisted State exists to restore).
 initialState :: State
 initialState =
-  State {mode = Observing, loopCount = 0, notes = [], lastDecision = Nothing}
+  State {mode = Observing, notes = [], lastDecision = Nothing}
 
--- | @render :: State -> Maybe Text -> Text@. LOCKED signature. Plain Haskell
--- conditionals + the @[fmt|]@ quasiquoter over 'State' — no jinja, no effects:
--- this function cannot itself suspend or call 'Harness.loop'\'s @runLLMTurn@
--- (that's what makes per-turn re-rendering unrepresentable by construction).
-render :: State -> Maybe Text -> Text
-render st lastCompaction =
+-- | @render :: State -> Text@. Plain Haskell conditionals + the @[fmt|]@
+-- quasiquoter over 'State' — no jinja, no effects: this function cannot
+-- itself suspend or call 'Harness.loop'\'s @runLLMTurn@ (that's what makes
+-- per-turn re-rendering unrepresentable by construction). Domain policy
+-- only — the driver composes this output with the loop-iteration count, the
+-- prior compaction summary, and capability/finalization instructions.
+render :: State -> Text
+render st =
   [fmt|You are a self-iterating agent, currently {modeLine}.
-Loop count so far: {loopCount st}.
 {lastDecisionBlock}
-{notesBlock}
-{compactionBlock}|]
+{notesBlock}|]
   where
     modeLine = case mode st of
       Observing -> "observing" :: Text
@@ -118,6 +122,3 @@ Loop count so far: {loopCount st}.
       | otherwise =
           "Notes carried forward:\n"
             <> T.intercalate "\n" (map ("- " <>) (notes st))
-    compactionBlock = case lastCompaction of
-      Nothing -> ""
-      Just summary -> "Summary of the prior window:\n" <> summary

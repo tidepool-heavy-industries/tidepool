@@ -47,13 +47,14 @@ use tidepool_harness::{answerer_decls, Harness, NodeId, TurnOutcome};
 struct StageSample {
     /// Kept for cross-checking, but NOT what attribution keys off (see
     /// `Collector::current_turn`): `jit_codegen`/`run_exec` are emitted from
-    /// `tidepool-runtime` with no answerer node id at all (a `NO_NODE`
-    /// sentinel, `u64::MAX`), so keying attribution off `node` would silently
-    /// drop those two stages into every turn's residual.
+    /// `tidepool-runtime` with no answerer node id at all (rendered
+    /// `"bootstrap"`, `timing::NO_NODE`'s display form as of
+    /// dogfood-observability), so keying attribution off `node` would
+    /// silently drop those two stages into every turn's residual.
     #[allow(dead_code)]
-    node: u64,
+    node: String,
     #[allow(dead_code)]
-    round: u64,
+    round: String,
     stage: String,
     ms: u64,
     #[allow(dead_code)]
@@ -115,8 +116,8 @@ impl Collector {
 
 #[derive(Default)]
 struct StageVisitor {
-    node: Option<u64>,
-    round: Option<u64>,
+    node: Option<String>,
+    round: Option<String>,
     stage: Option<String>,
     ms: Option<u64>,
     bytes: Option<u64>,
@@ -125,8 +126,6 @@ struct StageVisitor {
 impl Visit for StageVisitor {
     fn record_u64(&mut self, field: &Field, value: u64) {
         match field.name() {
-            "node" => self.node = Some(value),
-            "round" => self.round = Some(value),
             "ms" => self.ms = Some(value),
             "bytes" => self.bytes = Some(value),
             _ => {}
@@ -140,8 +139,14 @@ impl Visit for StageVisitor {
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "stage" {
-            self.stage = Some(value.to_string());
+        // `node`/`round` render through `timing::render_node`/`render_round`
+        // (sentinel-aware text, e.g. "bootstrap"/"-") as of dogfood-observability
+        // — string fields now, not `u64`.
+        match field.name() {
+            "stage" => self.stage = Some(value.to_string()),
+            "node" => self.node = Some(value.to_string()),
+            "round" => self.round = Some(value.to_string()),
+            _ => {}
         }
     }
 
@@ -178,8 +183,8 @@ impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
         self.0.samples.lock().unwrap().push((
             label,
             StageSample {
-                node: visitor.node.unwrap_or(u64::MAX),
-                round: visitor.round.unwrap_or(u64::MAX),
+                node: visitor.node.unwrap_or_default(),
+                round: visitor.round.unwrap_or_default(),
                 stage,
                 ms,
                 bytes: visitor.bytes.unwrap_or(0),

@@ -241,35 +241,6 @@ struct PendingHole {
     raw_request: Value,
 }
 
-/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
-/// its resident `JitEffectMachine`, straight from
-/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
-/// instrumentation, this is a read-only view of counters that already exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeapSummary {
-    pub nursery_bytes: usize,
-    pub live_bytes: usize,
-    pub gc_count: u64,
-}
-
-/// A tree-pane row: a node's identity, parentage, lifecycle state, and (when
-/// suspended) whether the pending hole is a fork and its prompt.
-#[derive(Debug, Clone)]
-pub struct NodeSummary {
-    pub node: NodeId,
-    pub parent: Option<NodeId>,
-    pub state: crate::tree::NodeState,
-    pub is_fork_hole: bool,
-    pub hole_prompt: Option<String>,
-    /// Set when this node is mid-`drive_answerer_to_value`, PARKED on the
-    /// operator-decision channel after exhausting its rung-1 auto-retry
-    /// (the escalation ladder's rung 2) — the node's [`crate::tree::NodeState`]
-    /// itself is unchanged (still `Running`: no hole was published, no event
-    /// was logged), so this is the harness's own in-memory signal the
-    /// observatory badges/pops up on. `None` otherwise.
-    pub awaiting_operator: bool,
-}
-
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
 /// answerer exhausted its auto-retry and is parked awaiting an operator
 /// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
@@ -341,19 +312,82 @@ fn truncate_ghc_error(msg: &str) -> String {
     }
 }
 
-/// Render a turn-compile failure as text a MODEL can act on.
+/// The `Expr.hs` anchor + display label [`render_compile_error`] renders a
+/// remapped `run_turn` diagnostic under — mirrors `tidepool-mcp`'s eval-path
+/// `anchor: "Expr.hs"` (the module every `run_turn` template declares, via
+/// `tidepool_mcp::build_preamble`), with a harness-specific display label.
+const TURN_ANCHOR: &str = "Expr.hs";
+const TURN_LABEL: &str = "<turn>";
+
+/// The EXPR template's user-code marker — byte-identical to
+/// `tidepool-mcp/src/eval_prep.rs`'s `format_error_with_source::MARKER`,
+/// since `engine::expr_turn_template` is built through the SAME
+/// `tidepool_mcp::template_haskell`/`template_haskell_anchored` that eval
+/// uses (`engine::template_turn_for`).
+const EXPR_MARKER: &str = "__user = let {\n __b =\n";
+
+/// The BIND/BINDDISCARD templates' (`engine::session_bind_template`)
+/// user-code marker: the turn statement is spliced immediately after
+/// `__result = do {`, with no `[user-lines]` annotation of its own (that
+/// marker is `template_haskell`-specific — `session_bind_template` never
+/// calls it) — found empirically by reading the builder, per this item's
+/// spec.
+const BIND_MARKER: &str = "__result = do {\n";
+
+/// Compute a candidate template's own user-code line window: `(line_offset,
+/// (start, end))`, `line_offset` = newline count up to and including
+/// `marker`'s end, `(start, end)` = the 1-based inclusive range `content`
+/// (the turn text `run_block` embedded — same `block` for every candidate)
+/// occupies immediately after it. `None` when `marker` isn't in `source` (a
+/// candidate that was never built, or a builder that changed shape).
+fn candidate_window(
+    source: &str,
+    marker: &str,
+    content_lines: usize,
+) -> Option<(usize, (usize, usize))> {
+    let pos = source.find(marker)?;
+    let offset = source[..pos + marker.len()].matches('\n').count();
+    Some((offset, (offset + 1, offset + content_lines)))
+}
+
+/// Render a turn-compile failure as text a MODEL can act on, with GHC's
+/// coordinates remapped from TEMPLATE space to the model's own turn text
+/// (`block`) — see `plans/post-restart/dev/error-coordinates.md`.
 ///
 /// `CompileError::Diagnostics`' own `Display` reports only how many
 /// diagnostics there were, not what they said — fine for a log line, useless
 /// as the corrective user turn [`Harness::run_to_hole_or_done`] feeds back,
-/// which is the whole mechanism by which a model fixes its own Haskell. So the
-/// diagnostics are rendered here: severity, span, and message per entry, in
-/// the order GHC reported them. Every other variant's `Display` already
-/// carries its detail.
-fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
+/// which is the whole mechanism by which a model fixes its own Haskell.
+/// `9c2b14ff` restored the content (severity/span/message per entry); this
+/// restores the COORDINATES, reusing `tidepool_runtime::diag`'s remapper (the
+/// same one `tidepool-mcp`'s eval path uses) rather than a second one.
+///
+/// `run_turn` builds up to TWO full module sources before it knows which
+/// verdict GHC will pick (`expr_source` always; `bind_source` — representing
+/// both `Bind`/`BindDiscard`, which share its exact preamble/offset — only
+/// when the node has a value-plane bind context worth trying), and a compile
+/// FAILURE carries no verdict tag: `run_turn` returns before ever decoding
+/// which template applied. So a diagnostic is remapped against a candidate
+/// ONLY when its raw line falls inside THAT candidate's own (deterministically
+/// computed, from `block`) user-code window — tried EXPR first, then BIND.
+/// A diagnostic outside every candidate's window (or when there is no
+/// candidate at all) keeps its raw template-space span, exactly as before
+/// this fix: picking the wrong candidate would silently shift every line
+/// number by a wrong constant, which is worse than not remapping.
+fn render_compile_error(
+    e: &tidepool_runtime::CompileError,
+    block: &str,
+    expr_source: &str,
+    bind_source: &str,
+) -> String {
     let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
         return e.to_string();
     };
+    if let Some(opts) = pick_render_opts(diags, block, expr_source, bind_source) {
+        let mut out = format!("GHC error ({} diagnostic(s)):\n", diags.len());
+        out.push_str(&tidepool_runtime::diag::render_diagnostics(diags, &opts));
+        return out;
+    }
     let mut out = format!("GHC error ({} diagnostic(s)):", diags.len());
     for d in diags {
         out.push('\n');
@@ -368,14 +402,42 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
     out
 }
 
-/// A node's in-progress turn as it streams — the answer text and reasoning
-/// ("thinking") accumulated so far, before the turn completes and is logged.
-/// The observatory renders this so tokens appear live; it's cleared when the
-/// turn lands in the durable log.
-#[derive(Debug, Clone, Default)]
-pub struct LiveTurn {
-    pub text: String,
-    pub reasoning: String,
+/// Pick which candidate template's [`tidepool_runtime::diag::RenderOpts`]
+/// (if any) a batch of diagnostics should be remapped against — see
+/// [`render_compile_error`]'s doc for why this exists and why the choice is
+/// derived, never guessed. All diagnostics in one `CompileError::Diagnostics`
+/// batch come from the SAME compile, so one representative (anchor-file)
+/// diagnostic's raw line decides for the whole batch.
+fn pick_render_opts<'a>(
+    diags: &[tidepool_runtime::diag::ExtractDiag],
+    block: &str,
+    expr_source: &'a str,
+    bind_source: &'a str,
+) -> Option<tidepool_runtime::diag::RenderOpts<'a>> {
+    let representative_line = diags.iter().find_map(|d| {
+        let span = d.span.as_ref()?;
+        span.file
+            .ends_with(TURN_ANCHOR)
+            .then_some(span.start_line as usize)
+    })?;
+    let content_lines = engine::content_line_count(block);
+    for (source, marker) in [(expr_source, EXPR_MARKER), (bind_source, BIND_MARKER)] {
+        let Some((offset, (start, end))) = candidate_window(source, marker, content_lines) else {
+            continue;
+        };
+        if representative_line >= start && representative_line <= end {
+            return Some(tidepool_runtime::diag::RenderOpts {
+                anchor: TURN_ANCHOR,
+                label: TURN_LABEL,
+                user_lines: Some((start, end)),
+                line_offset: offset,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source,
+            });
+        }
+    }
+    None
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -383,7 +445,7 @@ pub struct LiveTurn {
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
-    /// Unique per-construction run identity (F3 fix), scoping this
+    /// Unique per-construction run identity, scoping this
     /// instance's node decl-plane directories to
     /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
     /// sharing the same cache root (a different process, or a second
@@ -473,45 +535,13 @@ impl Harness {
         })
     }
 
-    /// Install the "changed" callback the web layer uses to nudge its SSE
-    /// stream when a streaming delta lands. Set once, at startup.
-    pub fn set_notifier(&self, f: impl Fn() + Send + Sync + 'static) {
-        let _ = self.notifier.set(Box::new(f));
-    }
-
-    /// Fire the installed notifier, if any (no-op otherwise).
-    fn notify(&self) {
-        if let Some(f) = self.notifier.get() {
-            f();
-        }
-    }
-
-    /// The node's in-progress streaming turn, if one is active — the
-    /// observatory renders this to show tokens/thinking as they arrive.
-    pub fn live_turn(&self, node: NodeId) -> Option<LiveTurn> {
-        self.live_turns.lock().get(&node).cloned()
-    }
-
-    /// Fold one streaming delta into the node's live-turn buffer.
-    fn apply_delta(&self, node: NodeId, delta: StreamDelta) {
-        let mut live = self.live_turns.lock();
-        let entry = live.entry(node).or_default();
-        match delta {
-            StreamDelta::Text(t) => entry.text.push_str(&t),
-            StreamDelta::Reasoning(r) => entry.reasoning.push_str(&r),
-        }
-    }
-
-    /// Drive one model turn on `node` with live streaming: deltas land in the
-    /// node's live-turn buffer (rendered token-by-token in the observatory)
-    /// while the complete turn is assembled, with a throttled `notify()`
-    /// nudging the SSE stream. On failure the partial buffer is dropped; on
-    /// success it's left intact for the caller to swap for the logged turn via
-    /// [`Self::finish_live_turn`], so the transcript never flickers empty.
-    /// Shared by the root turn loop and the fork/fanout answerer loops.
+    /// Drive one model turn via the provider over its `StreamSink` (see
+    /// `provider::StreamDelta`/`StreamSink`) — the sink is still wired so the
+    /// provider's own streaming path runs; nothing currently reads the
+    /// deltas past draining the channel. Shared by the root turn loop and the
+    /// fork/fanout answerer loops.
     async fn stream_turn(
         &self,
-        node: NodeId,
         transcript: &[Message],
         framing: Option<&str>,
     ) -> Result<engine::DrivenTurn, HarnessError> {
@@ -520,40 +550,13 @@ impl Harness {
         let drive_fut =
             engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, framing, Some(tx));
         tokio::pin!(drive_fut);
-        let mut last_notify: Option<std::time::Instant> = None;
         let result = loop {
             tokio::select! {
-                res = &mut drive_fut => {
-                    while let Ok(d) = rx.try_recv() {
-                        self.apply_delta(node, d);
-                    }
-                    break res;
-                }
-                Some(delta) = rx.recv() => {
-                    self.apply_delta(node, delta);
-                    if last_notify.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(120)) {
-                        self.notify();
-                        last_notify = Some(std::time::Instant::now());
-                    }
-                }
+                res = &mut drive_fut => break res,
+                Some(_delta) = rx.recv() => {}
             }
         };
-        match result {
-            Ok(d) => Ok(d),
-            Err(e) => {
-                self.live_turns.lock().remove(&node);
-                self.notify();
-                Err(e.into())
-            }
-        }
-    }
-
-    /// Clear the node's live-turn buffer and re-render — called right after the
-    /// turn is logged, so the transcript swaps the streaming buffer for the
-    /// durable turn in a single frame.
-    fn finish_live_turn(&self, node: NodeId) {
-        self.live_turns.lock().remove(&node);
-        self.notify();
+        result.map_err(Into::into)
     }
 
     /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
@@ -660,93 +663,6 @@ impl Harness {
     /// module — required for a value to cross between them via `resume`.
     pub fn cfg(&self) -> &EngineConfig {
         &self.cfg
-    }
-
-    /// A flat snapshot of the tree for the observatory tree pane, in DFS
-    /// (parent-before-child, creation order) order. Each entry carries enough
-    /// to render a node row: id, parent, state, and — when suspended —
-    /// whether the pending hole is a fork (so the pane can badge it).
-    ///
-    /// Unpaginated — reads the whole tree via [`NodeTree::node_ids_after`]
-    /// with no limit. Fine at R0 scale; [`Self::tree_snapshot_page`] is the
-    /// cursor-paged alternative for the protocol endpoint, usable at
-    /// 10³–10⁴ nodes.
-    pub fn tree_snapshot(&self) -> Vec<NodeSummary> {
-        let (all_ids, _) = self.tree.node_ids_after(None, usize::MAX);
-        let mut stack: Vec<NodeId> = all_ids
-            .into_iter()
-            .filter(|n| self.tree.parent(*n) == Some(None))
-            .collect();
-        // DFS from roots, preserving child order.
-        stack.reverse();
-        let mut visit = stack;
-        let mut order = Vec::new();
-        while let Some(n) = visit.pop() {
-            order.push(n);
-            if let Some(children) = self.tree.children(n) {
-                for c in children.into_iter().rev() {
-                    visit.push(c);
-                }
-            }
-        }
-        order
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect()
-    }
-
-    /// Cursor-paged tree snapshot — no small-tree assumption; flat id order
-    /// (not the DFS parent/child order
-    /// `tree_snapshot` uses; a page is a slice of the id space, not a subtree).
-    /// Returns up to `limit` rows after `cursor`, plus the next cursor to page
-    /// with (`None` once exhausted). Built on [`NodeTree::node_ids_after`], the
-    /// one additive pagination primitive this leaf adds to `NodeTree`.
-    pub fn tree_snapshot_page(
-        &self,
-        cursor: Option<NodeId>,
-        limit: usize,
-    ) -> (Vec<NodeSummary>, Option<NodeId>) {
-        let (ids, next) = self.tree.node_ids_after(cursor, limit);
-        let nodes = ids
-            .into_iter()
-            .filter_map(|n| self.node_summary(n))
-            .collect();
-        (nodes, next)
-    }
-
-    /// Build one node's summary row, or `None` if `n` doesn't exist (a benign
-    /// race with a concurrent tree mutation — callers filter these out).
-    fn node_summary(&self, n: NodeId) -> Option<NodeSummary> {
-        let state = self.tree.state(n)?;
-        let pending = self.pending_hole(n);
-        let is_fork = matches!(
-            pending.as_ref().map(|c| &c.routing),
-            Some(HoleRouting::Fork { .. })
-        );
-        let prompt = pending.as_ref().map(|c| c.prompt.clone());
-        Some(NodeSummary {
-            node: n,
-            parent: self.tree.parent(n).flatten(),
-            state,
-            is_fork_hole: is_fork,
-            hole_prompt: prompt,
-            awaiting_operator: self.escalations.lock().contains_key(&n),
-        })
-    }
-
-    /// `node`'s live heap/GC snapshot, straight off its resident
-    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
-    /// when `node` has no live session (never forced, terminal) or during the
-    /// transient mid-turn gap while its session runs on the blocking pool
-    /// (the same benign race [`Self::node_summary`] tolerates).
-    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
-        let sid = self.tree.session_of(node)?;
-        let stats = self.tree.registry().peek(sid, Session::heap_stats)??;
-        Some(HeapSummary {
-            nursery_bytes: stats.nursery_bytes,
-            live_bytes: stats.live_bytes,
-            gc_count: stats.gc_count,
-        })
     }
 
     /// Create a ROOT node as a thunk with the DEFAULT system framing
@@ -1014,13 +930,8 @@ impl Harness {
             )
         };
 
-        // Stream the provider call into `node`'s live-turn buffer (rendered
-        // token-by-token), then log the completed turn with its thinking and
-        // swap the buffer for the durable turn in one frame.
         let provider_started = std::time::Instant::now();
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         timing::record_stage(
             node.0,
             timing::NO_ROUND,
@@ -1036,7 +947,6 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -1074,7 +984,11 @@ impl Harness {
         // block runs, so it precedes this turn's Effect / HolePublished
         // events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
-        tracing::debug!(node = node.0, %block, "executed Haskell");
+        // INFO, not DEBUG: a person watching the console must see the exact
+        // source every compile ran (dogfood-observability deliverable 1) —
+        // full text, never truncated (a pathologically large source is
+        // itself signal worth seeing).
+        tracing::info!(node = node.0, source = %block, "compiled turn source");
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -1116,9 +1030,7 @@ impl Harness {
         };
 
         self.tree.turn_start(node, "model".to_string(), None)?;
-        let driven = self
-            .stream_turn(node, &transcript, framing.as_deref())
-            .await?;
+        let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
         self.tree.turn_delta_reasoned(
             node,
             turn_seq,
@@ -1127,7 +1039,6 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        self.finish_live_turn(node);
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -1187,8 +1098,8 @@ impl Harness {
         )?;
 
         // The BIND/BINDDISCARD templates' imports: user imports + the decl
-        // module + current Val modules (mirrors what `run_bind_turn` used to
-        // merge) — just the user imports when the node has no decl plane.
+        // module + current Val modules — just the user imports when the node
+        // has no decl plane.
         let bind_imports = match &bind_ctx {
             Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
                 (_, true) => imports.to_string(),
@@ -1219,7 +1130,10 @@ impl Harness {
             },
             TurnTemplate {
                 kind: TemplateSelector::Bind,
-                source: bind_source,
+                // Kept alongside (see below) — a compile failure carries no
+                // verdict tag, so a corrective error needs both candidate
+                // sources to remap against.
+                source: bind_source.clone(),
             },
             TurnTemplate {
                 kind: TemplateSelector::BindDiscard,
@@ -1227,7 +1141,7 @@ impl Harness {
             },
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: expr_source,
+                source: expr_source.clone(),
             },
         ];
         timing::record_stage(
@@ -1281,7 +1195,9 @@ impl Harness {
         })
         .await
         .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
-        .map_err(|e| HarnessError::Compile(render_compile_error(&e)))?;
+        .map_err(|e| {
+            HarnessError::Compile(render_compile_error(&e, block, &expr_source, &bind_source))
+        })?;
 
         match outcome {
             TurnResult::Decl { .. } => {
@@ -1346,6 +1262,7 @@ impl Harness {
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                self.log_turn_extracted(node, &compiled.asks, None)?;
                 let asks = AsksSidecar::from_pairs(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
@@ -1493,6 +1410,11 @@ impl Harness {
         compiled: CompiledTurn,
         gen: Generation,
     ) -> Result<engine::TurnOutcome, HarnessError> {
+        self.log_turn_extracted(
+            node,
+            &compiled.asks,
+            Some((&binder.name, &binder.type_display)),
+        )?;
         let asks = AsksSidecar::from_pairs(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
@@ -1541,8 +1463,16 @@ impl Harness {
                 }
                 // The model's Haskell didn't compile — feed the GHC error back
                 // verbatim (capped) as a corrective user turn and retry, rather
-                // than cancelling the node.
+                // than cancelling the node. `turns` is this hole's corrective-
+                // retry round index — a burned round must be visible while it
+                // is happening, not just reconstructable afterwards.
                 Err(HarnessError::Compile(msg)) => {
+                    tracing::warn!(
+                        node = node.0,
+                        round = turns,
+                        "compile attempt failed (round {turns} of {}, corrective retry)",
+                        self.cfg.max_turns
+                    );
                     let ghc = truncate_ghc_error(&msg);
                     self.push_user_turn(
                         node,
@@ -1585,7 +1515,6 @@ impl Harness {
                 // than stranded `Running`. The failure is recorded as the turn's
                 // result so it shows in the transcript.
                 let _ = self.tree.node_done(node, format!("follow-up failed: {e}"));
-                self.finish_live_turn(node);
                 Err(e)
             }
         }
@@ -1638,20 +1567,6 @@ impl Harness {
             classified: pending.classified.clone(),
             table: convo.suspend_table.clone().unwrap_or_default(),
         })
-    }
-
-    /// The pending `Ui` value for a `dialogAsk` hole on `node`, deserialized
-    /// from the routing payload — what the observatory form pane renders. `None`
-    /// unless the node is suspended on a Dialog hole with a well-formed `Ui`.
-    pub fn pending_dialog_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
-        match self.pending_hole(node)?.routing {
-            // `dialogAsk :: Ui -> M Value` (typed at the Haskell surface): the
-            // payload is a well-formed `Ui` by construction, so a parse failure
-            // here means a genuine wire mismatch, not a model mistake. No
-            // boundary coercion — the type system guards the shape upstream.
-            HoleRouting::Dialog { ui } => serde_json::from_value(ui).ok(),
-            _ => None,
-        }
     }
 
     /// The SERVER-DERIVED `Ui` form (`uiof::ui_of`) for a
@@ -1778,11 +1693,13 @@ impl Harness {
     /// Without (2) the next hole's `drive_turn` cannot run a fresh block on the
     /// same session. Returns the finalized value (already read out of the
     /// suspended request by `take_finalized_value_core`, so aborting the
-    /// continuation does not lose it).
+    /// continuation does not lose it) alongside its rendered JSON text — what
+    /// the answer actually WAS, for the driver's `Finalize` narration event
+    /// (dogfood-observability deliverable 4).
     pub(crate) fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<Value, HarnessError> {
+    ) -> Result<(Value, String), HarnessError> {
         // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
         let hole = {
             let convos = self.convos.lock();
@@ -1794,7 +1711,8 @@ impl Harness {
                 .hole
                 .clone()
         };
-        let (value, _table) = self.take_finalized_value_core(node)?;
+        let (value, table) = self.take_finalized_value_core(node)?;
+        let rendered = tidepool_runtime::value_to_json(&value, &table, 0).to_string();
 
         // Abort the resident session's parked finalize continuation so the
         // session returns to idle and can run the NEXT hole's turn. `abort`
@@ -1814,7 +1732,7 @@ impl Harness {
 
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
-        Ok(value)
+        Ok((value, rendered))
     }
 
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
@@ -1973,16 +1891,16 @@ impl Harness {
     }
 
     /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
-    /// path leaves it `Running` with a live resident session (the leak external
-    /// review flagged: only the success path used to terminalize + drop the
-    /// child's session; a provider/join/log fault inside
-    /// `drive_answerer_to_value`, or a `resume_parent` failure after,
-    /// propagated via `?` and orphaned the child). Scoped to the fork/fanout
-    /// callers deliberately — NOT baked into `drive_answerer_to_value` itself,
-    /// which is also called in-context with `answerer == the main node`,
-    /// where cancelling "the child" would kill the live agent. `terminate_node`
-    /// is idempotent, so this is safe to repeat even against the internal
-    /// abort paths that already retired the child (cap-exhaustion /
+    /// path leaves it `Running` with a live resident session: every fallible
+    /// step after forcing the child (a provider/join/log fault inside
+    /// `drive_answerer_to_value`, or a `resume_parent` failure after) must
+    /// route through this explicit cleanup instead of propagating via `?`
+    /// and orphaning the child. Scoped to the fork/fanout callers
+    /// deliberately — NOT baked into `drive_answerer_to_value` itself, which
+    /// is also called in-context with `answerer == the main node`, where
+    /// cancelling "the child" would kill the live agent. `terminate_node` is
+    /// idempotent, so this is safe to repeat even against the internal abort
+    /// paths that already retired the child (cap-exhaustion /
     /// `ChildSuspended`).
     fn cleanup_failed_child(&self, child: NodeId) {
         let _ = self.terminate_node(child, "fork child failed");
@@ -2214,10 +2132,17 @@ impl Harness {
             }
         };
         // Push the hole card as a user turn, then drive the node's own loop to an
-        // answering value against itself.
+        // answering value against itself. `suspend_table` is the table THIS
+        // hole was classified from (set when the node suspended) — exactly
+        // the table `ty` was resolved against.
+        let table = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.suspend_table.clone());
         self.push_user_turn(
             node,
-            &engine::hole_card(&pending.classified.prompt, ty.as_deref()),
+            &engine::hole_card(&pending.classified.prompt, ty.as_deref(), table.as_ref()),
         )?;
         let value = self
             .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns, &self.cfg)
@@ -2372,10 +2297,9 @@ impl Harness {
             .and_then(|c| c.suspend_table.clone())
             .unwrap_or_default();
         let value = engine::json_answer_to_value(&submission, &table)?;
-        // `resume_parent` logs the Consumed attempt itself, once, only after
-        // the resume actually succeeds — logging it here too used to
-        // double-log every mechanical dialog answer (fixed: single source of
-        // truth for the Consumed record).
+        // `resume_parent` logs the Consumed attempt itself, exactly once,
+        // only after the resume actually succeeds — the single source of
+        // truth for the Consumed record; this call site must not log again.
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -2389,9 +2313,9 @@ impl Harness {
     /// no single child of a fan can consume the whole node's turn budget).
     /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
     ///
-    /// CAP EXHAUSTION does NOT return straight out anymore (the old
-    /// mid-fan hard-failure that leaked a `Running` answerer and wedged the
-    /// parent) — it runs the escalation ladder via
+    /// CAP EXHAUSTION never returns straight out: a hard-failure here would
+    /// leak a `Running` answerer and wedge the parent, so it instead runs
+    /// the escalation ladder via
     /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
     /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
     /// an unrelated resident/routing error) unwinds out of this loop; on
@@ -2448,9 +2372,7 @@ impl Harness {
                     convo.framing.clone(),
                 )
             };
-            let driven = self
-                .stream_turn(answerer, &transcript, framing.as_deref())
-                .await?;
+            let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
             self.tree.turn_delta_reasoned(
                 answerer,
                 turn_seq,
@@ -2459,7 +2381,6 @@ impl Harness {
                 Some(driven.usage),
                 driven.reasoning.clone(),
             )?;
-            self.finish_live_turn(answerer);
             {
                 let mut convos = self.convos.lock();
                 let convo = convos
@@ -2874,10 +2795,17 @@ impl Harness {
         prompt: &str,
         ty: Option<&str>,
     ) -> Result<NodeId, HarnessError> {
-        let (parent_transcript, parent_framing) = {
+        // `parent`'s `suspend_table` is the table its CURRENT hole (the one
+        // this fork answers) was classified from — exactly the table `ty` was
+        // resolved against.
+        let (parent_transcript, parent_framing, table) = {
             let convos = self.convos.lock();
             let convo = convos.get(&parent).ok_or(HarnessError::NoSession(parent))?;
-            (convo.transcript.clone(), convo.framing.clone())
+            (
+                convo.transcript.clone(),
+                convo.framing.clone(),
+                convo.suspend_table.clone(),
+            )
         };
         let checkpoint = parent_transcript.len() as u64;
         let child = self.tree.create_node(
@@ -2895,7 +2823,7 @@ impl Harness {
         let mut transcript = parent_transcript;
         transcript.push(Message {
             role: Role::User,
-            content: engine::hole_card(prompt, ty),
+            content: engine::hole_card(prompt, ty, table.as_ref()),
             reasoning_items: Vec::new(),
         });
         self.forked_transcripts
@@ -2913,6 +2841,34 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         self.tree
             .hole_answer_attempt(node, hole.clone(), source.to_string(), outcome)?;
+        Ok(())
+    }
+
+    /// Log what extract said the just-compiled turn's holes and binds ARE —
+    /// the `asks.json` site → type table plus a value-plane bind's bound
+    /// name/type, if either is non-empty — to console INFO and `log.jsonl`
+    /// (dogfood-observability deliverable 2). A no-op (no console line, no
+    /// event) when the turn has neither: most turns don't.
+    fn log_turn_extracted(
+        &self,
+        node: NodeId,
+        asks: &[(u32, String)],
+        bound: Option<(&str, &str)>,
+    ) -> Result<(), HarnessError> {
+        if asks.is_empty() && bound.is_none() {
+            return Ok(());
+        }
+        tracing::info!(
+            node = node.0,
+            asks = ?asks,
+            bound = ?bound,
+            "turn extracted types"
+        );
+        self.tree.turn_extracted(
+            node,
+            asks.to_vec(),
+            bound.map(|(name, ty)| (name.to_string(), ty.to_string())),
+        )?;
         Ok(())
     }
 
@@ -3114,8 +3070,8 @@ impl Harness {
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
-    /// in-place compaction relief (02-runtime.md LOCKED: "replace its
-    /// context with the summary so the loop CONTINUES", NO loop-abort). The
+    /// in-place compaction relief: replace the context with the summary so
+    /// the loop CONTINUES, never a loop-abort. The
     /// accumulated exchange is collapsed to one User-role message carrying
     /// `summary` as prior-window context; the node's running [`Usage`] is reset
     /// (`node_usage` now reflects only the small compacted window, so the
@@ -3201,6 +3157,157 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
+    }
+
+    // ---- render_compile_error / error coordinates -------------------------
+    //
+    // `render_compile_error` remaps a `run_turn` compile failure's GHC
+    // coordinates from TEMPLATE space to the model's own turn text. These
+    // build SYNTHETIC candidate sources (same marker shape the real
+    // `expr_turn_template`/`session_bind_template` builders produce, per
+    // `EXPR_MARKER`/`BIND_MARKER`) and a synthetic diagnostic, so the offset
+    // arithmetic is pinned without a real GHC compile.
+
+    fn diag(file: &str, line: u32, col: u32, message: &str) -> tidepool_runtime::diag::ExtractDiag {
+        tidepool_runtime::diag::ExtractDiag {
+            span: Some(tidepool_runtime::diag::DiagSpan {
+                file: file.to_string(),
+                start_line: line,
+                start_col: col,
+                end_line: line,
+                end_col: col + 1,
+            }),
+            severity: "error".to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// A synthetic EXPR-template source: `preamble_lines` filler lines, the
+    /// real `EXPR_MARKER`, then one line per `content_lines` standing in for
+    /// the model's own turn text.
+    fn fake_expr_source(preamble_lines: usize, content_lines: usize) -> String {
+        let mut s = "-- preamble\n".repeat(preamble_lines);
+        s.push_str(EXPR_MARKER);
+        for i in 0..content_lines {
+            s.push_str(&format!("userExprLine{i}\n"));
+        }
+        s.push_str(" } in __b\n");
+        s
+    }
+
+    /// A synthetic BIND-template source: same shape, `BIND_MARKER` instead.
+    fn fake_bind_source(preamble_lines: usize, content_lines: usize) -> String {
+        let mut s = "-- preamble\n".repeat(preamble_lines);
+        s.push_str(BIND_MARKER);
+        for i in 0..content_lines {
+            s.push_str(&format!("userStmtLine{i}\n"));
+        }
+        s.push_str(" ; pure x\n }\n");
+        s
+    }
+
+    /// The assertion that matters most, mutation-closed: a turn whose user
+    /// code fails on its FIRST line reports line 1, not the preamble-offset
+    /// raw line. Break `candidate_window`'s `offset + 1` (e.g. to plain
+    /// `offset`) and this goes red.
+    #[test]
+    fn render_compile_error_remaps_first_line_of_user_code() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        // EXPR_MARKER has 2 newlines, so the first user line lands on raw
+        // line 3.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            3,
+            1,
+            "Variable not in scope: garbage",
+        )]);
+        let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
+        assert!(out.contains("<turn>:1:"), "{out}");
+        assert!(
+            !out.contains("Expr.hs:3"),
+            "raw template line leaked: {out}"
+        );
+    }
+
+    /// A multi-line user turn failing on its Nth line reports N.
+    #[test]
+    fn render_compile_error_remaps_nth_line_of_user_code() {
+        let expr_source = fake_expr_source(0, 3);
+        let bind_source = fake_bind_source(0, 3);
+        // Raw line 5 = offset(2) + 3rd content line.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            5,
+            1,
+            "type error on the third line",
+        )]);
+        let block = "userExprLine0\nuserExprLine1\nuserExprLine2";
+        let out = render_compile_error(&err, block, &expr_source, &bind_source);
+        assert!(out.contains("<turn>:3:"), "{out}");
+    }
+
+    /// The verdict-ambiguity case: when the diagnostic's raw line falls
+    /// outside the EXPR candidate's window but inside the BIND candidate's,
+    /// the BIND candidate is used instead — never the (wrong) EXPR offset.
+    #[test]
+    fn render_compile_error_falls_back_to_bind_candidate_when_expr_window_misses() {
+        // EXPR: 0 preamble lines, 1-line window at raw line 3.
+        let expr_source = fake_expr_source(0, 1);
+        // BIND: 10 preamble lines pushes its window well past EXPR's.
+        let bind_source = fake_bind_source(10, 1);
+        let bind_offset = candidate_window(&bind_source, BIND_MARKER, 1).unwrap().0;
+        let raw_line = (bind_offset + 1) as u32;
+        let err =
+            tidepool_runtime::CompileError::Diagnostics(vec![diag("Expr.hs", raw_line, 1, "oops")]);
+        let out = render_compile_error(&err, "x", &expr_source, &bind_source);
+        assert!(out.contains("<turn>:1:"), "{out}");
+    }
+
+    /// A diagnostic whose raw line falls in NEITHER candidate's window keeps
+    /// its raw template-space span — remapping against the wrong candidate
+    /// would silently shift the line by a wrong constant, which is worse
+    /// than not remapping at all.
+    #[test]
+    fn render_compile_error_leaves_out_of_window_diagnostic_raw() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            9999,
+            1,
+            "deep in generated scaffolding",
+        )]);
+        let out = render_compile_error(&err, "x", &expr_source, &bind_source);
+        assert!(out.contains("Expr.hs:9999:1"), "{out}");
+        assert!(!out.contains("<turn>"), "{out}");
+    }
+
+    /// A non-`Diagnostics` variant carries no GHC coordinates to remap —
+    /// renders verbatim via `Display`, exactly as before this fix.
+    #[test]
+    fn render_compile_error_non_diagnostics_variant_renders_verbatim() {
+        let err = tidepool_runtime::CompileError::IOTypeDetected;
+        let out = render_compile_error(&err, "x", "", "");
+        assert_eq!(out, err.to_string());
+    }
+
+    /// A template-internal binder (`__b`) whose OWN span is in the
+    /// scaffold-preamble region must not leak into a remapped diagnostic —
+    /// exercising `tidepool_runtime::diag`'s scrubbing through the harness's
+    /// own picked `RenderOpts`, not a second implementation of it.
+    #[test]
+    fn render_compile_error_scrubs_template_internal_binder() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        let message = "* Ambiguous type variable `f0'\n\
+             Relevant bindings include\n  \
+             __b :: f0 (Value, b0) (bound at Expr.hs:1:2)\n  \
+             (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)";
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag("Expr.hs", 3, 1, message)]);
+        let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
+        assert!(!out.contains("__b"), "{out}");
+        assert!(out.contains("Ambiguous type variable"), "{out}");
     }
 
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a

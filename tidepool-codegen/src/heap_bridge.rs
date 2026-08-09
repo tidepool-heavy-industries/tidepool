@@ -15,9 +15,9 @@ pub enum BridgeError {
     UnexpectedLitTag(u8),
     /// A `Value` variant with no heap representation reached `value_to_heap`
     /// (only `Con`/`Lit`/`ByteArray` are convertible). Distinct from
-    /// `UnexpectedHeapTag` — this is a Rust-side `Value`-shape error, not a bad
-    /// byte read from the heap. It previously overloaded the `TAG_FORWARDED`
-    /// (255) sentinel and masqueraded as a heap-tag fault.
+    /// `UnexpectedHeapTag` — this is a Rust-side `Value`-shape error, not a
+    /// bad byte read from the heap, and must never be conflated with the
+    /// `TAG_FORWARDED` (255) sentinel.
     #[error("non-convertible Value (no heap representation)")]
     NonConvertibleValue,
     #[error("null pointer")]
@@ -477,8 +477,7 @@ impl recursion::MappableFrame for ValueFrame<recursion::PartiallyApplied> {
 /// Stack-safe: runs as a fallible hylomorphism (`recursion` crate) over
 /// [`ValueFrame`] — arbitrarily deep bushy structures (nested JSON, tuple
 /// towers) convert without consuming call stack. Children allocate before
-/// parents; sibling allocation ORDER differs from the old recursive
-/// version (right-to-left), which nothing observes.
+/// parents; sibling allocation order is otherwise unobserved by any caller.
 ///
 /// # Safety
 ///
@@ -715,9 +714,9 @@ mod tests {
     #[test]
     fn value_to_heap_deep_tower_is_stack_safe() {
         // 50k-deep single-field Con tower converted on a 64 KiB thread:
-        // the hylo-based conversion must not consume call stack per level
-        // (the old recursive version overflowed), and the Value's drop is
-        // iterative. Build the tower iteratively too, obviously.
+        // the hylo-based conversion must not consume call stack per level,
+        // and the Value's drop is iterative. Build the tower iteratively too,
+        // obviously.
         std::thread::Builder::new()
             .stack_size(64 * 1024)
             .spawn(|| {

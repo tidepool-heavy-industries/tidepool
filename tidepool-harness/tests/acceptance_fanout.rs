@@ -9,6 +9,8 @@
 //! same as a plain fork); the final `[Int]` preserves prompt/declaration
 //! order regardless of which child needed a retry.
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,14 +20,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
 use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorDecision};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -74,12 +68,7 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
 /// declaration order `[1, 2, 3]` regardless of which child needed a retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_of_three_preserves_order_across_a_retry() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("fanout.jsonl");
@@ -208,12 +197,7 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
 /// involvement, no escalation ever appears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("fanout-rung1.jsonl");
@@ -287,12 +271,7 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
 /// `/steer/:node/abort` POST without a browser.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("fanout-abort.jsonl");

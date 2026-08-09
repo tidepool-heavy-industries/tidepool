@@ -38,10 +38,12 @@ loop st = do
 semantic `State` to the driver. The driver checkpoints that value and invokes
 the next cycle. Between cycles Rust deliberately regains control to compose a
 fresh system prompt and runtime context, apply compaction and budgets, select
-the next deployed resident source, and restore the checkpointed value. Async
-handles and parked continuations may coexist within a cycle, but v1 reaches an
-agent-quiescent boundary before returning: raw handles and Haskell closures
-never become cross-cycle orchestration state.
+the next deployed resident source, and restore the checkpointed value. Agents
+may continue running between cycles. Their stable identities and the resident's
+plan for them are ordinary checkpointed data; an attached Haskell handle and a
+parked Haskell continuation are not. Thus the resident can fire-and-forget a
+wave, return its next `State`, and attach to those same agents in a later
+cycle.
 
 An agent's communication contract is described separately using a
 Servant-inspired Generic record. The record declares the tools the child may
@@ -227,6 +229,60 @@ flight.
 Handles strongly type authored messages and terminal results. Lifecycle state
 is runtime data, not a phantom-type state machine.
 
+### Durable pokes and the resident inbox
+
+`pokeAgent` is the normal, non-blocking control operation. It accepts a tagged,
+typed message into a durable per-agent FIFO and returns once Tidepool has
+recorded it; it never waits for the child to act on it:
+
+```haskell
+data PokeMode = WhenSafe | InterruptCurrentTurn
+
+data Poke message = Poke
+  { mode    :: PokeMode
+  , message :: message
+  }
+```
+
+`WhenSafe` delivers the queued message as an active-turn steer when the backend
+permits, or starts/queues the agent's next follow-up turn when it is idle. If
+the child is temporarily unsteerable -- for example, parked in a generated
+tool call -- the message remains queued until it is deliverable or the agent
+reaches a terminal state.
+
+`InterruptCurrentTurn` asks the adapter to cancel any active turn, resolve or
+cancel its parked tool request cleanly, then deliver the typed message as a new
+turn. If the agent is already idle it behaves like `WhenSafe`. The poke remains
+non-blocking: interruption and redelivery progress through the runtime state
+machine after durable acceptance. A later lifecycle event reports what
+actually happened.
+
+This is deliberately one authored operation rather than separate steer,
+follow-up, and interrupt verbs. Those are delivery mechanics; the resident's
+policy is to send a typed message tagged with whether current work may continue.
+Raw force-cancel remains an internal runtime/administrative cleanup primitive.
+No accepted poke is silently discarded or implicitly coalesced.
+
+Residents can also receive typed messages from the operator, the driver, and
+other residents. The driver owns a durable inbox and schedules a new cycle on
+arrival; authored Haskell consumes it with one atomic drain, rather than busy
+polling:
+
+```haskell
+step :: State -> M Effs State
+step st = do
+  inbox <- drainMailbox @ResidentMessage
+  let st' = incorporate inbox st
+  ...
+```
+
+Undrained messages remain queued across checkpoints. A concrete resident
+declares its one `ResidentMessage` inbox type as an ordinary Generic ADT; the
+driver binds the queue to that schema at deployment. Delivery, ordering,
+deduplication receipts, and wakeups are runtime concerns; interpreting a
+message and deciding whether to poke, replace, wait, or stop is resident
+policy.
+
 ### Realms and cycles define scheduling semantics
 
 The realm spike proved that one JIT machine can hold multiple independently
@@ -248,10 +304,12 @@ lexical values it captured plus the results of effects performed after resume;
 shared runtime ledgers are consulted through effects, not hidden mutable
 closure state. The cycle folds results and receipts into the returned `State`.
 
-V1 requires quiescence before a cycle returns. Durable agent identities and
-cross-cycle reattachment may later be represented as checkpointed data, but a
-parked Haskell continuation is never the representation of pending work across
-cycles.
+V1 requires Haskell-continuation quiescence before a cycle returns, not agent
+quiescence. A `waitAgent` suspended continuation must resolve before the cycle
+ends, but independently running agents may outlive the cycle through stable
+checkpointed references. The next cycle reattaches to the runtime registry by
+that identity. A parked Haskell continuation is never the representation of
+pending work across cycles.
 
 Near-term resident revision occurs at a deployment boundary: a frontier model
 and human edit the repository, Tidepool waits for a quiescent cycle boundary,
@@ -265,10 +323,10 @@ domain, not one process per agent. That server owns multiple loaded Codex
 threads. The Tidepool registry owns thread identities, subscriptions, pending
 tool handlers, workspaces, receipts, and policies.
 
-V1 does not need an elaborate LRU. Terminal and idle agents may accumulate
-within one resident iteration or delegation wave. An intermediate wave boundary
-may keep running and tool-parked agents live; the outer resident-cycle boundary
-must first make them quiescent and then release them.
+V1 does not need an elaborate LRU. Terminal, idle, and running agents may
+accumulate while a resident retains their stable identities. The initial
+correctness rule is durability and explicit lifecycle observation, not eager
+cleanup; retention/GC policy follows measurement.
 
 ### The Haskell surface is provider-neutral
 
@@ -312,11 +370,11 @@ workspace observation.
    whose handlers run in the parent's `M effs` environment.
 4. Derive tool names, schemas, dispatch, and result decoding from ordinary
    Generic records and ADTs.
-5. Preserve asynchronous orchestration, active steering, interruption,
-   progress observation, follow-up turns, and recursive delegation.
+5. Preserve asynchronous orchestration, tagged cooperative/interrupting
+   pokes, progress observation, follow-up turns, and recursive delegation.
 6. Reuse ChatGPT-authenticated Codex and its native coding harness rather than
    reproduce edit, command, session, and context machinery.
-7. Run each coding worker in a caller-selected workspace under an explicit
+7. Run each coding worker in its own PRD 19 managed worktree under an explicit
    sandbox policy.
 8. Return typed results alongside authoritative execution/activity receipts.
 9. Keep the public authored vocabulary small enough to teach in one compact
@@ -340,11 +398,11 @@ workspace observation.
 - Making `codex-codes` types part of Tidepool's public Rust or Haskell API.
 - Making recursive self-improvement safe or effective by assertion; that is an
   evaluation question after the substrate exists.
-- Creating git worktrees, managing branches, merging changes, or promoting a
-  canonical branch. The separate
+- Implementing Git worktree creation, branch mutation, merging, or promotion
+  inside the Agent effect. The separate
   [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
-  composes worktree allocation and repository events around Agent; spawning
-  itself accepts an assigned workspace.
+  couples managed-worktree allocation/binding with spawning and supplies
+  repository events; coding agents still perform Git workflow operations.
 
 ## Primary authored experience
 
@@ -467,13 +525,28 @@ observeWorker worker = waitAgent worker >>= \case
     updateTelemetry activity
     observeWorker worker
 
-  AgentFinished result receipt -> do
+  AgentWentIdle -> do
+    pokeAgent worker (whenSafe (PleaseFinalize "Report your result or blocker now."))
+    observeWorker worker
+
+  AgentFinalized result receipt -> do
     recordReceipt receipt
     pure result
 
   AgentFailed failure ->
     recoverWorker failure
+
+  AgentInterrupted receipt -> do
+    recordReceipt receipt
+    observeWorker worker
 ```
+
+The compact example shows the first cooperative reminder. A real resident
+stores an escalation stage and deadline in checkpointed `State`: later
+`AgentWentIdle` or stale observations can trigger progressively stronger
+`whenSafe` messages, followed by an `interrupting` typed finalize/handoff
+message, replacement, operator escalation, or an explicit stop. The runtime
+reports lifecycle facts; this schedule remains authored policy.
 
 ## Public Haskell API
 
@@ -483,10 +556,18 @@ but the intended semantic surface is:
 ```haskell
 data AgentSpec effs tools input result
 data AgentHandle input result
+data AgentReference input result
+
+data PokeMode = WhenSafe | InterruptCurrentTurn
+data Poke input = Poke PokeMode input
+
+whenSafe    :: input -> Poke input
+interrupting :: input -> Poke input
 
 data AgentEvent result
   = AgentActivity AgentActivity
-  | AgentFinished result AgentReceipt
+  | AgentWentIdle AgentIdleReceipt
+  | AgentFinalized result AgentReceipt
   | AgentFailed AgentFailure
   | AgentInterrupted AgentReceipt
 
@@ -496,23 +577,14 @@ spawnAgent
   -> Text
   -> M effs (AgentHandle input result)
 
-sendMessage
+pokeAgent
   :: AgentHandle input result
-  -> input
-  -> M effs ()
-
-followupTask
-  :: AgentHandle input result
-  -> Text
+  -> Poke input
   -> M effs ()
 
 waitAgent
   :: AgentHandle input result
   -> M effs (AgentEvent result)
-
-interruptAgent
-  :: AgentHandle input result
-  -> M effs ()
 
 releaseAgent
   :: AgentHandle input result
@@ -524,10 +596,21 @@ retainAgent
 
 listAgents
   :: M effs [AgentSummary]
+
+attachAgent
+  :: AgentReference input result
+  -> M effs (AgentHandle input result)
+
+drainMailbox
+  :: Generic message
+  => M effs [message]
 ```
 
 `listAgents` is intentionally type-erased observability. Typed payloads remain
-available through the handle that owns their types.
+available through the handle that owns their types. A stable `AgentId` plus its
+protocol fingerprint is checkpointable resident data; `attachAgent` recreates
+the typed handle for a later cycle and fails loudly if the deployed protocol no
+longer matches.
 
 Convenience combinators are ordinary library code:
 
@@ -558,23 +641,26 @@ parTraverseAgents
 
 - `spawnAgent` creates a thread, installs its frozen tool contract, starts the
   initial turn, and returns after the thread/turn is accepted.
-- `sendMessage` steers the currently active turn. V1 reports a typed runtime
-  error when no steerable turn is active rather than silently starting one.
-- `followupTask` starts a new turn on an idle durable agent. It does not mutate
-  an active turn.
+- `pokeAgent` durably accepts a typed message without waiting for a response.
+  `whenSafe` steers an active turn when possible, starts/queues a follow-up when
+  idle, and otherwise retains the message until delivery is possible.
+  `interrupting` first interrupts any active turn and then starts the message
+  as the next turn. A terminal or released target produces an explicit typed
+  failure/receipt, never a dropped message.
 - `waitAgent` returns the next observable event for that handle. Repeated calls
-  drive a per-agent event stream until a terminal event.
-- `interruptAgent` requests interruption of the current turn. It is idempotent
-  once the handle is terminal.
+  drive a per-agent event stream. `AgentWentIdle` is an ordinary typed outcome:
+  the resident may poke with escalating urgency, wait again, replace the agent,
+  or stop. It is not an exception.
 - `releaseAgent` detaches/unsubscribes and releases hot runtime resources. It
   does not delete durable thread history.
 - `retainAgent` exempts a handle from automatic release at the current
   wave/loop boundary.
 
-Whether `sendMessage` may steer a turn currently parked on a dynamic tool call
-is deliberately gated on the backend spike. The API remains useful if that
-specific scheduling combination is unsupported: the parent can return the new
-information through the outstanding tool call or interrupt and follow up.
+Whether a `whenSafe` poke may reach a turn currently parked on a dynamic tool
+call is deliberately gated on the backend spike. If unsupported, Tidepool
+retains it until the tool call resolves. An `interrupting` poke instead cancels
+the turn and safely resolves the outstanding tool request before beginning its
+message as a new turn.
 
 ## Servant-style agent eDSL
 
@@ -687,14 +773,10 @@ data AgentRuntime a where
     :: CompiledAgent
     -> AgentRuntime AgentId
 
-  SendInput
+  QueuePoke
     :: AgentId
+    -> PokeMode
     -> StructuralValue
-    -> AgentRuntime ()
-
-  StartFollowup
-    :: AgentId
-    -> Text
     -> AgentRuntime ()
 
   AwaitEvent
@@ -707,7 +789,7 @@ data AgentRuntime a where
     -> StructuralValue
     -> AgentRuntime ()
 
-  Interrupt
+  ForceInterrupt
     :: AgentId
     -> AgentRuntime ()
 
@@ -720,7 +802,7 @@ The public handler performs the typed work around this transport:
 
 - compile the tool record;
 - register Haskell dispatch closures with the resident runtime;
-- structurally encode outbound messages;
+- structurally encode and durably queue tagged outbound pokes;
 - structurally decode tool inputs and final results;
 - invoke handlers inside the parent `M effs` row;
 - encode handler results back to the child; and
@@ -794,14 +876,15 @@ or wait for another typed result, subject to its effect row.
 A handler failure must resolve the outstanding server request with an explicit
 tool error; it must never strand a pending call. The runtime records the
 failure, cancels any abandoned nested work, and lets the child or resident's
-bounded recovery policy decide whether to retry, continue, or interrupt.
+bounded recovery policy decide whether to retry, continue, send an interrupting
+poke, or stop.
 
 ### Structured completion
 
 V1 uses `turn/start.outputSchema` derived from the requested result type, then
 validates and decodes the terminal assistant value with Tidepool's structural
 Generic decoder. A malformed result does not become a typed success; the
-runtime may steer a correction or begin a bounded follow-up retry.
+runtime may enqueue a bounded corrective poke.
 
 A reserved generated `finish_task` dynamic tool may provide a stronger
 completion gate: it could reject malformed output while leaving the child
@@ -878,6 +961,14 @@ This state is intentionally not reflected in the `AgentHandle` type. Async
 events, external interruption, app-server failures, and steering races make a
 runtime state machine more honest and substantially easier to author against.
 
+`Idle`, `Completed`, `Failed`, and `Interrupted` are all observable lifecycle
+facts, not hidden cleanup transitions. The resident's checkpointed plan records
+the semantic state it needs -- agent references, last meaningful observation,
+pending escalation, retry budget, and expected result -- and makes the next
+decision from the event stream. Tidepool provides stale/deadline observations
+and bounded queues; it does not decide whether a stale worker should be poked,
+replaced, or escalated to the operator.
+
 The registry also owns:
 
 - backend thread/turn identifiers;
@@ -897,8 +988,8 @@ V1 uses coarse structured cleanup rather than GC finalizers or LRU policy:
 - retained agents remain live or resumable;
 - terminal ephemeral agents are released after their value and receipt are
   integrated;
-- idle durable agents are unsubscribed at a loop/wave boundary and resumed on
-  later use; and
+- idle durable agents retain their thread identity and queued pokes until the
+  resident explicitly releases them; and
 - failed/abandoned pending Haskell tool tasks are cancelled when their agent
   is interrupted or released.
 
@@ -908,11 +999,11 @@ deletion is an administrative operation outside the initial authored surface.
 A loop/wave boundary is explicit (`withAgentWave`, or an equivalent driver
 boundary); the runtime never attempts to infer one from authored recursion.
 
-The v1 driver does not complete a cycle while an authored agent handle remains
-running or parked. The resident must wait for it or interrupt it, then release
-the resulting terminal/idle worker before returning its next `State`. This
-makes cycle teardown reclaim the realm and all handler closures without relying
-on GC finalizers.
+The v1 driver does not complete a cycle while an authored Haskell continuation
+remains parked. It may complete while an independently running/idle agent
+exists: the checkpoint contains its stable `AgentReference`, never the Haskell
+handle or continuation. This makes cycle teardown reclaim the realm and handler
+closures without requiring the server to kill useful background work.
 
 The server already has an idle unload policy after the last subscriber. A
 future bounded hot-thread LRU is an optimization if actual memory observations
@@ -922,27 +1013,22 @@ justify it.
 
 - Durable Codex threads may be resumed after a backend process restart.
 - Ephemeral threads are disposable and need not be crash-recoverable.
-- V1 checkpoints only quiescent semantic state, never raw process handles or
-  Haskell closures.
-- A later durable-agent extension may checkpoint stable agent/thread identities
-  and reconstruct typed attachment from an agent role/specification.
+- V1 checkpoints only quiescent semantic state plus stable agent/thread
+  identities, never raw process handles or Haskell closures.
+- A later cycle reconstructs typed attachment from the checkpointed reference
+  and its agent role/specification.
 - A checkpoint referring to a missing durable worker records that worker as
   lost and follows authored recovery policy.
 - Tidepool owns wall-clock deadlines, backend restart, and event-queue bounds.
 
 ## Workspace boundary
 
-Agent spawning consumes a workspace assignment; it does not create or manage
-one. The assignment supplies an absolute `cwd` plus the sandbox access Codex
-may exercise there:
-
-> **Revision (Inanna, 2026-08-08):** once
-> [`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
-> lands, agent creation is tightly coupled to worktree allocation — a
-> managed worktree is the only workspace an agent can receive, one
-> worktree per agent, all agents isolated. `CurrentWorkspace` and
-> free-form workspace assignment are transitional, valid only for
-> pre-PRD-19 spikes and dogfood.
+The low-level Agent backend consumes an absolute `cwd` and sandbox assignment;
+it does not implement Git. The public surface after
+[`19-managed-worktrees-events-prd.md`](19-managed-worktrees-events-prd.md)
+couples agent creation to managed-worktree allocation/binding: one worktree per
+agent, all coding agents isolated. `CurrentWorkspace` and free-form workspace
+assignment are transitional facilities only for pre-PRD-19 spikes.
 
 ```haskell
 data Workspace = Workspace
@@ -953,15 +1039,10 @@ data Workspace = Workspace
 data WorkspaceAccess = ReadOnly | WorkspaceWrite
 ```
 
-The first dogfood points at its standalone repository. Exomonad may later
-allocate a worktree and pass its path as a `Workspace`, but that composition is
-outside this effect and PRD.
-
-That later effect should expose workspace activity as events in the same style
-as Agent events: commits created, checks completed, conflicts detected, and
-the tree becoming dirty or clean. A higher-level run may pair an `AgentHandle`
-with a `WorktreeHandle` and select across both event streams, treating them as
-one orchestration unit without making either effect own the other's lifecycle.
+PRD 19 exposes workspace activity as events in the same style as Agent events
+and returns a higher-level worker run containing both typed agent and worktree
+handles. Worktree and Agent remain separate internal effects even though public
+creation binds them atomically.
 
 The terminal receipt records what the agent runtime actually observed without
 claiming ownership of repository history:
@@ -1026,8 +1107,8 @@ The initial advertised contract should remain compact:
 > Define an agent's callable tools as a Generic record parameterized by
 > `mode`; each field has type `mode :- Call Input Output` or `mode :- Notify
 > Input`. Build an `AgentSpec` with value-level instructions and `tool`
-> handlers, then use `spawnAgent`, `sendMessage`, `followupTask`, `waitAgent`,
-> and `interruptAgent`. Tool inputs, messages, and results are ordinary
+> handlers, then use `spawnAgent`, `pokeAgent`, and `waitAgent`. Tag each poke
+> `whenSafe` or `interrupting`. Tool inputs, messages, and results are ordinary
 > Generic ADTs. Agent use composes through normal `M effs` Haskell.
 
 One complete worker example may follow. Do not teach app-server, MCP, JSON
@@ -1076,9 +1157,10 @@ While the dynamic tool request remains outstanding:
   pending request, item events, and turn state; and
 - prove no pending Haskell task or server request leaks.
 
-Failure of steer-while-parked narrows `sendMessage`; it does not kill the
-design. Failure to safely interrupt/reclaim a parked request requires an
-adapter workaround before broader implementation.
+Failure of steer-while-parked delays `whenSafe` delivery until the tool call
+resolves; it does not kill the design. Failure to safely interrupt/reclaim a
+parked request blocks `interrupting` pokes and requires an adapter workaround
+before broader implementation.
 
 ### Spike 3 — concurrency and one-server ownership
 
@@ -1241,15 +1323,17 @@ increasing capability from unchanged workers.
 5. A generated tool call parks only its child while the parent executes an
    arbitrary permitted `M effs` handler and may recursively spawn another
    agent.
-6. Typed messages steer active agents; typed results are decoded only after
-   structural validation.
+6. Typed pokes are durably queued; `whenSafe` steers or follows up without
+   cancelling current work, while `interrupting` cancels the current turn and
+   delivers its message next. Typed results are decoded only after structural
+   validation.
 7. Every terminal result is paired with authoritative activity/workspace
    receipts.
-8. Each worker runs in its caller-assigned workspace and sandbox; spawning
-   makes no claim about git lifecycle or repository integration.
-9. Wave cleanup may preserve running/parked workers; cycle cleanup requires
-   quiescence, releases terminal/idle workers, and cancels abandoned pending
-   handlers without relying on GC.
+8. Each worker runs in its own managed worktree and sandbox; the Agent effect
+   itself makes no claim about Git workflow operations or branch promotion.
+9. Wave/cycle cleanup may preserve independent running or idle workers through
+   checkpointed references, but requires Haskell-continuation quiescence and
+   cancels abandoned pending handlers without relying on GC.
 10. The adapter passes pinned protocol fixtures and contains all
     `codex-codes`/app-server types behind a Tidepool-owned boundary.
 11. No normal worker run mutates the operator's global Codex configuration.
@@ -1265,8 +1349,9 @@ before the dogfood resident becomes a durable surface:
 
 1. Whether `outputSchema` or a generated `finish_task` is the canonical
    terminal protocol.
-2. Whether `sendMessage` is allowed during a parked tool request and how its
-   ordering is exposed.
+2. Whether a `whenSafe` poke is delivered during a parked tool request or only
+   after it resolves, and how that ordering is exposed. `interrupting` retains
+   its cancel-then-deliver semantics either way.
 3. The first semantic `ModelPolicy` vocabulary and where exact model pinning
    lives for benchmarks.
 4. Whether durable named specialists are needed in the first dogfood or all
@@ -1317,3 +1402,21 @@ Keep backend lifecycle, authentication, process control, workspace binding,
 receipts, and persistence in stable handlers. Keep planning, delegation strategy,
 review topology, and stopping policy in the repo-local Haskell resident. The
 runtime is designed to host rapidly changing programs, not become one.
+
+## Addendum — decisions locked pre-flight (Inanna + root, 2026-08-09)
+
+1. **Cross-cycle tool calls — reattach-supplies-tools, mailbox-bridged.**
+   `attachAgent` takes the checkpointed `AgentReference` PLUS a freshly
+   built tools record; the runtime validates the protocol fingerprint and
+   atomically installs the handlers before delivery resumes. A tool call
+   arriving while no handler generation is attached is written to a
+   bounded durable queue AND schedules a resident cycle (the same
+   arrival-schedules-a-cycle path `drainMailbox` uses — one mechanism,
+   one more message kind). The worker experiences a slow tool call.
+   Neither forbid-cross-cycle nor queue-without-reattach is the design.
+2. **Typed failure results everywhere, to start.** `spawnAgent`,
+   `attachAgent`, `pokeAgent` return case-matchable typed errors
+   (`SpawnError`/`AttachError`/`PokeError` — variant lists filled by the
+   first backend lane's contact with reality); `retainAgent` returns the
+   `AgentReference`. No `()`-returning operation whose semantics promise
+   a failure it cannot express.

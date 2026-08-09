@@ -23,14 +23,6 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -107,10 +99,7 @@ impl ModelProvider for ContextCapturingProvider {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_hole_sees_first_holes_exchange() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let second_saw_first = Arc::new(Mutex::new(None));

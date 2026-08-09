@@ -13,7 +13,8 @@
 -- @finalize@) but never declares 'RunLLMTurn' at all (an effect's GADT +
 -- helpers are only emitted for decls actually passed into a given compile).
 -- An answerer turn answers via @finalize \@T@, gathers operator input with
--- 'Tidepool.Form.askUser' (the only operator verb in its row, riding
+-- 'Tidepool.Form.askUser' \/ 'Tidepool.Form.choose' \/
+-- 'Tidepool.Form.chooseMany' (the only operator verbs in its row, all riding
 -- 'AskUser'), and delegates to parallel sub-answerers with 'fork'\/'forkAll'
 -- (riding 'Fork', 'Tidepool.Fork') — and NOTHING else.
 --

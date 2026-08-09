@@ -4,6 +4,8 @@
 //! drives real compiles through the real Harness, zero live model calls via
 //! scripted providers).
 
+mod support;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -15,14 +17,6 @@ use tidepool_harness::provider::{
 };
 use tidepool_harness::tree::NodeState;
 use tidepool_harness::{Harness, HarnessError, TurnOutcome};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -128,12 +122,7 @@ fn assistant_turn_deltas(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_drive_turn_on_one_node_serializes() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("turn-lease.jsonl");
@@ -187,12 +176,7 @@ async fn concurrent_drive_turn_on_one_node_serializes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_turn_releases_its_lease() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let writer = LogWriter::create(dir.path().join("turn-lease-fail.jsonl"), &header()).unwrap();
@@ -235,12 +219,7 @@ async fn a_failed_turn_releases_its_lease() {
 /// `TurnInFlight` forever instead of recovering).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn panic_mid_turn_recovers_via_drop_or_reports_busy_never_no_session() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let writer =

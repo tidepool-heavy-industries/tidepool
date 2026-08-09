@@ -80,6 +80,43 @@ pub fn ui_of(table: &DataConTable, ty: &str) -> Option<Ui> {
     None
 }
 
+/// Render a names-only synopsis of `ty`'s shape from `table`, degrading
+/// through the SAME cases [`ui_of`] does (constructor/selector names only —
+/// the table captures field LABELS but not field TYPES, so a "shape" here
+/// is never more than that):
+///
+/// - all of `ty`'s constructors have zero fields (a nullary sum) → the
+///   constructor names, in `dataConTag` order — `"Advance | Hold | Abort"`.
+/// - exactly one constructor, and it carries field labels (a record) → the
+///   selector names — `"Contribution { addedIdeas, draftDelta, advance }"`.
+/// - anything else (a multi-constructor type with fields, a single
+///   positional constructor, or a type name `table` has no constructors
+///   for) → the bare type name alone, `ty`. Never a partial/invented shape —
+///   a hole card showing `Ty { a, b, ? }` would claim knowledge the table
+///   doesn't have.
+#[must_use]
+pub fn type_synopsis(table: &DataConTable, ty: &str) -> String {
+    let ids = table.constructors_of_type(ty);
+    if !ids.is_empty() {
+        let all_nullary = ids
+            .iter()
+            .all(|&id| table.get(id).is_some_and(|dc| dc.rep_arity == 0));
+        if all_nullary {
+            let names: Vec<&str> = ids.iter().filter_map(|&id| table.name_of(id)).collect();
+            if names.len() == ids.len() {
+                return names.join(" | ");
+            }
+        } else if let [id] = ids[..] {
+            if let Some(labels) = table.field_labels_of(id) {
+                if !labels.is_empty() {
+                    return format!("{ty} {{ {} }}", labels.join(", "));
+                }
+            }
+        }
+    }
+    ty.to_string()
+}
+
 /// The module a type is defined in, derived from the module-qualified name
 /// of one of its constructors (`"Verdict.NOGO"` → `"Verdict"`) — real
 /// metadata the extract already captured, not a guess from the type name.
@@ -127,8 +164,8 @@ fn haskell_literal(v: &Json) -> Option<String> {
 }
 
 /// Mechanically build the `resume` expression from a form submission's
-/// `values` map (F1's `{values, prose}` answer encoding — `prose` is not
-/// consulted here; a non-empty prose answer is the elaboration path's job,
+/// `values` map (a submission is `{values, prose}`; `prose` is not
+/// consulted here — a non-empty prose answer is the elaboration path's job,
 /// not this one), against the `Ui` this hole's answer type derived to.
 ///
 /// - [`Ui::Choice`]: `values` must carry EXACTLY one key, and it must name
@@ -309,6 +346,81 @@ mod tests {
     fn unknown_type_name_yields_none() {
         let table = DataConTable::new();
         assert_eq!(ui_of(&table, "NoSuchType"), None);
+    }
+
+    // ---- type_synopsis ------------------------------------------------------
+
+    #[test]
+    fn nullary_sum_synopsis_in_declaration_order() {
+        let mut table = DataConTable::new();
+        table.insert(nullary(3, "Abort", 3, "Verdict"));
+        table.insert(nullary(1, "Advance", 1, "Verdict"));
+        table.insert(nullary(2, "Hold", 2, "Verdict"));
+        assert_eq!(type_synopsis(&table, "Verdict"), "Advance | Hold | Abort");
+    }
+
+    #[test]
+    fn record_synopsis_lists_selector_names_in_field_order() {
+        let mut table = DataConTable::new();
+        let dc = with_fields(1, "Contribution", 1, 3, "Contribution");
+        table.insert(dc.clone());
+        table.set_field_labels(
+            dc.id,
+            vec![
+                "addedIdeas".to_string(),
+                "draftDelta".to_string(),
+                "advance".to_string(),
+            ],
+        );
+        assert_eq!(
+            type_synopsis(&table, "Contribution"),
+            "Contribution { addedIdeas, draftDelta, advance }"
+        );
+    }
+
+    /// Mutation-close the degrade path: each unsupported shape renders the
+    /// BARE TYPE NAME and nothing else — never a partial/invented shape.
+    #[test]
+    fn unsupported_shapes_render_bare_type_name_only() {
+        // Multi-constructor with fields — labels set on the FIRST
+        // (lowest-tag) constructor specifically, so a synopsis that (wrongly)
+        // special-cased "the first constructor with labels" instead of "the
+        // ONLY constructor" would render a partial shape here.
+        let mut either = DataConTable::new();
+        let left = with_fields(1, "Left", 1, 1, "Either");
+        either.insert(left.clone());
+        either.set_field_labels(left.id, vec!["error".to_string()]);
+        either.insert(with_fields(2, "Right", 2, 1, "Either"));
+        assert_eq!(type_synopsis(&either, "Either"), "Either");
+
+        // Single positional constructor (no captured field labels).
+        let mut pair = DataConTable::new();
+        pair.insert(with_fields(1, "Pair", 1, 2, "Pair"));
+        assert_eq!(type_synopsis(&pair, "Pair"), "Pair");
+
+        // Unknown type name.
+        let empty = DataConTable::new();
+        assert_eq!(type_synopsis(&empty, "NoSuchType"), "NoSuchType");
+    }
+
+    /// Derived from the table, not hardcoded: changing a record's field
+    /// names changes the synopsis.
+    #[test]
+    fn record_synopsis_follows_table_field_name_changes() {
+        let mut table = DataConTable::new();
+        let dc = with_fields(1, "Person", 1, 2, "Person");
+        table.insert(dc.clone());
+        table.set_field_labels(dc.id, vec!["name".to_string(), "age".to_string()]);
+        assert_eq!(type_synopsis(&table, "Person"), "Person { name, age }");
+
+        let mut table2 = DataConTable::new();
+        let dc2 = with_fields(1, "Person", 1, 2, "Person");
+        table2.insert(dc2.clone());
+        table2.set_field_labels(dc2.id, vec!["fullName".to_string(), "yearsOld".to_string()]);
+        assert_eq!(
+            type_synopsis(&table2, "Person"),
+            "Person { fullName, yearsOld }"
+        );
     }
 
     // ---- defining_module ---------------------------------------------------

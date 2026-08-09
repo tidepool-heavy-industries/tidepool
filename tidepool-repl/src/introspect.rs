@@ -1,12 +1,12 @@
 //! `:i <Name>` resolution for stdlib/preamble types — the source-scan lane.
 //!
-//! The repl's `:i` used to see only (1) session value bindings, (2) built-in
-//! effect decl `type_defs`, and (3) session-declared types — so the types the
-//! preamble puts in scope (`Proc`, `Hit`, `Schema`, … from
+//! Session value bindings, built-in effect decl `type_defs`, and
+//! session-declared types don't cover everything `:i` needs to resolve: the
+//! types the preamble puts in scope (`Proc`, `Hit`, `Schema`, … from
 //! `haskell/lib/Tidepool/*.hs`, re-exported by `Tidepool.Prelude`, plus
-//! project/global `.tidepool/lib` verb-module types) answered
-//! `not a bound value or known type` — a dead end exactly where a caller is
-//! trying to repair a type error.
+//! project/global `.tidepool/lib` verb-module types) must resolve too, or a
+//! caller repairing a type error hits `not a bound value or known type` for
+//! a type that's plainly in scope.
 //!
 //! The extract binary owns GHC-side type knowledge but has no info-dump flag
 //! (and is outside this crate's boundary), so this lane scans the SOURCES the
@@ -502,9 +502,9 @@ data Gadt where
 
     #[test]
     fn include_dir_collision_reports_ambiguous_in_dir_order() {
-        // Two distinct files across two include dirs both declare `Foo` —
-        // this used to silently return the first dir's hit (masking the
-        // collision); it must now report ambiguity, in `include_dirs` order.
+        // Two distinct files across two include dirs both declare `Foo`: the
+        // collision must be reported as ambiguous (not the first dir's hit
+        // silently returned), in `include_dirs` order.
         let d1 = dir_with(&[("A.hs", "module A where\n\ndata Foo = FooA Int\n")]);
         let d2 = dir_with(&[("B.hs", "module B where\n\ndata Foo = FooB Int\n")]);
         let v = lookup(&[&d1, &d2], "Foo").unwrap();

@@ -38,7 +38,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # not a failure mode; `scripts/ghc-slots.sh run` exports TIDEPOOL_GHC_SLOT, so
 # an outer wrapper is respected rather than double-acquired.
 if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
-  exec "$PWD/scripts/ghc-slots.sh" run -- "$PWD/scripts/battery.sh" "$@"
+  exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/battery.sh" "$@"
 fi
 
 if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev/null 2>&1; then
@@ -97,7 +97,7 @@ echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --workspace --ignore-default-filter "$@" 2> >(tee "$tmp_log" >&2)
+cargo nextest run --workspace --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2)
 run_status=$?
 set -e
 
