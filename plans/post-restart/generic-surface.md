@@ -55,6 +55,14 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
   - Commit with `--no-verify`. Never `git add -A`. Repo-root `tmp/` is
     protected.
   - Grep/Read over LSP; do not start per-worktree rust-analyzer.
+  - **Name the INSTRUMENT beside any number.** A receipt states what
+    produced a count, not only the count. An instrument that identifies its
+    referent structurally (an in-code counter, a test that fails on
+    divergence) beats one that pattern-matches something which merely looks
+    right (`pgrep -f`, a grep over args) — three such external instruments
+    were each wrong in a different direction on this box in one day.
+    Per-binary nextest lines satisfy this already; anything else numeric
+    needs it stated.
   - **Inherited-red is established by A/B, never by argument.** A red test
     you did not cause is a normal thing to inherit and a fine thing to
     report — and it is also the most convenient available excuse, so it
