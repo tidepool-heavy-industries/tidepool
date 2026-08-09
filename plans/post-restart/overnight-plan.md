@@ -107,3 +107,30 @@ folds.
 - env-skip-fail dev live: missing-env test skips convert to loud failures
   (ruling: the stated fail-loud convention was already the law; skip-as-pass
   sites nonconforming). Duration-vs-work-claimed adopted as doctrine.
+
+## Amendments after ChatGPT plan review (pre-boarding, Inanna-endorsed)
+
+- CHAIN B SPLIT (Inanna: "agent-core is doing a lot" — agreed): overnight
+  spawns ONLY lane 1 of five: (1) one-cycle clean-spawn vertical — one
+  worker, one cycle, no cross-cycle, no reattach, provisional/internal API
+  shapes allowed. Lanes (2) coupled-spawn failure/saga matrix, (3) durable
+  poke/interrupt ordering, (4) cross-cycle detach/reattach + tool-handler
+  wakeup, (5) mailbox/staleness seam: DEFERRED, each gated on design
+  freezes the review demands (typed SpawnError/PokeError/AttachError,
+  agentReference op, the reattach-vs-wake-vs-forbid decision for
+  cross-cycle tool calls, the coupled-spawn state machine). Those are
+  MORNING PRD work, not overnight implementation.
+- MODEL POLICY: runtime-resolved cheap-plumbing tier — query model/list,
+  prefer gpt-5.4-mini if present else gpt-5.6-luna (Inanna: cheapest;
+  luna fine if ~same price); record the EXACT resolved model in every
+  receipt. No hardcoded slug.
+- CHAIN C SCOPE ADD: parking contract/code reconciliation folds into
+  realm-step4 — privatize ContinuationId/RealmId (minting authority),
+  crate-private ContinuationFrame, typed lookup errors (not stringly
+  Handler), bind resume to a runtime-owned handler-row witness. Until
+  then the contract file gets an UNVERIFIED-vs-code banner (morning).
+- CHAIN D ENDPOINT HARDENING: form-api is config-gated OFF by default,
+  loopback-only, per-prompt nonce, explicitly test-only — an operator
+  answer is authority regardless of the word "testing".
+- Ledger state-table (state/fixed-by/verified-on/next) + PRD 14 status
+  truing: MORNING items.
