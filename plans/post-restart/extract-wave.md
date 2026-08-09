@@ -126,6 +126,39 @@ setup + depanal) answers C1 directly.
 
 ### SCOPE CAVEAT on every Phase-B number (same audit)
 
+### C1 DONE CRITERION: retire `11-turn-latency-contract.md` (Inanna, via root)
+
+The doc is judged no-longer-useful — its numbers are turn-1-only and its rows
+are mislabeled, both established by the audit below. It is NOT deleted out from
+under this lane, because this lane cites it and C1 rewrites the very
+instrumentation it describes. Instead **C1 retires it**, so the doc dies at the
+moment its replacement exists and there is no window where the measurement
+machinery is undocumented.
+
+The SAME commit that fixes the phase brackets (rows mean what their names say;
+the session path emits phases) must:
+
+1. either replace the doc with a short current contract, or fold the contract
+   statement into C1's receipts;
+2. DELETE the stale file;
+3. update every reference. The full list as of 2026-08-08 — note two are in
+   CODE, not docs:
+   - `plans/one-spawn-turn-protocol.md:28`
+   - `plans/post-restart/extract-wave.md:81` (this file's own citation)
+   - `plans/post-restart/extract-wave/spawn-latency/00-spec.md:16`
+   - `tidepool-harness/examples/turn_latency_bench.rs:8`
+   - `tidepool-harness/src/timing.rs:29`
+
+`timing.rs:29` sits in the flat-stages passage that governs the `ghc_setup` /
+`ghc_load` partition, so C1 is editing that file anyway — the reference update
+lands naturally in the same change rather than as separate bookkeeping. Re-grep
+before landing; this list is dated.
+
+Until C1 lands, the doc STANDS, carrying root's correction header (03d33d1b) so
+nobody cites it naively.
+
+### SCOPE CAVEAT on every Phase-B number (same audit)
+
 `runSessionPipeline` (`GhcPipeline.hs` ~326) emits **zero** `emitPhase` calls.
 `runPipelineSession` (~106) routes there whenever `isSessionScopeActive`
 (`Session.hs` ~173: true iff any `Val.G<n>` iface is injected). So the 60/26/6
