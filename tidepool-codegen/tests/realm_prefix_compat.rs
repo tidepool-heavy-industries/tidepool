@@ -1,8 +1,15 @@
 //! Enforced constraint 1 (realm-lanes/B-prefix-compat, verdict §7 step 3):
-//! entering the parked path with a realm whose handled prefix disagrees
-//! position-by-position with the machine's established prefix, up to the
-//! shorter length, must be refused loudly BEFORE the machine is driven at
-//! all, and must leave the machine untouched.
+//! entering the parked path with a realm whose non-empty handled prefix is
+//! not EXACTLY EQUAL to the machine's established prefix — an empty prefix
+//! is compatible with anything — must be refused loudly BEFORE the machine
+//! is driven at all, and must leave the machine untouched. A strict
+//! extension (agreeing up to the shorter length but differing in length) is
+//! NOT compatible: the established prefix is caller-supplied metadata about
+//! a realm's own suspend threshold, not a read of the machine's actual
+//! (opaque, compile-time monomorphized) handler stack, so a shorter realm
+//! says nothing about whether the real `H` has a handler at the extended
+//! position. `refused_strict_extension` and
+//! `refused_strict_extension_established_longer` below pin this.
 //!
 //! `DispatchEffect` is positional over an `HList` and the suspend test is
 //! `tag >= suspend_tag`; both are correct only relative to ONE effect row
@@ -30,7 +37,8 @@
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, JitError, ParkKind, ParkedOutcome, RealmId, ResumeInput,
+    ContinuationId, JitEffectMachine, JitError, ParkKind, ParkedOutcome, PrefixMismatch, RealmId,
+    ResumeInput,
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
@@ -401,12 +409,20 @@ fn accepted_identical_prefixes() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Accepted: strict extension.
+// Refused: strict extension, both directions. Agreement up to the shorter
+// length is NOT the check — two non-empty prefixes must be EXACTLY EQUAL.
+// The established prefix is caller-supplied metadata about a realm's own
+// suspend threshold; it says nothing about how many handlers the machine's
+// real (opaque) `H` has, so a realm's shorter prefix does not license
+// another realm to extend it — that extending realm's tag at the extended
+// position sits BELOW ITS OWN threshold (dispatched, not suspended), and
+// could reach a real handler `H` has there. Refusing on any length
+// difference is what keeps this check sound.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
 #[serial]
-fn accepted_strict_extension() {
+fn refused_strict_extension() {
     in_test_thread(|| {
         arm_gc_hazards();
         let table = adversarial_table();
@@ -416,11 +432,118 @@ fn accepted_strict_extension() {
         let long = owned(&["FileIO", "Proc", "Memory"]);
 
         let a = park_fragment(&mut machine, &table, RealmId(0), "a", 1, 1, &short);
-        let b = park_fragment(&mut machine, &table, RealmId(1), "b", 2, 2, &long);
+        assert_rooting_receipt(&machine, 1);
+
+        let before_ids = machine.parked_ids();
+        let before_parked = machine.parked_count();
+        let before_roots = machine.stowed_roots_count();
+
+        let err = try_park_fragment(&mut machine, &table, RealmId(1), "b_refused", 2, 2, &long)
+            .expect_err("a strict extension of the established prefix must be refused");
+        match err {
+            JitError::IncompatibleHandledPrefix {
+                established,
+                incoming,
+                mismatch,
+            } => {
+                assert_eq!(established, short, "error must name the established prefix");
+                assert_eq!(incoming, long, "error must name the incoming prefix");
+                assert_eq!(
+                    mismatch,
+                    PrefixMismatch::Length,
+                    "an extension disagrees in length, not at a shared position"
+                );
+            }
+            other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
+        }
+
+        // The machine is untouched by the refusal.
+        assert_eq!(machine.parked_ids(), before_ids, "parked_ids unchanged");
+        assert_eq!(
+            machine.parked_count(),
+            before_parked,
+            "parked_count unchanged"
+        );
+        assert_eq!(
+            machine.stowed_roots_count(),
+            before_roots,
+            "stowed_roots_count unchanged"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        // A subsequent COMPATIBLE park still succeeds — the established
+        // prefix was not corrupted by the refused attempt.
+        let c = park_fragment(&mut machine, &table, RealmId(2), "c", 3, 3, &short);
         assert_rooting_receipt(&machine, 2);
 
         resume_and_verify(&mut machine, a, 1, 1);
-        resume_and_verify(&mut machine, b, 2, 2);
+        resume_and_verify(&mut machine, c, 3, 3);
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+/// Mirror of `refused_strict_extension`: the ESTABLISHED prefix is the
+/// longer one this time, and the shorter incoming prefix is refused too —
+/// exact-length equality is symmetric even though which park sets the
+/// established prefix is not.
+#[test]
+#[serial]
+fn refused_strict_extension_established_longer() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine = new_machine(&table);
+
+        let long = owned(&["FileIO", "Proc", "Memory"]);
+        let short = owned(&["FileIO", "Proc"]);
+
+        let a = park_fragment(&mut machine, &table, RealmId(0), "a", 1, 1, &long);
+        assert_rooting_receipt(&machine, 1);
+
+        let before_ids = machine.parked_ids();
+        let before_parked = machine.parked_count();
+        let before_roots = machine.stowed_roots_count();
+
+        let err = try_park_fragment(&mut machine, &table, RealmId(1), "b_refused", 2, 2, &short)
+            .expect_err("an established prefix longer than the incoming one must be refused");
+        match err {
+            JitError::IncompatibleHandledPrefix {
+                established,
+                incoming,
+                mismatch,
+            } => {
+                assert_eq!(established, long, "error must name the established prefix");
+                assert_eq!(incoming, short, "error must name the incoming prefix");
+                assert_eq!(
+                    mismatch,
+                    PrefixMismatch::Length,
+                    "an extension disagrees in length, not at a shared position"
+                );
+            }
+            other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
+        }
+
+        assert_eq!(machine.parked_ids(), before_ids, "parked_ids unchanged");
+        assert_eq!(
+            machine.parked_count(),
+            before_parked,
+            "parked_count unchanged"
+        );
+        assert_eq!(
+            machine.stowed_roots_count(),
+            before_roots,
+            "stowed_roots_count unchanged"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        let c = park_fragment(&mut machine, &table, RealmId(2), "c", 3, 3, &long);
+        assert_rooting_receipt(&machine, 2);
+
+        resume_and_verify(&mut machine, a, 1, 1);
+        resume_and_verify(&mut machine, c, 3, 3);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();
@@ -459,12 +582,13 @@ fn refused_disagreeing_a_then_b() {
             JitError::IncompatibleHandledPrefix {
                 established,
                 incoming,
-                position,
+                mismatch,
             } => {
                 assert_eq!(established, row_a, "error must name the established prefix");
                 assert_eq!(incoming, row_b, "error must name the incoming prefix");
                 assert_eq!(
-                    position, 1,
+                    mismatch,
+                    PrefixMismatch::Position(1),
                     "FileIO agrees at 0; Memory vs Proc disagrees at 1"
                 );
             }
@@ -522,11 +646,11 @@ fn refused_disagreeing_b_then_a() {
             JitError::IncompatibleHandledPrefix {
                 established,
                 incoming,
-                position,
+                mismatch,
             } => {
                 assert_eq!(established, row_b);
                 assert_eq!(incoming, row_a);
-                assert_eq!(position, 1);
+                assert_eq!(mismatch, PrefixMismatch::Position(1));
             }
             other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
         }
@@ -590,11 +714,11 @@ fn established_prefix_survives_resume_to_completion() {
             JitError::IncompatibleHandledPrefix {
                 established,
                 incoming,
-                position,
+                mismatch,
             } => {
                 assert_eq!(established, base);
                 assert_eq!(incoming, disagreeing);
-                assert_eq!(position, 1);
+                assert_eq!(mismatch, PrefixMismatch::Position(1));
             }
             other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
         }
@@ -667,11 +791,11 @@ fn refused_disagreeing_completing_run_never_executes() {
             JitError::IncompatibleHandledPrefix {
                 established,
                 incoming,
-                position,
+                mismatch,
             } => {
                 assert_eq!(established, row_a);
                 assert_eq!(incoming, row_b);
-                assert_eq!(position, 1);
+                assert_eq!(mismatch, PrefixMismatch::Position(1));
             }
             other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
         }
@@ -748,11 +872,11 @@ fn establishment_on_completion_then_refuses_disagreeing() {
             JitError::IncompatibleHandledPrefix {
                 established,
                 incoming,
-                position,
+                mismatch,
             } => {
                 assert_eq!(established, row_a);
                 assert_eq!(incoming, row_b);
-                assert_eq!(position, 1);
+                assert_eq!(mismatch, PrefixMismatch::Position(1));
             }
             other => panic!("expected IncompatibleHandledPrefix, got: {other}"),
         }

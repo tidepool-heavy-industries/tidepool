@@ -78,6 +78,29 @@ use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 use crate::yield_type::Yield;
 
+/// Why an incoming handled prefix was refused against the machine's
+/// established one ([`JitEffectMachine::check_prefix_compatible`]). Two
+/// non-empty prefixes must be EXACTLY EQUAL, so a disagreement is either a
+/// length difference (not reducible to any shared position — naming one
+/// would be misleading) or, at equal length, a content disagreement at a
+/// specific position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixMismatch {
+    /// Both prefixes are non-empty but of different lengths.
+    Length,
+    /// Same length, but the prefixes disagree at this 0-based position.
+    Position(usize),
+}
+
+impl std::fmt::Display for PrefixMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefixMismatch::Length => write!(f, "differing lengths"),
+            PrefixMismatch::Position(position) => write!(f, "position {position}"),
+        }
+    }
+}
+
 /// Error type for JIT compilation/execution failures.
 #[derive(Debug, thiserror::Error)]
 pub enum JitError {
@@ -105,17 +128,20 @@ pub enum JitError {
     /// Refused at ENTRY to the parked path, before the machine is driven at
     /// all (never a machine invariant violation — a caller/configuration
     /// error, so `Err`, not a panic): the realm's handled-effect prefix
-    /// disagrees, at `position`, with the prefix the machine already
-    /// established from an earlier entry. See
-    /// [`JitEffectMachine::enter_parked_path`].
+    /// disagrees with the prefix the machine already established from an
+    /// earlier entry. Two non-empty prefixes must be EXACTLY EQUAL — an
+    /// empty prefix never produces this error, it is compatible with
+    /// anything. See [`JitEffectMachine::check_prefix_compatible`] for why
+    /// exact equality is the sound check and what it does, and does not,
+    /// verify.
     #[error(
-        "realm handled-effect prefix disagrees with the machine's established prefix at \
-         position {position}: established {established:?}, incoming {incoming:?}"
+        "realm handled-effect prefix disagrees with the machine's established prefix \
+         ({mismatch}): established {established:?}, incoming {incoming:?}"
     )]
     IncompatibleHandledPrefix {
         established: Vec<String>,
         incoming: Vec<String>,
-        position: usize,
+        mismatch: PrefixMismatch,
     },
 }
 
@@ -2754,38 +2780,67 @@ impl JitEffectMachine {
 
     /// Check `incoming` — a realm's handled prefix, the effect names for tags
     /// `[0, suspend_tag)` in position order — against the machine's
-    /// established prefix, position-by-position up to the SHORTER of the two
-    /// lengths. `DispatchEffect` is positional over an `HList` and the
-    /// suspend test is `tag >= suspend_tag`; both are correct only relative
-    /// to one effect row whose handled effects occupy a contiguous low
-    /// prefix, so two realms sharing a machine must agree on that prefix
-    /// everywhere it overlaps.
+    /// established prefix. `DispatchEffect` is positional over an `HList`
+    /// and the suspend test is `tag >= suspend_tag`; both are correct only
+    /// relative to one effect row whose handled effects occupy a contiguous
+    /// low prefix, so two realms sharing a machine must agree on that prefix
+    /// exactly, not merely where they happen to overlap.
     ///
     /// An EMPTY `incoming` prefix is compatible with anything — this is the
     /// outer driver's threshold-zero row (`vec![runllmturn_decl()]`, handled
-    /// prefix empty). If the machine has not established a prefix yet, any
+    /// prefix empty: nothing handled, nothing ever dispatched, so it cannot
+    /// misroute). If the machine has not established a prefix yet, any
     /// `incoming` prefix is compatible (it may go on to become the
-    /// establishing one). Otherwise, agreement at every position up to the
-    /// shorter length is COMPATIBLE — this accepts a strict EXTENSION
-    /// (`[FileIO, Proc]` then `[FileIO, Proc, Memory]`) as well as an
-    /// identical prefix. A tag introduced by such an extension beyond the
-    /// machine's actual handler stack falls off the end of the `HList` as
-    /// `EffectError::UnhandledEffect` — a clean error, not a silent misroute,
-    /// but NOT a guarantee the extension is fully safe; only the shared
-    /// prefix is verified. Any disagreement within the shared length is
-    /// refused.
+    /// establishing one). Otherwise, two non-empty prefixes must be EXACTLY
+    /// EQUAL: a length difference is refused as [`PrefixMismatch::Length`]
+    /// (a strict EXTENSION, e.g. `[FileIO, Proc]` established against
+    /// `[FileIO, Proc, Memory]` incoming, is REFUSED, not accepted — see
+    /// below for why); equal length but disagreeing content is refused as
+    /// [`PrefixMismatch::Position`] at the first differing index.
+    ///
+    /// **Why exact equality, not agreement-up-to-the-shorter-length.** The
+    /// established prefix is CALLER-SUPPLIED metadata, not something read off
+    /// the machine's actual (compile-time monomorphized, runtime-opaque) `H`.
+    /// A realm declaring a shorter prefix says nothing about how many
+    /// handlers `H` really has — it may simply use a lower suspend
+    /// threshold. So accepting an extension is unsound: if `H` really does
+    /// have a handler at the extended position, the extending realm's tag
+    /// there is BELOW ITS OWN threshold (dispatched, not suspended), and it
+    /// reaches that handler — a silent misroute, exactly what this check
+    /// exists to prevent.
+    ///
+    /// **Why exact equality IS sound.** With every non-empty established
+    /// prefix on a machine equal to every other, and an empty prefix
+    /// dispatching nothing, every tag that is ever DISPATCHED (as opposed to
+    /// suspended) is strictly below the one common prefix length, and every
+    /// realm agrees on what sits at every position below that length. No
+    /// dispatched tag can therefore reach a position two realms disagree
+    /// about.
+    ///
+    /// **The residual, stated rather than glossed.** This check enforces
+    /// agreement AMONG realms sharing a machine; it cannot verify a declared
+    /// prefix against the actual, opaque `H` — a single realm parking alone,
+    /// or every realm agreeing with each other while all of them are wrong
+    /// about `H`, is not caught here. A wrong declared prefix, undetected by
+    /// any other realm's disagreement, remains the caller's responsibility.
     fn check_prefix_compatible(&self, incoming: &[String]) -> Result<(), JitError> {
         if incoming.is_empty() {
             return Ok(());
         }
         if let Some(established) = &self.established_prefix {
-            let shorter = established.len().min(incoming.len());
-            for position in 0..shorter {
-                if established[position] != incoming[position] {
+            if established.len() != incoming.len() {
+                return Err(JitError::IncompatibleHandledPrefix {
+                    established: established.to_vec(),
+                    incoming: incoming.to_vec(),
+                    mismatch: PrefixMismatch::Length,
+                });
+            }
+            for (position, (e, i)) in established.iter().zip(incoming.iter()).enumerate() {
+                if e != i {
                     return Err(JitError::IncompatibleHandledPrefix {
                         established: established.to_vec(),
                         incoming: incoming.to_vec(),
-                        position,
+                        mismatch: PrefixMismatch::Position(position),
                     });
                 }
             }
@@ -2796,7 +2851,12 @@ impl JitEffectMachine {
     /// Enter the parked path with `incoming` — a realm's handled prefix.
     /// Checks it against the machine's established prefix
     /// ([`Self::check_prefix_compatible`]) and, if compatible, ESTABLISHES it
-    /// when this is the first non-empty prefix to enter.
+    /// when this is the first non-empty prefix to enter. Two non-empty
+    /// prefixes must be EXACTLY EQUAL to be compatible — see
+    /// [`Self::check_prefix_compatible`] for why that is sound (every
+    /// dispatched tag sits below the one common prefix length every realm
+    /// agrees on) and its residual (agreement AMONG realms, not verification
+    /// against the actual opaque `H`).
     ///
     /// `H` is fixed for the machine's life regardless of whether the
     /// entering turn goes on to suspend or complete, so establishing must
@@ -2819,6 +2879,24 @@ impl JitEffectMachine {
             self.established_prefix = Some(incoming.clone());
         }
         Ok(())
+    }
+
+    /// The rooting receipt (SEAM.md §1): every parked continuation must be a
+    /// registered GC root for its whole parked lifetime, so
+    /// `stowed_roots_count() == parked_count()` at every quiescent point the
+    /// registry passes through. `debug_assert_eq!` rather than a hard
+    /// assertion — a violation is a soundness bug worth crashing a debug or
+    /// test build over, but no release caller should pay a counting cost for
+    /// it. Call after every registry mutation: a park, a re-park during a
+    /// resume, a rejected resume that leaves the frame parked, a successful
+    /// removal, and a drain.
+    fn assert_rooting_receipt(&self) {
+        debug_assert_eq!(
+            self.machine_state.stowed_roots_count(),
+            self.continuations.len(),
+            "rooting receipt violated: stowed_roots_count() must equal the parked \
+             continuation count at every quiescent point"
+        );
     }
 
     /// Park a suspended continuation into the registry as a registered GC root
@@ -2868,6 +2946,7 @@ impl JitEffectMachine {
                 handled_prefix,
             },
         );
+        self.assert_rooting_receipt();
         id
     }
 
@@ -2878,6 +2957,13 @@ impl JitEffectMachine {
     /// `suspended_continuation` is left `None` throughout, so the machine stays
     /// usable: further fragments, further parked turns, and resumes of OTHER
     /// parked continuations all run against it while this one waits.
+    ///
+    /// `handled_prefix` must be EXACTLY EQUAL to every other non-empty
+    /// prefix already on this machine, or empty — see
+    /// [`Self::check_prefix_compatible`] for why that is the sound check
+    /// (not merely agreement up to a shared length) and its residual (it
+    /// enforces agreement AMONG realms, not verification against the
+    /// actual, opaque `H`).
     ///
     /// # Panics
     /// Panics on a non-session machine — heap retention across the suspension
@@ -2918,7 +3004,14 @@ impl JitEffectMachine {
     /// prefix to enter, BEFORE the machine is driven at all
     /// ([`Self::enter_parked_path`]) — an incompatible realm never executes a
     /// single effect against a foreign handler stack, whether or not it
-    /// would go on to suspend or complete. A disagreement refuses with
+    /// would go on to suspend or complete. Two non-empty prefixes must be
+    /// EXACTLY EQUAL to be compatible — a strict extension of the
+    /// established prefix is REFUSED, not accepted, because the established
+    /// prefix is caller-supplied metadata, not a read of the machine's
+    /// actual (opaque) handler stack (see
+    /// [`Self::check_prefix_compatible`] for the full argument and its
+    /// residual: this enforces agreement AMONG realms, not verification
+    /// against the real `H`). A disagreement refuses with
     /// `JitError::IncompatibleHandledPrefix` and leaves the machine
     /// untouched (nothing has run yet).
     ///
@@ -2964,7 +3057,13 @@ impl JitEffectMachine {
     /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
     /// to establish) via [`Self::enter_parked_path`] at the TOP of this
     /// method, before the continuation is driven at all — same discipline as
-    /// [`Self::run_fragment_suspendable_parked`]'s entry check.
+    /// [`Self::run_fragment_suspendable_parked`]'s entry check. The frame's
+    /// own prefix was already checked EXACTLY EQUAL to the machine's
+    /// established one when it first parked, and the established prefix is
+    /// monotonic, so this re-check cannot newly disagree — see
+    /// [`Self::check_prefix_compatible`] for why exact equality is sound and
+    /// its residual (agreement AMONG realms, not verification against the
+    /// real `H`).
     ///
     /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
     /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
@@ -3020,11 +3119,14 @@ impl JitEffectMachine {
         // disagree.
         self.enter_parked_path(&handled_prefix)?;
         if let ResumeInput::Answer(val) = &input {
-            answer_force_nf(val).map_err(|reason| {
-                JitError::Effect(EffectError::Handler(format!(
+            if let Err(reason) = answer_force_nf(val) {
+                // A5: rejected WITHOUT consuming — the frame stays parked and
+                // still rooted, so the rooting receipt must still hold.
+                self.assert_rooting_receipt();
+                return Err(JitError::Effect(EffectError::Handler(format!(
                     "resume answer is not in normal form (bottom in the answer): {reason}"
-                )))
-            })?;
+                ))));
+            }
         }
         // Answer verified NF (or this is an Abort) — NOW take the frame and
         // release its root. Every early return above left it parked and rooted.
@@ -3034,6 +3136,7 @@ impl JitEffectMachine {
             .expect("frame present (peeked above, &mut self held throughout)");
         let slot: *mut *mut u8 = &mut *frame.cell;
         self.machine_state.deregister_stowed_root(slot);
+        self.assert_rooting_receipt();
         // Read the GC-CURRENT pointer out of the cell: collections since the
         // park rewrote it in place through the registered slot.
         let continuation = *frame.cell;
@@ -3163,6 +3266,7 @@ impl Drop for JitEffectMachine {
             let slot: *mut *mut u8 = &mut *frame.cell;
             self.machine_state.deregister_stowed_root(slot);
         }
+        self.assert_rooting_receipt();
         // Clear this machine's persistent-root registry (whose slots point
         // into the session heap Vec, which drops with self after this).
         // Harmless for one-shot machines (free_session_heap does nothing if
