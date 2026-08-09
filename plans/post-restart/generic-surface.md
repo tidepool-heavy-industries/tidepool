@@ -119,36 +119,19 @@ re-derive. Spawns when a current lane closes (three-lane cap, Inanna
       the conflicting generic `render` from the unqualified Tidepool
       prelude vs hide it (a special prelude must not become a
       compatibility bucket). RESOLVED — removal approved; see the anchor.
-7. **`GCheckpoint` cutover** (added to this queue by root 2026-08-08,
-   sequenced AFTER the `askUser` swap, since this lane holds the interpreter
-   context). The custom checkpoint interpreter replaces the aeson-derived
-   encoding. **One constraint RELAXED from the anchor as first written
-   (Inanna):** wire-compatibility with today's encoding is the DEFAULT, not
-   a requirement. Where matching aeson's shape costs real complexity, BREAK
-   instead — breaking is cheap while dogfood is paused. A break must be
-   LOUD: a typed decode error naming the codec change, leading to
-   discard-and-restart. A silent misparse is the one unacceptable outcome.
-   This is the subsystem that produced both dogfood crashes, and it is a
-   REPLACEMENT rather than an addition — forms were sequenced ahead of it
-   precisely because they are additive.
+7. **HANDED OFF — `GCheckpoint` cutover + Form-builder deletion.** Cut
+   from this queue (Inanna, 2026-08-08): lanes that accumulate separable
+   work run too long, and appending these to a live lane was the textbook
+   case. They ride a fresh lane on the post-fold tip instead, so everything
+   this lane built sits underneath them rather than beside them. Spec:
+   [`checkpoint-codec-lane.md`](checkpoint-codec-lane.md) — carries the
+   GCheckpoint constraints, the confirmed silent-corruption target list,
+   the golden matrix, and the five interpreter facts a fresh dev would
+   otherwise rediscover.
 
-   **The current codec has CONFIRMED silent-corruption paths** (external
-   review, 2026-08-08). These are the concrete case for the
-   loudness-as-a-test requirement — not a hypothetical risk to guard
-   against, a list of live defects to fix and pin:
-   - `Nothing`, `Just x` and unit all collapse to `null` (`render.rs:127`).
-   - Three different constructor encodings emitted, while Haskell expects
-     `tag` (~`render.rs:259`).
-   - `Maybe` null-decode loses `Just ()` and nested `Just Nothing`.
-   - `ToJSON ()` emits `null` while `FromJSON ()` accepts only `[]`.
-   - Sentinel STRINGS instead of errors at depth limits.
-   - Scientific components defaulting to zero.
-
-   Golden-test matrix, derived from that list: nested `Maybe`, unit,
-   non-finite numbers, mixed-constructor sums, recursion, unknown fields,
-   depth overflow. Each case must produce either a correct round trip or a
-   LOUD typed decode error naming the codec change. A silent misparse is
-   the one unacceptable outcome, and "loud" is a test, not an intention.
+   **This lane ends at: rebase + gate, then the `askUser @T` swap +
+   `choose`/`chooseMany`, then submit.** Those are coupled to context this
+   lane holds; nothing else is.
 
 ## VERIFY
 
