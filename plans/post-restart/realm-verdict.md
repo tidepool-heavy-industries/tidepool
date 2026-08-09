@@ -361,3 +361,4 @@ continuation registry, the parked run/resume entries, `realm_multi_continuation.
 and `realm_cycle_scoped_drop.rs`. Rebased onto the current tree and green there.
 It is a prototype, not a landing: `suspended_continuation` and every existing
 entry are untouched, which is what a landing would collapse.
+
