@@ -14,15 +14,13 @@ pub fn emit_case(
     binder: &VarId,
     alts: &[Alt<usize>],
 ) -> Result<SsaVal, EmitError> {
-    // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
 
-    // 2. Bind case binder (save old value for restore)
-    // NOTE: EnvGuard cannot be used here because it would borrow ctx.env mutably,
-    // preventing the use of ctx in subsequent emit_* calls.
+    // Bind the case binder, saving the old value for restore below. EnvGuard
+    // can't be used here because it would borrow ctx.env mutably, preventing
+    // the use of ctx in subsequent emit_* calls.
     let old_case_binder = args.ctx.env.insert(*binder, scrut);
 
-    // 3. Classify alts
     let data_alts: Vec<_> = alts
         .iter()
         .filter(|alt| matches!(alt.con, AltCon::DataAlt(_)))
@@ -49,11 +47,9 @@ pub fn emit_case(
         crate::coverage::hit("case:litalt");
     }
 
-    // 4. Create merge block
     let merge_block = args.builder.create_block();
     args.builder.append_block_param(merge_block, types::I64);
 
-    // 5. Dispatch
     if !data_alts.is_empty() {
         emit_data_dispatch(
             EmitArgs {
@@ -128,7 +124,6 @@ pub fn emit_case(
     let result = args.builder.block_params(merge_block)[0];
     args.builder.declare_value_needs_stack_map(result);
 
-    // 6. Restore case binder
     args.ctx.env.restore(*binder, old_case_binder);
 
     Ok(SsaVal::HeapPtr(result))
@@ -141,7 +136,7 @@ fn emit_data_dispatch(
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
-    // 1. Force if needed (tag < 2: Closure or Thunk)
+    // Force if needed (tag < 2: Closure or Thunk).
     let tag = args
         .builder
         .ins()
