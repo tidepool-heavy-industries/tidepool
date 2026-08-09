@@ -139,6 +139,68 @@ filtered way, not the raw grep count, so it is apples-to-apples.
     "used to"/"the leak external review flagged" narration but kept the
     mechanism description (what would leak, and what prevents it now) intact.
 
+- `tidepool-codegen/src/host_fns/` pass (commits `8708a2fe..df9133d0`, one per
+  file; `cancel.rs`, `streaming.rs`, `primops.rs` needed no changes). Removed
+  review-ID/wave-label hits: `T6` (mod.rs, harmonized to the bare `leaf N`
+  numbering `machine_state.rs` — out of scope for this lane — already uses),
+  `M3`, `L1`, `L2`, `L3`, `L4`, `L8`, `S3-C1`/`S3-C2`/`S3-C3`/`S3-C6`, `Wave
+  1.A`/`Wave 1.B`, `component D`/`component K`, plus citations to
+  `repo-review-2026-07-06/01-gc-memory-safety.md` and
+  `codex-review-2026-08-08.md`. Kept as-is (not archaeology): GitHub issue/PR
+  citations (`#325`, `#273`, `#336`, PR #272 — consistent with the
+  `tidepool-effect`/`tidepool-repl` passes' precedent of keeping tracking
+  numbers), `segment 40` (self-described section title in this crate's own
+  `CLAUDE.md`), and `BUG-1`/`BUG-2` in `primops.rs` (the canonical names of
+  two still-live, still-tested regressions in `tests/proptest_host_arrays.rs`,
+  not a wave label — removing them would sever the comment-to-test link).
+  Four items are load-bearing enough to call out explicitly (invariants
+  preserved in the comments left behind, only the label/citation framing
+  dropped):
+  - `tidepool-codegen/src/host_fns/force.rs`'s `heap_force`: **prior bug — a
+    JIT call chain returning null without setting `has_runtime_error` (App's
+    `null_propagate_block` / `trampoline_resolve`'s defensive paths) could get
+    memoized as a thunk's `THUNK_EVALUATED` indirection; a LATER force
+    following that indirection dereferences the null pointer — segfault.**
+    Fixed by treating a null result the same as the `code_ptr == 0` case:
+    record `RuntimeError::BadPointer` and memoize the poison object (never
+    null) instead. Covered by
+    `test_heap_force_thunk_null_result_is_not_memoized_as_null`.
+  - `tidepool-codegen/src/host_fns/force.rs`'s `deep_force`: **prior bug — the
+    original loop re-registered every still-pending work item as a GC root on
+    every iteration, because a work item was a bare `*mut u8` inside a `Vec`
+    that reallocates as it grows; any root registered at a raw address into
+    that `Vec`'s backing buffer would dangle across a later `push`.** Fixed by
+    giving each work item its own heap-stable `RootedLocal` cell, registered
+    once at push and truncated once at pop — this relies on `work` staying a
+    strict LIFO stack (push children only after finishing their parent), an
+    invariant now stated directly in the function doc rather than in a
+    separate "M3" section.
+  - `tidepool-codegen/src/host_fns/errors.rs`'s `materialize_message` (Text
+    branch, `nf == 3`): **prior bug — this branch read the offset/len Con
+    fields without the null guard every other field access in the function
+    has; a `Text` value with a null offset field segfaulted inside
+    `read_small_int`'s `read_tag` instead of yielding a message-less error.**
+    Fixed by guarding null there too. Covered by
+    `materialize_message_text_null_offset_field_does_not_segfault`.
+  - `tidepool-codegen/src/host_fns/errors.rs`'s `MAX_CALL_DEPTH` /
+    `debug_app_return`: **prior bug — the call-depth counter was only ever
+    incremented, never decremented on return, so it measured TOTAL calls made
+    rather than live nesting; ~20k purely-sequential, non-nested applications
+    tripped the same `RuntimeError::StackOverflow` a genuinely 20k-deep
+    recursion would.** Fixed by decrementing in `debug_app_return` on every
+    return path, so the counter now bounds only concurrently-active,
+    unreturned calls. The doc comments on both `MAX_CALL_DEPTH` and
+    `debug_app_return` state this contract directly now instead of citing the
+    finding that fixed it.
+  - Also worth noting (not separately relocated — the invariant is fully
+    restated in the comment in place):
+    `tidepool-codegen/src/host_fns/gc.rs`'s `verify_heap_post_gc` BLACKHOLE
+    capture check documents that `for_each_pointer_field` (in
+    `tidepool-heap`, out of scope for this lane) once skipped tracing
+    `THUNK_BLACKHOLE` captures, which the fix in that crate closed; the
+    check here is now stated as pure defense-in-depth ("a second, redundant
+    check … not a gap"), not a live gap description.
+
 ## Uncertain-keep list
 
 Populated during the per-module passes below as items are found where the
