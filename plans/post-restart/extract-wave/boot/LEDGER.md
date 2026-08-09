@@ -142,6 +142,37 @@ write against code that does not survive.
    runs that fragment to completion, and a loop fragment carrying real
    effect sites then runs and suspends correctly on the same machine.
 
+### 2a. That audit turned up a live cross-lane hazard, now routed
+
+Following the mechanism through produced a finding this sub-TL did not
+set out to make, recorded by the wave TL at `df458ebc` and routed to
+sub-TL `spawn-latency`:
+
+`ConTags` needs all FIVE scaffolding constructors, but only `Val` is
+reachable in a pure entry term. `E`, `Union`, `Leaf`, `Node` are in the
+table today **only** because `collectDataCons` sweeps every home-module
+TyCon with no reachability filter — they are not in `wiredInDataCons`
+(`Translate.hs` ~2737). **D2 replaces exactly that sweep** with a
+reachability-derived closure, and as originally specified would have
+stripped four of the five and broken the boot path this wave is building.
+D2 now carries a correctness requirement to keep the five as mandatory
+roots, with its own pin on a pure entry term.
+
+The general shape, worth carrying forward: **the current table's
+over-collection is load-bearing in undocumented places.** This boot path
+depended on it and nobody had written that down.
+
+**Placement requirement (wave TL, binding).** `boot-lazy`'s test (2) — a
+loop fragment with real effect sites running on the render-booted machine
+and suspending at its hole — is the regression guard that catches D2
+getting this wrong. It therefore MUST live in a
+`tidepool-harness/tests/acceptance_*.rs` binary, so
+`scripts/battery-shard.sh tidepool-harness -E 'binary(/^acceptance_/)'`
+selects it — that shard is in D2's mandatory gate set. A guard sitting
+outside the other lane's gates catches nothing. The test's doc comment
+must say what it guards and why, so a later reader does not delete it as
+redundant.
+
 3. **Item 0b's landing is scoped to the mechanism + RunLLMTurn.** The
    vocabulary/row split is the mechanism; the policy for this landing is
    `row ∪ {RunLLMTurn}` at every call site. Deliberate, not a shortcut:
