@@ -349,10 +349,14 @@ impl Session {
     /// `Auto` item just works: the worker thread blocks inside `run_eval`
     /// (same stack), `session_resume` unblocks it, and the loop continues.
     ///
-    /// `Auto` items use the try-cascade: `run_def` is attempted first; on a
-    /// GHC parse error (not a type/scope error) the item falls back to
-    /// `run_eval`. Non-parse errors from `run_def` surface as-is — the item
-    /// is a declaration, just a broken one.
+    /// `Auto` items dispatch straight from this batch's classify verdict when
+    /// one is present (`Decl` → `run_def`, `Bind`/`Expr` → `run_eval`), never
+    /// paying for a doomed `run_def` probe GHC's own parser already ruled
+    /// out. Only when no verdict is available (the batch classify itself
+    /// failed) do they fall back to the try-cascade: `run_def` attempted
+    /// first, falling back to `run_eval` on a GHC parse error (not a
+    /// type/scope error — that means the item IS a declaration, just a
+    /// broken one, and surfaces as-is).
     fn run_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         items: &[BlockItem],
@@ -790,7 +794,8 @@ impl Session {
     /// for stmt/meta items and as the fallback when a decl batch fails. `verdict`
     /// is this item's precomputed classify verdict from `run_block`'s batch
     /// spawn (`None` for `Decl`/`Meta`, or when the batch classify failed);
-    /// only `run_eval` (on the `Stmt`/`Auto` paths) consumes it.
+    /// `run_eval` (on the `Stmt`/`Auto` paths) and `Auto`'s own dispatch below
+    /// both consume it.
     fn run_one_item<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         item: &BlockItem,
@@ -805,20 +810,32 @@ impl Session {
                 self.run_eval(&expr.0, verdict, handlers, captured),
             ),
             BlockItem::Meta(meta) => (ItemKind::Meta, self.run_meta(meta)),
-            BlockItem::Auto(expr) => {
-                // Try-cascade: attempt as declaration first. On a GHC parse
-                // error the item is not a decl → fall back to run_eval (bind
-                // vs expr internally). A non-parse failure (type/scope error)
-                // means it IS a declaration, just broken — surface the error.
-                let def_result = self.run_def(&expr.0);
-                match def_result {
-                    TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
-                        ItemKind::Stmt,
-                        self.run_eval(&expr.0, verdict, handlers, captured),
-                    ),
-                    other => (ItemKind::Decl, other),
+            // GHC's parser already classified this item (the block's batch
+            // `classify_block` spawn) — when that verdict is present, dispatch
+            // straight from it instead of paying for a doomed `run_def` probe
+            // first: a `Decl` verdict runs as a declaration directly, a
+            // `Bind`/`Expr` verdict runs `run_eval` directly. The try-cascade
+            // (attempt `run_def`, fall back to `run_eval` on a GHC parse
+            // error) is a degradation path for when NO verdict is available
+            // (the batch classify itself failed) — there, GHC's parser is the
+            // only way left to tell decl from stmt.
+            BlockItem::Auto(expr) => match verdict {
+                Some(v) if v.kind == TurnKind::Decl => (ItemKind::Decl, self.run_def(&expr.0)),
+                Some(_) => (
+                    ItemKind::Stmt,
+                    self.run_eval(&expr.0, verdict, handlers, captured),
+                ),
+                None => {
+                    let def_result = self.run_def(&expr.0);
+                    match def_result {
+                        TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
+                            ItemKind::Stmt,
+                            self.run_eval(&expr.0, verdict, handlers, captured),
+                        ),
+                        other => (ItemKind::Decl, other),
+                    }
                 }
-            }
+            },
         }
     }
 
