@@ -40,6 +40,14 @@ non-mechanical.
 
 - turn 1: table=164 constructors, fragment-reachable=24 → 6.8:1 (~15%)
 - turn 2: table=166, reachable=15 → 11.1:1 (~9%) — worsens as the table grows
+
+Phase-B measurement (2026-08-08, `11-turn-latency-contract.md`) RE-AIMS the
+spawn items: 60–66% of a turn's extract spawn is GHC's `core` phase,
+26–32% session boot, under 6% typecheck. The standing home-module
+typecheck suspicion is REFUTED — promote E6 (tiered -O2) and D1 (double
+translation of reachable Core), and read C1's double-compile suspicion
+against this breakdown before spending on it. Spawn count is no longer
+where the time is.
 - downstream: turn 1 emits 232 Cranelift funcs / 13,348 blocks for a
   24-constructor fragment
 - CAVEAT (carry with the number): "single-digit-to-low-teens percent
