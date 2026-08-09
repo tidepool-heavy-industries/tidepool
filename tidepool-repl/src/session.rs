@@ -3437,10 +3437,7 @@ mod reset_tests {
     /// `Session` level.
     #[test]
     fn reset_clears_stale_cancel_handle_from_slot() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let stack = tidepool_handlers::build_minimal_stack();
         let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
         let effects_dir =

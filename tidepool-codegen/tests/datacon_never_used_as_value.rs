@@ -346,10 +346,12 @@ fn positive_control_detects_constructor_referenced_as_a_value() {
 fn positive_control_tree_and_table_share_id_space() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/test/corpus_cbor");
     let meta_path = dir.join("meta.cbor");
-    if !meta_path.exists() {
-        eprintln!("SKIP {} (no meta.cbor — partial checkout)", dir.display());
-        return;
-    }
+    assert!(
+        meta_path.exists(),
+        "no meta.cbor at {} — this positive control needs the committed \
+         corpus_cbor fixtures; check the checkout",
+        meta_path.display()
+    );
     let meta = std::fs::read(&meta_path).unwrap();
     let table: DataConTable = read_metadata(&meta).unwrap().0;
     let table_ids: BTreeSet<DataConId> = table.iter().map(|dc| dc.id).collect();

@@ -191,10 +191,10 @@ result = do
 fn show_double_10_effects_full_mcp_with_library() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let user_lib = manifest.parent().unwrap().join(".tidepool").join("lib");
-    if !user_lib.join("Library.hs").exists() {
-        eprintln!("Skipping: .tidepool/lib/Library.hs not found");
-        return;
-    }
+    assert!(
+        user_lib.join("Library.hs").exists(),
+        ".tidepool/lib/Library.hs not found"
+    );
 
     let body = r#"say :: Text -> M ()
 say t = do

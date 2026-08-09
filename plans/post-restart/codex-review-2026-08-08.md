@@ -358,3 +358,41 @@ haskell/CLAUDE.md warns pruning *_u<n>.cbor drops `compared` below
 COMPARED_FLOOR, so naive regeneration breaks the floor it protects.
 All regeneration requests route through root (or the extract-wave TL
 within its subtree).
+
+### Item 14 second addendum (2026-08-09): three reds UNMASKED by the vacuity sweep
+
+Converting silent-negative skip sites to loud made three previously
+vacuous-green tests visibly red — pre-existing (stash-confirmed identical
+on unmodified files), newly observable:
+8. repro_decl_library_import (2 tests) — GHC "module not loaded",
+   session-aware multi-module decl-compile path
+9. dogfood_observability first test — same path/signature
+Same failure family; likely one root cause on the multi-module
+decl-compile path. Morning triage. (derived_sum_shape_equals_its_literal
+is FIXED on this tip and leaves the sanctioned list.)
+
+## 17. The Fork row has FIVE hand-maintained mirrors across two crates; the mock-derive fold fixed ONE (extract-wave sweep, 2026-08-09)
+
+Production truth: `fork_decl()` is in `standard_decls()`
+(tidepool-mcp/src/effect_decls.rs:261). Extract-wave's verified sweep
+found five hand-written copies of the standard effect row spelling it
+`… Ask, RunLLMTurn` with Fork omitted:
+
+    tidepool-testing/src/eval_harness.rs:403   EFFECT_NAMES list        — FIXED (mock-derive fold: now derived from standard_decls())
+    tidepool-testing/src/eval_harness.rs:486   mock module SOURCE (`type M = Eff '[…]`) — STALE
+    tidepool-testing/src/eval_harness.rs:804   same row in a doc comment                — STALE
+    tidepool-mcp/src/lib.rs:877                assertion on preamble content            — STALE, will FAIL in the tidepool-mcp shard
+    tidepool-mcp/src/lib.rs:887                second assertion, same file              — STALE, same
+
+The lib.rs assertions live in a shard nobody's current gates run, so the
+red is INVISIBLE until the centralized verification pass runs that crate.
+Fourth instance of the one-definition-N-mirrors family; the fixed list's
+own doc comment predicted its own drift while four sibling mirrors sat
+unmentioned.
+
+BUG-HUNT SCOPE — state the property, not the target: "no hand-written
+copy of the standard effect row survives" (grep the row shape; there may
+be a sixth spelling the sweep didn't match). NOT a blind string edit:
+adding Fork to the mock module source plausibly needs a matching GADT
+decl + stub handler in the mock, or every mock-compiling test breaks.
+Owner: the post-centralization verification pass.

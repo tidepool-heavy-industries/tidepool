@@ -23,6 +23,17 @@
 #                                               the calling pane dies). Prints pid +
 #                                               log path and returns immediately;
 #                                               poll the log across turns.
+#                                               GUARANTEE BOUND: detach survives
+#                                               the CALLING PANE dying (setsid).
+#                                               It does NOT survive box-level
+#                                               kill events (observed 2026-08-09:
+#                                               an overnight event took every
+#                                               detached waiter and job with it).
+#                                               A detached job is not durable —
+#                                               on any long gap, verify the job
+#                                               actually ran (log start/exit
+#                                               markers) before trusting a
+#                                               conclusion built on it.
 #                                               ENVELOPE: detach is about surviving
 #                                               the WAIT, not running legs in
 #                                               PARALLEL — at most ONE brokered leg
