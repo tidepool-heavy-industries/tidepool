@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 
 fn sample_spec() -> FormSpec {
     FormSpec {
+        // The FLAT path: no derived shape, which is what `None` means here.
+        shape: None,
         fields: vec![
             Field {
                 key: "mood".into(),
