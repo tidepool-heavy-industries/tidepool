@@ -1,4 +1,4 @@
-//! Wave 3b — session-eval turn compilation (the bind/reference extract seam).
+//! Session-eval turn compilation (the bind/reference extract seam).
 //!
 //! A `session_eval` turn is classified by GHC's parser (parse-only) into a BIND
 //! (`x <- action` / `let x = e`), an EXPR (bare expression), or a DECL
@@ -126,7 +126,7 @@ pub struct SessionBind<'a> {
 /// selection key template lookup is keyed on. `Decl` also selects a template
 /// — the extract's decl path requires `--turn-template decl=<file>` and
 /// errors without one — but a `Decl` verdict still never compiles through it;
-/// the template is only the parse wrapper (`wrap_decls`'s pragma block).
+/// the template is only the parse wrapper's pragma block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateSelector {
     /// A top-level declaration — selects the parse wrapper (never compiles).
@@ -195,9 +195,8 @@ pub struct TurnTemplate {
 }
 
 /// The decl template source `run_turn`'s `Decl` verdict selects — the parse
-/// wrapper the deleted `binders.rs`'s `wrap_decls` used to build per-call, now
-/// authored once and spliced via `{{TURN}}`. The pragma block is
-/// byte-identical to `wrap_decls`'s (moved verbatim, not retyped).
+/// wrapper for a top-level declaration, authored once and spliced via
+/// `{{TURN}}`.
 pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes #-}\nmodule SessionDecls where\n{{TURN}}\n";
 
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
@@ -561,7 +560,7 @@ fn read_compiled_turn(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
-    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     Ok(CompiledTurn {
@@ -1018,7 +1017,7 @@ pub fn compile_session_turn(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
-    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     let binders = if is_bind {
@@ -1703,8 +1702,7 @@ mod tests {
         // -- decl (rule 3), extension-gated syntax --
         //
         // `run_turn`'s decl branch wraps the turn text in the decl template's
-        // 17-extension pragma block before compiling (moved verbatim from
-        // the deleted `binders.rs`'s `wrap_decls`). Dropping the wrapper is a
+        // 17-extension pragma block before compiling. Dropping the wrapper is a
         // compile-boundary narrowing (a valid declaration stops compiling),
         // which is exactly the strict-superset violation the dialect rule
         // forbids. These three are confirmed (by direct probe of
@@ -1723,7 +1721,7 @@ mod tests {
             kind: TurnKind::Decl,
             binders: &["f"],
         },
-        // #321-class regression, decl side (see `quasiquote_bind` below for
+        // Quasiquote regression, decl side (see `quasiquote_bind` below for
         // the bind side): a quasiquote in a *declaration* body must still
         // classify and compile as a decl.
         Case {
@@ -1758,7 +1756,7 @@ mod tests {
             kind: TurnKind::Bind,
             binders: &["a", "b"],
         },
-        // #321-class regression: a quasiquote must still classify as a bind
+        // Quasiquote regression: a quasiquote must still classify as a bind
         // (QuasiQuotes is parse-only here — the quote is one token to the
         // parser).
         Case {
