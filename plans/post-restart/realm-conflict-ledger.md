@@ -157,10 +157,12 @@ drift is non-uniform within a file and because a small fraction of
 "line-number" corrections turn out to be semantic corrections wearing a
 line-number's clothes.
 
+| Z7 | 2026-08-08 | `git rebase harness-interaction-surface` (tip `ee5fb242`; parent advanced again during `submit_branch`) | `root.realm-spike` (this lane) | 15 commits replayed. Incoming diff: `plans/post-restart/extract-wave.md` only (+8) — **zero source files in any crate**. | Clean, 0 minutes. Triggered by `submit_branch` refusing with `needs_rebase` rather than by a ping — the tool enforces the cascade, which is why the parent's fold stays clean. Transfer proof carries forward unchanged (`git diff --name-only 81bf2c13 HEAD` outside `plans/` is empty), so the 684/684 at Z4 still describes this tree's source exactly. | 0 | no |
+
 ## Running tally
 
 - Conflicting folds: 3 (C1, C2, C3 — all this DOC file, never code)
-- Zero-conflict folds: 6 (Z1, Z2 folds; Z3, Z4, Z5, Z6 rebases)
+- Zero-conflict folds: 7 (Z1, Z2 folds; Z3, Z4, Z5, Z6, Z7 rebases)
 - Same-file concurrent edits: 3 (Z3 `jit_machine.rs`; Z4 and Z5 the same file vs an incoming restructuring fold) — still zero CODE conflicts
 - Total resolution minutes: 13 (C1 2, C2 6, C3 5)
 - **Anchor-drift re-verification cost: real but unmeasured in minutes** (Z4, Z6) — the largest non-conflict cost the experiment has found, now measured twice (once from the code side, once from a downstream doc-author's full re-check) with the same conclusion
