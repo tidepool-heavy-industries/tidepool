@@ -21,9 +21,22 @@
 //! reach for anything agent-shaped beyond an opaque identity.
 
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
+
+/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
+/// failed, from any underlying error with a `Display` impl (`std::io::Error`
+/// for I/O, `serde_json::Error` for a corrupt record).
+fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
+    WorktreeError::StorageFailure {
+        path: path.to_path_buf(),
+        detail: detail.to_string(),
+    }
+}
 
 /// An opaque agent identity. Deliberately a string newtype and not a typed
 /// agent handle: the coupled-spawn seam is on hold, and coupling this module to
@@ -82,15 +95,69 @@ pub struct Binding {
 ///
 /// Durable alongside the registry: a restart that forgot its bindings would
 /// happily hand a retained worktree to a second writer while the first is still
-/// running.
-#[derive(Debug, Default)]
+/// running. There is deliberately no in-memory-only constructor — every
+/// binding decision this table makes has to survive a crash, so `open` (not
+/// `new`) is the only way to get one.
+///
+/// One JSON file per worktree id under `root`, holding that worktree's full
+/// lease history (every agent that ever bound to it, each entry's `state`
+/// its outcome) — an append for `bind`, an in-place state edit for `settle`.
+/// The full history loads into memory at `open` so [`Self::current`] can stay
+/// a cheap borrow; every mutation re-persists just the affected worktree's
+/// file with the same temp-file/fsync/rename discipline as the registry.
+#[derive(Debug)]
 pub struct BindingTable {
+    root: PathBuf,
     bindings: Vec<Binding>,
 }
 
 impl BindingTable {
-    pub fn new() -> Self {
-        Self::default()
+    /// Open (creating if absent) a binding table rooted at `root`, loading
+    /// every persisted binding into memory.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
+
+        let mut bindings = Vec::new();
+        for entry in fs::read_dir(&root).map_err(|e| storage_failure(&root, e))? {
+            let entry = entry.map_err(|e| storage_failure(&root, e))?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
+            let mut rows: Vec<Binding> =
+                serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
+            bindings.append(&mut rows);
+        }
+
+        Ok(Self { root, bindings })
+    }
+
+    fn path_for(&self, worktree: &WorktreeId) -> PathBuf {
+        self.root.join(format!("{}.json", worktree.as_str()))
+    }
+
+    /// Rewrite the on-disk file for `worktree` from the current in-memory
+    /// rows, crash-safely (temp file in the same directory, fsync, rename).
+    fn persist(&self, worktree: &WorktreeId) -> Result<(), WorktreeError> {
+        let rows: Vec<&Binding> = self
+            .bindings
+            .iter()
+            .filter(|b| &b.worktree == worktree)
+            .collect();
+        let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
+        let path = self.path_for(worktree);
+        // `path_for` always joins onto `self.root`, so this always has a parent.
+        let dir = path.parent().expect("binding path has a parent directory");
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
+        tmp.write_all(&bytes)
+            .map_err(|e| storage_failure(&path, e))?;
+        tmp.as_file()
+            .sync_all()
+            .map_err(|e| storage_failure(&path, e))?;
+        tmp.persist(&path).map_err(|e| storage_failure(&path, e))?;
+        Ok(())
     }
 
     /// Bind an agent to a worktree.
@@ -104,18 +171,40 @@ impl BindingTable {
         agent: &AgentRef,
         now_ms: i64,
     ) -> Result<(), WorktreeError> {
-        let _ = (worktree, agent, now_ms);
-        todo!("L1")
+        if let Some(current) = self.current(worktree) {
+            return Err(WorktreeError::WorktreeBusy {
+                worktree: worktree.clone(),
+                holder: current.agent.to_string(),
+            });
+        }
+        self.bindings.push(Binding {
+            worktree: worktree.clone(),
+            agent: agent.clone(),
+            state: BindingState::Active,
+            bound_at_ms: now_ms,
+        });
+        self.persist(worktree)?;
+        Ok(())
     }
 
     /// Mark the current binding terminal or released, permitting a rebind.
+    /// A no-op (not an error) when there is no active binding to settle:
+    /// `error.rs` is frozen and has no variant for that case, and settling
+    /// twice is a harmless idempotent request rather than a domain failure.
     pub fn settle(
         &mut self,
         worktree: &WorktreeId,
         state: BindingState,
     ) -> Result<(), WorktreeError> {
-        let _ = (worktree, state);
-        todo!("L1")
+        let idx = self
+            .bindings
+            .iter()
+            .rposition(|b| &b.worktree == worktree && b.state == BindingState::Active);
+        if let Some(i) = idx {
+            self.bindings[i].state = state;
+            self.persist(worktree)?;
+        }
+        Ok(())
     }
 
     pub fn current(&self, worktree: &WorktreeId) -> Option<&Binding> {

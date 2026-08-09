@@ -11,12 +11,17 @@
 //! belongs to coding agents with their native tools, and Tidepool observes what
 //! the repository became.
 
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
-use crate::git::GitCli;
+use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
-use crate::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
+use crate::registry::{
+    now_ms, worktree_present, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
+    WorktreeRegistry, WorktreeSummary,
+};
 
 /// Tidepool's owned branch namespace. Every managed branch lives under this
 /// prefix so a managed branch can never collide with, or be mistaken for, a
@@ -28,6 +33,36 @@ pub const TIDEPOOL_BRANCH_PREFIX: &str = "tidepool/worktree";
 /// operator is invited to check out, and keeping it out of the branch namespace
 /// keeps it out of every `git branch` listing the operator reads.
 pub const TIDEPOOL_SNAPSHOT_REF_PREFIX: &str = "refs/tidepool/snapshots";
+
+/// Sanitize a caller-supplied label into the tail of a managed branch name.
+/// The label is never a path or an identity — only ASCII alphanumerics, `-`,
+/// `_`, `.`, and `/` survive; everything else becomes `-`, runs of separators
+/// collapse, and leading/trailing separators are trimmed. An empty result
+/// (e.g. an all-punctuation label) falls back to `"worktree"` rather than
+/// producing a branch name that ends in the bare prefix.
+fn sanitize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut last_was_sep = false;
+    for c in label.chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
+            c
+        } else {
+            '-'
+        };
+        let is_sep = c == '-' || c == '/';
+        if is_sep && last_was_sep {
+            continue;
+        }
+        last_was_sep = is_sep;
+        out.push(c);
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '/' || c == '.');
+    if trimmed.is_empty() {
+        "worktree".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
 /// What to seed a managed worktree from, and under what dirty-source policy.
 ///
@@ -168,18 +203,192 @@ impl WorktreeManager {
     /// materializing and finalize it after; a provisional row that never
     /// finalized is discoverable as such.
     pub fn create(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle, WorktreeError> {
-        let _ = spec;
-        todo!("L1 (clean) / L2 (dirty snapshot path)")
+        let id = self.registry.mint_id()?;
+        let resolved = self.resolve_source(spec, &id)?;
+
+        fs::create_dir_all(&self.worktree_root).map_err(|e| WorktreeError::StorageFailure {
+            path: self.worktree_root.clone(),
+            detail: e.to_string(),
+        })?;
+        let cwd = self.worktree_root.join(id.as_str());
+        let branch = BranchName::from_raw(format!(
+            "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
+            sanitize_label(&spec.label),
+            id.as_str()
+        ));
+
+        let provisional = WorktreeReceipt {
+            worktree_id: id.clone(),
+            cwd: cwd.clone(),
+            branch: branch.clone(),
+            source_head: resolved.seed.clone(),
+            snapshot_ref: resolved.snapshot_ref.clone(),
+            origin: resolved.origin.clone(),
+            source_repository: resolved.git_repository.clone(),
+            created_at_ms: now_ms(),
+            status: WorktreeRecordStatus::Provisional,
+        };
+        // Recorded before materializing: a crash between here and the
+        // `worktree add` below leaves a discoverable provisional row rather
+        // than a live worktree nothing recorded.
+        self.registry.put(&provisional)?;
+
+        let args: Vec<OsString> = vec![
+            "worktree".into(),
+            "add".into(),
+            "-q".into(),
+            "-b".into(),
+            OsString::from(branch.as_str()),
+            cwd.clone().into_os_string(),
+            OsString::from(resolved.seed.as_str()),
+        ];
+        self.git.try_run(&resolved.git_repository, &args)?;
+
+        let finalized = WorktreeReceipt {
+            status: WorktreeRecordStatus::Finalized,
+            ..provisional
+        };
+        self.registry.put(&finalized)?;
+
+        Ok(WorktreeHandle::from_receipt(finalized))
+    }
+
+    /// Resolve what commit a new worktree should be rooted at, and where.
+    fn resolve_source(
+        &self,
+        spec: &WorktreeSpec,
+        id: &WorktreeId,
+    ) -> Result<ResolvedSeed, WorktreeError> {
+        match &spec.source {
+            WorktreeSource::CurrentRepository => {
+                let (seed, snapshot_ref) =
+                    self.resolve_dirty_or_clean(&self.source_repository, spec.dirty_policy, id)?;
+                Ok(ResolvedSeed {
+                    seed,
+                    snapshot_ref,
+                    origin: WorktreeOrigin::CurrentRepository,
+                    git_repository: self.source_repository.clone(),
+                })
+            }
+            WorktreeSource::Ref(r) => {
+                // A named ref is already-committed content: there is nothing
+                // uncommitted to check, so no dirty/in-progress gate applies.
+                let out = self
+                    .git
+                    .try_run(&self.source_repository, &["rev-parse", r.as_str()])?;
+                Ok(ResolvedSeed {
+                    seed: GitOid::from_raw(out.trimmed()),
+                    snapshot_ref: None,
+                    origin: WorktreeOrigin::Ref(r.clone()),
+                    git_repository: self.source_repository.clone(),
+                })
+            }
+            WorktreeSource::Worktree(wid) => {
+                let handle = self
+                    .lookup(wid)?
+                    .ok_or_else(|| WorktreeError::WorktreeNotRegistered(wid.clone()))?;
+                let cwd = handle.cwd().to_path_buf();
+                let (seed, snapshot_ref) =
+                    self.resolve_dirty_or_clean(&cwd, spec.dirty_policy, id)?;
+                Ok(ResolvedSeed {
+                    seed,
+                    snapshot_ref,
+                    origin: WorktreeOrigin::Worktree(wid.clone()),
+                    git_repository: cwd,
+                })
+            }
+        }
+    }
+
+    /// Check `repo` clean/in-progress and produce the commit to root a new
+    /// branch at. An in-progress merge/rebase/cherry-pick refuses regardless
+    /// of `policy` — a synthetic commit of a half-merged tree is a
+    /// reproducible base for the wrong program, dirty-snapshot opt-in or not.
+    fn resolve_dirty_or_clean(
+        &self,
+        repo: &Path,
+        policy: DirtyPolicy,
+        id: &WorktreeId,
+    ) -> Result<(GitOid, Option<GitRef>), WorktreeError> {
+        if let Some(kind) = inspect::in_progress(&self.git, repo)? {
+            return Err(WorktreeError::SourceOperationInProgress(kind));
+        }
+        let summary = inspect::dirty_summary(&self.git, repo)?;
+        if summary.is_clean() {
+            let out = self.git.try_run(repo, &["rev-parse", "HEAD"])?;
+            return Ok((GitOid::from_raw(out.trimmed()), None));
+        }
+        match policy {
+            DirtyPolicy::RequireClean => Err(WorktreeError::SourceDirty(summary)),
+            DirtyPolicy::AllowDirtySnapshot => {
+                let temp_index_dir = self
+                    .worktree_root
+                    .join(".tidepool-snapshot-index")
+                    .join(id.as_str());
+                let receipt =
+                    crate::snapshot::snapshot_source(&self.git, repo, id, &temp_index_dir)?;
+                Ok((receipt.snapshot_commit, Some(receipt.snapshot_ref)))
+            }
+        }
     }
 
     /// Look a worktree up by durable id. `Err(WorktreeLost)` when it is
     /// registered but gone from disk; `Ok(None)` when it was never registered.
     pub fn lookup(&self, id: &WorktreeId) -> Result<Option<WorktreeHandle>, WorktreeError> {
-        let _ = id;
-        todo!("L1: must work in a FRESH process against only on-disk state")
+        match self.registry.get(id)? {
+            None => Ok(None),
+            Some(receipt) => {
+                if worktree_present(&receipt.cwd) {
+                    Ok(Some(WorktreeHandle::from_receipt(receipt)))
+                } else {
+                    Err(WorktreeError::WorktreeLost(id.clone()))
+                }
+            }
+        }
     }
 
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
-        todo!("L1")
+        self.registry.list()
     }
+
+    /// Fresh read of `handle`'s CURRENT git `HEAD`, performed at call time.
+    ///
+    /// This is PRD 19's `worktreeHead`. It is deliberately NOT
+    /// [`WorktreeHandle::source_head`] (the seed commit a managed branch was
+    /// rooted at, recorded once at `create` and frozen forever after) and NOT
+    /// anything [`crate::monitor::WorktreeMonitor`] last reconciled — the
+    /// verb exists precisely so a resident spanning cycles can see HEAD
+    /// movement the monitor never observed, closing the window between one
+    /// cycle's handlers unregistering and the next cycle's re-registering.
+    /// A cached or stale answer here silently reopens that exact gap.
+    ///
+    /// Lives on [`WorktreeManager`] rather than as a [`WorktreeHandle`]
+    /// method because a handle is a cheap value holding recorded facts — it
+    /// carries no [`GitCli`] — so anything a handle could answer on its own
+    /// would by construction be cached, which is the one thing this verb may
+    /// not be. Only the manager, which owns the `GitCli`, can perform a
+    /// fresh read.
+    ///
+    /// Fails [`WorktreeError::WorktreeLost`] under the same check `lookup`
+    /// uses, so a worktree removed from disk after the handle was obtained
+    /// is reported the same way everywhere in this crate. `git rev-parse
+    /// HEAD` resolves to the current commit whether the tree is on a normal
+    /// branch checkout or detached, so no special-casing is needed for
+    /// detached HEAD.
+    pub fn worktree_head(&self, handle: &WorktreeHandle) -> Result<GitOid, WorktreeError> {
+        if !worktree_present(handle.cwd()) {
+            return Err(WorktreeError::WorktreeLost(handle.id().clone()));
+        }
+        let out = self.git.try_run(handle.cwd(), &["rev-parse", "HEAD"])?;
+        Ok(GitOid::from_raw(out.trimmed()))
+    }
+}
+
+/// What a new worktree should be rooted at, and in which repository the
+/// `git worktree add` invocation must run.
+struct ResolvedSeed {
+    seed: GitOid,
+    snapshot_ref: Option<GitRef>,
+    origin: WorktreeOrigin,
+    git_repository: PathBuf,
 }

@@ -39,6 +39,48 @@ pub enum WorktreeError {
     #[error("managed worktree {0} is registered but missing on disk")]
     WorktreeLost(WorktreeId),
 
+    /// No registry record for this id — it was never registered here.
+    ///
+    /// DISTINCT FROM [`WorktreeError::WorktreeLost`], and the distinction is
+    /// the point: this is a typo or a stale id from another registry, while
+    /// `WorktreeLost` is data loss. Collapsing them hides the second behind the
+    /// first, so an operator investigating a vanished worktree would be told it
+    /// never existed. `lookup` distinguishes them by returning `Ok(None)` here;
+    /// paths that must produce a handle (seeding a worktree `fromWorktree` off
+    /// an unknown id) have no `None` to return and raise this instead.
+    #[error("no managed worktree registered with id {0}")]
+    WorktreeNotRegistered(WorktreeId),
+
+    /// The caller pointed the registry at a root inside a git working tree.
+    ///
+    /// A deployment misconfiguration rather than a per-call outcome, but typed
+    /// rather than a panic because it is the never-dirty-the-source invariant
+    /// caught at the one moment it can still be prevented, and a resident that
+    /// can catch it can fall back to a correct root instead of dying. Note the
+    /// check is the broader "inside ANY working tree", since `open` is given
+    /// only a root and not the source repository it must stay out of.
+    #[error("registry root {} resolves inside the git working tree at {} — the registry must live outside every source repository", .root.display(), .inside.display())]
+    InvalidRegistryRoot { root: PathBuf, inside: PathBuf },
+
+    /// Tidepool's OWN durable storage failed — the registry, the binding table,
+    /// or the event journal could not be read or written.
+    ///
+    /// Typed rather than a panic because of who is calling. A resident is a
+    /// long-running process driving many worktrees, and `ENOSPC` while
+    /// journalling one event should fail that cycle, not abort the process and
+    /// take every other worktree's in-flight work with it. Loud is required
+    /// here — the PRD is explicit that inability to journal or drain fails
+    /// loudly and commits are never silently dropped — but loud means an error
+    /// the caller must handle, not a crash it cannot.
+    ///
+    /// This is for genuine I/O failure against runtime-owned storage. Failures
+    /// that are unreachable-by-construction (serializing our own types) or that
+    /// indicate the machine is broken in a way no caller can act on (a system
+    /// clock before the Unix epoch) stay panics — a `Result` a caller can only
+    /// `unwrap` is noise.
+    #[error("tidepool storage failure at {}: {detail}", .path.display())]
+    StorageFailure { path: PathBuf, detail: String },
+
     /// A dirty submodule in the source. v1 refuses rather than snapshotting a
     /// gitlink whose pointed-at content it did not capture.
     #[error("dirty submodule is unsupported in v1: {}", .0.display())]
