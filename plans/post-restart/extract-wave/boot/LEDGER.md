@@ -644,6 +644,57 @@ Settled by a dev's mechanism read and this TL's direct grep, against two
 TLs' agreement — which is the reason a dev is told to contradict its TL
 when a stated mechanism does not match what it observes.
 
+### We enforced derive-don't-restate on code while violating it on the RULES
+
+The wave's most self-implicating finding, and therefore the one most likely
+to be true of whatever we build next.
+
+`OPERATIONAL.md`'s Block was pasted verbatim into every dev spec by
+standing instruction. **A pasted Block freezes at spawn time, and the Block
+changed ~10 times in one day** — throttle v1→v2, `detach`, the
+one-brokered-leg envelope, coverage denominators, the holder rule, the
+named-guard rule. Every spec pasted before an amendment carries the
+staleness **invisibly**: nothing in it announces that the source moved.
+
+The visible tip of it was the tier-1 self-contradiction (a dev copying the
+Block got both "wrap every invocation including the quick tier" and "tier
+1, safe unattended", the wrong one sounding more actionable). That was one
+contradiction inside one file; every pasted copy carried the same defect
+with no tell at all.
+
+**N pasted copies is exactly the antipattern the same file bans two
+sections down.** Third artifact today where duplication carried its own
+justification into a context where it stopped being true — after
+`EFFECT_NAMES` vs `standard_decls()`, and `FromJSON.hs:153`'s inherited
+comment. This one is ours.
+
+**Fix: read by REF, never `cat` the worktree copy** (wave TL, `b5e036cc`):
+
+    git show root.extract-wave:plans/post-restart/extract-wave/OPERATIONAL.md
+
+The first proposed fix was `cat` **in the dev's own worktree** — which
+carries the same defect one level down: a dev's copy is frozen at FORK
+time, earlier than spawn. Measured rather than argued, in this tree:
+
+    diff <(git show root.extract-wave:…/OPERATIONAL.md) plans/…/OPERATIONAL.md → DIFFERS
+
+Even this TL's copy was stale, one hop closer than any dev. A dev following
+that step 0 literally would read **a stale copy of the fix for staleness**.
+
+**`git show <ref>:<path>` is the absolute-parent-path equivalent for
+docs.** `$PWD/scripts/ghc-slots.sh` silently gave 3 slots when the broker
+had 6; a local `OPERATIONAL.md` silently gives yesterday's rules. Same
+shape, different artifact. Secondary benefit: `git show` puts the text in
+the dev's own transcript, so "did you read it" is answerable **from the
+record** rather than on trust — strictly better than the paste on the very
+axis the paste was defending.
+
+**Corollary — a TL's own messages are frozen at send time too.** Every dev
+was told: *if the canonical Block contradicts something I told you
+directly, the Block wins, and tell me so I reconcile.* Without that, we
+replace N pasted copies with N+1 authorities, the newest one hardest to
+notice **because it arrives as conversation rather than as a document.**
+
 ### Doctrine does not exempt the doctrine's carrier
 
 Recorded verbatim at the wave TL's request, because it is the sharpest
