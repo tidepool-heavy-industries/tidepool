@@ -223,6 +223,25 @@ children's merge-bases. Four things must happen at that boundary:
 Say in the rebase receipt which conflicts appeared and how they resolved —
 "kept both" is only checkable if it is stated.
 
+**The delta underneath this rebase keeps growing** — jit-chain-2, both
+codegen hardening devs, phase-b (one-spawn-turn) and realm-build (realm
+machine) have all folded at root. Two consequences worth knowing before
+reaching for a tool that worked earlier in this wave:
+
+- **phase-b landed a WIRE BREAK whose redeploy is deferred to dogfood
+  resume.** The DEPLOYED extract binary is therefore behind the tree. The
+  spike in `16-generic-spike-receipts.md` was run through `tidepool-repl`
+  against that deployed extract — a fast verification path, and NOT
+  available again until the redeploy happens. Per the one-format wire
+  policy a stale extract fails LOUD rather than silently misparsing, so
+  this shows up as an error rather than as wrong receipts; know what it is
+  when it appears. Verify through the tree's own extract
+  (`TIDEPOOL_EXTRACT` from a `cabal build`) instead.
+- `tidepool-harness/src/selfharness/driver.rs` is this lane's only real
+  overlap candidate with the phase-b turn work. Expect it as the likeliest
+  source-level conflict; plan docs aside, everything else this lane touched
+  is new files or files no other lane claimed.
+
 ## DONE CRITERIA
 
 - Spike verdict reported (either way) with receipts.
