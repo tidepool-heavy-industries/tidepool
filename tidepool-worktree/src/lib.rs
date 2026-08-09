@@ -37,7 +37,7 @@ pub mod registry;
 pub mod snapshot;
 pub mod testing;
 
-pub use binding::{AgentRef, Binding, BindingState};
+pub use binding::{AgentRef, Binding, BindingState, BindingTable};
 pub use create::{
     DirtyPolicy, WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec,
     TIDEPOOL_BRANCH_PREFIX, TIDEPOOL_SNAPSHOT_REF_PREFIX,
@@ -49,5 +49,7 @@ pub use journal::{EventJournal, JournalEntry};
 pub use monitor::{
     CommitReceipt, HeadChangeKind, HeadChangeReceipt, Observed, RepositoryEvent, WorktreeMonitor,
 };
-pub use registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
+pub use registry::{
+    WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSummary,
+};
 pub use snapshot::SnapshotReceipt;

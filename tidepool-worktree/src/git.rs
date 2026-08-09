@@ -170,6 +170,43 @@ pub mod inspect {
         Ok(PathBuf::from(out.trimmed()))
     }
 
+    /// One parsed `git status --porcelain=v1 -z` entry. `x`/`y` are the index
+    /// and worktree status columns; `path` is repository-relative.
+    struct StatusEntry<'a> {
+        x: char,
+        y: char,
+        path: &'a str,
+    }
+
+    /// Parse `-z` porcelain v1 output into entries, consuming the extra
+    /// `orig_path` field a rename/copy (`R`/`C` in either column) appends —
+    /// otherwise every entry after the first rename would misalign.
+    fn parse_porcelain_z(stdout: &str) -> Vec<StatusEntry<'_>> {
+        let mut parts: Vec<&str> = stdout.split('\0').collect();
+        if parts.last() == Some(&"") {
+            parts.pop();
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < parts.len() {
+            let entry = parts[i];
+            i += 1;
+            if entry.len() < 3 {
+                continue;
+            }
+            let bytes = entry.as_bytes();
+            let x = bytes[0] as char;
+            let y = bytes[1] as char;
+            let path = &entry[3..];
+            if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+                // Rename/copy entries carry an extra orig_path field.
+                i += 1;
+            }
+            out.push(StatusEntry { x, y, path });
+        }
+        out
+    }
+
     /// The source's dirty state, read without changing anything.
     ///
     /// Lives here rather than in [`crate::snapshot`] because BOTH the clean
@@ -177,12 +214,61 @@ pub mod inspect {
     /// (to record `pre_status`) need it, and two notions of "dirty" that drift
     /// apart would let a source be refused by one and captured differently by
     /// the other.
+    ///
+    /// Two reads: the first (no `--ignored`) classifies staged/unstaged/
+    /// untracked; the second (`--ignored=matching`) counts ignored paths
+    /// without asking the first read to carry a flag it does not need.
     pub fn dirty_summary(
         git: &GitCli,
         source: &Path,
     ) -> Result<crate::error::DirtySummary, WorktreeError> {
-        let _ = (git, source);
-        todo!("L1")
+        use std::collections::BTreeSet;
+
+        let out = git.try_run(
+            source,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+        )?;
+
+        let mut staged = BTreeSet::new();
+        let mut unstaged = BTreeSet::new();
+        let mut untracked = BTreeSet::new();
+        for e in parse_porcelain_z(&out.stdout) {
+            if e.x == '?' && e.y == '?' {
+                untracked.insert(e.path.to_string());
+                continue;
+            }
+            if e.x == '!' && e.y == '!' {
+                continue;
+            }
+            if e.x != ' ' {
+                staged.insert(e.path.to_string());
+            }
+            if e.y != ' ' {
+                unstaged.insert(e.path.to_string());
+            }
+        }
+
+        let ignored_out = git.try_run(
+            source,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+                "--ignored=matching",
+            ],
+        )?;
+        let ignored_excluded = parse_porcelain_z(&ignored_out.stdout)
+            .into_iter()
+            .filter(|e| e.x == '!' && e.y == '!')
+            .count();
+
+        Ok(crate::error::DirtySummary {
+            staged: staged.into_iter().collect(),
+            unstaged: unstaged.into_iter().collect(),
+            untracked: untracked.into_iter().collect(),
+            ignored_excluded,
+        })
     }
 
     /// Which in-progress operation, if any, the worktree at `cwd` is inside.
