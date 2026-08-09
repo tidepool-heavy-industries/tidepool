@@ -394,7 +394,9 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - One-format wire policy: extract changes that move the wire ship both
   sides via redeploy, fail loud on skew.
 - Correctness gates: hardened differential (floors), corpus_report,
-  extract-fidelity-test 26/26, harness acceptance. E6 additionally needs
+  extract-fidelity-test (ALL tests — report actual N/N, never match a
+  hardcoded number; it was 26 pre-D1-A and is 30 after), harness acceptance.
+  E6 additionally needs
   the full set with zero tolerance.
 
 ## D7 (measured live, 2026-08-08 dogfood): boot pays FOUR extract compiles

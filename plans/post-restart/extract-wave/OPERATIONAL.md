@@ -474,7 +474,13 @@ rules below — each is this rule applied to one artifact.
   `COMPARED_FLOOR` must not drop.
 - **corpus_report** — same shape,
   `-E 'test(corpus_report)'`.
-- **extract-fidelity-test 26/26** —
+- **extract-fidelity-test — ALL tests, report the actual N/N.** Do NOT match a
+  hardcoded number: this line said `26/26` and D1-A added four `D1Defense`
+  checks, making it `30/30`. A dev reporting `26/26` against a stale spec would
+  be reporting a **truncated run that matches the doc** — the denominator rule
+  defeated by the gate list itself. The count is whatever the suite currently
+  holds; report it and require zero failures.
+  (Historical: 26 pre-D1-A, 30 after.) Invocation —
   `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- bash -c 'cd haskell && cabal test extract-fidelity-test'`.
   26 of 26, no fewer.
 - **harness acceptance** — `scripts/battery-shard.sh tidepool-harness
