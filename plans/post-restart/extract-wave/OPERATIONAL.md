@@ -118,6 +118,24 @@ localized diffs and log it at fold):
   report.** Fixing a number is not evidence about its neighbours, and the
   feeling of having just been careful is actively misleading.
 
+  **REPORT THE HOLDERS, NOT JUST THE WAITERS** (boot, from being caught by it).
+  A queue-depth number names a SYMPTOM; the holder list names a CAUSE. When a
+  17-deep queue was escalated here, checking the four holders showed two were
+  the escalating lane's own child. Before reporting starvation, run
+  `lslocks | grep tidepool-ghc` and read BOTH columns — and check the holders'
+  ages and commands (`ps -o etime=,args= -p <pid>`), since a slot held for an
+  hour by a serialised run is a different problem from four slots doing work.
+
+  **AT MOST ONE BROKERED LEG PER DEV AT A TIME.** Sequence gate legs; do not
+  launch them concurrently. `detach` makes concurrency *easy* and does not make
+  it *permitted* — detach is about surviving the WAIT, not about running things
+  in PARALLEL. Those are independent, and a dev handed the mechanism without
+  the envelope will reasonably infer the wrong one.
+  The general form, boot's, and it is the companion to "a new mechanism
+  announced is not a mechanism adopted": **a mechanism adopted is not a
+  mechanism bounded.** When you hand down a capability, state its envelope in
+  the same breath.
+
   **KNOW THE NOISE FLOOR BEFORE CLAIMING A TREND** (spawn-latency, measured).
   On this box, `ghc_setup` ranged **68 → 287 ms across five turns at a FLAT
   module graph** — a 4.2x spread with zero growth in the thing being varied. So
