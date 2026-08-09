@@ -8,6 +8,19 @@ the `openai/codex` CLI source at git tag `rust-v0.146.0` (the tag matching
 `codex --version` → `codex-cli 0.146.0`). No app-server process was started
 and no ChatGPT token was spent producing this file.
 
+**Caveat that governs how to read every finding below: the generated JSON
+Schema in this directory is not a complete picture of the protocol.**
+`codex app-server generate-json-schema` (and whatever produced `codex-codes`'
+generated types) silently drops fields marked `#[experimental(...)]` in the
+CLI's own source — it does not mark them absent-but-gated, it omits them
+entirely. Reading the schema (or the crate) as the full protocol surface
+leads to the wrong conclusion that dynamic tools do not exist at 0.146.0.
+They do; they're just not discoverable from the schema. Section 1 below is
+the concrete case. Anywhere this document says a field or type is "present"
+or "typed," that claim is sourced from the CLI's own Rust source at the
+pinned tag, not from the schema alone — the schema was the starting point,
+never the last word.
+
 ## 1. Where does `dynamicTools` attach?
 
 **`ThreadStartParams.dynamicTools`** — a top-level field of the `thread/start`
@@ -169,3 +182,58 @@ crate `0.146.4`) is not the cause of this gap — the gap is that the crate's
 type generation drops fields the schema itself omits for experimental gating,
 at every version. A future crate bump will not fix this; the field needs
 hand-rolling for as long as `dynamicTools` stays experimental.
+
+## Finding: what `codex-codes` is actually doing for us, on the critical path
+
+Not a vendor-or-keep call — that's root's and the TL's, on evidence, not on
+the fact that the dependency is already added. This is the evidence.
+
+PRD 18's own rule: *"At the first material protocol or maintenance problem,
+vendor the required client code or replace it with a small Tidepool-owned
+Tokio stdio/JSONL adapter."* The dynamicTools gap above is arguably exactly
+that kind of problem — it sits on the one experimental surface the whole
+adapter exists to drive — so it's worth naming precisely what the dependency
+buys before deciding whether it's still earning its keep.
+
+**What `codex-codes` provides that this crate actually uses, on the vertical
+core's critical path:**
+- Process lifecycle: `AppServerBuilder` (binary resolution via `which`,
+  argument construction, stdio piping) and version-check preflight
+  (`check_codex_version_async`, harmless `codex --version` call, warn-only on
+  skew — confirmed non-fatal even against a newer CLI).
+- Raw framing: `RawAsyncClient` — newline-delimited JSON read/write over the
+  child's stdio, with a 10MB stdout buffer and a background stderr drain so
+  the app-server's ~200KB/s tracing output doesn't block it on a full pipe.
+  This crate uses ONLY this raw layer for phase 3/4, not the higher-level
+  `AsyncClient`, precisely because frame capture and the concurrent
+  turn/tool-call/completion read loop needed hand-written control flow either
+  way.
+- JSON-RPC envelope types: `JsonRpcRequest`/`JsonRpcResponse`/`JsonRpcError`/
+  `JsonRpcNotification`/`JsonRpcMessage`/`RequestId` — thin, ~120 lines
+  upstream (`src/jsonrpc.rs`), no correlation logic beyond the enum shape;
+  this crate does its own id-matching in `Session::request`/`drive_turn`
+  rather than using the crate's `AsyncClient::request` correlation loop
+  (needed to, per the dynamicTools gap and the concurrent-read requirement
+  above).
+- Generated wire types for the STABLE surface: `InitializeParams`/
+  `InitializeCapabilities`, all of `ThreadStartParams` except `dynamicTools`,
+  all of `TurnStartParams` including `outputSchema`, `DynamicToolCallParams`/
+  `DynamicToolCallResponse`, `Turn`/`ThreadItem`/`TurnStatus`,
+  `TurnCompletedNotification`, `SandboxPolicy`, `UserInput`,
+  `AbsolutePathBuf`. This is the bulk of what's actually load-bearing: several
+  thousand lines of generated serde structs this crate did not write and does
+  not want to maintain by hand.
+
+**What it does NOT provide on the critical path:** any type or field on the
+experimental surface (`dynamicTools` and its four supporting types, confirmed
+above), and no correlation/dispatch logic this crate actually calls (built its
+own instead, for reasons independent of the gap).
+
+**Net:** on the vertical core specifically, `codex-codes` is buying transport
+convenience (process spawn + raw framing + stderr handling) and a large body
+of generated STABLE-surface types, at the cost of one gap on the one
+experimental surface this adapter's reason for existing depends on — a gap
+that requires hand-rolling four small types now and staying alert to it on
+every future CLI bump, since it will not self-heal with a crate version bump.
+Whether that trade is worth vendoring instead is root's call; this crate has
+not needed anything from `codex-codes` beyond what's listed above.

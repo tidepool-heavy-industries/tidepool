@@ -35,6 +35,7 @@
 //! it at turn start — proving that is sufficient is the first thing this
 //! adapter does, before any run that spends a token.
 
+pub mod dynamic_tools;
 pub mod isolation;
 pub mod process;
 
