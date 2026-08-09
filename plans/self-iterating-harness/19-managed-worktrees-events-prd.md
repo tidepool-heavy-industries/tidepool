@@ -440,14 +440,16 @@ error to the SENDING resident's handler — loud, not lost — and any retry,
 There is no runtime delivery queue and no auto-enqueue on idle agents;
 PRD 18's message semantics stand unmodified.
 
-**V1 cycle shape (consequence of decided substrate, stated honestly):**
-the entire unfold/fold runs within ONE resident cycle, because durable
-agent handles across cycles are deferred (deferred question 2 here; PRD
-18 open decision 4) and PRD 18's v1 driver requires agent quiescence at a
-cycle boundary. The trade: no mid-tree checkpoint — a crash loses
-orchestration state back to the last checkpoint, while every worktree,
-branch, and receipt survives by ID for post-mortem and manual restart.
-Accepted for v1; revisit with durable agent identities.
+**Cycle shape (updated to PRD 18's revised summary, 2026-08-08):** agents
+may CONTINUE RUNNING between resident cycles — their stable identities and
+the resident's plan for them are ordinary checkpointed data. What still
+never crosses a cycle boundary: an attached Haskell handle, a parked
+Haskell continuation, or an event subscription. So the dev-tree unfold/
+fold can span cycles: each cycle re-registers its `withHandler` reactions
+from explicit `State` and stable worktree IDs, and re-attaches to running
+workers by checkpointed identity. A crash loses only the orchestration
+decisions since the last checkpoint; worktrees, branches, receipts, and
+still-running agent threads all survive and are re-discoverable by ID.
 
 ## Implementation plan
 

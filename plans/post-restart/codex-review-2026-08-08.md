@@ -198,3 +198,67 @@ unknown fields, depth overflow.
 | 6 | Extension drift | generic-surface |
 | 7 | D1 defense absent | extract-wave (spec amended in place) |
 | 8 | Checkpoint codec | generic-surface step 7 target list |
+
+## Second pass — engine review (2026-08-08, post-realm-fold, read-only)
+
+Overall verdict: the unified-machine direction is validated ("not an
+epicycle: permanent GC-rooted continuations plus per-frame realm state are
+the right primitives"); one machine can host the outer + answerer
+continuations with separate source capability rows. Tree is "halfway
+between prototype and production." Five findings:
+
+**9. HIGH — retryable resume error wedges ResidentSession.**
+`resident.rs:671` clears `pending` BEFORE calling the machine, but
+`jit_machine.rs:1328` deliberately leaves the continuation intact when
+answer NF-forcing fails (so the caller can retry). After that failure:
+machine still suspended, `pending` None, `is_idle()` wrongly true, next
+turn passes the resident check and panics on the machine's stowed-
+continuation assertion. Fix: the machine registry is authoritative —
+remove a public pending ID only when the frame was actually consumed; the
+current slot path needs the same clear-after-consume ordering.
+**Routed: dedicated dev (resident-pending-fix), narrow exception to the
+step-4 hold** (ordering fix + regression test only; the registry-only
+conversion still belongs to step 4).
+
+**10. MEDIUM — one-compile plan cites machinery Phase B did not build.**
+`one-compile-bootstrap.md:25` says render+loop multi-target emission comes
+from "Phase B's multi-binder machinery," but Phase B deferred that
+writeWholeModuleClosed work (`one-spawn-turn-protocol-phase-b.md:99`) and
+the writer still accepts exactly one target (`Main.hs:333`) — so all four
+boot compiles still exist. Recommendation adopted: adapt `--all-closed`'s
+existing multi-binder loop (`Main.hs:185`) into a STRICT explicit
+`--targets render,loop` mode (fail if either target fails; preserve
+per-target asks/warnings) rather than inventing multi-target extraction.
+**Routed: extract-wave (item 0 premise correction).**
+
+**11. MEDIUM — slot-and-registry exclusion is convention, not machine
+invariant.** The legacy slot entry (`jit_machine.rs:1213`) checks only the
+slot; a caller can park a realm then invoke a legacy suspendable entry,
+creating both suspension kinds; `resume_parked` then panics (:3165).
+Production integration must make this structurally impossible —
+registry-only ResidentSession (step 4) is the real fix.
+**Routed: interim machine-level guard (legacy suspendable entries assert
+`parked_count()==0`) to runner-unification's executor seam; structural fix
+stays step 4.**
+
+**12. MEDIUM — malformed classification silently becomes executable
+semantics.** `turn.rs:887` defaults missing/unknown kind to Expr, drops
+non-string binders, defaults malformed binder lists to empty — a corrupted
+or version-skewed "bind" verdict becomes a discard bind or expression
+instead of an infrastructure error, contradicting phase-b's own loud-
+VersionSkew philosophy. Fix: strict deserialization (only decl|bind|expr,
+required string-array binders, everything else rejected loudly).
+**Routed: dev (strict-classify), grouped with 13.**
+
+**13. LOW/PERF — REPL Auto ignores its own verdict.** `session.rs:808`
+pays batch GHC classification then still runs the obsolete decl-probe
+cascade, so an ordinary expression can cost classification + failed decl
+compile + expr compile. Fix: dispatch directly from a present verdict;
+keep the cascade only for the no-verdict degradation path.
+**Routed: dev (strict-classify).**
+
+The review's recommended order (pending fix → strict multi-target → seed
+deletion → registry-only conversion → one cycle-owned machine → prefix
+descriptor bound to cycle runtime) matches the standing plan: items 1-2
+route as above, 3 is extract-wave item 0, 4-5 are realm step 4 + PRD 18,
+6 is the contract's derive-don't-declare guidance already in force.
