@@ -314,12 +314,55 @@ pub trait ObservationSource: Send {
 /// and that monitor's own contract is that its restart baseline is its last
 /// JOURNALLED observation rather than an in-memory one. Keeping a second
 /// baseline here would silently override the durable one and lose exactly the
-/// between-cycle movement the journal exists to preserve. The only per-process
-/// state is the [`EvEventId`] counter, which is runtime identity (which views
-/// belong to one change) rather than a baseline, and is per-cycle by the same
-/// rule that makes subscriptions per-cycle.
+/// between-cycle movement the journal exists to preserve.
+///
+/// The two other pieces of state it carries are BOTH temporary — see the
+/// `WORKAROUND(wt-seam)` markers on the fields. Neither is a baseline and
+/// neither is an invariant of this adapter; both exist only until
+/// `tidepool-worktree`'s seam defects are fixed, and both must then be deleted
+/// rather than kept as belt-and-braces. Find every site with
+/// `grep -rn 'WORKAROUND(wt-seam)'`.
 pub struct MonitorObservations {
     monitor: tidepool_worktree::WorktreeMonitor,
+
+    /// WORKAROUND(wt-seam) — NOT an invariant of this adapter. It compensates
+    /// for a defect in ANOTHER crate.
+    ///
+    /// Defect: `WorktreeMonitor::reconcile` PANICS on an unregistered worktree
+    /// ("register() must run first", `tidepool-worktree/src/monitor.rs`). The
+    /// ids reaching `observe` come from author-supplied `Watch` values, so a
+    /// `withHandler` naming an unregistered worktree would abort the eval by
+    /// panic instead of failing as the typed `EventSourceLost` the authored
+    /// surface declares for that case.
+    ///
+    /// DELETE WHEN: `reconcile` returns a typed error for an unregistered id
+    /// instead of panicking. Then drop this field, drop the membership check in
+    /// `observe`, and map that error through `worktree_error_to_event_error`
+    /// like every other monitor failure. `register` itself stays — it is real
+    /// wiring, not part of the workaround.
+    ///
+    /// No test pins this field's behaviour; nothing goes with it.
+    registered: Vec<WtWorktreeId>,
+
+    /// WORKAROUND(wt-seam) — NOT an invariant of this adapter. It compensates
+    /// for a defect in ANOTHER crate.
+    ///
+    /// Defect: the monitor already mints an `EventId` per pass and journals
+    /// under it, but `reconcile` returns `Vec<RepositoryEvent>` with no id
+    /// attached, so the id that crosses to Haskell cannot be the journalled
+    /// one. Authors are unharmed — co-emitted views of one change still SHARE
+    /// an id, because this counter also advances once per pass — but an
+    /// `Observed.eventId` cannot be correlated with its journal row. The
+    /// absence is deliberately loud rather than papered over: re-deriving a
+    /// second id here would make correlation silently WRONG instead of
+    /// visibly ABSENT.
+    ///
+    /// DELETE WHEN: `reconcile` returns the id it already minted — e.g.
+    /// `Vec<Observed<RepositoryEvent>>`, using the `Observed<T>` already
+    /// exported from `monitor.rs`. Then drop this field and take the id from
+    /// each observation instead of minting one in `observe`.
+    ///
+    /// No test pins this field's behaviour; nothing goes with it.
     next_event_id: i64,
 }
 
@@ -327,8 +370,30 @@ impl MonitorObservations {
     pub fn new(monitor: tidepool_worktree::WorktreeMonitor) -> Self {
         Self {
             monitor,
+            registered: Vec::new(),
             next_event_id: 1,
         }
+    }
+
+    /// Start watching `worktree` at `path`, and record that `observe` may
+    /// reconcile it. Forwards to
+    /// [`WorktreeMonitor::register`](tidepool_worktree::WorktreeMonitor::register),
+    /// which establishes the starting baseline from the journal when it has one
+    /// (so movement during a process gap is still reported) and from a fresh
+    /// git read otherwise.
+    pub fn register(
+        &mut self,
+        worktree: WtWorktreeId,
+        path: std::path::PathBuf,
+    ) -> Result<(), EventError> {
+        let domain_id = tidepool_worktree::WorktreeId::from_raw(worktree.raw.clone());
+        self.monitor
+            .register(domain_id, path)
+            .map_err(worktree_error_to_event_error)?;
+        if !self.registered.contains(&worktree) {
+            self.registered.push(worktree);
+        }
+        Ok(())
     }
 }
 
@@ -339,6 +404,14 @@ impl ObservationSource for MonitorObservations {
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let mut out = Vec::new();
         for wire_id in worktrees {
+            // WORKAROUND(wt-seam) — another crate's defect, not an invariant
+            // here. `reconcile` panics on an unregistered id; the id came from
+            // an author's `Watch`, so it must fail typed instead. DELETE WHEN
+            // `reconcile` returns a typed error for an unregistered id (see the
+            // `registered` field's doc).
+            if !self.registered.contains(wire_id) {
+                return Err(EventError::EventSourceLost(wire_id.raw.clone()));
+            }
             let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
             let facts = self
                 .monitor
@@ -347,8 +420,13 @@ impl ObservationSource for MonitorObservations {
             if facts.is_empty() {
                 continue;
             }
-            // One id per PASS, shared by every view it produced — see
-            // `EvEventId`'s docs for why the sharing is the information.
+            // WORKAROUND(wt-seam) — another crate's defect, not an invariant
+            // here. The monitor already minted an id for this pass and
+            // journalled under it, but `reconcile` does not hand it back, so
+            // this stands in. One id per PASS keeps the authored invariant
+            // (co-emitted views share an id); what it cannot do is match the
+            // journal row. DELETE WHEN `reconcile` returns the id it minted
+            // (see the `next_event_id` field's doc).
             let event_id = EvEventId {
                 raw: self.next_event_id,
             };
