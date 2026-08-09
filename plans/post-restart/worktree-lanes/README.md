@@ -48,10 +48,29 @@ and captured differently by the other.
    coupling sync pass, which is Inanna's. Read that file for design pressure;
    do not edit it.
 
-Known divergence for that sync pass: `Harness.hs` writes `payload observed`
-where the PRD's `Observed` names its field `value`, and calls `pokeAgent =
-sendMessage` against a poke that the PRD has since made fire-and-forget. The
-PRD wins; the file is not ours to correct.
+Known divergences for that sync pass: `Harness.hs` writes `payload observed`
+where the PRD's `Observed` names its field `value`, and defines `pokeAgent =
+sendMessage` when `sendMessage`/`followupTask` no longer exist as separate
+operations — they are `pokeAgent`. The PRD wins; the file is not ours to
+correct.
+
+An earlier revision of this note claimed the second divergence was that
+`Harness.hs` assumes guaranteed delivery where the PRD had made pokes
+fire-and-forget. That is superseded and was propagated into a dev spec before
+being caught: Inanna's PRD 18 revision makes `pokeAgent` a DURABLE PER-AGENT
+QUEUE — a poke is accepted, stays queued until deliverable, is never silently
+discarded, and delivery to an idle agent starts or queues a follow-up turn.
+PRD 19's paragraph is synced at root's 930f326e. So a `headChanged` handler
+that just pokes and returns is correct, with no error-handling choreography
+for unsteerable agents; residents own REACTION policy, the runtime owns
+delivery.
+
+Also changed on root's tip (4eb9283b, 930f326e) and material to L4: agents may
+CONTINUE RUNNING between resident cycles, so the unfold/fold can span cycles
+and each cycle re-registers its `withHandler` reactions from explicit `State`
+and stable worktree IDs. What still never crosses a cycle boundary is
+unchanged and reinforced: an attached Haskell handle, a parked continuation, or
+an event subscription.
 
 ## Territory
 
