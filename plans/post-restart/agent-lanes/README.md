@@ -57,6 +57,31 @@ Wrapping cheap commands just burns slots another lane is waiting on.
 Slot wait over 15 minutes is **starvation — report it, do not bypass** and do
 not reach for `exclusive` to jump the queue.
 
+### Use `detach`, not `run` — a correctness fix, not a preference
+
+```
+/home/inanna/dev/tidepool/scripts/ghc-slots.sh detach -- <cmd>
+```
+
+Runs the wrapped command in its own session (`setsid`), prints a pid and a log
+path, returns immediately; poll the log across turns.
+
+**A plain `run` that is QUEUED gets killed by this environment's ~380s process
+kill before it ever acquires a slot.** You wait, you get killed, nothing ran —
+and there is no obvious signal separating that from a failed test. With three
+box-wide slots contended across three waves, that is the likely outcome, not a
+corner case. `detach` queues durably and releases its slot even if the pane
+dies.
+
+This supersedes the `ghc-slots.sh run --` spelling in the operational block
+below and in every dev spec in this directory. The absolute path and the
+never-`exclusive` rule are unchanged.
+
+**Enqueue hold (root, 2026-08-08):** new slot-taking work is held ~45 minutes
+or until root announces release — extract-wave has a dev killed-while-queued
+twice with a complete implementation, and it gets the next free slot. In-flight
+runs finish naturally; pure-Rust work continues under the throttle.
+
 ## Wave 1 lanes
 
 | Lane | Owns | Deliverable |
