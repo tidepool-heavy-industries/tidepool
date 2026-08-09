@@ -499,6 +499,40 @@ rules below — each is this rule applied to one artifact.
 
 ## Correctness gates (this wave's standard; sub-TLs enforce per item)
 
+> ## ⚠ CORRECTED 2026-08-09 — TWO OF THESE FOUR CANNOT SEE EXTRACTOR CHANGES
+>
+> **`haskell_suite_differential` and `corpus_report` NEVER INVOKE THE
+> EXTRACTOR.** Verified: zero references to `Command::new` / `compile_haskell`
+> / `TIDEPOOL_EXTRACT` in either; they replay **frozen CBOR** from
+> `haskell/test/suite_cbor/` (350 fixtures) and `haskell/test/corpus_cbor/`
+> (128). They are **JIT-vs-eval differentials**, and they pass identically
+> whether the extractor is correct or catastrophically broken.
+>
+> So for any item changing what the extractor EMITS — E6 (tiering shifts ids
+> and Core), D1-B (removes a metadata source), D2 (narrows the table) — **these
+> two prove nothing.** Demonstrated empirically: with a real fault injected,
+> both had no path to it.
+>
+> The instruments are correct; **the citation of them was wrong.**
+> `haskell/CLAUDE.md` documents that fixtures must be REGENERATED after
+> changing the serializer, and this gate list omitted that step — so we ran a
+> JIT differential and read it as extractor coverage. Same shape as the pinned
+> trio, one level up.
+>
+> **The honest extractor-coverage set is thinner than we were treating it:**
+> `extract-fidelity-test` (drives the real pipeline — but its fixtures never
+> touch JSON/Aeson, a real hole) and **harness acceptance** (spawns real
+> extracts end to end; that is why it costs ~1845s). Size extractor changes
+> against those two, and say so in the receipt.
+>
+> **FIXTURE REGENERATION IS A SEQUENCED WAVE-LEVEL ACTION, NOT A LANE'S CALL.**
+> `suite_cbor`/`corpus_cbor` are shared directories with other lanes in flight;
+> regenerating them is a shared-artifact mutation with the same blast radius as
+> a wire change. Ask your TL, who sequences it. Do NOT regenerate to make a
+> differential see your fault. (`haskell/CLAUDE.md` also warns that pruning
+> `*_u<n>.cbor` from `suite_cbor` drops `compared` below `COMPARED_FLOOR` — a
+> naive regeneration breaks the floor it was meant to protect.)
+
 - **hardened differential** with its floors — `haskell_suite_differential`
   (`#[ignore]`d + expensive: `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
   tidepool-codegen --run-ignored all -E 'test(haskell_suite_differential)'`).

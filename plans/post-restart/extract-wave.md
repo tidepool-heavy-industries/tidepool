@@ -393,6 +393,19 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
   referent at all**.)
 - One-format wire policy: extract changes that move the wire ship both
   sides via redeploy, fail loud on skew.
+- **GATE BAR CORRECTED 2026-08-09:** `haskell_suite_differential` and
+  `corpus_report` **never invoke the extractor** — verified, zero
+  `Command`/`compile_haskell`/`TIDEPOOL_EXTRACT` references; they replay frozen
+  CBOR from `suite_cbor`/`corpus_cbor` as JIT-vs-eval differentials. They
+  therefore **cannot observe any change to what the extractor emits** (E6, D1-B,
+  D2) and pass identically whether it is correct or broken. I named the hardened
+  differential as *the* gate for extractor changes in three specs; that was
+  wrong. Real extractor coverage is `extract-fidelity-test` (real pipeline; its
+  fixtures never touch JSON/Aeson — a known hole) plus harness acceptance (real
+  end-to-end extracts). Fixture REGENERATION is the missing prerequisite and is
+  a sequenced wave-level action, never a lane's call — shared directories,
+  redeploy-class blast radius, and a naive prune drops `compared` below
+  `COMPARED_FLOOR`.
 - Correctness gates: hardened differential (floors), corpus_report,
   extract-fidelity-test (ALL tests — report actual N/N, never match a
   hardcoded number; it was 26 pre-D1-A and is 30 after), harness acceptance.
