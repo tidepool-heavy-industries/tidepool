@@ -142,6 +142,50 @@ write against code that does not survive.
    runs that fragment to completion, and a loop fragment carrying real
    effect sites then runs and suspends correctly on the same machine.
 
+### 2b. Named-guard receipt rule (wave-wide, `19b8dca9`) — pushed to all devs
+
+> If a gate exists to catch ONE specific failure mode, the receipt must
+> show that specific test passing **by name, with its own pass line** —
+> not the aggregate that contains it. Where the guard is cross-lane, the
+> receipt must ALSO name the base commit it ran against.
+
+This closes the hole immediately past 2a's placement fix: getting a guard
+into a `binary(/^acceptance_/)`-selected file means the shard CAN run it,
+not that it DID. A renamed binary, an `#[ignore]`, a `cfg`, or an
+env-gated early return each leaves a correct tree, a green aggregate, and
+an unrun guard. Pushed to all four live devs with the specific tests named
+per lane (ConTags pins + spawn-count red-line; the `Member` negative test;
+fail-on-any-bad-target + per-target asks + COMPARED_FLOOR as a number).
+
+Third instance this wave of a label not establishing what its name
+implies — mislabeled timing rows, a guard outside its gate set, an
+aggregate standing in for a specific test. Treated as this wave's
+characteristic failure, not three coincidences.
+
+### 2c. The ConTags SUPPLIER attribution was also wrong (upstream, corrected)
+
+Recorded so this lane does not repeat it: the four non-`Val` scaffolding
+constructors do NOT arrive via `collectDataCons` (the unfiltered
+home-TyCon sweep). freer-simple is not vendored under `haskell/`, so its
+TyCons can never be in a home module's `mg_tcs`. The real supplier is
+`collectTransitiveDCons` — the binder-TYPE closure (`Translate.hs`
+~1094–1129) — reaching `Eff` → `Val`/`E` → `E`'s field types
+`Union effs b` / `FTCQueue (Eff effs) b a`. All five come from the TYPE,
+reachability-independent. Corrected upstream at `6df9482b`.
+
+Nothing in this lane changes: the pins are correct under either story, and
+the verdict that cleared wave 2 rested on the SEED ITSELF BEING PURE, not
+on where table entries come from.
+
+The lesson, passed to every dev as a reporting standard: **a correct
+conclusion can travel with a wrong mechanism, and the wrong mechanism is
+the dangerous half — it aims the fix at the wrong object.** A dev
+following the original note would have preserved `tyconMeta`, replaced
+`transitiveMeta`, and shipped the exact break the warning existed to
+prevent, while believing they had complied. Devs are instructed to report
+the mechanism they actually TRACED, with file and line, and to say so when
+it contradicts their spec.
+
 ### 2a. That audit turned up a live cross-lane hazard, now routed
 
 Following the mechanism through produced a finding this sub-TL did not
