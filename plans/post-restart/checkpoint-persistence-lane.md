@@ -167,19 +167,15 @@ do not confuse the two.
    application. Do not re-attempt prescriptive "add `deriving (Generic)`"
    text; it needs a typechecker plugin.
 
-**Known trap — `==` between a DERIVED sum and a hand-written literal.**
-`formShape @T == SumShape "T" [...]` dies with `[JIT] runtime_error kind=4
-(TypeMetadata)` + `runtime_strlen: bad pointer 0x0` + `[CASE TRAP]`.
-Reproduced 2026-08-09 and escalated to root; the failing test
-(`generic_form_roundtrip::derived_sum_shape_equals_its_literal`) is the
-tracking pin and must not be deleted.
-
-Constructing the literal is NOT the trigger: a multi-variant sum literal
-encodes fine on its own (0.235s, correct JSON), as does a one-variant one.
-An intermediate report claimed otherwise and did not reproduce. Assert from
-RUST on the returned `Value` (see `generic_form_wire`) rather than comparing
-against a Haskell literal, and escalate a fresh signature rather than
-designing around it.
+**Was-fixed note — `==` between a derived sum and a literal.** This
+crashed during the forms wave (`kind=4 TypeMetadata` / `bad pointer 0x0` /
+`[CASE TRAP]`) and is FIXED on trunk: `Translate.hs`'s `isTypeMetadataVar`
+discriminated Typeable sentinels by name prefix alone and could poison a
+load-bearing Generic-metadata literal; it now discriminates by RHS type
+shape. `generic_form_roundtrip::derived_sum_shape_equals_its_literal` is the
+regression pin. Golden matrices may compare against literals normally, and
+`generic_form_wire`'s assert-from-Rust style can be unwound at leisure — it
+was a workaround, not a requirement.
 
 **Before trusting ANY green from a GHC-heavy test: export
 `TIDEPOOL_EXTRACT`.** `tidepool_testing::eval_harness::extract_available()`

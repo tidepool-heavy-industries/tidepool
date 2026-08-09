@@ -232,25 +232,20 @@ children's merge-bases. Four things must happen at that boundary:
    one-field constructor and loads an address payload without requiring a
    literal tag; `0x1` is consistent with an unboxed tag word). **ConTags
    does not touch that path.** Therefore:
-   Outcome, settled by a preserved run:
-   - **Still fails** — reproduced on this tip (HEAD `c19cdade`), state
-     preserved: `[JIT] runtime_error kind=4 (TypeMetadata)` +
-     `runtime_strlen: bad pointer 0x0` + `[CASE TRAP] main_lambda_128`.
-     The `==` form is a real defect; repro is with root.
-   - **The trigger is the COMPARISON, per dev-2's original isolation.** An
-     intermediate report characterized it as a multi-variant sum LITERAL
-     dying on encode alone; that did NOT reproduce here. Run directly on
-     this tip, `encodeShape (SumShape "E" [VariantShape "A" UnitShape,
-     VariantShape "B" UnitShape])` PASSES in 0.235s with correct JSON, as
-     does the one-variant control. What fails is
-     `formShape @Two == SumShape "Two" [...]` — derived sum compared
-     against a literal.
+   **CLOSED — real defect, fixed on trunk.** `Translate.hs`'s
+   `isTypeMetadataVar` discriminated Typeable sentinels by NAME PREFIX
+   alone, so GHC's float-out naming could get a load-bearing
+   Generic-metadata string literal poisoned as a sentinel. It now
+   discriminates by RHS type shape. Verified red-then-green on both repros
+   (including this lane's preserved failing tree driven by the fixed
+   binary), with a non-Generic control program's CBOR byte-identical — the
+   fix un-poisons rather than perturbs.
 
-     The characterization flipped twice across two well-argued dev reports.
-     What settled it was a preserved failing run, not a better argument.
-   - Work around it by asserting from RUST on the returned `Value` (what
-     `generic_form_wire` does) rather than comparing against a Haskell
-     literal. Do not delete the failing test — it is the tracking pin.
+   `derived_sum_shape_equals_its_literal` goes green on the next rebase; it
+   stays as the regression pin. The characterization flipped twice across
+   two well-argued dev reports before a preserved failing run settled it —
+   `==` between a derived sum and a literal was the trigger, not building
+   the literal, which encoded fine in 0.235s.
    The hardening fix is not this lane's work — only its failure shape is.
 3. **`15-generic-surface-wave.md` is dual-edited** — this lane appended the
    resolved-`render` decision; root updated the checkpoint bullet. Keep
