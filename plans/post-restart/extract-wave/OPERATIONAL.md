@@ -99,6 +99,18 @@ about a NEIGHBOUR of the claim:
 | the canonical rules | a worktree copy frozen at fork |
 | what a tool is FOR | what it was observed doing |
 
+**THE EVIDENCE HIERARCHY** (spawn-latency): **"I ran it" beats "I found it",
+and both beat "it is cited."** With the addendum that is the whole reason the
+`pinned trio` survived unresolvable for so long: **three documents citing a set
+is not stronger evidence than one — it is the SAME evidence, repeated, and the
+repetition reads as corroboration.** A phrase gains apparent authority from
+being quoted, and quoting is not checking. Same trap as two agents converging
+on a wrong conclusion from the same misleading token: convergence is evidence
+only when the paths are independent.
+Corollary now standing (root): **every "pinned by X" / "guarded by X" claim
+resolves to enumerated test paths, or it carries the label UNVERIFIED.** Add
+"citable but unresolvable" to the hunt list for any audit.
+
 **A distinct sub-case worth naming** (spawn-latency), because it is not an
 instrument returning a plausible wrong answer — it is consulting the wrong KIND
 of source: **when a claim is about PURPOSE, the source of truth is the
