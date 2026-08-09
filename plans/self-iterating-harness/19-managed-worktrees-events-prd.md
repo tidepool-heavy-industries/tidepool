@@ -366,6 +366,23 @@ for traceability and restart diagnosis, not implicit callback replay.
 
 ## Exomonad integration, under human guidance
 
+> **Endgame decision (Inanna, 2026-08-08), superseding the open framing
+> below:** the exo swarm is ultimately HOSTED ON dev-tree — replacement,
+> not coexistence. Critically, exo's distinctive machinery (the MCP
+> sidecar, message routing) goes UNUSED in that future: it existed to
+> drive interactive Claude sessions, and dev-tree drives HEADLESS agents
+> directly through the backend adapter (PRD 18), which is strictly
+> simpler. Consequence: NOTHING from Exomonad is ported or adopted —
+> no hooksock adaptation, no inbox-reader extraction, no shared crate.
+> The L5 decision record stands as reference/prior-art documentation
+> only; its per-property analysis remains useful as a checklist of
+> reliability properties Tidepool's own designs must satisfy natively
+> (notify + periodic backstop, durable cursors, no-replay for fresh
+> readers), but the mechanisms are reimplemented Tidepool-native where
+> PRD acceptance criteria already demand them, not carried over. Goal 8
+> and the review-lane framing below are retained for historical context
+> of how this was decided.
+
 This is an explicit implementation lane. A Tidepool maintainer and an
 Exomonad-aware human/agent jointly map useful existing components and choose
 whether to extract a shared crate, adapt a proven pattern with tests, or retain
