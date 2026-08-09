@@ -292,6 +292,43 @@ dropping its only `recordDC` supplier removes it from metadata while it is still
 on the wire — precisely CHECK A's contract. That converts "the test happens to
 fire A" into "the test fires A for the reason CHECK A exists".
 
+### The provisional invariant, CHECKED at fold — conclusion holds, mechanism was imprecise
+
+I held the no-re-run argument provisionally and checked it against the diff.
+**The conclusion survives; the stated mechanism does not, and the correction
+matters for anyone reading the receipt later.**
+
+The dev's claim was "all three changes touch only `collectReachableConDCs` and
+CHECK B's severity, leaving CHECK A's path invariant." In `Main.hs`'s
+`assertMetaCoversEmitted`:
+
+    reachableMeta = map dcToMeta (collectReachableConDCs reachBinds)
+    nameById      = Map.fromList [ (dcmId m, dcmQualName m) | m <- reachableMeta ]
+    nameOf vid    = ... Map.lookup vid nameById
+    missingEmitted = emittedConIds nodes `Set.difference` allMetaIds
+
+- CHECK A's **FIRING CONDITION** (`missingEmitted`) depends on `emittedConIds`
+  and `allMetaIds` only. **Genuinely invariant** across all three changes.
+- CHECK A's **MESSAGE** resolves names through `nameById` ← `collectReachableConDCs`.
+  So the three changes DO reach CHECK A's path — its diagnostic text.
+
+Conclusion still holds for the physical-deletion receipt: `GHC.Num.Integer.IS`
+is neither an unboxed tuple (so the categorical exclusion does not drop it) nor
+a CallStack constructor (so the revert only adds to the map). Its resolution is
+unaffected and the message is byte-identical under the new shape. **No re-run
+owed** — but for a reason one step off the one stated.
+
+### Follow-up wart found in the same read (non-blocking, for D1-B)
+
+A MULTI-ELEMENT unboxed tuple **can** be emitted: `Translate.hs` ~2088-2090
+does `recordDC dc` then emits `FDataAlt (varId (dataConWorkId dc))` for the
+heap-box case. If such a constructor ever went missing from metadata, CHECK A
+would fire **correctly** — safety intact — but print `<name unresolvable>`,
+because `isUnboxedTupleDataCon` removed it from `nameById`. The exclusion is
+right for CHECK B's purpose and wrong for CHECK A's name lookup, which shares
+the same source. Fix at D1-B: build `nameById` from an UNFILTERED walk, keeping
+the filter only where CHECK B consumes it.
+
 **Still PROVISIONAL, to confirm against the diff at fold:** the dev's argument
 that the physical-deletion leg needs no re-run rests on all three changes
 touching only `collectReachableConDCs` and B's severity, leaving CHECK A's path
@@ -585,7 +622,7 @@ anyone reading this ledger before the report:
 | Item | Status | Measurement | Decision | Receipts |
 |---|---|---|---|---|
 | C1 measurement | **done** (`c1-timing`) | `01-c1-measurement.md`. `ghc_load` (=`load'` alone) is 28–32% of `extract.total`, second loop (`typecheck`+`core`) 62–69%, combined ~96–97% — demonstrated stable across a 1-min-loadavg swing of ~11→~34 (two arms, 6 samples each, ratio moved <2pp). `ghc_load` is 97–98% of `ghc_setup+ghc_load` in both arms — almost none of the historical "session boot 26–32%" was boot. Typecheck-suspicion REFUTED framing withdrawn mid-item (measures one of two typechecks); treated as OPEN. Session path reached (5 samples, sequence order) but the generation-count label is reconstructed from output text (SUSPECT, see report), not `Lib.G<n>` decl-chain scaling (UNANSWERED). | Evidence only, no decision recorded here (that's the wave TL's per spec) — see report §"Answers (3)" | wire-inertness ×2 (stdout+files byte-identical); `extract-fidelity-test` 26/26; `tidepool-harness` acceptance shard 24/24, 0 failed; `cargo check --workspace` clean |
-| D1-A defense | in flight (`d1-defense`) | — | — | — |
+| D1-A defense | **done** (`d1-defense`, folded) | CHECK A (emitted `NCon`/`FDataAlt` ids ⊆ meta) hard-fails pre-write; CHECK B (independent syntactic Core visitor, never calls the translator) downgraded to diagnostic — its invariant is false by design. `scanMeta` still present (removal is D1-B). | Both mutation legs name CHECK A — two constructors, two call sites. CHECK B's fatality retired on measured evidence, not preference. Does NOT move the wire (checks run pre-write, no output bytes change on a passing extraction). | `extract-fidelity-test` **30/30** (4 D1Defense checks by name, incl. an anti-vacuity control and a permanent pin on CHECK A's message); harness acceptance **20/24 → 24/24**; `corpus_report` **1/1**; `cargo nextest` quick **1862/1862, 9 skipped**; both mutation legs exit 1, output dir empty; `git status` restore proof empty (scoped + full-repo) |
 | D1-B removal | queued | — | — | — |
 | E6 tiered `-O2` | queued | — | — | — |
 | D2 runtime closure | queued | — | — | — |
