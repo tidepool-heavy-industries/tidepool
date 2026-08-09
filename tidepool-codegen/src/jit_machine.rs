@@ -607,6 +607,16 @@ pub(crate) struct RegistryGuard {
     /// The thread's `CURRENT_MACHINE` value before `install_registries`
     /// installed `machine_state` (null unless runs nest) — restored on drop.
     prev_machine: *mut MachineState,
+    /// Points at the owning `JitEffectMachine::continuations`, set by
+    /// `install_registries_with_cancel_flag`. Read at Drop time (after this
+    /// run's own park/resume has already mutated it) to decide whether
+    /// `parked_streams` is safe to clear — see the PARKED-STREAM LIFETIME note
+    /// on `Drop for RegistryGuard` below.
+    continuations: *const HashMap<ContinuationId, ContinuationFrame>,
+    /// Points at the owning `JitEffectMachine::suspended_continuation`, same
+    /// timing/rationale as `continuations` above (the single-slot path's
+    /// sibling state).
+    suspended_continuation: *const Option<*mut u8>,
 }
 
 /// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
@@ -678,7 +688,27 @@ impl Drop for RegistryGuard {
             (*self.machine_state).clear_cancel_flag();
             let _ = (*self.machine_state).take_runtime_error();
             let _ = (*self.machine_state).drain_diagnostics();
-            (*self.machine_state).clear_parked_streams();
+            // PARKED-STREAM LIFETIME: `parked_streams` is machine-global
+            // (`MachineState`, not per-frame), but a continuation can cross a
+            // suspend boundary — this run's own suspend, OR a sibling realm's
+            // — while still holding an UNFORCED streamed-response tail thunk
+            // (`host_fns::streaming`'s `alloc_stream_tail_thunk`/
+            // `alloc_element_thunk`) that names an entry in this map. Clearing
+            // unconditionally on every run's teardown (the pre-fix behavior)
+            // orphaned that entry the instant ANY run on the machine
+            // returned — including the very run that just parked it — so
+            // forcing the tail later hit a clean but wrong "registry entry
+            // missing (stale continuation?)" error even with no bug in the
+            // continuation itself. Clearing only when NOTHING is left
+            // suspended (neither the single slot nor the registry) defers the
+            // clear until the map is genuinely unreachable from any live
+            // continuation — see `realm_stream_registry_lifetime.rs` for the
+            // red (unconditional clear) / green (this guard) receipt.
+            let nothing_suspended =
+                (*self.continuations).is_empty() && (*self.suspended_continuation).is_none();
+            if nothing_suspended {
+                (*self.machine_state).clear_parked_streams();
+            }
             (*self.machine_state).reset_call_depth();
         }
         // D7: this drops only the thread-local's Rc *handle* to the lambda
@@ -924,6 +954,8 @@ impl JitEffectMachine {
             reclaim: None,
             machine_state: machine_state_ptr,
             prev_machine,
+            continuations: &self.continuations as *const _,
+            suspended_continuation: &self.suspended_continuation as *const _,
         }
     }
 
@@ -1850,6 +1882,36 @@ impl JitEffectMachine {
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
         self.pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
+        // GLOBAL-ID INVARIANT (codex-review-2026-08-08.md item 3): `json_con_ids`,
+        // `time_con_ids`, and `tags` (`ConTags`) below are MACHINE-GLOBAL —
+        // one slot each on `JitEffectMachine`/`MachineState`, not one per
+        // realm or per parked frame. Every `add_function` call on this
+        // machine (any realm) accumulates into the SAME three slots, and a
+        // later call's successfully-resolved ids OVERWRITE an earlier one's
+        // (re-resolved, not merged — see the `tags` comment below for the
+        // exact Err/Ok transition table). `resume_applied` reads `self.tags`
+        // (not a per-frame copy) to interpret a resumed continuation's own
+        // freer-simple envelope (`Val`/`E`/`Union`/`Leaf`/`Node`).
+        //
+        // This is safe ONLY because every realm sharing one machine is
+        // expected to agree on these ids: `Val`/`E`/`Union`/`Leaf`/`Node`
+        // (and, if used, the JSON `Either`/`I#`/`Text` / time constructors)
+        // come from the SAME fixed library modules for every realm compiled
+        // through this process, so in practice every table resolves them to
+        // the SAME numeric tags — this is what makes "last writer wins"
+        // harmless rather than a silent tag-confusion hazard. It is NOT
+        // guaranteed by any check here: a table that assigned a DIFFERENT
+        // numeric tag to one of these shared constructors would silently
+        // corrupt how an already-parked SIBLING realm's continuation gets
+        // interpreted on its next resume. What IS guarded, and load-bearing
+        // for realms in general, is that a realm's OWN domain constructors
+        // never go through this machine-global cache at all: `resume_parked`
+        // decodes exclusively against `ContinuationFrame::table` (A4, cloned
+        // once at park time), so two realms may freely reuse the SAME numeric
+        // `DataConId`/tag for DIFFERENT domain constructors without collision
+        // or shadowing — see `realm_global_id_isolation.rs` for the pinning
+        // test.
+        //
         // ACCUMULATE the primop constructor-id bundles (JsonDecode / ParseISO8601)
         // as fragments introduce constructors: upgrade None -> Some, never clobber
         // a resolved bundle. Each turn's table is a SUBSET of the session, so a

@@ -24,22 +24,52 @@
 //!        the heap, THEN resume both.
 //!   F4 — eight parks with distinct captured values, a GC forced between each,
 //!        resumed in a fixed shuffled order.
+//!   W1 — NESTED/MID-EFFECT: parked partway through an effect sequence (one
+//!        DISPATCHED effect answered inline, then a suspending ask) rather
+//!        than at a clean top-level ask.
+//!   W2 — STREAMED RESPONSE TAIL: the dispatched effect's answer is an
+//!        unforced lazily-streamed list, embedded unforced in the parked
+//!        continuation and only forced after resume.
+//!   W3 — FINALIZED CLOSURE PARK: suspended on a closure-valued `finalize`
+//!        (`ContinuationFrame::finalized_root` populated).
+//!   W4a/W4b — BINDING PARK: `ParkKind::Binding { forced: true }` /
+//!        `{ forced: false }`.
+//! (codex-review-2026-08-08.md item 5: F1-F4/A5 above only ever falsify ONE
+//! heap shape — a captured constructor chain across a clean top-level ask.
+//! W1-W4 widen that to the four shapes the review found unfalsified.)
 //!
 //! `stowed_roots_count() == parked_count()` is asserted at every step. That
 //! equality is the receipt that rooting — not luck, not timing — is what
 //! protects the parked continuations.
 //!
 //! WHICH CASES CARRY THE SAFETY CLAIM. Deleting the `register_stowed_root` call
-//! in `park_continuation` (the negative control) kills F3, F4, and the A5 case
-//! with a poisoned tag — but leaves F1 and F2 GREEN, because neither forces a
-//! collection between its parks. F1/F2 test the registry's ordering and
-//! bookkeeping; F3/F4 test memory safety. Read the results that way.
+//! in `park_continuation` (the negative control) kills F3, F4, the A5 case,
+//! and ALL FIVE of W1/W2/W3/W4a/W4b — every one of those forces a real
+//! collection (tripping the heap-doubling branch) with the continuation
+//! parked and nothing else protecting it, and every one dies with the same
+//! deterministic poisoned tag 221 (`force_ptr: unexpected heap tag 221`) on
+//! the resume that follows. F1 and F2 stay GREEN under the control, because
+//! neither forces a collection between its parks — they test the registry's
+//! ordering and bookkeeping, not memory safety. Read the results that way.
+//!
+//! W3 is a SPLIT CASE, confirmed by the same control run: its finalized
+//! PAYLOAD (taken via `take_parked_finalized_root` and checked for a live
+//! `TAG_CLOSURE` tag) stays GREEN under the control — that value is tenured
+//! into old-space and persistent-rooted by `tenure_finalized_payload` at
+//! SUSPEND time, before `park_continuation` (and therefore
+//! `register_stowed_root`) ever runs, so its safety comes from the OLD-SPACE
+//! persistent-root mechanism, not the stowed-roots registry. The frame's
+//! `resume_parked` call that follows (which threads `captured` — an ordinary
+//! nursery allocation — through the continuation) is what actually dies. Read
+//! W3 as: finalized-payload read = bookkeeping/independent-mechanism;
+//! continuation resume = safety case.
 //!
 //! The single-slot machinery (`suspended_continuation`, `run_child_fragment`,
 //! `enter_nested_child`, the L7 asserts) is the CONTROL GROUP and is untouched;
 //! `nested_child_gc_rooting.rs` remains its suite.
 
 use tidepool_codegen::emit::ExternalEnv;
+use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{
     ContinuationId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
 };
@@ -53,6 +83,8 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
+
+use tidepool_heap::layout as heap_layout;
 
 use serial_test::serial;
 
@@ -79,6 +111,28 @@ const ASK_TAG: u64 = 0;
 /// `Pair captured answerWrapped`.
 const PAIR_ID: DataConId = DataConId(2);
 
+// ─── shape-widening additions (W1-W4, plans/post-restart/codex-review-2026-08-08.md
+// item 5) — distinct ids, disjoint from the F1-F4/A5 ids above. ────────────
+
+/// list cons/nil, matching `EffectContext::respond_list`'s `":"`/`"[]"`
+/// name+arity lookup — used by W2's streamed tail.
+const CONS_ID: DataConId = DataConId(3);
+const NIL_ID: DataConId = DataConId(4);
+/// Boxed Int, what `ToCore for i64` wraps a streamed element in
+/// (`respond_list`'s pull-time conversion) — used by W2.
+const I_HASH_ID: DataConId = DataConId(5);
+/// `FinalizeWith site closure` (W4 shape in `realm_per_realm_fields.rs`'s
+/// numbering) — a 2-field Con whose field 1 is a raw closure. Used by W3.
+const FINALIZE_ID: DataConId = DataConId(16);
+/// 3-field constructor for W1/W2's deep-verify: `Triple captured mid answer`.
+const TRIPLE_ID: DataConId = DataConId(17);
+
+/// The internal (DISPATCHED) effect tag W1/W2 use before their own suspending
+/// ask — distinct from `ASK_TAG` so a single `suspend_tag` threshold (1)
+/// dispatches tag 0 and suspends tag 1.
+const MID_EFFECT_TAG: u64 = 0;
+const MID_ASK_TAG: u64 = 1;
+
 fn adversarial_table() -> DataConTable {
     let mut table = DataConTable::new();
     table.insert(DataCon {
@@ -99,6 +153,23 @@ fn adversarial_table() -> DataConTable {
         qualified_name: None,
         type_name: String::new(),
     });
+    for (id, name, tag, arity) in [
+        (CONS_ID, ":", 3u32, 2u32),
+        (NIL_ID, "[]", 4, 0),
+        (I_HASH_ID, "I#", 5, 1),
+        (FINALIZE_ID, "FinalizeWith", 16, 2),
+        (TRIPLE_ID, "Triple", 17, 3),
+    ] {
+        table.insert(DataCon {
+            id,
+            name: name.to_string(),
+            tag,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: String::new(),
+        });
+    }
     for (id, name, qual, arity) in [
         (VAL_ID, "Val", "Control.Monad.Freer.Val", 1u32),
         (E_ID, "E", "Control.Monad.Freer.E", 2),
@@ -215,6 +286,326 @@ fn assert_pair_result(v: &Value, expect_captured: i64, expect_answer: i64) {
             );
         }
         other => panic!("expected Pair(C1 captured, C1 answer), got {other:?}"),
+    }
+}
+
+// ─── W1/W2 — a NESTED / mid-effect suspend: one DISPATCHED effect (handled,
+// answered inline) precedes the suspending ask, so the parked continuation
+// closes over both a pre-existing captured value AND the dispatched effect's
+// materialized answer, not just a clean top-level ask. ────────────────────
+
+/// ```text
+/// let captured = C1 CAPTURED_N in
+///   E (Union (W# MID_EFFECT_TAG) (I# effectReq))
+///     (Leaf (\v1 ->
+///        E (Union (W# MID_ASK_TAG) (I# askReq))
+///          (Leaf (\v2 -> Val (Triple captured (C1 v1) (C1 v2))))))
+/// ```
+///
+/// `v1` — the DISPATCHED effect's materialized answer — is threaded into the
+/// continuation exactly like `captured`: both must survive whatever GC runs
+/// while the SECOND (suspending) effect is parked.
+fn build_mid_effect_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    let cap_lit = b.push(CoreFrame::Lit(Literal::LitInt(captured_n)));
+    let captured = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![cap_lit],
+    });
+
+    // Innermost: \v2 -> Val (Triple captured (C1 v1) (C1 v2))
+    let var_v1 = b.push(CoreFrame::Var(VarId(0)));
+    let c1_v1 = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![var_v1],
+    });
+    let var_v2 = b.push(CoreFrame::Var(VarId(2)));
+    let c1_v2 = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![var_v2],
+    });
+    let var_captured = b.push(CoreFrame::Var(VarId(1)));
+    let triple = b.push(CoreFrame::Con {
+        tag: TRIPLE_ID,
+        fields: vec![var_captured, c1_v1, c1_v2],
+    });
+    let val2 = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![triple],
+    });
+    let lam2 = b.push(CoreFrame::Lam {
+        binder: VarId(2),
+        body: val2,
+    });
+    let leaf2 = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam2],
+    });
+    let ask_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_ASK_TAG)));
+    let ask_request = b.push(CoreFrame::Lit(Literal::LitInt(ask_req)));
+    let ask_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![ask_tag_word, ask_request],
+    });
+    let e2 = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![ask_union, leaf2],
+    });
+
+    // Outer: \v1 -> e2
+    let lam1 = b.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: e2,
+    });
+    let leaf1 = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam1],
+    });
+    let effect_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_EFFECT_TAG)));
+    let effect_request = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![effect_tag_word, effect_request],
+    });
+    let e1 = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![effect_union, leaf1],
+    });
+
+    b.push(CoreFrame::LetNonRec {
+        binder: VarId(1),
+        rhs: captured,
+        body: e1,
+    });
+    b.build()
+}
+
+/// W2's sibling of [`build_mid_effect_suspend`]: identical shape, except `v1`
+/// (the dispatched effect's answer — a STREAMED list here) is embedded
+/// UNFORCED as the Triple's field directly, not wrapped in `C1`. Forcing it
+/// is left entirely to whoever deep-verifies the resumed result.
+fn build_streamed_tail_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    let cap_lit = b.push(CoreFrame::Lit(Literal::LitInt(captured_n)));
+    let captured = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![cap_lit],
+    });
+
+    // Innermost: \v2 -> Val (Triple captured v1 (C1 v2)) — v1 (the streamed
+    // tail) is passed through UNFORCED, unlike build_mid_effect_suspend.
+    let var_v1 = b.push(CoreFrame::Var(VarId(0)));
+    let var_v2 = b.push(CoreFrame::Var(VarId(2)));
+    let c1_v2 = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![var_v2],
+    });
+    let var_captured = b.push(CoreFrame::Var(VarId(1)));
+    let triple = b.push(CoreFrame::Con {
+        tag: TRIPLE_ID,
+        fields: vec![var_captured, var_v1, c1_v2],
+    });
+    let val2 = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![triple],
+    });
+    let lam2 = b.push(CoreFrame::Lam {
+        binder: VarId(2),
+        body: val2,
+    });
+    let leaf2 = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam2],
+    });
+    let ask_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_ASK_TAG)));
+    let ask_request = b.push(CoreFrame::Lit(Literal::LitInt(ask_req)));
+    let ask_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![ask_tag_word, ask_request],
+    });
+    let e2 = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![ask_union, leaf2],
+    });
+
+    let lam1 = b.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: e2,
+    });
+    let leaf1 = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam1],
+    });
+    let effect_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_EFFECT_TAG)));
+    let effect_request = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![effect_tag_word, effect_request],
+    });
+    let e1 = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![effect_union, leaf1],
+    });
+
+    b.push(CoreFrame::LetNonRec {
+        binder: VarId(1),
+        rhs: captured,
+        body: e1,
+    });
+    b.build()
+}
+
+/// W3's shape — identical to `realm_per_realm_fields.rs`'s
+/// `build_suspending_finalize` (closure-valued `finalize`), reproduced here
+/// (test binaries are separate crates) since W3 additionally forces a real
+/// collection while parked, which that file's A2 case does not:
+///
+/// ```text
+/// let captured = C1 CAPTURED_N in
+///   E (Union (W# ASK_TAG) (FinalizeWith site (\v -> v)))
+///     (Leaf (\v -> Val (Pair captured (C1 v))))
+/// ```
+fn build_finalize_suspend(captured_n: i64, site: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    let cap_lit = b.push(CoreFrame::Lit(Literal::LitInt(captured_n)));
+    let captured = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![cap_lit],
+    });
+
+    let var_v = b.push(CoreFrame::Var(VarId(0)));
+    let c1_v = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![var_v],
+    });
+    let var_captured = b.push(CoreFrame::Var(VarId(1)));
+    let pair = b.push(CoreFrame::Con {
+        tag: PAIR_ID,
+        fields: vec![var_captured, c1_v],
+    });
+    let val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![pair],
+    });
+    let lam = b.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: val,
+    });
+    let leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam],
+    });
+
+    let tag_word = b.push(CoreFrame::Lit(Literal::LitWord(ASK_TAG)));
+
+    let site_lit = b.push(CoreFrame::Lit(Literal::LitInt(site)));
+    let closure_var = b.push(CoreFrame::Var(VarId(2)));
+    let closure = b.push(CoreFrame::Lam {
+        binder: VarId(2),
+        body: closure_var,
+    });
+    let finalize_with = b.push(CoreFrame::Con {
+        tag: FINALIZE_ID,
+        fields: vec![site_lit, closure],
+    });
+
+    let union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![tag_word, finalize_with],
+    });
+    let e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![union, leaf],
+    });
+
+    b.push(CoreFrame::LetNonRec {
+        binder: VarId(1),
+        rhs: captured,
+        body: e,
+    });
+    b.build()
+}
+
+/// Dispatches `MID_EFFECT_TAG` by echoing the request straight back as the
+/// answer (no `ToCore`/table lookup needed) — panics on anything else,
+/// including the ask tag (which must suspend, not dispatch).
+struct MidEffectDispatch;
+impl DispatchEffect<()> for MidEffectDispatch {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &Value,
+        _cx: &EffectContext<'_, ()>,
+    ) -> Result<Response, EffectError> {
+        assert_eq!(
+            tag, MID_EFFECT_TAG,
+            "only the internal effect should dispatch; the ask must suspend instead"
+        );
+        Ok(Response::Complete(request.clone()))
+    }
+}
+
+/// Dispatches `MID_EFFECT_TAG` with a lazily-streamed 3-element list — any
+/// size takes the Park arm in `materialize_response_and_resume` when lazy
+/// results are enabled (the default), which is the mechanism W2 falsifies.
+struct StreamDispatch;
+impl DispatchEffect<()> for StreamDispatch {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        _request: &Value,
+        cx: &EffectContext<'_, ()>,
+    ) -> Result<Response, EffectError> {
+        assert_eq!(
+            tag, MID_EFFECT_TAG,
+            "only the internal effect should dispatch; the ask must suspend instead"
+        );
+        cx.respond_list(vec![10i64, 20i64, 30i64])
+    }
+}
+
+/// Deep-verify a resumed W1/W2 result: `Triple captured mid answer`.
+fn assert_triple_captured_and_answer(v: &Value, expect_captured: i64, expect_answer: i64) -> Value {
+    match v {
+        Value::Con(id, fields) if id.0 == TRIPLE_ID.0 && fields.len() == 3 => {
+            assert_eq!(
+                expect_int(&fields[0]),
+                expect_captured,
+                "captured value (bound BEFORE either effect) must survive every \
+                 collection that ran while the continuation was parked"
+            );
+            assert_eq!(
+                expect_int(&fields[2]),
+                expect_answer,
+                "the resumed (suspending) ask's answer must be threaded through"
+            );
+            fields[1].clone()
+        }
+        other => panic!("expected Triple(captured, mid, answer), got {other:?}"),
+    }
+}
+
+/// Walk a `:`/`[]` cons chain (post `heap_to_value_forcing`, so every tail is
+/// already forced) and assert it matches `expected` exactly.
+fn assert_int_list(v: &Value, expected: &[i64]) {
+    match v {
+        Value::Con(id, fields) if id.0 == CONS_ID.0 && fields.len() == 2 => {
+            let (head, rest) = expected
+                .split_first()
+                .unwrap_or_else(|| panic!("list longer than expected {expected:?}"));
+            assert_eq!(expect_int(&fields[0]), *head, "streamed element mismatch");
+            assert_int_list(&fields[1], rest);
+        }
+        Value::Con(id, fields) if id.0 == NIL_ID.0 && fields.is_empty() => {
+            assert!(
+                expected.is_empty(),
+                "list shorter than expected, missing {expected:?}"
+            );
+        }
+        other => panic!("expected a `:`/`[]` list cell, got {other:?}"),
     }
 }
 
@@ -744,4 +1135,335 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
 
         drop(machine);
     });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W1-W4 — the four continuation SHAPES codex-review-2026-08-08.md item 5
+// found unfalsified: F1-F4/A5 above only ever capture a constructor chain
+// across a clean top-level ask. Each W-case parks a DIFFERENT heap shape,
+// forces a real collection (doubling, where applicable) while it is parked,
+// resumes, and deep-verifies. See this file's negative-control run for which
+// of these are genuine SAFETY cases (die under the control, like F3/F4) vs
+// ordering/bookkeeping-only (stay green, like F1/F2) — labelled per case
+// below once that run confirmed it.
+// ───────────────────────────────────────────────────────────────────────────
+
+// ─── W1 — NESTED / MID-EFFECT: parked partway through an effect sequence
+// (one DISPATCHED effect answered inline, THEN a suspending ask), not at a
+// clean top-level ask. SAFETY CASE — dies under the negative control: the
+// parked continuation's `captured` value and the dispatched effect's
+// materialized answer are both ordinary nursery allocations protected only
+// by `register_stowed_root`, exactly like F3/F4's captured chain.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn w1_nested_mid_effect_continuation_parks_across_gc() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine =
+            JitEffectMachine::compile_session(&build_mid_effect_suspend(4004, 55, 9), &table, 2048)
+                .expect("compile_session");
+
+        let id = match machine
+            .run_suspendable_parked(
+                &table,
+                &mut MidEffectDispatch,
+                &(),
+                MID_ASK_TAG,
+                RealmId(0),
+                &[],
+            )
+            .expect("w1 entry run_suspendable_parked")
+        {
+            ParkedOutcome::Suspended { id, request, .. } => {
+                assert_eq!(expect_int(&request), 9, "the suspending ask's own payload");
+                id
+            }
+            ParkedOutcome::Completed { .. } => {
+                panic!("w1 entry should suspend at the ask, not complete")
+            }
+        };
+        assert_rooting_receipt(&machine, 1);
+
+        // Collect + double with the mid-effect continuation parked and
+        // nothing else protecting it — same discipline as F3.
+        force_gc_on(&mut machine, &table, "w1_collapse_1", 150);
+        force_gc_on(&mut machine, &table, "w1_collapse_2", 200);
+        assert!(
+            tidepool_codegen::host_fns::gc_doubling_run_count() > 0,
+            "W1 must trip the heap-doubling branch, not just a plain Cheney pass"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        match machine
+            .resume_parked(
+                id,
+                &mut MidEffectDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(77))),
+            )
+            .expect("resume w1")
+        {
+            ParkedOutcome::Completed { value, .. } => {
+                assert_triple_captured_and_answer(&value, 4004, 77);
+            }
+            ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
+        }
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W2 — STREAMED RESPONSE TAIL: the dispatched effect's answer is an unforced
+// lazily-streamed list (`respond_list`), embedded UNFORCED in the parked
+// continuation and only forced after resume. SAFETY CASE — dies under the
+// negative control: the stream-tail THUNK cell itself is an ordinary nursery
+// allocation reachable only through the (unrooted-under-control) continuation.
+// Also exercises the parked-stream REGISTRY lifetime fix (`RegistryGuard`'s
+// conditional `clear_parked_streams`, jit_machine.rs) — see
+// `realm_stream_registry_lifetime.rs` for that mechanism's own red/green.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn w2_streamed_response_tail_parks_across_gc() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine = JitEffectMachine::compile_session(
+            &build_streamed_tail_suspend(5005, 66, 10),
+            &table,
+            2048,
+        )
+        .expect("compile_session");
+
+        let id = match machine
+            .run_suspendable_parked(
+                &table,
+                &mut StreamDispatch,
+                &(),
+                MID_ASK_TAG,
+                RealmId(0),
+                &[],
+            )
+            .expect("w2 entry run_suspendable_parked")
+        {
+            ParkedOutcome::Suspended { id, request, .. } => {
+                assert_eq!(expect_int(&request), 10, "the suspending ask's own payload");
+                id
+            }
+            ParkedOutcome::Completed { .. } => {
+                panic!("w2 entry should suspend at the ask, not complete")
+            }
+        };
+        assert_rooting_receipt(&machine, 1);
+
+        force_gc_on(&mut machine, &table, "w2_collapse_1", 150);
+        force_gc_on(&mut machine, &table, "w2_collapse_2", 200);
+        assert!(
+            tidepool_codegen::host_fns::gc_doubling_run_count() > 0,
+            "W2 must trip the heap-doubling branch, not just a plain Cheney pass"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        match machine
+            .resume_parked(
+                id,
+                &mut StreamDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(88))),
+            )
+            .expect("resume w2")
+        {
+            ParkedOutcome::Completed { value, .. } => {
+                let streamed = assert_triple_captured_and_answer(&value, 5005, 88);
+                assert_int_list(&streamed, &[10, 20, 30]);
+            }
+            ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
+        }
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W3 — FINALIZED CLOSURE PARK: suspended on a closure-valued `finalize`
+// (`ContinuationFrame::finalized_root` populated). SPLIT CASE: the finalized
+// payload itself is tenured into old-space and persistent-rooted at SUSPEND
+// time (`tenure_finalized_payload`, BEFORE `park_continuation` even runs) —
+// that protection is independent of `register_stowed_root` and stays green
+// under the negative control. The REST of the parked continuation (`captured`,
+// still an ordinary nursery allocation) is a safety case exactly like F3/F4.
+// See the negative-control run below for the confirmed per-assertion split.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn w3_finalized_closure_park_survives_gc_and_resume() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine =
+            JitEffectMachine::compile_session(&build_finalize_suspend(6006, 300), &table, 2048)
+                .expect("compile_session");
+
+        let id = match machine
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
+            .expect("w3 entry run_suspendable_parked")
+        {
+            ParkedOutcome::Suspended {
+                id,
+                has_finalized_closure,
+                ..
+            } => {
+                assert!(
+                    has_finalized_closure,
+                    "the request must carry a CLOSURE_SENTINEL for the closure field"
+                );
+                id
+            }
+            ParkedOutcome::Completed { .. } => panic!("w3 entry must suspend on the finalize"),
+        };
+        assert_rooting_receipt(&machine, 1);
+
+        force_gc_on(&mut machine, &table, "w3_collapse_1", 150);
+        force_gc_on(&mut machine, &table, "w3_collapse_2", 200);
+        assert!(
+            tidepool_codegen::host_fns::gc_doubling_run_count() > 0,
+            "W3 must trip the heap-doubling branch, not just a plain Cheney pass"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        // The finalized payload's OWN protection (old-space persistent root,
+        // established before this frame was even parked) — confirm it is
+        // still a live, correctly-tagged closure object, not poisoned.
+        let finalized = machine
+            .take_parked_finalized_root(id)
+            .expect("w3 finalized root");
+        let tag = unsafe { heap_layout::read_tag(finalized.current()) };
+        assert_eq!(
+            tag,
+            heap_layout::TAG_CLOSURE,
+            "finalized payload must still be a live closure after two collections"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        // The frame itself is still parked and rooted — resume it. THIS is
+        // what actually depends on `register_stowed_root`: `captured` never
+        // went through old-space, it is an ordinary value threaded through
+        // the parked continuation like every other case in this file.
+        match machine
+            .resume_parked(
+                id,
+                &mut NoDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(42))),
+            )
+            .expect("resume w3")
+        {
+            ParkedOutcome::Completed { value, .. } => assert_pair_result(&value, 6006, 42),
+            ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
+        }
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W4 — BINDING PARK: `ParkKind::Binding { forced }`, both `forced: true` and
+// `forced: false`. SAFETY CASE — the tenure itself (`OldSpace::tenure`) only
+// runs AFTER resume completes the turn; while parked, the frame's captured
+// value is the same ordinary nursery allocation as every other case here.
+// ───────────────────────────────────────────────────────────────────────────
+
+fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
+    in_test_thread(move || {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_parent(1, 1), &table, 2048)
+                .expect("compile_session");
+
+        let frag = machine
+            .add_function(
+                "w4_bind_frag",
+                &build_suspending_parent(captured_n, req),
+                &table,
+                &ExternalEnv::new(),
+            )
+            .expect("add w4 fragment");
+        let id = match machine
+            .run_fragment_suspendable_parked(
+                frag,
+                &table,
+                &mut NoDispatch,
+                &(),
+                ASK_TAG,
+                RealmId(0),
+                ParkKind::Binding { forced },
+                &[],
+            )
+            .expect("w4 fragment run_fragment_suspendable_parked")
+        {
+            ParkedOutcome::Suspended { id, request, .. } => {
+                assert_eq!(expect_int(&request), req);
+                id
+            }
+            ParkedOutcome::Completed { .. } => panic!("w4 fragment should suspend at the ask"),
+        };
+        assert_rooting_receipt(&machine, 1);
+
+        force_gc_on(&mut machine, &table, "w4_collapse_1", 150);
+        force_gc_on(&mut machine, &table, "w4_collapse_2", 200);
+        assert!(
+            tidepool_codegen::host_fns::gc_doubling_run_count() > 0,
+            "W4 (forced={forced}) must trip the heap-doubling branch, not just a plain \
+             Cheney pass"
+        );
+        assert_rooting_receipt(&machine, 1);
+
+        match machine
+            .resume_parked(
+                id,
+                &mut NoDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(answer))),
+            )
+            .expect("resume w4")
+        {
+            ParkedOutcome::Completed { value, bound_root } => {
+                assert_pair_result(&value, captured_n, answer);
+                let root = bound_root.expect("a Binding park kind must return Some(bound_root)");
+                let bridged =
+                    unsafe { heap_bridge::heap_to_value(root.current()) }.expect("bridge w4 root");
+                assert_pair_result(&bridged, captured_n, answer);
+            }
+            ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
+        }
+        assert_rooting_receipt(&machine, 0);
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+#[test]
+#[serial]
+fn w4a_binding_park_forced_true_survives_gc_and_resume() {
+    w4_binding_park_case(true, 8008, 41, 9);
+}
+
+#[test]
+#[serial]
+fn w4b_binding_park_forced_false_survives_gc_and_resume() {
+    w4_binding_park_case(false, 8009, 43, 13);
 }
