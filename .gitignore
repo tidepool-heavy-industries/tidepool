@@ -84,3 +84,8 @@ viz/index.html
 haskell/test-session/work/
 haskell/test-fidelity/work/
 examples/guess/haskell/Game_cbor/
+
+# Per-worktree XDG_CACHE_HOME for tidepool-harness test shards (see the
+# generic-surface wave spec: `export XDG_CACHE_HOME="$PWD/.cache"`). Build
+# state, never committed.
+.cache/
