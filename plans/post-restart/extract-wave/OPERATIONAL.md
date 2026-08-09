@@ -47,14 +47,27 @@ localized diffs and log it at fold):
   gone; the deployed pair on this box is the old consistent pair and dogfood is
   PAUSED). Your test runs build the repo extract fresh, so your lanes are
   unaffected.
-- GHC slots are box-wide capped at **3** and several waves are running
-  concurrently — expect contention.
-  - `scripts/battery.sh` and `scripts/battery-shard.sh` SELF-SLOT (they re-exec
-    themselves under the broker). Do NOT wrap them.
-  - Any OTHER GHC-heavy command (raw `cabal build`, `cabal test`, a bare
-    `cargo nextest` over a GHC-extract crate) goes through the broker with an
-    absolute path and NEVER exclusive:
-    `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
+- **THROTTLE DIRECTIVE (root, 2026-08-08 — IN FORCE until root lifts it).**
+  The box hit load average **92**: the operator's SSH sessions died and a dev
+  pane died in the same window. Seven concurrent `tidepool-extract` compiles
+  were observed — nextest's `ghc-heavy` cap is **per-run, not box-wide**, so
+  parallel worktrees multiply it. The 3-slot semaphore is now the box-wide
+  governor for ALL heavy work, not just GHC-extract work.
+  **Wrap EVERY heavy invocation** in the broker, absolute path, NEVER
+  exclusive:
+  `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
+  This now includes, and did not before:
+  - `cargo nextest run` — **ANY tier, including the quick pure-Rust tier**
+  - `cargo check --workspace`, `cargo build --workspace`
+  - `cargo clippy --workspace`
+  - anything spawning extracts outside the battery scripts
+  EXEMPT: single-crate `cargo check -p <X>`, file edits, greps.
+  `scripts/battery.sh` / `scripts/battery-shard.sh` already self-acquire —
+  do NOT wrap them; that is unchanged.
+  If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
+  rather than bypassing the broker.
+  **Bias toward fewer, better-batched runs.** This wave is the heaviest GHC
+  consumer on the box, so the throttle bites hardest here.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
 - NEVER run bare `scripts/battery.sh` — this environment hard-kills background
   processes at ~380s and the full battery is hours. Use:
@@ -79,6 +92,20 @@ localized diffs and log it at fold):
 - RECEIPTS ARE PER-BINARY PASS/FAIL COUNTS, never exit codes. Paste the counts
   (`N passed, M failed` per test binary) in your submit note. "It passed" with
   no counts is not a receipt.
+- NAMED-GUARD RULE (wave-wide, from spawn-latency, 2026-08-08): **if a gate
+  exists to catch ONE specific failure mode, the receipt must show that
+  specific test passing by name, with its own pass line — not the aggregate
+  that contains it.** An aggregate count proves a suite ran; it does not prove
+  the guard executed. The residual hole it closes: the test is present in the
+  tree but the shard's filter does not select it — a renamed binary, an
+  `#[ignore]`, a cfg, an env-gated early return. Then the base commit is
+  correct, the count is green, and the guard never ran.
+  Where a guard is CROSS-LANE (it lives in one lane's branch and protects
+  another's change), the receipt must ALSO name the base commit it ran
+  against. Base proves which tree ran; the test name proves execution. Both,
+  or neither is established.
+  This is the same instrument that produced the C1 finding: do not trust that
+  a label ("harness acceptance, N passed") covers what its name implies.
 - Never touch another agent's worktree. Never checkout another branch. You are
   your worktree.
 - `TIDEPOOL_EXTRACT` must point at a freshly built `tidepool-extract-bin` for
