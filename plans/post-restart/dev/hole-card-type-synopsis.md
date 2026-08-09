@@ -64,6 +64,41 @@ Supported, mirroring `uiOf`:
   names — e.g. `Contribution { addedIdeas, draftDelta, advance }`
 - anything else → the type name alone
 
+## Also in scope — relax the finalize prescription back to the bare shape
+
+`answerer_hole_card` currently prescribes:
+
+> Answer by evaluating `(finalize @{ty} value :: M {ty})` — annotate the WHOLE
+> expression with `:: M {ty}` …
+
+That whole-expression annotation is a **stopgap**, added when bare
+`finalize @T value` did not compile (the ambiguous-`a0` defect). The
+`__anchor` fix has since landed in this lane, and
+`finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
+proves the bare shape now compiles for a pinned `Finalize T` row — which is
+exactly the row an answerer turn uses.
+
+So **relax it back to bare `finalize @T value`**, and drop the
+"annotate the WHOLE expression" instruction with it.
+
+Do this in the SAME pass as the synopsis, not as a separate change: both edit
+the same hole card, both are read by the same consumer (the model), and the
+prescription and the type synopsis should end up as one coherent hole-card
+voice rather than two revisions layered on each other.
+
+Three constraints:
+
+- **Relaxation, not prohibition.** The annotated form still compiles and stays
+  valid. Do not add machinery to reject it, and do not tell the model it is
+  wrong — it is merely no longer necessary.
+- **`hole_card` (~454) is NOT affected.** It prescribes `resume`, not
+  `finalize`, and was never subject to this defect. Leave its text alone.
+- The drift-proofing test
+  `prompts_prescribed_hole_card_shape_compiles_when_pinned` DERIVES its example
+  from this source rather than retyping it, so it follows your new text
+  automatically and must stay green. If it goes red, the text you wrote does
+  not compile — that is the test doing its job, not a test to update.
+
 ## Where
 
 `engine.rs`'s `hole_card(prompt, ty)` (~454) and `answerer_hole_card(prompt,
