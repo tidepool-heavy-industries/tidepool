@@ -350,6 +350,38 @@ impl WorktreeManager {
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         self.registry.list()
     }
+
+    /// Fresh read of `handle`'s CURRENT git `HEAD`, performed at call time.
+    ///
+    /// This is PRD 19's `worktreeHead`. It is deliberately NOT
+    /// [`WorktreeHandle::source_head`] (the seed commit a managed branch was
+    /// rooted at, recorded once at `create` and frozen forever after) and NOT
+    /// anything [`crate::monitor::WorktreeMonitor`] last reconciled — the
+    /// verb exists precisely so a resident spanning cycles can see HEAD
+    /// movement the monitor never observed, closing the window between one
+    /// cycle's handlers unregistering and the next cycle's re-registering.
+    /// A cached or stale answer here silently reopens that exact gap.
+    ///
+    /// Lives on [`WorktreeManager`] rather than as a [`WorktreeHandle`]
+    /// method because a handle is a cheap value holding recorded facts — it
+    /// carries no [`GitCli`] — so anything a handle could answer on its own
+    /// would by construction be cached, which is the one thing this verb may
+    /// not be. Only the manager, which owns the `GitCli`, can perform a
+    /// fresh read.
+    ///
+    /// Fails [`WorktreeError::WorktreeLost`] under the same check `lookup`
+    /// uses, so a worktree removed from disk after the handle was obtained
+    /// is reported the same way everywhere in this crate. `git rev-parse
+    /// HEAD` resolves to the current commit whether the tree is on a normal
+    /// branch checkout or detached, so no special-casing is needed for
+    /// detached HEAD.
+    pub fn worktree_head(&self, handle: &WorktreeHandle) -> Result<GitOid, WorktreeError> {
+        if !worktree_present(handle.cwd()) {
+            return Err(WorktreeError::WorktreeLost(handle.id().clone()));
+        }
+        let out = self.git.try_run(handle.cwd(), &["rev-parse", "HEAD"])?;
+        Ok(GitOid::from_raw(out.trimmed()))
+    }
 }
 
 /// What a new worktree should be rooted at, and in which repository the
