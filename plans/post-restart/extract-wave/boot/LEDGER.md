@@ -306,6 +306,70 @@ them.
 
 ---
 
+## Throttle-era scheduling decisions (2026-08-09, box hit load 92)
+
+Root's throttle directive (broker-wrap EVERY heavy invocation including
+quick-tier `nextest`) relayed to all four devs immediately, each with the
+parts biting its own lane. Two scheduling decisions follow, both approved
+by the wave TL:
+
+1. **Expensive shared legs run ONCE, post-fold, on the composed branch** —
+   not per-dev. The cost argument is secondary; the real one is that a
+   hardened-differential green on one child's branch does not establish
+   the COMPOSED branch is green, and the composed branch is what folds
+   upward. Two expensive runs proving less than one is the wrong trade
+   twice over.
+
+   **Exception, deliberate: `boot-targets` keeps the differential,
+   `corpus_report`, and extract-fidelity on its own branch.** Its diff
+   changes the extractor's emission path, and `haskell/app/Main.hs` is
+   shared with sub-TL `spawn-latency` — an extraction regression
+   discovered after composition could not be attributed between two lanes
+   touching the same file. `boot-lazy` (Rust session lifecycle) is
+   relieved of them; `boot-targets` is not.
+
+2. **No fifth concurrent child until at least two of four have folded** —
+   held even if slots free up. Four live devs plus wave 3 is the
+   amplification that produced load 92.
+
+**Wave 3 slips; scope NOT cut** (wave TL's ruling). Wave 3 is the
+render+loop fusion — the step taking item 0 from two pre-model compiles to
+one. Cutting it to recover schedule would leave the headline result half
+delivered while keeping all of the cost, and the throttle is a transient
+condition being actively worked, not a new baseline. No date estimated
+while slot waits are running 25 minutes; "unknown, gated on two folds" is
+the honest carry.
+
+### Load measurement — both obvious instruments are broken
+
+Recorded because a wrong reading here licenses exactly the behaviour the
+throttle forbids:
+
+- `pgrep -fc tidepool-extract` OVER-counts ~5x (22–24 against 4 real
+  compiles) — it matches every agent shell / `bash` / `zsh` / `timeout`
+  carrying `TIDEPOOL_EXTRACT=…`, so it tracks how many AGENTS exist.
+- Matching `comm` against the full binary name UNDER-counts to a constant
+  ZERO — Linux truncates `comm` to 15 chars, so `tidepool-extract-bin`
+  shows as `tidepool-extrac` and the full-name grep can never match.
+
+Correct: `ps -eo comm= | grep -c '^tidepool-extrac'` and
+`cat /proc/loadavg`. **A zero from a mistyped pattern reads exactly like a
+quiet box** — it looks like permission to proceed, not like an error.
+
+### Sixth instance of the wave's characteristic failure
+
+`OPERATIONAL.md`'s Block briefly contradicted itself: the new throttle
+bullet required wrapping `nextest` at ANY tier while the tier list ~14
+lines below still called tier 1 "(pure-Rust, safe unattended)". Devs copy
+that Block verbatim, and the stale line was the more actionable-sounding
+of the two. Reported across the namespace boundary rather than edited;
+fixed at `6033a70b` by marking the phrase **WITHDRAWN** rather than
+deleting it — so a dev who already copied the old text recognises what
+changed instead of half-remembering a blessing. A visible retraction beats
+a silent deletion for exactly the reason this wave keeps rediscovering.
+
+---
+
 ## Item 0 landing note — draft (goes into the fold message)
 
 **Why this item mattered beyond ~30s of launch latency.**
