@@ -48,6 +48,30 @@ compile*, not boot. The 60–66% `core` figure is the SECOND loop's `core2core`
 alone. That materially changes how C1 should be read and is the first thing
 the measurement must separate.
 
+**C1 third finding (wave TL, from the two above; spec amended at `ecfc4eb1`) —
+the typecheck refutation is UNSOUND.** `GhcPipeline.hs` ~222's own comment says
+each summary's `parseModule`/`typecheckModule` "redoes its typecheck
+independently of `load'`". The second loop typechecks (~193) AND core2cores
+(~213), and `load'` already did both. So the `typecheck` row (~219) sums only
+ONE of the TWO typechecks per extract — the other is inside `ghc_session`,
+unlabelled. **"Under 6% typecheck" measures half the typecheck cost and does
+NOT refute the home-module typecheck suspicion.** Home-module typecheck cost is
+OPEN, not refuted. C1 is correspondingly UPGRADED: confirmed in code, only its
+SIZE unknown — the breakdown partly CONCEALED C1 rather than refuting it.
+
+This does not weaken E6 or D1: 60–66% in the SECOND loop's `core2core` alone is
+ample warrant. Ordering unchanged.
+
+**Bracket-design decision (mine, a deliberate deviation from the amendment's
+wording).** The amendment says "one new phase row around `load'` — leaving
+`ghc_session` = setup + depanal". I am keeping `ghc_session`'s span EXACTLY as
+it is today (setup + depanal + `load'`) and nesting the new `load` row inside
+it. Narrowing `ghc_session` would redefine an existing phase name's meaning and
+make every historical 26–32% figure incomparable to the new ones — the
+`classify_extract` tombstone's failure mode precisely. `setup + depanal` is
+recoverable as `ghc_session − load`, so nothing is lost and comparability
+survives. `load'` is NOT decomposed internally, per the amendment.
+
 **C1 second finding — the session path emits NO timing at all.**
 `runSessionPipeline` (`GhcPipeline.hs:326-…`) has zero `emitPhase` calls.
 `runPipelineSession` routes to it whenever `isSessionScopeActive`
@@ -66,9 +90,13 @@ core-phase time is.
 
 ## Planned decomposition (measurement-first ordering)
 
-Ordering is set by the Phase-B breakdown (core-phase dominant; the home-module
-typecheck suspicion REFUTED), not by spawn count. No item below is sized off a
-spawn-count argument.
+Ordering is set by the Phase-B breakdown (core-phase dominant), not by spawn
+count. No item below is sized off a spawn-count argument.
+
+> The "home-module typecheck suspicion REFUTED" premise this ordering was
+> originally handed is WITHDRAWN (see the third finding above) — that row
+> measures half the typecheck cost. The ordering itself is unchanged: it rests
+> on the second loop's `core2core` alone, which the amendment did not disturb.
 
 | Wave | Dev | Item | Why here |
 |---|---|---|---|
