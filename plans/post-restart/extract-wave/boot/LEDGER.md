@@ -361,10 +361,99 @@ in a week when three separate external-observation instruments were each
 wrong in a different direction. An in-code counter establishes its
 referent; an external pattern match asserts one.
 
-### Item 0b — nameable effect vocabulary
+### Item 0b — nameable effect vocabulary — LANDED, UNVERIFIED
 
-- **Decision:** _pending._
-- **Receipts:** _pending._
+**Decision:** mechanism + `RunLLMTurn`, exactly as scoped. `EffectDecl`
+gains `helpers_row_polymorphic`; `effects_module_source_with_vocab(row,
+vocab, row_args)` holds the body and `effects_module_source_at` delegates;
+`emits_helpers_for(eff, row_effects)` is the single-sourced emission gate,
+**`pub(crate)`**.
+
+**Central constraint HELD, established independently by the dev rather
+than assumed:** `agent_decls()` / `answerer_decls()` / `outer_decls()` /
+`standard_decls()` are all **unchanged**. `RunLLMTurn` reaches the
+vocabulary only via `vocab_with_runllmturn` (`engine.rs:684`), **never the
+row**. Item 0b widened what is NAMEABLE and did not widen what is IN THE
+ROW.
+
+**Acceptance test exists and asserts BOTH directions** —
+`run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack`:
+`Member` + `RunLLMTurn` present, `not in scope` / `variable not in scope`
+absent. A negative test asserting only "compilation failed" passes for the
+wrong reason; this one cannot.
+
+**Receipts — HONEST STATUS:**
+
+| leg | result |
+|---|---|
+| `cargo check` / clippy / fmt | PASS (predecessor, pre-stop) |
+| tier-1 nextest | PASS (predecessor, pre-stop) |
+| `tidepool-mcp` shard | PASS modulo 3 inherited `Fork` reds (see below) |
+| `agent_stack_scoping` | PASS; `Member` test inspected by name |
+| extract-fidelity | **NEVER RAN** |
+| harness acceptance | **NEVER RAN** |
+| `tidepool-runtime` | **NEVER RAN** |
+
+The three `tidepool-mcp` reds are the **`Fork` divergence**, verified by
+this TL directly rather than accepted through the inheritance chain:
+`tidepool-mcp/src/lib.rs:877` asserts the standard row **omitting
+`Fork`**, while `fork_decl()` is in `standard_decls()`
+(`effect_decls.rs:261`). A hand-written copy of a production list gone
+stale — the same class item 0b's own predicate exists to prevent, one file
+over. This was the **fourth** site found; the wave TL's sweep then found
+**five across two crates** (ledger item 17 for the central pass).
+
+### Item 0 prerequisite — `--targets` — LANDED, PARTIALLY VERIFIED
+
+Multi-target emission from one GHC session: `Main.hs` split into
+`translateTargetClosed` / `writeClosedTargets` / `runMultiTargetClosed`
+with a `--targets` flag; `compile_turns` + thin `compile_turn` wrapper
+(`compile.rs` 149, 198).
+
+**The riskiest property is CONFIRMED, and by reading rather than by test**
+— strict mode is structurally unable to reach `--all-closed`'s
+skip-on-failure path, landed as the stronger of the two acceptable shapes:
+
+- `translateTargetClosed` (`Main.hs` 356–367) has **no try/catch at all**;
+  it propagates unconditionally.
+- `runMultiTargetClosed` (540–546) calls it directly inside a bare `forM`
+  — no per-target `try`.
+- `--all-closed`'s skip lives entirely in `processFile`'s own `(_, True)`
+  arm (200–281), calling a **different** function (`translateModuleClosed`)
+  with its own local `try`, and never touching `translateTargetClosed`.
+
+**SHAPE LANDED: SEPARATE FUNCTION.** Strict mode does not decline to skip;
+there is no skip in its call graph to decline. The `if strict then error
+else skip` regression cannot be produced by a refactor that "removes
+duplication", because there is no duplicated branch to merge.
+
+Single-target contract unchanged: `writeWholeModuleClosed`'s signature and
+all three call sites (`Main.hs` 292, 587, 695) untouched.
+
+**Receipts — HONEST STATUS:**
+
+| leg | result |
+|---|---|
+| `cabal build tidepool-extract-bin` | **PASS** — linked clean |
+| `cargo check --workspace` | **PASS** |
+| `cargo fmt --all -- --check` | **PASS** |
+| `cargo clippy --workspace` | **NO VERDICT** — killed mid-run by the stop |
+| tier-1 nextest | never started |
+| extract-fidelity | **NEVER RAN** |
+| harness acceptance (both named pins) | **NEVER RAN** — pins confirmed to EXIST by name (`acceptance_multi_target.rs` 74, 129), never executed |
+| `tidepool-runtime` | **NEVER RAN** |
+| hardened differential | **NEVER RAN — COMPARED_FLOOR NEVER MEASURED** |
+| `corpus_report` | **NEVER RAN** |
+
+**No figure exists for COMPARED_FLOOR or extract-fidelity N/N from this
+branch.** The dev also declined to claim the three inherited reds as
+re-verified live, carrying them explicitly as inherited from `ef9ac291`'s
+message and this ledger rather than laundering them as its own
+observation.
+
+Found while reading, **reported not fixed** (verification-only boundary):
+unused imports at `Main.hs` 22, 25, 26, 44; `result` at 231 shadowing 171
+(pre-existing, confirmed at HEAD).
 
 ---
 
