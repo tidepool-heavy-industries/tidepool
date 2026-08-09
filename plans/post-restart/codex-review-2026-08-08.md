@@ -263,22 +263,31 @@ descriptor bound to cycle runtime) matches the standing plan: items 1-2
 route as above, 3 is extract-wave item 0, 4-5 are realm step 4 + PRD 18,
 6 is the contract's derive-don't-declare guidance already in force.
 
-## 14. Vendored-Aeson sum rejection no longer fires for declare-but-don't-use — INHERITED regression (found 2026-08-09)
+## 14. Vendored-Aeson FromJSON sum rejection DOES NOT EXIST — inherited; design decision needed (corrected 2026-08-09)
 
-`0c49f0a2` (2026-08-07) moved the nullary-sum `TypeError` behind
-type-family-dispatched constraint (`GFromJSONSum (IsNullarySum ...)`),
-deferring it to the USE site — so `deriving (Generic, FromJSON)` on a
-non-nullary sum now compiles clean when the instance is never demanded.
-The commit message asserts the opposite ("still rejected at compile time").
+CORRECTED from an earlier wrong mechanism (a string-literal grep match was
+reported as verification — the day's failure class, again): FromJSON.hs has
+ZERO TypeErrors. `0c49f0a2`'s `GFromJSONSum 'False` branch routes to a real
+working TaggedObject decoder — the compile-time rejection was NEVER
+implemented on the FromJSON side (Value.hs has it; the false "compile-time
+rejection" comment at FromJSON.hs:153 was INHERITED along with the
+duplicated `IsNullarySum` family from the sibling module where it is true).
 Pinning test `generic_deriving_337::sum_type_rejected_at_compile_time` is
-red — SANCTIONED (second sanctioned red, beside mock_stack until
-mock-derive folds). Fix owner: generic-surface substrate territory; routed
-as a known item, not queued onto their live lane (fold-cadence).
+red — sanctioned.
 
-**Durable finding (extract-wave):** the guarantee hid for two days because
-its only enforcing test lives behind `--ignore-default-filter` — "a
-guarantee whose enforcing test lives in a tier nobody routinely runs is
-not enforced." Family member beside the three-variant table, one level
-out: not a receipt overstating coverage but a guard that never executes.
-Open question for a future sweep: what other compile-time rejections are
-pinned only in default-filtered tiers?
+**OPEN DESIGN DECISION (Inanna/morning):** implement the TypeError on
+`GFromJSONSum 'False` (restoring the commit message's claimed guarantee),
+or declare non-nullary FromJSON sums supported-but-lossy and retire the
+test. A behaviour change either way, not a repair.
+
+**Sanctioned reds are THREE** until their fixes fold:
+`mock_stack_matches_production` (mock-derive in flight),
+`sum_type_rejected_at_compile_time` (this item),
+`qq_fmt_brace_inside_hole_non_string_expr_still_works` (inherited,
+toExp Let case commented out, byte-identical at HEAD~1 — unowned).
+
+**Durable findings:** a guarantee whose enforcing test lives in a tier
+nobody routinely runs is not enforced; and its companion — duplicate a
+mechanism and you duplicate its documentation into a context where it
+lies. Open sweep question: what else is pinned only behind
+--ignore-default-filter?
