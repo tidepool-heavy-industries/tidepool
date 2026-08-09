@@ -10,6 +10,42 @@ Decisions live in `plans/self-iterating-harness/15-generic-surface-wave.md`
 (anchor) and `14-generic-derived-askuser-prd.md` (the PRD). Cite them; do not
 re-derive.
 
+## SCOPE QUESTION — settle this before writing any code
+
+**Do not build a `GCheckpoint` interpreter until someone confirms we need
+one.** Inanna challenged the premise (2026-08-08) and the challenge looks
+correct. Written up here rather than quietly acted on, because the anchor
+still says "custom `GCheckpoint` interpreter" and this contradicts it.
+
+`Tidepool.Aeson` already has `genericToJSON :: (Generic a, GToJSON (Rep a))
+=> a -> Value` and `genericParseJSON :: (Generic a, GFromJSON (Rep a)) =>
+Value -> Result a` (`Aeson/Value.hs:155`, `Aeson/FromJSON.hs:90`). They work
+off `Generic` ALONE. So the author-contract goal — an author writes
+`deriving (Generic)` and nothing else — is reachable today by having the
+RUNTIME call those functions, instead of authors deriving `ToJSON`/
+`FromJSON` themselves. That requires no new interpreter.
+
+The PRD's rejection of `ToJSON`/`FromJSON` was scoped to FORMS, and its
+reasons are form-specific: a form needs structural metadata to render a UI
+and selector-aware compile errors to teach an author. Persistence needs
+neither. It needs to write state down, read it back, and not corrupt it.
+Carrying "separate interpreters per consumer" from forms to persistence
+generalizes the argument past where it reaches.
+
+The confirmed corruption list below points the same way: those are BUGS in
+the serialization path we already have, largely Rust-side rendering. Fixing
+them fixes every `ToJSON`/`FromJSON` user. Writing a second serializer beside
+them leaves them broken for everyone else and leaves two things to keep
+correct.
+
+**Probable real scope, pending confirmation:** (1) fix the round-trip defects
+listed under "Loudness is a test"; (2) move checkpoint persistence to call
+`genericToJSON`/`genericParseJSON` so authored types need only
+`deriving (Generic)`; (3) pin the golden matrix. That is a bug-fix and
+wiring job, not a new codec — and if it turns out to be right, this lane
+should be renamed, since "codec" is the framing that produced the
+overreach.
+
 ## ANTI-PATTERNS (read first)
 
 - **DO NOT reimplement GHC** (Inanna, 2026-08-08). Custom `TypeError`s and a
@@ -61,10 +97,17 @@ Five things cost that lane real time to learn:
    generic REPRESENTATION, not on the path, so an erroring path rides along
    as an opaque type and the next level is demanded anyway — GHC unrolls
    forever, 60s+ CPU, no error. See `Occurs`/`GNested` in
-   `Tidepool.Form.Check` and `Tidepool.Form.GForm`. **Checkpoints ALLOW
-   recursion**, so you need this mechanism inverted rather than removed:
-   a cycle is legal, but something must still stop the SHAPE from being
-   infinite.
+   `Tidepool.Form.Check` and `Tidepool.Form.GForm`.
+
+   **This does NOT transfer to persistence, and an earlier draft of this
+   spec said it did — that was wrong** (Inanna caught it). A form derives
+   its shape from the TYPE with no value in hand, so a recursive type
+   yields a genuinely infinite shape and must be rejected at compile time.
+   Persistence walks a VALUE: recursion is ordinary, `Node Leaf Leaf` is
+   finite, and the existing path serializes it today. Only an infinite
+   VALUE diverges, and that is an ordinary Haskell infinite loop — not
+   something a serializer should police. Do not port `Occurs` here, and do
+   not invent a finiteness guard to replace it.
 3. **A `TypeError` fires only where GHC must SOLVE it** — an instance
    context, discharged at instance selection. Written as a GIVEN (a
    binding's own signature context) it defers to call sites and reports
