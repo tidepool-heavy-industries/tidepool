@@ -25,8 +25,9 @@ import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset
   , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
-import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
+import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
@@ -35,7 +36,7 @@ import GHC.Core.TyCon (isTupleTyCon)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_type_env)
-import GHC.Types.Name (nameOccName, nameUnique, mkExternalName)
+import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
@@ -47,6 +48,7 @@ import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName)
+import System.IO (hPutStrLn, stderr)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Char (toUpper)
@@ -163,6 +165,14 @@ runNormalPipeline path includes = do
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
     -- "No instance for Monad (Eff '[Console, …])".
     modGraphRaw <- depanal [] False
+    -- 'ghc_setup' phase (TIDEPOOL_TIMING): session DynFlags setup +
+    -- guessTarget/setTargets + this 'depanal' call, nothing else. FLAT and
+    -- non-overlapping with 'ghc_load' below — see Tidepool.Timing's module
+    -- haddock and the 'PHASE_GHC_SESSION' tombstone in timing.rs: this pair
+    -- retired the old 'ghc_session' bracket on the compile lane (a
+    -- collector recovers the historical figure as 'ghc_setup' + 'ghc_load').
+    setupT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     -- unpoison: keep the EPS healthy under the TH/QQ downgrade by unsetting
     -- Opt_IgnoreInterfacePragmas on every summary (see the depanal/load'
     -- haddock above). The bytecode-vs-object provisioning choice is made
@@ -171,24 +181,59 @@ runNormalPipeline path includes = do
     -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    loadT0 <- monotonicTime
     loadFlag <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
                (mapMG unpoison modGraphRaw)
+    loadT1 <- monotonicTime
+    -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
+    -- else. FLAT — see 'ghc_setup' above; the two rows partition what
+    -- 'ghc_session' used to bracket, they do not nest inside it.
+    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
-    sessionT1 <- monotonicTime
-    liftIO (emitPhase timing "ghc_session" (elapsedMs sessionT0 sessionT1))
-    -- Process all modules: parse, typecheck, desugar, optimize each.
-    -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
-    -- the load phase may have downgraded them for TH/QQ bytecode provisioning.
+    -- E6 (tiered -O2): process every module's parse/typecheck/desugar (PASS
+    -- 1, below), then run the expensive optimized-Core pipeline ('core2core',
+    -- canonicalizeDFlags' -O2 + exposed-unfoldings) only for the target and
+    -- its Core-REACHABLE dependencies (PASS 2) — see 'reachableModuleClosure'
+    -- for the exact rule and its soundness argument. A module outside that
+    -- set still gets parsed/typechecked (its diagnostics still surface) and
+    -- desugared (needed to compute reachability itself — see PASS 1's
+    -- comment for why desugar, not just typecheck, is the right stage), but
+    -- never pays 'core2core'.
     -- 'typecheck'/'core' are summed ACROSS this loop (one line each, emitted
     -- after) rather than timed per-module: the wire grammar is one line per
     -- phase per process, and a turn module always compiles alongside its
-    -- preamble/stdlib dep modules in the same loop.
+    -- preamble/stdlib dep modules in the same loop. 'core' sums EVERY
+    -- module's desugar time plus 'core2core' time for reachable modules only
+    -- — same phase definition as before (desugar+core2core, summed across
+    -- every module), just less of it now executes.
     tcMsRef <- liftIO (newIORef (0 :: Integer))
     coreMsRef <- liftIO (newIORef (0 :: Integer))
-    results <- forM summaries $ \modSum0 -> do
+    -- Diagnostic-only accounting (NOT part of the 'tidepool-timing phase=…'
+    -- wire grammar 'emitPhase' owns — see the line emitted below, distinctly
+    -- prefixed 'e6-tier', deliberately outside that contract so
+    -- 'ExtractTiming::parse' never has to know about it): the desugar/
+    -- core2core split WITHIN the 'core' phase, plus how many modules the tier
+    -- actually spared. 'core' stays one flat phase (desugar summed over every
+    -- module + core2core summed over reachable ones only) per the timing
+    -- contract; this line exists purely so E6's own report can size its win
+    -- against what it actually removed (core2core) rather than the whole
+    -- 'core' bucket (desugar + core2core), which is a larger, unmeasured-by-
+    -- this-item quantity.
+    dsMsRef <- liftIO (newIORef (0 :: Integer))
+    c2cMsRef <- liftIO (newIORef (0 :: Integer))
+    let targetModName = capitalize (takeBaseName path)
+        targetModName' = mkModuleName targetModName
+    -- PASS 1 — parse/typecheck/desugar EVERY module. Re-canonicalize each
+    -- module's DynFlags first (see canonicalizeDFlags): the load phase may
+    -- have downgraded them for TH/QQ bytecode provisioning. NOTE:
+    -- 'hscDesugar' does not consume the optLevel/unfolding-exposure flags
+    -- 'canonicalizeDFlags' sets (those govern 'core2core' alone, in PASS 2
+    -- below), so applying it unconditionally here costs nothing extra even
+    -- for a module PASS 2 goes on to tier down.
+    passOne <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
       (typechecked, tcMs) <- timeSection $ do
         parsed <- parseModule modSum
@@ -209,20 +254,82 @@ runNormalPipeline path includes = do
           -- scaffold-reserved name; see 'processSessionFile'). Try both.
           mResultTy   = capturedBindingType "result" tcGblEnv
                           <|> capturedBindingType "__result" tcGblEnv
-      (simplified, coreMs) <- timeSection $ do
-        desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-        liftIO $ core2core hscEnv desugared
-      liftIO (modifyIORef' coreMsRef (+ coreMs))
-      return (externalizeInternalTops simplified, mCapturedTy, mResultTy)
+      (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+      liftIO (modifyIORef' coreMsRef (+ dsMs))
+      liftIO (modifyIORef' dsMsRef (+ dsMs))
+      pure (ms_mod_name modSum, hscEnv, desugared, mCapturedTy, mResultTy)
+    -- Reachable-module rule (written down before implementation, per spec):
+    -- a home module is REACHABLE from the target iff it IS the target, or its
+    -- DESUGARED Core is transitively referenced — via a real 'Var' occurrence
+    -- at any depth — from the target module's own desugared Core. Computed on
+    -- desugared (pre-'core2core') Core specifically: by desugar time,
+    -- typeclass/instance selection is already resolved to explicit
+    -- dictionary-Var applications, so this walk would NOT miss a module
+    -- imported only for an orphan instance the way a renamer/typecheck-level
+    -- "used name" scan would — exactly the silent ErrorSentinel-poisoning
+    -- shape 'runSessionPipeline's PHASE 3 comment documents. And because this
+    -- codebase defines no @{-# RULES #-}@ anywhere (grep-confirmed empty),
+    -- 'core2core' cannot introduce a genuinely NEW cross-module reference that
+    -- wasn't already visible at this desugared stage — dictionary/instance
+    -- selection is the only mechanism that could hide a reference pre-Core,
+    -- and it's already resolved by here. So the desugar-stage reference graph
+    -- is a sound (superset-or-equal) approximation of what the fully
+    -- optimized Core actually needs.
+    --
+    -- A module OUTSIDE this closure would contribute zero bindings the
+    -- target's Core can reach either way — Main.hs's own post-hoc,
+    -- binding-level reachability walk over the final merged 'allBinds'
+    -- ('Translate.reachableBinds', run from the target) would discard it
+    -- regardless — so skipping 'core2core' for it changes no wire byte on a
+    -- passing extraction; it only skips work whose result was always going to
+    -- be thrown away.
+    forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
+    let gutsByMod = Map.fromList [ (m, g) | (m, _, g, _, _) <- passOne ]
+        reachableMods0 = reachableModuleClosure targetModName' gutsByMod
+        -- E6 mis-tiering fault injection (detection-power demonstration,
+        -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
+        -- 'core2core' regardless of whether the real closure above found it
+        -- reachable — simulating exactly the mistake this tier could make.
+        -- Inert unless set; never set outside a deliberate test.
+        reachableMods = case forceValidationOnly of
+          Just m  -> Set.delete (mkModuleName m) reachableMods0
+          Nothing -> reachableMods0
+    -- PASS 2 — core2core (canonicalizeDFlags' -O2 + exposed unfoldings) only
+    -- for modules in 'reachableMods'.
+    results <- fmap concat $ forM passOne $ \(modName, hscEnv, desugared, mCapturedTy, mResultTy) ->
+      if modName `Set.member` reachableMods
+        then do
+          (simplified, coreMs) <- timeSection $ liftIO (core2core hscEnv desugared)
+          liftIO (modifyIORef' coreMsRef (+ coreMs))
+          liftIO (modifyIORef' c2cMsRef (+ coreMs))
+          pure [(externalizeInternalTops simplified, mCapturedTy, mResultTy)]
+        else pure []
     totalTcMs <- liftIO (readIORef tcMsRef)
     totalCoreMs <- liftIO (readIORef coreMsRef)
     liftIO (emitPhase timing "typecheck" totalTcMs)
     liftIO (emitPhase timing "core" totalCoreMs)
+    -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
+    -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
+    -- it and there is nothing to keep in sync there.
+    when timing $ liftIO $ do
+      totalDsMs  <- readIORef dsMsRef
+      totalC2cMs <- readIORef c2cMsRef
+      let allModNames = [ m | (m, _, _, _, _) <- passOne ]
+          moduleCount = length allModNames
+          reachableCount = Set.size reachableMods
+          validationOnly = [ moduleNameString m | m <- allModNames, not (m `Set.member` reachableMods) ]
+      hPutStrLn stderr $
+        "e6-tier modules=" ++ show moduleCount
+        ++ " reachable=" ++ show reachableCount
+        ++ " desugar_ms=" ++ show totalDsMs
+        ++ " core2core_ms=" ++ show totalC2cMs
+        ++ " validation_only=" ++ show validationOnly
+        ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
     -- Phase barrier (backstop): a target or dependency compile error already
-    -- threw a spanned 'SourceError' from inside the loop above (each summary's
+    -- threw a spanned 'SourceError' from inside PASS 1 above (each summary's
     -- own 'parseModule'/'typecheckModule' redoes its typecheck independently
     -- of 'load'', so a real user type error surfaces there with its span
-    -- intact) — this MUST run after the loop, not before, or that spanned
+    -- intact) — this MUST run after both passes, not before, or that spanned
     -- diagnostic never fires and callers get this generic message instead.
     -- The phase timings above are emitted first, so a run that dies here still
     -- reports the work it did. Reaching here with 'loadFlag' still 'Failed'
@@ -234,8 +341,7 @@ runNormalPipeline path includes = do
         "runPipeline: module load failed compiling " ++ path
       Succeeded -> pure ()
     -- Merge: dependency module bindings first, target module last
-    let targetModName = capitalize (takeBaseName path)
-        isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+    let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
         allGuts = map fst3 results
     (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
@@ -243,8 +349,14 @@ runNormalPipeline path includes = do
       []      -> liftIO $ ioError $ userError $
         "Target module '" ++ targetModName ++ "' not found among compiled modules: "
         ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
+    -- 'allTyCons' unconditionally covers EVERY compiled module, not just
+    -- 'reachableMods': TyCon/DataCon declarations are populated by the
+    -- typechecker and are never touched by 'core2core' (which transforms
+    -- 'mg_binds' only — the two Passes above never re-derive 'mg_tcs'), so
+    -- this costs nothing extra and keeps validation-only modules' data types
+    -- available to D1's metadata walk exactly as before the tier.
     let allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
-        allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
+        allTyCons = concatMap (\(_, _, g, _, _) -> mg_tcs g) passOne
     hscEnv <- getSession
     warnings <- liftIO (nub . reverse <$> readIORef warnRef)
     return PipelineResult
@@ -325,8 +437,11 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
 -- (GHC-58427).
 runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
 runSessionPipeline scope path includes = do
-  libdir <- getLibdir
+  timing <- readTimingEnabled
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
+    sessionT0 <- monotonicTime
     dflags <- getSessionDynFlags
     setSessionDynFlags (extractionDynFlags dflags includes)
     target <- guessTarget path Nothing Nothing
@@ -341,6 +456,13 @@ runSessionPipeline scope path includes = do
         -- them resolves from the HPT entry the injection registers in phase 2.
         excludedVal = map renderSessionModule (ssValIfaces scope)
     modGraphRaw <- depanal excludedVal False
+    -- 'ghc_setup' phase (TIDEPOOL_TIMING): session DynFlags setup +
+    -- guessTarget/setTargets + this 'depanal' call — SAME MEANING as the
+    -- normal path's 'ghc_setup' phase. FLAT, partitioning what the retired
+    -- 'ghc_session' bracket used to cover — see Tidepool.Timing's module
+    -- haddock and the 'PHASE_GHC_SESSION' tombstone in timing.rs.
+    setupT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
         targetModName' = mkModuleName targetModName
@@ -384,8 +506,14 @@ runSessionPipeline scope path includes = do
     -- (injected as ifaces in PHASE 2), so it cannot go through @load'@. We use
     -- LoadAllTargets on depGraph (target filtered out above) — equivalent to the
     -- old @LoadDependenciesOf@ but without compiling the target prematurely.
+    loadT0 <- monotonicTime
     loadFlag <- load' Nothing LoadAllTargets
                mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
+    loadT1 <- monotonicTime
+    -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
+    -- else — same meaning as the normal path's 'ghc_load' phase. FLAT — see
+    -- 'ghc_setup' above.
+    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     -- Phase barrier: same policy as 'runNormalPipeline' — a 'Failed' PHASE 1
     -- dependency load stops here, before the module-graph restore, PHASE 2's
     -- Val iface injection, or PHASE 3's per-module compile ever see a
@@ -404,9 +532,15 @@ runSessionPipeline scope path includes = do
     -- PHASE 2 — inject the live @Val.G<g>@ ifaces into the now dep-populated
     -- HPT. AFTER @load'@, so its upsweep does not discard them; the subsequent
     -- per-module compile (no further @load'@) preserves them.
+    injectT0 <- monotonicTime
     hsc0 <- getSession
     hscInjected <- injectSessionScope scope hsc0
     setSession hscInjected
+    injectT1 <- monotonicTime
+    -- 'inject' phase (TIDEPOOL_TIMING): PHASE 2's Val-iface injection alone.
+    -- Session-path-only — the normal path never injects session Vals. FLAT,
+    -- like every other phase here — not summed into anything.
+    liftIO (emitPhase timing "inject" (elapsedMs injectT0 injectT1))
     -- PHASE 3 — compile EVERY home-source module (deps + target) to optimized
     -- Core, exactly like 'runNormalPipeline'. This is load-bearing: extracting
     -- only the target and resolving the home-library functions it calls
@@ -432,10 +566,19 @@ runSessionPipeline scope path includes = do
           [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
     when (null summaries) $
       liftIO $ ioError (userError "runSessionPipeline: empty module graph")
+    tcMsRef   <- liftIO (newIORef (0 :: Integer))
+    coreMsRef <- liftIO (newIORef (0 :: Integer))
     results <- forM summaries $ \modSum0 -> do
       let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
-      parsed      <- parseModule modSum
-      typechecked <- typecheckModule parsed
+      -- 'typecheck'/'core' are summed ACROSS this loop (one line each,
+      -- emitted after) exactly like 'runNormalPipeline' — same rationale:
+      -- the wire grammar is one line per phase per process, and a turn
+      -- module always compiles alongside its preamble/stdlib dep modules in
+      -- the same loop.
+      (typechecked, tcMs) <- timeSection $ do
+        parsed <- parseModule modSum
+        typecheckModule parsed
+      liftIO (modifyIORef' tcMsRef (+ tcMs))
       hscEnv0     <- getSession
       let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
           tcGblEnv = fst (tm_internals_ typechecked)
@@ -445,8 +588,10 @@ runSessionPipeline scope path includes = do
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@ — see 'processSessionFile').
           mResTy   = capturedBindingType "__result" tcGblEnv
-      desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-      simplified <- liftIO $ core2core hscEnv desugared
+      (simplified, coreMs) <- timeSection $ do
+        desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+        liftIO $ core2core hscEnv desugared
+      liftIO (modifyIORef' coreMsRef (+ coreMs))
       -- A deferred module (target ∪ transitive Val-importers, computed above)
       -- was deliberately excluded from PHASE 1's @load'@, so nothing has
       -- registered it in the HPT yet — do that here, now that PHASE 2's Val
@@ -470,6 +615,10 @@ runSessionPipeline scope path includes = do
         hscEnvNow <- getSession
         setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
       return (externalizeInternalTops simplified, mCapTy, mResTy)
+    totalTcMs   <- liftIO (readIORef tcMsRef)
+    totalCoreMs <- liftIO (readIORef coreMsRef)
+    liftIO (emitPhase timing "typecheck" totalTcMs)
+    liftIO (emitPhase timing "core" totalCoreMs)
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
         allGuts = map fst3 results
@@ -552,6 +701,66 @@ splitTupleType ty =
 -- the same 'ppr' pattern as 'capturedUserType' / 'dumpCore'.
 renderType :: Type -> String
 renderType ty = renderWithContext defaultSDocContext (ppr ty)
+
+-- | E6's reachable-module rule: a home module is REACHABLE from @target@ iff
+-- it IS @target@, or its (desugared) Core is transitively referenced — via a
+-- real 'Var' occurrence at any depth — from @target@'s own desugared Core.
+-- See the call site in 'runNormalPipeline' for the full soundness argument
+-- (why pre-'core2core' desugared Core is the right stage, and why computing
+-- this any earlier — e.g. from renamer/typecheck-level "used name" tracking
+-- — would be UNSOUND: it would miss a module imported only for an orphan
+-- instance).
+reachableModuleClosure :: ModuleName -> Map.Map ModuleName ModGuts -> Set.Set ModuleName
+reachableModuleClosure target gutsByMod = go (Set.singleton target) [target]
+  where
+    known = Map.keysSet gutsByMod
+    go visited [] = visited
+    go visited (m:ms) = case Map.lookup m gutsByMod of
+      Nothing   -> go visited ms
+      Just guts ->
+        let refs = moduleRefs known guts
+            new  = refs `Set.difference` visited
+        in go (visited `Set.union` new) (ms ++ Set.toList new)
+
+-- | Every OTHER home module (restricted to @known@) a module's top-level
+-- binding RHSs reference, via 'externalVarModules'.
+moduleRefs :: Set.Set ModuleName -> ModGuts -> Set.Set ModuleName
+moduleRefs known guts = Set.unions (map rhsModules (mg_binds guts))
+  where
+    rhsModules (NonRec _ rhs) = externalVarModules known rhs
+    rhsModules (Rec ps)       = Set.unions [ externalVarModules known rhs | (_, rhs) <- ps ]
+
+-- | Every home module (restricted to @known@) referenced by a real 'Var'
+-- occurrence anywhere in a Core expression, at any binding depth. No
+-- bound-variable tracking needed, unlike 'Translate.exprFreeVarKeys': a Core
+-- 'Var' occurrence already points at its exact binder 'Id' (resolved by the
+-- renamer/typechecker), so a local binder can never be confused with an
+-- unrelated same-named import the way source text could — this walk cannot
+-- under- OR over-count due to shadowing. Over-inclusion elsewhere (e.g. a
+-- 'Var' for a DataCon worker, whose own defining module needs no -O2
+-- unfoldings to be useful — its representation comes from static DataCon
+-- info, always available regardless of tier) is harmless: the only failure
+-- mode this item must avoid is EXCLUDING a module the target's Core
+-- genuinely needs; including one too many only gives back some of the tier's
+-- win, never correctness.
+externalVarModules :: Set.Set ModuleName -> CoreExpr -> Set.Set ModuleName
+externalVarModules known = go
+  where
+    go expr = case expr of
+      Var v -> case nameModule_maybe (idName v) of
+        Just m | moduleName m `Set.member` known -> Set.singleton (moduleName m)
+        _ -> Set.empty
+      Lit _           -> Set.empty
+      App f a         -> go f `Set.union` go a
+      Lam _ e         -> go e
+      Let b e         -> bindRefs b `Set.union` go e
+      Case s _ _ alts -> go s `Set.union` Set.unions [ go rhs | Alt _ _ rhs <- alts ]
+      Cast e _        -> go e
+      Tick _ e        -> go e
+      Type _          -> Set.empty
+      Coercion _      -> Set.empty
+    bindRefs (NonRec _ rhs) = go rhs
+    bindRefs (Rec ps)       = Set.unions [ go rhs | (_, rhs) <- ps ]
 
 -- | The canonical extraction DynFlags transformation, applied to the session
 -- flags at startup AND re-applied per-module before extraction.

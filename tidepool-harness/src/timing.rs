@@ -26,17 +26,19 @@
 //! to reason about containment. Where a coarse stage contains finer ones, the
 //! fine stages are prefixed by WHICH `tidepool-extract` spawn they came from —
 //! a harness turn makes exactly ONE spawn (see `plans/self-iterating-harness/
-//! 11-turn-latency-contract.md`'s pipeline walk): `extract.*` is the inside of
-//! that single `--turn` spawn's `extract_spawn`, including its own in-process
-//! `classify` substep (`extract.classify`). `classify.*` is a DIFFERENT
-//! lane's prefix — the block-classify spawn `tidepool_runtime::session::
-//! classify_block` makes on the repl's behalf, not something a harness turn
-//! emits at all. Keeping them under distinct prefixes matters beyond
-//! bookkeeping: it is the only way to see whether the extract's in-process
-//! classify substep is almost entirely GHC-session boot or does real work. A
-//! collector summing `extract.ghc_session` must never fold in
-//! `classify.ghc_session`'s numbers — that would silently merge two different
-//! subprocess spawns into one row and make the two lanes' costs unreadable.
+//! 11-extract-timing-contract.md`'s pipeline walk): `extract.*` is the inside
+//! of that single `--turn` spawn's `extract_spawn`, including its own
+//! in-process `classify` substep (`extract.classify`). `classify.*` is a
+//! DIFFERENT lane's prefix — the block-classify spawn `tidepool_runtime::
+//! session::classify_block` makes on the repl's behalf, not something a
+//! harness turn emits at all. Keeping them under distinct prefixes matters
+//! beyond bookkeeping: it is the only way to see whether the extract's
+//! in-process classify substep is almost entirely GHC-session boot or does
+//! real work. `extract.*` never carries a `ghc_session` row post-partition
+//! (see [`PHASE_GHC_SESSION`]'s doc) — only `classify.ghc_session` does — but
+//! the rule generalizes: a collector must never fold ANY `extract.<phase>`
+//! into the like-named `classify.<phase>`, since they are two different
+//! subprocess spawns even where a name happens to coincide.
 //!
 //! # The extract-side wire format
 //!
@@ -52,6 +54,27 @@
 //! are DIAGNOSTIC ONLY — stdout (the JSON diagnostics report) and the emitted
 //! CBOR are the wire contract and must be byte-identical with and without the
 //! env var set. With the var unset the extract emits nothing at all.
+//!
+//! # Flat phase partition (compile lane)
+//!
+//! On BOTH extract pipeline paths (`runNormalPipeline` and
+//! `runSessionPipeline` in `haskell/src/Tidepool/GhcPipeline.hs`),
+//! [`PHASE_GHC_SETUP`] (session `DynFlags` setup + `guessTarget`/`setTargets`
+//! + `depanal`) and [`PHASE_GHC_LOAD`] (the `load'` call alone) are two
+//! SEPARATE, NON-OVERLAPPING spans — not one nested inside the other. They
+//! PARTITION what an older, now-retired `ghc_session` bracket used to cover
+//! on the compile lane; see [`PHASE_GHC_SESSION`]'s doc for the retirement.
+//! A collector recovers the old coarse figure as the SUM `ghc_setup +
+//! ghc_load` — a flat-sum collector already does this for free, and neither
+//! row is emitted twice, so there is nothing to avoid double-counting. On the
+//! session path, [`PHASE_INJECT`] (PHASE 2's Val-iface splice) is a third
+//! flat row alongside them, with no normal-path counterpart. `load'` itself
+//! gets NO internal decomposition: it already redoes the SAME
+//! parse/typecheck/core2core work the per-module loop below it redoes a
+//! second time (see [`PHASE_TYPECHECK`]/[`PHASE_CORE`]), so one row around
+//! the whole call answers what matters. This is
+//! `haskell/src/Tidepool/Timing.hs`'s flat-phase doc, restated here since the
+//! two modules must stay in sync by hand.
 
 use std::time::Duration;
 
@@ -110,8 +133,32 @@ pub const RUST_STAGES: &[&str] = &[
 
 /// Process start to the point the GHC session is about to be created.
 pub const PHASE_STARTUP: &str = "startup";
-/// Creating the GHC session: flag parsing, package-db + interface loading.
+/// `ghc_session` now denotes exactly ONE span — the `--classify` lane's
+/// `getSessionDynFlags` (`Binders.hs` `classifyBlock`). The compile lane's
+/// former, much larger use (session setup + `depanal` + `load'`) is
+/// succeeded by [`PHASE_GHC_SETUP`] + [`PHASE_GHC_LOAD`]; a historical
+/// compile-lane `ghc_session` equals their sum. This is the SAME retirement
+/// discipline as the `classify_extract` tombstone (see the module doc): a
+/// same-named phase never changes meaning, so `ghc_session` keeps its
+/// ORIGINAL (small, classify-lane) meaning rather than being repurposed, and
+/// the compile lane's much larger span gets two new names instead.
 pub const PHASE_GHC_SESSION: &str = "ghc_session";
+/// FLAT (compile lane, both paths): session `DynFlags` setup +
+/// `guessTarget`/`setTargets` + the `depanal` call alone. Partitions the
+/// retired compile-lane `ghc_session` together with [`PHASE_GHC_LOAD`] — see
+/// [`PHASE_GHC_SESSION`]'s doc.
+pub const PHASE_GHC_SETUP: &str = "ghc_setup";
+/// FLAT (compile lane, both paths): GHC's `load' LoadAllTargets` call alone
+/// — a full compile of every home module (including `core2core`), separate
+/// from the SECOND parse/typecheck/core2core loop that
+/// [`PHASE_TYPECHECK`]/[`PHASE_CORE`] measure. Gets NO internal
+/// decomposition — see the module doc's flat-phase-partition section for why
+/// one row around the whole call is what answers C1.
+pub const PHASE_GHC_LOAD: &str = "ghc_load";
+/// FLAT, SESSION-PATH ONLY (absent on `runNormalPipeline`, which never
+/// injects session Vals): `injectSessionScope` splicing the live `Val.G<g>`
+/// ifaces into the HPT.
+pub const PHASE_INJECT: &str = "inject";
 /// The `--turn` mode's in-process classify substep (GHC-sourced verdict,
 /// inside the booted session, before any compile work) — absent when a
 /// caller supplies `--turn-verdict` and the mode skips its own re-parse.
@@ -129,10 +176,16 @@ pub const PHASE_WRITE: &str = "write";
 /// Whole-process wall clock as the extract itself measures it.
 pub const PHASE_TOTAL: &str = "total";
 
-/// Every extract-side phase, in pipeline order.
+/// Every extract-side phase, in pipeline order, across BOTH lanes. All
+/// FLAT — no entry is summed into another; see [`PHASE_GHC_SESSION`]'s doc
+/// for why `ghc_session` (classify lane only) sits apart from `ghc_setup`/
+/// `ghc_load` (compile lane) despite the adjacent listing.
 pub const EXTRACT_PHASES: &[&str] = &[
     PHASE_STARTUP,
+    PHASE_GHC_SETUP,
+    PHASE_GHC_LOAD,
     PHASE_GHC_SESSION,
+    PHASE_INJECT,
     PHASE_CLASSIFY,
     PHASE_TYPECHECK,
     PHASE_CORE,
@@ -272,6 +325,20 @@ tidepool-timing phase=total ms=2100\n";
     #[test]
     fn no_timing_lines_parses_empty() {
         assert!(ExtractTiming::parse("plain stderr\n").is_empty());
+    }
+
+    #[test]
+    fn parses_the_flat_ghc_setup_and_ghc_load_rows() {
+        let stderr = "\
+tidepool-timing phase=ghc_setup ms=142\n\
+tidepool-timing phase=ghc_load ms=4533\n";
+        let t = ExtractTiming::parse(stderr);
+        assert_eq!(t.phases.len(), 2);
+        assert_eq!(t.get(PHASE_GHC_SETUP), Some(142));
+        assert_eq!(t.get(PHASE_GHC_LOAD), Some(4533));
+        // Post-partition the compile lane never emits PHASE_GHC_SESSION —
+        // only the classify lane (Binders.hs classifyBlock) does.
+        assert_eq!(t.get(PHASE_GHC_SESSION), None);
     }
 
     #[test]

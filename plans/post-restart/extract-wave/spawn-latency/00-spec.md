@@ -13,11 +13,18 @@ the receipt counts, and anything that conflicted at fold. Do NOT edit
 ## The measurement that re-aims this lane (READ BEFORE PLANNING)
 
 Phase-B measurement, 2026-08-08
-(`plans/self-iterating-harness/11-turn-latency-contract.md`):
+(originally `11-turn-latency-contract.md`, RETIRED by C1 — see
+`plans/self-iterating-harness/11-extract-timing-contract.md`):
 
 - **60–66%** of a turn's extract spawn is GHC's `core` phase
 - **26–32%** session boot
 - **under 6%** typecheck
+
+C1's measurement (`01-c1-measurement.md`) revises the last two rows: the
+`typecheck` figure counts only one of the two typechecks a turn pays (the
+other is hidden inside `load'`), and most of "26–32% session boot" turns out
+to be `load'` running a full first compile, not session boot narrowly. Treat
+home-module typecheck cost as OPEN, not refuted.
 
 **The standing home-module typecheck suspicion is REFUTED.** Consequences,
 binding on your ordering:

@@ -7,6 +7,9 @@ module Tidepool.Translate
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
+  , emittedConIds
+  , collectReachableConDCs
+  , collectReachableConDCsRaw
   , wiredInDataCons
   , mergeMetaPreserving
   , dcToMeta
@@ -170,9 +173,22 @@ freshSynthVarId = do
   -- Tag 'T' = 0x54, shifted left 56 bits
   return (0x5400000000000000 .|. c)
 
+-- | D1 mutation-test fault injection (plans/post-restart/extract-wave/spawn-latency/00-spec.md):
+-- @TIDEPOOL_TEST_DROP_DC=\<module-qualified-name\>@ makes 'recordDC' silently
+-- skip recording exactly the one constructor whose 'qualifiedName' matches —
+-- simulating a constructor that reaches the emitted IR but never lands in
+-- the authoritative translation's 'tsUsedDCs', the exact shape the D1 hard-fail
+-- defense exists to catch. Inert unless set; checked once via 'unsafePerformIO',
+-- same pattern as 'joinrecDebugEnabled'.
+{-# NOINLINE testDropDC #-}
+testDropDC :: Maybe String
+testDropDC = unsafePerformIO $ System.Environment.lookupEnv "TIDEPOOL_TEST_DROP_DC"
+
 recordDC :: DataCon -> TransM ()
-recordDC dc = modify' $ \s ->
-  s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
+recordDC dc
+  | testDropDC == Just (T.unpack (qualifiedName (dataConName dc))) = return ()
+  | otherwise = modify' $ \s ->
+      s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
 -- | Fresh site id for a runLLMTurn/runLLMTurnFork call site (#R0):
 -- a plain per-'translateModule'-run counter, distinct from 'freshSynthVarId'
@@ -1037,6 +1053,75 @@ collectUsedDataCons binds =
         let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
         in tsUsedDCs s
       ) pairs
+
+-- | D1 CHECK A input: every constructor id that reaches the wire in a
+-- translated program's 'FlatNode's — an 'NCon' head id, or an 'FDataAlt'
+-- inside any 'NCase' alt. 'NCase'\'s own 'Word64' is the case BINDER's
+-- varId, not a constructor, and is deliberately excluded. The caller
+-- ('Main.assertMetaCoversEmitted') asserts this set is a subset of the
+-- emitted metadata's ids — see plans/post-restart/extract-wave/spawn-latency/00-spec.md.
+emittedConIds :: Seq FlatNode -> Set.Set Word64
+emittedConIds = foldl' step Set.empty
+  where
+    step acc (NCon w _)       = Set.insert w acc
+    step acc (NCase _ _ alts) = foldl' altStep acc alts
+    step acc _                = acc
+    altStep acc (FlatAlt (FDataAlt w) _ _) = Set.insert w acc
+    altStep acc _                          = acc
+
+-- | D1 CHECK B: an INDEPENDENT syntactic Core visitor — every DataCon
+-- reachable from these binds' RHSs, found WITHOUT ever invoking 'translate'
+-- or constructing a 'TransState'. That independence is the entire point:
+-- comparing this against the authoritative translation's 'tsUsedDCs' only
+-- proves anything if the two are computed by genuinely different code.
+-- Collects (a) every 'Var' naming a data-constructor WORKER
+-- ('isDataConWorkId_maybe') and (b) every 'DataAlt' scrutinized by a 'Case'.
+--
+-- Two filters, both CATEGORICAL (type-level facts, not translator-behaviour
+-- facts — excluding them costs no independence): the same 'isGhcCompilerDC'
+-- filter 'collectUsedDataCons' applies, so the two sets are comparable; and
+-- 'isUnboxedTupleDataCon', since an unboxed tuple has no runtime heap
+-- representation at all and can never require metadata (multi-return
+-- primop/FFI results built from one are always split apart before they'd
+-- reach the wire — see the @Case@ desugarings around line 2000).
+collectReachableConDCs :: [CoreBind] -> [DataCon]
+collectReachableConDCs binds =
+  filter (\dc -> not (isGhcCompilerDC dc) && not (isUnboxedTupleDataCon dc))
+    (collectReachableConDCsRaw binds)
+
+-- | The UNFILTERED walk 'collectReachableConDCs' filters. Kept as a separate
+-- export because it has a second consumer with a different filtering need:
+-- 'Main.assertMetaCoversEmitted's CHECK A name lookup must NOT inherit CHECK
+-- B's exclusions. B's filters are about what B should ASSERT ON (GHC-internal
+-- and unboxed-tuple constructors are legitimately never in the metadata); A's
+-- name map is about NAMING WHATEVER ACTUALLY FAILED, and a multi-element
+-- unboxed tuple CAN be emitted (see ~2088-2090: 'recordDC dc' then
+-- 'FDataAlt (varId (dataConWorkId dc))' for the heap-box case) -- filtering
+-- it out of A's map would print "<name unresolvable>" for exactly the
+-- constructor CHECK A most needs named. Every future CHECK-B-motivated
+-- exclusion added to 'collectReachableConDCs' must NOT be added here, or it
+-- silently degrades CHECK A's diagnostic one constructor at a time. One
+-- source, two consumers, two different filtering needs -- do not re-merge them.
+collectReachableConDCsRaw :: [CoreBind] -> [DataCon]
+collectReachableConDCsRaw binds =
+  Map.elems (foldl' goBind Map.empty binds)
+  where
+    ins m dc = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc m
+    goBind m (NonRec _ rhs) = goE m rhs
+    goBind m (Rec pairs)    = foldl' (\m' (_, rhs) -> goE m' rhs) m pairs
+    goE m expr = case expr of
+      Var v      -> maybe m (ins m) (isDataConWorkId_maybe v)
+      Lit{}      -> m
+      App f a    -> goE (goE m f) a
+      Lam _ e    -> goE m e
+      Let bind e -> goE (goBind m bind) e
+      Case s _ _ alts -> foldl' goAlt (goE m s) alts
+      Cast e _   -> goE m e
+      Tick _ e   -> goE m e
+      Type{}     -> m
+      Coercion{} -> m
+    goAlt m (Alt (DataAlt dc) _ rhs) = goE (ins m dc) rhs
+    goAlt m (Alt _ _ rhs)            = goE m rhs
 
 -- | Record field labels for a constructor (from GHC's @dataConFieldLabels@), in
 -- field order. Empty for positional (non-record) constructors. The Rust renderer

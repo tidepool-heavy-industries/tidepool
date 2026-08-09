@@ -11,6 +11,7 @@ import Fidelity.Harness (Check)
 import qualified Fidelity.Erasure as Erasure
 import qualified Fidelity.PrimopArity as PrimopArity
 import qualified Fidelity.Recognizers as Recognizers
+import qualified Fidelity.D1Defense as D1Defense
 
 import Control.Monad (forM_)
 import System.Exit (exitFailure, exitSuccess)
@@ -20,6 +21,7 @@ groups =
   [ ("coercion-binder erasure", Erasure.checks)
   , ("intrinsic recognizers",   Recognizers.checks)
   , ("pipeline barriers + unboxed-tuple arity", PrimopArity.checks)
+  , ("D1 hard-fail metadata-subset defense (mutation test)", D1Defense.checks)
   ]
 
 main :: IO ()

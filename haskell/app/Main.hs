@@ -6,6 +6,8 @@ import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
+import Numeric (showHex)
 import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
@@ -41,7 +43,7 @@ import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -461,6 +463,26 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
       hasIO       = or (map twHasIO writes)
       allVarNames = concatMap twVarNames writes
 
+  -- D1 defense, re-wired at the extract-wave fold (2026-08-09): the merge of
+  -- boot's '--targets' split with spawn-latency's D1-A left
+  -- 'assertMetaCoversEmitted' DEFINED BUT UNCALLED, because the single-target
+  -- body that used to call it was replaced by the 'writeWholeModuleClosed'
+  -- thin wrapper. It belongs HERE — this is now the one write path, so every
+  -- target on every mode passes through it.
+  --
+  -- Placement is load-bearing twice over. BEFORE the write step, because CHECK
+  -- A's contract is "not a byte of output is written if the emitted metadata
+  -- omits a constructor the program can reference". And BEFORE the encode
+  -- timeSection, because forcing 'allMeta' here keeps that cost OUT of
+  -- 'cbor_encode' — matching the pre-merge attribution, where the assert was
+  -- untimed and was what first forced the metadata thunk.
+  --
+  -- Per target, against the MERGED metadata: multi-target shares one
+  -- meta.cbor, so each target must be covered by the union, not by its own
+  -- slice.
+  forM_ targets $ \(tn, _, closed) ->
+    assertMetaCoversEmitted tn (cmNodes closed) (cmReachBinds closed) allMeta
+
   (metaCbor, metaMs) <- timeSection (evaluate (encodeMetadata allMeta hasIO mCapturedTy allVarNames warnTexts))
   emitPhase timing "cbor_encode" (encodeMsTotal + metaMs)
 
@@ -506,6 +528,71 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
 -- @{site, type}@ pairs it wrote to @asks.json@, so a caller that also needs
 -- them (the turn mode's rich result) reads them off this one translation
 -- rather than re-running 'translateModuleClosed'.
+-- | D1 defense (plans/post-restart/extract-wave/spawn-latency/00-spec.md,
+-- codex-review-2026-08-08.md item 7): asserts BEFORE a single byte of this
+-- binder's output is written that the emitted metadata covers every
+-- constructor id the emitted program can reference.
+--
+-- CHECK A (primary, hard-fail): every id in @'emittedConIds' nodes@ — what
+-- actually reaches the wire — must appear as some @allMeta@ entry's 'dcmId'.
+-- Not a warning, not a merge: 'error's, caught by the caller's 'try' exactly
+-- like any other extraction failure (nonzero exit, JSON diagnostics on
+-- stdout, no result.cbor \/ meta.cbor written). A constructor emitted into
+-- the IR but missing from the metadata is exactly the shape of the
+-- still-owed garbage-con_tag intermittent: the runtime would receive a
+-- constructor it cannot describe.
+--
+-- CHECK B (independence, DIAGNOSTIC): every DataCon 'collectReachableConDCs'
+-- finds — an INDEPENDENT syntactic Core visitor that never calls the
+-- translator — is compared against @allMeta@ and any gap is logged loudly to
+-- stderr, but does NOT fail extraction. Downgraded from hard-fail (root
+-- direction, 2026-08-09): the invariant "every DataCon in reachable Core is
+-- in the metadata" is FALSE BY DESIGN — the translator's job legitimately
+-- includes NOT translating whole classes of Core (interceptions, elisions,
+-- desugarings; e.g. multi-return primop/FFI unboxed-tuple splitting, Case
+-- clauses around line 2000, never reaches 'mapAltCon'/'recordDC'). CHECK A
+-- never firing alongside a CHECK B gap is the load-bearing evidence that the
+-- runtime was never at risk in that case. CHECK B stays wired in — a NEW,
+-- previously-unseen divergence class should still surface here — but it no
+-- longer blocks a build for an elision that is correct by design. Per the
+-- D1 spec, a CHECK B diagnostic is still a REAL FINDING to read and, if it
+-- names something outside the categorical unboxed-tuple exclusion below,
+-- escalate — never silently ignore.
+assertMetaCoversEmitted :: String -> Seq.Seq FlatNode -> [CoreBind] -> [DCMeta] -> IO ()
+assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
+  let allMetaIds = Set.fromList (map dcmId allMeta)
+      reachableMeta = map dcToMeta (collectReachableConDCs reachBinds)
+      -- Deliberately NOT built from 'reachableMeta': CHECK A's name lookup
+      -- must not inherit CHECK B's exclusions. See
+      -- 'Tidepool.Translate.collectReachableConDCsRaw's haddock -- B's
+      -- filters are about what B should assert on, A's map is about naming
+      -- whatever actually failed, and a multi-element unboxed tuple CAN be
+      -- emitted (Translate.hs ~2088-2090), so filtering it out here would
+      -- print "<name unresolvable>" for exactly the constructor CHECK A
+      -- most needs named.
+      nameById = Map.fromList
+        [ (dcmId m, dcmQualName m) | m <- map dcToMeta (collectReachableConDCsRaw reachBinds) ]
+      nameOf vid = maybe "<name unresolvable>" T.unpack (Map.lookup vid nameById)
+      missingEmitted = Set.toList (emittedConIds nodes `Set.difference` allMetaIds)
+  when (not (null missingEmitted)) $ error $
+       "D1 CHECK A (emitted-metadata subset) FAILED for binder " ++ targetName ++ ": "
+    ++ show (length missingEmitted)
+    ++ " constructor id(s) reach the wire (FlatNode NCon/FDataAlt) but are "
+    ++ "missing from meta.cbor -- the runtime would receive a constructor it "
+    ++ "cannot describe:\n"
+    ++ unlines [ "  0x" ++ showHex vid "" ++ " " ++ nameOf vid | vid <- missingEmitted ]
+  let missingReachable = filter (\m -> not (dcmId m `Set.member` allMetaIds)) reachableMeta
+  when (not (null missingReachable)) $ hPutStrLn stderr $
+       "D1 CHECK B (independent reachable-Core subset) DIAGNOSTIC for binder " ++ targetName ++ ": "
+    ++ show (length missingReachable)
+    ++ " DataCon(s) found by the independent syntactic Core visitor are "
+    ++ "missing from meta.cbor -- the authoritative translation and the "
+    ++ "independent collector disagree on reachability (informational only, "
+    ++ "does not fail the build -- see assertMetaCoversEmitted's haddock):\n"
+    ++ unlines [ "  0x" ++ showHex (dcmId m) "" ++ " " ++ T.unpack (dcmQualName m)
+               | m <- missingReachable ]
+
+
 --
 -- A thin wrapper over 'translateTargetClosed' + 'writeClosedTargets' (a
 -- singleton target list) since the multi-target '--targets' mode split this
