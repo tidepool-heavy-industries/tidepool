@@ -31,14 +31,15 @@
 # waiters on each slot as it drains — which is what a measurement wants.
 set -euo pipefail
 
-# 3-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
+# 4-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
 # concurrent extracts with every lane compliant at 3x3. The per-run cap is
-# now 1, so slots = box-wide extract ceiling, but that config is PER-WORKTREE
-# and propagates at rebase: do NOT raise the slot count until the live heavy
-# lanes confirm carrying per-run cap 1, then 4 slots is a net REDUCTION vs
-# the old effective 9. Keep the product <= ~4 on this box.
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2)
+# now 1 (fc3363dc) and the two heavy waves confirmed carrying it, so 4 slots
+# = box-wide extract ceiling of ~4, a net REDUCTION vs the old effective 9.
+# The cap config is PER-WORKTREE and propagates at rebase — a lane still on
+# per-run 3 can transiently fan one slot to 3; chase stragglers rather than
+# lowering this. Keep the product <= ~4-6 on this box.
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,
