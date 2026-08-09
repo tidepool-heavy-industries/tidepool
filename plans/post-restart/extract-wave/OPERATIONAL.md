@@ -66,12 +66,28 @@ localized diffs and log it at fold):
   do NOT wrap them; that is unchanged.
   If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
   rather than bypassing the broker.
+  **MEASURING actual load — the obvious commands are both wrong.**
+  `pgrep -fc tidepool-extract` OVER-counts wildly (22–24 on a box with 4 real
+  compiles): it matches every agent shell, `.claude-unwrapp`, `bash`, `zsh` and
+  `timeout` process carrying `TIDEPOOL_EXTRACT=…` in its command line or
+  environment, so it tracks how many AGENTS exist, not how much GHC runs.
+  But matching on `comm` with the full binary name UNDER-counts to a constant
+  zero: Linux truncates `comm` to 15 characters, so `tidepool-extract-bin`
+  appears as `tidepool-extrac` and `grep tidepool-extract-bin` can NEVER match.
+  The correct instruments:
+
+      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (note: 15-char truncation)
+      cat /proc/loadavg                            # actual load
+
+  Use both. A zero from a mistyped pattern reads exactly like a quiet box.
   **Bias toward fewer, better-batched runs.** This wave is the heaviest GHC
   consumer on the box, so the throttle bites hardest here.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
 - NEVER run bare `scripts/battery.sh` — this environment hard-kills background
   processes at ~380s and the full battery is hours. Use:
-  - tier 1 `cargo nextest run` (pure-Rust, safe unattended);
+  - tier 1 `cargo nextest run` (pure-Rust) — **MUST be broker-wrapped under the
+    throttle directive above. It is NOT "safe unattended"; that phrasing is
+    WITHDRAWN as of 24f6d7a7.**
   - tier 2 `scripts/battery.sh -p <crate> -E 'test(<name>)'`;
   - tier 3 `scripts/battery-shard.sh <crate>`;
   - tier 4 `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh <crate> ...`,
