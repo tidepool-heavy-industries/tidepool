@@ -441,6 +441,13 @@ message to send, and whether to wait, replace, integrate, or stop. Delivery,
 turn interruption, durable ordering, and idle follow-up mechanics belong to
 the runtime.
 
+For example, the resident may answer a first `AgentWentIdle` with
+`whenSafe (FinishAndCommit ...)`, record that escalation in checkpointed
+`State`, and answer a later idle/deadline observation with
+`interrupting (FinishAndCommit ...)`. The runtime performs both requests; the
+resident chooses the escalation schedule and handles the resulting typed
+lifecycle events.
+
 **Cycle shape (updated to PRD 18's revised summary, 2026-08-08):** agents
 may CONTINUE RUNNING between resident cycles — their stable identities and
 the resident's plan for them are ordinary checkpointed data. What still
