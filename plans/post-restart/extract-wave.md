@@ -368,19 +368,29 @@ fat-iface bytes per turn; worklist pushes vs unique vars), then commit.
 - Extractor id-stability is a PINNED invariant (three permanent tests from the
   ConTags incident). Changing id-minting fires them; that's the design
   conversation happening, not a test to silence.
-  **CORRECTED 2026-08-09 — the shorthand over-claims.** The three pin
-  `session_table_qualified_identity` (DataConId uniqueness by qualified name +
-  freer-five ConTags), `realm_varid_pinning` (VarId scoping ISOLATION, not
-  numeric determinism — it passes under any permutation), and
-  `VarIdMechanismTest` (the `stableVarId`/`fieldParentDisamb` contract, i.e.
-  the compile-order-INVARIANT branch of `varId`'s `isExternalName` split).
-  **None observes `localVarId` determinism** — internal/floated bindings bake
-  the raw GHC `Unique` and are allocation-order-sensitive by that function's
-  own doc comment. A green triple means those three properties are intact; it
-  does NOT mean ids did not move. **Their silence is not consent.** A change on
-  `localVarId`'s path has no pinned guard and owes a direct experiment.
-  (Fourth guard this wave found to cover less than its name — and the one both
-  the wave spec and the sub-TL specs leaned on hardest.)
+  **CORRECTED 2026-08-09 (twice — see below). The shorthand over-claims, and
+  the trio was never enumerated anywhere.** No document in this repo names its
+  members: this spec said "session_table_qualified_identity + two quick-tier
+  assertions", `codex-review-2026-08-08.md:99` says "the three pinned
+  id-stability tests" without naming any. The actual three, by exact path, each
+  read to confirm:
+  - `tidepool-repr::extend_checked_equivalence::distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order`
+  - `tidepool-repr::extend_checked_equivalence::merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard`
+  - `tidepool-runtime::session_table_qualified_identity`
+
+  **All three are DataConId qualified-name guards. None observes VarIds at
+  all** — not `localVarId`, not `stableVarId`. `localVarId` bakes the raw GHC
+  `Unique` for internal/floated bindings and is allocation-order-sensitive by
+  its own doc comment. A green triple means constructor-identity guarding is
+  intact; it does NOT mean ids did not move. **Their silence is not consent.**
+  A change on `localVarId`'s path has no pinned guard and owes a direct
+  experiment.
+  (My first correction here named `realm_varid_pinning` and `VarIdMechanismTest`
+  as two of the three — both real tests, neither in the trio. That was
+  relayed from a grep for plausible-looking tests rather than from a source
+  that defines the set, because no such source exists. Fourth guard this wave
+  covering less than its name; also the first citation found to have **no
+  referent at all**.)
 - One-format wire policy: extract changes that move the wire ship both
   sides via redeploy, fail loud on skew.
 - Correctness gates: hardened differential (floors), corpus_report,

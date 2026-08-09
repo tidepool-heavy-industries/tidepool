@@ -363,18 +363,22 @@ rules below — each is this rule applied to one artifact.
   property well, but the phrase reads as blanket coverage of the id space and
   is not. What they actually observe:
 
+  The trio, **enumerated by exact path because it was never written down
+  anywhere** (see the meta-note below) and each one read to confirm:
+
   | test | what it pins |
   |---|---|
-  | `session_table_qualified_identity` | DataConId uniqueness by qualified name + freer-five ConTags resolution |
-  | `realm_varid_pinning` | VarId **scoping isolation** — same-named binds mint distinct SessionVarIds and resolve correctly. Not numeric determinism; passes under any permutation. |
-  | `VarIdMechanismTest` | the `stableVarId` / `fieldParentDisamb` contract — the compile-order-INVARIANT branch of `varId`'s `isExternalName` split |
+  | `tidepool-repr::extend_checked_equivalence::distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order` | two distinct **DataConId**s sharing a qualified name is a hard error in `insert_checked`/`extend_checked`, in either arrival order |
+  | `tidepool-repr::extend_checked_equivalence::merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard` | `merge_table`'s skip-identical pre-filter cannot elide a colliding **DataConId** before the guard sees it |
+  | `tidepool-runtime::session_table_qualified_identity` | no qualified constructor name maps to >1 **DataConId** in the accumulated table; freer-five ConTags still resolve to what bootstrap froze |
 
-  **NOT observed: `localVarId` determinism.** Internal and floated bindings bake
-  the raw GHC `Unique` and are allocation-order-sensitive *by that function's own
-  doc comment* — numeric determinism there was never claimed. So a green triple
-  means "constructor identity, VarId scoping, and the `stableVarId`
-  disambiguator contract are intact". **It does not mean ids did not move, and
-  their silence is not consent.**
+  **ALL THREE ARE DataConId GUARDS. None observes VarIds at all** — not
+  `localVarId`, not `stableVarId`. So the label "extractor id-stability" never
+  covered the VarId space by any of these tests. `localVarId` bakes the raw GHC
+  `Unique` for internal/floated bindings and is allocation-order-sensitive *by
+  its own doc comment*; determinism there was never claimed and is not watched.
+  A green triple means **constructor-identity guarding is intact**. **It does
+  not mean ids did not move, and their silence is not consent.**
   Still true: if your change FIRES any of them, STOP and escalate to your TL —
   that is a design conversation with root, not a test to silence. But do not
   read a PASS as blanket id coverage; if your change touches `localVarId`'s
