@@ -46,10 +46,7 @@ fn mk(name: &str) -> String {
 
 #[test]
 fn dedup_nodes_drops_repeats_order_preserving() {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let a = mk("a");
     let b = mk("b");
     let code = format!(r#"pure (map nodeName (dedupNodes [{a}, {b}, {a}]))"#);
@@ -64,10 +61,7 @@ fn dedup_nodes_drops_repeats_order_preserving() {
 /// `walk`/`concatMapM` compose over `[LspNode]` directly.
 #[test]
 fn walk_bfs_terminates_on_cycle_and_dedupes() {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let code = format!(
         r#"
 let step n = case nodeName n of
@@ -90,10 +84,7 @@ in map nodeName <$> walk step 10 {a}
 /// no `fromMaybe`/unwrap needed to fan a frontier of nodes out and flatten.
 #[test]
 fn concat_map_m_composes_with_plain_list_step() {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let code = format!(
         r#"
 let step n = case nodeName n of

@@ -20,7 +20,7 @@
 //! WOULD prove opacity and marked `#[ignore = "... ledger #NN"]` — they are the
 //! implementers' work-list, not a product fix for this task.
 //!
-//! Each test skips cleanly (early return) when the session-aware extract is
+//! Each test panics loudly when the session-aware extract is
 //! unavailable, so the file still COMPILES without `TIDEPOOL_EXTRACT`.
 
 mod common;
@@ -129,10 +129,7 @@ fn parse_items(raw_text: &str) -> Vec<serde_json::Value> {
 /// `session_run`, so this proves cross-CALL persistence, not within-block scope.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cross_call_scoping_both_planes_persist() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Call 1: effectful bind (materializes a heap value, monomorphic).
@@ -164,10 +161,7 @@ async fn cross_call_scoping_both_planes_persist() {
 /// references it. Passing `input = 7` and evaluating `pure input` surfaces 7.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn input_payload_lane_in_scope() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // `input :: Aeson.Value` — a JSON number 7 renders back as 7.
@@ -187,10 +181,7 @@ async fn input_payload_lane_in_scope() {
 /// honored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_binding_named_input_not_confused_with_lane() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // No `input` payload passed on these calls — the only `input` in scope is
@@ -215,10 +206,7 @@ async fn user_binding_named_input_not_confused_with_lane() {
 /// populated from the trailing expression.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_statement_forms_consecutive() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let out = repl
@@ -246,10 +234,7 @@ async fn all_statement_forms_consecutive() {
 /// module noise (`Tidepool.Session`, `G<n>.hs:` paths).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn per_item_failure_granularity_and_clean_diag() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let out = repl
@@ -321,10 +306,7 @@ async fn per_item_failure_granularity_and_clean_diag() {
 /// names, so no Prelude-shadow leak is in play — that is the ignored case below.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plane_opacity_binds_interchangeable() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Pure bind (decl plane) and effectful bind (materialize), same type.
@@ -354,10 +336,7 @@ async fn plane_opacity_binds_interchangeable() {
 /// an "Ambiguous occurrence".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plane_opacity_pure_bind_shadows_prelude_name() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("let lookup = (42 :: Int)")
@@ -381,10 +360,7 @@ async fn plane_opacity_pure_bind_shadows_prelude_name() {
 /// #28's original gap), so the decl compiles and generalizes cold too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plane_opacity_open_hasfield_helper_binds_cold() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Fully open: `HasField "path" r a` with both r and a free (no `T.toUpper`

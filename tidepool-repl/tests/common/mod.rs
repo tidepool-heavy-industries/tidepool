@@ -13,14 +13,21 @@ use tidepool_handlers::{
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-/// True if the session-aware `tidepool-extract` is reachable (else the suite
-/// skips cleanly — CI without the nix shell / `TIDEPOOL_EXTRACT` set).
+/// True if the session-aware `tidepool-extract` is reachable.
 ///
 /// Delegates to the shared harness helper, which also derives + installs
 /// `TIDEPOOL_EXTRACT` (via `cabal list-bin`) when it isn't already set — so the
 /// repl suites stop depending on the caller having exported it by hand.
 pub fn extract_available() -> bool {
     tidepool_testing::eval_harness::extract_available()
+}
+
+/// Panic loudly instead of skipping (which nextest reports as PASS) when the
+/// session-aware `tidepool-extract` isn't reachable. This GHC-tier suite is
+/// excluded from the default nextest filter, so this only fires on a direct
+/// `--ignore-default-filter` invocation missing the environment.
+pub fn require_extract() {
+    tidepool_testing::eval_harness::require_extract()
 }
 
 /// The first text content block of a tool result.

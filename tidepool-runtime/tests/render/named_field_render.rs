@@ -11,11 +11,10 @@
 //! (`test_render_record_named_fields`) hand-build a table for.
 //!
 //! Needs the with-packages GHC on PATH and `TIDEPOOL_EXTRACT` pointing at a
-//! freshly built extract binary (see haskell/CLAUDE.md). Skips (passes) when
-//! `TIDEPOOL_EXTRACT` is unset so a plain `cargo test` on a checkout without the
-//! toolchain does not fail.
+//! freshly built extract binary (see haskell/CLAUDE.md). Panics loudly (see
+//! `require_extract`) when the toolchain is unreachable.
 
-use tidepool_testing::eval_harness::EvalHarness;
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 
 fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
     EvalHarness::new()
@@ -28,10 +27,7 @@ fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
 /// the constructor riding under `_con`.
 #[test]
 fn flat_record_renders_named_field() {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_none() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    require_extract();
     let src = "module Test where\n\
                data Person = Person { name :: String, age :: Int }\n\
                alice :: Person\n\
@@ -48,10 +44,7 @@ fn flat_record_renders_named_field() {
 /// deeply-structured outcomes stay readable (the issue's `FileApplied` case).
 #[test]
 fn nested_record_renders_named_field() {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_none() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    require_extract();
     let src = "module Test where\n\
                data Loc = Loc { line :: Int, col :: Int }\n\
                data Node = Node { label :: String, loc :: Loc }\n\

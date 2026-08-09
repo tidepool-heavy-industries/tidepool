@@ -1,7 +1,7 @@
 //! Calling-model provider boundary. The harness knows turns and
-//! token counts, never providers — segment 60 supplies the two impls
-//! (ChatGPT-subscription OAuth, API-key) behind this one trait, passing
-//! one shared behavior suite. This is NOT the in-program `Llm` effect
+//! token counts, never providers — two impls (ChatGPT-subscription OAuth,
+//! API-key) sit behind this one trait, sharing one behavior suite. This is
+//! NOT the in-program `Llm` effect
 //! (tidepool-handlers); different consumer, different budget accounting.
 //!
 //! Both impls (`oauth`, `api_key`) route chat calls through `genai` (`http`

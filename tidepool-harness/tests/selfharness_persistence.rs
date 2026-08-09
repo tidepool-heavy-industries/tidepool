@@ -32,14 +32,6 @@ use tidepool_harness::{
     Observer, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -149,12 +141,7 @@ fn source() -> HarnessSource {
 /// between) asserts generation keeps increasing within one process too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("restart").join("checkpoint.json");
@@ -378,12 +365,7 @@ fn compaction_driver(checkpoint_path: PathBuf) -> (SelfHarnessDriver, HarnessSou
 /// with the older state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("crash").join("checkpoint.json");
@@ -558,10 +540,7 @@ impl Observer for FingerprintChangeObserver {
 /// here by driving one real cycle afterward and checking what it commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("stale-fp").join("checkpoint.json");
@@ -652,10 +631,7 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
 /// runs out of scripted replies.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_run_loop() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("decode-retry").join("checkpoint.json");

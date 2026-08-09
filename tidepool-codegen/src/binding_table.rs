@@ -7,19 +7,18 @@
 //! and the value half is the live, GC-rooted [`BoundValue`] in the resident
 //! machine's heap (the JIT's plane).
 //!
-//! ## The two-layer shape (domain model §4; kimi-r2 #9 rewrite)
+//! ## The two-layer shape (domain model §4)
 //!
 //! A mutable `name → SessionVarId` map (`current`) over an append-only set of
 //! `SessionVarId → BindingEntry` (`live`). Rebinding a name mints a *fresh*
 //! `SessionVarId` (a new `Val.G<g'>` module → a new `stableVarId`) and repoints
 //! only `current`, so old roots stay reachable from captures in
 //! already-compiled fragments and the `DataConTable::insert_checked` collision
-//! guard is structurally never tripped. This REVISES the Wave-0 scaffold's
-//! `0xFD` counter-minted id + `type_string` field: under Option C the
-//! gen-versioned module name already yields a fresh, collision-free `0xFE`
-//! external id per (re)bind, and the structured type lives in the `.hi`, not a
-//! string. The `var_id` is minted by the Haskell extract (`Translate.stableVarId`)
-//! and stored here verbatim (see [`SessionVarId`]).
+//! guard is structurally never tripped: the gen-versioned module name yields a
+//! fresh, collision-free `0xFE` external id per (re)bind, and the structured
+//! type lives in the `.hi`, not a string. The `var_id` is minted by the
+//! Haskell extract (`Translate.stableVarId`) and stored here verbatim (see
+//! [`SessionVarId`]).
 
 use std::collections::HashMap;
 
@@ -174,7 +173,7 @@ impl BindingTable {
 
     /// Build the `ExternalEnv` the JIT consults at a Var-miss, seeded with
     /// only the `SessionVarId → RootSlot` slot addresses the incoming
-    /// fragment actually references (D9) — `referenced` (typically
+    /// fragment actually references — `referenced` (typically
     /// `tidepool_repr::free_vars(&fragment)`) intersected with `live`, not
     /// every live binding. The Var-miss site emits a per-fragment `load`
     /// through the slot to read the GC-current pointer, so seeding the slot
@@ -256,10 +255,9 @@ mod tests {
         assert_eq!(t.iter_current().count(), 1);
     }
 
-    /// Narrowed contract, honestly restated (D9): the old
-    /// `seed_external_env_covers_every_live_binding` claim ("every live
-    /// binding, unconditionally") no longer holds by default — it only holds
-    /// as the special case where every live binding is also referenced.
+    /// `seed_external_env` seeds every REFERENCED live binding, not every
+    /// live binding unconditionally; this covers the special case where
+    /// every live binding also happens to be referenced.
     #[test]
     fn seed_external_env_seeds_every_referenced_binding_when_all_are_referenced() {
         let mut a: *mut u8 = std::ptr::null_mut();
@@ -277,7 +275,7 @@ mod tests {
         assert!(env.get(y_var).is_some());
     }
 
-    /// D9: a live binding NOT in the referenced set must not be seeded — this
+    /// A live binding NOT in the referenced set must not be seeded — this
     /// is the narrowing itself. (Whether it stays a GC root regardless is a
     /// separate claim, proved by
     /// `session_seed_external_env_root_retention.rs`'s GC-poison test, not by
@@ -299,7 +297,7 @@ mod tests {
         assert!(env.get(y_var).is_none());
     }
 
-    /// D9: a referenced `VarId` that isn't a live session binding at all (an
+    /// A referenced `VarId` that isn't a live session binding at all (an
     /// ordinary local binder, or a stale id) is silently skipped rather than
     /// erroring — the whole point is an intersection with `live`, not a
     /// membership requirement on `referenced`.

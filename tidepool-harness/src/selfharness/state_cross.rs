@@ -1,10 +1,9 @@
-//! `State` crossing at a loop boundary — the SERIALIZED channel
-//! (02-runtime.md "Two monads over one resident heap"), distinct from the
-//! in-heap `run_child` channel `service_runllm_hole` uses within a loop.
-//! `State` is any author-defined `(ToJSON s, FromJSON s) => s` (LOCKED,
-//! 02-runtime.md), so crossing it is NOT a fixed-schema JSON bridge — it
-//! reuses the same two mechanisms already proven for other typed/opaque
-//! values crossing the Rust/Haskell boundary:
+//! `State` crossing at a loop boundary — the SERIALIZED channel across two
+//! monads sharing one resident heap, distinct from the in-heap `run_child`
+//! channel `service_runllm_hole` uses within a loop. `State` is any
+//! author-defined `(ToJSON s, FromJSON s) => s`, so crossing it is NOT a
+//! fixed-schema JSON bridge — it reuses the same two mechanisms already
+//! proven for other typed/opaque values crossing the Rust/Haskell boundary:
 //!
 //! - **outbound** (`state_out`): render an evaluated `Value` to
 //!   `serde_json::Value` via [`tidepool_runtime::value_to_json`] — the same

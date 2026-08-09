@@ -28,6 +28,11 @@ self-iterating harness driver blocks on when it needs a human.
 - `tests/operator_gate.rs` — the HTTP-level integration test: boots the real
   router with `axum::serve` on an ephemeral port and drives it with a real
   client.
+- `formapi.rs` — the testing-convenience `GET`/`POST /api/form` surface: a
+  second front door onto the SAME [`WebGate`], never a second gate. See
+  "Testing convenience" below.
+- `tests/form_api.rs` — the form-api's HTTP-level integration tests, same
+  shape as `tests/operator_gate.rs`.
 
 ## The four verbs
 
@@ -96,6 +101,44 @@ changes:
 Don't assert on class names, colors, or element nesting anywhere in this
 crate's tests — those are `render.rs`/`shell.rs`'s to change freely as long
 as the above holds.
+
+## Testing convenience: the form API (`formapi.rs`)
+
+`GET`/`POST /api/form`, mounted alongside the four browser verbs by
+`router_with_form_api` when explicitly enabled — lets a test/agent driver
+read and answer the pending form as plain JSON, no browser needed. This is
+NOT a second gate: `GET` reads the SAME `AppState` the browser page reads,
+and `POST` resolves the SAME `oneshot::Sender` a browser `/submit` would —
+one `WebGate`, two front doors onto it.
+
+Hardening is part of the spec, not optional, because a submission through
+this door is exactly as much operator authority as one through the page:
+
+- **Disabled by default.** `router()` (used by every existing caller) passes
+  `FormApiConfig::default()`, which is `enabled: false`; `merge()` on a
+  disabled config returns its input router UNCHANGED — the routes are absent
+  from the route table, not merely 404'd behind a flag check at request time.
+  The only way to enable it is `TIDEPOOL_FORM_API=1` in the process
+  environment, read by `FormApiConfig::from_env()` and wired into
+  `spawn_operator_server`'s router build. The env-var parsing itself is a
+  pure function (`env_flag_enabled`) so it's unit-tested without mutating
+  process env.
+- **Loopback only**, inherited rather than reimplemented: these routes mount
+  onto the exact `Router` `spawn_operator_server` serves off its one
+  hardcoded `127.0.0.1` listener (`lib.rs::bind_addr`). This module never
+  opens a socket of its own, so there is no second bind to audit.
+- **Per-prompt nonce.** `AppState::pending_form()` returns the pending
+  `FormSpec` alongside `Slot::rev` — the same revision counter F10 already
+  bumps exactly once per `publish`/`take`, under the same lock as `pending`.
+  `AppState::submit_form(nonce, submission)` only resolves when `nonce`
+  matches the CURRENT revision; a missing, wrong, or stale nonce (the form
+  was superseded since it was last `GET`) is rejected and the pending form is
+  left untouched. This is the same trick `shell.rs`'s client JS already uses
+  `data-rev` for (telling a genuinely new pending interaction apart from a
+  re-render of the same one) — reused here to require that a caller actually
+  observed the exact occurrence it's answering, not just guessing.
+- **Self-describing.** Every response — success or 400 — carries a
+  `"test_only"` string naming what this surface is for.
 
 ## Loopback trust model
 

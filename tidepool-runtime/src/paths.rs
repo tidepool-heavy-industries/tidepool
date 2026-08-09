@@ -164,7 +164,6 @@ mod tests {
 
     /// `load_secrets_from` loads valid `*_API_KEY` files (trimmed), ignores
     /// bad names / non-key files, and lets an already-set env var win.
-    /// (Relocated from tidepool/src/main.rs when the loader was hoisted here.)
     #[test]
     fn load_secrets_from_loads_and_respects_precedence() {
         let dir = std::env::temp_dir().join(format!("tp-secrets-{}", std::process::id()));

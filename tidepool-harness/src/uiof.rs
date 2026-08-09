@@ -127,8 +127,8 @@ fn haskell_literal(v: &Json) -> Option<String> {
 }
 
 /// Mechanically build the `resume` expression from a form submission's
-/// `values` map (F1's `{values, prose}` answer encoding — `prose` is not
-/// consulted here; a non-empty prose answer is the elaboration path's job,
+/// `values` map (a submission is `{values, prose}`; `prose` is not
+/// consulted here — a non-empty prose answer is the elaboration path's job,
 /// not this one), against the `Ui` this hole's answer type derived to.
 ///
 /// - [`Ui::Choice`]: `values` must carry EXACTLY one key, and it must name

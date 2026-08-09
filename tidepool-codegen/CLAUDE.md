@@ -93,6 +93,25 @@ families:
   already cascaded in it returns poison immediately, and a lazy poison-closure
   scrutinee is triggered to set the error flag.
 
+  The `AddrKind`/`ArrayKind` family did NOT cover every escape: `unbox_addr`'s
+  `SsaVal::Raw(v, tag)` branch trusts its *static* literal tag unconditionally
+  (a compile-time label, not a runtime check on `v`) — correct for `unbox_addr`
+  itself, since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
+  `minusAddr#`) must be free to hold a null/out-of-range address without
+  tripping a trap. But the class of `Addr#`-consuming primop that never calls a
+  host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`, `WriteWord8OffAddr`,
+  `IndexAddrOffAddr`, `IndexInt8OffAddr`, `IndexWord32OffAddr`,
+  `IndexWideCharOffAddr`, `WriteWideCharOffAddr`) dereferenced that raw
+  pointer directly via a Cranelift `load`/`store` with `MemFlags::trusted()`,
+  with nothing between a bad address and the memory access — an uncaught
+  SIGSEGV, not the clean `RuntimeError` every other fault here surfaces.
+  `emit_addr_deref_guard` (`src/emit/primop.rs`, found by code audit, not tied
+  to any specific reported crash) closes this: a runtime null/low-address
+  check immediately before each of those sites' load/store, reusing
+  `ShapeTrapKind::AddrKind`. Pinned by `tests/addr_deref_unbox_hardening.rs`
+  (A/B'd: a real SIGSEGV pre-fix, via `IndexAddrArray` reading a legitimately
+  zero-filled `ByteArray#` slot as an address).
+
 - **Runtime domain errors** (division by zero, `Prelude.chr: bad argument`) →
   the `runtime_error`/`runtime_error_with_msg` machinery, same as a Haskell
   `error` call. The div/`chr` guards in `src/emit/primop.rs` raise a clean

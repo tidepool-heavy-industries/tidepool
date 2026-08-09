@@ -1,9 +1,8 @@
 //! Config-dir resolution, mirroring `tidepool_runtime::paths::config_dir` /
 //! `global_secrets_dirs` (env overrides: `TIDEPOOL_CONFIG_DIR` →
 //! `XDG_CONFIG_HOME/tidepool` → `~/.config/tidepool` → a tmp fallback).
-//! Duplicated rather than depended-on: segment 60 must not pull
-//! `tidepool-runtime` into `tidepool-harness` just for path resolution
-//! (00-scaffold's crate-boundary contract).
+//! Duplicated rather than imported from `tidepool_runtime::paths`, so this
+//! module's path resolution stays self-contained.
 
 use std::path::PathBuf;
 

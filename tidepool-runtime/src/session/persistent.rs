@@ -243,8 +243,8 @@ pub struct PersistentSession<S: SuspensionMechanism> {
     session_table: DataConTable,
     /// The declaration plane: user `data`/`class`/`f x = …` accumulated as source
     /// across turns, imported by later turns through the gen-versioned module.
-    /// `None` for a session with no decl plane (the harness before W1b turns on
-    /// accumulation); `Some` for the repl and the accumulating harness.
+    /// `None` for a session with no decl plane; `Some` for the repl and the
+    /// accumulating harness.
     lib: Option<SessionLib>,
     /// The value plane: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
@@ -283,7 +283,8 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     // -- accessors ---------------------------------------------------------
 
     /// The decl-plane library (read). Panics if the session has no decl plane —
-    /// a repl invariant; the harness only calls this once W1b has installed one.
+    /// a repl invariant; the harness only calls this once a decl plane has been
+    /// installed.
     pub fn lib(&self) -> &SessionLib {
         self.lib.as_ref().expect("decl plane present")
     }
@@ -679,10 +680,10 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
 
     /// Build the [`ExternalEnv`] a later fragment consults at a `Var`-miss:
     /// the `SessionVarId → RootSlot` of every live binding `referenced`
-    /// names (D9) — typically `tidepool_repr::free_vars(&fragment)`. Not
-    /// every live binding: a binding absent from `referenced` still stays a
-    /// GC root (registered at bind time, independent of this call) but is
-    /// not seeded into this particular fragment's env.
+    /// names — typically `tidepool_repr::free_vars(&fragment)`. Not every
+    /// live binding: a binding absent from `referenced` still stays a GC
+    /// root (registered at bind time, independent of this call) but is not
+    /// seeded into this particular fragment's env.
     pub fn seed_external_env(&self, referenced: &[VarId]) -> ExternalEnv {
         self.bindings.seed_external_env(referenced)
     }

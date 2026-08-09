@@ -81,12 +81,9 @@ fn ask_tag() -> u64 {
         .expect("mock::EFFECT_NAMES always contains Ask") as u64
 }
 
-fn setup() -> Option<EvalHarness> {
-    if !eval_harness::extract_available() {
-        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
-        return None;
-    }
-    Some(EvalHarness::new().with_stdlib())
+fn setup() -> EvalHarness {
+    eval_harness::require_extract();
+    EvalHarness::new().with_stdlib()
 }
 
 /// Compile a plain (non-session-aware) turn — used only for the bootstrap
@@ -156,7 +153,7 @@ fn bootstrap(
 
 #[test]
 fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
-    let Some(harness) = setup() else { return };
+    let harness = setup();
     let mut session = bootstrap(&harness);
 
     let session_root = tempfile::tempdir().expect("session root tempdir");

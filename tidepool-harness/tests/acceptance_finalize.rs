@@ -33,6 +33,8 @@
 //! An ordinary DATA value still finalizes + terminates correctly
 //! (`finalize_hands_up_a_plain_data_value`).
 
+mod support;
+
 use std::sync::Arc;
 
 use tidepool_eval::value::Value;
@@ -43,14 +45,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::{Harness, HoleRouting, TurnOutcome};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -99,12 +93,7 @@ fn outcome_tag(o: &TurnOutcome) -> &'static str {
 /// unlike answering a `runLLMTurn`/`Fork` hole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_hands_up_a_plain_data_value() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("finalize-data.jsonl");
@@ -215,12 +204,7 @@ async fn finalize_hands_up_a_plain_data_value() {
 /// separate, deeper gap this suite does not attempt to close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
     let target = cfg
@@ -315,10 +299,7 @@ async fn finalize_a_closure() -> (std::sync::Arc<Harness>, NodeId) {
 /// data value could never be "applied").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_crosses_by_reference() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let (harness, root) = finalize_a_closure().await;
 
     // The finalized value is a LIVE CLOSURE kept in-heap, not
@@ -375,10 +356,7 @@ async fn finalize_closure_crosses_by_reference() {
 /// that lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_closure_full_round_trip() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let (harness, root) = finalize_a_closure().await;
 
     let result = harness

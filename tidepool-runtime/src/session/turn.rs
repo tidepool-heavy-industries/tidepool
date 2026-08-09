@@ -1,4 +1,4 @@
-//! Wave 3b — session-eval turn compilation (the bind/reference extract seam).
+//! Session-eval turn compilation (the bind/reference extract seam).
 //!
 //! A `session_eval` turn is classified by GHC's parser (parse-only) into a BIND
 //! (`x <- action` / `let x = e`), an EXPR (bare expression), or a DECL
@@ -77,16 +77,6 @@ fn turn_kind_wire_name(kind: TurnKind) -> &'static str {
     }
 }
 
-/// `classifyTurn` rule 6: neither parse succeeds → `expr`, so the real error
-/// surfaces at compile rather than here.
-fn parse_turn_kind(kind: &str) -> TurnKind {
-    match kind {
-        "decl" => TurnKind::Decl,
-        "bind" => TurnKind::Bind,
-        _ => TurnKind::Expr,
-    }
-}
-
 /// Decl-vs-bind-vs-expr classification of a turn (GHC-sourced, parse-only).
 ///
 /// GHC's parser is the single authority (both declaration and statement
@@ -136,7 +126,7 @@ pub struct SessionBind<'a> {
 /// selection key template lookup is keyed on. `Decl` also selects a template
 /// — the extract's decl path requires `--turn-template decl=<file>` and
 /// errors without one — but a `Decl` verdict still never compiles through it;
-/// the template is only the parse wrapper (`wrap_decls`'s pragma block).
+/// the template is only the parse wrapper's pragma block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateSelector {
     /// A top-level declaration — selects the parse wrapper (never compiles).
@@ -580,7 +570,7 @@ fn read_compiled_turn(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
-    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     Ok(CompiledTurn {
@@ -893,24 +883,58 @@ fn parse_classify_json(
     verdicts.iter().map(parse_one_verdict).collect()
 }
 
+/// Strict wire-shape validation for one classify verdict. This lane has no
+/// user-error mode (see `classify_block`'s non-zero-exit handling above): GHC
+/// always emits exactly `decl`/`bind`/`expr` for `kind` and a well-formed
+/// string array for `binders` (`classifyTurn` rule 6 already folds an
+/// unparseable turn into an `expr` VERDICT on the Haskell side — that
+/// reclassification is GHC's job, not Rust's). So any shape this function
+/// can't recognize is a corrupted or version-skewed wire payload, never a
+/// user-Haskell condition — reject it loudly as `MalformedDiagnostics` (the
+/// same VersionSkew family the non-zero-exit path above uses) instead of
+/// silently defaulting to `expr` or dropping binders. A defaulted verdict
+/// would make a corrupted "bind" turn execute as a discard bind or a plain
+/// expression instead of surfacing the corruption.
 fn parse_one_verdict(v: &serde_json::Value) -> Result<TurnClassification, CompileError> {
-    let kind = v
+    let kind_str = v
         .get("kind")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("expr");
-    let binders = v
-        .get("binders")
-        .and_then(serde_json::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
+        .ok_or_else(|| {
+            CompileError::MalformedDiagnostics(format!(
+                "classify verdict: missing or non-string `kind` field: {v}"
+            ))
+        })?;
+    let kind = match kind_str {
+        "decl" => TurnKind::Decl,
+        "bind" => TurnKind::Bind,
+        "expr" => TurnKind::Expr,
+        other => {
+            return Err(CompileError::MalformedDiagnostics(format!(
+                "classify verdict: unknown kind {other:?} (expected decl|bind|expr)"
+            )))
+        }
+    };
+    let binders_val = v.get("binders").ok_or_else(|| {
+        CompileError::MalformedDiagnostics(format!(
+            "classify verdict: missing `binders` field for kind {kind_str:?}"
+        ))
+    })?;
+    let binders_arr = binders_val.as_array().ok_or_else(|| {
+        CompileError::MalformedDiagnostics(format!(
+            "classify verdict: `binders` field is not an array for kind {kind_str:?}: {binders_val}"
+        ))
+    })?;
+    let binders = binders_arr
+        .iter()
+        .map(|x| {
+            x.as_str().map(str::to_string).ok_or_else(|| {
+                CompileError::MalformedDiagnostics(format!(
+                    "classify verdict: non-string binder entry for kind {kind_str:?}: {x}"
+                ))
+            })
         })
-        .unwrap_or_default();
-    Ok(TurnClassification {
-        kind: parse_turn_kind(kind),
-        binders,
-    })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TurnClassification { kind, binders })
 }
 
 /// Compile one session-eval turn through the session-aware extract path.
@@ -1003,7 +1027,7 @@ pub fn compile_session_turn(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
-    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     let binders = if is_bind {
@@ -1204,6 +1228,68 @@ mod tests {
             parse_classify_json(r#"{"verdicts":[{"kind":"decl","binders":["sq"]}]}"#, 1).unwrap();
         assert_eq!(cs[0].kind, TurnKind::Decl);
         assert_eq!(cs[0].binders, vec!["sq".to_string()]);
+    }
+
+    /// Old behavior (pre-fix): an unrecognized `kind` silently defaulted to
+    /// `TurnKind::Expr` — a corrupted "bind" verdict would then run as a bare
+    /// expression instead of surfacing the corruption. New behavior: any
+    /// `kind` other than `decl`/`bind`/`expr` is a loud infrastructure error,
+    /// in the same `MalformedDiagnostics` (→ VersionSkew) family as the
+    /// non-zero-exit path above — this lane has no user-error mode.
+    #[test]
+    fn unknown_kind_is_malformed_diagnostics_not_silent_expr() {
+        let err =
+            parse_classify_json(r#"{"verdicts":[{"kind":"weird","binders":[]}]}"#, 1).unwrap_err();
+        assert!(
+            matches!(err, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics, got {err:?}"
+        );
+    }
+
+    /// Old behavior: a missing `kind` field silently defaulted to
+    /// `TurnKind::Expr` via `unwrap_or("expr")`. New behavior: missing
+    /// `kind` is a loud infrastructure error, not a silent expr verdict.
+    #[test]
+    fn missing_kind_is_malformed_diagnostics_not_silent_expr() {
+        let err = parse_classify_json(r#"{"verdicts":[{"binders":["x"]}]}"#, 1).unwrap_err();
+        assert!(
+            matches!(err, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics, got {err:?}"
+        );
+    }
+
+    /// Old behavior: `filter_map` silently dropped any non-string binder
+    /// entry, so `["x", 5]` decoded as `["x"]` — a corrupted binder list
+    /// would compile a bind with the wrong binder set instead of failing.
+    /// New behavior: any non-string element rejects the whole verdict.
+    #[test]
+    fn non_string_binder_is_malformed_diagnostics_not_silently_dropped() {
+        let err = parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x",5]}]}"#, 1)
+            .unwrap_err();
+        assert!(
+            matches!(err, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics, got {err:?}"
+        );
+    }
+
+    /// Old behavior: a `binders` field that is not an array (or is absent)
+    /// defaulted to `vec![]` via `unwrap_or_default` — a corrupted "bind"
+    /// verdict would silently become a discard bind. New behavior: a
+    /// malformed or missing `binders` field is a loud infrastructure error.
+    #[test]
+    fn malformed_binder_list_is_malformed_diagnostics_not_silent_empty() {
+        let non_array =
+            parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":"x"}]}"#, 1).unwrap_err();
+        assert!(
+            matches!(non_array, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics for non-array binders, got {non_array:?}"
+        );
+
+        let missing = parse_classify_json(r#"{"verdicts":[{"kind":"bind"}]}"#, 1).unwrap_err();
+        assert!(
+            matches!(missing, CompileError::MalformedDiagnostics(_)),
+            "expected MalformedDiagnostics for missing binders, got {missing:?}"
+        );
     }
 
     #[test]
@@ -1626,8 +1712,7 @@ mod tests {
         // -- decl (rule 3), extension-gated syntax --
         //
         // `run_turn`'s decl branch wraps the turn text in the decl template's
-        // 17-extension pragma block before compiling (moved verbatim from
-        // the deleted `binders.rs`'s `wrap_decls`). Dropping the wrapper is a
+        // 17-extension pragma block before compiling. Dropping the wrapper is a
         // compile-boundary narrowing (a valid declaration stops compiling),
         // which is exactly the strict-superset violation the dialect rule
         // forbids. These three are confirmed (by direct probe of
@@ -1646,7 +1731,7 @@ mod tests {
             kind: TurnKind::Decl,
             binders: &["f"],
         },
-        // #321-class regression, decl side (see `quasiquote_bind` below for
+        // Quasiquote regression, decl side (see `quasiquote_bind` below for
         // the bind side): a quasiquote in a *declaration* body must still
         // classify and compile as a decl.
         Case {
@@ -1681,7 +1766,7 @@ mod tests {
             kind: TurnKind::Bind,
             binders: &["a", "b"],
         },
-        // #321-class regression: a quasiquote must still classify as a bind
+        // Quasiquote regression: a quasiquote must still classify as a bind
         // (QuasiQuotes is parse-only here — the quote is one token to the
         // parser).
         Case {

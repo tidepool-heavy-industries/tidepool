@@ -39,14 +39,6 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -174,10 +166,7 @@ impl ModelProvider for InPlaceProbeProvider {
 /// and the SECOND hole runs under it. The summary reaches the next render.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let second_hole = Arc::new(Mutex::new(None));
@@ -355,10 +344,7 @@ impl ModelProvider for MultiRoundProvider {
 /// NOT compact — asserts the threshold reads the last-turn input, not the sum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_multiround_highwater_does_not_overcount() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, nix develop)");
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let saw_summarize = Arc::new(Mutex::new(false));

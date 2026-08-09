@@ -34,7 +34,7 @@ use tidepool_repr::PrimOpKind;
 ///
 /// This is a runtime *domain* error, routed through the same `runtime_error`
 /// machinery as a Haskell `error` call — NOT a bare Cranelift `trap` (`ud2` →
-/// SIGILL), which used to crash the whole process on a divide by zero instead
+/// SIGILL), which would crash the whole process on a divide by zero instead
 /// of yielding a catchable error.
 fn emit_div_zero_check(
     sess: &mut EmitSession,
@@ -980,6 +980,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let effective = builder.ins().iadd(addr, idx);
+            let effective = emit_addr_deref_guard(sess.pipeline, builder, effective);
             let byte_val = builder.ins().load(types::I8, MemFlags::new(), effective, 0);
             let char_val = builder.ins().uextend(types::I64, byte_val);
             Ok(SsaVal::Raw(char_val, LIT_TAG_CHAR))
@@ -1768,6 +1769,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
             let word = builder.ins().uextend(types::I64, byte);
             Ok(SsaVal::Raw(word, LIT_TAG_WORD))
@@ -1788,6 +1790,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().ireduce(types::I8, val);
             builder.ins().store(MemFlags::trusted(), byte, ptr, 0);
             Ok(SsaVal::Raw(
@@ -1832,6 +1835,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 8);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let loaded = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 0);
             Ok(SsaVal::Raw(loaded, crate::layout::LIT_TAG_ADDR))
         }
@@ -1840,6 +1844,7 @@ pub fn emit_primop(
             let addr = unbox_addr(sess.pipeline, builder, args[0]);
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let ptr = builder.ins().iadd(addr, off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().sextend(types::I64, byte);
             Ok(SsaVal::Raw(val, LIT_TAG_INT))
@@ -1850,6 +1855,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().uextend(types::I64, w32);
             Ok(SsaVal::Raw(val, LIT_TAG_WORD))
@@ -1860,6 +1866,7 @@ pub fn emit_primop(
             let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
             let val = builder.ins().uextend(types::I64, w32);
             Ok(SsaVal::Raw(val, LIT_TAG_CHAR))
@@ -1871,6 +1878,7 @@ pub fn emit_primop(
             let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
             let byte_off = builder.ins().imul_imm(off, 4);
             let ptr = builder.ins().iadd(addr, byte_off);
+            let ptr = emit_addr_deref_guard(sess.pipeline, builder, ptr);
             let w32 = builder.ins().ireduce(types::I32, val);
             builder.ins().store(MemFlags::trusted(), w32, ptr, 0);
             Ok(SsaVal::Raw(
@@ -2674,6 +2682,95 @@ fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut Functio
     builder.inst_results(call)[0]
 }
 
+/// Guard a pointer immediately before it is DEREFERENCED by an in-JIT
+/// `load`/`store` — the class of `Addr#`-consuming primop that never calls a
+/// host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`, `WriteWord8OffAddr`,
+/// `IndexAddrOffAddr`, `IndexInt8OffAddr`, `IndexWord32OffAddr`,
+/// `IndexWideCharOffAddr`, `WriteWideCharOffAddr`), so nothing stands between
+/// a bad address and a raw memory access.
+///
+/// `unbox_addr`'s `Raw` branch trusts its *static* literal tag
+/// unconditionally — a compile-time label the emitter attaches when it KNOWS
+/// the value's provenance, not a runtime check on the VALUE — by design,
+/// since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
+/// `minusAddr#`) must be free to hold, and compute with, a null or
+/// out-of-range address WITHOUT tripping a trap; only an actual DEREFERENCE
+/// may reject one. But nothing validated the resulting VALUE anywhere on the
+/// path to that dereference: `IndexAddrArray`, for instance, loads whatever
+/// 8 bytes sit in a `ByteArray#` slot and returns them as `Raw(_,
+/// LIT_TAG_ADDR)` verbatim — a zero-filled slot (a perfectly legal
+/// `ByteArray#` payload; nothing requires a slot meant to hold an address to
+/// already contain one) round-trips as address 0 with no check anywhere.
+/// Every site above then dereferenced that address directly via a Cranelift
+/// `load`/`store` with `MemFlags::trusted()` — an uncaught SIGSEGV on a bad
+/// pointer, not the clean `RuntimeError` every other fault in this codegen
+/// surfaces. `FfiStrlen` and friends are NOT in this list: they call a host
+/// fn (`runtime_strlen`, ...) that self-checks via `check_ptr_invalid`.
+///
+/// Traps via the same `ShapeTrapKind::AddrKind` breadcrumb `unbox_addr`
+/// uses, so an invalid address is diagnosed identically whether it was
+/// rejected by static/heap-shape typing or reached here with the right
+/// shape and a bad value. Returns a pointer safe to dereference: `addr`
+/// unchanged when valid, or the poison buffer `runtime_shape_trap` returns
+/// when not — so the caller's subsequent load/store always targets real,
+/// owned memory.
+fn emit_addr_deref_guard(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    addr: Value,
+) -> Value {
+    let is_invalid = builder.ins().icmp_imm(
+        IntCC::UnsignedLessThan,
+        addr,
+        crate::host_fns::MIN_VALID_ADDR as i64,
+    );
+    let ok_block = builder.create_block();
+    builder.append_block_param(ok_block, types::I64);
+    let trap_block = builder.create_block();
+    builder.ins().brif(
+        is_invalid,
+        trap_block,
+        &[],
+        ok_block,
+        &[BlockArg::Value(addr)],
+    );
+
+    builder.switch_to_block(trap_block);
+    builder.seal_block(trap_block);
+    let trap_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_shape_trap",
+            Linkage::Import,
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
+        )
+        .expect("declare runtime_shape_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::AddrKind as i64);
+    // scrut_ptr passed as 0, matching emit_addr_raw_kind_trap above: `addr`
+    // is not necessarily a heap pointer (it may be an arbitrary integer), so
+    // passing it risks runtime_shape_trap dereferencing garbage in its own
+    // diagnostic dump.
+    let call = builder
+        .ins()
+        .call(trap_ref, &[kind, zero, zero, dummy_addr, zero, zero]);
+    let poison = builder.inst_results(call)[0];
+    builder.ins().jump(ok_block, &[BlockArg::Value(poison)]);
+
+    builder.switch_to_block(ok_block);
+    builder.seal_block(ok_block);
+    builder.block_params(ok_block)[0]
+}
+
 /// Walk through a chain of 1-field boxing-wrapper Cons (`I#`, `W#`, `D#`,
 /// `Addr#`, `ByteArray#`, `Ptr#`, ... — the shapes GHC emits when an unboxed
 /// Core value is wrapped) starting from a `HeapPtr`, stopping at the first
@@ -2682,12 +2779,12 @@ fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut Functio
 /// so an arbitrary multi-field Con can never be silently unwrapped.
 ///
 /// Returns the final (non-Con) heap value — NOT yet known to be a `TAG_LIT`
-/// of any particular class. This is the loop `unbox_addr` and
-/// `unbox_bytearray` used to duplicate independently; callers apply their
-/// own class-specific guard afterward (`unbox_addr`'s address-class check,
-/// `unbox_bytearray`'s array-class check) before reading the payload — the
-/// accepted literal classes and payload-offset adjustment genuinely differ
-/// per consumer, so only this shared traversal is factored out.
+/// of any particular class. Shared by `unbox_addr` and `unbox_bytearray`;
+/// each applies its own class-specific guard afterward (`unbox_addr`'s
+/// address-class check, `unbox_bytearray`'s array-class check) before
+/// reading the payload — the accepted literal classes and payload-offset
+/// adjustment genuinely differ per consumer, so only this traversal is
+/// shared.
 fn unwrap_boxing_chain(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -2778,15 +2875,14 @@ fn emit_array_raw_kind_trap(
 ///   the emitter itself when it produced the value) — anything else is
 ///   rejected via [`emit_addr_raw_kind_trap`] without ever treating the raw
 ///   bits as a pointer.
-/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons (as
-///   before), but the final payload MUST land on a `TAG_LIT` object whose
-///   `lit_tag` is one of the address-carrying classes (`String#`/`Addr#`/
-///   `ByteArray#`) before its payload is loaded as an address. A stray tag
-///   word or a Lit of an unrelated class (e.g. `Int#`) traps cleanly via
-///   `runtime_shape_trap` instead of being dereferenced — this is the fix
-///   for the escape described in codex-review-2026-08-08.md item 1, where a
-///   Con's single field was loaded and used as an address with no literal-
-///   tag check at all.
+/// - `HeapPtr` values recurse through 1-field boxing-wrapper Cons, but the
+///   final payload MUST land on a `TAG_LIT` object whose `lit_tag` is one of
+///   the address-carrying classes (`String#`/`Addr#`/`ByteArray#`) before its
+///   payload is loaded as an address. A stray tag word or a Lit of an
+///   unrelated class (e.g. `Int#`) traps cleanly via `runtime_shape_trap`
+///   instead of being dereferenced: without this check, a Con's single field
+///   could be loaded and used as an address with no literal-tag validation
+///   at all.
 fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
         SsaVal::Raw(v, tag) => {
@@ -2802,9 +2898,8 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
             // Guard the final load: v_final is only guaranteed NOT to be a
             // 1-field Con wrapper — it could be a Thunk, Closure, or a Lit of
             // an unrelated class (e.g. an Int#/Word# tag word that escaped
-            // case dispatch — the f137d34-shaped witness this hardens
-            // against). Require TAG_LIT and an address-carrying lit-tag
-            // before loading LIT_VALUE_OFFSET as an address.
+            // case dispatch). Require TAG_LIT and an address-carrying
+            // lit-tag before loading LIT_VALUE_OFFSET as an address.
             let obj_tag = builder
                 .ins()
                 .load(types::I8, MemFlags::trusted(), v_final, 0);
@@ -2904,10 +2999,10 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
 ///   array-carrying classes (`String#`/`ByteArray#`/`SmallArray#`/`Array#`)
 ///   before its payload is loaded as a buffer pointer. A stray tag word or a
 ///   Lit of an unrelated class (e.g. `Int#`) traps cleanly via
-///   `runtime_shape_trap` instead of being dereferenced — this closes the
-///   `unbox_addr`-shaped gap named in codex-review-2026-08-08.md item 1's
-///   follow-up: `unbox_bytearray` had its own con-unwrap loop with no final
-///   `TAG_LIT` check at all.
+///   `runtime_shape_trap` instead of being dereferenced: without this check,
+///   the final payload could be read as a buffer pointer with no `TAG_LIT`
+///   validation at all — the same class of gap `unbox_addr` above guards
+///   against.
 ///
 /// Note `Addr#` is deliberately NOT an accepted class here (unlike
 /// `unbox_addr`, which accepts `ByteArray#`): an `Addr#` literal's payload is
@@ -3112,10 +3207,10 @@ fn unbox_numeric(
             //   * F64 double unbox → DOUBLE only;
             //   * F32 float  unbox → FLOAT only.
             // Anything else is rejected: a pointer-valued STRING / BYTEARRAY /
-            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS — the original
-            // f137d34 witness Str("")), a non-Lit object, OR a numeric lit of
-            // the wrong float/integer class (e.g. a DOUBLE response forced by an
-            // Int# continuation — witness Double(3.5), whose IEEE-754 bits would
+            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS, e.g.
+            // `Str("")`), a non-Lit object, OR a numeric lit of the wrong
+            // float/integer class (e.g. a DOUBLE response forced by an Int#
+            // continuation — `Double(3.5)`, whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
             // runtime_shape_trap (kind LitClass) instead; the poison object it
             // returns is loaded from below, but the pending RuntimeError is

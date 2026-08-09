@@ -17,7 +17,7 @@
 //! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
 //! cleanly when the extractor is unreachable.
 
-use tidepool_testing::eval_harness::{extract_available, EvalHarness};
+use tidepool_testing::eval_harness::EvalHarness;
 
 const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
      module Expr where\n\
@@ -29,10 +29,7 @@ const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveG
 /// text. Panics if it COMPILES — an underivable type that typechecks is the
 /// failure mode these fixtures exist to catch.
 fn rejection(decls: &str) -> Option<String> {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let src = format!("{HEADER}{decls}");
     match EvalHarness::new().with_stdlib().compile(&src, "result") {
         Ok(_) => panic!("expected a compile-time rejection, but this compiled:\n{src}"),
@@ -217,10 +214,7 @@ result = show (formShape @Q)
 /// unsupported shapes, not a tax on supported ones.
 #[test]
 fn supported_shapes_still_compile() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let src = format!(
         "{HEADER}\n\
          data Env = Dev | Prod deriving (Generic)\n\

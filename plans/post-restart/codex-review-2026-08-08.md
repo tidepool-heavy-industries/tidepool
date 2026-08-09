@@ -96,8 +96,14 @@ Domain-constructor isolation pinned (`realm_global_id_isolation.rs`).
 assumed unchecked — a divergent tag would silently corrupt how a parked
 SIBLING realm's continuation reads on resume) is ACCEPTED as a documented
 residual for now: divergence requires an extractor id-minting change,
-which fires the three pinned id-stability tests upstream, so the hole is
-double-covered today. A cheap loud agreement check (envelope-subset tag
+which fires the pinned id-stability tests upstream, so the hole is
+double-covered today. (Enumerated 2026-08-09 after "the three pinned
+tests" proved citable-but-unresolvable: tidepool-repr::
+extend_checked_equivalence::{distinct_ids_sharing_a_qualified_name_collide_regardless_of_input_order,
+merge_table_skip_filter_cannot_dodge_the_qualified_name_collision_guard}
++ tidepool-runtime::session_table_qualified_identity — ALL DataConId
+qualified-name guards; NONE observes VarIds. The set covers constructor
+identity only.) A cheap loud agreement check (envelope-subset tag
 checksum verified at add_function/park) is ATTACHED TO STEP 4's work item
 — same lane, same files, when the go-signal fires. Not closed silently;
 not worth a standalone lane.
@@ -262,3 +268,93 @@ deletion → registry-only conversion → one cycle-owned machine → prefix
 descriptor bound to cycle runtime) matches the standing plan: items 1-2
 route as above, 3 is extract-wave item 0, 4-5 are realm step 4 + PRD 18,
 6 is the contract's derive-don't-declare guidance already in force.
+
+## 14. Vendored-Aeson FromJSON sum rejection DOES NOT EXIST — inherited; design decision needed (corrected 2026-08-09)
+
+CORRECTED from an earlier wrong mechanism (a string-literal grep match was
+reported as verification — the day's failure class, again): FromJSON.hs has
+ZERO TypeErrors. `0c49f0a2`'s `GFromJSONSum 'False` branch routes to a real
+working TaggedObject decoder — the compile-time rejection was NEVER
+implemented on the FromJSON side (Value.hs has it; the false "compile-time
+rejection" comment at FromJSON.hs:153 was INHERITED along with the
+duplicated `IsNullarySum` family from the sibling module where it is true).
+Pinning test `generic_deriving_337::sum_type_rejected_at_compile_time` is
+red — sanctioned.
+
+**OPEN DESIGN DECISION (Inanna/morning):** implement the TypeError on
+`GFromJSONSum 'False` (restoring the commit message's claimed guarantee),
+or declare non-nullary FromJSON sums supported-but-lossy and retire the
+test. A behaviour change either way, not a repair.
+
+**Sanctioned reds are THREE** until their fixes fold:
+`mock_stack_matches_production` (mock-derive in flight),
+`sum_type_rejected_at_compile_time` (this item),
+`qq_fmt_brace_inside_hole_non_string_expr_still_works` (inherited,
+toExp Let case commented out, byte-identical at HEAD~1 — unowned).
+
+**Durable findings:** a guarantee whose enforcing test lives in a tier
+nobody routinely runs is not enforced; and its companion — duplicate a
+mechanism and you duplicate its documentation into a context where it
+lies. Open sweep question: what else is pinned only behind
+--ignore-default-filter?
+
+### Item 14 addendum (2026-08-09): full-shard red census — SEVEN in tidepool-runtime
+
+With fail-fast truncation lifted, a fresh full shard (881 tests,
+--no-fail-fast, cache-consistent A/B'd) shows 7 pre-existing reds. THIS
+LIST is the source of truth for "sanctioned" (counts in messages go stale):
+1. mock_stack_matches_production (mock-derive in flight)
+2. sum_type_rejected_at_compile_time (item 14 design decision)
+3. mixed_nullary_sum_still_rejected_at_compile_time (same family/root as 2)
+4. qq_fmt_brace_inside_hole_non_string_expr_still_works (toExp Let case)
+5. user_union_normalize::user_defined_union_survives_effectful_normalize
+   ("missing freer-simple constructor 'Union' in DataConTable" — D2/ConTags
+   -adjacent; A/B-confirmed pre-existing on trunk)
+6. jit_surface::works_from_json_float (decodeFloat_Int# unboxed-tuple
+   primop, self-described extract landmine)
+7. stdlib_regressions_02_medium::works_int_prism_floors_not_truncates
+Items 5-7 surfaced only because truncation ended — the crate's full red
+set had never been seen on any routine path. Morning triage owns 3-7's
+routing. HAZARD note: git stash is SHARED across all worktrees on this
+box — A/B stashers must push/pop LIFO immediately; prefer diff-to-patch
+plus checkout for A/B legs.
+
+### Item 14 decision (Inanna + root, 2026-08-09, pre-flight)
+
+**Symmetric lossless support, both directions.** Today writing a
+payload-carrying sum to JSON is compile-banned (Value.hs) while reading
+one is quietly allowed (FromJSON.hs) — direction asymmetry nobody chose.
+Checkpoints need these types to round-trip, so: support both sides,
+losslessly, with round-trip tests; retire the reject-at-compile-time
+pinning tests as part of the same change. Owner: checkpoint-persistence
+lane (Chain A).
+
+## 15. Zero-method class dictionary culled — extract-pipeline bug (agent-wave, 2026-08-09)
+
+A zero-method class's dictionary-constructor binding is culled by the
+extractor while a reference survives — reported as a dangling NVar, not a
+GHC error. ConstraintKinds workaround committed and sound (agent-wave
+checkpoint); the BUG is unfixed and any zero-method class is exposed.
+Owner: extract-wave/spawn-latency territory (morning routing). Repro
+context in agent-lanes/receipt-agent-wave-checkpoint.md.
+
+## 16. Two of four standing extractor gates never invoke the extractor (extract-wave, 2026-08-09) — BOX-WIDE RULE
+
+haskell_suite_differential and corpus_report replay FROZEN CBOR (zero
+extractor invocations — verified); they are JIT-vs-eval differentials
+that pass identically with a catastrophically broken extractor, unless
+fixtures are regenerated. Empirically shown: injected extractor fault,
+extract-fidelity 30/30 clean, neither fixture gate had a path to it. The
+citation was wrong, not the instruments — same class as the pinned trio,
+one level up. Honest extractor coverage = extract-fidelity-test (real
+pipeline; KNOWN HOLE: fixtures never touch JSON/Aeson — morning fixture
+work) + harness acceptance (real extracts, ~1845s).
+
+BOX-WIDE RULE (root-adopted from extract-wave's wave rule): fixture
+regeneration under haskell/test/{suite_cbor,corpus_cbor} is a SEQUENCED
+ROOT/WAVE-LEVEL ACTION, never an individual lane's call — shared dirs,
+in-flight lanes, redeploy-class blast radius, and a booby trap:
+haskell/CLAUDE.md warns pruning *_u<n>.cbor drops `compared` below
+COMPARED_FLOOR, so naive regeneration breaks the floor it protects.
+All regeneration requests route through root (or the extract-wave TL
+within its subtree).

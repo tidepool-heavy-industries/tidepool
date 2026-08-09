@@ -1,0 +1,48 @@
+//! The Codex `app-server` backend.
+//!
+//! # Containment
+//!
+//! This module and its children are the ONLY place `codex-codes`, app-server
+//! JSON-RPC, thread/turn wire types, or the word "Codex" may appear. Anything
+//! crossing out of here is [`crate::seam`] vocabulary.
+//!
+//! # Pinning
+//!
+//! The CLI and the client crate are pinned TOGETHER; see `PINNED_CLI_VERSION`.
+//! Dynamic tools are an experimental app-server surface, so a version bump is a
+//! deliberate act with a fixture re-run behind it, not a lockfile refresh.
+//!
+//! # Protocol truth
+//!
+//! `fixtures/app-server-0.146.0/PROTOCOL-NOTES.md` records the phase-2
+//! findings sourced offline from the pinned CLI tag and the `codex-codes`
+//! generated types: where `dynamicTools` attaches (`ThreadStartParams`,
+//! top-level, NOT nested in `config`), the `experimentalApi` opt-in, the
+//! tool-error shape, and `outputSchema`. The headline finding: `codex-codes`
+//! 0.146.4 does not expose `dynamicTools` or its spec types at all
+//! (experimental-gated fields are dropped from schema generation), so this
+//! module hand-rolls `DynamicToolSpec` and friends and sends `thread/start`
+//! through the crate's raw `request()` escape hatch rather than its typed
+//! helper.
+//!
+//! # Config isolation
+//!
+//! No normal worker run may mutate the operator's Codex user configuration
+//! (PRD 18 acceptance criterion 11). The operator's `~/.codex` holds a live
+//! ChatGPT authentication; credentials are never copied or rewritten into an
+//! isolated `CODEX_HOME` to route around this. The shape that avoids the
+//! documented project-trust write is to omit `cwd` from thread start and supply
+//! it at turn start — proving that is sufficient is the first thing this
+//! adapter does, before any run that spends a token.
+
+pub mod dynamic_tools;
+pub mod isolation;
+pub mod process;
+
+/// The Codex CLI version this adapter is pinned to and its fixtures were
+/// recorded against.
+pub const PINNED_CLI_VERSION: &str = "0.146.0";
+
+// Bring-up lands here: process lifecycle, initialize handshake, thread/turn
+// requests, `item/tool/call` correlation, and the projection into
+// `crate::seam::RuntimeAgentEvent`.

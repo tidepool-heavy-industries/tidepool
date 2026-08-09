@@ -12,7 +12,7 @@
 //!     doesn't leak a worker thread + JIT machine.
 //!   - H3: a runaway turn is cancelled at a JIT safepoint and self-heals to Idle.
 //!
-//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); skips cleanly otherwise.
+//! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); panics loudly otherwise.
 
 mod common;
 use common::*;
@@ -42,10 +42,7 @@ fn parse_suspended(text: &str) -> String {
 /// generous timeout: a hang fails the test instead of stalling the suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_while_suspended_drops_ask_and_recovers() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     // Suspend on an `ask` and DO NOT resume it.
@@ -91,10 +88,7 @@ async fn reset_while_suspended_drops_ask_and_recovers() {
 /// Resuming the original continuation must then still work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_on_suspended_session_is_rejected() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.eval(r#"ask SNum "pick a number""#).await;
@@ -144,10 +138,7 @@ async fn run_on_suspended_session_is_rejected() {
 /// session until reset/reap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timed_out_runaway_self_heals_to_idle() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     // Turn budget must exceed the per-eval GHC compile so the timeout fires
     // during the LOOP, not compilation. A novel expression compiles in ~13s
     // quiet, but under a full-parallel `cargo nextest` run the extract compile
@@ -204,10 +195,7 @@ async fn timed_out_runaway_self_heals_to_idle() {
 /// which the busy-guard would reject if the session were still Suspended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandoned_suspension_is_reaped_to_idle() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::with_ttl(Duration::from_millis(300));
 
     let t = repl.eval(r#"ask SNum "pick a number""#).await;

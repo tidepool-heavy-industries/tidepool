@@ -13,7 +13,7 @@
 //! `x`, both `Tidepool.Session.Val.G1` (exports `x`) and `…Val.G2` (exports `x`)
 //! are imported unqualified → GHC ambiguous-occurrence error at the reference.
 //!
-//! Each test skips cleanly when the session-aware extract is unavailable.
+//! Each test panics loudly when the session-aware extract is unavailable.
 
 mod common;
 use common::*;
@@ -32,9 +32,7 @@ use common::*;
 /// `x' — either Val.G1.x or Val.G2.x". Now PASSES with newest-wins => 3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_value_name_newest_wins() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -68,9 +66,7 @@ async fn rebind_value_name_newest_wins() {
 /// imported PRIOR `n`. (CASE 1 above doesn't catch this — its RHS is a constant.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn self_referential_rebind_reads_prior() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("n <- pure (1 :: Int)")
@@ -101,9 +97,7 @@ async fn self_referential_rebind_reads_prior() {
 /// caused the TypeMetadata forcing. Covered by text_bind.rs green suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_value_different_type() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -131,9 +125,7 @@ async fn rebind_value_different_type() {
 /// is broken (general Tier-0 force bug, high value) — NOT rebind-specific.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_bind_text_no_rebind() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let bind = repl.eval("s <- pure (T.pack \"hi\")").await;
@@ -160,9 +152,7 @@ async fn first_bind_text_no_rebind() {
 /// rebind-same-name-specific). Fixed by BUG-2 (commit caf3f4b). Now PASSES.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn different_name_text_after_int() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -190,9 +180,7 @@ async fn different_name_text_after_int() {
 /// path most likely to actually work. A failure here is a deeper regression.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_function_latest_wins() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("g x = x + (1 :: Int)").await.expect_ok("def g v1");
@@ -243,9 +231,7 @@ async fn redefine_function_latest_wins() {
 /// mismatch, which is the right behavior, not a bug to design coexistence around.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_type_old_binding_orphaned_gracefully() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.def("data Color = Red | Green")
@@ -296,9 +282,7 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
 /// the reference path (case 1) is broken.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bindings_after_rebind_lists_once() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -330,9 +314,7 @@ async fn bindings_after_rebind_lists_once() {
 /// (seeing the value plane). Bare and `let` reads must AGREE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migrated_name_read_from_later_let() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure ([] :: [Int])")
@@ -362,9 +344,7 @@ async fn migrated_name_read_from_later_let() {
 /// folds it must see every element (not a stale empty decl).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accumulate_then_let_fold() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("acc <- pure ([] :: [Int])")
@@ -393,9 +373,7 @@ async fn accumulate_then_let_fold() {
 /// must not retro-change `g`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn def_referencing_migrated_name_closes_over_value() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("x <- pure (1 :: Int)")
@@ -427,9 +405,7 @@ async fn def_referencing_migrated_name_closes_over_value() {
 /// when there is no migration, and generalization is preserved).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_referencing_unmigrated_decl_still_works() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     repl.eval("n <- pure (5 :: Int)")

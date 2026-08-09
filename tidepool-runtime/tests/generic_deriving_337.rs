@@ -10,27 +10,22 @@
 //! objects.
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`, then
-//! `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips cleanly
-//! when the extractor is unreachable.
+//! `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Panics
+//! loudly (see `require_extract`) when the extractor is unreachable.
 
 use serde_json::json;
-use tidepool_testing::eval_harness::{extract_available, EvalHarness};
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 /// Compile + run a full module PURE on the JIT, returning the target binding's
-/// JSON. Skips (returns `None`) when the extractor is unavailable.
-fn run(source: &str, target: &str) -> Option<serde_json::Value> {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
-    Some(
-        EvalHarness::new()
-            .with_stdlib()
-            .run_pure(source, target)
-            .expect("compile_and_run_pure failed")
-            .to_json(),
-    )
+/// JSON. Panics loudly when the extractor is unavailable.
+fn run(source: &str, target: &str) -> serde_json::Value {
+    require_extract();
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(source, target)
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 const HEADER: &str =
@@ -52,9 +47,8 @@ fn repro_337_fields_sum_to_7() {
          \x20   Error _ -> -1\n\
          \x20 Left _ -> -2\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(7), "#337 repro must decode fields summing to 7")
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(7), "#337 repro must decode fields summing to 7")
 }
 
 /// A record whose field is itself a derived record decodes recursively — the
@@ -72,9 +66,8 @@ fn nested_record_decodes() {
          \x20   Error _ -> -1\n\
          \x20 Left _ -> -2\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(12), "nested record fields sum to 12")
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(12), "nested record fields sum to 12")
 }
 
 /// The ToJSON generic default builds a field-name-keyed object.
@@ -86,13 +79,12 @@ fn generic_tojson_builds_object() {
          result :: Value\n\
          result = toJSON (Rec 3 4)\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!({"rx": 3, "ry": 4}),
-            "toJSON emits field-keyed object"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!({"rx": 3, "ry": 4}),
+        "toJSON emits field-keyed object"
+    )
 }
 
 /// Round trip: `fromJSON . toJSON` recovers the record — the acceptance shape.
@@ -106,9 +98,8 @@ fn round_trip_to_from_json() {
          \x20 Success r -> rx r + ry r\n\
          \x20 Error _ -> -1\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(v, json!(7), "round trip recovers fields summing to 7")
-    }
+    let v = run(&src, "result");
+    assert_eq!(v, json!(7), "round trip recovers fields summing to 7")
 }
 
 /// A missing field yields `Error`, not a crash — the decode-failure path returns
@@ -125,13 +116,12 @@ fn missing_field_returns_error() {
          \x20   Error _ -> 0\n\
          \x20 Left _ -> -2\n"
     );
-    if let Some(v) = run(&src, "result") {
-        assert_eq!(
-            v,
-            json!(0),
-            "missing field decodes to Error (0), not a crash"
-        )
-    }
+    let v = run(&src, "result");
+    assert_eq!(
+        v,
+        json!(0),
+        "missing field decodes to Error (0), not a crash"
+    )
 }
 
 /// A sum type deriving FromJSON is rejected at COMPILE time with a clear
@@ -139,10 +129,7 @@ fn missing_field_returns_error() {
 /// called (the original #337 failure mode), and not a raw "no instance" dump.
 #[test]
 fn sum_type_rejected_at_compile_time() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n\
          data S = A Int | B Int deriving (Generic, FromJSON)\n\n\
@@ -176,10 +163,7 @@ fn sum_type_rejected_at_compile_time() {
 /// tracked separately as an engine issue and is not the taught idiom.)
 #[test]
 fn eval_jit_parity_on_generic_core() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n\
          data Rec = Rec {{ rx :: Int, ry :: Int }} deriving (Generic, FromJSON)\n\n\

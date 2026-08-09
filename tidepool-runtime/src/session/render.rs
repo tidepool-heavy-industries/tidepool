@@ -1,5 +1,5 @@
 //! Pure rendering of the gen-versioned `Tidepool.Session.Lib.G<g>` declaration
-//! modules (Lane A, plan §3 + §5.0).
+//! modules.
 //!
 //! The whole module source is a **pure function of the decl log**: given the
 //! ordered turns (each carrying the raw declaration source text and the
@@ -8,7 +8,7 @@
 //! generation **selectively** — `import …G<g-1> hiding (<names redefined this
 //! turn>)` — and re-exports it plus this turn's items. That selective re-export
 //! is what lets a redefined `data` type coexist with its older shape without
-//! GHC's conflicting-export error (kimi-r2 #2): the two `Foo`s live in distinct
+//! GHC's conflicting-export error: the two `Foo`s live in distinct
 //! gen-versioned modules and only the newest is in scope unqualified.
 //!
 //! Binder names come from GHC (see `super::binders`), never a Rust-side Haskell
@@ -157,7 +157,7 @@ impl DeclLog {
 
     /// The declaration source texts of a **replayable** notebook skeleton: turn
     /// sources in log order, but with fully-superseded turns dropped so a name
-    /// redefined across SEPARATE turns emits only its LATEST definition (#320).
+    /// redefined across SEPARATE turns emits only its LATEST definition.
     ///
     /// A flat `:program` replay concatenates top-level decls, so two turns that
     /// both define `rf` (`rf x = x+1` then `rf x = x+2`) would emit two
@@ -219,12 +219,13 @@ pub struct ModuleEnv {
 }
 
 impl ModuleEnv {
-    /// A minimal **lens-free** pure surface sufficient for Lane-A declarations:
-    /// the JIT-safe `T.` text vocabulary (`Tidepool.Data.Text`) and `Map.`, over
-    /// the base `Prelude`. Deliberately avoids `Tidepool.Prelude` (which pulls
-    /// `Control.Lens`, demanding the `with-packages` GHC) so the standalone
-    /// declaration REPL compiles against the plain toolchain. The full server
-    /// (Wave 2) passes its own effects/`M`-stack [`ModuleEnv`] instead.
+    /// A minimal **lens-free** pure surface sufficient for standalone
+    /// declarations: the JIT-safe `T.` text vocabulary (`Tidepool.Data.Text`)
+    /// and `Map.`, over the base `Prelude`. Deliberately avoids
+    /// `Tidepool.Prelude` (which pulls `Control.Lens`, demanding the
+    /// `with-packages` GHC) so the standalone declaration REPL compiles
+    /// against the plain toolchain. The full server passes its own
+    /// effects/`M`-stack [`ModuleEnv`] instead.
     #[must_use]
     pub fn standalone_default() -> ModuleEnv {
         ModuleEnv {
@@ -239,13 +240,15 @@ impl ModuleEnv {
             // mirrored here; the sole intentional divergence is
             // `NoImplicitPrelude` (standalone relies on the implicit Prelude,
             // via its plain-toolchain imports below) — every other extension
-            // in `decl_pragmas` must appear here too. `test_standalone_default_
-            // tracks_decl_pragmas` (below) asserts the set equality (modulo
-            // that one documented delta) so this can't drift silently again —
-            // it caught `DeriveGeneric`/`DeriveAnyClass` missing here
-            // (generic-surface wave, 2026-08-08), the same drift class as the
-            // `OverloadedRecordDot`/`DuplicateRecordFields` gap fixed earlier
-            // (friction #28).
+            // in `decl_pragmas` must appear here too. `OverloadedRecordDot`
+            // and `DuplicateRecordFields` must both stay present so record-dot
+            // (`h.path`, a core idiom) compiles here as well.
+            //
+            // `test_standalone_default_tracks_decl_pragmas` (below) asserts
+            // that set equality (modulo the one documented delta), so this
+            // cannot drift silently: it caught `DeriveGeneric`/`DeriveAnyClass`
+            // missing here, the same drift class as the earlier
+            // `OverloadedRecordDot`/`DuplicateRecordFields` gap.
             pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
                       FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, \
                       PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, \
@@ -469,9 +472,9 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 /// hiding on any shared constructor name would silently nuke an *unrelated*
 /// prior type that merely reused a constructor name. Cross-type constructor
 /// reuse instead surfaces as a loud GHC conflicting-export error at compile —
-/// the honest outcome for a genuinely ambiguous program (and out of Lane A's
-/// scope). Reshape-coexistence of a redefined type lives in the gen-versioned
-/// module split, not here.
+/// the honest outcome for a genuinely ambiguous program; this renderer does not
+/// attempt to disambiguate it. Reshape-coexistence of a redefined type lives
+/// in the gen-versioned module split, not here.
 fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportItem> {
     let mut acc: Vec<ExportItem> = Vec::new();
     for turn in log.turns.iter().take(gen_one_based.saturating_sub(1)) {
@@ -496,8 +499,8 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
 /// reusing a name those modules also export (e.g. `over`, which
 /// `Tidepool.Prelude` re-exports from `Control.Lens`) shadows gracefully
 /// instead of an "ambiguous occurrence" — GHCi parity for ANY session decl,
-/// pure or genuine (ledger #36): a pure `let`/`<-` bind promoted into a decl
-/// for GHCi-parity type generalization (see `tidepool-repl`'s
+/// pure or genuine: a pure `let`/`<-` bind promoted into a decl for
+/// GHCi-parity type generalization (see `tidepool-repl`'s
 /// `try_pure_bind_as_decl`) must shadow a colliding wildcard-imported name
 /// exactly as a genuine top-level declaration would, so pure and effectful
 /// binds stay interchangeable.
@@ -582,12 +585,11 @@ pub fn render_module_with_vals(
     // `data Hit` vs. the project `Library` facade's `Hit`, or `over` vs.
     // `Tidepool.Prelude`'s Control.Lens re-export) becomes an "ambiguous
     // occurrence" — the same collision class `hide_module_names`
-    // (tidepool-repl) already guards on the stmt-preamble side (BUG-7); this
-    // ports the same guard to EVERY unqualified decl-module import (not just
-    // `Library`) now that the decl env always carries the full
-    // `Tidepool.Prelude` surface (see `session_decl_module_env`). Applies to
-    // ANY session decl, pure or genuine (ledger #36) — a pure-bind-promoted
-    // decl shadows exactly like a real one.
+    // (tidepool-repl) guards on the stmt-preamble side, ported here to EVERY
+    // unqualified decl-module import (not just `Library`) since the decl env
+    // always carries the full `Tidepool.Prelude` surface (see
+    // `session_decl_module_env`). Applies to ANY session decl, pure or
+    // genuine — a pure-bind-promoted decl shadows exactly like a real one.
     let all_session_heads: Vec<&ExportItem> = prior.iter().chain(this.items.iter()).collect();
 
     let prev_module = if g >= 2 {
@@ -897,7 +899,7 @@ mod tests {
 
     #[test]
     fn replayable_sources_drops_cross_turn_redefinition() {
-        // #320: `rf x = x+1` then `rf x = x+2` in SEPARATE turns. A flat
+        // `rf x = x+1` then `rf x = x+2` in SEPARATE turns. A flat
         // `:program` replay must emit ONLY the latest `rf`, not both (the two
         // equations would be an overlapping-clause pair GHC rejects).
         let mut log = DeclLog::new();

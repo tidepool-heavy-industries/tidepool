@@ -70,10 +70,7 @@ check nm ok = if ok then [] else [nm]
 /// Compile + run a module PURE on the JIT and return `result` as JSON. Skips
 /// (returns `None`) when the extractor is unavailable.
 fn eval_result(body: &str) -> Option<serde_json::Value> {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return None;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let src = format!("{HEADER}{DECLS}\n{body}");
     Some(
         EvalHarness::new()

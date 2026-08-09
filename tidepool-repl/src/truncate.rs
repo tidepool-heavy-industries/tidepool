@@ -1,11 +1,11 @@
 //! Rust-side result truncation + the `:stub <n>` fetch affordance.
 //!
-//! The eval preamble's `paginateResult` used to truncate oversized results
-//! HASKELL-side (`paginateTrunc` in `Tidepool.Orchestrate`), discarding the
-//! elided subtrees before the value ever crossed into Rust — so the
-//! `[~N chars -> stub_K]` markers named stubs nothing could fetch, and the
-//! `[truncated — bind the result and re-query]` hint only helped when the
-//! value happened to be bindable. The repl instead:
+//! The eval preamble's `paginateResult` truncates oversized results
+//! HASKELL-side by default (`paginateTrunc` in `Tidepool.Orchestrate`),
+//! discarding the elided subtrees before the value ever crosses into Rust —
+//! so the `[~N chars -> stub_K]` markers would name stubs nothing could
+//! fetch, and the `[truncated — bind the result and re-query]` hint would
+//! only help when the value happened to be bindable. The repl instead:
 //!
 //! 1. builds its preamble in `tidepool_mcp::PaginateMode::Passthrough`
 //!    (`server::repl_preamble`) so the FULL value reaches Rust,
@@ -21,8 +21,8 @@
 //! - budget-exhausted object tail → a `"..."` key with
 //!   `"[N more fields, ~M chars -> stub_K]"`
 //! - oversized top-level string → `"<prefix>...[N chars -> stub_K]"` (the
-//!   Haskell version dropped the stub id here — the full string was
-//!   unfetchable; stashing it is part of this fix).
+//!   Haskell version drops the stub id here since it has nowhere to stash the
+//!   full string; the repl stashes it, so the full string stays fetchable).
 
 use serde_json::{Map, Value};
 

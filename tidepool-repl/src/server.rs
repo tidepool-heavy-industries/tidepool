@@ -106,7 +106,7 @@ pub struct SessionResumeRequest {
 
 /// Classify one `session_run` item string into a [`BlockItem`].
 ///
-/// Classification strategy (try-cascade, approach (a) from the plan):
+/// Classification strategy (try-cascade):
 /// - `:` prefix → [`BlockItem::Meta`] via `MetaCommand::parse`.
 /// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
 ///   `instance`, …) → [`BlockItem::Decl`] (unambiguous; skip cascade).
@@ -118,9 +118,9 @@ pub struct SessionResumeRequest {
 /// immediately rather than silently producing a wrong result.
 pub fn classify_item(text: &str) -> Result<BlockItem, String> {
     let s = text.trim();
-    // An empty/whitespace-only item is a NO-OP (RE-1): route it to run_def,
-    // which returns Ok without bumping the generation (matches the legacy
-    // `session_def ""` contract). Erroring here would fail the whole block.
+    // An empty/whitespace-only item is a NO-OP: route it to run_def, which
+    // returns Ok without bumping the generation. Erroring here would fail the
+    // whole block.
     if s.is_empty() {
         return Ok(BlockItem::Decl(DeclText(String::new())));
     }
@@ -178,9 +178,9 @@ pub struct ReplServerConfig {
     /// back to `Idle`. `None` ⇒ parked continuations never expire — the
     /// production default (`main.rs`): a parked ask holds one worker thread +
     /// JIT machine, an acceptable cost for long-parked knots. Tests set it
-    /// small to exercise the reap path (H2).
+    /// small to exercise the reap path.
     pub continuation_ttl: Option<Duration>,
-    /// How long a `Wedged` session (a timed-out turn, H3) may linger before the
+    /// How long a `Wedged` session (a timed-out turn) may linger before the
     /// reaper closes and removes it. `None` ⇒ no wedged sweep. `main.rs` keeps
     /// ~30 min — a wedged session is dead weight, unlike a parked ask.
     pub wedged_ttl: Option<Duration>,
@@ -294,10 +294,10 @@ impl TidepoolReplServer {
     }
 
     /// Spawn the background reaper: periodically reclaim an abandoned suspension
-    /// (a parked `ask` never resumed, H2 — only if `continuation_ttl` is set)
-    /// and a `Wedged` session (a timed-out turn, H3 — only if `wedged_ttl` is
-    /// set). No-op when both TTLs are `None` or there is no tokio runtime (e.g. a
-    /// unit test that constructs the server off-runtime).
+    /// (a parked `ask` never resumed — only if `continuation_ttl` is set) and a
+    /// `Wedged` session (a timed-out turn — only if `wedged_ttl` is set). No-op
+    /// when both TTLs are `None` or there is no tokio runtime (e.g. a unit test
+    /// that constructs the server off-runtime).
     fn spawn_reaper(&self) {
         let suspended_ttl = self.inner.cfg.continuation_ttl;
         let wedged_ttl = self.inner.cfg.wedged_ttl;
@@ -507,7 +507,7 @@ impl TidepoolReplServer {
             Ok(s) => s,
             Err(e) => return CallToolResult::error(vec![Content::text(e)]),
         };
-        // Busy-guard (M5): only an Idle session accepts a new turn. A turn that
+        // Busy-guard: only an Idle session accepts a new turn. A turn that
         // is running, suspended on an `ask`, wedged, or closing must be resolved
         // first — otherwise a second run would queue behind the parked worker and
         // later mutate state against a dropped listener.
@@ -623,7 +623,7 @@ impl TidepoolReplServer {
         // Validate + canonicalize the reply against the suspension's schema
         // BEFORE consuming the continuation. This (a) makes `ask` return a
         // STRUCTURED, optic-extractable Value — a reply that arrived as a JSON
-        // string is parsed into the canonical shape (BUG-9) — and (b) leaves an
+        // string is parsed into the canonical shape — and (b) leaves an
         // invalid reply's continuation un-consumed so the caller can retry.
         // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
         let Some(state) = self.inner.manager.state() else {
@@ -823,7 +823,7 @@ impl TidepoolReplServer {
         let received = match timeout(turn_timeout, session_rx.recv()).await {
             Ok(r) => r,
             Err(_) => {
-                // H3: the worker is still computing past the budget. Abort it
+                // The worker is still computing past the budget. Abort it
                 // cooperatively on two fronts:
                 //   (1) `request_abort` unwinds an `ask`-parked turn at the
                 //       effect boundary;
@@ -966,7 +966,7 @@ impl TidepoolReplServer {
 /// - An abandoned `Suspended` (never resumed) → `Idle`: dropping the
 ///   `Suspension` drops its `response_tx`, so the parked worker's
 ///   `response_rx.recv()` errors, the turn unwinds, and the worker returns to
-///   its command loop — the session stays alive and usable (H2).
+///   its command loop — the session stays alive and usable.
 /// - A stale `Wedged` (timed-out turn) → removed, freeing the slot. The worker
 ///   is DETACHED, not joined: a pure-compute runaway can't be joined without
 ///   hanging.
@@ -1236,12 +1236,11 @@ pub struct EmptyRequest {}
 
 #[cfg(test)]
 mod tests {
-    /// Byte-identity check for the `Passthrough`-mode builder against the OLD
-    /// technique it replaces (string-patching the `Truncate`-mode preamble's
-    /// `paginateResult = paginateTrunc` binding line to a pass-through) — the
-    /// generated Haskell text must be identical either way.
+    /// Byte-identity check: `PaginateMode::Passthrough` must produce the same
+    /// Haskell text as hand-patching the `Truncate`-mode preamble's
+    /// `paginateResult = paginateTrunc` binding line to a pass-through no-op.
     #[test]
-    fn passthrough_mode_matches_the_old_string_patch() {
+    fn passthrough_mode_matches_hand_patched_preamble() {
         let stack = tidepool_handlers::build_minimal_stack();
         let (decls, _ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
 
@@ -1269,8 +1268,7 @@ mod tests {
         );
     }
 
-    /// Empty effect stack ⇒ no `paginateResult` alias emitted in EITHER mode
-    /// (mirrors the old `passthrough_is_noop_without_alias` coverage).
+    /// Empty effect stack ⇒ no `paginateResult` alias emitted in EITHER mode.
     #[test]
     fn passthrough_mode_is_noop_without_alias() {
         let truncate_mode = tidepool_mcp::build_preamble_non_interactive(&[], false);

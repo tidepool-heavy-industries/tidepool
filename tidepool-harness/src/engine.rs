@@ -135,9 +135,9 @@ pub struct ClassifiedHole {
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
-///   `ask schema prompt`). The old `payload.get("ui")` → `Dialog` probe is
-///   gone (dead once `dialogAsk` was deleted) — a Dialog hole is no longer
-///   PRODUCED, though the variant and its consumers still exist.
+///   `ask schema prompt`). A Dialog hole is never PRODUCED here — no
+///   `payload` probe routes to it — though the `HoleRouting::Dialog` variant
+///   and its consumers still exist.
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -243,8 +243,7 @@ fn decode_askuser_spec(
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
 /// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
-/// its shape (identical to what `AskWith` used to carry for this family) is
-/// documented once.
+/// this shape is documented once rather than at every call site.
 fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
     let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
     let ty = asks.type_of(site).map(str::to_string);
@@ -568,12 +567,11 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
 /// and routed to `template_haskell`'s `imports` field.
 ///
-/// No implicit import is added here anymore (the old always-on `Tidepool.Ui
-/// hiding (prose, code)` was for `dialogAsk`, now deleted): `Tidepool.Form`
-/// is already auto-imported by the turn preamble when `AskUser` is in the
-/// compiling stack (`preamble::pragmas_and_imports`), and an Agent-stack turn
-/// (which has no `AskUser`) must NOT get it force-imported — Tidepool.Form
-/// would fail to resolve there (it depends on `askUserRaw`).
+/// No implicit import is added here: `Tidepool.Form` is already
+/// auto-imported by the turn preamble when `AskUser` is in the compiling
+/// stack (`preamble::pragmas_and_imports`), and an Agent-stack turn (which
+/// has no `AskUser`) must NOT get it force-imported — `Tidepool.Form` would
+/// fail to resolve there (it depends on `askUserRaw`).
 pub fn split_imports(block: &str) -> (String, String) {
     let mut imports: Vec<String> = Vec::new();
     let mut body = Vec::new();
@@ -642,8 +640,8 @@ pub struct EngineConfig {
     /// Per-node turn cap — a model that never emits a runnable/answering block
     /// is stopped after this many turns (config, default small).
     pub max_turns: u32,
-    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer (B1 widen):
-    /// each of the N children gets this budget independently, so one
+    /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
+    /// children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
     /// way a single shared cap would. Plain fork/return-control answerers
     /// still use `max_turns`.
@@ -651,8 +649,8 @@ pub struct EngineConfig {
     /// Per-turn output-token cap handed to the provider.
     pub max_tokens: Option<u32>,
     /// The context-window budget (in tokens) the runtime watches for MID-LOOP
-    /// emergency compaction (self-iterating-harness, 02-runtime.md
-    /// Compaction). DISTINCT from [`Self::max_tokens`], which is the ~2048
+    /// emergency compaction (self-iterating-harness). DISTINCT from
+    /// [`Self::max_tokens`], which is the ~2048
     /// per-turn *output* cap — this is the whole answerer session's
     /// accumulated *context* size, summed across its turns. At ~80% of this,
     /// the driver forces a compact-to-text summary of the answerer transcript
@@ -726,8 +724,7 @@ impl EngineConfig {
     /// Agent stack `standard()` hardcodes. The self-iterating harness's outer
     /// driver uses this for its `Eff '[RunLLMTurn]`-only compile
     /// (`vec![tidepool_mcp::runllmturn_decl()]`), so `Harness = M` resolves
-    /// to the literal single-effect row 02-runtime.md locks in, rather than
-    /// the full Agent stack.
+    /// to that literal single-effect row rather than the full Agent stack.
     pub fn from_decls(
         decls: Vec<tidepool_mcp::EffectDecl>,
         prelude_dir: PathBuf,
@@ -1306,9 +1303,9 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value
 }
 
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
-/// `Value` (F3's RAW-value rule for a `runLLMTurnFanout` resume — the
-/// same "hand back the native representation, not an Aeson wrapper"
-/// discipline a single fork's `unsafeCoerce` relies on). `items` must
+/// `Value` for a `runLLMTurnFanout` resume — the same "hand back the native
+/// representation, not an Aeson wrapper" discipline a single fork's
+/// `unsafeCoerce` relies on. `items` must
 /// already be in declaration order; `table` only needs to know the
 /// always-wired-in `:`/`[]` constructors (any `DataConTable` from the same
 /// compiled program qualifies — `DataConId`s are stable hashes, not

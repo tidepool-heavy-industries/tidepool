@@ -1,17 +1,16 @@
 //! ChatGPT-subscription OAuth `ModelProvider` impl (Codex-style
-//! authorization-code + PKCE via a loopback callback). 60-auth's crate
-//! survey ruled out hand-rolling this: the OAuth mechanics (PKCE
-//! generation, code exchange, refresh, the loopback callback server) are
-//! the `openai-auth` crate's job — its `OAuthConfig::default()` already
-//! carries the real Codex CLI client id / endpoints. This module supplies
-//! only Tidepool-specific glue: config-dir token persistence (0600,
-//! `super::paths`) and the `ModelProvider` impl (chat calls route through
-//! `genai`, see `super::http`).
+//! authorization-code + PKCE via a loopback callback), rather than
+//! hand-rolling the OAuth mechanics: PKCE generation, code exchange,
+//! refresh, and the loopback callback server are the `openai-auth` crate's
+//! job — its `OAuthConfig::default()` already carries the real Codex CLI
+//! client id / endpoints. This module supplies only Tidepool-specific
+//! glue: config-dir token persistence (0600, `super::paths`) and the
+//! `ModelProvider` impl (chat calls route through `genai`, see
+//! `super::http`).
 //!
 //! This is the PRIMARY Codex-auth flow (verified against
 //! `openai/codex`'s `codex-rs/login` source, Apache-2.0) — not the beta,
-//! undocumented device-code variant, which the operator's steer ruled out
-//! hand-porting for R0.
+//! undocumented device-code variant, which is out of R0 scope.
 //!
 //! **R0 CONSTRAINT (by design, not an oversight):** the OAuth callback
 //! listens on `127.0.0.1:<port>` (default 1455) on the box running the
@@ -164,10 +163,10 @@ fn port_forward_hint(port: u16) -> String {
     )
 }
 
-/// One step of sign-in: build the authorization URL. No network call
-/// (`OAuthClient::start_flow` generates PKCE locally) — matches the
-/// SPEC's "plain async fns" framing even though this particular step
-/// doesn't await anything.
+/// One step of sign-in: build the authorization URL. `async fn` for
+/// interface consistency with [`complete_login`], even though
+/// `OAuthClient::start_flow` generates PKCE locally and this step makes
+/// no network call.
 pub async fn start_login(cfg: &OauthConfig) -> Result<LoginStart, ProviderError> {
     let flow = cfg
         .client()?

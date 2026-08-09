@@ -44,10 +44,7 @@ fn eval_ok(code: &str, expected: serde_json::Value) {
 
 #[test]
 fn user_code_compiles_against_generated_bridged_decls() {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     // Construct a generated `Commit` and read a Text field via record-dot.
     eval_ok(
         r#"pure ((Commit "deadbeef" "subj" "auth" "date" ["a.hs","b.hs"]).sha)"#,

@@ -10,6 +10,8 @@
 //! request with no forcing event → literal zero child effect/turn events,
 //! audited from the log".
 
+mod support;
+
 use std::sync::Arc;
 
 use tidepool_harness::engine::EngineConfig;
@@ -18,14 +20,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::{ClassifiedHole, Harness, HoleRouting, TurnOutcome};
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -55,6 +49,7 @@ fn event_node(e: &Event) -> Option<NodeId> {
         Event::NodeCreated { node, .. }
         | Event::Forced { node, .. }
         | Event::TurnStart { node, .. }
+        | Event::TurnExtracted { node, .. }
         | Event::Effect { node, .. }
         | Event::HolePublished { node, .. }
         | Event::HoleAnswerAttempt { node, .. }
@@ -86,12 +81,7 @@ fn all_events(log_path: &std::path::Path) -> Vec<Event> {
 /// effect event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_request_with_no_forcing_event_has_zero_child_events() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("consent.jsonl");

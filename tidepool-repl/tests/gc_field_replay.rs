@@ -66,10 +66,7 @@ fn build_full_stack_repl() -> Repl {
 /// the fold-result bind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn field_session_replay_bridged_substrate_verified() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     tidepool_codegen::host_fns::set_heap_verify(true);
     tidepool_codegen::host_fns::set_gc_poison(true);
     let repl = build_full_stack_repl();
@@ -139,10 +136,7 @@ async fn field_session_replay_bridged_substrate_verified() {
 /// handoff, not the GC core.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn field_session_replay_split_turns_control() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     tidepool_codegen::host_fns::set_heap_verify(true);
     tidepool_codegen::host_fns::set_gc_poison(true);
     let repl = build_full_stack_repl();

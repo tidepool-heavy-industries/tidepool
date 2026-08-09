@@ -41,14 +41,6 @@ use tidepool_harness::{
     SelfHarnessDriver, Submission,
 };
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -247,12 +239,7 @@ fn askuser_reply() -> RecordedReply {
 /// render cycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn askuser_operator_form_round_trip_and_ws4_log() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
@@ -416,10 +403,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
 /// A wrong type there is a GHC error, so this compiling IS the proof.
 #[test]
 fn prd_example_adts_compile_with_only_deriving_generic() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
     let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     cfg.include.push(fixtures_dir());

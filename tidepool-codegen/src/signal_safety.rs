@@ -201,8 +201,8 @@ mod inner {
     impl std::fmt::Display for SignalError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let name = match self.0 {
-                // The JIT no longer emits bare `trap`s: case misses, div-by-zero,
-                // and bad `chr` all route through host calls that yield clean
+                // The JIT emits no bare `trap`s: case misses, div-by-zero, and
+                // bad `chr` all route through host calls that yield clean
                 // RuntimeErrors. So a SIGILL/SIGFPE reaching here is a genuine
                 // fault (heap corruption, a bad pointer, an unguarded op), not a
                 // routine language-level error.
@@ -342,10 +342,9 @@ mod inner {
         }
         // SAFETY: Not in JIT context — writing crash dump with async-signal-safe calls,
         // then terminating this thread only (not the process) to avoid killing the MCP server.
-        // The stderr breadcrumb is load-bearing: a silent thread exit presents to the
-        // embedder as a HANG (the eval caller never returns), which cost a full
-        // debugging session before the crash.log was discovered. write(2) is
-        // async-signal-safe.
+        // The stderr breadcrumb is load-bearing: without it a silent thread exit
+        // presents to the embedder as a HANG, since the eval caller never returns.
+        // write(2) is async-signal-safe.
         unsafe {
             write_crash_dump(sig, _info);
             let msg = b"[tidepool] fatal signal outside JIT protection; eval thread terminated; see .tidepool/crash.log\n";

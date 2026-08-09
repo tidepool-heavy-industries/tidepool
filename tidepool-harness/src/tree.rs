@@ -19,8 +19,7 @@ pub struct NodeId(pub u64);
 pub struct HoleId(pub String);
 
 /// Extract-time yield-site id: the literal threaded by the head-swap
-/// rewrite, key into the `asks.json` sidecar
-/// (plans/harness-r0/10-extract-pass/SPEC.md).
+/// rewrite, key into the `asks.json` sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SiteId(pub u32);
 
@@ -52,8 +51,9 @@ pub enum FanBadge {
     Dynamic,
 }
 
-/// Pre-force price class. DRAFT granularity — segment 30 (forcing)
-/// may refine; the contract is that a class exists and renders as a badge.
+/// Pre-force price class. Coarse-grained by design: the contract is only
+/// that a class always exists and renders as a badge, not that this
+/// taxonomy is final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriceClass {
@@ -66,8 +66,8 @@ pub enum PriceClass {
 }
 
 /// Resident-session registry slot. Generic over the machine handle so this
-/// crate stays free of the JIT dependency — segment 20 instantiates `M`
-/// with its resident-session type. The stowed-XOR-running discipline
+/// crate stays free of the JIT dependency — a caller instantiates `M` with
+/// its concrete resident-session type. The stowed-XOR-running discipline
 /// (jit_machine.rs Send rationale) maps onto these variants: a machine is
 /// in exactly one slot, and `Running`/`RunningChild` means it is out on a turn.
 #[derive(Debug)]
@@ -78,9 +78,9 @@ pub enum Slot<M> {
         machine: M,
         hole: HoleId,
     },
-    /// Segment 40: the machine is out on a NESTED CHILD run against a suspended
-    /// parent — the parent is still suspended on `hole`, and the child restores
-    /// the slot back to `Suspended { hole }` on completion. A parent
+    /// The machine is out on a NESTED CHILD run against a suspended parent —
+    /// the parent is still suspended on `hole`, and the child restores the
+    /// slot back to `Suspended { hole }` on completion. A parent
     /// resume/abort or a new top-level run is rejected while in this state
     /// (sequential-isolated: exactly one computation on the heap at a time).
     RunningChild {

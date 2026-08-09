@@ -2,8 +2,9 @@
 //! event. The header pins toolchain identity; replay is EFFECT-RESPONSE
 //! SUBSTITUTION (re-run logged sources with logged responses injected), so
 //! `Effect` events MUST record the response — a missing response breaks
-//! restoration. Segment 30 implements the writer and the replayer;
-//! this module is the wire contract.
+//! restoration. This module is the wire contract; the sibling `writer`/
+//! `reader` submodules and `crate::replay` implement the writer and the
+//! replayer against it.
 //!
 //! Layout: [`LogHeader`] is the file's first line, unwrapped. Every
 //! subsequent line is an [`EventRecord`] — the writer-assigned monotonic
@@ -75,6 +76,18 @@ pub enum Event {
         node: NodeId,
         source: String,
         input: Option<Value>,
+    },
+    /// What extract said the just-compiled turn's holes and binds ARE:
+    /// the `asks.json` sidecar's site → rendered-type pairs (each a
+    /// `runLLMTurn`/`runLLMTurnFork`/`finalize` yield site in the compiled
+    /// block), and — for a value-plane bind (`x <- e`) — the bound name and
+    /// its rendered type. Emitted right after the compile that produced
+    /// `TurnStart` for the same turn succeeds; `asks` is empty and `bound` is
+    /// `None` when the turn has neither (most turns).
+    TurnExtracted {
+        node: NodeId,
+        asks: Vec<(u32, String)>,
+        bound: Option<(String, String)>,
     },
     Effect {
         node: NodeId,

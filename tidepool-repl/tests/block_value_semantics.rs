@@ -34,10 +34,7 @@ fn envelope(text: &str) -> serde_json::Value {
 /// `value` still showed item 0's truncated value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stub_item_after_truncating_expr_keeps_its_own_value() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl
@@ -77,10 +74,7 @@ async fn stub_item_after_truncating_expr_keeps_its_own_value() {
 /// duplication the dedup step exists to eliminate, just misapplied).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn block_ending_in_bind_leaves_top_level_value_null_no_duplication() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.run(&["2 + 2", "x <- pure (5 :: Int)"]).await;
@@ -110,10 +104,7 @@ async fn block_ending_in_bind_leaves_top_level_value_null_no_duplication() {
 /// — the good path the F1/F2 fix must not regress.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn block_ending_in_expression_populates_top_level_and_suppresses_item_value() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    require_extract();
     let repl = Repl::new();
 
     let t = repl.run(&["x <- pure (5 :: Int)", "x + 1"]).await;

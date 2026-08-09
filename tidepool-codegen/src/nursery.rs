@@ -5,16 +5,13 @@ use crate::context::VMContext;
 /// Provides the backing memory that VMContext's alloc_ptr/alloc_limit point into.
 /// No GC — panics on exhaustion.
 pub struct Nursery {
-    /// `Vec<u64>`, not `Vec<u8>` (L8, repo-review-2026-07-06/01-gc-memory-
-    /// safety.md): heap objects stored here are read/written assuming
-    /// 8-byte alignment, but a `Vec<u8>`'s OWN element alignment is 1 — any
-    /// 8-byte alignment it happens to have is an accident of the global
-    /// allocator (glibc malloc always returns suitably-aligned memory for
-    /// non-tiny sizes) rather than anything the type system guarantees.
-    /// `Vec<u64>` makes the guarantee structural: its allocation is ALWAYS
-    /// 8-byte aligned regardless of allocator, holding even under an
-    /// allocator swap. Exposed to callers as raw `*const/*mut u8`; `size()`
-    /// is always a multiple of 8 (rounded up from the requested byte count).
+    /// `Vec<u64>`, not `Vec<u8>`: heap objects stored here are read/written
+    /// assuming 8-byte alignment. `Vec<u64>` makes that guarantee structural
+    /// (its allocation is always 8-byte aligned, regardless of allocator) —
+    /// a `Vec<u8>` would only be aligned by accident of the global
+    /// allocator's behavior. Exposed to callers as raw `*const/*mut u8`;
+    /// `size()` is always a multiple of 8 (rounded up from the requested
+    /// byte count).
     buffer: Vec<u64>,
 }
 
@@ -92,9 +89,8 @@ mod tests {
         );
     }
 
-    /// L8: alignment is now a STRUCTURAL guarantee of `Vec<u64>` backing,
-    /// not an accident of glibc malloc's behavior for `Vec<u8>` — this
-    /// holds regardless of the global allocator in use.
+    /// Alignment is a structural guarantee of `Vec<u64>` backing, holding
+    /// regardless of the global allocator in use.
     #[test]
     fn test_vmctx_alignment() {
         let size = 1024;

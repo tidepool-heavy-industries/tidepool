@@ -321,8 +321,8 @@ unsafe fn measure_closure_bytes(ptr: *mut u8, from_start: *const u8, from_end: *
         // re-scan. Skip it here so `measure` matches `bytes_copied`, honoring
         // the per-object idempotency the `tenure` doc promises. Without this,
         // a second tenure that shares substructure over-counts and trips the
-        // `measure == bytes_copied` invariant (latent until the Wave-1.B bind
-        // path tenures multiple values per generation).
+        // `measure == bytes_copied` invariant whenever a bind path tenures
+        // multiple values sharing substructure within one generation.
         if read_tag(obj) == TAG_FORWARDED {
             continue;
         }
@@ -557,17 +557,15 @@ mod tests {
         }
     }
 
-    /// Regression for the shipped `run_multi_bind` corruption: tenuring the
-    /// SAME top-level root pointer twice in one call (e.g.
-    /// `(a, b) <- pure (dup, dup)`, where both tuple fields are literally the
-    /// same heap object). Unlike `test_overlapping_tenures_preserve_sharing`
-    /// (where the shared node is a CHILD reached through a field —  already
-    /// handled by `cheney_copy`/`evacuate`'s own forwarding check), this is
-    /// the root of the SECOND `tenure()` call itself already being forwarded
-    /// by the first. Before the forward-skip fix, `measure_closure_bytes`
-    /// returns 0 for an already-forwarded root, so `tenure` rooted the raw
-    /// (now TAG_FORWARDED) pointer directly — the resulting slot read back
-    /// `heap tag: 255` instead of the tenured value.
+    /// Tenuring the SAME top-level root pointer twice in one call (e.g.
+    /// `(a, b) <- pure (dup, dup)`, where both tuple fields are the same heap
+    /// object) must follow the forwarding pointer on the second tenure
+    /// rather than rooting the stale `TAG_FORWARDED` stub directly — the
+    /// latter corrupts `run_multi_bind`, resolving to `heap tag: 255` instead
+    /// of the tenured value. Unlike `test_overlapping_tenures_preserve_sharing`
+    /// (a shared CHILD reached through a field, already handled by
+    /// `cheney_copy`/`evacuate`'s own forwarding check), here the ROOT of the
+    /// second `tenure()` call is itself already forwarded by the first.
     #[test]
     #[serial]
     fn test_tenure_same_root_twice_follows_forward() {

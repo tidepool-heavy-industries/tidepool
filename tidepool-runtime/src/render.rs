@@ -145,8 +145,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                             Ok(s) => json!(s),
                             Err(_) => {
                                 // The reported length is the UNCLAMPED len
-                                // field (matching historical renderer
-                                // output), not the clamped slice length.
+                                // field, not the clamped slice length.
                                 let len = shapes::unbox_int(len_val, table).unwrap_or_else(|| {
                                     shapes::text_backing(ba_val, table)
                                         .map(|b| {
@@ -170,13 +169,13 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
                 // List: try to collect as array or string
                 ("[]", []) => {
-                    // Empty list. KNOWN LIMITATION (proptest_render_json B1): an
-                    // empty Haskell `String` ([Char]) is indistinguishable from any
-                    // other empty list at the Value level, so it renders as `[]`
-                    // while `Text ""`/`LitString ""` render as `""`. The char-vs-list
-                    // heuristic in `collect_list` needs a non-empty spine to fire.
-                    // Unfixable here; the Prelude's Text-everywhere policy is the
-                    // real mitigation.
+                    // KNOWN LIMITATION: an empty Haskell `String` ([Char]) is
+                    // indistinguishable from any other empty list at the Value
+                    // level, so it renders as `[]` while `Text ""`/`LitString
+                    // ""` render as `""`. The char-vs-list heuristic in
+                    // `collect_list` needs a non-empty spine to fire.
+                    // Unfixable here; the Prelude's Text-everywhere policy is
+                    // the real mitigation.
                     json!([])
                 }
                 (":", [head, tail]) => collect_list(head, tail, table, d),
@@ -448,9 +447,9 @@ fn collect_list(
                     ("[]", []) => break,
                     (":", [h, t]) => {
                         // Truncate only when MORE elements provably exist (we are
-                        // looking at a cons cell past the cap). Checking at the top
-                        // of the loop instead falsely truncated a complete list of
-                        // exactly MAX_LIST_LEN. (proptest_render_json B5)
+                        // looking at a cons cell past the cap) — checking at the top
+                        // of the loop instead would falsely truncate a complete list
+                        // of exactly MAX_LIST_LEN.
                         if count >= MAX_LIST_LEN {
                             let mut arr: Vec<serde_json::Value> = elems
                                 .iter()
@@ -824,8 +823,8 @@ mod tests {
 
     #[test]
     fn test_render_record_named_fields() {
-        // A record constructor with field labels renders as a named-field object
-        // (ledger #42): `Hit { path, line, text }` → {"_con","path","line","text"}.
+        // A record constructor with field labels renders as a named-field object:
+        // `Hit { path, line, text }` → {"_con","path","line","text"}.
         let mut table = test_table();
         let hit_id = DataConId(100);
         table.insert(DataCon {

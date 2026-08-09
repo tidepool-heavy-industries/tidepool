@@ -344,7 +344,7 @@ fn render_compile_error(e: &tidepool_runtime::CompileError) -> String {
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
-    /// Unique per-construction run identity (F3 fix), scoping this
+    /// Unique per-construction run identity, scoping this
     /// instance's node decl-plane directories to
     /// `harness-sessions/<run_id>/node-<id>` so a second, concurrent Harness
     /// sharing the same cache root (a different process, or a second
@@ -890,7 +890,11 @@ impl Harness {
         // block runs, so it precedes this turn's Effect / HolePublished
         // events in the durable log.
         self.tree.turn_start(node, block.clone(), None)?;
-        tracing::debug!(node = node.0, %block, "executed Haskell");
+        // INFO, not DEBUG: a person watching the console must see the exact
+        // source every compile ran (dogfood-observability deliverable 1) —
+        // full text, never truncated (a pathologically large source is
+        // itself signal worth seeing).
+        tracing::info!(node = node.0, source = %block, "compiled turn source");
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -1000,8 +1004,8 @@ impl Harness {
         )?;
 
         // The BIND/BINDDISCARD templates' imports: user imports + the decl
-        // module + current Val modules (mirrors what `run_bind_turn` used to
-        // merge) — just the user imports when the node has no decl plane.
+        // module + current Val modules — just the user imports when the node
+        // has no decl plane.
         let bind_imports = match &bind_ctx {
             Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
                 (_, true) => imports.to_string(),
@@ -1159,6 +1163,7 @@ impl Harness {
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                self.log_turn_extracted(node, &compiled.asks, None)?;
                 let asks = AsksSidecar::from_pairs(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
@@ -1306,6 +1311,11 @@ impl Harness {
         compiled: CompiledTurn,
         gen: Generation,
     ) -> Result<engine::TurnOutcome, HarnessError> {
+        self.log_turn_extracted(
+            node,
+            &compiled.asks,
+            Some((&binder.name, &binder.type_display)),
+        )?;
         let asks = AsksSidecar::from_pairs(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
@@ -1354,8 +1364,16 @@ impl Harness {
                 }
                 // The model's Haskell didn't compile — feed the GHC error back
                 // verbatim (capped) as a corrective user turn and retry, rather
-                // than cancelling the node.
+                // than cancelling the node. `turns` is this hole's corrective-
+                // retry round index — a burned round must be visible while it
+                // is happening, not just reconstructable afterwards.
                 Err(HarnessError::Compile(msg)) => {
+                    tracing::warn!(
+                        node = node.0,
+                        round = turns,
+                        "compile attempt failed (round {turns} of {}, corrective retry)",
+                        self.cfg.max_turns
+                    );
                     let ghc = truncate_ghc_error(&msg);
                     self.push_user_turn(
                         node,
@@ -1576,11 +1594,13 @@ impl Harness {
     /// Without (2) the next hole's `drive_turn` cannot run a fresh block on the
     /// same session. Returns the finalized value (already read out of the
     /// suspended request by `take_finalized_value_core`, so aborting the
-    /// continuation does not lose it).
+    /// continuation does not lose it) alongside its rendered JSON text — what
+    /// the answer actually WAS, for the driver's `Finalize` narration event
+    /// (dogfood-observability deliverable 4).
     pub(crate) fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<Value, HarnessError> {
+    ) -> Result<(Value, String), HarnessError> {
         // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
         let hole = {
             let convos = self.convos.lock();
@@ -1592,7 +1612,8 @@ impl Harness {
                 .hole
                 .clone()
         };
-        let (value, _table) = self.take_finalized_value_core(node)?;
+        let (value, table) = self.take_finalized_value_core(node)?;
+        let rendered = tidepool_runtime::value_to_json(&value, &table, 0).to_string();
 
         // Abort the resident session's parked finalize continuation so the
         // session returns to idle and can run the NEXT hole's turn. `abort`
@@ -1612,7 +1633,7 @@ impl Harness {
 
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
-        Ok(value)
+        Ok((value, rendered))
     }
 
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
@@ -1757,17 +1778,30 @@ impl Harness {
         })
     }
 
+    /// The first node currently suspended on a Dialog (operator) hole, if any —
+    /// what the inspector focuses by default.
+    pub fn first_operator_hole(&self) -> Option<NodeId> {
+        let convos = self.convos.lock();
+        convos.iter().find_map(|(n, c)| {
+            matches!(
+                c.pending.as_ref().map(|p| &p.classified.routing),
+                Some(HoleRouting::Dialog { .. }) | Some(HoleRouting::Ask { .. })
+            )
+            .then_some(*n)
+        })
+    }
+
     /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
-    /// path leaves it `Running` with a live resident session (the leak external
-    /// review flagged: only the success path used to terminalize + drop the
-    /// child's session; a provider/join/log fault inside
-    /// `drive_answerer_to_value`, or a `resume_parent` failure after,
-    /// propagated via `?` and orphaned the child). Scoped to the fork/fanout
-    /// callers deliberately — NOT baked into `drive_answerer_to_value` itself,
-    /// which is also called in-context with `answerer == the main node`,
-    /// where cancelling "the child" would kill the live agent. `terminate_node`
-    /// is idempotent, so this is safe to repeat even against the internal
-    /// abort paths that already retired the child (cap-exhaustion /
+    /// path leaves it `Running` with a live resident session: every fallible
+    /// step after forcing the child (a provider/join/log fault inside
+    /// `drive_answerer_to_value`, or a `resume_parent` failure after) must
+    /// route through this explicit cleanup instead of propagating via `?`
+    /// and orphaning the child. Scoped to the fork/fanout callers
+    /// deliberately — NOT baked into `drive_answerer_to_value` itself, which
+    /// is also called in-context with `answerer == the main node`, where
+    /// cancelling "the child" would kill the live agent. `terminate_node` is
+    /// idempotent, so this is safe to repeat even against the internal abort
+    /// paths that already retired the child (cap-exhaustion /
     /// `ChildSuspended`).
     fn cleanup_failed_child(&self, child: NodeId) {
         let _ = self.terminate_node(child, "fork child failed");
@@ -2157,10 +2191,9 @@ impl Harness {
             .and_then(|c| c.suspend_table.clone())
             .unwrap_or_default();
         let value = engine::json_answer_to_value(&submission, &table)?;
-        // `resume_parent` logs the Consumed attempt itself, once, only after
-        // the resume actually succeeds — logging it here too used to
-        // double-log every mechanical dialog answer (fixed: single source of
-        // truth for the Consumed record).
+        // `resume_parent` logs the Consumed attempt itself, exactly once,
+        // only after the resume actually succeeds — the single source of
+        // truth for the Consumed record; this call site must not log again.
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
@@ -2174,9 +2207,9 @@ impl Harness {
     /// no single child of a fan can consume the whole node's turn budget).
     /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
     ///
-    /// CAP EXHAUSTION does NOT return straight out anymore (the old
-    /// mid-fan hard-failure that leaked a `Running` answerer and wedged the
-    /// parent) — it runs the escalation ladder via
+    /// CAP EXHAUSTION never returns straight out: a hard-failure here would
+    /// leak a `Running` answerer and wedge the parent, so it instead runs
+    /// the escalation ladder via
     /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
     /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
     /// an unrelated resident/routing error) unwinds out of this loop; on
@@ -2698,6 +2731,34 @@ impl Harness {
         Ok(())
     }
 
+    /// Log what extract said the just-compiled turn's holes and binds ARE —
+    /// the `asks.json` site → type table plus a value-plane bind's bound
+    /// name/type, if either is non-empty — to console INFO and `log.jsonl`
+    /// (dogfood-observability deliverable 2). A no-op (no console line, no
+    /// event) when the turn has neither: most turns don't.
+    fn log_turn_extracted(
+        &self,
+        node: NodeId,
+        asks: &[(u32, String)],
+        bound: Option<(&str, &str)>,
+    ) -> Result<(), HarnessError> {
+        if asks.is_empty() && bound.is_none() {
+            return Ok(());
+        }
+        tracing::info!(
+            node = node.0,
+            asks = ?asks,
+            bound = ?bound,
+            "turn extracted types"
+        );
+        self.tree.turn_extracted(
+            node,
+            asks.to_vec(),
+            bound.map(|(name, ty)| (name.to_string(), ty.to_string())),
+        )?;
+        Ok(())
+    }
+
     /// Cancel a node (operator stop / teardown) — retires it via
     /// [`Self::terminate_node`].
     pub fn cancel(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
@@ -2896,8 +2957,8 @@ impl Harness {
     /// Replace `node`'s transcript with a single summary message IN PLACE,
     /// keeping the resident session, per-node framing (`render`'s output), and
     /// turn-sequence continuity live — the self-iterating harness's MID-LOOP
-    /// in-place compaction relief (02-runtime.md LOCKED: "replace its
-    /// context with the summary so the loop CONTINUES", NO loop-abort). The
+    /// in-place compaction relief: replace the context with the summary so
+    /// the loop CONTINUES, never a loop-abort. The
     /// accumulated exchange is collapsed to one User-role message carrying
     /// `summary` as prior-window context; the node's running [`Usage`] is reset
     /// (`node_usage` now reflects only the small compacted window, so the

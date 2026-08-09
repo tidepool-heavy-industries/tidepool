@@ -287,7 +287,7 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
             // subtracted 1 to address the tail, so an `UnhandledEffect` bubbling
             // up from `HNil` (or a deeper layer) must have 1 added back per
             // layer it passes through, or the diagnostic names the wrong
-            // (handled) effect for any tag beyond the first (#F2).
+            // (handled) effect for any tag beyond the first.
             self.tail
                 .dispatch(tag - 1, request, cx)
                 .map_err(|e| match e {
@@ -407,8 +407,8 @@ mod tests {
         match result {
             Err(EffectError::UnhandledEffect { tag: 1 }) => {}
             // tag is decremented per HCons layer to address the tail, then
-            // restored by 1 per layer on the way back out (#F2) — the
-            // diagnostic must name the ORIGINAL out-of-range tag, 1.
+            // restored by 1 per layer on the way back out — the diagnostic
+            // must name the ORIGINAL out-of-range tag, 1.
             other => panic!("expected UnhandledEffect {{ tag: 1 }}, got {other:?}"),
         }
     }
@@ -446,8 +446,8 @@ mod tests {
         match result {
             Err(EffectError::UnhandledEffect { tag: 2 }) => {}
             // tag decremented by 2 on the way in (one per HCons layer), then
-            // restored by 2 on the way out (#F2) — the original out-of-range
-            // tag, 2, is what a version-skewed caller needs to see.
+            // restored by 2 on the way out — the original out-of-range tag,
+            // 2, is what a version-skewed caller needs to see.
             other => panic!("expected UnhandledEffect {{ tag: 2 }}, got {other:?}"),
         }
     }

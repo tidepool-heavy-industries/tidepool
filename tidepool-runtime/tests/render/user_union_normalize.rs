@@ -29,17 +29,14 @@
 //! was already fixed in plan 03 via the same `freer_names::resolve` helper,
 //! prior to this work — see `repro_qq_union.rs` for that class of regression.
 //!
-//! Requires a worktree extract binary — skips cleanly when unavailable (see
-//! `tidepool_testing::eval_harness::extract_available`).
+//! Requires a worktree extract binary — panics loudly when unavailable (see
+//! `tidepool_testing::eval_harness::require_extract`).
 
-use tidepool_testing::eval_harness::{extract_available, mock, EvalHarness};
+use tidepool_testing::eval_harness::{mock, require_extract, EvalHarness};
 
 #[test]
 fn user_defined_union_survives_effectful_normalize() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return;
-    }
+    require_extract();
     let src = mock::mcp_module(
         "data Union a b = Union a b\n\n\
          unionSum :: Union Int Int -> Int\n\

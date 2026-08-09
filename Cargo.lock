@@ -504,6 +504,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-codes"
+version = "0.146.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b163a2775c1a881cfffc6fe4ad81af8dd4666756d509f64e8db337c04312298"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "which 8.0.5",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3722,7 +3736,21 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "which",
+ "which 7.0.3",
+]
+
+[[package]]
+name = "tidepool-agent"
+version = "0.1.0"
+dependencies = [
+ "codex-codes",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4039,7 +4067,7 @@ dependencies = [
  "tidepool-testing",
  "tokio",
  "tracing",
- "which",
+ "which 7.0.3",
 ]
 
 [[package]]
@@ -4195,6 +4223,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -4735,6 +4764,15 @@ dependencies = [
  "env_home",
  "rustix",
  "winsafe",
+]
+
+[[package]]
+name = "which"
+version = "8.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f3ef584124b911bcc3875c2f1472e80f24361ceb789bd1c62b3e9a3df9ff43c"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

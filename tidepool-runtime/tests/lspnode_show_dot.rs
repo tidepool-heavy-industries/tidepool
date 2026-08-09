@@ -41,10 +41,7 @@ fn eval_ok(code: &str, expected: serde_json::Value) {
 
 #[test]
 fn lspnode_is_show_and_dot_accessible() {
-    if !tidepool_testing::eval_harness::extract_available() {
-        eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let node =
         r#"(LspNode "myFunc" "MyModule" "function" "src/Lib.hs" (Position 10 4) "myFunc x = x")"#;
 

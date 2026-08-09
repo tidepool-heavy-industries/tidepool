@@ -255,10 +255,13 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
                 reasoning_items: Vec::new(), // the durable log never carries them
             });
         }
-        // TurnStart / Effect / HoleAnswerAttempt do not change tree STATE (they
-        // are within-turn detail the replayer substitutes against, not folded
-        // into node lifecycle here).
-        Event::TurnStart { .. } | Event::Effect { .. } | Event::HoleAnswerAttempt { .. } => {}
+        // TurnStart / Effect / HoleAnswerAttempt / TurnExtracted do not change
+        // tree STATE (they are within-turn detail the replayer substitutes
+        // against, not folded into node lifecycle here).
+        Event::TurnStart { .. }
+        | Event::Effect { .. }
+        | Event::HoleAnswerAttempt { .. }
+        | Event::TurnExtracted { .. } => {}
     }
 }
 

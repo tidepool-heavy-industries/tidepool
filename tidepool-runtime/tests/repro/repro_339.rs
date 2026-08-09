@@ -12,7 +12,7 @@
 //! primop extractors only stripped exactly one `Con` layer; the fix (in
 //! `tidepool-eval/src/eval.rs`) makes them peel repeated single-field boxed
 //! layers, matching the JIT's tolerance for the same shape.
-use tidepool_testing::eval_harness::{extract_available, EvalHarness};
+use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 const HEADER: &str =
@@ -24,10 +24,7 @@ const HEADER: &str =
 /// in one expression. Both engines must return 7.
 #[test]
 fn repro_339_eval_jit_parity_on_fused_round_trip() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return;
-    }
+    require_extract();
     let src = format!(
         "{HEADER}\n\
          data Rec = Rec {{ rx :: Int, ry :: Int }} deriving (Generic, ToJSON, FromJSON)\n\n\

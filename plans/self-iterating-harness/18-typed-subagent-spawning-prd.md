@@ -1402,3 +1402,21 @@ Keep backend lifecycle, authentication, process control, workspace binding,
 receipts, and persistence in stable handlers. Keep planning, delegation strategy,
 review topology, and stopping policy in the repo-local Haskell resident. The
 runtime is designed to host rapidly changing programs, not become one.
+
+## Addendum — decisions locked pre-flight (Inanna + root, 2026-08-09)
+
+1. **Cross-cycle tool calls — reattach-supplies-tools, mailbox-bridged.**
+   `attachAgent` takes the checkpointed `AgentReference` PLUS a freshly
+   built tools record; the runtime validates the protocol fingerprint and
+   atomically installs the handlers before delivery resumes. A tool call
+   arriving while no handler generation is attached is written to a
+   bounded durable queue AND schedules a resident cycle (the same
+   arrival-schedules-a-cycle path `drainMailbox` uses — one mechanism,
+   one more message kind). The worker experiences a slow tool call.
+   Neither forbid-cross-cycle nor queue-without-reattach is the design.
+2. **Typed failure results everywhere, to start.** `spawnAgent`,
+   `attachAgent`, `pokeAgent` return case-matchable typed errors
+   (`SpawnError`/`AttachError`/`PokeError` — variant lists filled by the
+   first backend lane's contact with reality); `retainAgent` returns the
+   `AgentReference`. No `()`-returning operation whose semantics promise
+   a failure it cannot express.

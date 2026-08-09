@@ -1,6 +1,6 @@
-//! The runtime driver spine — the outer `render`/`loop` alternation
-//! (01/02-runtime.md) over the OUTER Harness-monad resident session,
-//! servicing each `runLLMTurn` hole by driving a NESTED
+//! The runtime driver spine — the outer `render`/`loop` alternation over the
+//! OUTER Harness-monad resident session, servicing each `runLLMTurn` hole by
+//! driving a NESTED
 //! [`crate::harness::Harness`] (an ordinary Agent node, reusing
 //! `run_to_hole_or_done`) to a `finalize` and `run_child`-ing the result
 //! back in-heap to resume `loop`.
@@ -47,7 +47,7 @@ use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
-use crate::selfharness::observer::{Event, Observer};
+use crate::selfharness::observer::{Event, FormSource, Observer};
 use crate::selfharness::operator::{FormSpec, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
@@ -138,8 +138,8 @@ struct OuterSession {
 
 /// The outer Harness-monad's OWN decl list — `Eff '[RunLLMTurn, AskUser]`,
 /// distinct from the nested Agent's full stack (`crate::engine`'s private
-/// `agent_decls`). `RunLLMTurn` is the loop's model-spawning verb (02-runtime.md
-/// LOCKED: no BASE effects for v1); `AskUser` is
+/// `agent_decls`). `RunLLMTurn` is the loop's model-spawning verb (no BASE
+/// effects on the outer row in v1); `AskUser` is
 /// added so an AUTHORED `loop` can present a typed operator form directly —
 /// `Tidepool.Form`'s `askUser` is auto-imported into every outer compile
 /// whenever `AskUser` is in this decl list (see
@@ -186,8 +186,7 @@ fn not_bootstrapped() -> DriverError {
 
 /// Default emergency-compaction threshold — 80% of the CONTEXT-WINDOW budget
 /// ([`EngineConfig::context_window_tokens`], NOT `max_tokens`, which is the
-/// 2048 per-turn *output* cap; 02-runtime.md LOCKED: "~80% of a real
-/// context-window budget"). Overridable per driver via
+/// 2048 per-turn *output* cap). Overridable per driver via
 /// [`SelfHarnessDriver::set_compaction_threshold_percent`] (e.g. a test
 /// driving a low threshold to trip compaction deterministically off a
 /// single small turn's usage).
@@ -202,20 +201,15 @@ const COMPACTION_TARGET_DIVISOR: u32 = 4;
 /// Per-hole SOFT cap: after this many model rounds on a
 /// single `runLLMTurn` hole that did NOT finalize, nudge the answerer once
 /// ("approaching max tool calls, finalize now with `@T`") and keep driving.
-/// 08-wave1-correctness.md LOCKED: "up to 16 tool-call rounds ... at 16 the
-/// runtime nudges".
 const ANSWERER_NUDGE_ROUNDS: u32 = 16;
 
 /// Per-hole HARD cap: after this many non-finalize model rounds on one hole,
 /// hard-fail the `runLLMTurn` effect with a [`DriverError`].
-/// 08-wave1-correctness.md LOCKED: "at 32 it hard-fails the runLLMTurn
-/// effect".
 const ANSWERER_MAX_ROUNDS: u32 = 32;
 
 /// Cap on CONSECUTIVE `askUser` re-presentations within the servicing of ONE
 /// hole: `askUser` re-prompts by RECURSION on a decode failure — no
-/// `Either`, per spec — and
-/// the frozen headless `StdinGate::present_form` returns an EMPTY
+/// `Either` — and the frozen headless `StdinGate::present_form` returns an EMPTY
 /// `Submission` on EOF rather than erroring, so a non-interactive gate with
 /// closed stdin composes into an unbounded hot loop that NEITHER
 /// `ANSWERER_MAX_ROUNDS` nor `LOOP_INFERENCE_CALL_CAP` catches (both only
@@ -230,10 +224,9 @@ const ANSWERER_MAX_ROUNDS: u32 = 32;
 /// typos while making a broken/closed gate terminate loudly and fast.
 const ASKUSER_MAX_REPROMPTS: u32 = 8;
 
-/// Per-LOOP hard cap on TOTAL model inference calls across every hole + round
-/// (08-wave1-correctness.md LOCKED: "Per-loop total inference-call cap =
-/// 1024 — hard-stop the loop"). Keeps a misbehaving harness from running
-/// away regardless of per-hole budgets or compaction.
+/// Per-LOOP hard cap on TOTAL model inference calls across every hole + round.
+/// Keeps a misbehaving harness from running away regardless of per-hole
+/// budgets or compaction.
 const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 
 /// The narrow answerer instruction appended after `render`'s output to form
@@ -301,9 +294,9 @@ pub struct SelfHarnessDriver {
     observer: Arc<dyn Observer>,
     /// The LATEST emergency-compaction `Text`, fed as the NEXT
     /// [`Self::run_one_cycle`] call's `lastCompaction` — driver-owned state
-    /// rather than a threaded parameter, since 02-runtime.md LOCKS the
-    /// *runtime* (not the caller) as the owner of the compaction lifecycle.
-    /// Updated MID-LOOP by [`Self::maybe_compact_answerer`] the moment a
+    /// rather than a threaded parameter, since the *runtime* (not the
+    /// caller) owns the compaction lifecycle. Updated MID-LOOP by
+    /// [`Self::maybe_compact_answerer`] the moment a
     /// compaction fires (the loop then CONTINUES under the summary). `None`
     /// until the first compaction fires.
     last_compaction: Option<String>,
@@ -315,8 +308,8 @@ pub struct SelfHarnessDriver {
     /// not a stale carried-forward one. Set by [`Self::maybe_compact_answerer`].
     cycle_compaction: Option<String>,
     /// The emergency-compaction threshold, as a percentage of the CONTEXT-
-    /// WINDOW budget ([`EngineConfig::context_window_tokens`], 02-runtime.md:
-    /// "~80%", [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
+    /// WINDOW budget ([`EngineConfig::context_window_tokens`], default
+    /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`]). Configurable via
     /// [`Self::set_compaction_threshold_percent`]. Checked MID-LOOP against the
     /// answerer session's real accumulated context ([`Harness::node_usage`]),
     /// not against `max_tokens` after the loop.
@@ -498,7 +491,7 @@ impl SelfHarnessDriver {
 
     /// Override the emergency-compaction threshold (default
     /// [`DEFAULT_COMPACTION_THRESHOLD_PERCENT`], ~80% of the context-window
-    /// budget per 02-runtime.md). Mainly for tests: a low percentage trips
+    /// budget). Mainly for tests: a low percentage trips
     /// compaction deterministically off a single small scripted turn's usage
     /// instead of needing a long scripted reply sequence to organically cross
     /// 80% of [`EngineConfig::context_window_tokens`].
@@ -507,8 +500,8 @@ impl SelfHarnessDriver {
     }
 
     /// Override the per-hole answerer round caps (default
-    /// [`ANSWERER_NUDGE_ROUNDS`]/[`ANSWERER_MAX_ROUNDS`], 16/32 per
-    /// 08-wave1-correctness.md). Mainly for tests: small caps (e.g. 3/6) trip
+    /// [`ANSWERER_NUDGE_ROUNDS`]/[`ANSWERER_MAX_ROUNDS`], 16/32).
+    /// Mainly for tests: small caps (e.g. 3/6) trip
     /// the nudge + hard-fail with a few scripted turns instead of 16/32 real
     /// GHC compiles. `nudge` is clamped below `max`.
     pub fn set_answerer_round_caps(&mut self, nudge: u32, max: u32) {
@@ -563,8 +556,8 @@ impl SelfHarnessDriver {
     /// and a nested Agent's answerer turn resolve identically, so
     /// author-defined types crossing between them get the same DataConId),
     /// compiled against [`outer_decls`]/[`tidepool_mcp::runllmturn_decl`] —
-    /// so `Harness = M` resolves to the literal `Eff '[RunLLMTurn]` row
-    /// (02-runtime.md LOCKED). No-op if already bootstrapped.
+    /// so `Harness = M` resolves to the literal `Eff '[RunLLMTurn]` row.
+    /// No-op if already bootstrapped.
     fn bootstrap(&mut self, source: &HarnessSource) -> Result<(), DriverError> {
         if self.outer.is_some() {
             return Ok(());
@@ -649,8 +642,20 @@ impl SelfHarnessDriver {
     /// an authored harness routinely also defines (e.g. `render`) — see
     /// `state_cross`'s module doc for the "ambiguous occurrence" this
     /// avoids.
-    fn compile_outer(&mut self, code: &str, helpers: &str) -> Result<CompiledTurn, DriverError> {
-        let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+    ///
+    /// `label` (`"render"`/`"loop"`) identifies this compile in the emitted
+    /// [`Event::OuterCompile`] — the OUTER session has no per-node durable
+    /// log of its own (`crate::log::Event::TurnStart` only ever covers a tree
+    /// node's turns), so this event is the whole record of what the outer
+    /// session's fragments actually were, verbatim (dogfood-observability
+    /// deliverable 1).
+    fn compile_outer(
+        &mut self,
+        code: &str,
+        helpers: &str,
+        label: &str,
+    ) -> Result<CompiledTurn, DriverError> {
+        let outer = self.outer.as_ref().ok_or_else(not_bootstrapped)?;
         let imports = format!(
             "qualified {} as {}",
             outer.module_name,
@@ -661,12 +666,18 @@ impl SelfHarnessDriver {
             .turn_target(None)
             .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
             .stack;
+        let extract_bin = outer.cfg.extract_bin.clone();
+        let include = outer.cfg.include.clone();
         let src = engine::template_turn_for(&outer_decls(), &stack, code, &imports, helpers);
+        self.emit(Event::OuterCompile {
+            label: label.to_string(),
+            source: src.clone(),
+        });
         compile::compile_turn(
-            &outer.cfg.extract_bin,
+            &extract_bin,
             &src,
             "result",
-            &outer.cfg.include,
+            &include,
             timing::NO_NODE,
             timing::NO_ROUND,
         )
@@ -687,8 +698,8 @@ impl SelfHarnessDriver {
     /// emergency-compaction `Text` if one has fired, carried forward
     /// automatically across repeated calls (by [`Self::run_loop`], or by a
     /// caller driving cycles by hand — see `acceptance_selfharness.rs`),
-    /// since 02-runtime.md locks the *runtime*, not the caller, as the
-    /// compaction lifecycle's owner. This cycle's OWN compaction (if
+    /// since the *runtime*, not the caller, owns the compaction lifecycle.
+    /// This cycle's OWN compaction (if
     /// [`Self::maybe_compact_answerer`] fires one MID-LOOP) updates
     /// `self.last_compaction` before `prompt_after` is rendered, so
     /// `prompt_after` already reflects it — proving the summary reaches the
@@ -1019,7 +1030,7 @@ impl SelfHarnessDriver {
     ) -> Result<(Value, DataConTable), DriverError> {
         let helpers = state_cross::state_in(prior_state);
         let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
-        let compiled = self.compile_outer(&code, &helpers)?;
+        let compiled = self.compile_outer(&code, &helpers, "loop")?;
 
         let mut outcome = {
             let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
@@ -1093,17 +1104,17 @@ impl SelfHarnessDriver {
     /// Service one `runLLMTurn @A` suspension (`site`/`ty` from
     /// [`crate::engine::HoleRouting::RunLLMTurn`], `prompt` the hole's
     /// human-facing text) against the CURRENT loop's SINGLE render-seeded
-    /// answerer session (`self.answerer`, W1/C2): push the hole card as a User
+    /// answerer session (`self.answerer`): push the hole card as a User
     /// turn onto that persistent node — so hole #2 sees hole #1's exchange
     /// (the accumulating context window) — then drive it as a bounded
-    /// multi-turn interaction to `finalize` (WS-B's effect — terminates the
-    /// Agent turn loop rather than resuming it, per 03-agent-surface.md). The
-    /// finalized value feeds straight into the OUTER session's `resume` to
-    /// answer `loop`'s parked continuation.
+    /// multi-turn interaction to `finalize` (the effect that terminates the
+    /// Agent turn loop rather than resuming it). The finalized value feeds
+    /// straight into the OUTER session's `resume` to answer `loop`'s parked
+    /// continuation.
     ///
-    /// Bounded (W1 runaway caps): each non-finalize model round counts against
-    /// a per-hole budget — at [`ANSWERER_NUDGE_ROUNDS`] the answerer is nudged
-    /// to finalize, at [`ANSWERER_MAX_ROUNDS`] the hole hard-fails — and
+    /// Bounded: each non-finalize model round counts against a per-hole
+    /// budget — at [`ANSWERER_NUDGE_ROUNDS`] the answerer is nudged to
+    /// finalize, at [`ANSWERER_MAX_ROUNDS`] the hole hard-fails — and
     /// against the per-loop [`LOOP_INFERENCE_CALL_CAP`] total.
     pub async fn service_runllm_hole(
         &mut self,
@@ -1115,6 +1126,7 @@ impl SelfHarnessDriver {
         self.emit(Event::RunLLMTurnHole {
             site,
             ty: ty.map(String::from),
+            prompt: prompt.to_string(),
         });
 
         let node = self.answerer.ok_or_else(|| {
@@ -1135,12 +1147,12 @@ impl SelfHarnessDriver {
         // Push the hole card onto the EXISTING answerer node, accumulating
         // context rather than spawning a fresh one. The SCOPED answerer card
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
-        // `resume expr` (which does not compile against this stack — finding 1).
+        // `resume expr` (which does not compile against this stack).
         let child_prompt = engine::answerer_hole_card(prompt, ty, self.answerer_imports());
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
-        let outcome = self.drive_answerer_to_finalize(node, ty).await?;
+        let outcome = self.drive_answerer_to_finalize(node, ty, site).await?;
         self.emit(Event::TurnEnd { node });
 
         let is_finalize = matches!(
@@ -1155,12 +1167,15 @@ impl SelfHarnessDriver {
             )));
         }
 
-        // W1/C2: take the finalized value AND keep the node live (consume the
+        // Take the finalized value AND keep the node live (consume the
         // finalize hole, Suspended→Running) so the NEXT hole can push onto the
         // same accumulating session — not `take_finalized_value`, which cancels.
-        let value = self.agent.take_finalized_value_keep_open(node)?;
-        self.emit(Event::Finalize { node });
-        // W2: the answerer node is REUSED across the loop's holes (C2), so
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+        self.emit(Event::Finalize {
+            node,
+            value: rendered,
+        });
+        // The answerer node is REUSED across the loop's holes, so
         // `node_usage` returns the node's CUMULATIVE context size. The
         // MID-LOOP compaction check (`maybe_compact_answerer`) reads it BETWEEN
         // holes, once per hole, right after this returns — never summed per-hole
@@ -1191,6 +1206,7 @@ impl SelfHarnessDriver {
         &mut self,
         node: NodeId,
         ty: Option<&str>,
+        site: u32,
     ) -> Result<TurnOutcome, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
@@ -1226,6 +1242,31 @@ impl SelfHarnessDriver {
             self.loop_inference_calls += 1;
             rounds += 1;
             let outcome = self.agent.drive_turn(node).await;
+            // A retry loop that burns rounds must be visible while it is
+            // happening, not reconstructable afterwards (dogfood-observability
+            // deliverable 3) — one `AnswererRound` per round that reached a
+            // compile attempt, `error: None` on success regardless of what the
+            // block went on to do. `NoBlock` never reaches a compile, so it is
+            // not a round for this fold's purposes.
+            match &outcome {
+                Ok(TurnOutcome::Suspended { .. } | TurnOutcome::Completed { .. }) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: None,
+                    });
+                }
+                Err(HarnessError::Compile(msg)) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: Some(msg.clone()),
+                    });
+                }
+                Ok(TurnOutcome::NoBlock { .. }) | Err(_) => {}
+            }
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
                     // A Finalize suspension is the answer. An AskUser suspension
@@ -1383,6 +1424,11 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
+            let form_source = FormSource::Answerer { node };
+            self.emit(Event::FormPresented {
+                source: form_source.clone(),
+                spec: spec.clone(),
+            });
             // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
             // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
             // under `block_in_place` so that blocking wait yields the tokio
@@ -1390,6 +1436,10 @@ impl SelfHarnessDriver {
             let gate = Arc::clone(&self.gate);
             let form = spec.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+            self.emit(Event::FormSubmitted {
+                source: form_source,
+                submission: submission.clone(),
+            });
             self.agent
                 .answer_dialog(node, Json::Object(submission))
                 .await?;
@@ -1461,11 +1511,19 @@ impl SelfHarnessDriver {
             }
             reprompts += 1;
 
+            self.emit(Event::FormPresented {
+                source: FormSource::OuterLoop,
+                spec: spec.clone(),
+            });
             // Sync-blocking gate under `block_in_place` (see the frozen contract):
             // a web gate parks a channel here; yield the worker while it waits.
             let gate = Arc::clone(&self.gate);
             let form = spec.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+            self.emit(Event::FormSubmitted {
+                source: FormSource::OuterLoop,
+                submission: submission.clone(),
+            });
             let answer = engine::json_answer_to_value(&Json::Object(submission), &compiled.table)
                 .map_err(|e| {
                 DriverError::Session(format!("outer askUser submission decode: {e}"))
@@ -1603,7 +1661,7 @@ impl SelfHarnessDriver {
             "pure ({q}.render __selfHarnessState)",
             q = state_cross::LOADED_QUALIFIER
         );
-        let compiled = self.compile_outer(&code, &state_decl)?;
+        let compiled = self.compile_outer(&code, &state_decl, "render")?;
         let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
         let outcome = outer
             .session
@@ -1634,10 +1692,11 @@ impl SelfHarnessDriver {
         Ok(framing)
     }
 
-    /// Runtime-owned MID-LOOP emergency compaction with IN-PLACE relief
-    /// (02-runtime.md LOCKED: the *runtime* owns this trigger, never the loop;
-    /// "replace its context with the summary so the loop CONTINUES", NO
-    /// loop-abort). Called between the answerer's holes ([`Self::run_loop_fragment_inner`]).
+    /// Runtime-owned MID-LOOP emergency compaction with IN-PLACE relief: the
+    /// *runtime* owns this trigger, never the loop, and it replaces the
+    /// answerer's context with the summary so the loop CONTINUES — never a
+    /// loop-abort. Called between the answerer's holes
+    /// ([`Self::run_loop_fragment_inner`]).
     ///
     /// Watches the CURRENT loop's answerer session's REAL context size —
     /// [`Harness::node_last_input_tokens`], the LAST turn's `input_tokens`

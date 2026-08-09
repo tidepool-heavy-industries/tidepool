@@ -33,7 +33,7 @@ use tidepool_handlers::{
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
-use common::extract_available;
+use common::require_extract;
 
 fn text_of(res: &CallToolResult) -> String {
     match &res.content[0].raw {
@@ -93,9 +93,7 @@ fn build_server_with_real_library(cwd: PathBuf) -> Option<TidepoolReplServer> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decl_resolves_library_reexported_type_without_explicit_import() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let cwd =
         std::env::temp_dir().join(format!("tidepool-repl-declimp-cwd-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).unwrap();
@@ -127,9 +125,7 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decl_defining_a_library_reexported_name_does_not_collide() {
-    if !extract_available() {
-        return;
-    }
+    require_extract();
     let cwd =
         std::env::temp_dir().join(format!("tidepool-repl-declimp-cwd2-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).unwrap();

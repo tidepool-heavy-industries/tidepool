@@ -100,20 +100,16 @@ pub fn emit_join(
     rhs_idx: usize,
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
-    // 1. Create a new block for the join point
     let join_block = args.builder.create_block();
-
-    // 2. Add block params — one I64 param per join parameter
     for _ in params {
         args.builder.append_block_param(join_block, types::I64);
     }
 
-    // 3. Create a continuation/merge block for the result
     let merge_block = args.builder.create_block();
     args.builder.append_block_param(merge_block, types::I64); // result
 
-    // 4. Register the join point in ctx
-    // We use a dummy Value(0) for param_types since Jump just needs to know they are heap pointers.
+    // param_types only needs to record that each param is a heap pointer, so
+    // a dummy Value(0) stands in for each one — Jump never reads it back.
     let dummy_val = Value::from_u32(0);
     // A join is a loop iff its rhs jumps back to its own label. Recursive
     // back-edges get a cancel safepoint in `emit_jump` (#325); forward joins
@@ -128,7 +124,7 @@ pub fn emit_join(
         },
     );
 
-    // 5. Emit body (the continuation that may contain Jumps)
+    // Emit the body (the continuation that may contain Jumps to this join).
     let body_result = EmitContext::emit_node(
         EmitArgs {
             ctx: args.ctx,
@@ -149,14 +145,12 @@ pub fn emit_join(
         .ins()
         .jump(merge_block, &[BlockArg::Value(body_val)]);
 
-    // 6. Switch to join block, emit rhs
     args.builder.switch_to_block(join_block);
 
-    // Bind params to block params
+    // Bind params to block params. EnvGuard can't be used here because it
+    // would borrow ctx.env mutably, preventing the use of ctx in emit_node.
     let block_params = args.builder.block_params(join_block).to_vec();
     let mut scope = EnvScope::new();
-    // NOTE: EnvGuard cannot be used here because it would borrow ctx.env mutably,
-    // preventing the use of ctx in emit_node.
     for (i, param_var) in params.iter().enumerate() {
         let val = block_params[i];
         args.builder.declare_value_needs_stack_map(val); // CRITICAL
@@ -185,22 +179,18 @@ pub fn emit_join(
         .ins()
         .jump(merge_block, &[BlockArg::Value(rhs_val)]);
 
-    // 7. Seal blocks
-    // Body is emitted, so all Jumps to join_block are known.
+    // join_block seals once the body (its only jump source) is emitted;
+    // merge_block seals once both the body and rhs paths into it are known.
     args.builder.seal_block(join_block);
-    // Both body and rhs paths to merge_block are known.
     args.builder.seal_block(merge_block);
 
-    // 8. Switch to merge block, get result
     args.builder.switch_to_block(merge_block);
     let result = args.builder.block_params(merge_block)[0];
-    args.builder.declare_value_needs_stack_map(result); // CRITICAL
+    args.builder.declare_value_needs_stack_map(result); // CRITICAL: result must survive a GC at any later safepoint
 
-    // 9. Clean up
     args.ctx.join_blocks.remove(label);
     args.ctx.env.restore_scope(scope);
 
-    // 10. Return result
     Ok(SsaVal::HeapPtr(result))
 }
 
@@ -211,17 +201,15 @@ pub fn emit_jump(
     label: &JoinId,
     arg_indices: &[usize],
 ) -> Result<SsaVal, EmitError> {
-    // 1. Look up label in ctx.join_blocks
     let join_info = args.ctx.join_blocks.get(label)?;
     let join_block = join_info.block;
     let recursive = join_info.recursive;
 
-    // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();
     for &arg_idx in arg_indices {
-        // Jump arguments are always evaluated before we emit the jump terminator,
-        // so they are not in tail position. Do NOT propagate any surrounding tail
-        // context into these expressions: they must always be emitted as NonTail.
+        // Jump arguments are evaluated before the jump terminator, so they
+        // are never in tail position — force NonTail regardless of any
+        // surrounding tail context.
         let val = EmitContext::emit_node(
             EmitArgs {
                 ctx: args.ctx,
@@ -231,7 +219,6 @@ pub fn emit_jump(
             },
             arg_idx,
         )?;
-        // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
             args.builder,
             args.sess.vmctx,
@@ -241,19 +228,18 @@ pub fn emit_jump(
         )));
     }
 
-    // 3.5. External-cancellation safepoint for recursive join back-edges (#325).
+    // External-cancellation safepoint for recursive join back-edges (#325).
     emit_join_cancel_safepoint(args.sess.pipeline, args.builder, args.sess.vmctx, recursive)?;
 
-    // 4. Jump
     args.builder.ins().jump(join_block, &arg_values);
 
-    // 5. After a jump, the current block is terminated.
-    // Create a new unreachable block so Cranelift doesn't complain about instructions after a terminator.
+    // The current block is now terminated; open a fresh one so Cranelift
+    // doesn't complain about code emitted after a terminator (dead, since
+    // the jump above never falls through).
     let unreachable_block = args.builder.create_block();
     args.builder.switch_to_block(unreachable_block);
     args.builder.seal_block(unreachable_block);
 
-    // 6. Return a dummy SsaVal (dead code)
     Ok(SsaVal::Raw(
         args.builder.ins().iconst(types::I64, 0),
         LIT_TAG_INT,
