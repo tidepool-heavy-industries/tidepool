@@ -138,6 +138,40 @@ alone are exactly the buried-assertion shape this rule cannot certify.
 
 Base commit for the runs: TODO.
 
+## 3a. Open obligations this lane hands forward
+
+Two items outlive this receipt. Both are carried at their CODE SITES as well as
+here, because an obligation that lives only in a receipt is discharged only by
+someone who happens to re-read the receipt.
+
+**1. Land the `(<|>)` hiding term, keyed on `emits_helpers_for`.** Blocked on
+extract-wave folding boot-vocab to the shared base. The term is already
+VERIFIED (four gates at `d6fce023`, patch and gate file in `verified/`), so
+what remains is landing, not deciding. It must CALL boot-vocab's
+`emits_helpers_for(eff, row_effects)` — never a restatement, never a local
+copy, whatever the spelling. Carried at the call site in
+`tidepool-mcp/src/eval_prep.rs`, where whoever performs the move will meet it.
+
+**2. Remove the two `MonitorObservations` workarounds once `wt-seam` lands.**
+They exist only because the freshly-landed L3 monitor panics on an unregistered
+worktree id (`monitor.rs:273`) instead of returning the typed `EventSourceLost`
+the surface declares, and because `reconcile` returns no `EventId`, so
+`Observed.eventId` cannot be correlated with its journal row. Both are being
+fixed in `tidepool-worktree` by the `wt-seam` lane; the id fix wires up
+`Observed<T>`, which already exists in `monitor.rs`, is exported, and is
+entirely unused.
+
+Both sites are marked with the greppable token `WORKAROUND(wt-seam)` carrying
+the defect, the condition that makes the workaround dead, and an explicit note
+that it is another crate's defect rather than an invariant of this adapter —
+`grep -rn 'WORKAROUND(wt-seam)'` finds them all.
+
+Why the marking rather than a receipt line: **a workaround that outlives its
+defect is indistinguishable from a real invariant to the next reader, and will
+be defended as one.** Someone finds the registered-id check, assumes it guards
+something live, and builds on it. Belt-and-braces is not a safe default here;
+it is how a dead guard becomes load-bearing.
+
 ## 4. Shared files touched, for the fold's conflict log
 
 | File | How |
