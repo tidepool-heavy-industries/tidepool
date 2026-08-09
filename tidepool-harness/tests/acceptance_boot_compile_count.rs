@@ -192,7 +192,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     // `runLLMTurn` hole and the driver calls the model for the first time
     // (which `SnapshotOnFirstCall` intercepts and snapshots, then errors to
     // cleanly end the cycle).
-    let outcome = driver.run_one_cycle(&source, None);
+    let outcome = driver.run_one_cycle(&source, None).await;
     assert!(
         outcome.is_err(),
         "SnapshotOnFirstCall always errors its first (and only expected) call — \
