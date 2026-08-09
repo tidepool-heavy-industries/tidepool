@@ -283,6 +283,64 @@ must not be taken on the normal-path numbers alone.
   target+reachable). SEMANTICS-SENSITIVE: exposed unfoldings affect
   extraction — differential + corpus + extract-fidelity suites mandatory.
 
+### DECISION RECORDED (spawn-latency, 2026-08-08, on C1's measurement)
+
+Measured: `ghc_load` (`load'` alone) **28–32%** of `extract.total`;
+typecheck+core (second loop) **62–69%**; combined **~96–97%**.
+`ghc_load / (ghc_setup + ghc_load)` = **97–98%** on both arms. True boot
+(`startup + ghc_setup`) = **93–233 ms = 0.6–1.9%**. Robust, not assumed: the
+ratio moved <2 pp across a 1-min loadavg swing of ~11→~34 (two arms, n=6 each),
+with a mechanism — `parMakeCount` is never set, so both arms are sequential and
+contention cannot degrade them asymmetrically. Absolutes swung ~40%; the ratio
+did not.
+
+1. **PERSISTENT SERVER — REJECTED, on latency only.** Its distinctive benefit
+   over interfaces is avoiding per-turn process + session establishment, which
+   measures 0.6–1.9%. The historical "session boot 26–32%" was never boot —
+   `ghc_load` is 97–98% of that span. `inject` measured 0 ms at every sampled
+   session turn. A resident process costs lifecycle, crash recovery, cross-turn
+   invalidation, and a new class of state-leak bug; 1–2% does not buy that.
+   **Scope, so it is not over-read: E4's per-process cache death SURVIVES
+   untouched** — the FatIface decode cache dies with each disposable extractor,
+   so every turn re-decodes. That is a real amortization argument for residency,
+   UNMEASURED, not refuted here. If it ever becomes the reason to build a
+   server it must be measured and argued on its own terms, never smuggled back
+   in on the boot argument, which is closed.
+   **Residual flagged by this TL, now RESOLVED AS SCOPED (`abd00d60`):**
+   `ghc_setup` contains `depanal`, which walks a module graph the `Lib.G<n>`
+   chain GROWS; the sampled sessions were pinned at `Lib.G1`. So the rejection
+   is scoped — **the server is rejected on boot cost FOR SESSIONS AT THE DEPTHS
+   SAMPLED**, with depth-scaling of `ghc_setup` named as the one measurement
+   that could reopen it. A repeated `depanal` over a growing graph would be a
+   residency argument arriving through the one door the latency scoping did not
+   close — the same shape as E4's, and named as precisely.
+   Why scoped rather than measured now: at a FLAT module graph (top-level
+   bindings 1706–1709 throughout), `ghc_setup` ranged **68 → 287 ms across five
+   turns — a 4.2x spread with zero module growth.** That is the noise floor; a
+   2–3 generation sweep cannot clear it, distinguishing a depanal trend needs
+   ~8–10 generations, and no existing `tidepool-repl` test drives more than 2–3
+   sequential `repl.def(...)` calls. The depth column is therefore folded into
+   part 3's ALREADY-REQUIRED `Lib.G<n>` compile-time-vs-generations measurement
+   — same vehicle, same run, one more column — not queued as a second errand.
+   Recorded as a PREDICTION, explicitly not as evidence: `depanal` is a
+   header-parse downsweep, O(n) in module count with a small constant, whereas
+   E2's O(n²) lives in the compile chain — so `ghc_setup`'s SHARE should shrink
+   with depth. If the measurement contradicts it, that contradiction is the
+   finding and part 1 reopens on its own terms.
+2. **NEITHER FIRST — C1's own fix is promoted ahead of both.** ~96–97% of a
+   turn is two back-to-back full compiles of the same module set INSIDE ONE
+   PROCESS, so no persistence architecture recovers any of it. Removing the
+   redundant `load'` is ~30% of every extract for a local change, and it
+   re-bases the arithmetic either architecture would be sized against.
+3. **PRECOMPILED (FAT) INTERFACES — surviving candidate, DEFERRED with the
+   measurement attached.** After C1's fix one compile remains (~65% of today's
+   extract). Two figures decide it and neither exists: compile time vs
+   `Lib.G<n>` generations (E2's axis — the session vehicle never grew past
+   `Lib.G1`) and fat-iface bytes/decode per turn (E4 — one measurement serves
+   both this and the residency case). Interfaces must be FAT: unfolding-less
+   iface resolution bakes `ErrorSentinel`s that surface as `kind=4
+   TypeMetadata`.
+
 **The pivotal decision: persistent extractor.** E1/E2/E4 all point at it;
 C1's measurement decides between precompiled interfaces vs persistent
 server. Measure first (Codex ranking: binder-vs-validation spawn breakdown;
