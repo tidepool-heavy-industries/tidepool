@@ -235,6 +235,9 @@ impl WorktreeMonitor {
     pub fn register(&mut self, worktree: WorktreeId, path: PathBuf) -> Result<(), WorktreeError> {
         let (mut head, mut branch) = self.last_observed(&worktree);
         if head.is_none() {
+            if !crate::registry::worktree_present(&path) {
+                return Err(WorktreeError::WorktreeLost(worktree));
+            }
             head = Some(read_head(&self.git, &path)?);
             branch = read_branch(&self.git, &path);
         }
@@ -261,21 +264,35 @@ impl WorktreeMonitor {
     }
 
     /// Reconcile one worktree against its last observed state and return the
-    /// facts that follow, in observation order, sharing one [`EventId`] when
-    /// they describe one underlying change. Returns empty when nothing moved.
+    /// facts that follow, in observation order, each carrying the
+    /// [`EventId`] the pass minted and journalled — so the id a caller holds
+    /// is provably the id a restart diagnosis finds in the journal, sharing
+    /// one id when they describe one underlying change. Returns empty when
+    /// nothing moved.
     ///
     /// Idempotent: reconciling twice with no writer in between yields nothing
     /// the second time.
+    ///
+    /// `Err(WorktreeError::WorktreeNotRegistered)` when `register` never ran
+    /// for `worktree` — a typed failure an author can match on, not a panic,
+    /// since worktree ids reach this call from author-supplied values at the
+    /// effect surface. `Err(WorktreeError::WorktreeLost)` when `worktree` WAS
+    /// registered but its path is gone from disk (a human removed it,
+    /// retain-first's "never silently recreated" case) — the same typed
+    /// failure [`crate::create::WorktreeManager::worktree_head`] and
+    /// `lookup` already use for this condition, rather than letting the
+    /// subsequent `git` invocation fail opaquely against a missing directory.
     pub fn reconcile(
         &mut self,
         worktree: &WorktreeId,
-    ) -> Result<Vec<RepositoryEvent>, WorktreeError> {
-        let baseline = self.baselines.get(worktree).unwrap_or_else(|| {
-            panic!(
-                "tidepool-worktree: reconcile called for unregistered worktree {worktree} \
-                 — register() must run first"
-            )
-        });
+    ) -> Result<Vec<Observed<RepositoryEvent>>, WorktreeError> {
+        let baseline = self
+            .baselines
+            .get(worktree)
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(worktree.clone()))?;
+        if !crate::registry::worktree_present(&baseline.path) {
+            return Err(WorktreeError::WorktreeLost(worktree.clone()));
+        }
         let path = baseline.path.clone();
         let old_head = baseline
             .head
@@ -307,14 +324,20 @@ impl WorktreeMonitor {
                     let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), oid)?;
                     let ev = RepositoryEvent::Commit(receipt);
                     self.journal.append(&ev, event_id)?;
-                    events.push(ev);
+                    events.push(Observed {
+                        event_id,
+                        value: ev,
+                    });
                 }
             }
             HeadChangeKind::Amended(_, new) => {
                 let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), new)?;
                 let ev = RepositoryEvent::Commit(receipt);
                 self.journal.append(&ev, event_id)?;
-                events.push(ev);
+                events.push(Observed {
+                    event_id,
+                    value: ev,
+                });
             }
             HeadChangeKind::Rewritten(_)
             | HeadChangeKind::Rewound
@@ -331,7 +354,10 @@ impl WorktreeMonitor {
             observed_at_ms,
         });
         self.journal.append(&head_changed, event_id)?;
-        events.push(head_changed);
+        events.push(Observed {
+            event_id,
+            value: head_changed,
+        });
 
         self.baselines.insert(
             worktree.clone(),

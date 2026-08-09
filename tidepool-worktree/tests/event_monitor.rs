@@ -15,7 +15,8 @@ use std::path::PathBuf;
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    EventJournal, GitCli, HeadChangeKind, RepositoryEvent, WorktreeId, WorktreeMonitor,
+    EventJournal, GitCli, HeadChangeKind, Observed, RepositoryEvent, WorktreeError, WorktreeId,
+    WorktreeMonitor,
 };
 
 /// A fresh journal path inside its own temp dir, and a monitor over it.
@@ -34,20 +35,22 @@ fn wt(raw: &str) -> WorktreeId {
     WorktreeId::from_raw(raw)
 }
 
-fn head_changed(events: &[RepositoryEvent]) -> Vec<&tidepool_worktree::HeadChangeReceipt> {
+fn head_changed(
+    events: &[Observed<RepositoryEvent>],
+) -> Vec<&tidepool_worktree::HeadChangeReceipt> {
     events
         .iter()
-        .filter_map(|e| match e {
+        .filter_map(|e| match &e.value {
             RepositoryEvent::HeadChanged(r) => Some(r),
             RepositoryEvent::Commit(_) => None,
         })
         .collect()
 }
 
-fn commits(events: &[RepositoryEvent]) -> Vec<&tidepool_worktree::CommitReceipt> {
+fn commits(events: &[Observed<RepositoryEvent>]) -> Vec<&tidepool_worktree::CommitReceipt> {
     events
         .iter()
-        .filter_map(|e| match e {
+        .filter_map(|e| match &e.value {
             RepositoryEvent::Commit(r) => Some(r),
             RepositoryEvent::HeadChanged(_) => None,
         })
@@ -110,12 +113,18 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     );
     assert_eq!(hcs[0].new_head, new_head);
     assert!(
-        matches!(events[0], RepositoryEvent::Commit(_)),
+        matches!(events[0].value, RepositoryEvent::Commit(_)),
         "observation order: Commit before HeadChanged, got {events:?}"
     );
+    assert_eq!(
+        events[0].event_id, events[1].event_id,
+        "the Observed wrapper reconcile now returns must itself carry one shared EventId \
+         across co-emitted views, not just the journal rows behind them"
+    );
 
-    // Event id sharing: extract from the journal, since RepositoryEvent itself
-    // does not carry an EventId (Observed<T> does, at the surface layer).
+    // Event id sharing, cross-checked against the journal (not just the
+    // returned Observed values above) — the journal is what a restart
+    // diagnosis reads, so it must agree with what the caller was handed.
     let entries = EventJournal::open(&_journal_path)
         .expect("reopen journal")
         .since(0)
@@ -135,6 +144,10 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     assert_eq!(
         ids[0], ids[1],
         "Commit and HeadChanged must share one EventId"
+    );
+    assert_eq!(
+        events[0].event_id, ids[0],
+        "the id reconcile returned must be the id the journal actually recorded"
     );
 }
 
@@ -551,4 +564,127 @@ fn real_git_worktree_add_is_monitored_directly() {
     let cs = commits(&events);
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].oid, new_head);
+}
+
+/// LANE L8 seam fix: `reconcile` on an id `register` never ran for must
+/// return a typed, matchable failure — never panic. Worktree ids reach
+/// `reconcile` from author-supplied values at the effect surface, so an
+/// unregistered id is an ordinary authoring mistake, not a process-ending
+/// event.
+#[test]
+fn reconcile_on_unregistered_worktree_returns_worktree_not_registered() {
+    let (mut monitor, _journal_path, _tmp) = open_monitor();
+    let id = wt("never-registered");
+
+    let err = monitor
+        .reconcile(&id)
+        .expect_err("reconcile on an unregistered worktree must fail, not panic");
+    assert!(
+        matches!(&err, WorktreeError::WorktreeNotRegistered(bad) if bad == &id),
+        "expected WorktreeNotRegistered({id:?}), got {err:?}"
+    );
+}
+
+/// LANE L8 seam fix, task-3 decision: a worktree that WAS registered but has
+/// since been removed from disk (the retain-first "a human deleted it" case,
+/// same condition `WorktreeManager::lookup`/`worktree_head` already type as
+/// `WorktreeLost`) must reconcile as `WorktreeLost`, not surface the raw,
+/// opaque `GitFailure` that `git rev-parse HEAD` against a missing directory
+/// would otherwise produce.
+#[test]
+fn reconcile_of_a_worktree_removed_from_disk_returns_worktree_lost() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+
+    let (mut monitor, _journal_path, _tmp) = open_monitor();
+    let id = wt("w1");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .expect("register");
+    monitor.reconcile(&id).expect("priming reconcile");
+
+    std::fs::remove_dir_all(repo.path()).expect("remove worktree dir by hand");
+
+    let err = monitor
+        .reconcile(&id)
+        .expect_err("reconcile of a removed worktree must fail");
+    assert!(
+        matches!(&err, WorktreeError::WorktreeLost(lost) if lost == &id),
+        "expected WorktreeLost({id:?}), got {err:?}"
+    );
+}
+
+/// LANE L8 seam fix, the load-bearing gate: the [`EventId`] `reconcile`
+/// returns on each [`Observed`] must be the SAME id the journal recorded for
+/// that pass — not a fresh id minted independently at the return path, which
+/// would make every other test in this file pass while correlation to the
+/// journal (PRD 19's stated reason the journal exists) stayed impossible.
+///
+/// Wrong-reason guard: an implementation that mints a disconnected id would
+/// still pass a naive "some id came back" check, and one that always returns
+/// a constant (e.g. `EventId(0)`) would still pass a naive "ids agree" check
+/// if the journal also happened to start numbering from a fixed value. This
+/// gate closes both: it forces two DISTINCT passes to mint two DISTINCT ids
+/// (`assert_ne!` below — a constant/shared id fails here), then verifies the
+/// second pass's returned id matches the journal rows recorded under that
+/// SAME id, by both count and content (an empty/disconnected journal fails
+/// the count check; a coincidental id match fails the content check).
+#[test]
+fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("a.txt", "one", "first").expect("commit");
+
+    let (mut monitor, journal_path, _tmp) = open_monitor();
+    let id = wt("w1");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .expect("register");
+    monitor.reconcile(&id).expect("priming reconcile");
+
+    w.commit_file("b.txt", "two", "second").expect("commit");
+    let first_pass = monitor.reconcile(&id).expect("reconcile 1");
+    assert!(!first_pass.is_empty());
+    let first_id = first_pass[0].event_id;
+
+    w.commit_file("c.txt", "three", "third").expect("commit");
+    let second_pass = monitor.reconcile(&id).expect("reconcile 2");
+    assert!(!second_pass.is_empty());
+    let second_id = second_pass[0].event_id;
+
+    assert_ne!(
+        first_id, second_id,
+        "each reconciliation pass must mint a distinct id, or this gate cannot tell a \
+         correctly-wired id from a constant/shared one"
+    );
+    assert!(
+        second_pass.iter().all(|e| e.event_id == second_id),
+        "every observation the second pass returns must carry that pass's id"
+    );
+
+    let entries = EventJournal::open(&journal_path)
+        .expect("reopen journal")
+        .since(0)
+        .expect("since");
+    let journalled_under_second_id: Vec<_> =
+        entries.iter().filter(|e| e.event_id == second_id).collect();
+    assert_eq!(
+        journalled_under_second_id.len(),
+        second_pass.len(),
+        "the journal must carry exactly the rows the second pass returned, under the id it \
+         returned — a disconnected fresh id, or a journal that recorded nothing for it, fails \
+         this count"
+    );
+    for observed in &second_pass {
+        assert!(
+            journalled_under_second_id
+                .iter()
+                .any(|e| e.event == observed.value),
+            "returned event {:?} must appear in the journal under the id reconcile returned \
+             for it: {observed:?}",
+            observed.value
+        );
+    }
 }
