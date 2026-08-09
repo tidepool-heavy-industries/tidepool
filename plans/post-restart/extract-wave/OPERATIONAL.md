@@ -51,27 +51,130 @@ localized diffs and log it at fold):
   The box hit load average **92**: the operator's SSH sessions died and a dev
   pane died in the same window. Seven concurrent `tidepool-extract` compiles
   were observed — nextest's `ghc-heavy` cap is **per-run, not box-wide**, so
-  parallel worktrees multiply it. The 3-slot semaphore is now the box-wide
-  governor for ALL heavy work, not just GHC-extract work.
-  **Wrap EVERY heavy invocation** in the broker, absolute path, NEVER
-  exclusive:
-  `/home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>`
-  This now includes, and did not before:
-  - `cargo nextest run` — **ANY tier, including the quick pure-Rust tier**
-  - `cargo check --workspace`, `cargo build --workspace`
-  - `cargo clippy --workspace`
-  - anything spawning extracts outside the battery scripts
-  EXEMPT: single-crate `cargo check -p <X>`, file edits, greps.
-  `scripts/battery.sh` / `scripts/battery-shard.sh` already self-acquire —
-  do NOT wrap them; that is unchanged.
+  parallel worktrees multiply it.
+
+  **THROTTLE V2 SUPERSEDES V1 (root, 2026-08-08). READ THIS, NOT THE HISTORY
+  ABOVE.** V1 routed 2-minute quick tiers and clippy through the same 3-slot
+  FIFO as 30-minute shards, which manufactured a 44-deep queue and a priority
+  inversion. V2 splits heavy work in two by KIND:
+
+  **(a) Pure-Rust heavy work EXITS the slot queue.** Do NOT broker-wrap
+  `cargo check/build --workspace`, quick-tier `cargo nextest run`, or
+  `cargo clippy`. Instead bound and deprioritise it:
+
+      export CARGO_BUILD_JOBS=4
+      nice -n 15 cargo <cmd>            # nextest additionally: -j 4
+
+  Rationale worth keeping: a queue cannot govern what it cannot see, but the
+  scheduler can. Unbrokered `rustc` was measured at 564% across 4 procs — the
+  box's largest consumer — so it is handled by deprioritisation, not queueing.
+
+  **(b) GHC-heavy work STAYS slot-brokered**, absolute path, NEVER exclusive:
+
+      /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- <cmd>
+
+  That means anything spawning `tidepool-extract`, any `cabal test`, and any
+  `--ignore-default-filter` run. With the small jobs gone, the queue belongs to
+  these.
+
+  `scripts/battery.sh` / `scripts/battery-shard.sh` self-acquire — do NOT wrap
+  them. Unchanged across both versions.
+  EXEMPT entirely: single-crate `cargo check -p <X>`, file edits, greps.
+
+  **The spin is fixed at the mechanism level** (root's `2d72434e`, live at the
+  absolute path above — verified): waiters kernel-block with jittered `flock -w`
+  rotation instead of sleep-polling, so a blocked waiter costs ~zero CPU. No
+  action needed; new invocations get it automatically. (The "43 sleep-pollers
+  burning 1.2 cores" figure originally cited for this fix was MINE and was
+  WRONG — see the queue-depth instrument below. Blocking still beats polling,
+  so the fix stands on its own merits; only its stated magnitude was fiction.)
+
+  **QUEUE DEPTH: use `lslocks`, never a process grep.**
+
+      lslocks | grep tidepool-ghc      # WRITE = holder, WRITE* = blocked waiter
+
+  Kernel truth, immune to the args-grep trap. `pgrep -f ghc-slots.sh` matches
+  every `.claude-unwrapp` AGENT SESSION whose command line mentions the script —
+  measured here as 22 agent sessions + 8 bash + 5 zsh, against **4 real holders
+  and 4 real waiters**. The wave's "50-deep queue with 60-minute waiters" was
+  that misclassification, and it was mine.
+  Note what this is: **the identical trap this file already documents for
+  `pgrep -fc tidepool-extract`, committed one level up by the person who
+  documented it**, and then propagated upward and cited in a commit message
+  before anyone checked the referent. A grep over process ARGS counts agents,
+  not work. Reach for the kernel's own accounting.
+
+  The MemAvailable floor is a soft guard and is NOT binding at 18 GB. If you see
+  a floor rejection, that is real memory pressure, not this.
+
+  **USE `detach` FOR ANYTHING THAT MIGHT QUEUE — this is now the default for
+  GHC-heavy work, not an escape hatch:**
+
+      /home/inanna/dev/tidepool/scripts/ghc-slots.sh detach -- <cmd>
+
+  New session via `setsid`; prints pid + log path and returns instantly. Poll
+  the log across turns. Slot discipline is FULLY honoured — the detached child
+  is `run` itself, so it holds and releases the `flock`. This is not a bypass.
+
+  Why it exists (root's `bf3026af`, from this wave's finding): `ghc-slots.sh
+  run` has **no timeout and no give-up path** — `while :;` forever. Combined
+  with the environment's ~380s process kill and 3 slots shared across three
+  waves, "wrap every GHC-heavy invocation" was an **unsatisfiable triple**: a
+  fully compliant dev's attempt is not refused a slot, it is KILLED WHILE
+  QUEUED, making zero progress indefinitely. Demonstrated, not inferred:
+  `boot-targets` died twice at ~340s without ever acquiring. `detach` decouples
+  the queue wait from the agent's process lifetime. It is also strictly better
+  than the old behaviour absent any kill: a dead pane no longer drops a queued
+  waiter.
+
+  If you launch a detached job and then abandon it, **reap it** — an orphaned
+  waiter holds a queue position nobody is waiting on, and relaunches stack.
+
+  **MEASURE FROM INSIDE THE DETACHED COMMAND, NEVER FROM THE QUEUEING SHELL**
+  (spawn-latency, 2026-08-08). `detach` decouples QUEUE time from EXECUTION
+  time, so the box conditions visible where you enqueue a job are NOT the
+  conditions it runs under — and with queue ages reaching 60 minutes the gap is
+  enormous. Any sample labelled with the queueing shell's loadavg, extract
+  count, or cap state is MISLABELLED. Emit those readings from inside the
+  detached command, to its own log, immediately before the measured work
+  starts. This is the same failure as the phase rows that opened this wave — a
+  label asserting more than it establishes — arriving through a new door that
+  the fix for the previous one opened.
+
   If a slot wait exceeds ~15 minutes, REPORT it upward as a starvation signal
   rather than bypassing the broker.
+  **MEASURING actual load — the obvious commands are both wrong.**
+  `pgrep -fc tidepool-extract` OVER-counts wildly (22–24 on a box with 4 real
+  compiles): it matches every agent shell, `.claude-unwrapp`, `bash`, `zsh` and
+  `timeout` process carrying `TIDEPOOL_EXTRACT=…` in its command line or
+  environment, so it tracks how many AGENTS exist, not how much GHC runs.
+  But matching on `comm` with the full binary name UNDER-counts to a constant
+  zero: a USERSPACE process's `comm` is capped at 15 characters
+  (`TASK_COMM_LEN` is 16 including the NUL — verified directly:
+  `/proc/<pid>/comm` for a live extract reads `tidepool-extrac`, length 15), so
+  `grep tidepool-extract-bin` can NEVER match.
+  Precision, because a naive check refutes the general form: `ps -eo comm=` DOES
+  show longer values — 39, 36, 33 characters — but every one of them is a
+  KERNEL thread (`nvidia-modeset/…`, `kworker/…`, `rcu_…`), which is a
+  different naming path. The 15-char cap holds for every binary we care about.
+  Anchor and stop at `extrac`; do not generalise past userspace.
+  The correct instruments:
+
+      ps -eo comm= | grep -c '^tidepool-extrac'    # real compiles (note: 15-char truncation)
+      cat /proc/loadavg                            # actual load
+
+  Use both. A zero from a mistyped pattern reads exactly like a quiet box.
   **Bias toward fewer, better-batched runs.** This wave is the heaviest GHC
   consumer on the box, so the throttle bites hardest here.
 - `export XDG_CACHE_HOME="$PWD/.cache"` before harness shards.
 - NEVER run bare `scripts/battery.sh` — this environment hard-kills background
   processes at ~380s and the full battery is hours. Use:
-  - tier 1 `cargo nextest run` (pure-Rust, safe unattended);
+  - tier 1 `cargo nextest run` (pure-Rust) — under THROTTLE V2 this is
+    **case (a): do NOT broker-wrap it.** Run it as
+    `export CARGO_BUILD_JOBS=4; nice -n 15 cargo nextest run -j 4`.
+    (Two superseded phrasings, recorded so a stale copy is recognisable:
+    "safe unattended" was WITHDRAWN at 24f6d7a7; "MUST be broker-wrapped" was
+    v1 and is superseded by v2.)
   - tier 2 `scripts/battery.sh -p <crate> -E 'test(<name>)'`;
   - tier 3 `scripts/battery-shard.sh <crate>`;
   - tier 4 `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh <crate> ...`,
