@@ -434,6 +434,7 @@ pub mod mock {
         "Time",
         "Ask",
         "RunLLMTurn",
+        "Fork",
     ];
 
     /// The standard MCP module preamble: LANGUAGE pragmas, `module Expr`, the
