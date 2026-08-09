@@ -1,7 +1,27 @@
 # extract-wave operational block
 
-**Copy this file's "Block" section VERBATIM into EVERY dev spec you write.**
-It is not a summary — it is the literal text devs must receive.
+**SUPERSEDED (2026-08-09): do NOT paste this file's Block into dev specs.**
+The original instruction here was to copy it verbatim into every spec. That is
+now the wrong practice, and this session is the proof.
+
+Make it a mandatory **STEP 0** in every dev spec instead: *"`cat
+plans/post-restart/extract-wave/OPERATIONAL.md` in your own worktree and follow
+its Block verbatim before doing anything else."* Devs fork from their TL's HEAD,
+so the canonical file is already in their tree — they receive the literal text,
+from the single source.
+
+Why the change (spawn-latency proposed it; the decisive argument is empirical):
+a pasted Block **freezes at spawn time**, and this Block was amended roughly ten
+times in one session — throttle v1 → v2, `detach`, the denominator rule, the
+holder rule, the named-guard rule. A dev spawned in the morning with a pasted
+copy spent the afternoon following **superseded rules**, and that is not
+hypothetical: it is exactly what happened with "tier 1 is safe unattended" and
+with "wrap every invocation including the quick tier". A reference resolves at
+read time; a paste is a snapshot nobody re-takes.
+It is also N copies that drift, which is the derive-don't-restate antipattern
+this very file bans two sections down. The failure mode the paste guarded
+against — a dev skipping a linked file — is covered by making the read STEP 0
+with an explicit read-in-full instruction, not a passing citation.
 
 ## Namespace allocation (extract-wave, allocated by the wave TL up front)
 
