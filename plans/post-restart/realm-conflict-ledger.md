@@ -23,9 +23,11 @@ Mechanical resolutions are logged and moved past.
 |---|------|-----------|--------|---------------|------|
 | Z1 | 2026-08-08 | `merge` into `root.realm-spike` | `root.realm-spike.lifetime` | 4 files: `plans/post-restart/spike-notes/realm-lifetime.md`, `tidepool-codegen/tests/realm_root_growth.rs`, `tidepool-codegen/tests/realm_module_growth.rs`, `tidepool-codegen/src/jit_machine.rs` | Clean. Note the fourth file: this lane DID edit `jit_machine.rs` — the file the extract wave's runtime territory also touches — adding two accessors (`functions_defined`, `old_space_bytes_used`) into the existing accessor block near `persistent_roots_count`. Additive `impl`-block insertion, no conflict against the fork point. |
 
+| Z2 | 2026-08-08 | `merge` into `root.realm-spike` | `root.realm-spike.leakcmp` | 2 files: `plans/post-restart/spike-notes/realm-leak-comparison.md`, `tidepool-codegen/tests/realm_leak_comparison.rs` | Clean. Second lane to add a file under `spike-notes/` and a file under `tidepool-codegen/tests/` — same two directories `lifetime` had already written to. Sibling files in a shared directory do not conflict; only same-file hunks do. Worth stating, since directory-level overlap is what timid partitioning usually optimizes against. |
+
 ## Running tally
 
 - Conflicting folds: 0
-- Zero-conflict folds: 1
+- Zero-conflict folds: 2
 - Total resolution minutes: 0
 - Sides dropped: 0
