@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -25,6 +26,35 @@ use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 use crate::timing;
+
+/// Process-global count of `tidepool-extract` spawns paid by
+/// [`compile_turn`] — the extract-wave `boot` item's done-criterion needs a
+/// live receipt that the self-iterating harness's pre-model-call compile
+/// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
+/// and this is the single spawn function every path the self-harness launch
+/// reaches funnels through (the outer session's boot seed and its
+/// `render`/`loop` compiles, and the answerer `Harness`'s own boot seed — see
+/// `tidepool-harness/tests/acceptance_boot_compile_count.rs` for the traced
+/// call chain). PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
+/// on it must run as its own test binary so no other test's compiles land on
+/// the same count (nextest already gives one process per test binary).
+static EXTRACT_SPAWNS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of `tidepool-extract` spawns [`compile_turn`] has paid in this
+/// process so far. `Ordering::SeqCst` so a reader on another thread (the
+/// acceptance test's snapshot, taken from inside a model-provider callback
+/// running on a different thread than the compiling turn) is guaranteed to
+/// see every increment a compiling thread has performed before this call.
+pub fn extract_spawn_count() -> u64 {
+    EXTRACT_SPAWNS.load(Ordering::SeqCst)
+}
+
+/// Reset the process-global spawn counter to zero. For test isolation within
+/// a single test binary that drives more than one `compile_turn`-reaching
+/// launch and wants each launch's count in isolation.
+pub fn reset_extract_spawn_count() {
+    EXTRACT_SPAWNS.store(0, Ordering::SeqCst);
+}
 
 /// One `asks.json` entry: a yield-site id and its rendered answer type.
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +158,10 @@ pub fn compile_turn(
         bin: extract_bin.to_string(),
         source,
     })?;
+    // Counted on a successful spawn (the process actually launched and ran to
+    // exit) — a `Spawn` error above (bad path, `Command::output` I/O failure)
+    // never paid a real `tidepool-extract` cost and must not count as one.
+    EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
     timing::record_stage(
         node,
         round,
