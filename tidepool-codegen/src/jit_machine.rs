@@ -1954,6 +1954,19 @@ impl JitEffectMachine {
         //     fresh `Err` would break a session whose later turn happens to
         //     carry a sparser table than a prior turn did.
         if let Ok(refreshed) = ConTags::from_table(table) {
+            if self.tags.is_err() {
+                // NAMED heal event (plans/post-restart/extract-wave/boot's
+                // lazy-boot item): a machine bootstrapped from a ConTags-free
+                // expr (e.g. the outer session's pure `render` seed) starts
+                // `Err(MissingConTags)`; this fragment's table is the first to
+                // resolve. Must be loud — the whole point of naming it is that
+                // a future regression that stops the heal surfaces HERE, not
+                // three files away as a confusing dispatch failure.
+                log::info!(
+                    target: "tidepool::codegen",
+                    "ConTags healed on add_function(name={name}): was MissingConTags, now resolved from this fragment's table",
+                );
+            }
             self.tags = Ok(refreshed);
         }
         let nodes = expr.nodes.len();
