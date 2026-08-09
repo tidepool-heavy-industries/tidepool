@@ -1413,6 +1413,21 @@ macro_rules! worktree_effect_def {
                 "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
                 "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
                 "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
+                // The `errors` block templates a `ToJSON` instance for
+                // `WorktreeError`, so every type reachable from one of its
+                // fields needs one. These are hand-written rather than derived
+                // because the vendored `ToJSON`'s generic default only covers
+                // single-constructor records — `InProgressKind` is
+                // multi-constructor and the identity types are positional.
+                // The identity types render as their bare payload: a receipt
+                // reader wants the id, not a wrapper object.
+                "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
+                "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
+                "instance ToJSON GitRef where toJSON (GitRef t) = toJSON t",
+                "instance ToJSON BranchName where toJSON (BranchName t) = toJSON t",
+                "instance ToJSON InProgressKind where toJSON k = toJSON (show k)",
+                "instance ToJSON DirtySummary where toJSON d = object [\"staged\" .= d.staged, \"unstaged\" .= d.unstaged, \"untracked\" .= d.untracked, \"ignoredExcluded\" .= d.ignoredExcluded]",
+                "instance ToJSON GitFailureReceipt where toJSON r = object [\"args\" .= r.gitArgs, \"cwd\" .= r.gitCwd, \"exitCode\" .= r.gitExitCode, \"stdout\" .= r.gitStdout, \"stderr\" .= r.gitStderr]",
             ],
             // Typed per-verb failure (#335): a dirty source, a lost tree, or a
             // busy worktree is DATA an author cases on, not an eval abort.
@@ -1448,6 +1463,14 @@ macro_rules! worktree_effect_def {
                 { ctor WorktreeBranchOf, method worktree_branch_of,
                   args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
                   ret "BranchName", errors WorktreeError },
+                // A FRESH git read of the worktree's current HEAD. Deliberately
+                // NOT the handle's recorded `sourceHead` (the seed the branch
+                // was rooted at) and NOT the monitor's last-observed baseline:
+                // the entire point is to see what the monitor did not. See the
+                // helper's docs for the gap it exists to close.
+                { ctor WorktreeHeadOf, method worktree_head_of,
+                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
+                  ret "GitOid", errors WorktreeError },
             ],
             helpers [
                 { raw ["-- | Seed a managed worktree from the repository Tidepool is running",
@@ -1484,6 +1507,29 @@ macro_rules! worktree_effect_def {
                 { raw ["-- | The managed branch this worktree is on, read fresh from git.",
                        "worktreeBranch :: WorktreeHandle -> M BranchName",
                        "worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither"] },
+                { raw ["-- | This worktree's CURRENT @HEAD@, read fresh from git right now.",
+                       "--",
+                       "-- Deliberately none of the three things it could be confused with: it",
+                       "-- is not the handle's recorded @sourceHead@ (the commit the managed",
+                       "-- branch was rooted at), and it is not the event monitor's",
+                       "-- last-observed baseline.  The whole purpose is to see what the",
+                       "-- monitor did NOT.",
+                       "--",
+                       "-- It exists for the gap a resident spanning cycles has to close",
+                       "-- itself.  A subscription never replays, and it lives only for its",
+                       "-- cycle, so @HEAD@ can move after one cycle unregisters and before the",
+                       "-- next one registers.  A resident closes that window in ORDINARY",
+                       "-- AUTHORED CODE: compare @worktreeHead tree@ against the head it",
+                       "-- checkpointed, act on any difference, and only then register live",
+                       "-- reactions with 'withHandler'.",
+                       "--",
+                       "-- That is a reinforcement of no-replay, not a loophole in it.  The",
+                       "-- journal stays diagnostic rather than quietly becoming a callback",
+                       "-- replay mechanism, because the resident — which knows what it already",
+                       "-- acted on — decides what the gap meant, rather than the runtime",
+                       "-- guessing on its behalf.",
+                       "worktreeHead :: WorktreeHandle -> M GitOid",
+                       "worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither"] },
                 { raw ["-- | The durable identity of a managed worktree. Pure: the handle",
                        "-- already carries its receipt, so this reads no git state.",
                        "worktreeId :: WorktreeHandle -> WorktreeId",

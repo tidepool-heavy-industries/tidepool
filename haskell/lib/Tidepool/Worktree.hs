@@ -43,6 +43,29 @@
 -- — give it its own worktree created 'fromWorktree' off the branch it is
 -- reviewing.
 --
+-- == Reading @HEAD@ across a cycle boundary
+--
+-- 'worktreeHead' is a FRESH git read of a worktree's current @HEAD@ — not the
+-- handle's recorded @sourceHead@, and not the event monitor's last-observed
+-- baseline.  It is how a resident that spans cycles closes a gap the event
+-- system deliberately will not close for it.
+--
+-- A subscription never replays and lives only for its cycle, so @HEAD@ can move
+-- after one cycle unregisters and before the next registers.  A resident
+-- reconciles that window itself, in ordinary code, before going live:
+--
+-- @
+-- current <- 'worktreeHead' tree
+-- when (current \/= checkpointedHead) (reactToMissedMovement current)
+-- 'Tidepool.Event.withHandler' ('Tidepool.Event.headChanged' tree) onChange $ do
+--   ...
+-- @
+--
+-- This REINFORCES no-replay rather than working around it.  The journal stays
+-- diagnostic instead of quietly becoming a callback-replay mechanism, because
+-- the resident — which knows what it already acted on — decides what the gap
+-- meant, rather than the runtime guessing on its behalf.
+--
 -- HOLD: @workspaceOf :: WorktreeHandle -> Workspace@ and the coupled-spawn
 -- signature are NOT exported yet.  @Workspace@ is PRD 18's type and the
 -- coupling revision is being designed jointly with the agent lane through
@@ -71,6 +94,7 @@ module Tidepool.Worktree
   , GitOid
   , worktreeId
   , worktreeBranch
+  , worktreeHead
 
     -- * Receipts and failures
   , WorktreeReceipt (..)
@@ -106,5 +130,6 @@ import Tidepool.Effects
   , renderWorktreeError
   , renderWorktreeId
   , worktreeBranch
+  , worktreeHead
   , worktreeId
   )
