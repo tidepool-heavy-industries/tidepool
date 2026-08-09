@@ -282,6 +282,22 @@ localized diffs and log it at fold):
   Check log CONTENT, never exit status: an environment failure exits in
   milliseconds and reads as a fast pass.
 
+- **HOLD A PRIOR EXPECTATION OF THE ANSWER'S SIZE BEFORE YOU RUN THE COMMAND**
+  (spawn-latency — the deepest of the instrument lessons, because it says care
+  is not the defense). Counting `#[test]` declarations across 11 acceptance
+  binaries took three successive grep patterns; **the first two returned a clean
+  `0`**, defeated by `#[tokio::test(flavor = "multi_thread", …)]` carrying
+  arguments. Each attempt looked careful and each returned a plausibly-shaped
+  answer. What caught it was not pattern discipline — it was **implausibility**:
+  zero tests across eleven acceptance binaries cannot be true.
+  So the earlier rule ("a correction to an instrument needs the same
+  verification as the instrument") is necessary but insufficient: more care with
+  the regex would not have helped. **A zero is only catchable if you knew
+  roughly what non-zero should look like.** State the expected magnitude first,
+  then run the command, then compare. This is the same instinct as the
+  denominator rule — know what the total ought to be before you read what it
+  was.
+
 - **A COMMENT SAYING "THIS CAN DRIFT" IS NOT A MITIGATION** (boot). It is a
   recorded decision to keep a mechanism that fails silently, and it reads as
   diligence while providing none. Live proof: `eval_harness.rs:387` documents
