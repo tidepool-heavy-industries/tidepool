@@ -263,11 +263,16 @@ delegate; `import Tidepool.Fork`). Each sub-answerer independently answers \
 one brief and cannot itself fork or gather operator input — it must resolve \
 its own brief directly. Combine the results and `finalize` as usual.\n\
 \n\
-When you have the answer, COMMIT it by evaluating `(finalize @T value :: M T)` \
-— annotate the WHOLE expression with `:: M T` (an inner `value :: T` \
-annotation is not sufficient). This ends your turn and hands the typed value \
-back to the loop. `T` is the type named in the request. Do not call any other \
-effect to answer; `finalize` is how you resolve the request.";
+When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
+ends your turn and hands the typed value back to the loop. `T` is the type \
+named in the request. Do not call any other effect to answer; `finalize` is \
+how you resolve the request.";
+// The "annotate the WHOLE expression :: M T" wording this suffix used to
+// carry was a stopgap for the ambiguous-`a0` defect; `__anchor`
+// (`template_turn_for`) fixed that at the source and
+// `finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
+// pins the bare shape — see `engine::answerer_hole_card`'s doc, whose voice
+// this now matches.
 
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
