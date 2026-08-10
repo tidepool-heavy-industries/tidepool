@@ -90,3 +90,4 @@ examples/guess/haskell/Game_cbor/
 # clobbers live dogfood state; every lane exports XDG_CACHE_HOME="$PWD/.cache"
 # before harness runs, so the dir appears in every worktree.
 .cache/
+.cache-bisect*/
