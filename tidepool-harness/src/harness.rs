@@ -475,11 +475,6 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// A "something changed" callback the web layer installs
-    /// ([`Self::set_notifier`]) so streaming deltas nudge the SSE stream to
-    /// re-render. `None` (unset) in tests / headless runs — the harness works
-    /// the same, just without live push.
-    notifier: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// A just-created root's opening prompt PLUS its optional per-node framing
     /// (the system message override — [`NodeConvo::framing`]), staged between
     /// `create_root`/`create_root_framed` and `force` (a thunk node has no
@@ -533,7 +528,6 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
@@ -3354,7 +3348,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
@@ -3389,7 +3382,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),

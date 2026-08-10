@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::selfharness::operator::{FormSpec, Submission};
+use crate::selfharness::operator::FormSpec;
 use crate::tree::NodeId;
 
 /// Which side of the driver presented an `askUser` form: a nested answerer's
@@ -76,9 +76,12 @@ pub enum Event {
     /// decode failure re-suspends on a fresh form (Haskell-side recursion,
     /// no `Either`), so a re-prompt shows as another `FormPresented` /
     /// `FormSubmitted` pair for the same [`FormSource`].
+    /// `submission` is the gate's answer VALUE — an object for legacy flat
+    /// forms, but any JSON value for a shape-carrying form (a unit answer is
+    /// the bare string `"unit"`).
     FormSubmitted {
         source: FormSource,
-        submission: Submission,
+        submission: serde_json::Value,
     },
     /// The driver compiled one of the OUTER session's own fragments —
     /// `render(state, lastCompaction)` or `loop __selfHarnessState` — the

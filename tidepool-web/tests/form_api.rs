@@ -132,13 +132,7 @@ async fn get_post_roundtrip() {
     assert!(v["test_only"].as_str().is_some());
 
     let got = handle.await.unwrap();
-    assert_eq!(
-        got,
-        json!({"mood": "calm", "count": 3})
-            .as_object()
-            .unwrap()
-            .clone()
-    );
+    assert_eq!(got, json!({"mood": "calm", "count": 3}));
 
     // Resolved — nothing pending anymore.
     let after: Value = client
@@ -221,13 +215,7 @@ async fn nonce_required() {
     assert_eq!(resp.status(), 200);
 
     let got = handle.await.unwrap();
-    assert_eq!(
-        got,
-        json!({"mood": "calm", "count": 1})
-            .as_object()
-            .unwrap()
-            .clone()
-    );
+    assert_eq!(got, json!({"mood": "calm", "count": 1}));
 }
 
 /// A GET with nothing pending reports `pending: false` and no nonce.

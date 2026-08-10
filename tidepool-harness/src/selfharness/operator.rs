@@ -209,19 +209,26 @@ pub struct EnumOption {
     pub tag: String,
 }
 
-/// A flat operator submission: one scalar JSON value per field `key` (enum →
+/// A flat CLIENT submission: one scalar JSON value per field `key` (enum →
 /// the chosen `tag` string, int → number, text → string, bool → bool). ONE
 /// canonical shape — no `{values,prose}` coercion, no keyed/unkeyed duality.
+/// This is the shape a browser/API client POSTs; it is NOT the gate's return
+/// type — see [`OperatorGate::present_form`].
 pub type Submission = serde_json::Map<String, serde_json::Value>;
 
 /// The seam the driver blocks on for operator input. Sync-blocking by design
 /// (see module docs). A web GUI implements this by parking a channel
 /// resolved from an HTTP handler; [`StdinGate`] keeps headless runs working.
 pub trait OperatorGate: Send + Sync {
-    /// Present `spec` to the operator and BLOCK until they submit. The returned
-    /// [`Submission`] is decoded against the form by the caller; a decode
-    /// failure re-presents the form (the retry is Haskell-side in `askUser`).
-    fn present_form(&self, spec: &FormSpec) -> Submission;
+    /// Present `spec` to the operator and BLOCK until they submit. Returns the
+    /// ANSWER VALUE ready for the Haskell decode: for a legacy flat form, the
+    /// [`Submission`] object; for a shape-carrying form (`askUser @T`), the
+    /// reassembled structural `FormAnswer` — which for a unit-shaped form is
+    /// the bare JSON string `"unit"`, NOT an object. The transport is a full
+    /// `Value` precisely so that answer survives; forcing an object here is
+    /// what made `askUser @()` re-prompt forever. A decode failure Haskell-side
+    /// re-presents the form (the retry lives in `askUser`).
+    fn present_form(&self, spec: &FormSpec) -> serde_json::Value;
 
     /// BLOCK until the operator advances to the next loop iteration (the
     /// human button-click gate that replaces the stdin between-loops gate).
@@ -236,12 +243,16 @@ pub trait OperatorGate: Send + Sync {
 pub struct StdinGate;
 
 impl OperatorGate for StdinGate {
-    fn present_form(&self, _spec: &FormSpec) -> Submission {
+    fn present_form(&self, _spec: &FormSpec) -> serde_json::Value {
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
-            return Submission::new();
+            return serde_json::Value::Object(Submission::new());
         }
-        serde_json::from_str(line.trim()).unwrap_or_default()
+        // Any JSON value passes through — a bare `"unit"` line answers a
+        // unit-shaped form. An unparseable line degrades to `{}`, which the
+        // Haskell decode rejects and re-presents (never a panic mid-drive).
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|_| serde_json::Value::Object(Submission::new()))
     }
 
     fn await_continue(&self) {

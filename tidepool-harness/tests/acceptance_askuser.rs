@@ -135,15 +135,11 @@ fn decision_answer() -> FormAnswer {
     ])
 }
 
-/// A [`Submission`] carrying a structural answer: every non-unit
-/// [`FormAnswer`] variant serializes to a one-key JSON object, so the flat
-/// submission map carries it as-is — no second channel, no gate signature
-/// change.
-fn submission_of(answer: &FormAnswer) -> Submission {
-    match serde_json::to_value(answer).expect("a FormAnswer serializes") {
-        serde_json::Value::Object(map) => map,
-        other => panic!("a structural answer must serialize to a JSON object, got {other}"),
-    }
+/// A structural answer as the gate's answer VALUE — serialized whole, so a
+/// unit answer (the bare string `"unit"`) crosses as itself rather than being
+/// forced through an object.
+fn submission_of(answer: &FormAnswer) -> serde_json::Value {
+    serde_json::to_value(answer).expect("a FormAnswer serializes")
 }
 
 /// A scripted operator that answers from the SHAPE it is handed rather than
@@ -172,7 +168,7 @@ impl ScriptedGate {
 }
 
 impl OperatorGate for ScriptedGate {
-    fn present_form(&self, spec: &FormSpec) -> Submission {
+    fn present_form(&self, spec: &FormSpec) -> serde_json::Value {
         let shape = spec
             .shape
             .clone()
@@ -185,7 +181,7 @@ impl OperatorGate for ScriptedGate {
                 let nth = self.decision_presentations.fetch_add(1, Ordering::SeqCst);
                 if nth == 0 {
                     // Malformed: not an answer at all. Re-prompt, don't fail.
-                    Submission::new()
+                    serde_json::Value::Object(Submission::new())
                 } else {
                     submission_of(&decision_answer())
                 }

@@ -68,9 +68,12 @@ enum Pending {
     /// Nothing pending.
     Idle,
     /// A form is awaiting submission; `resolve` unparks `present_form`.
+    /// Carries the ANSWER VALUE (see `OperatorGate::present_form`): an object
+    /// for legacy flat forms, any JSON value for shape-carrying ones — a
+    /// unit-shaped answer is the bare string `"unit"`.
     Form {
         spec: FormSpec,
-        resolve: oneshot::Sender<Submission>,
+        resolve: oneshot::Sender<Jv>,
     },
     /// The between-loops gate; `resolve` unparks `await_continue`.
     Continue { resolve: oneshot::Sender<()> },
@@ -185,10 +188,13 @@ impl AppState {
                 slot.rev += 1;
                 drop(slot);
                 self.ping();
-                let Pending::Form { resolve, .. } = taken else {
+                let Pending::Form { spec, resolve } = taken else {
                     unreachable!("matched Pending::Form above")
                 };
-                let _ = resolve.send(submission);
+                // Same reassembly as the browser `/submit` — this path used
+                // to forward the raw flat map, so a shape-carrying form
+                // submitted via the API was never decodable Haskell-side.
+                let _ = resolve.send(answer_value(&spec, submission));
                 Ok(())
             }
             Pending::Form { .. } => Err(FormApiSubmitError::NonceMismatch { current: slot.rev }),
@@ -211,7 +217,7 @@ impl WebGate {
 }
 
 impl OperatorGate for WebGate {
-    fn present_form(&self, spec: &FormSpec) -> Submission {
+    fn present_form(&self, spec: &FormSpec) -> Jv {
         let (resolve, wait) = oneshot::channel();
         self.state.publish(Pending::Form {
             spec: spec.clone(),
@@ -220,7 +226,7 @@ impl OperatorGate for WebGate {
         // The sender is dropped only if the pending slot is replaced (a newer
         // interaction supersedes this one); an empty submission then re-prompts
         // via the Haskell-side decode retry rather than deadlocking the driver.
-        wait.blocking_recv().unwrap_or_default()
+        wait.blocking_recv().unwrap_or_else(|_| json!({}))
     }
 
     fn await_continue(&self) {
@@ -286,24 +292,7 @@ async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
     };
     match st.take() {
         Pending::Form { spec, resolve } => {
-            // A spec carrying a recursive `shape` (what `askUser @T` emits)
-            // was rendered at dotted bind paths: reassemble the flat POST
-            // into the structural `FormAnswer` the Haskell side reads back.
-            // The answer travels in the same flat `Submission` map because
-            // every non-unit `FormAnswer` variant IS a one-key JSON object.
-            // An incomplete or wrong-typed submission resolves to an EMPTY
-            // map, which the Haskell decode rejects and re-presents — the
-            // same path a bad flat submission already takes.
-            let submission = match &spec.shape {
-                Some(shape) => collect_form_answer(shape, ROOT_BIND_PATH, &submission)
-                    .and_then(|answer| match serde_json::to_value(answer) {
-                        Ok(Jv::Object(map)) => Some(map),
-                        _ => None,
-                    })
-                    .unwrap_or_default(),
-                None => submission,
-            };
-            let _ = resolve.send(submission);
+            let _ = resolve.send(answer_value(&spec, submission));
             Json(json!({"ok": true})).into_response()
         }
         other => {
@@ -339,6 +328,25 @@ fn err_json(msg: String) -> Response {
 // -------------------------------------------------------------------------
 // Nested submissions — flat wire object -> structural FormAnswer.
 // -------------------------------------------------------------------------
+
+/// The ONE conversion from a client's flat POST to the answer value the gate
+/// returns — shared by the browser `/submit` and the form-API path so they
+/// cannot disagree. A spec carrying a recursive `shape` (what `askUser @T`
+/// emits) was rendered at dotted bind paths: reassemble the flat map into the
+/// structural [`FormAnswer`] and serialize it WHOLE — a unit answer is the
+/// bare string `"unit"`, and forcing it into an object is what made
+/// `askUser @()` re-prompt forever. An incomplete or wrong-typed submission
+/// resolves to `{}`, which the Haskell decode rejects and re-presents — the
+/// same path a bad flat submission already takes. A legacy (shapeless) spec
+/// passes the flat object through verbatim.
+fn answer_value(spec: &FormSpec, submission: Map<String, Jv>) -> Jv {
+    match &spec.shape {
+        Some(shape) => collect_form_answer(shape, ROOT_BIND_PATH, &submission)
+            .and_then(|answer| serde_json::to_value(answer).ok())
+            .unwrap_or_else(|| json!({})),
+        None => Jv::Object(submission),
+    }
+}
 
 /// Reassemble a flat `{"<dotted.path>": <scalar>}` submission (exactly what
 /// `render::generic_shape`'s markup, collected by `shell::JS`'s ordinary
@@ -452,9 +460,7 @@ mod tests {
         while !matches!(st.slot.lock().unwrap().pending, Pending::Form { .. }) {
             std::thread::yield_now();
         }
-        let mut body = Submission::new();
-        body.insert("mood".into(), json!("calm"));
-        body.insert("count".into(), json!(3));
+        let body = json!({"mood": "calm", "count": 3});
         match st.take() {
             Pending::Form { resolve, spec } => {
                 assert_eq!(spec.fields.len(), 2);
@@ -465,6 +471,30 @@ mod tests {
 
         let got = handle.join().unwrap();
         assert_eq!(got, body);
+    }
+
+    /// The regression this transport exists for: a unit-shaped form
+    /// (`askUser @()`, a nullary single-constructor type) answers as the bare
+    /// wire string `"unit"`. The old object-only transport coerced it to `{}`,
+    /// which the Haskell decode rejects — an infinite re-prompt.
+    #[test]
+    fn unit_shaped_answer_survives_reassembly_as_the_bare_wire_string() {
+        let spec = FormSpec {
+            fields: vec![],
+            shape: Some(FormShape::Unit),
+        };
+        assert_eq!(answer_value(&spec, Submission::new()), json!("unit"));
+    }
+
+    /// An incomplete shape submission still degrades to `{}` (reject and
+    /// re-present), not a panic and not a partial answer.
+    #[test]
+    fn incomplete_shape_submission_degrades_to_the_rejectable_empty_object() {
+        let spec = FormSpec {
+            fields: vec![],
+            shape: Some(FormShape::String),
+        };
+        assert_eq!(answer_value(&spec, Submission::new()), json!({}));
     }
 
     #[test]

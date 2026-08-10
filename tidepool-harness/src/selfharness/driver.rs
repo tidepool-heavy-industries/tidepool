@@ -1420,9 +1420,7 @@ impl SelfHarnessDriver {
                 source: form_source,
                 submission: submission.clone(),
             });
-            self.agent
-                .answer_dialog(node, Json::Object(submission))
-                .await?;
+            self.agent.answer_dialog(node, submission).await?;
 
             let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
                 // The resume completed the node with no further suspension.
@@ -1504,10 +1502,10 @@ impl SelfHarnessDriver {
                 source: FormSource::OuterLoop,
                 submission: submission.clone(),
             });
-            let answer = engine::json_answer_to_value(&Json::Object(submission), &compiled.table)
-                .map_err(|e| {
-                DriverError::Session(format!("outer askUser submission decode: {e}"))
-            })?;
+            let answer =
+                engine::json_answer_to_value(&submission, &compiled.table).map_err(|e| {
+                    DriverError::Session(format!("outer askUser submission decode: {e}"))
+                })?;
             let outcome = {
                 let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
                 outer.session.resume(&hole, answer).map_err(|e| {

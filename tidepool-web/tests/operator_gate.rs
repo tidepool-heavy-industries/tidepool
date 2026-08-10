@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tidepool_harness::selfharness::operator::{
-    EnumOption, Field, FieldKind, FormSpec, OperatorGate, Submission,
+    EnumOption, Field, FieldKind, FormSpec, OperatorGate,
 };
 use tidepool_web::{router, AppState, WebGate};
 use tokio::net::TcpListener;
@@ -39,13 +39,6 @@ fn sample_spec() -> FormSpec {
             },
         ],
         shape: None,
-    }
-}
-
-fn submission_of(v: Value) -> Submission {
-    match v {
-        Value::Object(m) => m,
-        other => panic!("expected a JSON object, got {other}"),
     }
 }
 
@@ -110,7 +103,7 @@ async fn submit_resolves_present_form_with_exact_submission() {
     assert_eq!(v, json!({"ok": true}));
 
     let got = handle.await.unwrap();
-    assert_eq!(got, submission_of(body));
+    assert_eq!(got, body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -194,7 +187,7 @@ async fn submit_with_non_object_body_is_rejected() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let got = handle.await.unwrap();
-    assert_eq!(got, submission_of(body));
+    assert_eq!(got, body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -245,7 +238,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let got = handle.await.unwrap();
-    assert_eq!(got, submission_of(body));
+    assert_eq!(got, body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
