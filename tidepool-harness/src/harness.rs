@@ -241,6 +241,17 @@ struct PendingHole {
     raw_request: Value,
 }
 
+/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
+/// its resident `JitEffectMachine`, straight from
+/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
+/// instrumentation, this is a read-only view of counters that already exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapSummary {
+    pub nursery_bytes: usize,
+    pub live_bytes: usize,
+    pub gc_count: u64,
+}
+
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
 /// answerer exhausted its auto-retry and is parked awaiting an operator
 /// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
@@ -464,10 +475,6 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Per-node streaming turn buffer (see [`LiveTurn`]). Present only while a
-    /// node's turn is actively streaming; the entry is removed when the turn
-    /// completes (its content is then in the log).
-    live_turns: Mutex<HashMap<NodeId, LiveTurn>>,
     /// A "something changed" callback the web layer installs
     /// ([`Self::set_notifier`]) so streaming deltas nudge the SSE stream to
     /// re-render. `None` (unset) in tests / headless runs — the harness works
@@ -526,7 +533,6 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
@@ -663,6 +669,20 @@ impl Harness {
     /// module — required for a value to cross between them via `resume`.
     pub fn cfg(&self) -> &EngineConfig {
         &self.cfg
+    }
+
+    /// `node`'s live heap/GC snapshot, straight off its resident
+    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
+    /// when `node` has no live session (never forced, terminal) or during the
+    /// transient mid-turn gap while its session runs on the blocking pool.
+    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
+        let sid = self.tree.session_of(node)?;
+        let stats = self.tree.registry().peek(sid, Session::heap_stats)??;
+        Some(HeapSummary {
+            nursery_bytes: stats.nursery_bytes,
+            live_bytes: stats.live_bytes,
+            gc_count: stats.gc_count,
+        })
     }
 
     /// Create a ROOT node as a thunk with the DEFAULT system framing
@@ -3334,7 +3354,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),
@@ -3370,7 +3389,6 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            live_turns: Mutex::new(HashMap::new()),
             notifier: std::sync::OnceLock::new(),
             seeds: Mutex::new(HashMap::new()),
             forked_transcripts: Mutex::new(HashMap::new()),

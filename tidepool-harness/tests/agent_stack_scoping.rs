@@ -142,10 +142,7 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
 /// all, so naming it — even just to import it — was itself "not in scope".
 #[test]
 fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    support::require_extract();
 
     let result = compile_against(
         answerer_decls(),

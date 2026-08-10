@@ -396,3 +396,28 @@ be a sixth spelling the sweep didn't match). NOT a blind string edit:
 adding Fork to the mock module source plausibly needs a matching GADT
 decl + stub handler in the mock, or every mock-compiling test breaks.
 Owner: the post-centralization verification pass.
+
+## 18. extract-wave's parent-merge resolution dropped three definitions git couldn't see (root repair at fold, 2026-08-09)
+
+The fold gate (`cargo check --workspace --all-targets`) caught three
+casualties of the hand-authored resolution in 5992c529 — the same
+rename-by-refactor blindness its own doc commit (d704dff7) describes:
+
+1. `LiveTurn` struct + `live_turn()`/`apply_delta()`/`finish_live_turn()`
+   — the per-node live-streaming subsystem from their side. The field
+   survived, the subsystem didn't. Root repair: REMOVED the orphaned
+   field (trunk's drain-and-discard `stream_turn` is the survivor);
+   the full subsystem is recoverable at `5992c529^1` harness.rs:376-555.
+   BUG-HUNT DECISION: was live-turn streaming meant to land? Zero
+   consumers existed on either side (web observatory never wired it),
+   so nothing user-visible was lost — but if the observatory wants
+   live tokens, restore from that ref rather than rewriting.
+2. `HeapSummary` + `Harness::heap_stats` — RESTORED verbatim (consumer:
+   `acceptance_lazy_boot.rs`, item 0's own acceptance test).
+3. One stale `extract_available()` call in `agent_stack_scoping.rs` —
+   converted to `support::require_extract()` per the vacuity sweep.
+
+Workspace check clean after repair. The lesson is item counting: their
+receipts said "two semantic merge regressions caught and fixed at fold";
+the gate found a third and fourth. A divergent-branch fold's semantic
+break count is not knowable from the merge — only from the build.
