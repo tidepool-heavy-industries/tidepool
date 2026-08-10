@@ -171,6 +171,14 @@ surface here — it drifts. Module map:
   real and expected to stay in sync. (Doc-history note on this passage's
   prior wording: `plans/decision-archive/haskell.md`.)
 
+- `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (Servant-style
+  tool-record algebra, gate 1(a)), `CodecSpike` (gate 1(b)'s positional codec
+  proof — Tidepool↔Tidepool polarity ONLY), `ModelCodec` (the MODEL-boundary
+  codec: one Generic traversal → named-field JSON Schema + decoder + encoder;
+  use THIS for anything a model reads or writes), `Spawn` (typed `spawnAgent`
+  over the generated `spawnAgentRaw`; compiles only in rows containing
+  Subagent + Worktree, same row-gating as Form).
+
 ### Structured LLM / Ask — one `Schema` vocabulary
 
 Two primitives share one schema vocabulary; both return a validated `Value` you
