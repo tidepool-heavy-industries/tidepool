@@ -459,11 +459,20 @@ confirming test before a fix):
   server assumption must become explicit (doc) or enforced (lock);
   binding becomes transactional inside coupled spawn when agent-core
   lands.
-- R2.6 MED-HIGH: harness.rs:405 error-coordinate attribution prefers
-  Expr on overlapping windows — a Bind error can get the Expr excerpt.
-  Compile protocol should carry candidate identity. (The lane disclosed
-  window-containment as non-guessing; overlap is the case that breaks
-  that claim.)
+- R2.6 MED-HIGH: error-coordinate attribution prefers Expr on
+  overlapping windows — a Bind error can get the Expr offset/excerpt.
+  SHARPENED (root, 2026-08-09): overlap is the COMMON case, not a
+  corner — the expr/bind windows are the same block at offsets
+  differing by a few preamble lines, so any multi-line block overlaps;
+  misattribution shifts every line by the offset delta. Mechanism
+  mapped: run_turn hands ALL templates to ONE extract invocation and
+  the EXTRACTOR selects which applies, so only the extractor knows the
+  failing candidate — the fix is the diagnostics JSON (DiagJson,
+  {"version":1,...}) carrying the template kind, parsed in
+  tidepool-runtime::diag, consumed by harness pick_render_opts in
+  place of window-containment. Deferred as its own focused leg: an
+  extractor wire change (redeploy-class) squeezed into a pipeline tail
+  is how wire bugs happen.
 - R2.7 MED: git.rs:181 drops rename origin paths (stale old path in
   synthetic tree); snapshot.rs:170 treats submodule-status failure as
   no-submodules (fail-open against the crate's fail-loud contract).
