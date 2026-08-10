@@ -484,7 +484,9 @@ fn refuses_dirty_submodule_and_leaves_source_untouched() {
 /// exists (git creates the index FILE, never its parent directories).
 #[test]
 fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
-    use tidepool_worktree::{DirtyPolicy, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec};
+    use tidepool_worktree::{
+        DirtyPolicy, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec,
+    };
 
     let repo = TestRepo::init().expect("init");
     repo.writer()
@@ -527,5 +529,53 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
         std::fs::read(repo.path().join("tracked.txt")).expect("read back"),
         b"dirtied\n",
         "working-tree bytes changed"
+    );
+}
+
+/// A staged rename (`git mv`) must not resurrect the OLD path in the snapshot:
+/// `read-tree HEAD` seeds the temp index with the old path, and only staging
+/// the rename's BOTH sides records the deletion. Pre-fix, the porcelain parser
+/// consumed the orig_path field for alignment but discarded it, so the
+/// synthetic tree contained the renamed-away file alongside the new one.
+#[test]
+fn snapshot_of_a_staged_rename_drops_the_old_path() {
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("old_name.txt", "content\n", "init")
+        .expect("c1");
+    repo.git()
+        .try_run(repo.path(), &["mv", "old_name.txt", "new_name.txt"])
+        .expect("git mv");
+
+    let temp_index_dir = tempfile::TempDir::new().expect("temp index dir");
+    let receipt = snapshot_source(
+        repo.git(),
+        repo.path(),
+        &WorktreeId::from_raw("w-rename"),
+        temp_index_dir.path(),
+    )
+    .expect("snapshot succeeds");
+
+    let tree = repo
+        .git()
+        .try_run(
+            repo.path(),
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                receipt.snapshot_commit.as_str(),
+            ],
+        )
+        .expect("ls-tree")
+        .stdout;
+    let names: Vec<&str> = tree.lines().collect();
+    assert!(
+        names.contains(&"new_name.txt"),
+        "the rename's new path must be captured: {names:?}"
+    );
+    assert!(
+        !names.contains(&"old_name.txt"),
+        "the rename's old path must NOT survive into the snapshot: {names:?}"
     );
 }

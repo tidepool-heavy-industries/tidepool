@@ -175,10 +175,10 @@ pub fn snapshot_source(
 /// `git submodule status` exits 0 with empty output when there are no
 /// submodules at all, so this is a no-op on the common case.
 fn refuse_dirty_submodules(git: &GitCli, source: &Path) -> Result<Vec<String>, WorktreeError> {
-    let out = match git.run(source, &["submodule", "status"]) {
-        Ok(out) => out,
-        Err(_) => return Ok(Vec::new()),
-    };
+    // A FAILED `git submodule status` is never the no-submodules case (that
+    // exits 0 with empty output, per above) — swallowing it here would let a
+    // snapshot proceed past the very check that guards it. Fail loud.
+    let out = git.try_run(source, &["submodule", "status"])?;
 
     let mut changed_clean = Vec::new();
     for line in out.lines() {

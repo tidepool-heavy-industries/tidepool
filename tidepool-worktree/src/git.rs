@@ -176,6 +176,11 @@ pub mod inspect {
         x: char,
         y: char,
         path: &'a str,
+        /// The pre-rename/copy path (`R`/`C` entries only). Load-bearing for
+        /// the snapshot: staging only the NEW path into the temp index leaves
+        /// the OLD path present from `read-tree HEAD`, so the synthetic tree
+        /// would resurrect a file the rename removed.
+        orig_path: Option<&'a str>,
     }
 
     /// Parse `-z` porcelain v1 output into entries, consuming the extra
@@ -198,11 +203,20 @@ pub mod inspect {
             let x = bytes[0] as char;
             let y = bytes[1] as char;
             let path = &entry[3..];
-            if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+            let orig_path = if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
                 // Rename/copy entries carry an extra orig_path field.
+                let orig = parts.get(i).copied();
                 i += 1;
-            }
-            out.push(StatusEntry { x, y, path });
+                orig
+            } else {
+                None
+            };
+            out.push(StatusEntry {
+                x,
+                y,
+                path,
+                orig_path,
+            });
         }
         out
     }
@@ -242,9 +256,17 @@ pub mod inspect {
             }
             if e.x != ' ' {
                 staged.insert(e.path.to_string());
+                if let Some(orig) = e.orig_path {
+                    // A rename's OLD path is part of the same change: staging
+                    // it records the deletion in the snapshot's temp index.
+                    staged.insert(orig.to_string());
+                }
             }
             if e.y != ' ' {
                 unstaged.insert(e.path.to_string());
+                if let Some(orig) = e.orig_path {
+                    unstaged.insert(orig.to_string());
+                }
             }
         }
 
