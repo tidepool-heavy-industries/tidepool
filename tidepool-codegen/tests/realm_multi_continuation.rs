@@ -1233,14 +1233,12 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// W2 — STREAMED RESPONSE TAIL: the dispatched effect's answer is an unforced
-// lazily-streamed list (`respond_list`), embedded UNFORCED in the parked
-// continuation and only forced after resume. SAFETY CASE — dies under the
-// negative control: the stream-tail THUNK cell itself is an ordinary nursery
-// allocation reachable only through the (unrooted-under-control) continuation.
-// Also exercises the parked-stream REGISTRY lifetime fix (`RegistryGuard`'s
-// conditional `clear_parked_streams`, jit_machine.rs) — see
-// `realm_stream_registry_lifetime.rs` for that mechanism's own red/green.
+// W2 — LIST RESPONSE ACROSS PARK: the dispatched effect's answer is a list
+// (`respond_list`, materialized eagerly as heap cons cells at dispatch time),
+// embedded in the parked continuation and only consumed after resume. SAFETY
+// CASE — dies under the negative control: the response cells are ordinary
+// nursery allocations reachable only through the (unrooted-under-control)
+// continuation, so they must survive a GC while parked.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]

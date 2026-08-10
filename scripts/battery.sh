@@ -14,8 +14,7 @@
 # finish. Prefer:
 #   - a single crate/test slice: `scripts/battery.sh -p <crate> -E 'test(<name>)'`
 #   - a full crate as a survivable shard: `scripts/battery-shard.sh <crate>`
-# The named multi-hundred-second suites (lazy_consumption_property_suite,
-# effectful_lazy_ab_x8, corpus_report, haskell_suite_differential,
+# The named multi-hundred-second suites (corpus_report, haskell_suite_differential,
 # tidepool-testing::haskell_verified) are additionally gated behind
 # TIDEPOOL_EXPENSIVE_TESTS=1 and stay skipped even here unless you set it.
 # `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d (a

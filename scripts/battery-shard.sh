@@ -13,8 +13,8 @@
 #   scripts/battery-shard.sh tidepool-codegen -E 'binary(proptest_ghc_idioms)'
 #
 # This does NOT set TIDEPOOL_EXPENSIVE_TESTS — the multi-hundred-second
-# suites (lazy_consumption_property_suite, effectful_lazy_ab_x8,
-# corpus_report, haskell_suite_differential, tidepool-testing::haskell_verified)
+# suites (corpus_report, haskell_suite_differential,
+# tidepool-testing::haskell_verified)
 # stay skipped unless you export TIDEPOOL_EXPENSIVE_TESTS=1 yourself. Run
 # those deliberately, one at a time, with their own budget — they are NOT
 # what this script's ~380s-per-shard promise covers.

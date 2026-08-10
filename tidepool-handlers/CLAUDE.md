@@ -60,15 +60,13 @@ locked decision on union tags).
   with `cx.respond` (`Ok → Right v`, `Err → Left e`), so the handler is total by
   construction — no eval abort for a verb-level failure. (A genuine panic or a
   non-`Handler` `EffectError` — real corruption — is the only abort path.)
-- **`respond_stream(iter)`** — parks an arbitrary (possibly infinite) Rust
-  iterator; the JIT consumes it lazily. Use for open-ended/unbounded sources.
-- **`respond_list(vec)`** — an owned `Vec<T>` exposed lazily at ELEMENT
-  granularity: list cells materialize eagerly, but each cell's head is a
-  thunk that converts its element to a `Value` only when forced (memoized).
-  `take 3` converts 3 elements; `length` converts none. Use for a known-size
-  collection where callers commonly only need a prefix — the Fs `readGlob` verb
-  (`fs_read_glob`, `src/handlers/fs.rs`) is the live call site, exposing
-  `[FileRead]` at element granularity.
+- **`respond_list(vec)`** — an owned `Vec<T>` returned as a Haskell list.
+  Every element converts eagerly at dispatch time; what stays special is
+  that the machine builds the heap spine ITERATIVELY (stack safety on long
+  lists — `host_fns::list_materialize`). The Fs `readGlob` verb
+  (`fs_read_glob`, `src/handlers/fs.rs`) is the live call site. There is no
+  lazy/streaming response channel; if an unbounded source ever needs
+  exposure, add explicit pagination at the verb level.
 
 ## Sandboxing
 

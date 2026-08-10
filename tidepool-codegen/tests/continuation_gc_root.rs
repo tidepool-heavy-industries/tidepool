@@ -11,7 +11,7 @@
 //!
 //! This test forces that exact window deterministically: a one-effect program
 //! whose handler responds with a 3000-cell list, materialized EAGERLY
-//! (`TIDEPOOL_LAZY_RESULTS=0`) into a 16 KiB nursery — the materialization
+//! into a 16 KiB nursery — the materialization
 //! must collect (repeatedly, with heap doubling) while the continuation is
 //! live, and the test ASSERTS the collections fired (gc_trigger_call_count).
 //!
@@ -184,7 +184,6 @@ fn continuation_survives_gc_during_response_materialization() {
     // Kill-switch: force EAGER in-arm materialization (materialize_cons_list →
     // host_alloc_gc), so the collection is guaranteed to fire while the
     // continuation is live. Env is per-process; this file has one test.
-    std::env::set_var("TIDEPOOL_LAZY_RESULTS", "0");
 
     let table = test_table();
     let expr = build_one_effect_program(&table);
@@ -207,6 +206,4 @@ fn continuation_survives_gc_during_response_materialization() {
          — the fixture no longer exercises the exposure"
     );
     assert_full_list(&result);
-
-    std::env::remove_var("TIDEPOOL_LAZY_RESULTS");
 }

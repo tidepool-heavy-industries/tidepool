@@ -136,16 +136,14 @@ impl<'a> EffectMachine<'a> {
                     let cx = EffectContext::with_user(self.table, user);
                     let response = match handlers.dispatch(tag, &request, &cx)? {
                         crate::dispatch::Response::Complete(v) => v,
-                        // The interpreter machine has no chunked-thunk
-                        // machinery: drain streams eagerly into a list
-                        // Value, built back-to-front (iteratively — deep
-                        // spines must never hit recursive construction).
-                        crate::dispatch::Response::Stream(s) => {
-                            let (mut source, cons_id, nil_id) = s.into_parts();
-                            let mut items = Vec::new();
-                            while let Some(item) = source.next_value(self.table) {
-                                items.push(item.map_err(EffectError::Bridge)?);
-                            }
+                        // A list response arrives pre-converted; build the
+                        // spine back-to-front (iteratively — deep spines
+                        // must never hit recursive construction).
+                        crate::dispatch::Response::List {
+                            items,
+                            cons_id,
+                            nil_id,
+                        } => {
                             let mut acc = Value::Con(nil_id, vec![]);
                             for item in items.into_iter().rev() {
                                 acc = Value::Con(cons_id, vec![item, acc]);

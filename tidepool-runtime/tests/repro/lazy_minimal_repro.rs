@@ -1,5 +1,5 @@
-//! Minimal-stack regression coverage for lazy effect results: one
-//! hand-written effect (no MCP template), one handler responding with a
+//! Minimal-stack regression coverage for large list-shaped effect results:
+//! one hand-written effect (no MCP template), one handler responding with a
 //! 12k-element list. Historically this PASSED while the MCP-template shape
 //! hung — because this harness ran on an 8 MiB thread, masking the real bug
 //! (recursive Drop of the deep response spine overflowing the eval thread's
@@ -53,7 +53,6 @@ result = do
 {body}
 "#
     );
-    std::env::set_var("TIDEPOOL_LAZY_RESULTS", "1");
     EvalHarness::new()
         .with_stdlib()
         .run(&src, "result", frunk::hlist![BigListing { n }])

@@ -46,12 +46,12 @@
 //! as production instead of a test-only backdoor.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::context::VMContext;
-use crate::host_fns::{GcState, ParkedStream, RuntimeError, StreamId};
+use crate::host_fns::{GcState, RuntimeError};
 use crate::stack_map::StackMapRegistry;
 
 /// Per-machine ambient state. Every cell keeps the exact wrapper type
@@ -65,8 +65,6 @@ pub struct MachineState {
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
     diagnostics: RefCell<Vec<String>>,
-    parked_streams: RefCell<HashMap<StreamId, ParkedStream>>,
-    stream_next_id: Cell<u64>,
     /// Bumped once per actual collection (`perform_gc`). `deep_force` reads
     /// this to invalidate its address-keyed visited set whenever a GC could have
     /// relocated (or freed, then let something else reuse the address of)
@@ -136,8 +134,6 @@ impl MachineState {
             call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
             diagnostics: RefCell::new(Vec::new()),
-            parked_streams: RefCell::new(HashMap::new()),
-            stream_next_id: Cell::new(1),
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
@@ -288,48 +284,6 @@ impl MachineState {
 
     pub(crate) fn drain_diagnostics(&self) -> Vec<String> {
         self.diagnostics.borrow_mut().drain(..).collect()
-    }
-
-    // --- parked streams --------------------------------------------------------
-
-    /// Park a response stream; returns the registry id carried by tail thunks.
-    pub(crate) fn park_stream(&self, stream: ParkedStream) -> u64 {
-        let id = self.stream_next_id.get();
-        self.stream_next_id.set(id + 1);
-        self.parked_streams
-            .borrow_mut()
-            .insert(StreamId(id), stream);
-        id
-    }
-
-    /// Drop all parked streams (machine teardown).
-    pub(crate) fn clear_parked_streams(&self) {
-        self.parked_streams.borrow_mut().clear();
-    }
-
-    /// Read-only access to a parked stream by id (mirrors `PARKED_STREAMS
-    /// .with(|r| r.borrow().get(...))`).
-    pub(crate) fn parked_stream_get<R>(
-        &self,
-        id: StreamId,
-        f: impl FnOnce(&ParkedStream) -> R,
-    ) -> Option<R> {
-        self.parked_streams.borrow().get(&id).map(f)
-    }
-
-    /// Mutable access to a parked stream by id (mirrors `PARKED_STREAMS
-    /// .with(|r| r.borrow_mut().get_mut(...))`).
-    pub(crate) fn parked_stream_get_mut<R>(
-        &self,
-        id: StreamId,
-        f: impl FnOnce(&mut ParkedStream) -> R,
-    ) -> Option<R> {
-        self.parked_streams.borrow_mut().get_mut(&id).map(f)
-    }
-
-    /// Remove a parked stream by id (source exhausted).
-    pub(crate) fn remove_parked_stream(&self, id: StreamId) {
-        self.parked_streams.borrow_mut().remove(&id);
     }
 
     // --- GC generation counter --------------------------------------------
@@ -658,8 +612,8 @@ thread_local! {
     /// Per-thread reach for vmctx-less callers: host fns (called from
     /// JIT/emitted code) that take no `vmctx`, and the external ambient
     /// shims (`set_first_cause`/`take_runtime_error`/`has_runtime_error`/
-    /// `push_diagnostic`/`drain_diagnostics`/`park_stream`/
-    /// `clear_parked_streams`). Each eval runs on its own dedicated thread
+    /// `push_diagnostic`/`drain_diagnostics`). Each eval runs on its own
+    /// dedicated thread
     /// (server.rs spawns one per eval, up to `MAX_CONCURRENT_EVALS`
     /// concurrently, and a suspended eval keeps its thread + machine +
     /// `RegistryGuard` alive across the suspension) — so per-thread reach is

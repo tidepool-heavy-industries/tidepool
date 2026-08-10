@@ -6,134 +6,22 @@ use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_eval::value::Value;
 use tidepool_repr::{DataConId, DataConTable};
-
-/// A lazily-produced sequence of effect-result elements.
-///
-/// The element producer is *the cursor*: the JIT materializes list cells in
-/// chunks as Haskell code forces successive tails, and thunk memoization
-/// (force-once → indirection) guarantees each tail is pulled exactly once,
-/// in order — so a plain iterator is exactly the right shape. An infinite
-/// iterator is a legitimate infinite Haskell list.
-///
-/// Semantics note: the producer runs at *demand* time, interleaved with
-/// later effects. A `Vec`-backed stream (data captured at dispatch) keeps
-/// strict effect semantics — only conversion is deferred. A live-IO
-/// iterator opts into lazy-IO semantics (`hGetContents`-style): it observes
-/// world state from after its effect's sequence point. Capture first unless
-/// that is what you want.
-pub struct ValueStream {
-    source: Box<dyn ValueSource>,
-    cons_id: DataConId,
-    nil_id: DataConId,
-}
-
-impl ValueStream {
-    /// Build a stream from a custom source plus the list constructor ids
-    /// (escape hatch for exotic producers; most callers want
-    /// [`EffectContext::respond_stream`]).
-    pub fn from_source(
-        source: Box<dyn ValueSource>,
-        cons_id: DataConId,
-        nil_id: DataConId,
-    ) -> Self {
-        Self {
-            source,
-            cons_id,
-            nil_id,
-        }
-    }
-
-    /// Decompose into (source, cons id, nil id) — consumed by the machine
-    /// at the dispatch site.
-    pub fn into_parts(self) -> (Box<dyn ValueSource>, DataConId, DataConId) {
-        (self.source, self.cons_id, self.nil_id)
-    }
-}
-
-impl std::fmt::Debug for ValueStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<value stream>")
-    }
-}
-
-/// Element producer for [`ValueStream`].
-///
-/// The [`DataConTable`] is an *argument* to production rather than captured
-/// state, so sources need no `'static` table access and the machine
-/// provides its own table at chunk-materialization time.
-///
-/// Sources come in two strengths. Every source supports sequential
-/// `next_value`. A source that additionally reports `Some(len)` from
-/// [`ValueSource::len`] promises random access via [`ValueSource::get`] —
-/// which lets the machine defer per-ELEMENT conversion behind element
-/// thunks: forcing one list head converts one element, and a `length`
-/// fold that never inspects heads converts nothing at all.
-// `len` returns Option<usize> as a CAPABILITY signal (Some = random access
-// supported), not a plain size — an `is_empty` would conflate "empty" with
-// "sequential-only", so clippy's pairing suggestion does not apply.
-#[allow(clippy::len_without_is_empty)]
-pub trait ValueSource {
-    /// Produce the next element, or `None` when exhausted.
-    fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>>;
-
-    /// Total element count, if this source supports random access.
-    /// `Some(len)` obliges `get(idx)` to return `Some` for all `idx < len`.
-    fn len(&self) -> Option<usize> {
-        None
-    }
-
-    /// Convert the element at `idx` (random-access sources only).
-    fn get(&self, idx: usize, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
-        let _ = (idx, table);
-        None
-    }
-}
-
-/// Adapts any iterator of `ToCore` items into a [`ValueSource`]: elements
-/// convert one at a time, at pull time. Sequential-only.
-struct IterSource<I>(I);
-
-impl<I> ValueSource for IterSource<I>
-where
-    I: Iterator,
-    I::Item: ToCore,
-{
-    fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
-        self.0.next().map(|x| x.to_value(table))
-    }
-}
-
-/// Random-access source over an owned `Vec`: the machine defers element
-/// conversion behind per-element thunks. The cursor serves the sequential
-/// (kill-switch drain) path.
-struct VecSource<T> {
-    items: Vec<T>,
-    pos: usize,
-}
-
-impl<T: ToCore> ValueSource for VecSource<T> {
-    fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
-        let item = self.items.get(self.pos)?;
-        self.pos += 1;
-        Some(item.to_value(table))
-    }
-
-    fn len(&self) -> Option<usize> {
-        Some(self.items.len())
-    }
-
-    fn get(&self, idx: usize, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
-        self.items.get(idx).map(|x| x.to_value(table))
-    }
-}
-
 /// A handler's answer to an effect request.
 #[derive(Debug)]
 pub enum Response {
     /// Fully materialized value (the classic path).
     Complete(Value),
-    /// Lazily-produced list elements, materialized in chunks on demand.
-    Stream(ValueStream),
+    /// A list response with every element already converted. Carried as a
+    /// flat `Vec` (plus the list constructor ids) rather than a pre-built
+    /// cons `Value` so the machine can build the spine ITERATIVELY at the
+    /// heap boundary — a deep recursive `Value` spine must never exist,
+    /// neither at construction nor at `Drop` (~3 stack frames per cell
+    /// overflow the eval thread; see `materialize_cons_list`).
+    List {
+        items: Vec<Value>,
+        cons_id: DataConId,
+        nil_id: DataConId,
+    },
 }
 
 impl From<Value> for Response {
@@ -164,42 +52,29 @@ impl<'a, U> EffectContext<'a, U> {
             .map_err(EffectError::Bridge)
     }
 
-    /// Respond with a lazily-streamed list: elements convert and materialize
-    /// chunk-by-chunk as the Haskell program demands them. `take k` of a huge
-    /// listing only ever converts ~one chunk; an infinite iterator is a
-    /// legitimate infinite list. See [`ValueStream`] for the semantics note
-    /// on live-IO iterators. If you hold a `Vec`, prefer [`Self::respond_list`]
-    /// — it additionally defers per-ELEMENT conversion.
-    pub fn respond_stream<I>(&self, items: I) -> Result<Response, EffectError>
-    where
-        I: IntoIterator,
-        I::IntoIter: 'static,
-        I::Item: ToCore,
-    {
-        self.stream_response(Box::new(IterSource(items.into_iter())))
-    }
-
-    /// Respond with an owned `Vec`, lazily at ELEMENT granularity: list
-    /// cells materialize in chunks, but each cell's head is a thunk that
-    /// converts its element only when forced (memoized). `take 3` converts
-    /// 3 elements; `length` converts none.
+    /// Respond with an owned `Vec` as a Haskell list. Every element converts
+    /// EAGERLY, here, at dispatch time — there is no deferred conversion and
+    /// no stream machinery; what stays special about a list response is only
+    /// that the machine builds its heap spine iteratively (stack safety on
+    /// long lists), which is why this is not just `respond(items)`.
     pub fn respond_list<T>(&self, items: Vec<T>) -> Result<Response, EffectError>
     where
-        T: ToCore + 'static,
+        T: ToCore,
     {
-        self.stream_response(Box::new(VecSource { items, pos: 0 }))
-    }
-
-    fn stream_response(&self, source: Box<dyn ValueSource>) -> Result<Response, EffectError> {
         let cons_id = tidepool_bridge::get_resilient(self.table, ":", 2)
             .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName(":".into())))?;
         let nil_id = tidepool_bridge::get_resilient(self.table, "[]", 0)
             .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName("[]".into())))?;
-        Ok(Response::Stream(ValueStream {
-            source,
+        let items = items
+            .into_iter()
+            .map(|x| x.to_value(self.table))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(EffectError::Bridge)?;
+        Ok(Response::List {
+            items,
             cons_id,
             nil_id,
-        }))
+        })
     }
 
     /// Access the data constructor table (for manual `FromCore`/`ToCore` calls).

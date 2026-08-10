@@ -10,8 +10,8 @@
 //!   driven through the `VMContext` + stack-map registry.
 //! - **Error poisoning** — `RuntimeError` raising: case traps, bad pointers,
 //!   division by zero, and forced `error`/`undefined` sentinels.
-//! - **Lazy-result streaming** — the `ValueSource` / `ValueStream` machinery that
-//!   parks an effect-result iterator and serves it element-at-a-time.
+//! - **List materialization** — iterative, stack-safe construction of
+//!   list-shaped effect responses as heap cons chains.
 //!
 //! Always-on stderr breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]`) fire
 //! only on genuine compiler bugs and must stay loud.
@@ -20,7 +20,7 @@
 //! cancellation), [`gc`] (roots + the copying collector), [`errors`]
 //! (`RuntimeError` + poison machinery), [`force`] (WHNF/NF forcing + the tail
 //! trampoline), [`primops`] (byte/boxed-array, Double, JSON primops), and
-//! [`streaming`] (lazy effect-result materialization). Every item is
+//! [`list_materialize`] (eager list-response materialization). Every item is
 //! re-exported here so callers outside this module see one flat surface
 //! regardless of the internal module split.
 //!
@@ -29,7 +29,7 @@
 //! Per-machine state lives entirely on [`crate::machine_state::MachineState`],
 //! owned by `JitEffectMachine`: the cancel flag, JSON con ids, stack-map
 //! registry, and call depth (leaf 1); the first-cause runtime error,
-//! diagnostics, and parked-stream registry (leaf 2); and the GC state plus
+//! and diagnostics (leaf 2); and the GC state plus
 //! the run-scoped/session-scoped GC root registries (leaf 3). Two reach
 //! paths exist, and the GC cluster uses only the first:
 //!
@@ -40,8 +40,8 @@
 //!   the identical machine; see the "GC-cluster reach" note on
 //!   `machine_state.rs`.
 //! - **`CURRENT_MACHINE`** (a per-thread slot, `crate::machine_state`) — used
-//!   by the cancel/JSON/stack-map/call-depth/runtime-error/diagnostics/
-//!   parked-stream ambient shims for host fns that receive no `vmctx`.
+//!   by the cancel/JSON/stack-map/call-depth/runtime-error/diagnostics
+//!   ambient shims for host fns that receive no `vmctx`.
 //!
 //! Only the signal handler (`EXEC_CONTEXT` / `SIGNAL_SAFE_CTX`, read from
 //! async-signal context) must stay thread-scoped rather than per-machine.
@@ -53,8 +53,8 @@ mod cancel;
 mod errors;
 mod force;
 mod gc;
+mod list_materialize;
 mod primops;
-mod streaming;
 
 pub(crate) use cancel::check_cancel_and_set_error;
 pub use cancel::runtime_cancel_check;
@@ -98,10 +98,7 @@ pub use primops::{
     runtime_word2_rem, runtime_word_encode_double,
 };
 
-pub(crate) use streaming::{
-    alloc_stream_tail_thunk, materialize_cons_list, park_stream, ParkedStream, ReadySource,
-    StreamId,
-};
+pub(crate) use list_materialize::materialize_cons_list;
 
 /// Return the list of host function symbols for JIT registration.
 ///

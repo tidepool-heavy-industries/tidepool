@@ -725,16 +725,6 @@ pub(crate) struct RegistryGuard {
     /// The thread's `CURRENT_MACHINE` value before `install_registries`
     /// installed `machine_state` (null unless runs nest) — restored on drop.
     prev_machine: *mut MachineState,
-    /// Points at the owning `JitEffectMachine::continuations`, set by
-    /// `install_registries_with_cancel_flag`. Read at Drop time (after this
-    /// run's own park/resume has already mutated it) to decide whether
-    /// `parked_streams` is safe to clear — see the PARKED-STREAM LIFETIME note
-    /// on `Drop for RegistryGuard` below.
-    continuations: *const HashMap<ContinuationId, ContinuationFrame>,
-    /// Points at the owning `JitEffectMachine::suspended_continuation`, same
-    /// timing/rationale as `continuations` above (the single-slot path's
-    /// sibling state).
-    suspended_continuation: *const Option<*mut u8>,
 }
 
 /// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
@@ -806,37 +796,6 @@ impl Drop for RegistryGuard {
             (*self.machine_state).clear_cancel_flag();
             let _ = (*self.machine_state).take_runtime_error();
             let _ = (*self.machine_state).drain_diagnostics();
-            // PARKED-STREAM LIFETIME: `parked_streams` is machine-global
-            // (`MachineState`, not per-frame), but a continuation can cross a
-            // suspend boundary — this run's own suspend, OR a sibling realm's
-            // — while still holding an UNFORCED streamed-response tail thunk
-            // (`host_fns::streaming`'s `alloc_stream_tail_thunk`/
-            // `alloc_element_thunk`) that names an entry in this map. Clearing
-            // unconditionally on every run's teardown (the pre-fix behavior)
-            // orphaned that entry the instant ANY run on the machine
-            // returned — including the very run that just parked it — so
-            // forcing the tail later hit a clean but wrong "registry entry
-            // missing (stale continuation?)" error even with no bug in the
-            // continuation itself. Clearing only when NOTHING is left
-            // suspended (neither the single slot nor the registry) defers the
-            // clear until the map is genuinely unreachable from any live
-            // continuation — see `realm_stream_registry_lifetime.rs` for the
-            // red (unconditional clear) / green (this guard) receipt.
-            //
-            // GROWTH, named because it is the normal case rather than a corner:
-            // while ANY realm stays parked the map is never cleared, so entries
-            // accumulate across every run in between. A cycle's outer driver is
-            // parked for the whole cycle, so that is the steady state, not an
-            // edge. It is bounded by the machine's life and reclaimed on drop
-            // (`free_session_heap`), which is exactly what cycle-scoped
-            // lifetime buys — the same bound every other per-machine registry
-            // here relies on. An immortal machine would make this unbounded,
-            // which is one more reason cycle-scoping is load-bearing.
-            let nothing_suspended =
-                (*self.continuations).is_empty() && (*self.suspended_continuation).is_none();
-            if nothing_suspended {
-                (*self.machine_state).clear_parked_streams();
-            }
             (*self.machine_state).reset_call_depth();
         }
         // D7: this drops only the thread-local's Rc *handle* to the lambda
@@ -1082,8 +1041,6 @@ impl JitEffectMachine {
             reclaim: None,
             machine_state: machine_state_ptr,
             prev_machine,
-            continuations: &self.continuations as *const _,
-            suspended_continuation: &self.suspended_continuation as *const _,
         }
     }
 
@@ -1965,7 +1922,6 @@ impl JitEffectMachine {
             &mut machine,
             continuation,
             tidepool_effect::Response::Complete(answer),
-            table,
             suspend_tag,
             "",
         ) {
@@ -3451,11 +3407,10 @@ unsafe fn resolve_tail_calls_protected(
     Ok(ptr)
 }
 
-/// Normalized effect-response materialization: a stream to park, a Value to
-/// convert eagerly, or an already-materialized heap pointer (kill-switch
-/// drains). Shared by the one effect-drive loop below.
+/// Normalized effect-response materialization: a Value to convert eagerly,
+/// or an already-materialized heap pointer (the iterative list path).
+/// Shared by the one effect-drive loop below.
 enum ResponsePlan {
-    Park(crate::host_fns::ParkedStream),
     Eager(tidepool_eval::value::Value),
     Ready(*mut u8),
 }
@@ -3745,7 +3700,6 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                     machine,
                     continuation,
                     response,
-                    table,
                     tag,
                     resume_suffix,
                 )?;
@@ -3765,7 +3719,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
 /// exactly as before, so its behavior is unchanged.
 ///
 /// `continuation` is GC-rooted here for the duration: response materialization
-/// (`value_to_heap` / `alloc_stream_tail_thunk` / `materialize_cons_list`) can
+/// (`value_to_heap` / `materialize_cons_list`) can
 /// allocate and collect, which would move the continuation out from under the
 /// `machine.resume` below. The in-loop caller also holds its own arm root
 /// across request forcing; this extra registration harmlessly overlaps it
@@ -3774,7 +3728,6 @@ fn materialize_response_and_resume(
     machine: &mut CompiledEffectMachine,
     mut continuation: *mut u8,
     response: tidepool_effect::Response,
-    table: &DataConTable,
     tag: u64,
     resume_suffix: &str,
 ) -> Result<Yield, JitError> {
@@ -3787,98 +3740,50 @@ fn materialize_response_and_resume(
         crate::host_fns::register_rust_root(vmctx_ptr, &mut continuation as *mut *mut u8);
     }
 
-    // Response materialization. Two channels:
-    //
-    // Stream: the handler parked nothing and built nothing —
-    // elements convert per-pull, chunk-by-chunk, as Haskell forces
-    // tails (`take k` of a huge listing converts ~one chunk; an
-    // infinite producer is a legitimate infinite list). With the
-    // TIDEPOOL_LAZY_RESULTS=0 kill-switch the stream drains
-    // eagerly through the node cap instead.
-    //
-    // Complete: classic Value. Long list spines are flattened BY
-    // VALUE (iterative dismantle) and re-parked as a pre-converted
-    // stream — a deep spine must never reach a recursive Drop or
-    // recursive value_to_heap (~3 stack frames per cell overflow
-    // the eval thread; the fault lands outside signal protection
-    // and silently kills the thread — see .tidepool/crash.log).
-    // The node cap remains as a backstop for large non-list
-    // responses.
-    const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
+    // Response materialization. A list response (or a long list spine
+    // inside a Complete value) goes through ITERATIVE dismantle +
+    // `materialize_cons_list` — a deep spine must never reach a recursive
+    // Drop or recursive value_to_heap (~3 stack frames per cell overflow
+    // the eval thread; the fault lands outside signal protection and
+    // silently kills the thread). Everything else converts eagerly via
+    // value_to_heap. The node cap bounds every channel.
+    const LONG_SPINE_THRESHOLD_NODES: usize = 2_000;
     const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
-    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
-        .map(|v| v != "0")
-        .unwrap_or(true);
 
     let plan = match response {
-        tidepool_effect::Response::Stream(s) => {
-            let (mut source, cons_id, nil_id) = s.into_parts();
-            if lazy_enabled {
-                ResponsePlan::Park(crate::host_fns::ParkedStream {
-                    source,
-                    cons_tag: cons_id.0,
-                    nil_tag: nil_id.0,
-                    table: table.clone(),
-                })
-            } else {
-                // Kill-switch: drain through the node cap. (This
-                // makes infinite producers a clean TooLarge error
-                // instead of divergence.)
-                let mut items = Vec::new();
-                let mut nodes = 0usize;
-                let mut too_large = false;
-                while let Some(r) = source.next_value(table) {
-                    let v = r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
-                    nodes += 3 + v.node_count();
-                    items.push(v);
-                    if nodes > MAX_EFFECT_RESPONSE_NODES {
-                        too_large = true;
-                        break;
-                    }
-                }
-                if too_large {
-                    return Err(JitError::EffectResponseTooLarge {
-                        nodes,
-                        limit: MAX_EFFECT_RESPONSE_NODES,
-                    });
-                }
-                let p = unsafe {
-                    crate::signal_safety::with_signal_protection(|| {
-                        crate::host_fns::materialize_cons_list(
-                            machine.vmctx_mut(),
-                            cons_id.0,
-                            nil_id.0,
-                            &items,
-                        )
-                    })
-                }
-                .map_err(JitError::Signal)?;
-                if let Some(err) = crate::host_fns::take_runtime_error() {
-                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-                }
-                ResponsePlan::Ready(p)
+        tidepool_effect::Response::List {
+            items,
+            cons_id,
+            nil_id,
+        } => {
+            let nodes = 3 * items.len() + items.iter().map(|v| v.node_count()).sum::<usize>();
+            if nodes > MAX_EFFECT_RESPONSE_NODES {
+                return Err(JitError::EffectResponseTooLarge {
+                    nodes,
+                    limit: MAX_EFFECT_RESPONSE_NODES,
+                });
             }
+            let p = unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    crate::host_fns::materialize_cons_list(
+                        machine.vmctx_mut(),
+                        cons_id.0,
+                        nil_id.0,
+                        &items,
+                    )
+                })
+            }
+            .map_err(JitError::Signal)?;
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+            }
+            ResponsePlan::Ready(p)
         }
         tidepool_effect::Response::Complete(resp_val) => {
             let spine =
-                probe_list_spine(&resp_val).filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
+                probe_list_spine(&resp_val).filter(|&(_, _, len)| len > LONG_SPINE_THRESHOLD_NODES);
             match spine {
-                Some((cons_tag, nil_tag, len)) if lazy_enabled => {
-                    // Re-park the dismantled spine as a
-                    // pre-converted stream: one registry, one chunk
-                    // materializer for both channels.
-                    let items = dismantle_list_spine(resp_val, len);
-                    ResponsePlan::Park(crate::host_fns::ParkedStream {
-                        source: Box::new(crate::host_fns::ReadySource::new(items)),
-                        cons_tag,
-                        nil_tag,
-                        // Pre-converted: table never consulted.
-                        table: tidepool_repr::DataConTable::new(),
-                    })
-                }
                 Some((cons_tag, nil_tag, len)) => {
-                    // Kill-switch: eager iterative materialization,
-                    // cap still applies.
                     let items = dismantle_list_spine(resp_val, len);
                     let nodes = 3 * len + items.iter().map(|v| v.node_count()).sum::<usize>();
                     if nodes > MAX_EFFECT_RESPONSE_NODES {
@@ -3909,42 +3814,6 @@ fn materialize_response_and_resume(
     };
     let resp_ptr = match plan {
         ResponsePlan::Ready(p) => p,
-        ResponsePlan::Park(stream) => {
-            let id = crate::host_fns::park_stream(stream);
-            // SAFETY: vmctx is valid with installed GC state. One
-            // GC-and-retry via the shared `gc_retry` helper, matching the
-            // Eager arm below: `continuation` is already a registered
-            // rust_root (above), so the retry's collection evacuates it
-            // safely, and a transient nursery-full for this (small,
-            // fixed-size) tail-thunk allocation is recoverable rather than
-            // fatal.
-            //
-            // NESTED RETRY, not a second policy layer: `alloc_stream_tail_thunk`
-            // already retries internally via `host_alloc_gc` (also `gc_retry`-
-            // based), so on the failure path this can run alloc→gc→alloc→gc
-            // (inner) →alloc→gc→alloc (outer) — up to two collections, not
-            // `gc_retry`'s documented one. This outer wrap exists as
-            // defence-in-depth against that inner retry being removed or
-            // this allocation growing past what one collection can satisfy,
-            // not because one collection is insufficient today (it isn't —
-            // see the load test's module doc for the evidence).
-            let p = unsafe {
-                crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::gc_retry(
-                        vmctx_ptr,
-                        |p: &*mut u8| p.is_null(),
-                        || crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0),
-                    )
-                })
-            }
-            .map_err(JitError::Signal)?;
-            if p.is_null() {
-                return Err(JitError::HeapBridge(
-                    heap_bridge::BridgeError::NurseryExhausted,
-                ));
-            }
-            p
-        }
         ResponsePlan::Eager(resp_val) => {
             let nodes = resp_val.node_count();
             if nodes > MAX_EFFECT_RESPONSE_NODES {

@@ -170,13 +170,12 @@ capped without an edit there.
    walk full coverage without tripping the environment's kill.
 4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
    <crate>` (or targeted per-test). A handful of multi-hundred-second suites
-   (`lazy_consumption_property_suite`, `effectful_lazy_ab_x8`,
-   `corpus_report`, `haskell_suite_differential`,
+   (`corpus_report`, `haskell_suite_differential`,
    `tidepool-testing::haskell_verified`) early-return with a
    `SKIPPED (expensive)` line unless `TIDEPOOL_EXPENSIVE_TESTS=1` is set —
    this holds even under `--ignore-default-filter`, so tier 3 alone never
    accidentally triggers them. Run these deliberately, one at a time, outside
-   the ~380s assumption (`lazy_consumption_property_suite` alone is ~900s).
+   the ~380s assumption (some run for many hundreds of seconds).
 
 Never run bare `scripts/battery.sh` (tier 0, unbounded) expecting it to
 complete here — use tier 2 or 3.

@@ -597,7 +597,7 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
     // The generation counter must still have adopted the fixture's `1`: the
     // next successful cycle (starting fresh, since `restored` is `None`)
     // commits generation 2, not 1.
-    let outcome = driver
+    let _outcome = driver
         .run_one_cycle(&current_source, restored.as_ref())
         .await
         .expect("a cycle from fresh initialState after a discarded checkpoint must succeed");

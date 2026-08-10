@@ -96,7 +96,7 @@ fn make_table() -> DataConTable {
         (5, "Union", 1, 2),
         (6, ":", 2, 2),
         (7, "[]", 1, 0),
-        // I# boxes `respond_stream`/`respond_list` integer elements (i64::ToCore).
+        // I# boxes `respond_list` integer elements (i64::ToCore).
         (8, "I#", 1, 1),
     ] {
         t.insert(DataCon {
@@ -132,7 +132,7 @@ enum Spec {
     /// `Complete(<cons spine of length n>)` — probes `probe_list_spine` /
     /// `dismantle_list_spine` / re-park (n past `LAZY_SPINE_THRESHOLD_NODES`).
     HugeList(usize),
-    /// `Stream(0..n)` via `respond_stream` — parked iterator source. Sizes are
+    /// `Stream(0..n)` via `respond_list` — an eager list response. Sizes are
     /// chosen around chunk boundaries (255/256/257/4096).
     Stream(usize),
     /// `Complete(Lit(String))` fed into an integer continuation — shape
@@ -161,7 +161,7 @@ impl Spec {
                 }
                 Ok(acc.into())
             }
-            Spec::Stream(n) => cx.respond_stream(0..*n as i64),
+            Spec::Stream(n) => cx.respond_list((0..*n as i64).collect::<Vec<i64>>()),
             Spec::Str(s) => Ok(Value::Lit(Literal::LitString(s.clone().into_bytes())).into()),
             Spec::Double(d) => Ok(Value::Lit(Literal::LitDouble(d.to_bits())).into()),
             Spec::Err => Err(EffectError::Handler("scripted error".into())),

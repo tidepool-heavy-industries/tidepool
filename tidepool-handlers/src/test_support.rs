@@ -3,17 +3,17 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
-/// Unwrap a handler Response: Complete passes through; Stream drains into
-/// the equivalent cons-list Value.
+/// Unwrap a handler Response: Complete passes through; a List builds the
+/// equivalent cons-list Value (iteratively, back-to-front).
 pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> Value {
+    let _ = table;
     match r {
         tidepool_effect::Response::Complete(v) => v,
-        tidepool_effect::Response::Stream(s) => {
-            let (mut source, cons_id, nil_id) = s.into_parts();
-            let mut items = Vec::new();
-            while let Some(i) = source.next_value(table) {
-                items.push(i.expect("stream element conversion"));
-            }
+        tidepool_effect::Response::List {
+            items,
+            cons_id,
+            nil_id,
+        } => {
             let mut acc = Value::Con(nil_id, vec![]);
             for i in items.into_iter().rev() {
                 acc = Value::Con(cons_id, vec![i, acc]);
