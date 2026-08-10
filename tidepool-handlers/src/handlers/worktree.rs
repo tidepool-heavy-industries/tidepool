@@ -61,9 +61,15 @@ impl WorktreeHandler {
 // `String` where the domain carries `PathBuf`/newtypes). Field ORDER in the
 // wire structs is the wire contract (matches `worktree_effect_def!`'s
 // `type_defs` positionally) and must never be reordered here.
+//
+// The handful marked `pub(crate)` are REUSED by `handlers::agent` — the
+// Subagent wire types embed the Worktree ones (`AgSpawnWorkspace` carries a
+// `WtWorktreeSpec`/`WtWorktreeId`, `AgWorkerRun` a `WtWorktreeHandle`, and the
+// wire `SpawnError` carries this module's wire `WorktreeError`), so a second
+// copy over there would be two conversions to keep in step with one contract.
 // ============================================================================
 
-fn worktree_id_to_wire(id: &WorktreeId) -> WtWorktreeId {
+pub(crate) fn worktree_id_to_wire(id: &WorktreeId) -> WtWorktreeId {
     WtWorktreeId {
         raw: id.as_str().to_string(),
     }
@@ -74,7 +80,7 @@ fn worktree_id_to_wire(id: &WorktreeId) -> WtWorktreeId {
 /// `WorktreeNotRegistered` — semantically true (no such id was ever minted)
 /// and, load-bearingly, BEFORE the value can reach the registry/binding code
 /// that joins ids into file paths.
-fn worktree_id_from_wire(id: &WtWorktreeId) -> Result<WorktreeId, WorktreeError> {
+pub(crate) fn worktree_id_from_wire(id: &WtWorktreeId) -> Result<WorktreeId, WorktreeError> {
     if !WorktreeId::is_path_safe(&id.raw) {
         return Err(never_registered(id));
     }
@@ -149,7 +155,7 @@ fn dirty_policy_from_wire(policy: WtDirtyPolicy) -> DirtyPolicy {
     }
 }
 
-fn spec_from_wire(spec: WtWorktreeSpec) -> Result<WorktreeSpec, WorktreeError> {
+pub(crate) fn spec_from_wire(spec: WtWorktreeSpec) -> Result<WorktreeSpec, WorktreeError> {
     Ok(WorktreeSpec {
         source: worktree_source_from_wire(spec.spec_source)?,
         label: spec.spec_label,
@@ -168,7 +174,7 @@ fn receipt_to_wire(r: &WorktreeReceipt) -> WtWorktreeReceipt {
     }
 }
 
-fn handle_to_wire(h: &WorktreeHandle) -> WtWorktreeHandle {
+pub(crate) fn handle_to_wire(h: &WorktreeHandle) -> WtWorktreeHandle {
     WtWorktreeHandle {
         handle_receipt: receipt_to_wire(h.receipt()),
     }
@@ -186,7 +192,7 @@ fn summary_to_wire(s: &WorktreeSummary) -> WtWorktreeSummary {
 /// block, now ten variants in the same order — the original seven plus
 /// `WorktreeNotRegistered`/`InvalidRegistryRoot`/`StorageFailure`, added to the
 /// wire block once the storage-error lane grew the domain type to match).
-fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
+pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
     match e {
         DomainWorktreeError::SourceDirty(d) => {
             WorktreeError::SourceDirty(dirty_summary_to_wire(&d))
@@ -234,7 +240,7 @@ fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
 /// registered — distinct from `WorktreeLost` (registered, then gone from
 /// disk). See `worktree_lookup`'s doc comment and `error_to_wire`'s
 /// `WorktreeNotRegistered` arm above, which this stays consistent with.
-fn never_registered(tree_id: &WtWorktreeId) -> WorktreeError {
+pub(crate) fn never_registered(tree_id: &WtWorktreeId) -> WorktreeError {
     WorktreeError::WorktreeNotRegistered(tree_id.clone())
 }
 
