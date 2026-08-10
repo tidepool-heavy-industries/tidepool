@@ -119,7 +119,13 @@ impl Default for EventConfig {
             // trip, a spawned reviewer) never trips it, shallow enough that a
             // genuinely wedged handler fails in bounded memory.
             queue_bound: 1024,
-            poll_interval: Duration::from_millis(250),
+            // DERIVED from the substrate's one reasoned default (measured
+            // cost + latency budget on that constant's doc), not restated: a
+            // second hand-written figure here once disagreed with it by 20x
+            // and silently multiplied the git traffic the reasoning budgeted.
+            poll_interval: Duration::from_millis(
+                tidepool_worktree::DEFAULT_POLL_INTERVAL_MS,
+            ),
         }
     }
 }
