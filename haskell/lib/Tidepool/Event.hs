@@ -11,7 +11,7 @@
 -- @
 -- 'withHandler' ('headChanged' parentTree) (\\change ->
 --   for_ childAgents $ \\child ->
---     sendMessage child (RebaseWhenSafe (newHead (value change)))
+--     pokeAgent child (whenSafe (Rebase (newHead (value change))))
 --   ) $ do
 --     parent <- spawnAgent parentSpec parentTask
 --     waitAgent parent

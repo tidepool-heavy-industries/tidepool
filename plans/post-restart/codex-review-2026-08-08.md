@@ -421,3 +421,62 @@ Workspace check clean after repair. The lesson is item counting: their
 receipts said "two semantic merge regressions caught and fixed at fold";
 the gate found a third and fourth. A divergent-branch fold's semantic
 break count is not knowable from the merge — only from the build.
+
+## 19. External review pass (two codex reviewers, 2026-08-09 post-centralization) — triaged
+
+Reviewer 2 read ed56cb96 (pre extract-wave fold): its topology claims
+(extract-wave unmerged/142 ahead, no checkpoint branch) are STALE —
+that fold landed at b6180c16. Code-level findings below survive
+independent of topology. FIXED IMMEDIATELY (model-facing doc drift,
+committed with this entry): Worktree.hs taught read-HEAD-then-register,
+reopening the TOCTOU that PRD 19's register-then-reconcile-inside-scope
+closed; Event.hs's example used the retired sendMessage spelling instead
+of pokeAgent/whenSafe. Both now match the PRDs.
+
+BUG-HUNT QUEUE (new, verified-by-inspection claims — each needs a
+confirming test before a fix):
+- R2.1 HIGH: WorktreeId (id.rs:14) accepts arbitrary text and flows into
+  path components (handlers/worktree.rs:72, registry.rs:202,
+  binding.rs:137) — separators/.. can escape managed roots. Also
+  create.rs:175 does not enforce worktree_root-outside-repo. Validate
+  where wire values become domain values.
+- R2.2 HIGH: manager-owned dirty-snapshot path — create.rs:205 hands
+  snapshot.rs:74 a nested GIT_INDEX_FILE dir that is never created
+  before git read-tree. No coverage exercises dirty capture through
+  WorktreeManager::create.
+- R2.3 HIGH (= R1.5a): FormAnswer::Unit round-trip — web server
+  (server.rs:279-280) coerces any non-object answer to {}, Haskell
+  rejects and re-prompts; askUser @() and nullary single-constructor
+  types can never complete. Fix transport, keep object-adaptation to
+  the legacy flat path only.
+- R2.4 HIGH: journal tolerates a malformed final row in memory but never
+  truncates it (journal.rs:89) — later appends land after garbage.
+  monitor.rs:319 partial reconciliation batch + retained baseline can
+  duplicate commits under new EventIds. Needs tail repair + idempotent
+  batches. (Adjacent to, not covered by, worktree-wave's mid-row fix.)
+- R2.5 HIGH: binding.rs:105 is in-memory check + rewrite — no
+  interprocess CAS, two processes can bind one worktree. Single-owning-
+  server assumption must become explicit (doc) or enforced (lock);
+  binding becomes transactional inside coupled spawn when agent-core
+  lands.
+- R2.6 MED-HIGH: harness.rs:405 error-coordinate attribution prefers
+  Expr on overlapping windows — a Bind error can get the Expr excerpt.
+  Compile protocol should carry candidate identity. (The lane disclosed
+  window-containment as non-guessing; overlap is the case that breaks
+  that claim.)
+- R2.7 MED: git.rs:181 drops rename origin paths (stale old path in
+  synthetic tree); snapshot.rs:170 treats submodule-status failure as
+  no-submodules (fail-open against the crate's fail-loud contract).
+- R2.8 MED (= R1.5b): polling defaults disagree — monitor.rs:113 5s vs
+  handlers/event.rs:115-117 250ms (20x git traffic). Pick one, derive
+  the other.
+
+DESIGN LEDGER (not bugs; next-construction order both reviewers agree
+on): (a) withHandler is cooperative polling — a parked waitAgent is not
+woken by a commit; event arrival must eventually schedule a resident
+cycle via the same runtime-owned wakeup as mailbox arrival (R1.1);
+(b) the one-cycle coupled-spawn vertical (agent-core lane 1) is the
+missing vertical, then runtime-owned wakeups, then the dev-tree example
+becomes a policy program (R1.3, matches the standing Chain B plan);
+(c) PRD 14 persistence codec still asymmetric (state_cross.rs) —
+checkpoint-persistence-lane.md owns it; PRD 14 is not "complete" until.

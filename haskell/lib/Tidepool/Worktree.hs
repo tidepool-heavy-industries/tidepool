@@ -52,12 +52,17 @@
 --
 -- A subscription never replays and lives only for its cycle, so @HEAD@ can move
 -- after one cycle unregisters and before the next registers.  A resident
--- reconciles that window itself, in ordinary code, before going live:
+-- reconciles that window itself, in ordinary code, as the FIRST ACTION inside
+-- the newly registered handler scope — registration is active before the read,
+-- so a movement before registration is found by the reconciliation read while
+-- a movement after it is queued for the handler (deduplicate by observed head
+-- if both paths see the same movement).  Reading @HEAD@ before registering
+-- instead reopens the very window this closes:
 --
 -- @
--- current <- 'worktreeHead' tree
--- when (current \/= checkpointedHead) (reactToMissedMovement current)
 -- 'Tidepool.Event.withHandler' ('Tidepool.Event.headChanged' tree) onChange $ do
+--   current <- 'worktreeHead' tree
+--   when (current \/= checkpointedHead) (reactToMissedMovement current)
 --   ...
 -- @
 --
