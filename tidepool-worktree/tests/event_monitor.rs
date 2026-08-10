@@ -736,3 +736,109 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
         "every surviving row plus the appended one must be readable"
     );
 }
+
+/// Retry idempotency for a mid-batch failure. A pass that died AFTER
+/// journalling a gained commit but BEFORE its `HeadChanged` never advanced
+/// the baseline, so the retry (or a restarted process — `register` recovers
+/// baselines from `HeadChanged` rows only) rebuilds the same observations.
+/// The already-journalled commit must be DELIVERED (nobody saw the failed
+/// pass's events) but NOT journalled twice, and it keeps its journalled
+/// EventId.
+#[test]
+fn reconcile_retry_delivers_but_does_not_rejournal_a_failed_pass_leftover() {
+    use tidepool_worktree::{CommitReceipt, EventId, EventJournal, WorktreeMonitor};
+
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("a.txt", "one", "first").expect("commit");
+    let first = repo
+        .git()
+        .try_run(repo.path(), &["rev-parse", "HEAD"])
+        .expect("rev-parse")
+        .trimmed()
+        .to_string();
+    w.commit_file("b.txt", "two", "second").expect("commit");
+    let second = repo
+        .git()
+        .try_run(repo.path(), &["rev-parse", "HEAD"])
+        .expect("rev-parse")
+        .trimmed()
+        .to_string();
+
+    // Wind HEAD back so registration establishes the PRE-movement baseline.
+    repo.git()
+        .try_run(repo.path(), &["reset", "--hard", &first])
+        .expect("reset to first");
+
+    // The failed pass's leftover: the gained commit's row, journalled, with
+    // no HeadChanged after it.
+    let journal_dir = tempfile::TempDir::new().expect("journal dir");
+    let journal_path = journal_dir.path().join("events.jsonl");
+    let planted_id = EventId(424242);
+    {
+        let mut journal = EventJournal::open(&journal_path).expect("open journal");
+        journal
+            .append(
+                &RepositoryEvent::Commit(CommitReceipt {
+                    worktree: wt("w1"),
+                    oid: tidepool_worktree::GitOid::from_raw(second.clone()),
+                    parents: vec![tidepool_worktree::GitOid::from_raw(first.clone())],
+                    subject: "second".to_string(),
+                    author: "test".to_string(),
+                    committed_at_ms: 0,
+                    files: vec!["b.txt".to_string()],
+                }),
+                planted_id,
+            )
+            .expect("plant leftover row");
+    }
+
+    let journal = EventJournal::open(&journal_path).expect("reopen journal");
+    let mut monitor = WorktreeMonitor::new(GitCli::new(), journal);
+    let id = wt("w1");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .expect("register");
+
+    // The movement happens again (the same transition the failed pass saw).
+    repo.git()
+        .try_run(repo.path(), &["reset", "--hard", &second])
+        .expect("reset forward to second");
+
+    let events = monitor.reconcile(&id).expect("retry reconcile");
+
+    // Delivered: the commit (with the PLANTED id — id-based dedup downstream
+    // stays sound) and the HeadChanged (fresh id).
+    let delivered_commits = commits(&events);
+    assert_eq!(delivered_commits.len(), 1, "the gained commit is delivered");
+    assert_eq!(delivered_commits[0].oid.as_str(), second);
+    let commit_event_id = events
+        .iter()
+        .find(|o| matches!(o.value, RepositoryEvent::Commit(_)))
+        .expect("commit observed")
+        .event_id;
+    assert_eq!(
+        commit_event_id, planted_id,
+        "a re-delivered leftover keeps its journalled EventId"
+    );
+
+    // Journalled: exactly ONE commit row for that oid (the planted one), plus
+    // the HeadChanged. No duplicate receipt under a fresh id.
+    let rows = EventJournal::open(&journal_path)
+        .expect("reopen for audit")
+        .since(0)
+        .expect("since");
+    let commit_rows: Vec<_> = rows
+        .iter()
+        .filter(|e| matches!(&e.event, RepositoryEvent::Commit(c) if c.oid.as_str() == second))
+        .collect();
+    assert_eq!(commit_rows.len(), 1, "no duplicate commit row");
+    assert_eq!(commit_rows[0].event_id, planted_id);
+    assert_eq!(
+        rows.iter()
+            .filter(|e| matches!(e.event, RepositoryEvent::HeadChanged(_)))
+            .count(),
+        1,
+        "the retry journalled its HeadChanged"
+    );
+}

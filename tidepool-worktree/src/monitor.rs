@@ -316,13 +316,82 @@ impl WorktreeMonitor {
             classify(&self.git, &path, &old_head, &new_head)
         };
 
-        let mut events = Vec::new();
-
+        // Build the WHOLE batch before the first journal write: receipt
+        // construction is the failure-prone half (a git read per gained oid),
+        // and failing after a partial journalling would leave rows behind
+        // that a retry could not tell from new work.
+        let mut batch: Vec<RepositoryEvent> = Vec::new();
         match &kind {
             HeadChangeKind::Advanced(gained) => {
                 for oid in gained {
                     let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), oid)?;
-                    let ev = RepositoryEvent::Commit(receipt);
+                    batch.push(RepositoryEvent::Commit(receipt));
+                }
+            }
+            HeadChangeKind::Amended(_, new) => {
+                let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), new)?;
+                batch.push(RepositoryEvent::Commit(receipt));
+            }
+            HeadChangeKind::Rewritten(_)
+            | HeadChangeKind::Rewound
+            | HeadChangeKind::Switched
+            | HeadChangeKind::UnknownChange => {}
+        }
+        batch.push(RepositoryEvent::HeadChanged(HeadChangeReceipt {
+            worktree: worktree.clone(),
+            old_head: Some(old_head),
+            new_head: new_head.clone(),
+            kind,
+            branch: new_branch.clone(),
+            observed_at_ms,
+        }));
+
+        // Append idempotently. A pass that failed mid-batch retained its old
+        // baseline, so the retry rebuilds the same observations — any row the
+        // failed pass already journalled is DELIVERED again (the failed pass
+        // returned Err, so subscribers never saw it) but NOT re-journalled,
+        // and it keeps its journalled EventId so id-based dedup downstream
+        // stays sound.
+        //
+        // The dedup window is NOT the whole journal — a transition can
+        // legitimately recur (A -> B, rewound, A -> B again) and a full-history
+        // match would swallow the genuine second observation. It is exactly
+        // the rows a failed pass can leave: `HeadChanged` is appended last and
+        // the baseline insert after it is infallible, so a pass that
+        // journalled its `HeadChanged` always advanced the baseline and is
+        // not being retried. Leftovers are therefore only COMMIT rows for
+        // this worktree sitting AFTER this worktree's last `HeadChanged`.
+        let worktree_key = worktree.clone();
+        let leftover_commits: Vec<(GitOid, EventId)> = self
+            .journal
+            .iter()
+            .rev()
+            .take_while(|entry| {
+                !matches!(&entry.event, RepositoryEvent::HeadChanged(h) if h.worktree == worktree_key)
+            })
+            .filter_map(|entry| match &entry.event {
+                RepositoryEvent::Commit(c) if c.worktree == worktree_key => {
+                    Some((c.oid.clone(), entry.event_id))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        for ev in batch {
+            let prior_id = match &ev {
+                RepositoryEvent::Commit(c) => leftover_commits
+                    .iter()
+                    .find(|(oid, _)| *oid == c.oid)
+                    .map(|(_, id)| *id),
+                RepositoryEvent::HeadChanged(_) => None,
+            };
+            match prior_id {
+                Some(prior_id) => events.push(Observed {
+                    event_id: prior_id,
+                    value: ev,
+                }),
+                None => {
                     self.journal.append(&ev, event_id)?;
                     events.push(Observed {
                         event_id,
@@ -330,34 +399,7 @@ impl WorktreeMonitor {
                     });
                 }
             }
-            HeadChangeKind::Amended(_, new) => {
-                let receipt = build_commit_receipt(&self.git, &path, worktree.clone(), new)?;
-                let ev = RepositoryEvent::Commit(receipt);
-                self.journal.append(&ev, event_id)?;
-                events.push(Observed {
-                    event_id,
-                    value: ev,
-                });
-            }
-            HeadChangeKind::Rewritten(_)
-            | HeadChangeKind::Rewound
-            | HeadChangeKind::Switched
-            | HeadChangeKind::UnknownChange => {}
         }
-
-        let head_changed = RepositoryEvent::HeadChanged(HeadChangeReceipt {
-            worktree: worktree.clone(),
-            old_head: Some(old_head),
-            new_head: new_head.clone(),
-            kind,
-            branch: new_branch.clone(),
-            observed_at_ms,
-        });
-        self.journal.append(&head_changed, event_id)?;
-        events.push(Observed {
-            event_id,
-            value: head_changed,
-        });
 
         self.baselines.insert(
             worktree.clone(),

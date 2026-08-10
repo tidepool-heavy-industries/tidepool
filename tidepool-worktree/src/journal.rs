@@ -225,6 +225,12 @@ impl EventJournal {
         self.entries.last().map_or(0, |e| e.cursor)
     }
 
+    /// Every journalled entry, oldest first. The monitor's retry-idempotency
+    /// check reads this to recognize an observation it already recorded.
+    pub fn iter(&self) -> std::slice::Iter<'_, JournalEntry> {
+        self.entries.iter()
+    }
+
     /// Rows strictly after `cursor`. For diagnosis and restart recovery only.
     pub fn since(&self, cursor: u64) -> Result<Vec<JournalEntry>, WorktreeError> {
         Ok(self
