@@ -69,8 +69,16 @@ fn worktree_id_to_wire(id: &WorktreeId) -> WtWorktreeId {
     }
 }
 
-fn worktree_id_from_wire(id: &WtWorktreeId) -> WorktreeId {
-    WorktreeId::from_raw(id.raw.clone())
+/// The trust boundary where a wire id becomes a domain id. A raw value that
+/// is not path-safe (separators, dot-dots, empty, over-long) is rejected as
+/// `WorktreeNotRegistered` — semantically true (no such id was ever minted)
+/// and, load-bearingly, BEFORE the value can reach the registry/binding code
+/// that joins ids into file paths.
+fn worktree_id_from_wire(id: &WtWorktreeId) -> Result<WorktreeId, WorktreeError> {
+    if !WorktreeId::is_path_safe(&id.raw) {
+        return Err(never_registered(id));
+    }
+    Ok(WorktreeId::from_raw(id.raw.clone()))
 }
 
 fn git_oid_to_wire(oid: &GitOid) -> WtGitOid {
@@ -124,14 +132,14 @@ fn git_failure_receipt_to_wire(r: GitFailureReceipt) -> WtGitFailureReceipt {
     }
 }
 
-fn worktree_source_from_wire(source: WtWorktreeSource) -> WorktreeSource {
-    match source {
+fn worktree_source_from_wire(source: WtWorktreeSource) -> Result<WorktreeSource, WorktreeError> {
+    Ok(match source {
         WtWorktreeSource::SourceCurrentRepository => WorktreeSource::CurrentRepository,
         WtWorktreeSource::SourceRef(r) => WorktreeSource::Ref(git_ref_from_wire(&r)),
         WtWorktreeSource::SourceWorktree(id) => {
-            WorktreeSource::Worktree(worktree_id_from_wire(&id))
+            WorktreeSource::Worktree(worktree_id_from_wire(&id)?)
         }
-    }
+    })
 }
 
 fn dirty_policy_from_wire(policy: WtDirtyPolicy) -> DirtyPolicy {
@@ -141,12 +149,12 @@ fn dirty_policy_from_wire(policy: WtDirtyPolicy) -> DirtyPolicy {
     }
 }
 
-fn spec_from_wire(spec: WtWorktreeSpec) -> WorktreeSpec {
-    WorktreeSpec {
-        source: worktree_source_from_wire(spec.spec_source),
+fn spec_from_wire(spec: WtWorktreeSpec) -> Result<WorktreeSpec, WorktreeError> {
+    Ok(WorktreeSpec {
+        source: worktree_source_from_wire(spec.spec_source)?,
         label: spec.spec_label,
         dirty_policy: dirty_policy_from_wire(spec.spec_dirty_policy),
-    }
+    })
 }
 
 fn receipt_to_wire(r: &WorktreeReceipt) -> WtWorktreeReceipt {
@@ -235,7 +243,7 @@ impl WorktreeHandler {
     // arm wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
 
     fn worktree_create(&mut self, spec: WtWorktreeSpec) -> Result<WtWorktreeHandle, WorktreeError> {
-        let domain_spec = spec_from_wire(spec);
+        let domain_spec = spec_from_wire(spec)?;
         let handle = self.manager.create(&domain_spec).map_err(error_to_wire)?;
         Ok(handle_to_wire(&handle))
     }
@@ -253,7 +261,7 @@ impl WorktreeHandler {
         &mut self,
         tree_id: WtWorktreeId,
     ) -> Result<WtWorktreeHandle, WorktreeError> {
-        let id = worktree_id_from_wire(&tree_id);
+        let id = worktree_id_from_wire(&tree_id)?;
         match self.manager.lookup(&id).map_err(error_to_wire)? {
             Some(handle) => Ok(handle_to_wire(&handle)),
             None => Err(never_registered(&tree_id)),
@@ -269,7 +277,7 @@ impl WorktreeHandler {
     /// recorded one — reconciled inspection is the only source of truth (see
     /// `tidepool-worktree/CLAUDE.md`).
     fn worktree_branch_of(&mut self, tree_id: WtWorktreeId) -> Result<WtBranchName, WorktreeError> {
-        let id = worktree_id_from_wire(&tree_id);
+        let id = worktree_id_from_wire(&tree_id)?;
         let handle = self
             .manager
             .lookup(&id)
@@ -308,7 +316,7 @@ impl WorktreeHandler {
     /// local `rev-parse`, no `source_head` shortcut.
     #[allow(dead_code)]
     fn worktree_head_of(&mut self, tree_id: WtWorktreeId) -> Result<WtGitOid, WorktreeError> {
-        let id = worktree_id_from_wire(&tree_id);
+        let id = worktree_id_from_wire(&tree_id)?;
         let handle = self
             .manager
             .lookup(&id)
@@ -354,7 +362,7 @@ mod tests {
             spec_label: "dev-tree/root".to_string(),
             spec_dirty_policy: WtDirtyPolicy::RequireClean,
         };
-        let domain = spec_from_wire(wire);
+        let domain = spec_from_wire(wire).expect("valid wire spec");
         assert_eq!(
             domain,
             WorktreeSpec {
@@ -374,7 +382,7 @@ mod tests {
             spec_label: "reviewer".to_string(),
             spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
         };
-        let domain = spec_from_wire(wire);
+        let domain = spec_from_wire(wire).expect("valid wire spec");
         assert_eq!(
             domain,
             WorktreeSpec {
@@ -394,7 +402,7 @@ mod tests {
             spec_label: "child-of-abc123".to_string(),
             spec_dirty_policy: WtDirtyPolicy::RequireClean,
         };
-        let domain = spec_from_wire(wire);
+        let domain = spec_from_wire(wire).expect("valid wire spec");
         assert_eq!(
             domain,
             WorktreeSpec {
@@ -649,6 +657,40 @@ mod tests {
             WorktreeError::WorktreeNotRegistered(WtWorktreeId {
                 raw: "wt-typo".to_string()
             })
+        );
+    }
+
+    /// The wire boundary rejects an id that could act as a path, BEFORE it
+    /// becomes a domain `WorktreeId` (which registry/binding code joins into
+    /// file paths). Rejection spells `WorktreeNotRegistered` — no id outside
+    /// the minted alphabet was ever registered, and the caller learns nothing
+    /// about the filesystem.
+    #[test]
+    fn traversal_shaped_wire_ids_are_rejected_at_the_boundary() {
+        for evil in [
+            "../../../etc/passwd",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            "",
+            "wt-abc/../../x",
+        ] {
+            let wire = WtWorktreeId {
+                raw: evil.to_string(),
+            };
+            assert_eq!(
+                worktree_id_from_wire(&wire),
+                Err(never_registered(&wire)),
+                "{evil:?} must be rejected before becoming a domain id"
+            );
+        }
+        let minted = WtWorktreeId {
+            raw: "wt-19c8-2a4d-0-deadbeef".to_string(),
+        };
+        assert_eq!(
+            worktree_id_from_wire(&minted),
+            Ok(WorktreeId::from_raw("wt-19c8-2a4d-0-deadbeef"))
         );
     }
 }

@@ -135,6 +135,14 @@ impl BindingTable {
     }
 
     fn path_for(&self, worktree: &WorktreeId) -> PathBuf {
+        // Same backstop as `WorktreeRegistry::record_path` — ids are validated
+        // at the wire boundary; here that assumption fails loud, not as an
+        // escape.
+        debug_assert!(
+            WorktreeId::is_path_safe(worktree.as_str()),
+            "worktree id {:?} is not path-safe — a wire boundary failed to validate",
+            worktree.as_str()
+        );
         self.root.join(format!("{}.json", worktree.as_str()))
     }
 

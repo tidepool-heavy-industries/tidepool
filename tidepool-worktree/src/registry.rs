@@ -200,6 +200,14 @@ impl WorktreeRegistry {
     }
 
     fn record_path(&self, id: &WorktreeId) -> PathBuf {
+        // Ids are validated where wire becomes domain (`WorktreeId::is_path_safe`);
+        // this is the backstop that keeps a missed boundary from becoming a
+        // path escape instead of a loud bug.
+        debug_assert!(
+            WorktreeId::is_path_safe(id.as_str()),
+            "worktree id {:?} is not path-safe — a wire boundary failed to validate",
+            id.as_str()
+        );
         self.root
             .join(RECORDS_DIR)
             .join(format!("{}.json", id.as_str()))

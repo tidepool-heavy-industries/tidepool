@@ -210,6 +210,22 @@ impl WorktreeManager {
             path: self.worktree_root.clone(),
             detail: e.to_string(),
         })?;
+        // Never-dirty-the-source, enforced rather than documentary: refuse a
+        // worktree_root that resolves inside a git working tree (same check +
+        // error as `WorktreeRegistry::open` — git walks UP from the root, so
+        // the managed worktrees materialized BELOW this root never trip it).
+        if let Ok(canonical_root) = self.worktree_root.canonicalize() {
+            if let Ok(toplevel) = inspect::work_tree(&self.git, &canonical_root) {
+                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
+                    if canonical_root.starts_with(&canonical_toplevel) {
+                        return Err(WorktreeError::InvalidRegistryRoot {
+                            root: canonical_root,
+                            inside: canonical_toplevel,
+                        });
+                    }
+                }
+            }
+        }
         let cwd = self.worktree_root.join(id.as_str());
         let branch = BranchName::from_raw(format!(
             "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",

@@ -20,6 +20,23 @@ impl WorktreeId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether `raw` is safe to become a domain id at a TRUST BOUNDARY.
+    ///
+    /// Ids are joined into registry/binding file paths as a single component
+    /// (`<root>/<id>.json`), so a wire value containing a path separator (or
+    /// an over-long/empty token) is a path escape, not a lookup miss. Minted
+    /// ids (`wt-<hex>-…`) always satisfy this; anything else arriving on the
+    /// wire must be rejected BEFORE it becomes a `WorktreeId`. Validation
+    /// lives here (where wire becomes domain) rather than in `from_raw`,
+    /// which trusts its callers (registry load of self-minted rows, fixtures).
+    pub fn is_path_safe(raw: &str) -> bool {
+        !raw.is_empty()
+            && raw.len() <= 128
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
 }
 
 impl std::fmt::Display for WorktreeId {
