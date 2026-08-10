@@ -22,7 +22,7 @@ generates the `*_decl()` builder, and `effect_rust_projection!`
 (`tidepool-handlers/src/effect_glue.rs`) generates the `*Req` enum +
 `DescribeEffect` + dispatch. Adding a constructor = one `verbs` row in the
 definition + one hand-written inherent method on the handler struct (using
-`cx.respond`/`respond_stream`/`respond_list`, or an errors-tagged method
+`cx.respond`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called

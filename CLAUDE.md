@@ -90,7 +90,7 @@ in that directory):
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
 - `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
-  handler arm, the three `cx.respond*` variants, sandbox enforcement.
+  handler arm, the `cx.respond`/`respond_list` variants, sandbox enforcement.
 - `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
   mechanism, repl-specific usage notes.

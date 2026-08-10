@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn humanize_key_positional_key_passthrough() {
+    fn humanize_key_digit_key_passes_through() {
         assert_eq!(humanize_key("1"), "1");
     }
 
