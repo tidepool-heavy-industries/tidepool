@@ -123,9 +123,7 @@ impl Default for EventConfig {
             // cost + latency budget on that constant's doc), not restated: a
             // second hand-written figure here once disagreed with it by 20x
             // and silently multiplied the git traffic the reasoning budgeted.
-            poll_interval: Duration::from_millis(
-                tidepool_worktree::DEFAULT_POLL_INTERVAL_MS,
-            ),
+            poll_interval: Duration::from_millis(tidepool_worktree::DEFAULT_POLL_INTERVAL_MS),
         }
     }
 }

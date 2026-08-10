@@ -1755,6 +1755,128 @@ macro_rules! event_effect_def {
     };
 }
 
+/// Subagent effect — single definition (PRD 18 LANE 1: the one-cycle coupled
+/// spawn). PROVISIONAL by charter: this lane exists to inform PRD 18's
+/// freezes, and every shape here may be renamed when root freezes the public
+/// surface (in particular, the GADT is `Subagent` rather than `Agent` because
+/// `Tidepool.Agent` is the harness answerer's module and the rename is root's
+/// call — see `plans/post-restart/agent-lanes/inheritance-for-agent-core.md`
+/// §8, and `lane1-scaffold-plan.md` for every other interpretation call).
+///
+/// **One verb.** `spawnAgent` is the whole lane-1 authored surface: ONE call
+/// atomically resolves a workspace (new managed worktree, or an existing
+/// unbound one), binds it, dispatches one task to the backend, runs ONE work
+/// cycle, and returns a typed outcome + receipt — or ONE case-matchable
+/// `SpawnError` naming the saga stage that failed, with the rollback already
+/// done (no Active binding left behind; a created worktree is RETAINED and
+/// rebindable, per retain-first). `createWorktree` deliberately remains
+/// non-public vocabulary for agent work (addendum decision 4); this effect
+/// does not re-export it.
+///
+/// **Row requirement.** These types reference `WorktreeSpec` /
+/// `WorktreeHandle` / `WorktreeError` from `worktree_effect_def!`'s
+/// type_defs, so a row containing Subagent must also contain Worktree.
+///
+/// **Typed-result decoding is Haskell-side.** The verb returns the terminal
+/// payload as a `CyclePayload`; decoding `PayloadStructured` against the
+/// caller's result type is `Tidepool.Agent.ModelCodec`'s job (named-field
+/// polarity — NOT the positional gate-1(b) shape), and a decode failure is a
+/// typed error, never a success.
+// See `http_effect_def!` on why `crate::` (not `$crate`) is correct here:
+// `crate::handlers::worktree::WorktreeError` / `crate::effect_glue::JsonArg`
+// resolve at the EXPANSION site (tidepool-handlers), the only consumer of the
+// Rust arg types.
+#[allow(clippy::crate_in_macro_def)]
+#[macro_export]
+macro_rules! subagent_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Subagent,
+            handler SubagentHandler,
+            req SubagentReq,
+            decl_fn subagent_decl,
+            description [
+                "Typed headless subagents (LANE 1: one-cycle coupled spawn). ",
+                "`spawnAgentRaw spec schema` is ONE atomic call: it allocates or takes a ",
+                "managed worktree, binds it to a fresh agent, dispatches the task to the ",
+                "coding backend, runs ONE work cycle in that worktree, and returns a ",
+                "`SpawnOutcome` (the WorkerRun pair, the terminal payload, and a receipt ",
+                "naming the worktree, binding, backend thread, and EXACT resolved model) ",
+                "— or a case-matchable `SpawnError` naming the saga stage that failed, ",
+                "with the rollback already done: no binding is left active, and a created ",
+                "worktree is retained and rebindable, never deleted. Build the spec with ",
+                "`spawnSpec` (new worktree) or `spawnSpecIn` (existing unbound worktree).",
+            ],
+            type_defs [
+                "data AgentId = AgentId Int deriving (Show, Eq)",
+                "data BackendThreadId = BackendThreadId Text deriving (Show, Eq)",
+                "data SpawnWorkspace = SpawnNewWorktree WorktreeSpec | SpawnExistingWorktree WorktreeId deriving (Show, Eq)",
+                "data SpawnSpec = SpawnSpec { spawnWorkspace :: SpawnWorkspace, spawnAgentLabel :: Text, spawnTask :: Text } deriving (Show, Eq)",
+                "data SpawnStage = StageAllocating | StageWorktreeReady | StageBound | StageThreadAccepted | StageRunning deriving (Show, Eq)",
+                "data BackendFailure = BackendUnavailable Text | ProtocolRejected Text | RunFailed Text deriving (Show, Eq)",
+                "data CyclePayload = PayloadStructured Value | PayloadUnstructured Text | PayloadAbsent deriving (Show, Eq)",
+                "data WorkerRun = WorkerRun { runAgent :: AgentId, runWorktree :: WorktreeHandle, runThread :: BackendThreadId } deriving (Show, Eq)",
+                "data SpawnReceipt = SpawnReceipt { receiptAgent :: AgentId, receiptWorktree :: WorktreeId, receiptBindingRef :: Text, receiptThread :: BackendThreadId, receiptModel :: Text, receiptTurn :: Text } deriving (Show, Eq)",
+                "data SpawnOutcome = SpawnOutcome { outcomeRun :: WorkerRun, outcomePayload :: CyclePayload, outcomeReceipt :: SpawnReceipt } deriving (Show, Eq)",
+                // ToJSON for every type reachable from a SpawnError field (the
+                // errors block templates the SpawnError instance itself). The
+                // vendored generic default rejects multi-constructor sums, so
+                // these are hand-written, same as the Worktree family's.
+                "instance ToJSON SpawnStage where toJSON s = toJSON (show s)",
+                "instance ToJSON BackendFailure where { toJSON (BackendUnavailable t) = object [\"backendUnavailable\" .= t]; toJSON (ProtocolRejected t) = object [\"protocolRejected\" .= t]; toJSON (RunFailed t) = object [\"runFailed\" .= t] }",
+            ],
+            // Typed per-verb failure (#335) + PRD 18 addendum decision 2
+            // (typed failure results everywhere; variant list is this lane's
+            // contact with reality, deliberately provisional).
+            errors SpawnError [
+                { ctor SpawnWorktreeFailed, fields { stage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, worktreeFailure: "WorktreeError" as crate::handlers::worktree::WorktreeError },
+                  doc "the workspace could not be resolved: creation failed, or an existing id was lost/unregistered" },
+                { ctor SpawnBindingFailed, fields { bindStage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, bindingFailure: "WorktreeError" as crate::handlers::worktree::WorktreeError },
+                  doc "the binding was refused (WorktreeBusy names the holder) or could not be persisted" },
+                { ctor SpawnBackendFailed, fields { backendStage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, backendFailure: "BackendFailure" as tidepool_bridge_effects::AgBackendFailure },
+                  doc "the backend failed; the stage distinguishes a rejected thread from a failed cycle" },
+                { ctor SpawnRollbackFailed, fields { rollbackStage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, originalFailure: "Text" as String, rollbackFailure: "Text" as String },
+                  doc "the rollback itself failed — both failures carried, rendered; never a silent swallow" },
+                { ctor SpawnResultMalformed, fields { malformedDetail: "Text" as String },
+                  doc "the structured terminal payload did not decode to the requested result type — produced by the Haskell-side decoder, never sent by Rust" },
+            ],
+            verbs [
+                { ctor SubagentSpawn, method subagent_spawn,
+                  args { spec: "SpawnSpec" as tidepool_bridge_effects::AgSpawnSpec, schema: "Value" as crate::effect_glue::JsonArg },
+                  ret "SpawnOutcome", errors SpawnError },
+            ],
+            helpers [
+                { raw ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
+                       "-- backend cycle, atomically; `schema` is the JSON Schema the terminal",
+                       "-- result must conform to. Prefer the typed wrapper in",
+                       "-- `Tidepool.Agent.ModelCodec` (schema derived from your result type,",
+                       "-- payload decoded for you); this is its substrate.",
+                       "spawnAgentRaw :: SpawnSpec -> Value -> M (Either SpawnError SpawnOutcome)",
+                       "spawnAgentRaw spec schema = send (SubagentSpawn spec schema)"] },
+                { raw ["-- | Spawn in a NEW managed worktree: worktree spec, agent label, task.",
+                       "spawnSpec :: WorktreeSpec -> Text -> Text -> SpawnSpec",
+                       "spawnSpec wspec lbl task = SpawnSpec (SpawnNewWorktree wspec) lbl task"] },
+                { raw ["-- | Spawn in an EXISTING unbound managed worktree by durable id.",
+                       "-- Fails `SpawnBindingFailed` (naming the holder) if it is bound.",
+                       "spawnSpecIn :: WorktreeId -> Text -> Text -> SpawnSpec",
+                       "spawnSpecIn tid lbl task = SpawnSpec (SpawnExistingWorktree tid) lbl task"] },
+                { raw ["-- | One-line operator-readable rendering of a spawn failure.",
+                       "-- Case-match the constructor when you mean to BRANCH on it.",
+                       "renderBackendFailure :: BackendFailure -> Text",
+                       "renderBackendFailure (BackendUnavailable t) = \"backend unavailable: \" <> t",
+                       "renderBackendFailure (ProtocolRejected t) = \"backend rejected request: \" <> t",
+                       "renderBackendFailure (RunFailed t) = \"agent run failed: \" <> t"] },
+                { raw ["renderSpawnError :: SpawnError -> Text",
+                       "renderSpawnError (SpawnWorktreeFailed st e) = \"spawn failed at \" <> show st <> \" (worktree): \" <> renderWorktreeError e",
+                       "renderSpawnError (SpawnBindingFailed st e) = \"spawn failed at \" <> show st <> \" (binding): \" <> renderWorktreeError e",
+                       "renderSpawnError (SpawnBackendFailed st b) = \"spawn failed at \" <> show st <> \" (backend): \" <> renderBackendFailure b",
+                       "renderSpawnError (SpawnRollbackFailed st orig rb) = \"spawn failed at \" <> show st <> \" AND rollback failed: \" <> orig <> \"; rollback: \" <> rb",
+                       "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

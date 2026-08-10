@@ -326,6 +326,115 @@ impl EvRepositoryEvent {
     }
 }
 
+// ============================================================================
+// Subagent wire types (PRD 18 lane 1 — coupled spawn), `Ag*`-prefixed.
+//
+// Same rules as the `Wt*`/`Ev*` families above: these do NOT derive
+// `CoreRecord` (their Haskell decls are single-sourced from
+// `subagent_effect_def!`'s `type_defs`), and field ORDER in each struct is the
+// wire contract, matching those decls positionally. PROVISIONAL shapes — this
+// lane exists to inform PRD 18's freezes, and renames land here + in the
+// effect def together.
+// ============================================================================
+
+/// Haskell `AgentId` — Tidepool's identity for one agent, minted by the
+/// runtime, never by a backend.
+#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+#[core(name = "AgentId")]
+pub struct AgAgentId {
+    pub raw: i64,
+}
+
+/// Haskell `BackendThreadId` — a backend's identity for the hosting thread.
+/// Opaque: stored, compared, echoed, never parsed.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "BackendThreadId")]
+pub struct AgBackendThreadId {
+    pub raw: String,
+}
+
+/// Haskell `SpawnWorkspace` — a new managed worktree, or an existing UNBOUND
+/// one by durable id (PRD 18 addendum decision 3/4: coupled-only surface).
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+pub enum AgSpawnWorkspace {
+    SpawnNewWorktree(WtWorktreeSpec),
+    SpawnExistingWorktree(WtWorktreeId),
+}
+
+/// Haskell `SpawnSpec` — built in Haskell, consumed in Rust. The result
+/// schema rides the verb's separate `Value` argument (JsonArg lane), not this
+/// record.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "SpawnSpec")]
+pub struct AgSpawnSpec {
+    pub spawn_workspace: AgSpawnWorkspace,
+    pub spawn_agent_label: String,
+    pub spawn_task: String,
+}
+
+/// Haskell `SpawnStage` — how far the saga got; carried on every SpawnError.
+#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgSpawnStage {
+    StageAllocating,
+    StageWorktreeReady,
+    StageBound,
+    StageThreadAccepted,
+    StageRunning,
+}
+
+/// Haskell `BackendFailure` — the seam's `AgentBackendError`, case-matchable
+/// (retryable-vs-not, mine-vs-theirs).
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+pub enum AgBackendFailure {
+    BackendUnavailable(String),
+    ProtocolRejected(String),
+    RunFailed(String),
+}
+
+/// Haskell `CyclePayload` — what the terminal message actually was.
+/// `PayloadStructured` is not yet a typed success: decoding against the
+/// caller's type happens Haskell-side, and a decode failure there is a typed
+/// error. ToCore-only: this is outbound (`serde_json::Value` has no FromCore).
+#[derive(ToCore, Clone, Debug, PartialEq)]
+pub enum AgCyclePayload {
+    PayloadStructured(serde_json::Value),
+    PayloadUnstructured(String),
+    PayloadAbsent,
+}
+
+/// Haskell `WorkerRun` — the coupled pair one spawn yields (PRD 19's result
+/// shape) plus the backend thread identity.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "WorkerRun")]
+pub struct AgWorkerRun {
+    pub run_agent: AgAgentId,
+    pub run_worktree: WtWorktreeHandle,
+    pub run_thread: AgBackendThreadId,
+}
+
+/// Haskell `SpawnReceipt` — every field checkable against disk or the
+/// backend; `receipt_model` is the EXACT resolved model, never a tier name.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "SpawnReceipt")]
+pub struct AgSpawnReceipt {
+    pub receipt_agent: AgAgentId,
+    pub receipt_worktree: WtWorktreeId,
+    pub receipt_binding_ref: String,
+    pub receipt_thread: AgBackendThreadId,
+    pub receipt_model: String,
+    pub receipt_turn: String,
+}
+
+/// Haskell `SpawnOutcome` — the verb's success payload. ToCore-only (carries
+/// `AgCyclePayload`).
+#[derive(ToCore, Clone, Debug, PartialEq)]
+#[core(name = "SpawnOutcome")]
+pub struct AgSpawnOutcome {
+    pub outcome_run: AgWorkerRun,
+    pub outcome_payload: AgCyclePayload,
+    pub outcome_receipt: AgSpawnReceipt,
+}
+
 /// Build the `Tidepool.Records.Bridged` Haskell module — the GENERATED home of
 /// the fully-migrated bridged result records, where the Rust struct is the
 /// single source of truth. Materialized to the committed

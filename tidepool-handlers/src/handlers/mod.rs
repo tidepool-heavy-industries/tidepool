@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod console;
 pub mod event;
 pub mod exec;
@@ -11,6 +12,7 @@ pub mod meta;
 pub mod time;
 pub mod worktree;
 
+pub use agent::*;
 pub use console::*;
 pub use event::*;
 pub use exec::*;

@@ -287,3 +287,9 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 // containing them, which is what lane L4's acceptance harness does.
 crate::worktree_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::event_effect_def!(crate::effect_defs::effect_decl_projection);
+
+// Subagent (PRD 18 lane 1): `subagent_decl()`. Like Worktree/RepoEvent, NOT
+// in `build_base_stack`'s row — an opt-in effect for rows that spawn coupled
+// agent+worktree workers. Requires Worktree in the same row (its types
+// reference WorktreeSpec/WorktreeHandle/WorktreeError).
+crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);

@@ -139,6 +139,84 @@ pub enum AgentBackendError {
     RunFailed { detail: String },
 }
 
+/// How a spawn names the model it wants. Runtime-RESOLVED, never a hardcoded
+/// slug (Inanna, 2026-08-09): the backend queries its own model list and picks
+/// the concrete model, and [`CycleOutcome::resolved_model`] records EXACTLY
+/// what it got — a receipt naming a tier rather than the model it actually ran
+/// is not checkable.
+///
+/// Lane 1 needs only the cheap-plumbing tier (codex: prefer `gpt-5.4-mini`,
+/// else `gpt-5.6-luna`, NEVER `gpt-5.6-terra`). A richer semantic vocabulary
+/// (`Fast`/`Capable`/`Deep`) is PRD 18 open decision 3, not lane-1 scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelPolicy {
+    CheapPlumbing,
+}
+
+/// What one thread is created with. Frozen for the thread's lifetime — dynamic
+/// tools are thread-scoped, not turn-scoped.
+///
+/// Lane 1's authored surface passes no dynamic tools (`dynamic_tools: []`);
+/// the field exists because the transport supports them and the agent wave
+/// proved the round trip live — parent-tool dispatch through the realm is a
+/// later lane's work, not a seam gap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSpec {
+    pub ephemeral: bool,
+    pub dynamic_tools: Vec<DynamicToolDeclaration>,
+}
+
+/// One work cycle: one turn on one thread, in one workspace.
+///
+/// `cwd` is supplied HERE and not at thread creation — the request shape that
+/// avoids the documented Codex project-trust config write (PRD 18 acceptance
+/// criterion 11; see `backend::codex`'s module docs). Backends that don't
+/// share that hazard still honor the same split, so the seam has one shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleSpec {
+    /// Absolute path of the (bound, managed) worktree the worker runs in.
+    pub cwd: String,
+    /// The initial task prompt, ordinary text.
+    pub task: String,
+    /// JSON Schema constraining the terminal message. Derived from the
+    /// caller's result type by the structural interpreter — no authored
+    /// Haskell writes one, same rule as [`DynamicToolDeclaration::input_schema`].
+    pub output_schema: Option<serde_json::Value>,
+    pub model: ModelPolicy,
+}
+
+/// What the terminal message actually was. Typed rather than `Option<Value>`
+/// because "the model wrote non-JSON text" and "the model wrote nothing" are
+/// different facts a caller acts on differently, and collapsing either into
+/// a decode failure would hide which side broke the contract.
+///
+/// `Structured` is NOT yet a typed success: decoding it against the caller's
+/// requested type happens on the Haskell side, and a decode failure there is
+/// a typed error, never a success.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CycleResultPayload {
+    /// The final agent message parsed as JSON (the `outputSchema` contract:
+    /// the message TEXT is the schema-conforming JSON — there is no separate
+    /// structured-output field).
+    Structured(serde_json::Value),
+    /// The final agent message, present but not parseable as JSON.
+    Unstructured(String),
+    /// The turn completed without any agent message.
+    Absent,
+}
+
+/// Everything one completed cycle reports back through the seam.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleOutcome {
+    pub turn: TurnId,
+    pub payload: CycleResultPayload,
+    /// Receipt-bearing observations, in the order the backend reported them.
+    pub activity: Vec<AgentActivity>,
+    /// The EXACT model the backend resolved and ran — recorded per the
+    /// [`ModelPolicy`] rule, never the tier name.
+    pub resolved_model: String,
+}
+
 /// What a caller-assigned workspace grants a worker.
 ///
 /// TRANSITIONAL (PRD 19 revision, Inanna 2026-08-08): agent creation is being

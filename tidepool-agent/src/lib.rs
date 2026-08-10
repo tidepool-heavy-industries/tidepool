@@ -30,8 +30,14 @@
 
 pub mod backend;
 pub mod seam;
+pub mod spawn;
 
+pub use backend::OneCycleBackend;
 pub use seam::{
-    AgentBackendError, AgentId, BackendThreadId, DynamicToolDeclaration, RuntimeAgentEvent,
-    ToolCallId, TurnId,
+    AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
+    DynamicToolDeclaration, ModelPolicy, RuntimeAgentEvent, ThreadSpec, ToolCallId, TurnId,
+};
+pub use spawn::{
+    CoupledSpawner, OneCycleRun, SpawnError, SpawnReceipt, SpawnRequest, SpawnStage,
+    SpawnWorkspace, WorkerRun,
 };

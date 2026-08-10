@@ -20,6 +20,9 @@ tidepool-bridge-effects.workspace = true
 # PRD 19 lane L4: the RepoEvent handler's production observation source adapts
 # `WorktreeMonitor` — the git reasoning lives THERE, not here.
 tidepool-worktree.workspace = true
+# PRD 18 lane 1: the Subagent handler drives the coupled-spawn saga — the
+# saga and backend seam live THERE, not here.
+tidepool-agent.workspace = true
 inventory.workspace = true
 frunk.workspace = true
 # Native deps moved from tidepool/Cargo.toml

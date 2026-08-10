@@ -12,12 +12,13 @@ description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabu
 
 [dependencies]
 codex-codes = "=0.146.4"
-serde = { workspace = true }
-serde_json = { workspace = true }
+tidepool-worktree.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time", "process", "rt", "rt-multi-thread", "macros"] }
-tracing = { workspace = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "rt", "rt-multi-thread", "time"] }
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile.workspace = true

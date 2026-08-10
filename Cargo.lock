@@ -3749,6 +3749,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "tidepool-worktree",
  "tokio",
  "tracing",
 ]
@@ -3789,6 +3790,7 @@ name = "tidepool-bridge-effects"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "serde_json",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-eval",
@@ -3881,6 +3883,7 @@ dependencies = [
  "regex",
  "serde_json",
  "tempfile",
+ "tidepool-agent",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",

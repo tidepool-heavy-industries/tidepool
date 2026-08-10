@@ -14,3 +14,4 @@ tidepool-bridge-derive.workspace = true
 tidepool-eval.workspace = true
 tidepool-repr.workspace = true
 inventory.workspace = true
+serde_json.workspace = true
