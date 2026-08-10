@@ -489,3 +489,32 @@ missing vertical, then runtime-owned wakeups, then the dev-tree example
 becomes a policy program (R1.3, matches the standing Chain B plan);
 (c) PRD 14 persistence codec still asymmetric (state_cross.rs) —
 checkpoint-persistence-lane.md owns it; PRD 14 is not "complete" until.
+
+## 20. NEW extractor regression: hs-boot mutual-recursion group bakes a TypeMetadata sentinel (root bisect, 2026-08-09)
+
+tidepool-runtime::cross_mode_targeted::dimension_d1_mutual_recursion
+(June-vintage test; only runs in full runtime shards, which nobody had
+completed for weeks) fails on the tip-built extractor and PASSES on the
+deployed pre-weekend one — a genuine regression from this weekend's
+extractor changes, bisected live (same test, same runtime, binaries
+swapped).
+
+Mechanism trail: split-mode fixture Test -> Even <-> Odd (hs-boot
+cycle, NOINLINE both sides). With TIDEPOOL_IFACE_DEBUG=1 the new
+extractor prints exactly `[fat-iface] Odd: could not read .hi file`
+(FatIface.hs:97, findAndReadIface ... NotBoot fails), then the extract
+COMPLETES SILENTLY (no SKIPPED/unresolved line), the CBOR bakes an
+ErrorSentinel where Odd's binding should resolve, and the JIT traps
+kind=4 TypeMetadata at runtime — cause 1 of extract-wave's two-cause
+attribution caveat, live. E6's own receipt was verified against a gate
+set that never ran this shard.
+
+TWO defects, fix both: (a) whatever makes Odd's interface unreadable
+for the hs-boot group under the tiered pipeline (E6 territory —
+GhcPipeline two-pass + FatIface home-module resolution); (b) the
+SILENT bake — a load-bearing binding resolving to a sentinel must be a
+loud extract-time diagnostic, not a runtime trap (this is the same
+silent-negative family as everything else this weekend). Repro:
+`-E 'test(dimension_d1_mutual_recursion)'`, ~2s, needs only the tip
+extractor. Owner: a focused extract dev (morning); on the sanctioned
+list until then.
