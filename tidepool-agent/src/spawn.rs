@@ -38,8 +38,8 @@
 //! lifecycle-lane territory, routed in the lane handoff).
 
 use tidepool_worktree::{
-    BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId, WorktreeManager,
-    WorktreeSpec,
+    AgentRef, BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId,
+    WorktreeManager, WorktreeSpec,
 };
 
 use crate::backend::OneCycleBackend;
@@ -47,6 +47,51 @@ use crate::seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec, ModelPolicy,
     ThreadSpec, TurnId,
 };
+
+/// Wall-clock milliseconds since the Unix epoch, for `bound_at_ms`.
+///
+/// Local rather than shared with `tidepool-worktree`'s identical helper, which
+/// is `pub(crate)` there; a clock before the epoch is a broken machine no
+/// caller can act on, so it panics rather than widening every signature with a
+/// `Result` whose only handling is `unwrap`.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_millis() as i64
+}
+
+/// Sanitize a caller-supplied label into the tail of an `AgentRef`.
+///
+/// The label is decoration — never a path, never an identity (the minted
+/// [`AgentId`] in front of it is what makes the ref unique), so it is reduced
+/// to `[A-Za-z0-9._-]` with runs of `-` collapsed and the ends trimmed. Same
+/// shape as `create.rs`'s branch-name sanitizer minus `/`, which has no
+/// business in a ref that is written into a filename-adjacent record. An
+/// all-punctuation label falls back to `worker` rather than yielding a ref
+/// ending in a bare `-`.
+fn sanitize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut last_was_dash = false;
+    for c in label.chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            c
+        } else {
+            '-'
+        };
+        if c == '-' && last_was_dash {
+            continue;
+        }
+        last_was_dash = c == '-';
+        out.push(c);
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
+    if trimmed.is_empty() {
+        "worker".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
 /// Where in the saga something happened. Carried on every [`SpawnError`] so a
 /// caller (and a receipt reader) can see how far the spawn got without
@@ -122,6 +167,19 @@ pub enum SpawnError {
         original: Box<SpawnError>,
         rollback: WorktreeError,
     },
+}
+
+impl SpawnError {
+    /// How far the saga got. `RollbackFailed` reports the stage of the failure
+    /// it wraps, not a stage of its own — the rollback is not a saga step.
+    pub fn stage(&self) -> SpawnStage {
+        match self {
+            SpawnError::Worktree { stage, .. }
+            | SpawnError::Binding { stage, .. }
+            | SpawnError::Backend { stage, .. }
+            | SpawnError::RollbackFailed { stage, .. } => *stage,
+        }
+    }
 }
 
 /// What workspace a spawn runs in — a new managed worktree, or an existing
@@ -246,20 +304,146 @@ impl CoupledSpawner {
     /// See the module docs for the stage diagram and rollback semantics.
     pub fn spawn_one_cycle(
         &mut self,
-        _backend: &mut dyn OneCycleBackend,
-        _request: &SpawnRequest,
+        backend: &mut dyn OneCycleBackend,
+        request: &SpawnRequest,
     ) -> Result<OneCycleRun, SpawnError> {
-        // Dev lane `saga` implements this per lane1-scaffold-plan.md:
-        //  1. Allocating: New → manager.create(spec); Existing → manager.lookup
-        //     (WorktreeLost / not-registered → SpawnError::Worktree).
-        //  2. mint AgentId, binding_ref = "agent-<id>-<sanitized label>".
-        //  3. bind → SpawnError::Binding on refusal (WorktreeBusy names holder).
-        //  4. start_thread → on Err: settle(Released) then SpawnError::Backend
-        //     { stage: ThreadAccepted-edge } (rollback failure →
-        //     RollbackFailed).
-        //  5. run_cycle → on Err: settle(Released), as above, stage Running.
-        //  6. success: settle(Terminal), assemble WorkerRun/receipt.
-        todo!("lane-1 saga: implemented by the `saga` dev per the scaffold plan")
+        // 1. Allocating → WorktreeReady. Nothing is bound yet, so a failure
+        //    here has nothing to compensate: no binding row is ever written.
+        let worktree = self.resolve_workspace(&request.workspace)?;
+
+        // 2. Identity. The label is decoration on the `AgentRef` — the id is
+        //    what makes it unique — so sanitizing it cannot collide two agents.
+        let agent = self.mint_agent_id();
+        let binding_ref = format!("agent-{}-{}", agent.0, sanitize_label(&request.agent_label));
+
+        // 3. Bound. `WorktreeBusy` (one worktree, one agent) and a persist
+        //    failure are both binding failures; `BindingTable::bind` already
+        //    rolled its own memory back on the latter, so again there is
+        //    nothing here to compensate.
+        self.bindings
+            .bind(
+                worktree.id(),
+                &AgentRef::from_raw(binding_ref.clone()),
+                now_ms(),
+            )
+            .map_err(|error| SpawnError::Binding {
+                stage: SpawnStage::Bound,
+                error,
+            })?;
+
+        // 4. ThreadAccepted. From here on every failure path must settle the
+        //    binding `Released` — the worktree is retained (locked), but
+        //    leaving it Active-bound to an agent that will never run is the
+        //    orphan this saga exists to prevent.
+        let thread = match backend.start_thread(&request.thread_spec()) {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(self.roll_back(
+                    worktree.id(),
+                    SpawnError::Backend {
+                        stage: SpawnStage::ThreadAccepted,
+                        error,
+                    },
+                ));
+            }
+        };
+
+        // 5. Running. `cwd` is supplied per-cycle, not at thread creation —
+        //    see `CycleSpec`'s docs for why the seam splits it that way.
+        let cwd = worktree.cwd().to_string_lossy().into_owned();
+        let outcome = match backend.run_cycle(&thread, &request.cycle_spec(cwd)) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(self.roll_back(
+                    worktree.id(),
+                    SpawnError::Backend {
+                        stage: SpawnStage::Running,
+                        error,
+                    },
+                ));
+            }
+        };
+
+        // 6. Success: the cycle IS the agent's whole life (lane 1), so the
+        //    binding settles `Terminal`.
+        //
+        //    A settle failure here is reported `RollbackFailed` rather than
+        //    `Binding`, deliberately: `RollbackFailed` is this type's ONLY
+        //    signal that an Active binding may still be on disk, and that is
+        //    exactly what a failed terminal settle leaves behind. Returning
+        //    `Binding` would satisfy the "no Active binding remains" promise
+        //    this enum's docs make for every other variant, and it would be a
+        //    lie. `original` and `rollback` carry the same failure because on
+        //    the success path the settle is both the operation and its own
+        //    compensation — there is no earlier failure to lose, and no second
+        //    write worth attempting against storage that just refused one.
+        if let Err(rollback) = self.bindings.settle(worktree.id(), BindingState::Terminal) {
+            return Err(SpawnError::RollbackFailed {
+                stage: SpawnStage::Running,
+                original: Box::new(SpawnError::Binding {
+                    stage: SpawnStage::Running,
+                    error: rollback.clone(),
+                }),
+                rollback,
+            });
+        }
+
+        let receipt = SpawnReceipt {
+            agent,
+            worktree: worktree.id().clone(),
+            binding_ref,
+            thread: thread.clone(),
+            resolved_model: outcome.resolved_model,
+            turn: outcome.turn,
+        };
+        Ok(OneCycleRun {
+            run: WorkerRun {
+                agent,
+                worktree,
+                thread,
+            },
+            payload: outcome.payload,
+            receipt,
+            activity: outcome.activity,
+        })
+    }
+
+    /// Stage 1: a new managed worktree, or an existing one by durable id.
+    ///
+    /// The `lookup` cases stay distinct all the way out: `Ok(None)` is a typo
+    /// or a stale id (`WorktreeNotRegistered`), `Err(WorktreeLost)` is data
+    /// loss, and collapsing them would tell an operator whose worktree a human
+    /// deleted that it never existed.
+    fn resolve_workspace(&self, workspace: &SpawnWorkspace) -> Result<WorktreeHandle, SpawnError> {
+        let allocating = |error| SpawnError::Worktree {
+            stage: SpawnStage::Allocating,
+            error,
+        };
+        match workspace {
+            SpawnWorkspace::New(spec) => self.manager.create(spec).map_err(allocating),
+            SpawnWorkspace::Existing(id) => match self.manager.lookup(id) {
+                Ok(Some(handle)) => Ok(handle),
+                Ok(None) => Err(allocating(WorktreeError::WorktreeNotRegistered(id.clone()))),
+                Err(error) => Err(allocating(error)),
+            },
+        }
+    }
+
+    /// Compensate a post-`Bound` failure: settle the binding `Released` so the
+    /// retained worktree is left UNBOUND and rebindable, and return the error
+    /// the caller should see. A rollback that itself fails is escalated to
+    /// [`SpawnError::RollbackFailed`] carrying BOTH — swallowing either hides
+    /// the one a fix needs.
+    fn roll_back(&mut self, worktree: &WorktreeId, original: SpawnError) -> SpawnError {
+        let stage = original.stage();
+        match self.bindings.settle(worktree, BindingState::Released) {
+            Ok(()) => original,
+            Err(rollback) => SpawnError::RollbackFailed {
+                stage,
+                original: Box::new(original),
+                rollback,
+            },
+        }
     }
 
     /// Settle the current binding for `worktree` (rollback / completion
