@@ -37,7 +37,10 @@
 
 pub mod dynamic_tools;
 pub mod isolation;
+pub mod one_cycle;
 pub mod process;
+
+pub use one_cycle::{CodexOneCycleBackend, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT};
 
 /// The Codex CLI version this adapter is pinned to and its fixtures were
 /// recorded against.
