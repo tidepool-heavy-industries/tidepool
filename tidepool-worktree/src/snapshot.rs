@@ -102,6 +102,13 @@ pub fn snapshot_source(
     captured_paths.sort();
     captured_paths.dedup();
 
+    // Callers hand this dir in as a path, not a promise — the manager-owned
+    // path (`<worktree_root>/.tidepool-snapshot-index/<id>`) does not exist on
+    // a fresh root, and git creates the index FILE but never its parent dirs.
+    std::fs::create_dir_all(temp_index_dir).map_err(|e| WorktreeError::StorageFailure {
+        path: temp_index_dir.to_path_buf(),
+        detail: e.to_string(),
+    })?;
     let temp_index_path = temp_index_dir.join(format!("{}.index", worktree_id.as_str()));
     let temp_git = git.with_env(
         "GIT_INDEX_FILE",

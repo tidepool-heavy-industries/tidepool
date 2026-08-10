@@ -476,3 +476,56 @@ fn refuses_dirty_submodule_and_leaves_source_untouched() {
     let after = capture_source_state(repo.git(), repo.path());
     assert_source_untouched(&before, &after);
 }
+
+/// Dirty capture through the PRODUCTION path (`WorktreeManager::create` with
+/// `allowDirtySnapshot`), not `snapshot_source` handed a pre-made temp dir.
+/// The manager derives its temp-index dir under `worktree_root` and nothing
+/// pre-creates it — this test is red if `snapshot_source` assumes the dir
+/// exists (git creates the index FILE, never its parent directories).
+#[test]
+fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
+    use tidepool_worktree::{DirtyPolicy, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec};
+
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("tracked.txt", "committed\n", "first")
+        .expect("commit");
+    std::fs::write(repo.path().join("tracked.txt"), "dirtied\n").expect("dirty the tree");
+
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let manager = WorktreeManager::new(
+        GitCli::new(),
+        registry,
+        base.path().join("worktrees"),
+        repo.path(),
+    );
+
+    let before = capture_source_state(repo.git(), repo.path());
+    let handle = manager
+        .create(&WorktreeSpec {
+            source: WorktreeSource::CurrentRepository,
+            label: "dirty-capture".to_string(),
+            dirty_policy: DirtyPolicy::AllowDirtySnapshot,
+        })
+        .expect("dirty create must succeed through the manager-owned index dir");
+    assert!(
+        handle.receipt().snapshot_ref.is_some(),
+        "a dirty source must yield a snapshot ref"
+    );
+    // NOT `assert_source_untouched`: the manager path legitimately adds a
+    // managed `tidepool/worktree/…` branch to the source repo (that branch IS
+    // the mechanism). What must be untouched: bytes, HEAD, checked-out
+    // branch, index, and the dirty state itself.
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_eq!(before.head, after.head, "source HEAD moved");
+    assert_eq!(before.branch, after.branch, "checked-out branch changed");
+    assert_eq!(before.index_bytes, after.index_bytes, ".git/index changed");
+    assert_eq!(before.diff, after.diff, "unstaged diff changed");
+    assert_eq!(before.diff_cached, after.diff_cached, "staged diff changed");
+    assert_eq!(
+        std::fs::read(repo.path().join("tracked.txt")).expect("read back"),
+        b"dirtied\n",
+        "working-tree bytes changed"
+    );
+}
