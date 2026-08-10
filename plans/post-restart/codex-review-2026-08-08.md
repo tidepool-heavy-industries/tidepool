@@ -518,3 +518,21 @@ silent-negative family as everything else this weekend). Repro:
 `-E 'test(dimension_d1_mutual_recursion)'`, ~2s, needs only the tip
 extractor. Owner: a focused extract dev (morning); on the sanctioned
 list until then.
+
+### Item 14 — DECISION EXECUTED (structural-cleanup step 3a, 2026-08-10)
+
+Symmetric lossless sums landed in the vendored generic defaults: ToJSON
+now encodes payload sums as aeson's TaggedObject (the exact shape
+FromJSON always decoded), positional payload constructors are a
+compile-time TypeError naming the fix, and Maybe fields decode
+absent-or-null as Nothing. The two rejection-pinning sanctioned reds
+are RETIRED, rewritten as passing round-trips
+(named_field_sum_round_trips…, mixed_nullary_sum_round_trips…) plus an
+exact wire-shape pin. CodecSpike deleted; its recursion proof ported
+onto the production path (generic_recursive_sums.rs, 4/4 incl. wire
+shape). Contract tool schemas stop listing optional (Maybe) fields in
+"required". Verified: extract-fidelity 30/30, selfharness_persistence +
+finalize_type_pinning 15/15, generic-deriving suites 14/14.
+Sanctioned-red list is now: qq_fmt_brace…, works_from_json_float,
+works_int_prism…, user_union_normalize, the module-not-loaded family
+(items 8-9), and item 20's hs-boot regression.

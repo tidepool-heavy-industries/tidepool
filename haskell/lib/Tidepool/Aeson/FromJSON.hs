@@ -71,8 +71,9 @@ instance Monad Result where
 -- field-name-keyed JSON object into the record; @data Mode = Observing |
 -- Deciding | Acting deriving (Generic, FromJSON)@ (a nullary sum — every
 -- constructor has no fields, i.e. an enum) decodes from the constructor-name
--- string. A sum with any non-nullary constructor is still rejected at
--- compile time; write an explicit instance for those.
+-- string. A sum with payload constructors decodes from aeson's default
+-- TaggedObject shape, symmetric with 'Tidepool.Aeson.Value.ToJSON'\'s
+-- generic encode.
 class FromJSON a where
   parseJSON :: Value -> Result a
   default parseJSON :: (Generic a, GFromJSON (Rep a)) => Value -> Result a
@@ -120,6 +121,14 @@ instance (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R c)) where
     -- 'undefined': 'selName' inspects only the phantom selector type @s@, and a
     -- bottom here would be forced by the tree-walking eval oracle (though not by
     -- the JIT), diverging the two engines.
+    where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+-- A 'Maybe' field is OPTIONAL: a missing key (or an explicit @null@) decodes
+-- as 'Nothing' rather than failing — aeson's `omitNothingFields`-compatible
+-- read direction. Without this, a checkpoint written before a field was
+-- added could never decode again (the strict '.:' failed on the absent key).
+instance {-# OVERLAPPING #-} (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R (Maybe c))) where
+  gParseRecord o = (M1 . K1) <$> (o .:? fieldName)
     where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 -- Nullary constructor: an empty record decodes from any object.

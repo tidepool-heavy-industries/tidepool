@@ -170,8 +170,8 @@ instance AgentSchema Double where
 instance AgentSchema () where
   agentSchema _ = object [(T.pack "type", String (T.pack "null"))]
 
--- | Shallow: optionality (@required@) is not modeled from 'Maybe' in v1 — a
--- 'Maybe' field's schema is just its payload's schema.
+-- | A 'Maybe' field's schema is its payload's schema; its OPTIONALITY is
+-- carried by the field walk ('gAgentSchemaFields' marks it non-required).
 instance AgentSchema a => AgentSchema (Maybe a) where
   agentSchema _ = agentSchema (Proxy :: Proxy a)
 
@@ -188,15 +188,18 @@ instance GAgentSchemaObj f => GAgentSchema (M1 C c f) where
   gAgentSchema _ =
     object
       [ (T.pack "type", String (T.pack "object"))
-      , (T.pack "properties", Object (Map.fromList fields))
-      , (T.pack "required", Array (map (String . fst) fields))
+      , (T.pack "properties", Object (Map.fromList [(n, v) | (n, v, _) <- fields]))
+      -- Only genuinely required fields: a 'Maybe' field is optional and
+      -- must NOT appear here — a schema that lists an optional key in
+      -- @required@ forces the model to invent a value for it.
+      , (T.pack "required", Array [String n | (n, _, req) <- fields, req])
       ]
     where
       fields = gAgentSchemaFields (Proxy :: Proxy f)
 
--- | This gate's schema is single-constructor records only — the same
--- restriction 'Tidepool.Aeson.Value.ToJSON' already carries. Lists and
--- recursive shapes are dev-structural-codec's gate 1(b), not this one's.
+-- | This gate's schema is single-constructor records only — tool INPUTS are
+-- flat argument records by design; a sum-shaped input belongs on the
+-- model-output side ('Tidepool.Agent.ModelCodec').
 instance
   TypeError
     ( 'Text "Tidepool.Agent.Contract's structural schema supports single-constructor records only; "
@@ -207,8 +210,10 @@ instance
   where
   gAgentSchema _ = error "unreachable: multi-constructor schema is a compile-time TypeError"
 
+-- | Per field: (name, schema, required?). 'Maybe' fields report
+-- @required = False@; everything else 'True'.
 class GAgentSchemaObj (f :: Type -> Type) where
-  gAgentSchemaFields :: Proxy f -> [(Text, Value)]
+  gAgentSchemaFields :: Proxy f -> [(Text, Value, Bool)]
 
 instance (GAgentSchemaObj a, GAgentSchemaObj b) => GAgentSchemaObj (a :*: b) where
   gAgentSchemaFields _ = gAgentSchemaFields (Proxy :: Proxy a) ++ gAgentSchemaFields (Proxy :: Proxy b)
@@ -217,7 +222,12 @@ instance GAgentSchemaObj U1 where
   gAgentSchemaFields _ = []
 
 instance (Selector s, AgentSchema c) => GAgentSchemaObj (M1 S s (K1 R c)) where
-  gAgentSchemaFields _ = [(fieldName, agentSchema (Proxy :: Proxy c))]
+  gAgentSchemaFields _ = [(fieldName, agentSchema (Proxy :: Proxy c), True)]
+    where
+      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+instance {-# OVERLAPPING #-} (Selector s, AgentSchema c) => GAgentSchemaObj (M1 S s (K1 R (Maybe c))) where
+  gAgentSchemaFields _ = [(fieldName, agentSchema (Proxy :: Proxy c), False)]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 

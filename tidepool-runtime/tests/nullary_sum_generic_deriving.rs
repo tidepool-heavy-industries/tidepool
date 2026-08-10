@@ -115,26 +115,21 @@ fn unknown_string_returns_error() {
     )
 }
 
-/// A sum mixing a nullary and a non-nullary constructor is still rejected at
-/// COMPILE time — only all-nullary sums (enums) derive; a partial sum is out
-/// of scope, same as a fully non-nullary sum.
+/// A sum MIXING a nullary constructor with a record-payload constructor
+/// derives both directions and round-trips: the nullary side encodes as a
+/// tag-only object, the payload side as tag+fields — one TaggedObject shape
+/// for both (design decision, ledger item 14: symmetric support replaced
+/// rejection).
 #[test]
-fn mixed_nullary_sum_still_rejected_at_compile_time() {
+fn mixed_nullary_sum_round_trips_through_the_generic_defaults() {
     require_extract();
     let src = format!(
         "{HEADER}\n\
-         data M = A | B Int deriving (Generic, FromJSON)\n\n\
-         result :: Int\n\
-         result = 0\n"
+         data M = A | B {{ n :: Int }} deriving (Generic, ToJSON, FromJSON, Eq)\n\n\
+         roundTrip :: M -> Bool\n\
+         roundTrip m = case fromJSON (toJSON m) of {{ Success v -> v == m; Error _ -> False }}\n\n\
+         result :: Bool\n\
+         result = roundTrip A && roundTrip (B 9)\n"
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
-        Ok(_) => panic!("mixed nullary/non-nullary sum deriving FromJSON must not compile"),
-        Err(e) => {
-            let msg = tidepool_runtime::classify_compile(&e).message;
-            assert!(
-                msg.contains("single-constructor records only"),
-                "expected the generic sum-rejection TypeError, got:\n{msg}"
-            );
-        }
-    }
+    assert_eq!(run(&src, "result"), serde_json::json!(true));
 }

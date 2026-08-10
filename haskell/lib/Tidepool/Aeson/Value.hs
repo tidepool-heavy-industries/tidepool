@@ -142,16 +142,22 @@ eitherDecodeValue _ = Left T.empty
 -- @data Rec = Rec {..} deriving (Generic, ToJSON)@ builds a field-name-keyed
 -- JSON object; @data Mode = Observing | Deciding | Acting deriving (Generic,
 -- ToJSON)@ (a nullary sum — every constructor has no fields, i.e. an enum)
--- encodes each constructor as its bare name string. A sum with any
--- non-nullary constructor is still rejected at compile time.
+-- encodes each constructor as its bare name string. A sum with payload
+-- constructors encodes as aeson's default @TaggedObject@ shape — a JSON
+-- object with a @"tag"@ field naming the constructor and the constructor's
+-- RECORD fields alongside it — SYMMETRIC with what
+-- 'Tidepool.Aeson.FromJSON.FromJSON'\'s default decodes. A positional
+-- (non-record) payload constructor has no field names to key and is
+-- rejected at compile time.
 class ToJSON a where
   toJSON :: a -> Value
   default toJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
   toJSON = genericToJSON
 
--- | Encode a single-constructor record as a field-name-keyed JSON object, or
--- a nullary-sum (enum) as its constructor-name string. This is the
--- implementation behind the 'ToJSON' default method.
+-- | Encode a single-constructor record as a field-name-keyed JSON object, a
+-- nullary-sum (enum) as its constructor-name string, or a payload sum as a
+-- tagged object. This is the implementation behind the 'ToJSON' default
+-- method.
 genericToJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
 genericToJSON = gToJSON . from
 
@@ -184,11 +190,11 @@ instance (Selector s, ToJSON c) => GToRecord (M1 S s (K1 R c)) where
 instance GToRecord U1 where
   gToRecord _ = []
 
--- Sum types: no field-name-keyed object form, but a NULLARY sum (every
--- constructor has no fields — an enum) encodes as its constructor-name
--- string via 'GSumNullaryToJSON'. 'IsNullarySum' decides which branch of
--- 'GToJSONSum' applies; a sum with any non-nullary constructor still hits the
--- ''False' branch's TypeError below.
+-- Sum types: a NULLARY sum (every constructor has no fields — an enum)
+-- encodes as its constructor-name string via 'GSumNullaryToJSON'; a sum with
+-- payload constructors encodes as the tagged-object shape via
+-- 'GToJSONTaggedSum'. 'IsNullarySum' decides which branch of 'GToJSONSum'
+-- applies — mirroring the decode split in "Tidepool.Aeson.FromJSON".
 instance GToJSONSum (IsNullarySum (a :+: b)) (a :+: b) => GToJSON (a :+: b) where
   gToJSON = gToJSONSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
 
@@ -205,17 +211,48 @@ type family IsNullarySumAnd (a :: Bool) (b :: Bool) :: Bool where
   IsNullarySumAnd a b = 'False
 
 -- | Dispatch on whether a sum is all-nullary: 'True' routes to the
--- constructor-name encoder, 'False' to a compile-time rejection.
+-- constructor-name encoder, 'False' to the tagged-object encoder.
 class GToJSONSum (allNullary :: Bool) f where
   gToJSONSum :: Proxy allNullary -> f a -> Value
 
 instance GSumNullaryToJSON f => GToJSONSum 'True f where
   gToJSONSum _ = gSumNullaryToJSON
 
-instance TypeError ('Text "deriving ToJSON via GHC.Generics supports single-constructor records only; "
-                    ':<>: 'Text "this type has multiple constructors. Write an explicit ToJSON instance.")
-    => GToJSONSum 'False f where
-  gToJSONSum _ = error "unreachable: non-nullary sum ToJSON is a compile-time TypeError"
+instance GToJSONTaggedSum f => GToJSONSum 'False f where
+  gToJSONSum _ = gToJSONTaggedSum
+
+-- | aeson's default @TaggedObject@ shape, encode side: one JSON object per
+-- value carrying @"tag": <constructor name>@ plus the constructor's record
+-- fields — the exact shape "Tidepool.Aeson.FromJSON"\'s
+-- @GFromJSONTaggedSum@ decodes, so a payload sum round-trips through the two
+-- defaults. A nullary constructor in a mixed sum is an object carrying only
+-- @tag@. A POSITIONAL payload constructor has no selector names to key its
+-- fields and is rejected at compile time (the decode side fails the same
+-- shape at runtime with "key not present" — encode can afford the earlier,
+-- better error because the offending type is right here).
+class GToJSONTaggedSum f where
+  gToJSONTaggedSum :: f a -> Value
+
+instance (GToJSONTaggedSum a, GToJSONTaggedSum b) => GToJSONTaggedSum (a :+: b) where
+  gToJSONTaggedSum (L1 x) = gToJSONTaggedSum x
+  gToJSONTaggedSum (R1 x) = gToJSONTaggedSum x
+
+instance (Constructor c, GToRecord f, GAllFieldsNamed f) => GToJSONTaggedSum (M1 C c f) where
+  gToJSONTaggedSum m@(M1 x) =
+    object ((T.pack "tag", String (T.pack (conName m))) : gToRecord x)
+
+-- | Compile-time proof that every field of a payload constructor has a
+-- selector name (is a record field). A positional field'''s GHC.Generics
+-- selector symbol is empty, which would key an unfindable @""@ pair — reject
+-- it where the type is defined instead.
+class GAllFieldsNamed (f :: Type -> Type)
+instance GAllFieldsNamed U1
+instance (GAllFieldsNamed a, GAllFieldsNamed b) => GAllFieldsNamed (a :*: b)
+instance GAllFieldsNamed (M1 S ('MetaSel ('Just name) su ss ds) (K1 R c))
+instance
+  TypeError ('Text "deriving ToJSON via GHC.Generics: a payload constructor in a sum must use record syntax "
+             ':<>: 'Text "(named fields) — positional fields have no JSON key.")
+    => GAllFieldsNamed (M1 S ('MetaSel 'Nothing su ss ds) (K1 R c))
 
 -- | Encode a nullary-constructors-only sum leaf/branch as its constructor
 -- name. Only reachable once 'IsNullarySum' has established every constructor

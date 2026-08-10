@@ -16,7 +16,7 @@
 --
 -- = Why this exists — the wire caveat
 --
--- PRD 18 gate 1(b)'s spike ("Tidepool.Agent.CodecSpike") proved that lists and
+-- PRD 18 gate 1(b)'s spike (the since-deleted @Tidepool.Agent.CodecSpike@) proved that lists and
 -- recursion survive the real JIT. That result transfers unconditionally. Its
 -- WIRE SHAPE does not: it encodes every constructor as
 -- @{\"tag\": ..., \"fields\": [positional]}@, which is correct for
@@ -31,15 +31,15 @@
 -- = What it is NOT built on
 --
 -- * NOT the vendored @Tidepool.Aeson.Value.ToJSON@ \/
---   @Tidepool.Aeson.FromJSON.FromJSON@ generic defaults — those reject every
---   sum with a payload-carrying constructor at compile time, so
---   'WorkerResult' could not derive through them. The lossless-sum fix is
---   Chain A's (checkpoint-persistence); do not touch it from here.
+--   @Tidepool.Aeson.FromJSON.FromJSON@ generic defaults. (Historical: at the
+--   time those rejected payload sums on encode; they are symmetric now. This
+--   module still differs by POLICY — snake_case field names, tagged objects
+--   even for all-nullary sums, a schema, and JSONPath-carrying decode errors
+--   — and folding it onto the shared implementation behind small options is
+--   the structural-cleanup plan's step 3 remainder.)
 -- * NOT the generic-surface @Symbol@-metadata substrate.
 --
--- Base 'GHC.Generics' directly, mirroring "Tidepool.Agent.CodecSpike"'s pragma
--- set and its @Tidepool.Aeson.Value@ usage (the shape known to compile on this
--- toolchain).
+-- Base 'GHC.Generics' directly, over @Tidepool.Aeson.Value@.
 --
 -- = The encoding
 --
@@ -85,7 +85,7 @@
 -- __Positional (non-record) constructors with fields are a compile-time
 -- 'TypeError'__ — see 'GModelCon'. A model cannot be asked for positional
 -- fields, so this is a scope edge, not an omission. @data Plan = Step Text |
--- Seq [Plan]@ (CodecSpike's recursion proof) does NOT derive 'ModelCodec';
+-- Seq [Plan]@ (positional constructors) does NOT derive 'ModelCodec';
 -- give the constructors record selectors if they must cross this boundary.
 --
 -- __Leaves__: 'Text' → @string@, 'Int' → @integer@, 'Bool' → @boolean@,

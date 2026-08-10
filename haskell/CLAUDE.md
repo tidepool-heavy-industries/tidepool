@@ -172,12 +172,13 @@ surface here — it drifts. Module map:
   prior wording: `plans/decision-archive/haskell.md`.)
 
 - `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (Servant-style
-  tool-record algebra, gate 1(a)), `CodecSpike` (gate 1(b)'s positional codec
-  proof — Tidepool↔Tidepool polarity ONLY), `ModelCodec` (the MODEL-boundary
+  tool-record algebra, gate 1(a)), `ModelCodec` (the MODEL-boundary
   codec: one Generic traversal → named-field JSON Schema + decoder + encoder;
   use THIS for anything a model reads or writes), `Spawn` (typed `spawnAgent`
   over the generated `spawnAgentRaw`; compiles only in rows containing
-  Subagent + Worktree, same row-gating as Form).
+  Subagent + Worktree, same row-gating as Form). Recursive payload sums also
+  round-trip through the ordinary `Tidepool.Aeson` generic defaults
+  (TaggedObject wire; `tidepool-runtime/tests/generic_recursive_sums.rs`).
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 
