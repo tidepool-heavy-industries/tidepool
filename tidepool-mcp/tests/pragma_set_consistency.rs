@@ -40,8 +40,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use tidepool_mcp::{decl_pragmas, EVAL_PRAGMAS};
-use tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE;
 use tidepool_runtime::session::render::ModuleEnv;
+use tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE;
 
 /// Parse a `{-# LANGUAGE A, B, C #-}` block (or a bare `A, B, C` extension
 /// list, no pragma delimiters) into its set of extension names. Panics on a
@@ -56,8 +56,15 @@ fn extension_set(pragma_text: &str) -> BTreeSet<&str> {
         .trim_end()
         .trim_end_matches("#-}")
         .trim();
-    let set: BTreeSet<&str> = inner.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    assert!(!set.is_empty(), "parsed an empty extension set from: {pragma_text:?}");
+    let set: BTreeSet<&str> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        !set.is_empty(),
+        "parsed an empty extension set from: {pragma_text:?}"
+    );
     set
 }
 

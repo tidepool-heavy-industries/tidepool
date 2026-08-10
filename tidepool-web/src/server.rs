@@ -354,7 +354,11 @@ fn err_json(msg: String) -> Response {
 /// `raw` (they're always rendered) but their keys are never looked at, so a
 /// non-chosen branch's leftover/unfilled values never leak into the answer.
 #[must_use]
-pub fn collect_form_answer(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -> Option<FormAnswer> {
+pub fn collect_form_answer(
+    shape: &FormShape,
+    path: &str,
+    raw: &Map<String, Jv>,
+) -> Option<FormAnswer> {
     match shape {
         FormShape::String => match raw.get(path)? {
             Jv::String(s) => Some(FormAnswer::String(s.clone())),
@@ -377,7 +381,8 @@ pub fn collect_form_answer(shape: &FormShape, path: &str, raw: &Map<String, Jv>)
             let present_key = format!("{path}.__present");
             let present = matches!(raw.get(&present_key), Some(Jv::Bool(true)));
             if present {
-                collect_form_answer(inner, path, raw).map(|a| FormAnswer::Optional(Some(Box::new(a))))
+                collect_form_answer(inner, path, raw)
+                    .map(|a| FormAnswer::Optional(Some(Box::new(a))))
             } else {
                 Some(FormAnswer::Optional(None))
             }
@@ -598,20 +603,28 @@ mod tests {
         let FormAnswer::Product(fields) = &answer else {
             panic!("expected a Product answer");
         };
-        assert_eq!(field(fields, "service"), Some(&FormAnswer::String("api".to_string())));
+        assert_eq!(
+            field(fields, "service"),
+            Some(&FormAnswer::String("api".to_string()))
+        );
         assert_eq!(
             field(fields, "destination"),
             Some(&FormAnswer::Sum {
                 constructor: "Ssh".to_string(),
                 payload: Box::new(FormAnswer::Product(vec![
-                    ("host".to_string(), FormAnswer::String("example.com".to_string())),
+                    (
+                        "host".to_string(),
+                        FormAnswer::String("example.com".to_string())
+                    ),
                     ("port".to_string(), FormAnswer::Int(22)),
                 ])),
             })
         );
         assert_eq!(
             field(fields, "releaseNote"),
-            Some(&FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string())))))
+            Some(&FormAnswer::Optional(Some(Box::new(FormAnswer::String(
+                "hotfix".to_string()
+            )))))
         );
     }
 
@@ -670,7 +683,10 @@ mod tests {
                 payload: Box::new(FormAnswer::Unit),
             })
         );
-        assert_eq!(field(fields, "releaseNote"), Some(&FormAnswer::Optional(None)));
+        assert_eq!(
+            field(fields, "releaseNote"),
+            Some(&FormAnswer::Optional(None))
+        );
     }
 
     #[test]

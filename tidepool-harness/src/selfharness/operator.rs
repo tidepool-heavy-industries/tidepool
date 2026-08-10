@@ -440,7 +440,10 @@ mod tests {
 
     #[test]
     fn leaf_shape_and_answer_encode_as_documented() {
-        assert_eq!(serde_json::to_value(FormShape::String).unwrap(), json!("string"));
+        assert_eq!(
+            serde_json::to_value(FormShape::String).unwrap(),
+            json!("string")
+        );
         assert_eq!(
             serde_json::to_value(FormAnswer::String("api".to_string())).unwrap(),
             json!({"string": "api"})
@@ -449,14 +452,18 @@ mod tests {
 
     #[test]
     fn optional_present_and_absent_encode_as_documented() {
-        let present = FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string()))));
+        let present =
+            FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string()))));
         assert_eq!(
             serde_json::to_value(&present).unwrap(),
             json!({"optional": {"string": "hotfix"}})
         );
 
         let absent = FormAnswer::Optional(None);
-        assert_eq!(serde_json::to_value(&absent).unwrap(), json!({"optional": null}));
+        assert_eq!(
+            serde_json::to_value(&absent).unwrap(),
+            json!({"optional": null})
+        );
     }
 
     fn ssh_product_shape() -> FormShape {
@@ -478,7 +485,10 @@ mod tests {
 
     fn ssh_product_answer() -> FormAnswer {
         FormAnswer::Product(vec![
-            ("host".to_string(), FormAnswer::String("example.com".to_string())),
+            (
+                "host".to_string(),
+                FormAnswer::String("example.com".to_string()),
+            ),
             ("port".to_string(), FormAnswer::Int(22)),
         ])
     }
@@ -634,7 +644,14 @@ mod tests {
         let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["service", "environment", "destination", "replicas", "runMigrations", "releaseNote"]
+            vec![
+                "service",
+                "environment",
+                "destination",
+                "replicas",
+                "runMigrations",
+                "releaseNote"
+            ]
         );
         let Some((_, FormAnswer::Sum { constructor, .. })) =
             fields.iter().find(|(k, _)| k == "destination")

@@ -22,7 +22,8 @@
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
 
-const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
+const HEADER: &str =
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Aeson.Value (eitherDecodeValue)\n\
@@ -301,7 +302,11 @@ result = concat
       [ ("host", StringAnswer "example.com"), ("port", IntAnswer 22) ]
 "#;
     if let Some(v) = eval_result(body) {
-        assert_eq!(v, json!([]), "answers that did not match the documented contract")
+        assert_eq!(
+            v,
+            json!([]),
+            "answers that did not match the documented contract"
+        )
     }
 }
 

@@ -20,7 +20,8 @@
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
 
-const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
+const HEADER: &str =
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Form.Shape\n\
@@ -388,6 +389,10 @@ result =
   check "Two" (formShape @Two == SumShape "Two" [VariantShape "TA" UnitShape, VariantShape "TB" UnitShape])
 "#,
     ) {
-        assert_eq!(v, json!([]), "a derived sum shape did not equal its literal")
+        assert_eq!(
+            v,
+            json!([]),
+            "a derived sum shape did not equal its literal"
+        )
     }
 }

@@ -59,11 +59,8 @@ loop = do
 /// (GHC derives the module name from the file's basename) and return the dir.
 fn write_fixture() -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("create temp dir");
-    std::fs::write(
-        dir.path().join("HarnessProfileFixture.hs"),
-        FIXTURE_SOURCE,
-    )
-    .expect("write fixture source");
+    std::fs::write(dir.path().join("HarnessProfileFixture.hs"), FIXTURE_SOURCE)
+        .expect("write fixture source");
     dir
 }
 
