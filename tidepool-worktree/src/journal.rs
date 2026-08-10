@@ -84,7 +84,7 @@ impl EventJournal {
             .map_err(|e| storage_failure(&path, e))?;
 
         let file = File::open(&path).map_err(|e| storage_failure(&path, e))?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
 
         let mut entries = Vec::new();
         // A malformed row is recoverable ONLY as the final row — that is the
@@ -93,8 +93,15 @@ impl EventJournal {
         // and silently eliding it would delete exactly the evidence the journal
         // exists to preserve. So a bad row is held PENDING and only forgiven at
         // EOF; if any further line arrives, it was not last and we fail loudly.
-        let mut pending_bad: Option<(usize, String)> = None;
-        let not_final = |path: &Path, bad: (usize, String), next: usize| {
+        //
+        // Bytes are counted (hence `read_until`, not `lines()`) because
+        // forgiveness must include TAIL REPAIR: `append` opens with O_APPEND,
+        // so a torn row merely skipped in memory would get valid rows written
+        // AFTER it — manufacturing on disk exactly the corrupted-middle shape
+        // this loop refuses, and making the journal permanently unopenable
+        // one crash later.
+        let mut pending_bad: Option<(usize, String, u64)> = None;
+        let not_final = |path: &Path, bad: (usize, String, u64), next: usize| {
             storage_failure(
                 path,
                 format!(
@@ -106,45 +113,74 @@ impl EventJournal {
             )
         };
 
-        for (idx, line) in reader.lines().enumerate() {
-            let lineno = idx + 1;
-            match line {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut offset: u64 = 0;
+        let mut lineno: usize = 0;
+        loop {
+            buf.clear();
+            let n = reader
+                .read_until(b'\n', &mut buf)
+                .map_err(|e| storage_failure(&path, e))?;
+            if n == 0 {
+                break;
+            }
+            lineno += 1;
+            let line_start = offset;
+            offset += n as u64;
+            match std::str::from_utf8(&buf) {
                 Ok(l) => {
-                    if let Some(bad) = pending_bad.take() {
-                        return Err(not_final(&path, bad, lineno));
-                    }
                     if l.trim().is_empty() {
+                        if let Some(bad) = pending_bad.take() {
+                            return Err(not_final(&path, bad, lineno));
+                        }
                         continue;
                     }
-                    match serde_json::from_str::<JournalEntry>(&l) {
-                        Ok(entry) => entries.push(entry),
-                        Err(err) => pending_bad = Some((lineno, err.to_string())),
+                    match serde_json::from_str::<JournalEntry>(l) {
+                        Ok(entry) => {
+                            if let Some(bad) = pending_bad.take() {
+                                return Err(not_final(&path, bad, lineno));
+                            }
+                            entries.push(entry);
+                        }
+                        Err(err) => {
+                            if let Some(bad) = pending_bad.take() {
+                                return Err(not_final(&path, bad, lineno));
+                            }
+                            pending_bad = Some((lineno, err.to_string(), line_start));
+                        }
                     }
                 }
-                // `InvalidData` means `read_line` decoded non-UTF-8 bytes — the
-                // same torn-write shape as a truncated JSON row, so it gets the
-                // same final-row-only treatment. Any OTHER error (permission
-                // denied, a genuine read fault) is not explained by a torn write
-                // and propagates immediately.
-                Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                // Non-UTF-8 bytes are the same torn-write shape as a truncated
+                // JSON row, so they get the same final-row-only treatment.
+                Err(err) => {
                     if let Some(bad) = pending_bad.take() {
                         return Err(not_final(&path, bad, lineno));
                     }
-                    pending_bad = Some((lineno, format!("invalid utf-8: {err}")));
+                    pending_bad = Some((lineno, format!("invalid utf-8: {err}"), line_start));
                 }
-                Err(err) => return Err(storage_failure(&path, err)),
             }
         }
 
         // Reached EOF with a bad row outstanding: it WAS the final row, so this
         // is the recoverable torn write. Losing that one observation beats
-        // refusing to open the journal over it.
-        if let Some((lineno, reason)) = pending_bad {
+        // refusing to open the journal over it — and the file is TRUNCATED to
+        // the last good row so the next `append` lands after good data, not
+        // after garbage (see the loop comment).
+        if let Some((lineno, reason, bad_start)) = pending_bad {
             eprintln!(
-                "tidepool-worktree: event journal {} line {} is a torn final row, skipping: {reason}",
+                "tidepool-worktree: event journal {} line {} is a torn final row, \
+                 truncating it away: {reason}",
                 path.display(),
                 lineno
             );
+            let repair = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|e| storage_failure(&path, e))?;
+            repair
+                .set_len(bad_start)
+                .map_err(|e| storage_failure(&path, e))?;
+            repair.sync_all().map_err(|e| storage_failure(&path, e))?;
         }
 
         Ok(Self { path, entries })

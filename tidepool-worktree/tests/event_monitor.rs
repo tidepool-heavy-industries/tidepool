@@ -688,3 +688,51 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
         );
     }
 }
+
+/// Tail repair: forgiving a torn final row must also TRUNCATE it away, or the
+/// O_APPEND writer lands the next row after the garbage — manufacturing the
+/// corrupted-middle shape `open()` (rightly) refuses, so one crash would make
+/// the journal permanently unopenable. Sequence under test:
+/// tear -> open (repairs) -> append -> reopen (the crash-recovery read path).
+#[test]
+fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
+    let repo = TestRepo::init().expect("init");
+    let w = repo.writer();
+    w.commit_file("a.txt", "one", "first").expect("commit");
+
+    let (mut monitor, journal_path, _tmp) = open_monitor();
+    let id = wt("w1");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .expect("register");
+    monitor.reconcile(&id).expect("priming reconcile");
+    w.commit_file("b.txt", "two", "second").expect("commit");
+    monitor.reconcile(&id).expect("reconcile");
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal_path)
+            .expect("open journal for corruption");
+        write!(file, "{{\"cursor\":999,\"event_id\"").expect("write torn row");
+    }
+
+    let mut repaired = EventJournal::open(&journal_path).expect("reopen after tear");
+    let survivors = repaired.since(0).expect("since");
+    let sample = survivors
+        .last()
+        .expect("at least one surviving row")
+        .clone();
+    repaired
+        .append(&sample.event, sample.event_id)
+        .expect("append after repair");
+
+    let reopened = EventJournal::open(&journal_path)
+        .expect("append-after-tear must not corrupt the journal for the next open");
+    assert_eq!(
+        reopened.since(0).expect("since").len(),
+        survivors.len() + 1,
+        "every surviving row plus the appended one must be readable"
+    );
+}
