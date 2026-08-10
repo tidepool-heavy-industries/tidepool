@@ -325,7 +325,7 @@ processFile timing args path = do
               let cbor = encodeTree nodes
               -- Force CBOR encoding to surface errors from lazy thunks (e.g. unsupported FFI calls)
               _ <- evaluate (BS.length cbor)
-              let outFile = outDir </> name ++ ".cbor"
+              let outFile = outDir </> cborFileName name
               BS.writeFile outFile cbor
               hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
               let usedMeta = map dcToMeta (Map.elems usedDCs)
@@ -382,7 +382,7 @@ processFile timing args path = do
             dedupd = dedup Map.empty translated
         mapM_ (\(name, nodes) -> do
           let cbor = encodeTree nodes
-          let outFile = outDir </> name ++ ".cbor"
+          let outFile = outDir </> cborFileName name
           BS.writeFile outFile cbor
           hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
           ) dedupd
@@ -454,6 +454,23 @@ translateTargetClosed timing hscEnv binds targetName = do
 -- | One target's write-ready pieces, gathered by 'writeClosedTargets' before
 -- the cross-target metadata merge (the merge needs every target's pieces in
 -- scope at once, so they can't be written as each target is translated).
+-- | A binder name as a FILENAME component. Occ names can contain @/@ — the
+-- derived 'Eq' method @/=@ yields a @$c/=_u...@ binder — which @(</>)@-built
+-- paths read as a directory separator, so the write dies on a nonexistent
+-- subdirectory (observed live: @$c/=_u....cbor: withBinaryFile: does not
+-- exist@, surfaced by the first module whose types derive Eq under
+-- whole-closure extraction). Percent-encode @/@ (and @%@ so the encoding is
+-- injective). Readers that look files up BY NAME (the Rust side's
+-- @<target>.cbor@) only ever use caller-chosen target names today; if a
+-- target containing @/@ ever appears there, the Rust side must apply this
+-- same encoding.
+cborFileName :: String -> FilePath
+cborFileName name = concatMap enc name ++ ".cbor"
+  where
+    enc '/' = "%2F"
+    enc '%' = "%25"
+    enc c   = [c]
+
 data TargetWrite = TargetWrite
   { twOutFileBase :: String
   , twNodeCount   :: Int

@@ -1,5 +1,6 @@
 {
   "generation": 1,
+  "iteration": 1,
   "state": {
     "lastDecision": {
       "action": "observe",

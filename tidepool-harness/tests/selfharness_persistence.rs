@@ -601,11 +601,14 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
         .run_one_cycle(&current_source, restored.as_ref())
         .await
         .expect("a cycle from fresh initialState after a discarded checkpoint must succeed");
+    // Iteration lives in the checkpoint ENVELOPE, never in authored State.
+    // A fresh-start cycle after the discard runs as loop iteration 1 — the
+    // fixture's iteration is part of the discarded state and must NOT carry.
     assert_eq!(
-        outcome.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "starting fresh from initialState, loopCount must be 1, not continuing the \
-         discarded checkpoint's loopCount"
+        driver.iteration(),
+        1,
+        "starting fresh from initialState, the cycle must be loop iteration 1, not a \
+         continuation of the discarded checkpoint's count"
     );
     let committed = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after the fresh cycle")
@@ -680,10 +683,20 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
         "the retried cycle must commit generation 2, continuing from the planted \
          checkpoint's generation 1"
     );
+    // Unlike the fingerprint-DISCARD case (where the stale harness's loop
+    // history is thrown away with its state), a same-fingerprint decode
+    // retry is the SAME harness: the envelope's cycles-completed count
+    // legitimately continues (planted 1 -> this cycle is 2). What proves the
+    // retry started from fresh initialState is the committed STATE: a real
+    // `State` (its `mode` key present), not an echo of the planted garbage.
     assert_eq!(
-        committed.state.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
-        "the retried cycle must have started from fresh initialState (loopCount 1), \
-         not the undecodable planted state"
+        committed.iteration, 2,
+        "the same-fingerprint retry continues the envelope's cycle count"
     );
+    assert!(
+        committed.state.get("mode").is_some(),
+        "the retried cycle must commit a real State, got {:?}",
+        committed.state
+    );
+    assert_eq!(committed.state.get("totally"), None);
 }

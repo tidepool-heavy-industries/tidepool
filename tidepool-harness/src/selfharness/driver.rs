@@ -715,8 +715,31 @@ impl SelfHarnessDriver {
         // (the very first cycle) splices `Loaded.initialState` in the `render`
         // helpers (`state_cross::state_in(None)`), so no redundant
         // `pure initialState` compile + round-trip through JSON is needed.
+        //
+        // Since lazy boot, THIS compile — not `bootstrap` — is where "can we
+        // build a usable outer session at all" is actually answered (the
+        // eager boot seed that used to answer it is gone), so its failure
+        // takes the same Failed-vs-Poisoned classification as a bootstrap
+        // failure. A bare `?` here once returned early PAST the lifecycle
+        // update, leaving a failed driver reporting the cosmetic `Idle`, and
+        // a failed recovery reporting `Failed` forever instead of escalating.
         let prior_compaction = self.last_compaction.clone();
-        let prompt_before = self.render_framing(prior_state, prior_compaction.as_deref())?;
+        let prompt_before = match self.render_framing(prior_state, prior_compaction.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                self.discard_resident_state();
+                self.lifecycle = if recovering_from_failure {
+                    SelfHarnessState::Poisoned {
+                        reason: e.to_string(),
+                    }
+                } else {
+                    SelfHarnessState::Failed {
+                        reason: e.to_string(),
+                    }
+                };
+                return Err(e);
+            }
+        };
 
         // The pre-loop render IS the answerer session's system message.
         // Compose it with the narrow answerer instruction and stash it for
@@ -892,6 +915,13 @@ impl SelfHarnessDriver {
                 current_fingerprint: source.fingerprint.clone(),
             });
             self.last_compaction = None;
+            // The iteration count is the discarded harness's loop history —
+            // same reasoning as the compaction summary above. GENERATION
+            // deliberately still carries (adopted before this branch): it is
+            // storage lineage for the checkpoint FILE, not loop state, and
+            // the next commit must supersede the discarded row, not restart
+            // a parallel numbering at 1.
+            self.iteration = 0;
             return Ok(None);
         }
         self.last_compaction = checkpoint.compaction;
