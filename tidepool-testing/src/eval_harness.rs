@@ -503,8 +503,11 @@ data Ask a where
   Ask :: Text -> Ask Value
 data RunLLMTurn a where
   RunLLMTurnStub :: Text -> RunLLMTurn Value
+data Fork a where
+  ForkWith :: Int -> Text -> Fork Value
+  ForkAllWith :: Int -> [Text] -> Fork Value
 
-type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn]
+type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn, Fork]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
@@ -820,9 +823,27 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
+    // 11: Fork (stub — the answerer parallel-delegation effect; same
+    // dispatch-every-tag reasoning as MockRunLLMTurn).
+    #[derive(FromCore)]
+    #[allow(dead_code)]
+    pub enum ForkReq {
+        #[core(name = "ForkWith")]
+        ForkWith(i64, String),
+        #[core(name = "ForkAllWith")]
+        ForkAllWith(i64, Vec<String>),
+    }
+    pub struct MockFork;
+    impl EffectHandler for MockFork {
+        type Request = ForkReq;
+        fn handle(&mut self, _req: ForkReq, cx: &EffectContext) -> Result<Response, EffectError> {
+            cx.respond(serde_json::json!("stub_response"))
+        }
+    }
+
     /// The base-stack mock handler HList, in stack order (matches
     /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
-    /// Ask, RunLLMTurn]` — pass straight to [`super::EvalHarness::run`].
+    /// Ask, RunLLMTurn, Fork]` — pass straight to [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
         MockKv,
@@ -834,7 +855,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         MockGit,
         MockTime,
         MockAsk,
-        MockRunLLMTurn
+        MockRunLLMTurn,
+        MockFork
     ) {
         frunk::hlist![
             MockConsole,
@@ -847,7 +869,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
             MockGit,
             MockTime,
             MockAsk,
-            MockRunLLMTurn
+            MockRunLLMTurn,
+            MockFork
         ]
     }
 }
