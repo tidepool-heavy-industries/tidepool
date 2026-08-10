@@ -265,9 +265,13 @@ async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole(
         "an ordinary first cycle must publish Idle, got {:?}",
         driver.lifecycle()
     );
+    // The loop-iteration count lives in the checkpoint ENVELOPE
+    // (`driver.iteration()`), never in the authored `State` — asserting a
+    // `loopCount` key in `state_json` was this test's original spelling,
+    // stale once runtime iteration moved out of authored state.
     assert_eq!(
-        cycle.state_json.get("loopCount").and_then(|v| v.as_i64()),
-        Some(1),
+        driver.iteration(),
+        1,
         "the first-ever cycle must run loop exactly once, got {:?}",
         cycle.state_json
     );

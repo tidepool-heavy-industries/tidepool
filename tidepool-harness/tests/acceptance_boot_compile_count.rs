@@ -48,6 +48,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tidepool_harness::compile;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
@@ -71,15 +73,14 @@ use tidepool_harness::{
 /// into one extract invocation. A later dev lands the fix by changing THIS
 /// constant and nothing else in this test — the test itself, and the
 /// spawn-counting instrumentation it asserts against, stay unchanged.
-pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 4;
-
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
+///
+/// MEASURED 2026-08-09 on the centralized tip (this suite, clean cache):
+/// **2** — both boot seeds are gone (item 0 steps 1-3, boot-lazy), leaving
+/// exactly the two `compile_outer` invocations (render framing + loop body)
+/// that wave 3's render+loop fusion targets. 4 -> 2 is now a measurement,
+/// not an expectation; the remaining 2 -> 1 belongs to the routed
+/// `boot-onecompile` spec.
+pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 2;
 
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -149,12 +150,7 @@ impl ModelProvider for SnapshotOnFirstCall {
 /// [`PRE_MODEL_EXTRACT_COMPILES`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
-    if !extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     // Own process (nextest gives every test binary its own), but reset
     // anyway: this test binary has exactly one test function, so this only
