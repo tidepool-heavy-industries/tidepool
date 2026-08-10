@@ -22,7 +22,7 @@
 //! # What lives here and what does not
 //!
 //! Here: process lifecycle, request correlation, protocol fixtures, and the
-//! translation between a backend's wire events and [`seam::RuntimeAgentEvent`].
+//! translation between a backend's wire events and the seam vocabulary.
 //!
 //! Not here: the authored Haskell surface (`Call`/`Notify`/`Tool`/`AsServerT`),
 //! the Generic tool compiler, the agent registry, and realm parking. Those
@@ -35,7 +35,7 @@ pub mod spawn;
 pub use backend::OneCycleBackend;
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
-    DynamicToolDeclaration, ModelPolicy, RuntimeAgentEvent, ThreadSpec, ToolCallId, TurnId,
+    DynamicToolDeclaration, ModelPolicy, ThreadSpec, TurnId,
 };
 pub use spawn::{
     CoupledSpawner, OneCycleRun, SpawnError, SpawnReceipt, SpawnRequest, SpawnStage,

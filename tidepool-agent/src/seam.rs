@@ -6,8 +6,6 @@
 //! [`crate::backend::codex`] instead, projected into a neutral shape on the way
 //! out.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 /// Tidepool's identity for one agent. Minted by the registry, never by a
@@ -25,14 +23,6 @@ pub struct BackendThreadId(pub String);
 /// A backend's identity for one turn on a thread. Opaque, as above.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TurnId(pub String);
-
-/// A backend's identity for one outstanding server-initiated tool call.
-///
-/// This is the correlation token for the park/reply primitive: the backend
-/// blocks the child's turn until the host answers *this* id. Losing one strands
-/// a child turn forever, so it is carried end to end rather than reconstructed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ToolCallId(pub String);
 
 /// One dynamic tool as declared to a backend at agent creation.
 ///
@@ -53,49 +43,6 @@ pub struct DynamicToolDeclaration {
     pub input_schema: serde_json::Value,
 }
 
-/// What a backend observed, in Tidepool's vocabulary.
-///
-/// Deliberately coarse: the registry needs enough to route, park, and build a
-/// receipt. Rich per-backend activity detail is summarized into
-/// [`RuntimeAgentEvent::Activity`] rather than modeled variant-by-variant,
-/// because modeling it exactly is how backend vocabulary leaks upward one
-/// harmless-looking field at a time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum RuntimeAgentEvent {
-    /// The thread accepted a turn.
-    TurnStarted { turn: TurnId },
-
-    /// The child called one of its generated tools and is now parked until the
-    /// host answers `call`. The registry must resolve every one of these
-    /// exactly once, including on handler failure — an unresolved call is a
-    /// permanently stranded child.
-    ToolCall {
-        turn: TurnId,
-        call: ToolCallId,
-        /// The normalized wire name, matching a [`DynamicToolDeclaration::name`].
-        tool: String,
-        arguments: serde_json::Value,
-    },
-
-    /// Observable work that belongs in a receipt but does not change lifecycle.
-    Activity(AgentActivity),
-
-    /// The turn ended normally. `output` is the structured terminal value when
-    /// the backend produced one; decoding it against the requested result type
-    /// is the Haskell side's job, and a decode failure is NOT a success.
-    TurnCompleted {
-        turn: TurnId,
-        output: Option<serde_json::Value>,
-    },
-
-    /// The turn ended by interruption. Distinct from `Failed`: the receipt is
-    /// still authoritative for what happened before the interrupt.
-    TurnInterrupted { turn: TurnId },
-
-    /// The backend reported an error against this agent.
-    Failed { error: AgentBackendError },
-}
-
 /// Receipt-bearing observations. Model prose is never the source of any field
 /// here — PRD 18: "Runtime receipts are authoritative."
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,14 +54,6 @@ pub enum AgentActivity {
     },
     /// A path the backend actually changed.
     FileChanged { path: String },
-    /// Token/usage counters as reported by the backend, kept as a flat map so a
-    /// backend adding a counter does not change this type.
-    Usage { counters: BTreeMap<String, i64> },
-    /// Anything else worth journaling but not worth a variant yet.
-    Other {
-        kind: String,
-        detail: serde_json::Value,
-    },
 }
 
 /// Backend failures, projected into causes Tidepool can act on.
@@ -215,25 +154,4 @@ pub struct CycleOutcome {
     /// The EXACT model the backend resolved and ran — recorded per the
     /// [`ModelPolicy`] rule, never the tier name.
     pub resolved_model: String,
-}
-
-/// What a caller-assigned workspace grants a worker.
-///
-/// TRANSITIONAL (PRD 19 revision, Inanna 2026-08-08): agent creation is being
-/// coupled to worktree allocation — one managed worktree per agent, all agents
-/// isolated, and once PRD 19 lands a managed worktree is the ONLY workspace an
-/// agent can receive. This free-form shape is valid for pre-PRD-19 spikes and
-/// dogfood only. Do not build a writer-lease or shared-directory model on it;
-/// the coupling dissolves that problem rather than solving it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Workspace {
-    pub cwd: String,
-    pub access: WorkspaceAccess,
-}
-
-/// TRANSITIONAL — see [`Workspace`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkspaceAccess {
-    ReadOnly,
-    WorkspaceWrite,
 }
