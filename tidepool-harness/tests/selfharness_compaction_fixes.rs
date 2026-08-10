@@ -123,10 +123,13 @@ impl ModelProvider for CompactingProvider {
     }
 }
 
+/// One recorded `CompactionTrigger` payload: node, summary, pre/post input tokens.
+type TriggerRecord = (NodeId, String, u64, u64);
+
 /// Capturing observer: records the payload of every `CompactionTrigger`.
 #[derive(Default)]
 struct CaptureObserver {
-    triggers: Arc<Mutex<Vec<(NodeId, String, u64, u64)>>>,
+    triggers: Arc<Mutex<Vec<TriggerRecord>>>,
 }
 
 impl Observer for CaptureObserver {

@@ -22,9 +22,9 @@ in git history rather than here.
   verified (E6 **moves the wire**); item 0 (both boot seeds deleted), item 0b
   and the `--targets` prerequisite landed **UNVERIFIED** — gate runs were
   stopped under the wrap-up directive and their legs run in the centralized
-  pass. Item 0's headline is an *expected, unmeasured* 4 → 2, not 4 → 1;
-  `PRE_MODEL_EXTRACT_COMPILES` deliberately stays at 4 so the drop must be
-  measured rather than assumed. Wave 3 (render+loop fusion) and D2 are CUT and
+  pass. Item 0's 4 → 2 drop was MEASURED in the 2026-08-09 centralized pass
+  (`acceptance_boot_compile_count` observed 2 and its
+  `PRE_MODEL_EXTRACT_COMPILES` pin now says so). Wave 3 (render+loop fusion) and D2 are CUT and
   routed forward ready-to-spawn, D2 with a 212-line hand-off at
   `extract-wave/spawn-latency/03-d2-handoff.md`.
   The closing section also lists six standing hazards the wave established but

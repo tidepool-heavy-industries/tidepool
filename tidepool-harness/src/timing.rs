@@ -59,8 +59,9 @@
 //!
 //! On BOTH extract pipeline paths (`runNormalPipeline` and
 //! `runSessionPipeline` in `haskell/src/Tidepool/GhcPipeline.hs`),
-//! [`PHASE_GHC_SETUP`] (session `DynFlags` setup + `guessTarget`/`setTargets`
-//! + `depanal`) and [`PHASE_GHC_LOAD`] (the `load'` call alone) are two
+//! [`PHASE_GHC_SETUP`] (session `DynFlags` setup plus
+//! `guessTarget`/`setTargets`/`depanal`) and [`PHASE_GHC_LOAD`] (the `load'`
+//! call alone) are two
 //! SEPARATE, NON-OVERLAPPING spans — not one nested inside the other. They
 //! PARTITION what an older, now-retired `ghc_session` bracket used to cover
 //! on the compile lane; see [`PHASE_GHC_SESSION`]'s doc for the retirement.

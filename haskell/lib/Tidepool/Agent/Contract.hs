@@ -372,6 +372,12 @@ instance
 
 -- | The constraints needed to walk the server interpretation of a tools
 -- record.
+--
+-- A CONSTRAINT-KIND SYNONYM, deliberately not a zero-method class: the class
+-- encoding elaborates an empty dictionary whose culled @C:HasAgentApi@
+-- constructor trips a real extract-pipeline bug ("Dangling NVar reference").
+-- A synonym macro-expands at every use site and has no dictionary to cull.
+-- Do not "tidy" this into a class.
 type HasAgentApi tools m =
   ( Generic (tools (AsServerT m))
   , GCompileTools (Rep (tools (AsServerT m))) m

@@ -417,6 +417,13 @@ validateConFields mtag fields =
       | name `elem` seen = Just name
       | otherwise = firstRepeated (name : seen) rest
 
+-- Schema and encode call `error` where decode returns `Left`: a collision is
+-- a property of the TYPE, and the schema is built at agent construction —
+-- before any model call — so the partial branches fail fast on a type decode
+-- could never have accepted. Decode stays total because it judges model
+-- OUTPUT at runtime, where a `Left` must flow back as an ordinary result.
+-- The collision rules themselves are pinned by the decode-path tests in
+-- `tidepool-runtime/tests/agent_mode_encoding.rs`.
 checkedConSchema :: Maybe Text -> [ModelField] -> Value
 checkedConSchema mtag fields = case validateConFields mtag fields of
   Left problem -> error ("Tidepool.Agent.ModelCodec: " ++ T.unpack problem)

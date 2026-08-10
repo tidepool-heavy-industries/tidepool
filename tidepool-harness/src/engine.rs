@@ -1292,14 +1292,12 @@ pub enum TurnOutcome {
     /// The compiled block ran to completion; the node is done.
     Completed { rendered: String },
     /// The compiled block suspended at an `AskWith`; the hole is classified and
-    /// the machine's continuation id is `hole`.
+    /// the machine's continuation id is `hole`. The compiled turn's table is
+    /// NOT carried here — an answer's value bridges against the constructor
+    /// set stashed in the node's `convo.suspend_table`.
     Suspended {
         hole: String,
         classified: ClassifiedHole,
-        /// The compiled turn's table — kept so an in-context/fork answer's
-        /// value can be bridged against the SAME constructor set the parent
-        /// suspended with.
-        table: DataConTable,
     },
     /// The model replied with no runnable block — the caller decides whether to
     /// loop (feed a nudge) or stop.

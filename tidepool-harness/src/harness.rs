@@ -1366,11 +1366,7 @@ impl Harness {
                         convo.pending_bind = Some(pb);
                     }
                 }
-                Ok(engine::TurnOutcome::Suspended {
-                    hole,
-                    classified,
-                    table,
-                })
+                Ok(engine::TurnOutcome::Suspended { hole, classified })
             }
             Err(e) => {
                 let msg = format!("The eval failed at runtime: {e}");
@@ -1579,7 +1575,6 @@ impl Harness {
         Some(TurnOutcome::Suspended {
             hole: pending.hole.0.clone(),
             classified: pending.classified.clone(),
-            table: convo.suspend_table.clone().unwrap_or_default(),
         })
     }
 

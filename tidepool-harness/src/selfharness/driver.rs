@@ -1457,7 +1457,7 @@ impl SelfHarnessDriver {
             });
             self.agent.answer_dialog(node, submission).await?;
 
-            let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
+            let Some((hole, classified, _table)) = self.agent.pending_hole_full(node) else {
                 // The resume completed the node with no further suspension.
                 return Ok(None);
             };
@@ -1465,7 +1465,6 @@ impl SelfHarnessDriver {
                 return Ok(Some(TurnOutcome::Suspended {
                     hole: hole.0,
                     classified,
-                    table,
                 }));
             }
             if let HoleRouting::AskUser { spec: next_spec } = classified.routing {
