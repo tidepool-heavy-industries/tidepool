@@ -14,138 +14,50 @@
 //! this genuinely sync-blocking gate, so that block yields the tokio worker
 //! to other tasks instead of stalling it.
 //!
-//! # Recursive forms — [`FormShape`] / [`FormAnswer`]
+//! # Recursive forms — [`FormShape`]
 //!
 //! [`FormSpec`]/[`Field`]/[`Submission`] above are the FLAT v1 wire: one
-//! scalar per top-level key, no nesting. They stay live and unchanged — the
-//! `askUser` effect still emits and decodes them today.
+//! scalar per top-level key, no nesting. They stay live only until the
+//! legacy path is deleted.
 //!
-//! [`FormShape`] and [`FormAnswer`] are the RECURSIVE wire, mirroring
-//! Haskell's `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`/
-//! `FormAnswer`) constructor for constructor. They exist ALONGSIDE the flat
-//! types, not in place of them: `askUser @T` (PRD
-//! `plans/self-iterating-harness/14-generic-derived-askuser-prd.md`) is the
-//! live Haskell surface and emits a bare [`FormShape`] through the same
-//! `AskUserWith` suspension; [`crate::engine::classify_hole`] lifts it into
-//! [`FormSpec::shape`]. The flat types stay because the successor lane
-//! retires them, not because anything still emits them.
+//! [`FormShape`] is the RECURSIVE shape wire, mirroring Haskell's
+//! `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`)
+//! constructor for constructor. `askUser @T` emits a bare [`FormShape`]
+//! through the `AskUserWith` suspension; [`crate::engine::classify_hole`]
+//! lifts it into [`FormSpec::shape`].
 //!
-//! ## The JSON encoding is OWNED here, not by aeson
+//! ## The shape JSON encoding is OWNED here, not by aeson
 //!
 //! The Haskell encoder (`Tidepool.Form.Wire`) targets exactly what follows,
 //! and `tidepool-runtime/tests/generic_form_wire.rs` asserts it against
-//! these worked examples themselves. It is an internal
-//! transport representation, not an aeson `ToJSON`/`FromJSON` contract:
-//! nothing on either side derives or routes through generic JSON codecs for
-//! these types. Every shape below is what `#[derive(Serialize,
-//! Deserialize)]` with `#[serde(rename_all = "snake_case")]` (the default
-//! EXTERNALLY TAGGED representation) actually produces — the derive is the
-//! source of truth; the JSON here documents it, not the other way around.
+//! these worked examples themselves. Every shape below is what
+//! `#[derive(Serialize, Deserialize)]` with
+//! `#[serde(rename_all = "snake_case")]` (the default EXTERNALLY TAGGED
+//! representation) actually produces — the derive is the source of truth.
 //!
-//! A unit-payload enum variant (`FormShape::String`, `FormAnswer::Unit`, …)
-//! serializes as a bare JSON string equal to its snake_case variant name. A
-//! newtype variant (`FormShape::Optional(Box<FormShape>)`) serializes as a
-//! single-key object `{"optional": <inner>}`. A struct variant
-//! (`FormShape::Product { .. }`) serializes as `{"product": {<fields>}}`.
+//! A unit-payload variant (`FormShape::String`, …) serializes as a bare JSON
+//! string of its snake_case name. A newtype variant
+//! (`FormShape::Optional(Box<FormShape>)`) serializes as
+//! `{"optional": <inner>}`. A struct variant (`FormShape::Product { .. }`)
+//! serializes as `{"product": {<fields>}}`.
 //!
-//! [`FormAnswer::Product`] deliberately wraps `Vec<(FieldKey, FormAnswer)>`,
-//! NOT a JSON object: a JSON object silently collapses a duplicate key on
-//! parse, which would make `FormError::DuplicateField`-style detection
-//! (Haskell side, once the decoder exists) impossible to implement against
-//! this wire. An array of `[key, value]` pairs preserves duplicates and
-//! order for the decoder to reject or accept as it sees fit. Concretely, a
-//! `Vec<(String, X)>` field serializes as a JSON array of 2-element arrays
-//! (Rust tuples are sequences under serde), e.g. `[["host", …], ["port",
-//! …]]`.
+//! ## The ANSWER is ordinary JSON — there is no answer wire type
 //!
-//! ### The four encoding rules (frozen answer algebra, mirrored from
-//! Haskell's `FormAnswer` haddock and
-//! `plans/self-iterating-harness/16-generic-spike-receipts.md`)
+//! What the operator submits travels as a plain `serde_json::Value` shaped
+//! for the answer type's own generic `FromJSON` decode (Haskell side):
 //!
-//! These are usage discipline for whoever CONSTRUCTS a [`FormAnswer`]
-//! against a given [`FormShape`] (`tidepool-web`'s collector, and
-//! `Tidepool.Form.Wire`) — the Rust enum does not and cannot
-//! enforce them by itself, exactly as the Haskell ADT doesn't either:
+//! * record → JSON object of its fields: `{"host": "example.com", "port": 22}`;
+//! * all-nullary sum (enum) → the chosen constructor as a bare string:
+//!   `"Staging"`;
+//! * payload sum → tagged object, fields alongside the tag:
+//!   `{"tag": "Ssh", "host": "example.com", "port": 22}` (a nullary branch
+//!   of a mixed sum is `{"tag": "LocalHost"}`);
+//! * `Maybe` field → the value, or `null`/omitted for `Nothing`;
+//! * unit form (`askUser @()`) → `[]` (the vendored aeson-1.5 `()` decode);
+//! * leaves → the corresponding JSON scalar.
 //!
-//! 1. A single-constructor datatype answers with a bare [`FormAnswer::Product`]
-//!    — never wrap it in [`FormAnswer::Sum`].
-//! 2. A multi-constructor datatype ALWAYS answers [`FormAnswer::Sum`]
-//!    `{constructor, payload}`, including when the chosen branch is nullary.
-//! 3. A nullary constructor's payload is [`FormAnswer::Unit`], never an
-//!    empty [`FormAnswer::Product`] — so a nullary branch and a zero-field
-//!    record stay distinguishable on the wire (`"unit"` vs `{"product":
-//!    []}`).
-//! 4. `Maybe`/optional fields answer with [`FormAnswer::Optional`], never a
-//!    constructor pick.
-//!
-//! ## Worked examples
-//!
-//! One per shape, using the spike's own `DeployRequest` fixture
-//! (`16-generic-spike-receipts.md`) so the JSON below is traceable back to
-//! that verbatim `FormShape` dump.
-//!
-//! **Leaf** — `service :: Text`, answer `"api"`:
-//! ```text
-//! shape:  "string"
-//! answer: {"string":"api"}
-//! ```
-//!
-//! **Optional, present** — `releaseNote :: Maybe Text`, answer `Just
-//! "hotfix"`:
-//! ```text
-//! shape:  {"optional":"string"}
-//! answer: {"optional":{"string":"hotfix"}}
-//! ```
-//!
-//! **Optional, absent** — same field, answer `Nothing`:
-//! ```text
-//! shape:  {"optional":"string"}
-//! answer: {"optional":null}
-//! ```
-//!
-//! **Record product** (single-constructor `Ssh { host :: Text, port :: Int
-//! }`, so the answer is a BARE product — rule 1):
-//! ```text
-//! shape:  {"product":{"type_key":"Ssh","constructor":"Ssh","fields":[
-//!           {"key":"host","shape":"string"},
-//!           {"key":"port","shape":"int"}]}}
-//! answer: {"product":[["host",{"string":"example.com"}],["port",{"int":22}]]}
-//! ```
-//!
-//! **Nullary sum branch** — `environment :: Environment` (`Development |
-//! Staging | Production`), answer picks `Staging` (rule 2: still a `Sum`
-//! wrapper even though the payload is nullary; rule 3: payload is `"unit"`):
-//! ```text
-//! shape:  {"sum":{"type_key":"Environment","variants":[
-//!           {"constructor":"Development","shape":"unit"},
-//!           {"constructor":"Staging","shape":"unit"},
-//!           {"constructor":"Production","shape":"unit"}]}}
-//! answer: {"sum":{"constructor":"Staging","payload":"unit"}}
-//! ```
-//!
-//! **Payload-bearing sum branch** — `destination :: Destination`
-//! (`LocalHost | Ssh { host, port } | Container { image }`), answer picks
-//! `Ssh`:
-//! ```text
-//! answer: {"sum":{"constructor":"Ssh","payload":
-//!           {"product":[["host",{"string":"example.com"}],["port",{"int":22}]]}}}
-//! ```
-//!
-//! **Nested product-of-sum** — the whole `DeployRequest`, combining all of
-//! the above (see [`tests::deploy_request_nested_product_of_sum_round_trips`]
-//! for this exact value asserted against `serde_json`):
-//! ```text
-//! {"product":[
-//!   ["service",{"string":"api"}],
-//!   ["environment",{"sum":{"constructor":"Staging","payload":"unit"}}],
-//!   ["destination",{"sum":{"constructor":"Ssh","payload":
-//!     {"product":[["host",{"string":"example.com"}],["port",{"int":22}]]}}}],
-//!   ["replicas",{"int":3}],
-//!   ["runMigrations",{"bool":false}],
-//!   ["releaseNote",{"optional":{"string":"hotfix"}}]
-//! ]}
-//! ```
-
+//! The collector that builds this JSON from the rendered controls is
+//! `tidepool-web`'s submission path, guided by the same [`FormShape`].
 use serde::{Deserialize, Serialize};
 
 /// A typed form an agent spawned. Rendered by the web GUI; its
@@ -326,29 +238,6 @@ pub struct VariantShape {
     pub shape: FormShape,
 }
 
-/// What the operator submitted, structurally — mirrors Haskell's
-/// `Tidepool.Form.Shape.FormAnswer` constructor for constructor. See the
-/// module docs for the four encoding rules a caller constructing one of
-/// these against a [`FormShape`] must follow.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum FormAnswer {
-    String(String),
-    Int(i64),
-    Number(f64),
-    Bool(bool),
-    Unit,
-    Optional(Option<Box<FormAnswer>>),
-    /// Field/value pairs, in the shape's declaration order. A `Vec` of pairs
-    /// rather than a JSON object — see the module docs on why (duplicate-key
-    /// preservation for `FormError::DuplicateField`-style detection).
-    Product(Vec<(FieldKey, FormAnswer)>),
-    Sum {
-        constructor: ConstructorKey,
-        payload: Box<FormAnswer>,
-    },
-}
-
 /// The bind path a recursively-rendered [`FormShape`] sits at when it IS the
 /// whole form — the root `tidepool-web`'s renderer and its submission
 /// collector must BOTH start from, since a bind path is only meaningful
@@ -447,33 +336,13 @@ mod tests {
         assert_eq!(child_path("destination", "host"), "destination.host");
     }
 
-    // ---- FormShape / FormAnswer JSON encoding ------------------------------
+    // ---- FormShape JSON encoding -------------------------------------------
 
     #[test]
-    fn leaf_shape_and_answer_encode_as_documented() {
+    fn leaf_shape_encodes_as_documented() {
         assert_eq!(
             serde_json::to_value(FormShape::String).unwrap(),
             json!("string")
-        );
-        assert_eq!(
-            serde_json::to_value(FormAnswer::String("api".to_string())).unwrap(),
-            json!({"string": "api"})
-        );
-    }
-
-    #[test]
-    fn optional_present_and_absent_encode_as_documented() {
-        let present =
-            FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string()))));
-        assert_eq!(
-            serde_json::to_value(&present).unwrap(),
-            json!({"optional": {"string": "hotfix"}})
-        );
-
-        let absent = FormAnswer::Optional(None);
-        assert_eq!(
-            serde_json::to_value(&absent).unwrap(),
-            json!({"optional": null})
         );
     }
 
@@ -494,20 +363,10 @@ mod tests {
         }
     }
 
-    fn ssh_product_answer() -> FormAnswer {
-        FormAnswer::Product(vec![
-            (
-                "host".to_string(),
-                FormAnswer::String("example.com".to_string()),
-            ),
-            ("port".to_string(), FormAnswer::Int(22)),
-        ])
-    }
-
     /// Record product: single-constructor datatype, so the answer is a BARE
     /// `Product` — rule 1, no redundant `Sum` wrapper.
     #[test]
-    fn record_product_shape_and_answer_encode_as_documented() {
+    fn record_product_shape_encodes_as_documented() {
         assert_eq!(
             serde_json::to_value(ssh_product_shape()).unwrap(),
             json!({"product": {
@@ -518,10 +377,6 @@ mod tests {
                     {"key": "port", "shape": "int"}
                 ]
             }})
-        );
-        assert_eq!(
-            serde_json::to_value(ssh_product_answer()).unwrap(),
-            json!({"product": [["host", {"string": "example.com"}], ["port", {"int": 22}]]})
         );
     }
 
@@ -545,10 +400,9 @@ mod tests {
         }
     }
 
-    /// Nullary sum branch: rule 2 (`Sum` wrapper even though nullary) + rule
-    /// 3 (payload is `Unit`, not an empty `Product`).
+    /// Sum shape wire, pinned.
     #[test]
-    fn nullary_sum_branch_encodes_as_documented() {
+    fn nullary_sum_shape_encodes_as_documented() {
         assert_eq!(
             serde_json::to_value(environment_sum_shape()).unwrap(),
             json!({"sum": {
@@ -560,116 +414,6 @@ mod tests {
                 ]
             }})
         );
-        let answer = FormAnswer::Sum {
-            constructor: "Staging".to_string(),
-            payload: Box::new(FormAnswer::Unit),
-        };
-        assert_eq!(
-            serde_json::to_value(&answer).unwrap(),
-            json!({"sum": {"constructor": "Staging", "payload": "unit"}})
-        );
-    }
-
-    /// A nullary branch and a hypothetical zero-field record must stay
-    /// distinguishable on the wire (rule 3).
-    #[test]
-    fn nullary_payload_distinguishable_from_empty_product() {
-        let nullary = serde_json::to_value(FormAnswer::Unit).unwrap();
-        let empty_product = serde_json::to_value(FormAnswer::Product(vec![])).unwrap();
-        assert_ne!(nullary, empty_product);
-        assert_eq!(nullary, json!("unit"));
-        assert_eq!(empty_product, json!({"product": []}));
-    }
-
-    /// Payload-bearing sum branch: `destination :: Destination` picks `Ssh`.
-    #[test]
-    fn payload_bearing_sum_branch_encodes_as_documented() {
-        let answer = FormAnswer::Sum {
-            constructor: "Ssh".to_string(),
-            payload: Box::new(ssh_product_answer()),
-        };
-        assert_eq!(
-            serde_json::to_value(&answer).unwrap(),
-            json!({"sum": {"constructor": "Ssh", "payload":
-                {"product": [["host", {"string": "example.com"}], ["port", {"int": 22}]]}
-            }})
-        );
-    }
-
-    fn deploy_request_answer() -> FormAnswer {
-        FormAnswer::Product(vec![
-            ("service".to_string(), FormAnswer::String("api".to_string())),
-            (
-                "environment".to_string(),
-                FormAnswer::Sum {
-                    constructor: "Staging".to_string(),
-                    payload: Box::new(FormAnswer::Unit),
-                },
-            ),
-            (
-                "destination".to_string(),
-                FormAnswer::Sum {
-                    constructor: "Ssh".to_string(),
-                    payload: Box::new(ssh_product_answer()),
-                },
-            ),
-            ("replicas".to_string(), FormAnswer::Int(3)),
-            ("runMigrations".to_string(), FormAnswer::Bool(false)),
-            (
-                "releaseNote".to_string(),
-                FormAnswer::Optional(Some(Box::new(FormAnswer::String("hotfix".to_string())))),
-            ),
-        ])
-    }
-
-    /// The wire round trip DONE criterion: serialize, deserialize, compare —
-    /// over the spike's own nested product-of-sum `DeployRequest` fixture,
-    /// with every selector/constructor key surviving verbatim.
-    #[test]
-    fn deploy_request_nested_product_of_sum_round_trips() {
-        let answer = deploy_request_answer();
-        let wire = serde_json::to_string(&answer).unwrap();
-        let back: FormAnswer = serde_json::from_str(&wire).unwrap();
-        assert_eq!(answer, back);
-
-        let value = serde_json::to_value(&answer).unwrap();
-        assert_eq!(
-            value,
-            json!({"product": [
-                ["service", {"string": "api"}],
-                ["environment", {"sum": {"constructor": "Staging", "payload": "unit"}}],
-                ["destination", {"sum": {"constructor": "Ssh", "payload":
-                    {"product": [["host", {"string": "example.com"}], ["port", {"int": 22}]]}
-                }}],
-                ["replicas", {"int": 3}],
-                ["runMigrations", {"bool": false}],
-                ["releaseNote", {"optional": {"string": "hotfix"}}]
-            ]})
-        );
-
-        // Exact keys survive: constructor tags and field keys are found
-        // verbatim in the serialized wire, never humanized.
-        let FormAnswer::Product(fields) = &back else {
-            panic!("expected a Product answer");
-        };
-        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec![
-                "service",
-                "environment",
-                "destination",
-                "replicas",
-                "runMigrations",
-                "releaseNote"
-            ]
-        );
-        let Some((_, FormAnswer::Sum { constructor, .. })) =
-            fields.iter().find(|(k, _)| k == "destination")
-        else {
-            panic!("expected destination to be a Sum answer");
-        };
-        assert_eq!(constructor, "Ssh");
     }
 
     /// Flat [`FormSpec`]/[`Submission`] path stays green alongside the new

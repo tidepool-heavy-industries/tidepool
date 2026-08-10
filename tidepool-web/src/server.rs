@@ -26,22 +26,21 @@
 //! side (`blocking_recv`), so this composes with the driver's
 //! `block_in_place`/`block_on` turn driving.
 //!
-//! # Nested submissions — [`collect_form_answer`]
+//! # Nested submissions — [`collect_form_json`]
 //!
 //! The four verbs above and [`WebGate`] serve the FLAT `FormSpec`/
 //! `Submission` path — unchanged, and still what a spec with no `shape`
-//! takes. [`collect_form_answer`] is the RECURSIVE counterpart: it
-//! takes the flat `{"<dotted.path>": <scalar>}` object `render::generic_shape`'s
+//! takes. [`collect_form_json`] is the RECURSIVE counterpart: it takes the
+//! flat `{"<dotted.path>": <scalar>}` object `render::generic_shape`'s
 //! markup produces via `shell::JS`'s ordinary flat collector (see
-//! `render.rs`'s module docs) and reassembles it into a structural
-//! `FormAnswer`, guided by the same `FormShape` the form was rendered from —
-//! so a nested product-of-sum submission comes back nested, not flattened.
+//! `render.rs`'s module docs) and reassembles it into the PLAIN JSON the
+//! answer type's generic `FromJSON` decode reads — record objects, tagged
+//! record sums, bare strings for enums, `null` for absent optionals. There
+//! is no intermediate answer language.
 //!
 //! [`submit`] runs it whenever the pending spec carries a `shape` (what
-//! `askUser @T` emits), and hands the SERIALIZED `FormAnswer` back as the
-//! `Submission` — every non-unit `FormAnswer` variant is a one-key JSON
-//! object, so the flat map carries it without a second channel. Neither the
-//! client JS nor the gate signature changes.
+//! `askUser @T` emits). Neither the client JS nor the gate signature
+//! changes.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -54,7 +53,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, FormAnswer, FormShape, FormSpec, OperatorGate, Submission, ROOT_BIND_PATH,
+    child_path, FormShape, FormSpec, OperatorGate, Submission, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -70,7 +69,7 @@ enum Pending {
     /// A form is awaiting submission; `resolve` unparks `present_form`.
     /// Carries the ANSWER VALUE (see `OperatorGate::present_form`): an object
     /// for legacy flat forms, any JSON value for shape-carrying ones — a
-    /// unit-shaped answer is the bare string `"unit"`.
+    /// unit-shaped answer is `[]` (the vendored `()` wire).
     Form {
         spec: FormSpec,
         resolve: oneshot::Sender<Jv>,
@@ -326,83 +325,91 @@ fn err_json(msg: String) -> Response {
 }
 
 // -------------------------------------------------------------------------
-// Nested submissions — flat wire object -> structural FormAnswer.
+// Nested submissions — flat wire object -> the plain JSON answer.
 // -------------------------------------------------------------------------
 
 /// The ONE conversion from a client's flat POST to the answer value the gate
 /// returns — shared by the browser `/submit` and the form-API path so they
 /// cannot disagree. A spec carrying a recursive `shape` (what `askUser @T`
-/// emits) was rendered at dotted bind paths: reassemble the flat map into the
-/// structural [`FormAnswer`] and serialize it WHOLE — a unit answer is the
-/// bare string `"unit"`, and forcing it into an object is what made
-/// `askUser @()` re-prompt forever. An incomplete or wrong-typed submission
-/// resolves to `{}`, which the Haskell decode rejects and re-presents — the
-/// same path a bad flat submission already takes. A legacy (shapeless) spec
-/// passes the flat object through verbatim.
+/// emits) was rendered at dotted bind paths: reassemble the flat map into
+/// the ORDINARY JSON the answer type's generic `FromJSON` decode reads —
+/// there is no intermediate answer language. An incomplete or wrong-typed
+/// submission resolves to `{}`, which that decode rejects and re-presents —
+/// the same path a bad flat submission already takes. A legacy (shapeless)
+/// spec passes the flat object through verbatim.
 fn answer_value(spec: &FormSpec, submission: Map<String, Jv>) -> Jv {
     match &spec.shape {
-        Some(shape) => collect_form_answer(shape, ROOT_BIND_PATH, &submission)
-            .and_then(|answer| serde_json::to_value(answer).ok())
-            .unwrap_or_else(|| json!({})),
+        Some(shape) => {
+            collect_form_json(shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
+        }
         None => Jv::Object(submission),
     }
 }
 
+/// Whether every variant of a sum is nullary — an enum, whose answer is the
+/// chosen constructor as a bare string (matching the generic decode's
+/// all-nullary rule). A mixed sum answers as a tagged object instead.
+fn all_nullary(variants: &[tidepool_harness::selfharness::operator::VariantShape]) -> bool {
+    variants.iter().all(|v| matches!(v.shape, FormShape::Unit))
+}
+
 /// Reassemble a flat `{"<dotted.path>": <scalar>}` submission (exactly what
 /// `render::generic_shape`'s markup, collected by `shell::JS`'s ordinary
-/// flat `[data-bind]` walk, produces) into a structural [`FormAnswer`],
-/// guided by the [`FormShape`] the form was rendered from. `path` is the
-/// root bind path used at render time (`""` for a form rendered at the
-/// root).
+/// flat `[data-bind]` walk, produces) into the plain JSON the generic
+/// `FromJSON` decode accepts, guided by the [`FormShape`] the form was
+/// rendered from. `path` is the root bind path used at render time (`""`
+/// for a form rendered at the root).
 ///
-/// Rejects rather than guesses, mirroring `uiof::resume_expr_from_submission`:
-/// a missing leaf, a wrong-typed JSON scalar, or an unrecognized sum
-/// constructor all yield `None`. For a payload-bearing sum, only the CHOSEN
-/// variant's fields are read — the other variants' inputs are present in
-/// `raw` (they're always rendered) but their keys are never looked at, so a
-/// non-chosen branch's leftover/unfilled values never leak into the answer.
+/// The JSON per shape: leaves are the corresponding scalar; a record is an
+/// object of its fields; an all-nullary sum is the chosen constructor as a
+/// bare string; a payload sum is a tagged object (`{"tag": <ctor>, ...}` —
+/// the chosen variant's record fields merged beside the tag, tag-only for a
+/// nullary branch); `Maybe` is the value or `null`; the unit form is `[]`
+/// (the vendored aeson-1.5 `()` wire).
+///
+/// Rejects rather than guesses: a missing leaf, a wrong-typed scalar, or an
+/// unrecognized sum constructor all yield `None`. For a payload-bearing sum,
+/// only the CHOSEN variant's fields are read — the other variants' inputs
+/// are present in `raw` (they're always rendered) but their keys are never
+/// looked at, so a non-chosen branch's leftover values never leak into the
+/// answer.
 #[must_use]
-pub fn collect_form_answer(
-    shape: &FormShape,
-    path: &str,
-    raw: &Map<String, Jv>,
-) -> Option<FormAnswer> {
+pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -> Option<Jv> {
     match shape {
         FormShape::String => match raw.get(path)? {
-            Jv::String(s) => Some(FormAnswer::String(s.clone())),
+            Jv::String(s) => Some(Jv::String(s.clone())),
             _ => None,
         },
         FormShape::Int => match raw.get(path)? {
-            Jv::Number(n) => n.as_i64().map(FormAnswer::Int),
+            n @ Jv::Number(_) if n.as_i64().is_some() => Some(n.clone()),
             _ => None,
         },
         FormShape::Number => match raw.get(path)? {
-            Jv::Number(n) => n.as_f64().map(FormAnswer::Number),
+            n @ Jv::Number(_) if n.as_f64().is_some() => Some(n.clone()),
             _ => None,
         },
         FormShape::Bool => match raw.get(path)? {
-            Jv::Bool(b) => Some(FormAnswer::Bool(*b)),
+            b @ Jv::Bool(_) => Some(b.clone()),
             _ => None,
         },
-        FormShape::Unit => Some(FormAnswer::Unit),
+        FormShape::Unit => Some(json!([])),
         FormShape::Optional(inner) => {
             let present_key = format!("{path}.__present");
             let present = matches!(raw.get(&present_key), Some(Jv::Bool(true)));
             if present {
-                collect_form_answer(inner, path, raw)
-                    .map(|a| FormAnswer::Optional(Some(Box::new(a))))
+                collect_form_json(inner, path, raw)
             } else {
-                Some(FormAnswer::Optional(None))
+                Some(Jv::Null)
             }
         }
         FormShape::Product { fields, .. } => {
-            let mut out = Vec::with_capacity(fields.len());
+            let mut out = Map::new();
             for field in fields {
                 let child = child_path(path, &field.key);
-                let value = collect_form_answer(&field.shape, &child, raw)?;
-                out.push((field.key.clone(), value));
+                let value = collect_form_json(&field.shape, &child, raw)?;
+                out.insert(field.key.clone(), value);
             }
-            Some(FormAnswer::Product(out))
+            Some(Jv::Object(out))
         }
         FormShape::Sum { variants, .. } => {
             let chosen = match raw.get(path)? {
@@ -410,12 +417,26 @@ pub fn collect_form_answer(
                 _ => return None,
             };
             let variant = variants.iter().find(|v| v.constructor == chosen)?;
+            if all_nullary(variants) {
+                // Enum: the bare constructor string.
+                return Some(Jv::String(chosen));
+            }
             let child = child_path(path, &variant.constructor);
-            let payload = collect_form_answer(&variant.shape, &child, raw)?;
-            Some(FormAnswer::Sum {
-                constructor: chosen,
-                payload: Box::new(payload),
-            })
+            let mut out = Map::new();
+            out.insert("tag".to_string(), Jv::String(chosen));
+            match &variant.shape {
+                FormShape::Unit => {}
+                FormShape::Product { fields, .. } => {
+                    for field in fields {
+                        let fchild = child_path(&child, &field.key);
+                        let value = collect_form_json(&field.shape, &fchild, raw)?;
+                        out.insert(field.key.clone(), value);
+                    }
+                }
+                // GForm only ever derives Unit or Product variant payloads.
+                _ => return None,
+            }
+            Some(Jv::Object(out))
         }
     }
 }
@@ -474,16 +495,16 @@ mod tests {
     }
 
     /// The regression this transport exists for: a unit-shaped form
-    /// (`askUser @()`, a nullary single-constructor type) answers as the bare
-    /// wire string `"unit"`. The old object-only transport coerced it to `{}`,
-    /// which the Haskell decode rejects — an infinite re-prompt.
+    /// (`askUser @()`) answers as `[]` — the vendored aeson-1.5 `()` wire.
+    /// The old object-only transport coerced non-object answers to `{}`,
+    /// which the decode rejects — an infinite re-prompt.
     #[test]
-    fn unit_shaped_answer_survives_reassembly_as_the_bare_wire_string() {
+    fn unit_shaped_answer_survives_reassembly() {
         let spec = FormSpec {
             fields: vec![],
             shape: Some(FormShape::Unit),
         };
-        assert_eq!(answer_value(&spec, Submission::new()), json!("unit"));
+        assert_eq!(answer_value(&spec, Submission::new()), json!([]));
     }
 
     /// An incomplete shape submission still degrades to `{}` (reject and
@@ -615,12 +636,8 @@ mod tests {
         v.as_object().unwrap().clone()
     }
 
-    fn field<'a>(fields: &'a [(String, FormAnswer)], key: &str) -> Option<&'a FormAnswer> {
-        fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-    }
-
     #[test]
-    fn collect_form_answer_reassembles_nested_product_of_sum() {
+    fn collect_form_json_reassembles_nested_product_of_sum() {
         let raw = obj(json!({
             "service": "api",
             "destination": "Ssh",
@@ -629,32 +646,13 @@ mod tests {
             "releaseNote.__present": true,
             "releaseNote": "hotfix",
         }));
-        let answer = collect_form_answer(&deploy_request_shape(), "", &raw).expect("collects");
-        let FormAnswer::Product(fields) = &answer else {
-            panic!("expected a Product answer");
-        };
         assert_eq!(
-            field(fields, "service"),
-            Some(&FormAnswer::String("api".to_string()))
-        );
-        assert_eq!(
-            field(fields, "destination"),
-            Some(&FormAnswer::Sum {
-                constructor: "Ssh".to_string(),
-                payload: Box::new(FormAnswer::Product(vec![
-                    (
-                        "host".to_string(),
-                        FormAnswer::String("example.com".to_string())
-                    ),
-                    ("port".to_string(), FormAnswer::Int(22)),
-                ])),
-            })
-        );
-        assert_eq!(
-            field(fields, "releaseNote"),
-            Some(&FormAnswer::Optional(Some(Box::new(FormAnswer::String(
-                "hotfix".to_string()
-            )))))
+            collect_form_json(&deploy_request_shape(), "", &raw),
+            Some(json!({
+                "service": "api",
+                "destination": {"tag": "Ssh", "host": "example.com", "port": 22},
+                "releaseNote": "hotfix"
+            }))
         );
     }
 
@@ -680,12 +678,11 @@ mod tests {
 
         let mut raw = Map::new();
         raw.insert(ROOT_BIND_PATH.to_string(), json!("LocalHost"));
+        // Destination is a MIXED sum (Ssh carries fields), so even the
+        // nullary branch answers as a tag-only object, not a bare string.
         assert_eq!(
-            collect_form_answer(&destination_shape(), ROOT_BIND_PATH, &raw),
-            Some(FormAnswer::Sum {
-                constructor: "LocalHost".to_string(),
-                payload: Box::new(FormAnswer::Unit),
-            })
+            collect_form_json(&destination_shape(), ROOT_BIND_PATH, &raw),
+            Some(json!({"tag": "LocalHost"}))
         );
     }
 
@@ -693,7 +690,7 @@ mod tests {
     /// (see `render.rs`); the collector must read only the CHOSEN branch and
     /// ignore stray values left over from the unselected one(s).
     #[test]
-    fn collect_form_answer_ignores_unselected_branch_fields() {
+    fn collect_form_json_ignores_unselected_branch_fields() {
         let raw = obj(json!({
             "service": "api",
             "destination": "LocalHost",
@@ -702,37 +699,55 @@ mod tests {
             "releaseNote.__present": false,
             "releaseNote": "ignored because __present is false",
         }));
-        let answer = collect_form_answer(&deploy_request_shape(), "", &raw).expect("collects");
-        let FormAnswer::Product(fields) = &answer else {
-            panic!("expected a Product answer");
+        assert_eq!(
+            collect_form_json(&deploy_request_shape(), "", &raw),
+            Some(json!({
+                "service": "api",
+                "destination": {"tag": "LocalHost"},
+                "releaseNote": null
+            }))
+        );
+    }
+
+    /// An ALL-nullary sum (an enum) answers as the bare constructor string —
+    /// the wire the generic decode reads for enum types.
+    #[test]
+    fn collect_form_json_enum_answers_as_bare_string() {
+        let shape = FormShape::Sum {
+            type_key: "Env".to_string(),
+            variants: vec![
+                VariantShape {
+                    constructor: "Dev".to_string(),
+                    shape: FormShape::Unit,
+                },
+                VariantShape {
+                    constructor: "Prod".to_string(),
+                    shape: FormShape::Unit,
+                },
+            ],
         };
+        let mut raw = Map::new();
+        raw.insert(ROOT_BIND_PATH.to_string(), json!("Prod"));
         assert_eq!(
-            field(fields, "destination"),
-            Some(&FormAnswer::Sum {
-                constructor: "LocalHost".to_string(),
-                payload: Box::new(FormAnswer::Unit),
-            })
-        );
-        assert_eq!(
-            field(fields, "releaseNote"),
-            Some(&FormAnswer::Optional(None))
+            collect_form_json(&shape, ROOT_BIND_PATH, &raw),
+            Some(json!("Prod"))
         );
     }
 
     #[test]
-    fn collect_form_answer_rejects_missing_field() {
+    fn collect_form_json_rejects_missing_field() {
         let raw = obj(json!({ "service": "api" }));
-        assert_eq!(collect_form_answer(&deploy_request_shape(), "", &raw), None);
+        assert_eq!(collect_form_json(&deploy_request_shape(), "", &raw), None);
     }
 
     #[test]
-    fn collect_form_answer_rejects_unknown_constructor() {
+    fn collect_form_json_rejects_unknown_constructor() {
         let raw = obj(json!({
             "service": "api",
             "destination": "Nope",
             "releaseNote.__present": false,
         }));
-        assert_eq!(collect_form_answer(&deploy_request_shape(), "", &raw), None);
+        assert_eq!(collect_form_json(&deploy_request_shape(), "", &raw), None);
     }
 
     /// DONE criterion: the display-humanization / exact-key split, asserted
@@ -765,11 +780,10 @@ mod tests {
             "releaseNote.__present": true,
             "releaseNote": "hotfix",
         }));
-        let answer = collect_form_answer(&shape, "", &raw).expect("collects");
-        let FormAnswer::Product(fields) = &answer else {
-            panic!("expected a Product answer");
-        };
-        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["service", "destination", "releaseNote"]);
+        let answer = collect_form_json(&shape, "", &raw).expect("collects");
+        let obj = answer.as_object().expect("a record collects to an object");
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["destination", "releaseNote", "service"]);
     }
 }

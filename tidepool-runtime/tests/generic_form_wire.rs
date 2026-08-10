@@ -1,6 +1,7 @@
 //! `Tidepool.Form.Wire` against the JSON contract `tidepool-harness`'s
 //! `selfharness::operator` module docs define — the encoder/decoder that puts
-//! a `FormShape` on the operator wire and reads a `FormAnswer` back off it.
+//! a `FormShape` on the operator wire; the submitted answer is ordinary
+//! JSON read by the generic `FromJSON` decode.
 //!
 //! The Rust side OWNS that encoding (it is what `#[derive(Serialize)]` with
 //! `rename_all = "snake_case"` produces, and `operator.rs`'s own tests assert
@@ -23,7 +24,7 @@ use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
 
 const HEADER: &str =
-    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Aeson.Value (eitherDecodeValue)\n\
@@ -39,13 +40,13 @@ const HEADER: &str =
 /// `Tidepool.Form.*`.
 const DECLS: &str = r#"
 data Environment = Development | Staging | Production
-  deriving (Generic, Eq, Show)
+  deriving (Generic, Eq, Show, FromJSON)
 
 data Destination
   = LocalHost
   | Ssh { host :: Text, port :: Int }
   | Container { image :: Text }
-  deriving (Generic, Eq, Show)
+  deriving (Generic, Eq, Show, FromJSON)
 
 data DeployRequest = DeployRequest
   { service       :: Text
@@ -54,7 +55,7 @@ data DeployRequest = DeployRequest
   , replicas      :: Int
   , runMigrations :: Bool
   , releaseNote   :: Maybe Text
-  } deriving (Generic, Eq, Show)
+  } deriving (Generic, Eq, Show, FromJSON)
 
 -- Parse a documented JSON literal. A literal that does not parse yields a
 -- marker value that cannot equal any encoding, so a broken literal fails the
@@ -239,108 +240,49 @@ fn derived_shape_crosses_the_wire_as_documented_json() {
     )
 }
 
-/// Every `FormAnswer` worked example, both directions: the encoding matches
-/// the documented JSON, and decoding that JSON gives the answer back.
-///
-/// The four frozen encoding rules are each pinned by a case here — bare
-/// product for a single-constructor datatype, `Sum` wrapper even for a
-/// nullary branch, `"unit"` (not an empty product) as a nullary payload, and
-/// `Optional` rather than a `Nothing`/`Just` pick.
+/// The submitted answer is ORDINARY JSON, decoded by the fixture types' own
+/// generic `FromJSON` — exactly the JSON `tidepool-web`'s collector builds.
+/// One pin per collector rule: record object, enum bare string, tagged
+/// mixed-sum object (tag-only for a nullary branch), `Maybe` null/omission,
+/// and the scalar leaves.
 #[test]
-fn answers_encode_and_decode_as_the_documented_contract() {
+fn plain_json_answers_decode_as_the_collector_documents() {
     let body = r#"
 result :: [Text]
 result = concat
-  [ check "leaf-encode" (encodeAnswer (StringAnswer "api") == wire "{\"string\":\"api\"}")
-  , check "leaf-decode" (decodeAnswer (wire "{\"string\":\"api\"}") == Just (StringAnswer "api"))
-  , check "int-encode" (encodeAnswer (IntAnswer 22) == wire "{\"int\":22}")
-  , check "int-decode" (decodeAnswer (wire "{\"int\":22}") == Just (IntAnswer 22))
-  , check "number-encode" (encodeAnswer (NumberAnswer 1.5) == wire "{\"number\":1.5}")
-  , check "number-decode" (decodeAnswer (wire "{\"number\":1.5}") == Just (NumberAnswer 1.5))
-  , check "bool-encode" (encodeAnswer (BoolAnswer False) == wire "{\"bool\":false}")
-  , check "bool-decode" (decodeAnswer (wire "{\"bool\":false}") == Just (BoolAnswer False))
-  , check "optional-present-encode"
-      (encodeAnswer (OptionalAnswer (Just (StringAnswer "hotfix")))
-        == wire "{\"optional\":{\"string\":\"hotfix\"}}")
-  , check "optional-present-decode"
-      (decodeAnswer (wire "{\"optional\":{\"string\":\"hotfix\"}}")
-        == Just (OptionalAnswer (Just (StringAnswer "hotfix"))))
-  , check "optional-absent-encode"
-      (encodeAnswer (OptionalAnswer Nothing) == wire "{\"optional\":null}")
-  , check "optional-absent-decode"
-      (decodeAnswer (wire "{\"optional\":null}") == Just (OptionalAnswer Nothing))
-  , check "record-product-encode" (encodeAnswer sshAnswer
-      == wire "{\"product\":[[\"host\",{\"string\":\"example.com\"}],[\"port\",{\"int\":22}]]}")
-  , check "record-product-decode"
-      (decodeAnswer (wire "{\"product\":[[\"host\",{\"string\":\"example.com\"}],[\"port\",{\"int\":22}]]}")
-        == Just sshAnswer)
-  , check "nullary-branch-encode"
-      (encodeAnswer (SumAnswer "Staging" UnitAnswer)
-        == wire "{\"sum\":{\"constructor\":\"Staging\",\"payload\":\"unit\"}}")
-  , check "nullary-branch-decode"
-      (decodeAnswer (wire "{\"sum\":{\"constructor\":\"Staging\",\"payload\":\"unit\"}}")
-        == Just (SumAnswer "Staging" UnitAnswer))
-  , check "payload-bearing-branch-encode" (encodeAnswer (SumAnswer "Ssh" sshAnswer)
-      == wire "{\"sum\":{\"constructor\":\"Ssh\",\"payload\":{\"product\":[[\"host\",{\"string\":\"example.com\"}],[\"port\",{\"int\":22}]]}}}")
-  , check "payload-bearing-branch-decode"
-      (decodeAnswer (wire "{\"sum\":{\"constructor\":\"Ssh\",\"payload\":{\"product\":[[\"host\",{\"string\":\"example.com\"}],[\"port\",{\"int\":22}]]}}}")
-        == Just (SumAnswer "Ssh" sshAnswer))
-  , check "nullary-payload-is-not-an-empty-product"
-      (encodeAnswer UnitAnswer /= encodeAnswer (ProductAnswer []))
-  , check "nullary-payload-encode" (encodeAnswer UnitAnswer == wire "\"unit\"")
-  , check "empty-product-encode" (encodeAnswer (ProductAnswer []) == wire "{\"product\":[]}")
-  , check "duplicate-keys-survive-the-wire"
-      (decodeAnswer (wire "{\"product\":[[\"a\",{\"int\":1}],[\"a\",{\"int\":2}]]}")
-        == Just (ProductAnswer [("a", IntAnswer 1), ("a", IntAnswer 2)]))
-  , check "not-an-answer-is-rejected" (decodeAnswer (wire "{\"nope\":1}") == Nothing)
-  , check "product-as-object-is-rejected"
-      (decodeAnswer (wire "{\"product\":{\"host\":{\"string\":\"x\"}}}") == Nothing)
-  , check "fractional-int-is-rejected" (decodeAnswer (wire "{\"int\":1.5}") == Nothing)
+  [ check "enum-bare-string" (fromJSON (wire "\"Staging\"") == Success Staging)
+  , check "mixed-sum-tagged" (fromJSON (wire "{\"tag\":\"Ssh\",\"host\":\"example.com\",\"port\":22}")
+      == Success (Ssh "example.com" 22))
+  , check "mixed-sum-nullary-tag-only" (fromJSON (wire "{\"tag\":\"LocalHost\"}")
+      == Success LocalHost)
+  , check "unknown-tag-rejected"
+      (case fromJSON (wire "{\"tag\":\"Nope\"}") :: Result Destination of
+         Error _ -> True
+         Success _ -> False)
   ]
-  where
-    sshAnswer = ProductAnswer
-      [ ("host", StringAnswer "example.com"), ("port", IntAnswer 22) ]
 "#;
     if let Some(v) = eval_result(body) {
-        assert_eq!(
-            v,
-            json!([]),
-            "answers that did not match the documented contract"
-        )
+        assert_eq!(v, json!([]), "answers that did not match the contract")
     }
 }
 
-/// The nested product-of-sum worked example — `operator.rs`'s largest, the
-/// one its own `deploy_request_nested_product_of_sum_round_trips` test
-/// asserts on the Rust side — decoded off the wire and rebuilt into the
-/// typed `DeployRequest`.
-///
-/// This is the full crossing in one case: documented JSON → `FormAnswer` →
-/// the agent's own ADT, with every selector and constructor key matching
-/// verbatim.
+/// The full crossing in one case: the exact JSON `tidepool-web`'s collector
+/// builds for the nested `DeployRequest` form (see `server.rs`'s
+/// `collect_form_json_reassembles_nested_product_of_sum`) decodes into the
+/// typed value — every selector, constructor, and optional handled by the
+/// one generic decode.
 #[test]
 fn documented_deploy_request_answer_rebuilds_the_typed_value() {
     let body = r#"
 result :: [Text]
 result = concat
-  [ check "decodes-to-a-form-answer" (decodeAnswer (wire submitted) == Just expectedAnswer)
-  , check "rebuilds-the-typed-value"
-      (fmap (decodeForm @DeployRequest) (decodeAnswer (wire submitted))
-        == Just (Right expected))
-  , check "round-trips-back-to-the-same-json"
-      (fmap encodeAnswer (decodeAnswer (wire submitted)) == Just (wire submitted))
+  [ check "rebuilds-the-typed-value" (fromJSON (wire submitted) == Success expected)
+  , check "absent-optional-is-nothing"
+      (fromJSON (wire submittedNoNote) == Success expected { releaseNote = Nothing })
   ]
   where
-    submitted = "{\"product\":[[\"service\",{\"string\":\"api\"}],[\"environment\",{\"sum\":{\"constructor\":\"Staging\",\"payload\":\"unit\"}}],[\"destination\",{\"sum\":{\"constructor\":\"Ssh\",\"payload\":{\"product\":[[\"host\",{\"string\":\"example.com\"}],[\"port\",{\"int\":22}]]}}}],[\"replicas\",{\"int\":3}],[\"runMigrations\",{\"bool\":false}],[\"releaseNote\",{\"optional\":{\"string\":\"hotfix\"}}]]}"
-    expectedAnswer = ProductAnswer
-      [ ("service", StringAnswer "api")
-      , ("environment", SumAnswer "Staging" UnitAnswer)
-      , ("destination", SumAnswer "Ssh" (ProductAnswer
-          [("host", StringAnswer "example.com"), ("port", IntAnswer 22)]))
-      , ("replicas", IntAnswer 3)
-      , ("runMigrations", BoolAnswer False)
-      , ("releaseNote", OptionalAnswer (Just (StringAnswer "hotfix")))
-      ]
+    submitted = "{\"service\":\"api\",\"environment\":\"Staging\",\"destination\":{\"tag\":\"Ssh\",\"host\":\"example.com\",\"port\":22},\"replicas\":3,\"runMigrations\":false,\"releaseNote\":\"hotfix\"}"
+    submittedNoNote = "{\"service\":\"api\",\"environment\":\"Staging\",\"destination\":{\"tag\":\"Ssh\",\"host\":\"example.com\",\"port\":22},\"replicas\":3,\"runMigrations\":false}"
     expected = DeployRequest
       { service = "api"
       , environment = Staging
@@ -351,10 +293,6 @@ result = concat
       }
 "#;
     if let Some(v) = eval_result(body) {
-        assert_eq!(
-            v,
-            json!([]),
-            "the documented DeployRequest submission did not cross to the typed value"
-        )
+        assert_eq!(v, json!([]), "deploy-request cases that failed")
     }
 }

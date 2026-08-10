@@ -52,9 +52,7 @@ fn nested_recursion_round_trips() {
 /// The recursive wire shape, pinned exactly: tag + record fields per level.
 #[test]
 fn recursive_wire_shape_is_tagged_objects() {
-    let src = format!(
-        "{HEADER}\nresult :: Value\nresult = toJSON (Seq [Step \"a\", Seq []])\n"
-    );
+    let src = format!("{HEADER}\nresult :: Value\nresult = toJSON (Seq [Step \"a\", Seq []])\n");
     assert_eq!(
         run(&src, "result"),
         json!({"tag": "Seq", "steps": [{"tag": "Step", "what": "a"}, {"tag": "Seq", "steps": []}]})

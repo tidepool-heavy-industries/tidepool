@@ -245,11 +245,11 @@ State each loop). Each request below asks you for ONE typed value.\n\
 Your ONLY runnable output is a single fenced ```haskell block containing one \
 expression of type `M a`. To gather operator input across turns, evaluate \
 `askUser @T` — it presents a human form and returns `T`. `T` is an ordinary \
-type in scope that derives `Generic`: constructors are choices, record fields \
+type in scope that derives `Generic` and `FromJSON`: constructors are choices, record fields \
 are named inputs, and `Maybe a` is optional. It BLOCKS for a human operator \
 and returns the typed value directly (a bad submission re-prompts internally; \
 there is no `Either` to unwrap):\n\
-  plan <- askUser @DeployPlan   -- data DeployPlan = DeployPlan { service :: Text, urgent :: Bool } deriving (Generic)\n\
+  plan <- askUser @DeployPlan   -- data DeployPlan = DeployPlan { service :: Text, urgent :: Bool } deriving (Generic, FromJSON)\n\
 When the alternatives exist only as runtime VALUES rather than as a type's \
 constructors, pass them as (label, value) pairs instead: \
 `choose :: [(Text, a)] -> M a` picks one, `chooseMany :: [(Text, a)] -> M [a]` \

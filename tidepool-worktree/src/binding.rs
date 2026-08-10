@@ -133,6 +133,7 @@ impl BindingTable {
         let lock_path = root.join(".owner.lock");
         let owner_lock = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&lock_path)
             .map_err(|e| storage_failure(&lock_path, e))?;

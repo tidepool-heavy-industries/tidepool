@@ -30,7 +30,7 @@
 //! treats a dotted path as an ordinary (if unusual) object key string; it
 //! doesn't need to understand nesting, because `server::collect_form_answer`
 //! reassembles the resulting flat `{"destination.host": …}` map back into a
-//! structural [`tidepool_harness::selfharness::operator::FormAnswer`] on the
+//! plain JSON answer (`server.rs::collect_form_json`) on the
 //! server side, guided by the same `FormShape` the form was rendered from.
 //!
 //! A payload-bearing sum renders the discriminating choice AND every
@@ -209,7 +209,7 @@ pub fn generic_shape(path: &str, shape: &FormShape) -> Markup {
 /// An optional group: an "Include" toggle bound at `<path>.__present`
 /// (a reserved sentinel key — never a real selector/constructor key, so it
 /// never collides, and `server::collect_form_answer` strips it before
-/// building the [`tidepool_harness::selfharness::operator::FormAnswer`])
+/// building the plain JSON answer)
 /// plus the inner shape rendered at `path` itself.
 fn generic_optional(path: &str, inner: &FormShape) -> Markup {
     let present_key = format!("{path}.__present");

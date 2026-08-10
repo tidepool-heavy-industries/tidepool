@@ -1,46 +1,38 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The JSON transport for 'FormShape' and 'FormAnswer' — the Haskell half of
--- a contract whose Rust half is @tidepool-harness@'s
--- @selfharness::operator@ module documentation. That documentation is
--- NORMATIVE: it states what @#[derive(Serialize, Deserialize)]@ with
--- @rename_all = \"snake_case\"@ actually produces for those two enums, one
--- worked example per shape, and this module targets those examples verbatim
+-- | The JSON transport for 'FormShape' — the Haskell half of a contract
+-- whose Rust half is @tidepool-harness@'s @selfharness::operator@ module
+-- documentation. That documentation is NORMATIVE: it states what
+-- @#[derive(Serialize, Deserialize)]@ with @rename_all = \"snake_case\"@
+-- actually produces for the shape enum, one worked example per shape, and
+-- this module targets those examples verbatim
 -- (@tidepool-runtime\/tests\/generic_form_wire.rs@ asserts against the
 -- documented JSON itself, not against a paraphrase of it).
 --
--- This is an INTERNAL transport, not an aeson contract. Nothing here is a
--- @ToJSON@\/@FromJSON@ instance and nothing routes through one: the agent
--- never authors, derives, or reads this encoding — it writes an ordinary ADT
--- and gets one back (see @plans\/self-iterating-harness\/14-generic-derived-askuser-prd.md@,
--- which rejects @FromJSON@\/@ToJSON@ by decision record).
+-- SHAPE ONLY: the submitted ANSWER is ordinary JSON decoded by the answer
+-- type's own 'Tidepool.Aeson.FromJSON.FromJSON' instance — it has no
+-- transport of its own and never passes through this module.
 --
--- The encoding, in one table (@serde@'s externally-tagged representation):
+-- The shape encoding, in one table (@serde@'s externally-tagged
+-- representation):
 --
 -- * a unit variant is a bare string of its snake_case name — @\"string\"@,
 --   @\"unit\"@;
 -- * a newtype variant is a one-key object — @{\"optional\": …}@;
 -- * a struct variant is a one-key object wrapping an object of its fields —
---   @{\"sum\": {\"constructor\": …, \"payload\": …}}@;
--- * a product ANSWER's fields are an ARRAY of @[key, value]@ pairs, not an
---   object: a JSON object silently collapses a duplicate key on parse, and
---   'Tidepool.Form.Shape.DuplicateField' has to stay detectable.
+--   @{\"product\": {\"type_key\": …, \"fields\": …}}@.
 module Tidepool.Form.Wire
   ( encodeShape
-  , encodeAnswer
-  , decodeAnswer
   ) where
 
 import Prelude
 import Data.Text (Text)
 import qualified Data.Map.Strict as Map
 
-import Tidepool.Aeson.Scientific (fromFloatDigits, toBoundedInteger, toRealFloat)
 import Tidepool.Aeson.Value (Value (..), scientific)
 import Tidepool.Form.Shape
   ( FieldShape (..)
-  , FormAnswer (..)
   , FormShape (..)
   , VariantShape (..)
   )
@@ -88,68 +80,3 @@ encodeFieldShape (FieldShape key shape) =
 encodeVariantShape :: VariantShape -> Value
 encodeVariantShape (VariantShape con shape) =
   Object (Map.fromList [("constructor", String con), ("shape", encodeShape shape)])
-
--- ---------------------------------------------------------------------------
--- Answer (operator -> Haskell)
-
--- | Put an answer on the wire. The decode direction is what @askUser@ runs;
--- this exists so both directions of the frozen encoding are stated once, in
--- one place, and can be tested against each other.
-encodeAnswer :: FormAnswer -> Value
-encodeAnswer answer = case answer of
-  StringAnswer t -> tagged "string" (String t)
-  IntAnswer i -> tagged "int" (Number (scientific (toInteger i) 0))
-  NumberAnswer d -> tagged "number" (Number (fromFloatDigits d))
-  BoolAnswer b -> tagged "bool" (Bool b)
-  UnitAnswer -> String "unit"
-  OptionalAnswer Nothing -> tagged "optional" Null
-  OptionalAnswer (Just v) -> tagged "optional" (encodeAnswer v)
-  ProductAnswer kvs -> tagged "product" (Array (map encodeAnswerPair kvs))
-  SumAnswer con payload ->
-    tagged "sum" $
-      Object
-        ( Map.fromList
-            [ ("constructor", String con)
-            , ("payload", encodeAnswer payload)
-            ]
-        )
-
-encodeAnswerPair :: (Text, FormAnswer) -> Value
-encodeAnswerPair (key, value) = Array [String key, encodeAnswer value]
-
--- | Read what the operator submitted. 'Nothing' means the submission was not
--- a well-formed answer AT ALL — malformed transport, as distinct from a
--- well-formed answer that does not fit the requested type (which
--- 'Tidepool.Form.GForm.decodeForm' rejects as a
--- 'Tidepool.Form.Shape.FormError'). Both re-present the same form; neither
--- reaches the caller.
-decodeAnswer :: Value -> Maybe FormAnswer
-decodeAnswer value = case value of
-  String "unit" -> Just UnitAnswer
-  Object o -> case Map.toList o of
-    [("string", String t)] -> Just (StringAnswer t)
-    [("int", Number n)] -> fmap IntAnswer (toBoundedInteger n)
-    [("number", Number n)] -> Just (NumberAnswer (toRealFloat n))
-    [("bool", Bool b)] -> Just (BoolAnswer b)
-    [("optional", Null)] -> Just (OptionalAnswer Nothing)
-    [("optional", inner)] -> fmap (OptionalAnswer . Just) (decodeAnswer inner)
-    [("product", Array items)] -> fmap ProductAnswer (decodeAnswerPairs items)
-    [("sum", Object fields)] -> decodeSum fields
-    _ -> Nothing
-  _ -> Nothing
-
-decodeSum :: Map.Map Text Value -> Maybe FormAnswer
-decodeSum fields = case (Map.lookup "constructor" fields, Map.lookup "payload" fields) of
-  (Just (String con), Just payload) -> fmap (SumAnswer con) (decodeAnswer payload)
-  _ -> Nothing
-
--- | A product answer's @[[key, value], …]@ array. Order is preserved (it is
--- the shape's declaration order) and duplicates survive as duplicates — the
--- decoder is what decides whether either is acceptable.
-decodeAnswerPairs :: [Value] -> Maybe [(Text, FormAnswer)]
-decodeAnswerPairs [] = Just []
-decodeAnswerPairs (item : rest) = case item of
-  Array [String key, value] -> case (decodeAnswer value, decodeAnswerPairs rest) of
-    (Just v, Just vs) -> Just ((key, v) : vs)
-    _ -> Nothing
-  _ -> Nothing

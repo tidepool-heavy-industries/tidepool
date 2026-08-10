@@ -1,82 +1,64 @@
-//! The operator-form interpreter (`Tidepool.Form.GForm`) executed on the JIT
-//! through the real extract pipeline: a `FormShape` derived from a type's
-//! `Generic` representation with no value of that type, and a `FormAnswer`
-//! decoded back into the typed value.
+//! `askUser @T`'s structural coverage: shapes derive from type metadata
+//! alone (no value of `T` exists yet), and the submitted PLAIN JSON decodes
+//! back through `T`'s own generic `FromJSON` — there is no parallel answer
+//! language. Positional payload fields are rejected at COMPILE time (they
+//! have no selector to key a control or a JSON field by).
 //!
-//! A host-side typecheck would prove nothing here. Generic-representation
-//! dictionary elaboration is exactly the part that can typecheck under plain
-//! GHC and fail to elaborate under our JIT, so every case below compiles
-//! through `tidepool-extract` and runs on the JIT machine.
-//!
-//! Each test covers a whole coverage class in one compile. The shape tests
-//! return the derived shapes and assert them against exact expected renderings;
-//! the decode tests return the list of cases that FAILED and assert it is
-//! empty, so a failure names the case rather than just the class.
-//!
-//! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
-//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
-//! cleanly when the extractor is unreachable.
+//! Needs `TIDEPOOL_EXTRACT` (run inside `nix develop`).
 
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
 
 const HEADER: &str =
-    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Form.Shape\n\
      import Tidepool.Form.GForm\n";
 
-/// Every shape the coverage tests derive from, declared once.
+/// Every shape the coverage tests derive from, declared once. All payload
+/// fields are NAMED (record syntax) — the author contract the interpreter
+/// now enforces at compile time.
 ///
-/// Nothing here writes an instance of anything in `Tidepool.Form.GForm`:
-/// `deriving (Generic)` is the whole author contract, and `Eq`/`Show` are the
-/// ordinary domain classes these tests themselves use.
+/// `deriving (Generic, FromJSON)` is the whole author contract, and
+/// `Eq`/`Show` are the ordinary domain classes these tests themselves use.
 const DECLS: &str = r#"
 data Prims = Prims
   { pText :: Text
   , pInt  :: Int
   , pNum  :: Double
   , pFlag :: Bool
-  } deriving (Generic, Eq, Show)
+  } deriving (Generic, Eq, Show, FromJSON)
 
-data Pos = Pos Text Int deriving (Generic, Eq, Show)
+newtype Boxed = Boxed { unwrap :: Int } deriving (Generic, Eq, Show, FromJSON)
 
-newtype Tag = Tag Text deriving (Generic, Eq, Show)
-newtype Boxed = Boxed { unwrap :: Int } deriving (Generic, Eq, Show)
+data Nullary = Nullary deriving (Generic, Eq, Show, FromJSON)
+data Unit1 = Unit1 { u :: () } deriving (Generic, Eq, Show, FromJSON)
 
-data Pair = Pair { pair :: (Text, Int) } deriving (Generic, Eq, Show)
+data Two = TA | TB deriving (Generic, Eq, Show, FromJSON)
+data Three = T1 | T2 | T3 deriving (Generic, Eq, Show, FromJSON)
+data Five = F1 | F2 | F3 | F4 | F5 deriving (Generic, Eq, Show, FromJSON)
 
-data Nullary = Nullary deriving (Generic, Eq, Show)
-data Unit1 = Unit1 { u :: () } deriving (Generic, Eq, Show)
+data Dest = LocalHost | Ssh { host :: Text, port :: Int }
+  deriving (Generic, Eq, Show, FromJSON)
 
-data Two = TA | TB deriving (Generic, Eq, Show)
-data Three = T1 | T2 | T3 deriving (Generic, Eq, Show)
-data Five = F1 | F2 | F3 | F4 | F5 deriving (Generic, Eq, Show)
+data Named = Named { inner :: Three } deriving (Generic, Eq, Show, FromJSON)
 
-data Dest = LocalHost | Ssh { host :: Text, port :: Int } | Raw Text Int
-  deriving (Generic, Eq, Show)
-
-data Scope = CurrentFile | Workspace deriving (Generic, Eq, Show)
-data Speed = Fast | Thorough deriving (Generic, Eq, Show)
-data Operation = Search Scope | Analyze Speed deriving (Generic, Eq, Show)
-
-data Nested2 = Nested2 { a1 :: Pos, a2 :: Pos } deriving (Generic, Eq, Show)
+data Nested2 = Nested2 { a1 :: Boxed, a2 :: Boxed } deriving (Generic, Eq, Show, FromJSON)
 
 data Opts = Opts
   { maybeLeaf :: Maybe Text
-  , maybeProd :: Maybe Pos
   , maybeSum  :: Maybe Three
-  } deriving (Generic, Eq, Show)
+  } deriving (Generic, Eq, Show, FromJSON)
 
-data Twin = TwinL Text | TwinR Text deriving (Generic, Eq, Show)
+data Twin = TwinL { tl :: Text } | TwinR { tr :: Text }
+  deriving (Generic, Eq, Show, FromJSON)
 
 check :: Text -> Bool -> [Text]
 check nm ok = if ok then [] else [nm]
 "#;
 
-/// Compile + run a module PURE on the JIT and return `result` as JSON. Skips
-/// (returns `None`) when the extractor is unavailable.
+/// Compile + run a module PURE on the JIT and return `result` as JSON.
 fn eval_result(body: &str) -> Option<serde_json::Value> {
     tidepool_testing::eval_harness::require_extract();
     let src = format!("{HEADER}{DECLS}\n{body}");
@@ -90,13 +72,9 @@ fn eval_result(body: &str) -> Option<serde_json::Value> {
 }
 
 /// Shapes come from type metadata alone. Nothing in this module constructs a
-/// `Prims`, a `Dest`, or an `Operation` — the derivation never had a value to
-/// look at, which is the property `askUser @T` needs before the operator has
-/// answered anything.
-///
-/// Each shape is asserted through its rendering. That pins every key, every
-/// constructor, and the order of both, which is the whole contract — and it
-/// reads as the shape an operator's renderer receives.
+/// `Prims` or a `Dest` — the derivation never had a value to look at, which
+/// is the property `askUser @T` needs before the operator has answered
+/// anything.
 fn shapes(targets: &[&str]) -> Option<serde_json::Value> {
     let items = targets
         .iter()
@@ -106,44 +84,36 @@ fn shapes(targets: &[&str]) -> Option<serde_json::Value> {
     eval_result(&format!("result :: [Text]\nresult =\n  [ {items}\n  ]\n"))
 }
 
-/// Every primitive leaf, a named record, a positional product, and a
-/// one-field newtype — which stays a named structural boundary rather than
-/// collapsing into the type it wraps.
+/// Every primitive leaf, a named record, and a one-field record newtype —
+/// which stays a named structural boundary rather than collapsing into the
+/// type it wraps.
 #[test]
 fn leaf_product_and_newtype_shapes() {
-    if let Some(v) = shapes(&["Prims", "Pos", "Tag", "Boxed"]) {
+    if let Some(v) = shapes(&["Prims", "Boxed"]) {
         assert_eq!(
             v,
             json!([
                 r#"ProductShape "Prims" "Prims" [FieldShape "pText" StringShape,FieldShape "pInt" IntShape,FieldShape "pNum" NumberShape,FieldShape "pFlag" BoolShape]"#,
-                r#"ProductShape "Pos" "Pos" [FieldShape "1" StringShape,FieldShape "2" IntShape]"#,
-                r#"ProductShape "Tag" "Tag" [FieldShape "1" StringShape]"#,
                 r#"ProductShape "Boxed" "Boxed" [FieldShape "unwrap" IntShape]"#,
             ])
         )
     }
 }
 
-/// A constructor with no fields contributes no control, `()` is a unit leaf,
-/// and a tuple is an ordinary positional product whose field keys are its
-/// one-based positions.
 #[test]
-fn unit_nullary_and_tuple_shapes() {
-    if let Some(v) = shapes(&["Nullary", "Unit1", "Pair"]) {
+fn unit_and_nullary_shapes() {
+    if let Some(v) = shapes(&["Nullary", "Unit1"]) {
         assert_eq!(
             v,
             json!([
-                "UnitShape",
+                r#"UnitShape"#,
                 r#"ProductShape "Unit1" "Unit1" [FieldShape "u" UnitShape]"#,
-                r#"ProductShape "Pair" "Pair" [FieldShape "pair" (ProductShape "Tuple2" "(,)" [FieldShape "1" StringShape,FieldShape "2" IntShape])]"#,
             ])
         )
     }
 }
 
-/// Constructor DECLARATION order is option order, at 2, 3, and 5 constructors.
-/// `GHC.Generics` builds a balanced `:+:` tree; none of that shape reaches the
-/// variant list.
+/// Sum variants surface in DECLARATION order, not the balanced `:+:` tree's.
 #[test]
 fn sum_shapes_preserve_declaration_order() {
     if let Some(v) = shapes(&["Two", "Three", "Five"]) {
@@ -158,241 +128,92 @@ fn sum_shapes_preserve_declaration_order() {
     }
 }
 
-/// A payload-bearing sum: the nullary branch is `UnitShape`, the record branch
-/// keys by selector name, and the positional branch keys by position.
-///
-/// Sum-of-sum is here too: the outer constructors key the choice, and the
-/// selected branch contributes its own nested choice.
 #[test]
-fn payload_bearing_and_nested_sum_shapes() {
-    if let Some(v) = shapes(&["Dest", "Operation"]) {
+fn payload_bearing_and_nested_shapes() {
+    if let Some(v) = shapes(&["Dest", "Named", "Nested2", "Opts"]) {
         assert_eq!(
             v,
             json!([
-                r#"SumShape "Dest" [VariantShape "LocalHost" UnitShape,VariantShape "Ssh" (ProductShape "Dest" "Ssh" [FieldShape "host" StringShape,FieldShape "port" IntShape]),VariantShape "Raw" (ProductShape "Dest" "Raw" [FieldShape "1" StringShape,FieldShape "2" IntShape])]"#,
-                r#"SumShape "Operation" [VariantShape "Search" (ProductShape "Operation" "Search" [FieldShape "1" (SumShape "Scope" [VariantShape "CurrentFile" UnitShape,VariantShape "Workspace" UnitShape])]),VariantShape "Analyze" (ProductShape "Operation" "Analyze" [FieldShape "1" (SumShape "Speed" [VariantShape "Fast" UnitShape,VariantShape "Thorough" UnitShape])])]"#,
+                r#"SumShape "Dest" [VariantShape "LocalHost" UnitShape,VariantShape "Ssh" (ProductShape "Dest" "Ssh" [FieldShape "host" StringShape,FieldShape "port" IntShape])]"#,
+                r#"ProductShape "Named" "Named" [FieldShape "inner" (SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape])]"#,
+                r#"ProductShape "Nested2" "Nested2" [FieldShape "a1" (ProductShape "Boxed" "Boxed" [FieldShape "unwrap" IntShape]),FieldShape "a2" (ProductShape "Boxed" "Boxed" [FieldShape "unwrap" IntShape])]"#,
+                r#"ProductShape "Opts" "Opts" [FieldShape "maybeLeaf" (OptionalShape StringShape),FieldShape "maybeSum" (OptionalShape (SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape]))]"#,
             ])
         )
     }
 }
 
-/// `Maybe` is an optional control around a leaf, a product, and a sum alike —
-/// never a `Nothing`/`Just` constructor picker.
-///
-/// Positional keys are scoped to their OWN product node: two `Pos` fields in
-/// one record both start at "1". There is no form-wide field counter.
+/// A POSITIONAL payload field is a compile-time TypeError naming the fix —
+/// the successor to the deleted numeric-position keys.
 #[test]
-fn optional_and_node_scoped_positional_shapes() {
-    if let Some(v) = shapes(&["Opts", "Nested2"]) {
-        assert_eq!(
-            v,
-            json!([
-                r#"ProductShape "Opts" "Opts" [FieldShape "maybeLeaf" (OptionalShape StringShape),FieldShape "maybeProd" (OptionalShape (ProductShape "Pos" "Pos" [FieldShape "1" StringShape,FieldShape "2" IntShape])),FieldShape "maybeSum" (OptionalShape (SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape]))]"#,
-                r#"ProductShape "Nested2" "Nested2" [FieldShape "a1" (ProductShape "Pos" "Pos" [FieldShape "1" StringShape,FieldShape "2" IntShape]),FieldShape "a2" (ProductShape "Pos" "Pos" [FieldShape "1" StringShape,FieldShape "2" IntShape])]"#,
-            ])
-        )
+fn positional_field_is_rejected_at_compile_time() {
+    tidepool_testing::eval_harness::require_extract();
+    let src = format!(
+        "{HEADER}{DECLS}\ndata P = P Text Int deriving (Generic)\n\nresult :: Text\nresult = show (formShape @P)\n"
+    );
+    match EvalHarness::new().with_stdlib().compile(&src, "result") {
+        Ok(_) => panic!("a positional payload field must not derive a form"),
+        Err(e) => {
+            let msg = tidepool_runtime::classify_compile(&e).message;
+            assert!(
+                msg.contains("record syntax"),
+                "expected the positional-field TypeError, got:\n{msg}"
+            );
+        }
     }
 }
 
-/// Every structural-coverage case decodes back to the typed value.
-///
-/// The distinguishability cases are here on purpose: `False`, zero, an empty
-/// `Text`, a nullary payload, and the same leaf value under two different
-/// constructors all have to survive as themselves rather than collapsing into
-/// "absent" or into each other.
+/// Distinguishability under the ONE generic decode: `False`, zero, an empty
+/// `Text`, an absent optional, and the same leaf under two different
+/// constructors all survive as themselves.
 #[test]
-fn answers_decode_to_typed_values() {
+fn plain_json_answers_decode_to_typed_values() {
     let body = r#"
 result :: [Text]
 result = concat
-  [ check "prims" (decodeForm @Prims (ProductAnswer
-      [ ("pText", StringAnswer "hi"), ("pInt", IntAnswer 3)
-      , ("pNum", NumberAnswer 1.5), ("pFlag", BoolAnswer True) ])
-      == Right (Prims "hi" 3 1.5 True))
-  , check "prims-falsy-values-survive" (decodeForm @Prims (ProductAnswer
-      [ ("pText", StringAnswer ""), ("pInt", IntAnswer 0)
-      , ("pNum", NumberAnswer 0.0), ("pFlag", BoolAnswer False) ])
-      == Right (Prims "" 0 0.0 False))
-  , check "positional" (decodeForm @Pos
-      (ProductAnswer [("1", StringAnswer "x"), ("2", IntAnswer 7)]) == Right (Pos "x" 7))
-  , check "newtype-positional" (decodeForm @Tag
-      (ProductAnswer [("1", StringAnswer "t")]) == Right (Tag "t"))
-  , check "newtype-record" (decodeForm @Boxed
-      (ProductAnswer [("unwrap", IntAnswer 9)]) == Right (Boxed 9))
-  , check "tuple" (decodeForm @Pair (ProductAnswer
-      [("pair", ProductAnswer [("1", StringAnswer "a"), ("2", IntAnswer 1)])])
-      == Right (Pair ("a", 1)))
-  , check "unit-field" (decodeForm @Unit1
-      (ProductAnswer [("u", UnitAnswer)]) == Right (Unit1 ()))
-  , check "nullary-datatype" (decodeForm @Nullary UnitAnswer == Right Nullary)
-  , check "sum-of-2-all-constructors" (and
-      [ decodeForm @Two (SumAnswer "TA" UnitAnswer) == Right TA
-      , decodeForm @Two (SumAnswer "TB" UnitAnswer) == Right TB ])
-  , check "sum-of-3-all-constructors" (and
-      [ decodeForm @Three (SumAnswer "T1" UnitAnswer) == Right T1
-      , decodeForm @Three (SumAnswer "T2" UnitAnswer) == Right T2
-      , decodeForm @Three (SumAnswer "T3" UnitAnswer) == Right T3 ])
-  , check "sum-of-5-all-constructors" (and
-      [ decodeForm @Five (SumAnswer "F1" UnitAnswer) == Right F1
-      , decodeForm @Five (SumAnswer "F2" UnitAnswer) == Right F2
-      , decodeForm @Five (SumAnswer "F3" UnitAnswer) == Right F3
-      , decodeForm @Five (SumAnswer "F4" UnitAnswer) == Right F4
-      , decodeForm @Five (SumAnswer "F5" UnitAnswer) == Right F5 ])
-  , check "sum-nullary-branch" (decodeForm @Dest
-      (SumAnswer "LocalHost" UnitAnswer) == Right LocalHost)
-  , check "sum-record-branch" (decodeForm @Dest (SumAnswer "Ssh"
-      (ProductAnswer [("host", StringAnswer "example.com"), ("port", IntAnswer 22)]))
-      == Right (Ssh "example.com" 22))
-  , check "sum-positional-branch" (decodeForm @Dest (SumAnswer "Raw"
-      (ProductAnswer [("1", StringAnswer "r"), ("2", IntAnswer 1)]))
-      == Right (Raw "r" 1))
-  , check "sum-of-sum" (and
-      [ decodeForm @Operation (SumAnswer "Search"
-          (ProductAnswer [("1", SumAnswer "Workspace" UnitAnswer)]))
-          == Right (Search Workspace)
-      , decodeForm @Operation (SumAnswer "Analyze"
-          (ProductAnswer [("1", SumAnswer "Fast" UnitAnswer)]))
-          == Right (Analyze Fast) ])
-  , check "nested-positional-nodes-restart-at-1" (decodeForm @Nested2 (ProductAnswer
-      [ ("a1", ProductAnswer [("1", StringAnswer "l"), ("2", IntAnswer 1)])
-      , ("a2", ProductAnswer [("1", StringAnswer "r"), ("2", IntAnswer 2)]) ])
-      == Right (Nested2 (Pos "l" 1) (Pos "r" 2)))
-  , check "maybe-absent" (decodeForm @Opts (ProductAnswer
-      [ ("maybeLeaf", OptionalAnswer Nothing)
-      , ("maybeProd", OptionalAnswer Nothing)
-      , ("maybeSum", OptionalAnswer Nothing) ])
-      == Right (Opts Nothing Nothing Nothing))
-  , check "maybe-present-around-leaf-product-sum" (decodeForm @Opts (ProductAnswer
-      [ ("maybeLeaf", OptionalAnswer (Just (StringAnswer "n")))
-      , ("maybeProd", OptionalAnswer (Just
-          (ProductAnswer [("1", StringAnswer "p"), ("2", IntAnswer 1)])))
-      , ("maybeSum", OptionalAnswer (Just (SumAnswer "T2" UnitAnswer))) ])
-      == Right (Opts (Just "n") (Just (Pos "p" 1)) (Just T2)))
-  , check "empty-text-is-not-absent" (decodeForm @Opts (ProductAnswer
-      [ ("maybeLeaf", OptionalAnswer (Just (StringAnswer "")))
-      , ("maybeProd", OptionalAnswer Nothing)
-      , ("maybeSum", OptionalAnswer Nothing) ])
-      == Right (Opts (Just "") Nothing Nothing))
+  [ check "prims" (fromJSON (object
+      [ ("pText", String "hi"), ("pInt", toJSON (3 :: Int))
+      , ("pNum", toJSON (1.5 :: Double)), ("pFlag", Bool True) ])
+      == Success (Prims "hi" 3 1.5 True))
+  , check "prims-falsy-values-survive" (fromJSON (object
+      [ ("pText", String ""), ("pInt", toJSON (0 :: Int))
+      , ("pNum", toJSON (0.0 :: Double)), ("pFlag", Bool False) ])
+      == Success (Prims "" 0 0.0 False))
+  , check "enums" (and
+      [ fromJSON (String "TA") == Success TA
+      , fromJSON (String "T3") == Success T3
+      , fromJSON (String "F5") == Success F5 ])
+  , check "mixed-sum-both-branches" (and
+      [ fromJSON (object [("tag", String "LocalHost")]) == Success LocalHost
+      , fromJSON (object [("tag", String "Ssh"), ("host", String "h"), ("port", toJSON (2 :: Int))])
+          == Success (Ssh "h" 2) ])
+  , check "nested-enum-field" (fromJSON (object [("inner", String "T2")])
+      == Success (Named T2))
+  , check "maybe-absent-and-null" (and
+      [ fromJSON (object []) == Success (Opts Nothing Nothing)
+      , fromJSON (object [("maybeLeaf", Null), ("maybeSum", Null)])
+          == Success (Opts Nothing Nothing) ])
+  , check "maybe-present" (fromJSON (object
+      [("maybeLeaf", String "n"), ("maybeSum", String "T2")])
+      == Success (Opts (Just "n") (Just T2)))
+  , check "empty-text-is-not-absent" (fromJSON (object [("maybeLeaf", String "")])
+      == Success (Opts (Just "") Nothing))
   , check "identical-leaf-in-different-branches" (and
-      [ decodeForm @Twin (SumAnswer "TwinL" (ProductAnswer [("1", StringAnswer "same")]))
-          == Right (TwinL "same")
-      , decodeForm @Twin (SumAnswer "TwinR" (ProductAnswer [("1", StringAnswer "same")]))
-          == Right (TwinR "same") ])
+      [ fromJSON (object [("tag", String "TwinL"), ("tl", String "same")]) == Success (TwinL "same")
+      , fromJSON (object [("tag", String "TwinR"), ("tr", String "same")]) == Success (TwinR "same") ])
+  , check "missing-field-rejected"
+      (case fromJSON (object [("pText", String "x")]) :: Result Prims of
+         Error _ -> True
+         Success _ -> False)
+  , check "wrong-kind-rejected"
+      (case fromJSON (object
+        [ ("pText", String "x"), ("pInt", String "not a number")
+        , ("pNum", toJSON (1.0 :: Double)), ("pFlag", Bool True) ]) :: Result Prims of
+         Error _ -> True
+         Success _ -> False)
   ]
 "#;
     if let Some(v) = eval_result(body) {
         assert_eq!(v, json!([]), "cases that did not decode to the typed value")
-    }
-}
-
-/// Malformed submissions come back as `FormError` VALUES. Nothing throws, so
-/// `askUser` can re-present the same form; a bad submission never consumes the
-/// continuation.
-#[test]
-fn malformed_answers_are_rejected_as_data() {
-    let body = r#"
-result :: [Text]
-result = concat
-  [ check "missing-field" (decodeForm @Prims (ProductAnswer
-      [("pText", StringAnswer "x"), ("pNum", NumberAnswer 1.0), ("pFlag", BoolAnswer True)])
-      == (Left (MissingField "pInt") :: Either FormError Prims))
-  , check "extra-field" (decodeForm @Prims (ProductAnswer
-      [ ("pText", StringAnswer "x"), ("pInt", IntAnswer 1)
-      , ("pNum", NumberAnswer 1.0), ("pFlag", BoolAnswer True)
-      , ("nope", StringAnswer "?") ])
-      == (Left (UnexpectedField "nope") :: Either FormError Prims))
-  , check "duplicate-field" (decodeForm @Prims (ProductAnswer
-      [ ("pText", StringAnswer "x"), ("pText", StringAnswer "y")
-      , ("pInt", IntAnswer 1), ("pNum", NumberAnswer 1.0), ("pFlag", BoolAnswer True) ])
-      == (Left (DuplicateField "pText") :: Either FormError Prims))
-  , check "unknown-constructor" (decodeForm @Dest (SumAnswer "Nope" UnitAnswer)
-      == (Left (UnknownConstructor "Dest" "Nope" ["LocalHost", "Ssh", "Raw"])
-          :: Either FormError Dest))
-  , check "wrong-leaf-shape" (decodeForm @Prims (ProductAnswer
-      [ ("pText", IntAnswer 1), ("pInt", IntAnswer 1)
-      , ("pNum", NumberAnswer 1.0), ("pFlag", BoolAnswer True) ])
-      == (Left (InField "pText" (ShapeMismatch "text" "a whole number"))
-          :: Either FormError Prims))
-  , check "not-a-product" (decodeForm @Prims (StringAnswer "x")
-      == (Left (ShapeMismatch "a group of fields" "text") :: Either FormError Prims))
-  , check "not-a-choice" (decodeForm @Dest (ProductAnswer [])
-      == (Left (ShapeMismatch "a choice" "a group of fields") :: Either FormError Dest))
-  , check "nullary-branch-rejects-a-payload" (decodeForm @Dest
-      (SumAnswer "LocalHost" (ProductAnswer []))
-      == (Left (InVariant "LocalHost" (ShapeMismatch "no payload" "a group of fields"))
-          :: Either FormError Dest))
-  , check "optional-rejects-a-bare-value" (decodeForm @Opts (ProductAnswer
-      [ ("maybeLeaf", StringAnswer "n")
-      , ("maybeProd", OptionalAnswer Nothing)
-      , ("maybeSum", OptionalAnswer Nothing) ])
-      == (Left (InField "maybeLeaf" (ShapeMismatch "an optional value" "text"))
-          :: Either FormError Opts))
-  , check "nested-error-keeps-its-path" (decodeForm @Opts (ProductAnswer
-      [ ("maybeLeaf", OptionalAnswer Nothing)
-      , ("maybeProd", OptionalAnswer (Just
-          (ProductAnswer [("1", IntAnswer 1), ("2", IntAnswer 2)])))
-      , ("maybeSum", OptionalAnswer Nothing) ])
-      == (Left (InField "maybeProd" (InField "1" (ShapeMismatch "text" "a whole number")))
-          :: Either FormError Opts))
-  ]
-"#;
-    if let Some(v) = eval_result(body) {
-        assert_eq!(v, json!([]), "cases that were not rejected as expected")
-    }
-}
-
-/// An unknown constructor tag is reported ONCE, against the sum's own variant
-/// list — not accumulated per `:+:` branch.
-///
-/// The spike's left-to-right decode produced `no constructor Nope | no
-/// constructor Nope | no constructor Nope`: one useless line per branch, and
-/// no statement of what the operator could have picked instead.
-#[test]
-fn unknown_constructor_names_the_valid_choices_once() {
-    tidepool_testing::eval_harness::require_extract();
-    let body = r#"
-result :: Text
-result = case decodeForm @Dest (SumAnswer "Nope" UnitAnswer) of
-  Left e -> renderFormError e
-  Right _ -> "decoded an answer it should have rejected"
-"#;
-    let src = format!("{HEADER}{DECLS}\n{body}");
-    let v = EvalHarness::new()
-        .with_stdlib()
-        .run_pure(&src, "result")
-        .expect("compile_and_run_pure failed")
-        .to_json();
-    assert_eq!(
-        v,
-        json!("unknown constructor Nope for Dest; expected one of LocalHost, Ssh, Raw")
-    );
-}
-
-/// A DERIVED sum shape compared against its hand-written literal.
-///
-/// This exact comparison case-trapped while the interpreter was being built —
-/// a tag-as-address escape, isolated to derived-SUM vs sum-literal (derived
-/// product vs product literal, literal vs literal, and `show` of a derived sum
-/// were all fine). The shape tests above assert exact RENDERINGS instead,
-/// which pins every key, constructor and order without needing `==` over a
-/// derived sum, so coverage never depended on this.
-///
-/// It is asserted here because the `==` form is the natural thing to write and
-/// should either work or fail loudly. After `strlen-hardening`, a regression
-/// surfaces as a `ShapeTrapKind::AddrKind` poison+breadcrumb trap naming the
-/// bad unbox rather than a `runtime_strlen` segfault.
-#[test]
-fn derived_sum_shape_equals_its_literal() {
-    if let Some(v) = eval_result(
-        r#"result :: [Text]
-result =
-  check "Two" (formShape @Two == SumShape "Two" [VariantShape "TA" UnitShape, VariantShape "TB" UnitShape])
-"#,
-    ) {
-        assert_eq!(
-            v,
-            json!([]),
-            "a derived sum shape did not equal its literal"
-        )
     }
 }

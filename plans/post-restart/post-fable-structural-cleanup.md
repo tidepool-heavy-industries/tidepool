@@ -5,6 +5,26 @@ Research baseline: `79a2cc16b773b7d0645e24406ab46fe93cea2266` on 2026-08-09
 Live recheck: through `3788b141f513`; the checkout is still moving  
 Scope: architecture and subtraction, not the current bug hunt
 
+> **Execution stamp (Fable, 2026-08-10):** steps landed this pass, each
+> verified per its stop condition — step 2 (lazy streams deleted, eager
+> iterative lists; −5.9k lines), step 3a (symmetric generic sums +
+> Maybe-tolerant decode + CodecSpike deleted + honest tool-schema
+> `required`; the options-record/ModelCodec collapse is the documented 3b
+> remainder — the open design point is ModelCodec's JSONPath-quality decode
+> errors vs the vendored `Result`), step 4 core (FormAnswer deleted BOTH
+> sides; answers are plain JSON through the one generic decode; author
+> contract is now `deriving (Generic, FromJSON)` — the PRD-14
+> "Generic-only" headline was retired deliberately, since a Generic-only
+> decode would preserve the second traversal this step deletes; positional
+> form fields now a compile-time TypeError). Step 4's REMAINDER:
+> `Tidepool.Form.Legacy` + the flat `FormSpec.fields`/`Field`/`FieldKind`/
+> `EnumOption`/`Submission` vocabulary and its render/JS path still exist
+> (severable; nothing Haskell-side emits the flat wire). Step 5's
+> dead-vocabulary half landed (RuntimeAgentEvent/Workspace/ToolCallId/
+> Usage/Other deleted); the Call/Notify mode-machinery replacement is
+> BUNDLED with the parked Subagent→Agent rename decision. Steps 6-11
+> untouched, per the interference warning and decision gates.
+>
 > **Rebaseline stamp (Fable, 2026-08-09, run complete):** the run ended at
 > `8441b352`. The two commits after the live recheck are immaterial to this
 > plan's facts: a Fork constructor-coverage test in tidepool-handlers and a

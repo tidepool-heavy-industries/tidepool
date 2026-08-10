@@ -34,7 +34,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::{FieldShape, FormAnswer, FormShape, VariantShape};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, FormSpec, Harness, LogObserver, OperatorGate,
@@ -112,34 +112,16 @@ fn expected_decision_shape() -> FormShape {
     }
 }
 
-/// A `Decision` the operator built: `act-7`, `High`. Rule 1 (bare product for
-/// a single-constructor type) and rule 2 (`Sum` wrapper even for a nullary
-/// branch) are both exercised.
-fn decision_answer() -> FormAnswer {
-    FormAnswer::Product(vec![
-        (
-            "action".to_string(),
-            FormAnswer::String("act-7".to_string()),
-        ),
-        (
-            "rationale".to_string(),
-            FormAnswer::String("from form".to_string()),
-        ),
-        (
-            "confidence".to_string(),
-            FormAnswer::Sum {
-                constructor: "High".to_string(),
-                payload: Box::new(FormAnswer::Unit),
-            },
-        ),
-    ])
-}
-
-/// A structural answer as the gate's answer VALUE — serialized whole, so a
-/// unit answer (the bare string `"unit"`) crosses as itself rather than being
-/// forced through an object.
-fn submission_of(answer: &FormAnswer) -> serde_json::Value {
-    serde_json::to_value(answer).expect("a FormAnswer serializes")
+/// A `Decision` the operator built, as the PLAIN JSON the generic `FromJSON`
+/// decode reads: a record is an object of its fields, and a nullary-sum
+/// field (`confidence :: Confidence`) is the chosen constructor as a bare
+/// string.
+fn decision_answer() -> serde_json::Value {
+    serde_json::json!({
+        "action": "act-7",
+        "rationale": "from form",
+        "confidence": "High"
+    })
 }
 
 /// A scripted operator that answers from the SHAPE it is handed rather than
@@ -183,18 +165,19 @@ impl OperatorGate for ScriptedGate {
                     // Malformed: not an answer at all. Re-prompt, don't fail.
                     serde_json::Value::Object(Submission::new())
                 } else {
-                    submission_of(&decision_answer())
+                    decision_answer()
                 }
             }
-            // `chooseMany` — one checkbox per offered label. Keep the first.
+            // `chooseMany` — one checkbox per offered label, submitted as a
+            // plain JSON object of booleans. Keep the first.
             FormShape::Product {
                 type_key, fields, ..
-            } if type_key == "Choices" => submission_of(&FormAnswer::Product(
+            } if type_key == "Choices" => serde_json::Value::Object(
                 fields
                     .iter()
-                    .map(|f| (f.key.clone(), FormAnswer::Bool(f.key == "keep")))
+                    .map(|f| (f.key.clone(), serde_json::Value::Bool(f.key == "keep")))
                     .collect(),
-            )),
+            ),
             other => panic!("unexpected form shape presented: {other:?}"),
         }
     }
@@ -387,18 +370,19 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     );
 }
 
-/// The PRD's headline claim, at COMPILE level: declare the example ADTs with
-/// `deriving (Generic)` and nothing else, then ask for one — no imports beyond
-/// the module that defines them, no pragmas, no codec, no form builder, no
-/// instance of anything Tidepool-specific
-/// (`tests/fixtures/PrdTypes.hs` is the fixture, and what it does NOT contain
-/// is the assertion).
+/// The author-contract claim, at COMPILE level: declare the example ADTs
+/// with `deriving (Generic, FromJSON)` — the FromJSON being the vendored
+/// generic DEFAULT, no method written — then ask for one. No codec, no form
+/// builder, no instance of anything Tidepool-specific
+/// (`tests/fixtures/PrdTypes.hs` is the fixture, and what it does NOT
+/// contain is the assertion). One decode path: the same generic `FromJSON`
+/// that reads every other external value reads the form answer.
 ///
 /// `req.service :: Text` in the same block is what pins the SECOND half — the
 /// binding has exactly the requested Haskell type, not a `Value` or a tuple.
 /// A wrong type there is a GHC error, so this compiling IS the proof.
 #[test]
-fn prd_example_adts_compile_with_only_deriving_generic() {
+fn prd_example_adts_compile_with_the_bare_derive_contract() {
     support::require_extract();
     let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
         .expect("answerer engine config");
@@ -423,8 +407,8 @@ fn prd_example_adts_compile_with_only_deriving_generic() {
     );
     assert!(
         result.is_ok(),
-        "`askUser @DeployRequest` against types that derive ONLY Generic must \
-         compile, and its binding must be a real DeployRequest — got: {:?}",
+        "`askUser @DeployRequest` against types with the bare derive contract \
+         must compile, and its binding must be a real DeployRequest — got: {:?}",
         result.err().map(|e| e.to_string())
     );
 }

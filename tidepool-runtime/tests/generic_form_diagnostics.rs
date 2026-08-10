@@ -20,7 +20,7 @@
 use tidepool_testing::eval_harness::EvalHarness;
 
 const HEADER: &str =
-    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, TypeApplications #-}\n\
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Form.Shape\n\
@@ -218,9 +218,9 @@ fn supported_shapes_still_compile() {
     tidepool_testing::eval_harness::require_extract();
     let src = format!(
         "{HEADER}\n\
-         data Env = Dev | Prod deriving (Generic)\n\
+         data Env = Dev | Prod deriving (Generic, FromJSON)\n\
          data Q = Q {{ name :: Text, env :: Env, count :: Int, note :: Maybe Text }}\n\
-         \x20 deriving (Generic)\n\n\
+         \x20 deriving (Generic, FromJSON)\n\n\
          result :: Text\n\
          result = show (formShape @Q)\n"
     );

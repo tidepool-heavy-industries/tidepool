@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
@@ -5,8 +6,9 @@
 -- (@plans\/self-iterating-harness\/14-generic-derived-askuser-prd.md@),
 -- verbatim.
 --
--- The point of the fixture is what is NOT here. @deriving (Generic)@ is the
--- entire author contract — no @ToJSON@\/@FromJSON@, no form builder, no
+-- The point of the fixture is what is NOT here. @deriving (Generic,
+-- FromJSON)@ is the entire author contract — the @FromJSON@ is the vendored
+-- generic DEFAULT (no method written), and there is no form builder, no
 -- instance of anything in @Tidepool.Form.*@, no annotation beside a field.
 -- A turn that compiles @askUser \@DeployRequest@ against this module is the
 -- acceptance criterion "declare the ADTs and ask, bare".
@@ -20,13 +22,13 @@ import GHC.Generics (Generic)
 import Tidepool.Prelude
 
 data Environment = Development | Staging | Production
-  deriving (Generic)
+  deriving (Generic, FromJSON)
 
 data Destination
   = LocalHost
   | Ssh { host :: Text, port :: Int }
   | Container { image :: Text }
-  deriving (Generic)
+  deriving (Generic, FromJSON)
 
 data DeployRequest = DeployRequest
   { service       :: Text
@@ -36,4 +38,4 @@ data DeployRequest = DeployRequest
   , runMigrations :: Bool
   , releaseNote   :: Maybe Text
   }
-  deriving (Generic)
+  deriving (Generic, FromJSON)
