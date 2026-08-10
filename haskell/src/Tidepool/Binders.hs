@@ -32,6 +32,7 @@ import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
 import GHC.Driver.Session (DynFlags, importPaths, xopt_set)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser (parseStatement, parseDeclaration)
+import qualified GHC.Parser (parseModule)
 import GHC.Parser.Lexer (ParseResult(..), unP, initParserState)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
@@ -44,6 +45,7 @@ import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
 import Data.List (intercalate, foldl', nub)
+import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
@@ -213,7 +215,7 @@ data StmtBinders = StmtBinders
 --   * else (both fail) → @"expr"@ (the runtime recompiles through the
 --     bare-expression path, where GHC re-parses and reports the real error).
 classifyWithFlags :: DynFlags -> String -> StmtBinders
-classifyWithFlags dflags0 src = classifyTurn declRes stmtRes
+classifyWithFlags dflags0 src = classifyTurn declRes stmtRes modRes
   where
     dflags = foldl' xopt_set dflags0 stmtExtensions
     popts  = initParserOpts dflags
@@ -223,6 +225,7 @@ classifyWithFlags dflags0 src = classifyTurn declRes stmtRes
     -- is safe to reuse; the mutable lexer state is not).
     declRes = unP parseDeclaration (initParserState popts buf loc)
     stmtRes = unP parseStatement   (initParserState popts buf loc)
+    modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
 
 -- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a lane:
 -- it emits no phases of its own — a phase's owner has to be whatever knows it
@@ -282,11 +285,29 @@ classifyBlock timing srcs = do
 classifyTurn
   :: ParseResult (LHsDecl GhcPs)
   -> ParseResult (LStmt GhcPs (LHsExpr GhcPs))
+  -> ParseResult (Located (HsModule GhcPs))
   -> StmtBinders
-classifyTurn declRes stmtRes
+classifyTurn declRes stmtRes modRes
   | POk _ lstmt <- stmtRes, isBindStmt lstmt =
       StmtBinders "bind" (map occStr (collectLStmtBinders CollNoDictBinders lstmt))
   | POk _ ldecl <- declRes, Just sb <- declNameVerdict ldecl = sb
+  -- MULTI-DECLARATION items (a sig + its equation, mutually-referencing
+  -- equations — one turn, several top-level decls). `parseDeclaration` and
+  -- `parseStatement` are SINGLE-item parsers, so before this rule such items
+  -- fell all the way to the "expr" fallback, the runtime wrapped them in a
+  -- do-block, and the second line's `=` was a parse error — a regression the
+  -- old decl-first try-cascade masked and the verdict fast-path exposed. A
+  -- headerless decl sequence is a valid module, so the module parse is the
+  -- authority for this shape. Gated on >= 2 decls (single-item verdicts keep
+  -- their existing rules above/below, byte for byte) and on EVERY decl
+  -- declaring a name (a trailing bare call parses as a zero-binder splice
+  -- and must keep poisoning nothing — the item is then not a decl batch).
+  | POk _ lmod <- modRes
+  , decls <- hsmodDecls (unLoc lmod)
+  , length decls >= 2
+  , verdicts <- map declNameVerdict decls
+  , all isJust verdicts =
+      StmtBinders "decl" (nub (concatMap sbBinders (catMaybes verdicts)))
   | POk _ _ <- stmtRes = StmtBinders "expr" []
   | POk _ _ <- declRes = StmtBinders "decl" []
   | otherwise = StmtBinders "expr" []
