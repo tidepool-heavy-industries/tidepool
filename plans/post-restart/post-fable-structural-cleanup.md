@@ -18,11 +18,11 @@ Scope: architecture and subtraction, not the current bug hunt
 > decode would preserve the second traversal this step deletes; positional
 > form fields now a compile-time TypeError). Step 4's REMAINDER:
 > `Tidepool.Form.Legacy` + the flat `FormSpec.fields`/`Field`/`FieldKind`/
-> `EnumOption`/`Submission` vocabulary and its render/JS path still exist
-> (severable; nothing Haskell-side emits the flat wire). Step 5's
+> `EnumOption`/`Submission` vocabulary and its render/JS path were removed in
+> the post-Fable cleanup. Step 5's
 > dead-vocabulary half landed (RuntimeAgentEvent/Workspace/ToolCallId/
-> Usage/Other deleted); the Call/Notify mode-machinery replacement is
-> BUNDLED with the parked Subagent→Agent rename decision. Steps 6-11
+> Usage/Other deleted). Human steering on 2026-08-10 explicitly preserves the
+> Call/Notify mode interpretation seam: it is unfinished, not dead. Steps 6-11
 > untouched, per the interference warning and decision gates.
 >
 > **Rebaseline stamp (Fable, 2026-08-09, run complete):** the run ended at
@@ -407,13 +407,15 @@ A form has one submitted value: JSON. The form layer describes and displays
 that value but does not define another recursive value language, preserve
 duplicate object keys, or support a form-only constructor convention.
 
-### 4. Keep the coupled agent behavior; replace provisional APIs
+### 4. Keep the coupled agent behavior and finish the mode API
 
 #### Why
 
 The Haskell agent contract uses a Servant-style mode parameter, `Call`/`Notify`
-markers, `AsServerT`, an infix type family, and a generic traversal. There is one
-real interpretation today.
+markers, `AsServerT`, an infix type family, and a generic traversal. Only the
+server interpretation is implemented today, but human steering identifies the
+interpretation seam as intentional unfinished architecture rather than dead
+abstraction.
 
 Unlike the research baseline, there is now a working production path. The
 generated Subagent effect reaches `SubagentHandler`, the coupled spawn
@@ -432,13 +434,11 @@ not adapter isolation.
 
 #### Change
 
-- Replace the mode-parameterized Haskell API with an ordinary record of typed
-  tools, for example `Tool m input output` fields, unless the next implementation
-  demonstrates a second live interpretation before this cleanup lands.
-- Keep the generic traversal which compiles a real record of tools if it still
-  removes repetition.
-- Delete `Call`, `Notify`, `AsServerT`, the `(:-)` family, and mode machinery
-  which exists only to support hypothetical interpretations.
+- Preserve `Call`, `Notify`, `AsServerT`, `(:-)`, and the generic traversal.
+- Document the intended next interpretation before extending the algebra, and
+  keep `AsServerT` as the only implementation until that consumer is real.
+- Do not collapse unfinished extension structure merely because only one
+  interpretation is currently wired.
 - Use the shared JSON conversion and schema from step 2 for both tool input and
   structured model output.
 - Keep backend-specific protocol translation inside the Codex adapter.

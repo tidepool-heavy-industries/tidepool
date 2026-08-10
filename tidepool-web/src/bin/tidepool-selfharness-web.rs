@@ -5,8 +5,8 @@
 //! on for its two operator interactions (fill a form / click continue).
 //!
 //! `--demo` runs the server against a MOCK driver: a background thread that
-//! presents a sample `FormSpec` (one field of each v1 kind), prints the flat
-//! submission it receives, then parks on the continue gate — so the page and
+//! presents a representative `FormSpec`, prints the submitted answer, then
+//! parks on the continue gate — so the page and
 //! its aesthetic can be opened and reviewed on localhost with no harness, no
 //! model, and no API calls.
 //!
@@ -16,9 +16,7 @@
 
 use std::sync::Arc;
 
-use tidepool_harness::selfharness::operator::{
-    EnumOption, Field, FieldKind, FormSpec, OperatorGate,
-};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
 use tidepool_web::WebGate;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -53,47 +51,27 @@ fn demo_loop(gate: Arc<WebGate>) {
     }
 }
 
-/// One field of each v1 kind, so the rendered page exercises the whole surface.
+/// A representative derived-style product form.
 fn sample_form() -> FormSpec {
     FormSpec {
-        fields: vec![
-            Field {
-                key: "direction".into(),
-                label: "Direction".into(),
-                kind: FieldKind::Enum {
-                    options: vec![
-                        EnumOption {
-                            label: "Continue as planned".into(),
-                            tag: "continue".into(),
-                        },
-                        EnumOption {
-                            label: "Narrow the scope".into(),
-                            tag: "narrow".into(),
-                        },
-                        EnumOption {
-                            label: "Start over".into(),
-                            tag: "restart".into(),
-                        },
-                    ],
+        shape: FormShape::Product {
+            type_key: "Demo".into(),
+            constructor: "Demo".into(),
+            fields: vec![
+                FieldShape {
+                    key: "iterations".into(),
+                    shape: FormShape::Int,
                 },
-            },
-            Field {
-                key: "iterations".into(),
-                label: "Iterations".into(),
-                kind: FieldKind::Int,
-            },
-            Field {
-                key: "note".into(),
-                label: "Note to the agent".into(),
-                kind: FieldKind::Text,
-            },
-            Field {
-                key: "verbose".into(),
-                label: "Verbose logging".into(),
-                kind: FieldKind::Bool,
-            },
-        ],
-        shape: None,
+                FieldShape {
+                    key: "note".into(),
+                    shape: FormShape::String,
+                },
+                FieldShape {
+                    key: "verbose".into(),
+                    shape: FormShape::Bool,
+                },
+            ],
+        },
     }
 }
 

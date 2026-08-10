@@ -11,42 +11,23 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE ConstraintKinds #-}
--- | PRD 18 gate 1(a): the Servant-style agent tool contract algebra.
---
--- An agent's callable tools are a 'Generic' record parameterized by @mode@,
--- one field per endpoint:
+-- | Mode-interpreted agent tool records compiled into declarations and
+-- dynamic dispatch.
 --
 -- > data WorkerTools mode = WorkerTools
 -- >   { askParent      :: mode :- Call Question Decision
 -- >   , reportProgress :: mode :- Notify Progress
 -- >   } deriving (Generic)
 --
--- Interpreting @mode@ as @AsServerT m@ turns every field into a real
--- 'Tool': @askParent :: Tool m Question Decision@. 'compileTools' walks that
--- interpreted record ONCE (field order), and from each leaf ('Selector' name
--- + the 'Tool' value found there) emits both a wire declaration and a
--- dispatch entry — the declaration and the dispatcher cannot drift apart
--- because there is only one traversal, and the description/handler cannot
--- drift apart because they live in the same 'Tool' value.
+-- @AsServerT m@ interprets those endpoints as concrete 'Tool' values.
+-- 'compileTools' walks that interpretation once and derives each declaration
+-- and dispatch entry from the same selector and 'Tool' value. Other
+-- interpretations can be added without changing the authored record.
 --
--- @mode :- endpoint@ is a CLOSED type family (not open instances, per the
--- PRD's explicit "class instead of open instances if it elaborates smaller
--- or errors better" escape hatch): the endpoint vocabulary is fixed
--- ('Call'\/'Notify'), so there is nothing an open family's extensibility
--- would buy here, and a closed family gets a source-level 'TypeError'
--- fallthrough equation for free instead of GHC's generic "no instance"
--- dump. See @plans\/post-restart\/agent-lanes\/receipt-mode-encoding.md@ for
--- the elaboration evidence that decided GO on this encoding.
---
--- The structural interpreter in this module ('AgentSchema') is
--- DELIBERATELY shallow: single-constructor records and primitives only, no
--- lists, no recursion. That is dev-structural-codec's gate (1(b)); this
--- gate only needs enough structure to prove the mode encoding dispatches on
--- the real JIT. A multi-constructor endpoint type is rejected the same way
--- 'Tidepool.Aeson.Value.ToJSON' rejects multi-constructor sums: a
--- source-level 'TypeError', not a runtime crash.
+-- 'AgentSchema' supports primitive fields and single-constructor records.
+-- Multi-constructor tool inputs are rejected at compile time.
 module Tidepool.Agent.Contract
-  ( -- * Endpoint markers
+  ( -- * Endpoint algebra and server interpretation
     Call
   , Notify
   , AsServerT
@@ -87,29 +68,21 @@ import Tidepool.Aeson.Value (Value (..), object, ToJSON (..))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
 
 -- ---------------------------------------------------------------------------
--- Endpoint markers and the mode encoding
+-- Endpoint algebra and server interpretation
 -- ---------------------------------------------------------------------------
 
--- | A request\/response endpoint: the child calls in with @input@, the
--- handler runs in the parent's effect monad, the child gets @output@ back.
+-- | A request\/response endpoint.
 data Call input output
 
--- | A fire-and-forget endpoint: equivalent to @Call input ()@, but names
--- the intent distinctly (and may render differently in synopses/traces).
+-- | A fire-and-forget endpoint, interpreted as @Tool m input ()@ by the
+-- server mode.
 data Notify input
 
--- | The server-side interpretation of a tools record: @mode :- endpoint@
--- becomes the concrete 'Tool' value a resident author supplies a handler
--- for.
+-- | The server-side interpretation of a tools record.
 data AsServerT (m :: Type -> Type)
 
--- | Interpret one tools-record field's endpoint under @mode@.
---
--- CLOSED, not open: see the module header for why. The third equation is
--- the authoring diagnostic for "record field is not a supported endpoint" —
--- it fires at the exact source span of the offending field, because that is
--- where GHC must reduce this family application to build the record's
--- 'Generic' representation.
+-- | Interpret one endpoint under a record mode. The closed fallthrough gives
+-- an author-facing error at an unsupported field.
 type family mode :- endpoint where
   AsServerT m :- Call input output = Tool m input output
   AsServerT m :- Notify input = Tool m input ()
@@ -123,6 +96,10 @@ type family mode :- endpoint where
 
 infixr 0 :-
 
+-- ---------------------------------------------------------------------------
+-- Tool values
+-- ---------------------------------------------------------------------------
+
 -- | Documentation and handler are values, not type-level 'GHC.TypeLits.Symbol's
 -- — so a description can be assembled with resident state (@fmt@) at agent
 -- creation. Compiled once per agent thread (Codex dynamic tools are
@@ -133,8 +110,7 @@ data Tool m input output = Tool
   }
 
 -- | Build a request\/response 'Tool'. An alias for 'Tool' — kept distinct
--- from 'notify' so authored code reads its intent at the call site, mirroring
--- 'Call'\/'Notify'.
+-- from 'notify' so authored code reads its intent at the call site.
 tool :: Text -> (input -> m output) -> Tool m input output
 tool = Tool
 
@@ -146,7 +122,7 @@ notify = Tool
 -- Structural schema — shallow: single-constructor records + primitives
 -- ---------------------------------------------------------------------------
 
--- | A JSON-Schema-shaped structural description of a 'Call' input type, used
+-- | A JSON-Schema-shaped structural description of a tool input type, used
 -- for 'DynamicToolDeclaration''s @input_schema@. Reuses 'GHC.Generics' the
 -- same way 'Tidepool.Aeson.Value.ToJSON' does: a default method resolves via
 -- @deriving (Generic, AgentSchema)@ (needs @DeriveAnyClass@ at the use site).
@@ -204,7 +180,7 @@ instance
   TypeError
     ( 'Text "Tidepool.Agent.Contract's structural schema supports single-constructor records only; "
         ':<>: 'Text "this endpoint type has multiple constructors."
-        ':$$: 'Text "Write the endpoint as a record, or reach for the list/recursive structural codec (gate 1(b))."
+        ':$$: 'Text "Use a single-constructor record for tool input."
     ) =>
   GAgentSchema (a :+: b)
   where
@@ -240,9 +216,7 @@ instance {-# OVERLAPPING #-} (Selector s, AgentSchema c) => GAgentSchemaObj (M1 
 -- @tidepool_agent::seam::DynamicToolDeclaration@'s @name@ on the Rust side.
 type ToolName = Text
 
--- | The wire value shuttled across dispatch. Reuses the already-proven
--- 'Value' codec rather than inventing a parallel one — see the module
--- header on why this gate's schema stays shallow.
+-- | The JSON value shuttled across dispatch.
 type StructuralValue = Value
 
 -- | One dynamic tool as declared to a backend at agent creation. Field order
@@ -364,7 +338,7 @@ instance GCompileTools U1 m where
   gCompileEntries U1 = []
 
 -- | An agent tools record itself must be a single-constructor product of
--- endpoints — the same restriction the endpoint schema places on 'Call'
+-- endpoints — the same restriction the endpoint schema places on tool
 -- inputs/outputs, at the outer level.
 instance
   TypeError
@@ -375,10 +349,8 @@ instance
   where
   gCompileEntries _ = error "unreachable: multi-constructor tools record is a compile-time TypeError"
 
--- | The leaf: a field interpreted through @AsServerT m@ is always exactly
--- @Tool m input output@ (both 'Call' and 'Notify' reduce to this shape —
--- 'Notify' just fixes @output ~ ()@), so one instance covers both endpoint
--- kinds.
+-- | Every record leaf is exactly @Tool m input output@; unit-output tools use
+-- the same instance as request/response tools.
 instance
   (Selector s, FromJSON input, AgentSchema input, ToJSON output, Functor m) =>
   GCompileTools (M1 S s (K1 R (Tool m input output))) m
@@ -398,36 +370,15 @@ instance
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
--- | Everything 'compileTools' needs: a 'Generic' interpreted tools record
--- whose leaves 'GCompileTools' can walk. Two type parameters (not the PRD
--- sketch's one) because the constraint is over BOTH the record shape and
--- the effect monad @m@ it is interpreted at — "the exact class/row spelling
--- follows the existing Tidepool effect machinery" (PRD).
---
--- A CONSTRAINT-KIND SYNONYM, not a class: an earlier version was a
--- zero-method class with only a superclass context (@class (Generic ...,
--- GCompileTools ...) => HasAgentApi tools m@) plus its matching instance.
--- That elaborated to a dictionary with nothing in it — and tripped a real
--- extract-pipeline bug (a "Dangling NVar reference" for the culled
--- @C:HasAgentApi@ dictionary constructor; see the receipt). A synonym has no
--- dictionary of its own to construct or cull — it macro-expands to the raw
--- tuple at every use site — so it sidesteps the whole class of bug and
--- still gives authored signatures the same @HasAgentApi tools m =>@ shape.
---
--- A @tools@ that forgets @deriving (Generic)@ fails at a 'compileTools' call
--- site with GHC's own "no instance for (Generic ...)" — not an authored
--- 'TypeError'. See the receipt for why: intercepting that case needs two
--- instances with the same head distinguished only by constraint
--- satisfiability, which plain instance resolution can't do.
+-- | The constraints needed to walk the server interpretation of a tools
+-- record.
 type HasAgentApi tools m =
   ( Generic (tools (AsServerT m))
   , GCompileTools (Rep (tools (AsServerT m))) m
   )
 
--- | Compile an interpreted tools record into declarations + a dispatcher.
--- One 'GCompileTools' traversal produces 'ToolEntry' list @named@;
--- 'declarations' and the dispatch table are both plain projections of that
--- SAME list — see 'ToolEntry'.
+-- | Compile a server-interpreted tools record into declarations and a
+-- dispatcher. Both are projections of one 'GCompileTools' traversal.
 compileTools ::
   forall tools m.
   HasAgentApi tools m =>

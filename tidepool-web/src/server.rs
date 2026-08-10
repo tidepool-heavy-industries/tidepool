@@ -26,11 +26,9 @@
 //! side (`blocking_recv`), so this composes with the driver's
 //! `block_in_place`/`block_on` turn driving.
 //!
-//! # Nested submissions — [`collect_form_json`]
+//! # Shape-guided submissions — [`collect_form_json`]
 //!
-//! The four verbs above and [`WebGate`] serve the FLAT `FormSpec`/
-//! `Submission` path — unchanged, and still what a spec with no `shape`
-//! takes. [`collect_form_json`] is the RECURSIVE counterpart: it takes the
+//! [`collect_form_json`] takes the
 //! flat `{"<dotted.path>": <scalar>}` object `render::generic_shape`'s
 //! markup produces via `shell::JS`'s ordinary flat collector (see
 //! `render.rs`'s module docs) and reassembles it into the PLAIN JSON the
@@ -38,9 +36,7 @@
 //! record sums, bare strings for enums, `null` for absent optionals. There
 //! is no intermediate answer language.
 //!
-//! [`submit`] runs it whenever the pending spec carries a `shape` (what
-//! `askUser @T` emits). Neither the client JS nor the gate signature
-//! changes.
+//! Both browser and form-API submissions use this one conversion.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -53,7 +49,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, FormShape, FormSpec, OperatorGate, Submission, ROOT_BIND_PATH,
+    child_path, FormShape, FormSpec, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -67,9 +63,8 @@ enum Pending {
     /// Nothing pending.
     Idle,
     /// A form is awaiting submission; `resolve` unparks `present_form`.
-    /// Carries the ANSWER VALUE (see `OperatorGate::present_form`): an object
-    /// for legacy flat forms, any JSON value for shape-carrying ones — a
-    /// unit-shaped answer is `[]` (the vendored `()` wire).
+    /// Carries the ANSWER VALUE (see `OperatorGate::present_form`), which may
+    /// be an object, scalar, or `null` depending on the form shape.
     Form {
         spec: FormSpec,
         resolve: oneshot::Sender<Jv>,
@@ -178,7 +173,7 @@ impl AppState {
     pub fn submit_form(
         &self,
         nonce: u64,
-        submission: Submission,
+        submission: Map<String, Jv>,
     ) -> Result<(), FormApiSubmitError> {
         let mut slot = self.slot.lock().unwrap();
         match &slot.pending {
@@ -281,9 +276,8 @@ fn frame(st: &AppState) -> Event {
     PatchElements::new(st.panel_html()).write_as_axum_sse_event()
 }
 
-/// Resolve the pending form. Body: a FLAT `{ <key>: <scalar> }` object — the
-/// canonical [`Submission`] shape, taken verbatim (no coercion here; the client
-/// already typed each value by the field's `data-kind`).
+/// Resolve the pending form. The client posts a flat dotted-path object; the
+/// shape-guided collector below validates and reassembles it.
 async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
     let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
     let Jv::Object(submission) = raw else {
@@ -328,29 +322,23 @@ fn err_json(msg: String) -> Response {
 // Nested submissions — flat wire object -> the plain JSON answer.
 // -------------------------------------------------------------------------
 
-/// The ONE conversion from a client's flat POST to the answer value the gate
-/// returns — shared by the browser `/submit` and the form-API path so they
-/// cannot disagree. A spec carrying a recursive `shape` (what `askUser @T`
-/// emits) was rendered at dotted bind paths: reassemble the flat map into
-/// the ORDINARY JSON the answer type's generic `FromJSON` decode reads —
+/// Convert a client's flat POST to the answer returned by the gate. The
+/// browser `/submit` and form API share this path. It reassembles dotted bind
+/// paths into the ordinary JSON the answer type's generic `FromJSON` reads;
 /// there is no intermediate answer language. An incomplete or wrong-typed
 /// submission resolves to `{}`, which that decode rejects and re-presents —
-/// the same path a bad flat submission already takes. A legacy (shapeless)
-/// spec passes the flat object through verbatim.
+/// the same path every malformed submission takes.
 fn answer_value(spec: &FormSpec, submission: Map<String, Jv>) -> Jv {
-    match &spec.shape {
-        Some(shape) => {
-            collect_form_json(shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
-        }
-        None => Jv::Object(submission),
-    }
+    collect_form_json(&spec.shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
 }
 
 /// Whether every variant of a sum is nullary — an enum, whose answer is the
 /// chosen constructor as a bare string (matching the generic decode's
 /// all-nullary rule). A mixed sum answers as a tagged object instead.
 fn all_nullary(variants: &[tidepool_harness::selfharness::operator::VariantShape]) -> bool {
-    variants.iter().all(|v| matches!(v.shape, FormShape::Unit))
+    variants
+        .iter()
+        .all(|v| matches!(&v.shape, FormShape::Product { fields, .. } if fields.is_empty()))
 }
 
 /// Reassemble a flat `{"<dotted.path>": <scalar>}` submission (exactly what
@@ -364,8 +352,7 @@ fn all_nullary(variants: &[tidepool_harness::selfharness::operator::VariantShape
 /// object of its fields; an all-nullary sum is the chosen constructor as a
 /// bare string; a payload sum is a tagged object (`{"tag": <ctor>, ...}` —
 /// the chosen variant's record fields merged beside the tag, tag-only for a
-/// nullary branch); `Maybe` is the value or `null`; the unit form is `[]`
-/// (the vendored aeson-1.5 `()` wire).
+/// nullary branch); `Maybe` is the value or `null`; the unit form is `null`.
 ///
 /// Rejects rather than guesses: a missing leaf, a wrong-typed scalar, or an
 /// unrecognized sum constructor all yield `None`. For a payload-bearing sum,
@@ -392,9 +379,9 @@ pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -
             b @ Jv::Bool(_) => Some(b.clone()),
             _ => None,
         },
-        FormShape::Unit => Some(json!([])),
+        FormShape::Unit => Some(Jv::Null),
         FormShape::Optional(inner) => {
-            let present_key = format!("{path}.__present");
+            let present_key = format!("{path}#present");
             let present = matches!(raw.get(&present_key), Some(Jv::Bool(true)));
             if present {
                 collect_form_json(inner, path, raw)
@@ -425,7 +412,6 @@ pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -
             let mut out = Map::new();
             out.insert("tag".to_string(), Jv::String(chosen));
             match &variant.shape {
-                FormShape::Unit => {}
                 FormShape::Product { fields, .. } => {
                     for field in fields {
                         let fchild = child_path(&child, &field.key);
@@ -433,7 +419,7 @@ pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -
                         out.insert(field.key.clone(), value);
                     }
                 }
-                // GForm only ever derives Unit or Product variant payloads.
+                // GForm derives constructor payloads as Product shapes.
                 _ => return None,
             }
             Some(Jv::Object(out))
@@ -444,28 +430,24 @@ pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_harness::selfharness::operator::{EnumOption, Field, FieldKind};
+    use tidepool_harness::selfharness::operator::FieldShape;
 
     fn spec() -> FormSpec {
         FormSpec {
-            fields: vec![
-                Field {
-                    key: "mood".into(),
-                    label: "Mood".into(),
-                    kind: FieldKind::Enum {
-                        options: vec![EnumOption {
-                            label: "Calm".into(),
-                            tag: "calm".into(),
-                        }],
+            shape: FormShape::Product {
+                type_key: "Sample".into(),
+                constructor: "Sample".into(),
+                fields: vec![
+                    FieldShape {
+                        key: "mood".into(),
+                        shape: FormShape::String,
                     },
-                },
-                Field {
-                    key: "count".into(),
-                    label: "Count".into(),
-                    kind: FieldKind::Int,
-                },
-            ],
-            shape: None,
+                    FieldShape {
+                        key: "count".into(),
+                        shape: FormShape::Int,
+                    },
+                ],
+            },
         }
     }
 
@@ -484,7 +466,7 @@ mod tests {
         let body = json!({"mood": "calm", "count": 3});
         match st.take() {
             Pending::Form { resolve, spec } => {
-                assert_eq!(spec.fields.len(), 2);
+                assert!(matches!(spec.shape, FormShape::Product { .. }));
                 resolve.send(body.clone()).unwrap();
             }
             _ => panic!("expected a pending form"),
@@ -495,16 +477,15 @@ mod tests {
     }
 
     /// The regression this transport exists for: a unit-shaped form
-    /// (`askUser @()`) answers as `[]` — the vendored aeson-1.5 `()` wire.
+    /// (`askUser @()`) answers as `null`.
     /// The old object-only transport coerced non-object answers to `{}`,
     /// which the decode rejects — an infinite re-prompt.
     #[test]
     fn unit_shaped_answer_survives_reassembly() {
         let spec = FormSpec {
-            fields: vec![],
-            shape: Some(FormShape::Unit),
+            shape: FormShape::Unit,
         };
-        assert_eq!(answer_value(&spec, Submission::new()), json!([]));
+        assert_eq!(answer_value(&spec, Map::new()), Jv::Null);
     }
 
     /// An incomplete shape submission still degrades to `{}` (reject and
@@ -512,10 +493,9 @@ mod tests {
     #[test]
     fn incomplete_shape_submission_degrades_to_the_rejectable_empty_object() {
         let spec = FormSpec {
-            fields: vec![],
-            shape: Some(FormShape::String),
+            shape: FormShape::String,
         };
-        assert_eq!(answer_value(&spec, Submission::new()), json!({}));
+        assert_eq!(answer_value(&spec, Map::new()), json!({}));
     }
 
     #[test]
@@ -534,16 +514,13 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// The wire round trip: a `FormSpec` serialized and back yields the same
-    /// field set the renderer binds against.
+    /// The wire round trip preserves the form shape.
     #[test]
     fn form_spec_round_trips_through_serde() {
         let s = spec();
         let wire = serde_json::to_string(&s).unwrap();
         let back: FormSpec = serde_json::from_str(&wire).unwrap();
         assert_eq!(s, back);
-        let keys: Vec<&str> = back.fields.iter().map(|f| f.key.as_str()).collect();
-        assert_eq!(keys, vec!["mood", "count"]);
     }
 
     fn extract_rev(html: &str) -> &str {
@@ -574,9 +551,9 @@ mod tests {
         assert_ne!(rev1, rev2, "take must bump the revision");
     }
 
-    // ---- collect_form_answer -------------------------------------------------
+    // ---- collect_form_json ---------------------------------------------------
 
-    use tidepool_harness::selfharness::operator::{FieldShape, VariantShape};
+    use tidepool_harness::selfharness::operator::VariantShape;
 
     fn ssh_shape() -> FormShape {
         FormShape::Product {
@@ -601,7 +578,7 @@ mod tests {
             variants: vec![
                 VariantShape {
                     constructor: "LocalHost".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Destination", "LocalHost"),
                 },
                 VariantShape {
                     constructor: "Ssh".to_string(),
@@ -643,7 +620,7 @@ mod tests {
             "destination": "Ssh",
             "destination.Ssh.host": "example.com",
             "destination.Ssh.port": 22,
-            "releaseNote.__present": true,
+            "releaseNote#present": true,
             "releaseNote": "hotfix",
         }));
         assert_eq!(
@@ -667,8 +644,7 @@ mod tests {
     #[test]
     fn root_bind_path_renders_and_collects_a_root_sum() {
         let spec = FormSpec {
-            fields: vec![],
-            shape: Some(destination_shape()),
+            shape: destination_shape(),
         };
         let html = crate::render::panel(&crate::render::View::Form(&spec), 1).into_string();
         assert!(
@@ -696,8 +672,8 @@ mod tests {
             "destination": "LocalHost",
             "destination.Ssh.host": "example.com",
             "destination.Ssh.port": 22,
-            "releaseNote.__present": false,
-            "releaseNote": "ignored because __present is false",
+            "releaseNote#present": false,
+            "releaseNote": "ignored because presence is false",
         }));
         assert_eq!(
             collect_form_json(&deploy_request_shape(), "", &raw),
@@ -718,11 +694,11 @@ mod tests {
             variants: vec![
                 VariantShape {
                     constructor: "Dev".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Env", "Dev"),
                 },
                 VariantShape {
                     constructor: "Prod".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Env", "Prod"),
                 },
             ],
         };
@@ -732,6 +708,14 @@ mod tests {
             collect_form_json(&shape, ROOT_BIND_PATH, &raw),
             Some(json!("Prod"))
         );
+    }
+
+    fn empty_product(type_key: &str, constructor: &str) -> FormShape {
+        FormShape::Product {
+            type_key: type_key.to_string(),
+            constructor: constructor.to_string(),
+            fields: vec![],
+        }
     }
 
     #[test]
@@ -745,7 +729,7 @@ mod tests {
         let raw = obj(json!({
             "service": "api",
             "destination": "Nope",
-            "releaseNote.__present": false,
+            "releaseNote#present": false,
         }));
         assert_eq!(collect_form_json(&deploy_request_shape(), "", &raw), None);
     }
@@ -754,7 +738,7 @@ mod tests {
     /// end to end. Render the shape, scrape the exact bind paths back out of
     /// the HTML (not a hand-written guess at what the renderer emits), build
     /// a submission at exactly those paths, and confirm
-    /// `collect_form_answer` reconstructs the same exact keys — while the
+    /// `collect_form_json` reconstructs the same exact keys — while the
     /// rendered HTML shows only humanized label text, never the raw key.
     #[test]
     fn render_and_collect_round_trip_exact_keys_while_labels_humanize() {
@@ -765,7 +749,7 @@ mod tests {
 
         assert!(html.contains("data-bind=\"service\""));
         assert!(html.contains("data-bind=\"destination\""));
-        assert!(html.contains("data-bind=\"releaseNote.__present\""));
+        assert!(html.contains("data-bind=\"releaseNote#present\""));
         assert!(html.contains("data-bind=\"releaseNote\""));
         assert!(html.contains("data-bind=\"destination.Ssh.host\""));
         assert!(html.contains("data-bind=\"destination.Ssh.port\""));
@@ -777,7 +761,7 @@ mod tests {
             "destination": "Ssh",
             "destination.Ssh.host": "example.com",
             "destination.Ssh.port": 22,
-            "releaseNote.__present": true,
+            "releaseNote#present": true,
             "releaseNote": "hotfix",
         }));
         let answer = collect_form_json(&shape, "", &raw).expect("collects");

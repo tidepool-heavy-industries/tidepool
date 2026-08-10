@@ -398,6 +398,39 @@ conObjectSchema mtag fields =
       Nothing -> []
       Just _ -> ["tag"]
 
+-- A selector's source name is normalized before it reaches JSON. Two source
+-- names can therefore collapse to one key, and a sum payload can collide
+-- with the discriminator. `Map.fromList` would silently choose a winner;
+-- reject the schema instead so encode, decode, and the advertised contract
+-- remain one-to-one.
+validateConFields :: Maybe Text -> [ModelField] -> Either Text ()
+validateConFields mtag fields =
+  case firstRepeated [] (map mfName fields) of
+    Just name -> Left ("duplicate normalized model field name \"" <> name <> "\"")
+    Nothing -> case mtag of
+      Just _ | any ((== "tag") . mfName) fields ->
+        Left "model sum payload field \"tag\" collides with the constructor discriminator"
+      _ -> Right ()
+  where
+    firstRepeated _ [] = Nothing
+    firstRepeated seen (name : rest)
+      | name `elem` seen = Just name
+      | otherwise = firstRepeated (name : seen) rest
+
+checkedConSchema :: Maybe Text -> [ModelField] -> Value
+checkedConSchema mtag fields = case validateConFields mtag fields of
+  Left problem -> error ("Tidepool.Agent.ModelCodec: " ++ T.unpack problem)
+  Right () -> conObjectSchema mtag fields
+
+checkedConEncode :: Maybe Text -> [ModelField] -> [(Text, Value)] -> Value
+checkedConEncode mtag fields pairs = case validateConFields mtag fields of
+  Left problem -> error ("Tidepool.Agent.ModelCodec: " ++ T.unpack problem)
+  Right () -> Object (Map.fromList (tagPair ++ pairs))
+  where
+    tagPair = case mtag of
+      Nothing -> []
+      Just tag -> [("tag", String tag)]
+
 -- ---------------------------------------------------------------------------
 -- Generic traversal — top level
 -- ---------------------------------------------------------------------------
@@ -419,9 +452,13 @@ instance GModelCodec f => GModelCodec (M1 D d f) where
 
 -- | Single constructor: a bare named-field object, no discriminator.
 instance GModelCon f => GModelCodec (M1 C c f) where
-  gSchema _ = conObjectSchema Nothing (gConFields (Proxy :: Proxy f))
-  gEncode (M1 x) = Object (Map.fromList (gConEncode x))
-  gDecode path (Object o) = M1 <$> gConDecode path o
+  gSchema _ = checkedConSchema Nothing fields
+    where fields = gConFields (Proxy :: Proxy f)
+  gEncode (M1 x) = checkedConEncode Nothing fields (gConEncode x)
+    where fields = gConFields (Proxy :: Proxy f)
+  gDecode path (Object o) = do
+    validateConFields Nothing (gConFields (Proxy :: Proxy f))
+    M1 <$> gConDecode path o
   gDecode path v = Left (path <> ": expected an object, got " <> kindOf v)
 
 -- | Multi-constructor sum: @oneOf@ of per-constructor tagged objects. The tag
@@ -461,11 +498,17 @@ instance (GModelSum a, GModelSum b) => GModelSum (a :+: b) where
     Nothing -> fmap (fmap R1) (gSumDecode path tag o)
 
 instance (Constructor c, GModelCon f) => GModelSum (M1 C c f) where
-  gSumSchemas _ = [conObjectSchema (Just (conNameOf (Proxy :: Proxy c))) (gConFields (Proxy :: Proxy f))]
+  gSumSchemas _ = [checkedConSchema (Just tag) fields]
+    where
+      tag = conNameOf (Proxy :: Proxy c)
+      fields = gConFields (Proxy :: Proxy f)
   gSumTags _ = [conNameOf (Proxy :: Proxy c)]
-  gSumEncode m@(M1 x) = Object (Map.fromList (("tag", String (T.pack (conName m))) : gConEncode x))
+  gSumEncode m@(M1 x) = checkedConEncode (Just (T.pack (conName m))) fields (gConEncode x)
+    where fields = gConFields (Proxy :: Proxy f)
   gSumDecode path tag o
-    | tag == conNameOf (Proxy :: Proxy c) = Just (M1 <$> gConDecode path o)
+    | tag == conNameOf (Proxy :: Proxy c) = Just $ do
+        validateConFields (Just tag) (gConFields (Proxy :: Proxy f))
+        M1 <$> gConDecode path o
     | otherwise = Nothing
 
 -- | The constructor's source name, as it appears in the @tag@. No

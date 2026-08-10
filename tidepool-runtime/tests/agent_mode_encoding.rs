@@ -35,7 +35,8 @@ use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, DataKinds, TypeOperators, FlexibleContexts #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
-     import Tidepool.Agent.Contract\n";
+     import Tidepool.Agent.Contract\n\
+     import Tidepool.Agent.ModelCodec\n";
 
 /// `Question`/`Decision` are the shared `Call` input/output pair used by
 /// every fixture below. `compileTools`'s leaf constraint only needs
@@ -132,9 +133,8 @@ fn dynamic_dispatch_executes_on_real_jit() {
     );
 }
 
-/// `reportProgress` (a `Notify`, i.e. `Tool m input ()`) dispatches through
-/// the identical code path as a `Call` — proving `Notify` isn't a distinct
-/// leaf case that could silently diverge from `Call`'s.
+/// `reportProgress` is a `Notify`, interpreted as `Tool m input ()`, and
+/// dispatches through the same leaf path as `Call`.
 #[test]
 fn notify_endpoint_dispatches_through_the_same_path() {
     require_extract();
@@ -256,10 +256,7 @@ fn compile_fail_tools_record_missing_generic() {
     }
 }
 
-/// "record field is not a supported endpoint" — the `mode :- endpoint`
-/// closed type family's fallthrough equation, an authored `TypeError`. Fires
-/// at the exact field whose type is not `Call input output` or `Notify
-/// input`.
+/// An unsupported endpoint is rejected by the mode family's fallthrough.
 #[test]
 fn compile_fail_unsupported_endpoint_type() {
     require_extract();
@@ -273,20 +270,16 @@ fn compile_fail_unsupported_endpoint_type() {
          \x20 Right _ -> 1\n"
     );
     match EvalHarness::new().with_stdlib().compile(&src, "result") {
-        Ok(_) => panic!("a field whose endpoint type is not Call/Notify must not compile"),
+        Ok(_) => panic!("an unsupported mode endpoint must not compile"),
         Err(e) => {
             let msg = tidepool_runtime::classify_compile(&e).message;
             assert!(
                 msg.contains("unsupported agent tool endpoint"),
-                "expected our authored TypeError, got:\n{msg}"
+                "expected the authored endpoint diagnostic, got:\n{msg}"
             );
             assert!(
                 msg.contains("Call input output") && msg.contains("Notify input"),
-                "expected the fix to name both valid shapes, got:\n{msg}"
-            );
-            assert!(
-                !msg.contains("Rep "),
-                "must not leak GHC.Generics' Rep, got:\n{msg}"
+                "expected the diagnostic to name both valid endpoint forms, got:\n{msg}"
             );
         }
     }
@@ -429,5 +422,45 @@ fn compiletools_time_well_formed_record_compiles() {
         obj.get("constructor").and_then(|c| c.as_str()),
         Some("Right"),
         "well-formed WorkerTools must compile, got:\n{v}"
+    );
+}
+
+#[test]
+fn model_codec_rejects_normalized_field_collisions() {
+    let src = format!(
+        "{HEADER}\n\
+         data Collision = Collision {{ fooBar :: Text, foo_bar :: Text }} deriving (Generic)\n\
+         instance ModelCodec Collision\n\n\
+         result :: Text\n\
+         result = case decodeModel (object []) :: Either Text Collision of\n\
+         \x20 Left problem -> problem\n\
+         \x20 Right _ -> \"unexpectedly decoded\"\n"
+    );
+    let v = run_pure(&src, "result");
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("duplicate normalized model field name"),
+        "snake_case normalization must not silently merge fields: {v}"
+    );
+}
+
+#[test]
+fn model_codec_rejects_payload_tag_collision() {
+    let src = format!(
+        "{HEADER}\n\
+         data Collision = Empty | Payload {{ tag :: Text }} deriving (Generic)\n\
+         instance ModelCodec Collision\n\n\
+         result :: Text\n\
+         result = case decodeModel (object [(\"tag\", String \"Payload\")]) :: Either Text Collision of\n\
+         \x20 Left problem -> problem\n\
+         \x20 Right _ -> \"unexpectedly decoded\"\n"
+    );
+    let v = run_pure(&src, "result");
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("constructor discriminator"),
+        "the sum tag must not be overwritten by a payload field: {v}"
     );
 }

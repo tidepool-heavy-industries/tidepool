@@ -106,7 +106,7 @@ fn unit_and_nullary_shapes() {
         assert_eq!(
             v,
             json!([
-                r#"UnitShape"#,
+                r#"ProductShape "Nullary" "Nullary" []"#,
                 r#"ProductShape "Unit1" "Unit1" [FieldShape "u" UnitShape]"#,
             ])
         )
@@ -120,9 +120,9 @@ fn sum_shapes_preserve_declaration_order() {
         assert_eq!(
             v,
             json!([
-                r#"SumShape "Two" [VariantShape "TA" UnitShape,VariantShape "TB" UnitShape]"#,
-                r#"SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape]"#,
-                r#"SumShape "Five" [VariantShape "F1" UnitShape,VariantShape "F2" UnitShape,VariantShape "F3" UnitShape,VariantShape "F4" UnitShape,VariantShape "F5" UnitShape]"#,
+                r#"SumShape "Two" [VariantShape "TA" (ProductShape "Two" "TA" []),VariantShape "TB" (ProductShape "Two" "TB" [])]"#,
+                r#"SumShape "Three" [VariantShape "T1" (ProductShape "Three" "T1" []),VariantShape "T2" (ProductShape "Three" "T2" []),VariantShape "T3" (ProductShape "Three" "T3" [])]"#,
+                r#"SumShape "Five" [VariantShape "F1" (ProductShape "Five" "F1" []),VariantShape "F2" (ProductShape "Five" "F2" []),VariantShape "F3" (ProductShape "Five" "F3" []),VariantShape "F4" (ProductShape "Five" "F4" []),VariantShape "F5" (ProductShape "Five" "F5" [])]"#,
             ])
         )
     }
@@ -134,10 +134,10 @@ fn payload_bearing_and_nested_shapes() {
         assert_eq!(
             v,
             json!([
-                r#"SumShape "Dest" [VariantShape "LocalHost" UnitShape,VariantShape "Ssh" (ProductShape "Dest" "Ssh" [FieldShape "host" StringShape,FieldShape "port" IntShape])]"#,
-                r#"ProductShape "Named" "Named" [FieldShape "inner" (SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape])]"#,
+                r#"SumShape "Dest" [VariantShape "LocalHost" (ProductShape "Dest" "LocalHost" []),VariantShape "Ssh" (ProductShape "Dest" "Ssh" [FieldShape "host" StringShape,FieldShape "port" IntShape])]"#,
+                r#"ProductShape "Named" "Named" [FieldShape "inner" (SumShape "Three" [VariantShape "T1" (ProductShape "Three" "T1" []),VariantShape "T2" (ProductShape "Three" "T2" []),VariantShape "T3" (ProductShape "Three" "T3" [])])]"#,
                 r#"ProductShape "Nested2" "Nested2" [FieldShape "a1" (ProductShape "Boxed" "Boxed" [FieldShape "unwrap" IntShape]),FieldShape "a2" (ProductShape "Boxed" "Boxed" [FieldShape "unwrap" IntShape])]"#,
-                r#"ProductShape "Opts" "Opts" [FieldShape "maybeLeaf" (OptionalShape StringShape),FieldShape "maybeSum" (OptionalShape (SumShape "Three" [VariantShape "T1" UnitShape,VariantShape "T2" UnitShape,VariantShape "T3" UnitShape]))]"#,
+                r#"ProductShape "Opts" "Opts" [FieldShape "maybeLeaf" (OptionalShape StringShape),FieldShape "maybeSum" (OptionalShape (SumShape "Three" [VariantShape "T1" (ProductShape "Three" "T1" []),VariantShape "T2" (ProductShape "Three" "T2" []),VariantShape "T3" (ProductShape "Three" "T3" [])]))]"#,
             ])
         )
     }
@@ -175,6 +175,8 @@ result = concat
       [ ("pText", String "hi"), ("pInt", toJSON (3 :: Int))
       , ("pNum", toJSON (1.5 :: Double)), ("pFlag", Bool True) ])
       == Success (Prims "hi" 3 1.5 True))
+  , check "empty-record" (fromJSON (object []) == Success Nullary)
+  , check "unit-null" (fromJSON Null == Success ())
   , check "prims-falsy-values-survive" (fromJSON (object
       [ ("pText", String ""), ("pInt", toJSON (0 :: Int))
       , ("pNum", toJSON (0.0 :: Double)), ("pFlag", Bool False) ])

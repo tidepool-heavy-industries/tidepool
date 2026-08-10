@@ -20,8 +20,8 @@
 //!   `driver` emits to; ships a `LogObserver`, stubs a future GUI subscriber
 //!   + reactive hooks.
 //! - [`operator`] — the frozen [`operator::OperatorGate`] seam the
-//!   driver blocks on for operator input + the `FormSpec`/`Submission` wire
-//!   types; ships a headless [`operator::StdinGate`].
+//!   driver blocks on for operator input + the `FormSpec` shape wrapper;
+//!   ships a headless [`operator::StdinGate`].
 //! - [`persistence`] — local-file checkpoint (state + compaction + harness-
 //!   source fingerprint, one generation-tagged record) persist/restore +
 //!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
@@ -42,6 +42,6 @@ pub use driver::{answerer_decls, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};
-pub use operator::{EnumOption, Field, FieldKind, FormSpec, OperatorGate, StdinGate, Submission};
+pub use operator::{FormSpec, OperatorGate, StdinGate};
 pub use persistence::{Checkpoint, JsonlObserver, PersistenceError};
 pub use state_cross::{state_in, state_out};

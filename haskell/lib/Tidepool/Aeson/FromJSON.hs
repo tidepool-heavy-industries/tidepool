@@ -39,7 +39,10 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
-import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
+import Tidepool.Aeson.Value
+  ( Value(..), Object, Array, fromText, toText, eitherDecodeValue
+  , GAllFieldsNamed
+  )
 import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific, floatingOrInteger)
 import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
@@ -208,7 +211,7 @@ instance (GFromJSONTaggedSum a, GFromJSONTaggedSum b) => GFromJSONTaggedSum (a :
 -- | A single constructor leaf: decode its fields (via 'GFromRecord', so a
 -- nullary constructor succeeds trivially and a record's named fields are
 -- read out of the same tagged object) once its name matches `tag`.
-instance (Constructor c, GFromRecord f) => GFromJSONTaggedSum (M1 C c f) where
+instance (Constructor c, GFromRecord f, GAllFieldsNamed f) => GFromJSONTaggedSum (M1 C c f) where
   gFromJSONTaggedSum tag o
     | tag == T.pack name = Just (M1 <$> gParseRecord o)
     | otherwise           = Nothing
@@ -361,15 +364,12 @@ instance FromJSON a => FromJSON (Map.Map Text a) where
     where step k v acc = Map.insert (toText k) <$> parseJSON v <*> acc
   parseJSON v          = mismatch "object" v
 
--- | An EMPTY array, and nothing else — a non-empty array or any other shape
--- is an 'Error'. This pins aeson\'s 1.5.x @FromJSON ()@
--- (https://hackage.haskell.org/package/aeson-1.5.6.0/docs/src/Data.Aeson.Types.FromJSON.html,
--- @parseJSON = withArray \"()\" $ \\v -> if V.null v then pure () else fail
--- \"expected an empty array\"@); aeson 2.x relaxed this to @parseJSON _ = pure
--- ()@ (accepting any value), which is NOT what this instance mirrors.
+-- | JSON @null@, matching this package's 'ToJSON ()' instance and the unit
+-- schema exposed to agents. Keeping one spelling matters here: @askUser @()@
+-- feeds operator JSON straight back through this decoder.
 instance FromJSON () where
-  parseJSON (Array []) = Success ()
-  parseJSON v          = Error ("expected an empty array, got " ++ kindOf v)
+  parseJSON Null = Success ()
+  parseJSON v    = mismatch "null" v
 
 -- | A JSON ARRAY with an EXACT arity check — a 2-tuple rejects any array
 -- whose length isn't 2 (aeson `FromJSON2 (,)` —

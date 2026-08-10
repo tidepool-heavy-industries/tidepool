@@ -58,3 +58,27 @@ fn recursive_wire_shape_is_tagged_objects() {
         json!({"tag": "Seq", "steps": [{"tag": "Step", "what": "a"}, {"tag": "Seq", "steps": []}]})
     );
 }
+
+/// `tag` is the discriminator in a payload sum, so allowing a record field
+/// with the same key would make `Map.fromList` silently discard one meaning.
+/// Reject the type at derivation instead.
+#[test]
+fn payload_field_cannot_collide_with_sum_tag() {
+    require_extract();
+    let src = "{-# LANGUAGE NoImplicitPrelude, DeriveGeneric, DeriveAnyClass #-}\n\
+        module Expr where\n\
+        import Tidepool.Prelude hiding (error)\n\
+        data Bad = Empty | Payload { tag :: Text } deriving (Generic, ToJSON, FromJSON)\n\
+        result :: Value\n\
+        result = toJSON (Payload \"lost\")\n";
+    match EvalHarness::new().with_stdlib().compile(src, "result") {
+        Ok(_) => panic!("a payload field named tag must not derive generic JSON"),
+        Err(e) => {
+            let msg = tidepool_runtime::classify_compile(&e).message;
+            assert!(
+                msg.contains("reserved for the constructor discriminator"),
+                "expected the reserved-tag diagnostic, got:\n{msg}"
+            );
+        }
+    }
+}

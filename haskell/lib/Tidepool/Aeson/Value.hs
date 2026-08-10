@@ -43,6 +43,7 @@ module Tidepool.Aeson.Value
     -- * ToJSON class
   , ToJSON(..)
   , GToJSON(..)
+  , GAllFieldsNamed
   , genericToJSON
   ) where
 
@@ -248,9 +249,16 @@ instance (Constructor c, GToRecord f, GAllFieldsNamed f) => GToJSONTaggedSum (M1
 class GAllFieldsNamed (f :: Type -> Type)
 instance GAllFieldsNamed U1
 instance (GAllFieldsNamed a, GAllFieldsNamed b) => GAllFieldsNamed (a :*: b)
-instance GAllFieldsNamed (M1 S ('MetaSel ('Just name) su ss ds) (K1 R c))
 instance
-  TypeError ('Text "deriving ToJSON via GHC.Generics: a payload constructor in a sum must use record syntax "
+  {-# OVERLAPPING #-}
+  TypeError
+    ( 'Text "generic JSON: a record field named `tag` cannot appear in a payload constructor of a sum; "
+        ':<>: 'Text "`tag` is reserved for the constructor discriminator. Rename the field."
+    ) =>
+  GAllFieldsNamed (M1 S ('MetaSel ('Just "tag") su ss ds) (K1 R c))
+instance {-# OVERLAPPABLE #-} GAllFieldsNamed (M1 S ('MetaSel ('Just name) su ss ds) (K1 R c))
+instance
+  TypeError ('Text "generic JSON: a payload constructor in a sum must use record syntax "
              ':<>: 'Text "(named fields) — positional fields have no JSON key.")
     => GAllFieldsNamed (M1 S ('MetaSel 'Nothing su ss ds) (K1 R c))
 
@@ -342,4 +350,3 @@ instance ToJSON a => ToJSON (Map.Map Text a) where
 
 instance ToJSON a => ToJSON (Set.Set a) where
   toJSON = Array . map toJSON . Set.toList
-

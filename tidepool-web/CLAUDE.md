@@ -41,8 +41,8 @@ self-iterating harness driver blocks on when it needs a human.
   change, each replacing `#panel` in place. The first frame goes out
   immediately on connect so a page opened mid-interaction is correct without
   waiting for a tick.
-- `POST /submit` — resolves a pending form. Body: a flat `{ <key>: <scalar> }`
-  JSON object — the canonical `Submission` shape, taken verbatim.
+- `POST /submit` — resolves a pending form. Body: the renderer's flat dotted-
+  path object, validated and reassembled against the pending `FormShape`.
 - `POST /continue` — resolves the between-loops gate. No body; a plain click.
 
 Both POST handlers return `{"ok": true}` (200) on success or `{"ok": false,
@@ -69,7 +69,7 @@ async context.
 If a newer interaction supersedes a pending one before it's resolved (the
 `oneshot::Sender` gets dropped when `AppState::publish` replaces the pending
 slot), `blocking_recv()` returns an error; `present_form` treats that as an
-empty `Submission` rather than deadlocking the driver — the Haskell-side
+empty JSON object rather than deadlocking the driver — the Haskell-side
 decode-retry re-prompts on an empty/invalid submission.
 
 ## Wire contract between `render.rs` and `shell.rs`'s JS
@@ -146,8 +146,8 @@ Binds `127.0.0.1` only; reachability IS the authorization boundary — there is
 no auth token on the HTTP surface itself. Off-box access is via SSH
 port-forward or tailnet, not a password. There's no untrusted-input surface
 to defend against here the way the old observatory had to worry about
-model-supplied `Ui` content: a `FormSpec`'s `label`/`EnumOption::label` text
-is server-controlled (the Haskell `askUser` call site), and maud escapes text
+model-supplied `Ui` content: form labels come from Haskell type metadata, and
+maud escapes text
 content by construction — this crate doesn't need a separate injection-surface
 story.
 

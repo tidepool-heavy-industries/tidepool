@@ -13,32 +13,26 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{
-    EnumOption, Field, FieldKind, FormSpec, OperatorGate,
-};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
 use tidepool_web::{router, AppState, WebGate};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormSpec {
     FormSpec {
-        fields: vec![
-            Field {
-                key: "mood".into(),
-                label: "Mood".into(),
-                kind: FieldKind::Enum {
-                    options: vec![EnumOption {
-                        label: "Calm".into(),
-                        tag: "calm".into(),
-                    }],
+        shape: FormShape::Product {
+            type_key: "Sample".into(),
+            constructor: "Sample".into(),
+            fields: vec![
+                FieldShape {
+                    key: "mood".into(),
+                    shape: FormShape::String,
                 },
-            },
-            Field {
-                key: "count".into(),
-                label: "Count".into(),
-                kind: FieldKind::Int,
-            },
-        ],
-        shape: None,
+                FieldShape {
+                    key: "count".into(),
+                    shape: FormShape::Int,
+                },
+            ],
+        },
     }
 }
 
@@ -82,16 +76,16 @@ async fn submit_resolves_present_form_with_exact_submission() {
 
     // The pending form shows up on the page, wired for the two fields.
     let html = wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("data-bind=\"mood\"")
+        b.contains("data-bind=\"answer.mood\"")
     })
     .await;
     assert!(html.contains("id=\"panel\""));
-    assert!(html.contains("data-bind=\"count\""));
-    assert!(html.contains("data-kind=\"enum\""));
+    assert!(html.contains("data-bind=\"answer.count\""));
+    assert!(html.contains("data-kind=\"string\""));
     assert!(html.contains("data-kind=\"int\""));
     assert!(html.contains("@post('/submit')"));
 
-    let body = json!({"mood": "calm", "count": 3});
+    let body = json!({"answer.mood": "calm", "answer.count": 3});
     let resp = client
         .post(format!("{base}/submit"))
         .json(&body)
@@ -103,7 +97,7 @@ async fn submit_resolves_present_form_with_exact_submission() {
     assert_eq!(v, json!({"ok": true}));
 
     let got = handle.await.unwrap();
-    assert_eq!(got, body);
+    assert_eq!(got, json!({"mood": "calm", "count": 3}));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,7 +156,7 @@ async fn submit_with_non_object_body_is_rejected() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
     wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("data-bind=\"mood\"")
+        b.contains("data-bind=\"answer.mood\"")
     })
     .await;
 
@@ -178,7 +172,7 @@ async fn submit_with_non_object_body_is_rejected() {
 
     // The rejected body never touched the pending slot — the form is still
     // there, and a well-formed submission resolves the still-blocked driver.
-    let body = json!({"mood": "calm", "count": 0});
+    let body = json!({"answer.mood": "calm", "answer.count": 0});
     let resp = client
         .post(format!("{base}/submit"))
         .json(&body)
@@ -187,7 +181,7 @@ async fn submit_with_non_object_body_is_rejected() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let got = handle.await.unwrap();
-    assert_eq!(got, body);
+    assert_eq!(got, json!({"mood": "calm", "count": 0}));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -200,7 +194,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
     wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("data-bind=\"mood\"")
+        b.contains("data-bind=\"answer.mood\"")
     })
     .await;
 
@@ -227,9 +221,9 @@ async fn mismatched_verb_preserves_pending_interaction() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("data-bind=\"mood\""));
+    assert!(html.contains("data-bind=\"answer.mood\""));
 
-    let body = json!({"mood": "calm", "count": 1});
+    let body = json!({"answer.mood": "calm", "answer.count": 1});
     let resp = client
         .post(format!("{base}/submit"))
         .json(&body)
@@ -238,7 +232,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let got = handle.await.unwrap();
-    assert_eq!(got, body);
+    assert_eq!(got, json!({"mood": "calm", "count": 1}));
 }
 
 #[tokio::test(flavor = "multi_thread")]

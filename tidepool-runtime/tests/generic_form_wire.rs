@@ -207,15 +207,15 @@ fn derived_shape_crosses_the_wire_as_documented_json() {
                 {"key": "environment", "shape": {"sum": {
                     "type_key": "Environment",
                     "variants": [
-                        {"constructor": "Development", "shape": "unit"},
-                        {"constructor": "Staging", "shape": "unit"},
-                        {"constructor": "Production", "shape": "unit"}
+                        {"constructor": "Development", "shape": {"product": {"type_key": "Environment", "constructor": "Development", "fields": []}}},
+                        {"constructor": "Staging", "shape": {"product": {"type_key": "Environment", "constructor": "Staging", "fields": []}}},
+                        {"constructor": "Production", "shape": {"product": {"type_key": "Environment", "constructor": "Production", "fields": []}}}
                     ]
                 }}},
                 {"key": "destination", "shape": {"sum": {
                     "type_key": "Destination",
                     "variants": [
-                        {"constructor": "LocalHost", "shape": "unit"},
+                        {"constructor": "LocalHost", "shape": {"product": {"type_key": "Destination", "constructor": "LocalHost", "fields": []}}},
                         {"constructor": "Ssh", "shape": {"product": {
                             "type_key": "Destination",
                             "constructor": "Ssh",

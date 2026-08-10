@@ -30,8 +30,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{json, Value as Jv};
-use tidepool_harness::selfharness::operator::Submission;
+use serde_json::{json, Map, Value as Jv};
 
 use crate::server::AppState;
 
@@ -100,8 +99,7 @@ async fn get_form(State(st): State<AppState>) -> Json<Jv> {
 
 /// Resolve the pending form. Body: `{"nonce": <n>, "answer": {<key>: <scalar>,
 /// ...}}` — `nonce` is the value the matching `GET` returned, `answer` is the
-/// canonical flat [`Submission`] shape taken verbatim, same as a browser
-/// `/submit`.
+/// flat dotted-path object taken verbatim, same as a browser `/submit`.
 async fn submit_form(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
     let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
     let (nonce, answer) = match parse_submission(raw) {
@@ -117,7 +115,7 @@ async fn submit_form(State(st): State<AppState>, body: Option<Json<Jv>>) -> Resp
     }
 }
 
-fn parse_submission(raw: Jv) -> Result<(u64, Submission), String> {
+fn parse_submission(raw: Jv) -> Result<(u64, Map<String, Jv>), String> {
     let Jv::Object(mut obj) = raw else {
         return Err("body must be a JSON object: {\"nonce\": <n>, \"answer\": {...}}".to_string());
     };

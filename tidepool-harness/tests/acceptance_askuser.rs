@@ -38,7 +38,7 @@ use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShap
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, FormSpec, Harness, LogObserver, OperatorGate,
-    SelfHarnessDriver, Submission,
+    SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -95,20 +95,28 @@ fn expected_decision_shape() -> FormShape {
                     variants: vec![
                         VariantShape {
                             constructor: "Low".to_string(),
-                            shape: FormShape::Unit,
+                            shape: empty_product("Confidence", "Low"),
                         },
                         VariantShape {
                             constructor: "Medium".to_string(),
-                            shape: FormShape::Unit,
+                            shape: empty_product("Confidence", "Medium"),
                         },
                         VariantShape {
                             constructor: "High".to_string(),
-                            shape: FormShape::Unit,
+                            shape: empty_product("Confidence", "High"),
                         },
                     ],
                 },
             },
         ],
+    }
+}
+
+fn empty_product(type_key: &str, constructor: &str) -> FormShape {
+    FormShape::Product {
+        type_key: type_key.to_string(),
+        constructor: constructor.to_string(),
+        fields: vec![],
     }
 }
 
@@ -151,10 +159,7 @@ impl ScriptedGate {
 
 impl OperatorGate for ScriptedGate {
     fn present_form(&self, spec: &FormSpec) -> serde_json::Value {
-        let shape = spec
-            .shape
-            .clone()
-            .expect("askUser @T must present a derived FormShape, not a flat field list");
+        let shape = spec.shape.clone();
         self.seen.lock().unwrap().push(shape.clone());
 
         match &shape {
@@ -163,7 +168,7 @@ impl OperatorGate for ScriptedGate {
                 let nth = self.decision_presentations.fetch_add(1, Ordering::SeqCst);
                 if nth == 0 {
                     // Malformed: not an answer at all. Re-prompt, don't fail.
-                    serde_json::Value::Object(Submission::new())
+                    serde_json::json!({})
                 } else {
                     decision_answer()
                 }

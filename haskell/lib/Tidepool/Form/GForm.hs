@@ -111,12 +111,24 @@ import Tidepool.Form.Shape
 -- default) that reads the submitted JSON back. The visited set starts as
 -- @'[a]@, so a type that reaches itself is rejected at the field that closes
 -- the cycle.
-type DerivedForm a = (Generic a, GForm '[a] (Rep a), FromJSON a)
+type DerivedForm a = (FormRoot a, FromJSON a)
 
 -- | The form for @a@, derived from type metadata alone — no @a@ is required,
 -- or even constructible.
 formShape :: forall a. DerivedForm a => FormShape
-formShape = gShape @'[a] @(Rep a) Proxy
+formShape = rootShape @a
+
+-- | Root dispatch keeps the JSON unit type distinct from an empty user
+-- record. Their generic representations both end in 'U1', but their JSON is
+-- different: @()@ is @null@ while @data Empty = Empty@ is @{}@.
+class FormRoot a where
+  rootShape :: FormShape
+
+instance {-# OVERLAPPING #-} FormRoot () where
+  rootShape = UnitShape
+
+instance {-# OVERLAPPABLE #-} (Generic a, GForm '[a] (Rep a)) => FormRoot a where
+  rootShape = gShape @'[a] @(Rep a) Proxy
 
 -- ---------------------------------------------------------------------------
 -- Datatype level
@@ -167,9 +179,11 @@ instance (Constructor c, GBody seen g) => GVariants seen (M1 C c g) where
 class GBody (seen :: [Type]) (f :: Type -> Type) where
   gBodyShape :: TypeKey -> ConstructorKey -> FormShape
 
--- | A constructor with no fields contributes no control.
+-- | A constructor with no fields is still an empty record object. It has no
+-- controls, but retaining its product boundary makes the form collector emit
+-- @{}@ (or a tag-only object in a sum), exactly as generic JSON does.
 instance GBody seen U1 where
-  gBodyShape _ _ = UnitShape
+  gBodyShape ty con = ProductShape ty con []
 
 instance GFields seen (M1 S s x) => GBody seen (M1 S s x) where
   gBodyShape ty con = ProductShape ty con (gFieldShapes @seen @(M1 S s x))

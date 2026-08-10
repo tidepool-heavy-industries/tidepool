@@ -34,9 +34,9 @@ calls:
 cargo run --bin tidepool-selfharness-web -- --demo --port 4601
 ```
 
-`--demo` runs a background mock driver: it presents a sample `FormSpec` (one
-field of each v1 kind — enum/int/text/bool), prints the flat submission it
-receives to stderr, parks on the continue gate, then loops. Open
+`--demo` runs a background mock driver: it presents a representative derived
+form, prints the submitted answer to stderr, parks on the continue gate, then
+loops. Open
 `http://127.0.0.1:4601` and drive it by hand.
 
 ## The verbs

@@ -144,14 +144,12 @@ surface here — it drifts. Module map:
 - `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
   (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
   `choose`/`chooseMany` for alternatives that exist only as runtime VALUES.
-  Sub-modules: `Form.Shape` (the frozen `FormShape`/`FormAnswer` algebra),
+  Sub-modules: `Form.Shape` (the `FormShape` algebra),
   `Form.GForm` (the generic interpreter — shape out, typed value back),
   `Form.Check` (compile-time `TypeError` diagnostics), `Form.Wire` (the JSON
   transport, matching `tidepool-harness`'s `selfharness::operator` module
   docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
   (it builds on `askUserRaw`), and auto-imported whenever it is.
-  `Form.Legacy` is the de-advertised applicative builder, kept only until the
-  successor lane deletes it — do not build on it or mention it to a model.
 - `Ui` — the `Ui` eDSL (card/prose/code/choice/textIn/badge smart constructors).
   `FormQQ` — `[form|]`, a line-based DSL compiling to `[Ui]` (one widget per
   line: `choice <prompt>: <key> ...` / `text <prompt>` / `multiline <prompt>` /
@@ -171,8 +169,8 @@ surface here — it drifts. Module map:
   real and expected to stay in sync. (Doc-history note on this passage's
   prior wording: `plans/decision-archive/haskell.md`.)
 
-- `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (Servant-style
-  tool-record algebra, gate 1(a)), `ModelCodec` (the MODEL-boundary
+- `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (mode-
+  interpreted endpoint records compiled to declarations and dispatch), `ModelCodec` (the MODEL-boundary
   codec: one Generic traversal → named-field JSON Schema + decoder + encoder;
   use THIS for anything a model reads or writes), `Spawn` (typed `spawnAgent`
   over the generated `spawnAgentRaw`; compiles only in rows containing

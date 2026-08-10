@@ -24,8 +24,8 @@
 -- >
 -- > request <- askUser @DeployRequest
 --
--- The type IS the form: there is no second description of the shape to
--- drift from the answer type, and no second decode — the submitted value is
+-- The type defines the form: there is no second description of the shape to
+-- drift from the answer type. The submitted value is
 -- ordinary JSON read by the same generic @FromJSON@ every external value
 -- uses.
 --
@@ -35,8 +35,8 @@
 -- @askUser \@T@ covers structure a TYPE defines, 'choose' covers structure a
 -- VALUE defines, and neither can express the other.
 --
--- All three BLOCK for a human and return the typed value directly. A
--- submission that does not fit re-presents the SAME form; no @Either@
+-- All three block for a human and return the typed value directly. A
+-- submission that does not fit re-presents the same form; no @Either@
 -- reaches the caller.
 module Tidepool.Form
   ( askUser
@@ -63,7 +63,7 @@ import Tidepool.Form.Wire (encodeShape)
 -- operator built.
 --
 -- The shape is derived from type metadata alone — no @a@ exists yet, or even
--- needs to be constructible. The submitted value is ORDINARY JSON, decoded
+-- needs to be constructible. The submitted value is ordinary JSON, decoded
 -- by @a@'s own 'Tidepool.Aeson.FromJSON.FromJSON' instance (normally the
 -- generic default): the collector renders record objects, tagged record
 -- sums, bare strings for enums, and @null@\/omission for optionals — the
@@ -80,7 +80,7 @@ askUser = do
     Success value -> pure value
     Error _ -> askUser @a
 
--- | Ask the operator to pick ONE of a list of runtime alternatives. The
+-- | Ask the operator to pick one of a list of runtime alternatives. The
 -- 'Text' is what they see; the value they picked is what comes back.
 --
 -- > lane <- choose [(name, lane) | lane <- lanes, let name = laneName lane]
@@ -90,15 +90,19 @@ askUser = do
 -- Use 'chooseMany' (which may legitimately return @[]@) when the list can be
 -- empty.
 choose :: forall a. [(Text, a)] -> M a
-choose options = do
-  submitted <- askUserRaw (encodeShape shape)
-  case submitted of
-    -- An all-nullary chooser submits the picked label as a bare string —
-    -- the same wire an enum type's generic decode reads.
-    String label | Just value <- lookup label options -> pure value
-    _ -> choose options
+choose options
+  | repeatedLabel options = error "choose: labels must be unique"
+  | otherwise = awaitChoice
   where
-    shape = SumShape "Choice" (map (\(label, _) -> VariantShape label UnitShape) options)
+    awaitChoice = do
+      submitted <- askUserRaw (encodeShape shape)
+      case submitted of
+        String label | Just value <- lookup label options -> pure value
+        _ -> awaitChoice
+    shape =
+      SumShape
+        "Choice"
+        (map (\(label, _) -> VariantShape label (ProductShape "Choice" label [])) options)
 
 -- | Ask the operator to pick ANY NUMBER of a list of runtime alternatives,
 -- including none. The picked values come back in the order they were
@@ -106,16 +110,17 @@ choose options = do
 --
 -- > keep <- chooseMany [(idea, idea) | idea <- ideas st]
 chooseMany :: forall a. [(Text, a)] -> M [a]
-chooseMany options = do
-  submitted <- askUserRaw (encodeShape shape)
-  case submitted of
-    -- One checkbox per offered label, submitted as a plain JSON object of
-    -- booleans, read back in OFFER order rather than submission order — so
-    -- a repeated label cannot silently reorder or drop the values it
-    -- stands for.
-    Object picked | Just values <- selected picked -> pure values
-    _ -> chooseMany options
+chooseMany options
+  | repeatedLabel options = error "chooseMany: labels must be unique"
+  | otherwise = awaitChoices
   where
+    awaitChoices = do
+      submitted <- askUserRaw (encodeShape shape)
+      case submitted of
+        -- One checkbox per offered label, submitted as a plain JSON object of
+        -- booleans, read back in offer order rather than submission order.
+        Object picked | Just values <- selected picked -> pure values
+        _ -> awaitChoices
     shape =
       ProductShape
         "Choices"
@@ -128,3 +133,12 @@ chooseMany options = do
           Just (Bool True) -> fmap (value :) (go rest)
           Just (Bool False) -> go rest
           _ -> Nothing
+
+-- Labels are submitted as object keys (or constructor tags), so duplicates
+-- cannot represent distinct choices. Reject programmer error before showing
+-- an ambiguous form instead of silently aliasing two values.
+repeatedLabel :: [(Text, a)] -> Bool
+repeatedLabel = go []
+  where
+    go _ [] = False
+    go seen ((label, _) : rest) = label `elem` seen || go (label : seen) rest

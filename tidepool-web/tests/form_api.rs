@@ -12,33 +12,26 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{
-    EnumOption, Field, FieldKind, FormSpec, OperatorGate,
-};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
 use tidepool_web::{router_with_form_api, AppState, FormApiConfig, WebGate};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormSpec {
     FormSpec {
-        // The FLAT path: no derived shape, which is what `None` means here.
-        shape: None,
-        fields: vec![
-            Field {
-                key: "mood".into(),
-                label: "Mood".into(),
-                kind: FieldKind::Enum {
-                    options: vec![EnumOption {
-                        label: "Calm".into(),
-                        tag: "calm".into(),
-                    }],
+        shape: FormShape::Product {
+            type_key: "Sample".into(),
+            constructor: "Sample".into(),
+            fields: vec![
+                FieldShape {
+                    key: "mood".into(),
+                    shape: FormShape::String,
                 },
-            },
-            Field {
-                key: "count".into(),
-                label: "Count".into(),
-                kind: FieldKind::Int,
-            },
-        ],
+                FieldShape {
+                    key: "count".into(),
+                    shape: FormShape::Int,
+                },
+            ],
+        },
     }
 }
 
@@ -115,14 +108,20 @@ async fn get_post_roundtrip() {
     .await;
     let v: Value = serde_json::from_str(&body).unwrap();
     assert!(v["test_only"].as_str().is_some());
-    assert_eq!(v["form"]["fields"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        v["form"]["shape"]["product"]["fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let nonce = v["nonce"]
         .as_u64()
         .expect("nonce present while a form is pending");
 
     let resp = client
         .post(format!("{base}/api/form"))
-        .json(&json!({"nonce": nonce, "answer": {"mood": "calm", "count": 3}}))
+        .json(&json!({"nonce": nonce, "answer": {"answer.mood": "calm", "answer.count": 3}}))
         .send()
         .await
         .unwrap();
@@ -173,7 +172,7 @@ async fn nonce_required() {
     // Missing nonce.
     let resp = client
         .post(format!("{base}/api/form"))
-        .json(&json!({"answer": {"mood": "calm", "count": 1}}))
+        .json(&json!({"answer": {"answer.mood": "calm", "answer.count": 1}}))
         .send()
         .await
         .unwrap();
@@ -184,7 +183,7 @@ async fn nonce_required() {
     // Wrong nonce.
     let resp = client
         .post(format!("{base}/api/form"))
-        .json(&json!({"nonce": nonce + 999, "answer": {"mood": "calm", "count": 1}}))
+        .json(&json!({"nonce": nonce + 999, "answer": {"answer.mood": "calm", "answer.count": 1}}))
         .send()
         .await
         .unwrap();
@@ -208,7 +207,7 @@ async fn nonce_required() {
     // The correct nonce resolves it.
     let resp = client
         .post(format!("{base}/api/form"))
-        .json(&json!({"nonce": nonce, "answer": {"mood": "calm", "count": 1}}))
+        .json(&json!({"nonce": nonce, "answer": {"answer.mood": "calm", "answer.count": 1}}))
         .send()
         .await
         .unwrap();

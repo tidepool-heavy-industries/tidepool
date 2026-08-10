@@ -1,39 +1,22 @@
-//! The operator-input seam, consumed as-is by the
-//! `AskUser` effect decode, the driver's form servicer, and the web GUI —
-//! never redefined at those call sites. Single source for the form-spec /
-//! submission wire types and the [`OperatorGate`] the driver blocks on.
+//! Operator input shared by the `AskUser` effect decoder, self-harness driver,
+//! and web UI.
 //!
-//! The gate is **sync-blocking by frozen contract**, mirroring the existing
-//! between-loops stdin gate
-//! ([`super::driver::SelfHarnessDriver::between_loops_gate`]): `present_form`
-//! blocks the calling thread until the operator submits; `await_continue`
-//! blocks until the operator advances the loop. A web implementation parks a
-//! channel; the headless [`StdinGate`] reads a line. The driver's turn loop
-//! is `async fn` and `.await`s the `Harness` directly — the ONE place it
-//! still reaches for `tokio::task::block_in_place` is around a call into
-//! this genuinely sync-blocking gate, so that block yields the tokio worker
-//! to other tasks instead of stalling it.
+//! [`OperatorGate`] is synchronous: `present_form` blocks until submission and
+//! `await_continue` blocks between loop iterations. The web implementation
+//! parks a channel; [`StdinGate`] reads a line. The async driver isolates the
+//! blocking call with `tokio::task::block_in_place`.
 //!
-//! # Recursive forms — [`FormShape`]
-//!
-//! [`FormSpec`]/[`Field`]/[`Submission`] above are the FLAT v1 wire: one
-//! scalar per top-level key, no nesting. They stay live only until the
-//! legacy path is deleted.
-//!
-//! [`FormShape`] is the RECURSIVE shape wire, mirroring Haskell's
+//! [`FormShape`] is the form wire, mirroring Haskell's
 //! `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`)
 //! constructor for constructor. `askUser @T` emits a bare [`FormShape`]
 //! through the `AskUserWith` suspension; [`crate::engine::classify_hole`]
-//! lifts it into [`FormSpec::shape`].
+//! wraps it in [`FormSpec`] for the in-process gate.
 //!
-//! ## The shape JSON encoding is OWNED here, not by aeson
+//! ## Shape JSON
 //!
 //! The Haskell encoder (`Tidepool.Form.Wire`) targets exactly what follows,
 //! and `tidepool-runtime/tests/generic_form_wire.rs` asserts it against
-//! these worked examples themselves. Every shape below is what
-//! `#[derive(Serialize, Deserialize)]` with
-//! `#[serde(rename_all = "snake_case")]` (the default EXTERNALLY TAGGED
-//! representation) actually produces — the derive is the source of truth.
+//! these worked examples. The Rust derive below defines the encoding.
 //!
 //! A unit-payload variant (`FormShape::String`, …) serializes as a bare JSON
 //! string of its snake_case name. A newtype variant
@@ -41,7 +24,7 @@
 //! `{"optional": <inner>}`. A struct variant (`FormShape::Product { .. }`)
 //! serializes as `{"product": {<fields>}}`.
 //!
-//! ## The ANSWER is ordinary JSON — there is no answer wire type
+//! ## Answers are ordinary JSON
 //!
 //! What the operator submits travels as a plain `serde_json::Value` shaped
 //! for the answer type's own generic `FromJSON` decode (Haskell side):
@@ -53,93 +36,28 @@
 //!   `{"tag": "Ssh", "host": "example.com", "port": 22}` (a nullary branch
 //!   of a mixed sum is `{"tag": "LocalHost"}`);
 //! * `Maybe` field → the value, or `null`/omitted for `Nothing`;
-//! * unit form (`askUser @()`) → `[]` (the vendored aeson-1.5 `()` decode);
+//! * unit form (`askUser @()`) → `null`;
 //! * leaves → the corresponding JSON scalar.
 //!
 //! The collector that builds this JSON from the rendered controls is
 //! `tidepool-web`'s submission path, guided by the same [`FormShape`].
 use serde::{Deserialize, Serialize};
 
-/// A typed form an agent spawned. Rendered by the web GUI; its
-/// [`Submission`] decodes back to the agent's `a`.
-///
-/// TWO forms arrive here, and which one it is depends on which field is
-/// populated:
-///
-/// - `fields` — the FLAT v1 wire (enum (1-of-N) / int / text / bool, one
-///   scalar per top-level key), built by the de-advertised applicative
-///   builder (`Tidepool.Form.Legacy`). No Haskell caller emits it any more;
-///   it stays live until the successor lane confirms nothing else consumes
-///   it.
-/// - `shape` — the RECURSIVE [`FormShape`] derived from the answer TYPE by
-///   `askUser @T` (`Tidepool.Form`). This is what the live surface emits.
-///   The Haskell side sends the shape BARE — exactly the JSON documented in
-///   this module — and [`crate::engine::classify_hole`] lifts it into this
-///   struct, so nothing on the wire carries an invented envelope.
-///
-/// A gate renders `shape` when it is present and `fields` otherwise. The
-/// [`Submission`] it returns is a flat map either way: for a `shape` form
-/// that map IS the serialized [`FormAnswer`] (every non-unit `FormAnswer`
-/// variant is a one-key JSON object — see the encoding docs above), which is
-/// what `askUser @T` reads back.
-///
-/// `fields` stays REQUIRED on the wire: that is what keeps a bare
-/// [`FormShape`] JSON from deserializing into an empty `FormSpec` (serde
-/// ignores unknown fields), so the two wires stay tellable apart by decode
-/// alone.
+/// A typed form an agent spawned. Haskell sends the [`FormShape`] bare on the
+/// effect wire; the engine wraps it for the in-process gate and observer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FormSpec {
-    pub fields: Vec<Field>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape: Option<FormShape>,
+    pub shape: FormShape,
 }
-
-/// One field in a [`FormSpec`]. `key` is the stable submission key; `label` is
-/// the operator-facing prompt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Field {
-    pub key: String,
-    pub label: String,
-    pub kind: FieldKind,
-}
-
-/// The v1 typed primitives. `Enum` is a 1-of-N choice over labelled tags (the
-/// `tag` is what the submission carries; the `label` is what the operator sees).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FieldKind {
-    Enum { options: Vec<EnumOption> },
-    Int,
-    Text,
-    Bool,
-}
-
-/// One choice in an [`FieldKind::Enum`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EnumOption {
-    pub label: String,
-    pub tag: String,
-}
-
-/// A flat CLIENT submission: one scalar JSON value per field `key` (enum →
-/// the chosen `tag` string, int → number, text → string, bool → bool). ONE
-/// canonical shape — no `{values,prose}` coercion, no keyed/unkeyed duality.
-/// This is the shape a browser/API client POSTs; it is NOT the gate's return
-/// type — see [`OperatorGate::present_form`].
-pub type Submission = serde_json::Map<String, serde_json::Value>;
 
 /// The seam the driver blocks on for operator input. Sync-blocking by design
 /// (see module docs). A web GUI implements this by parking a channel
 /// resolved from an HTTP handler; [`StdinGate`] keeps headless runs working.
 pub trait OperatorGate: Send + Sync {
     /// Present `spec` to the operator and BLOCK until they submit. Returns the
-    /// ANSWER VALUE ready for the Haskell decode: for a legacy flat form, the
-    /// [`Submission`] object; for a shape-carrying form (`askUser @T`), the
-    /// reassembled structural `FormAnswer` — which for a unit-shaped form is
-    /// the bare JSON string `"unit"`, NOT an object. The transport is a full
-    /// `Value` precisely so that answer survives; forcing an object here is
-    /// what made `askUser @()` re-prompt forever. A decode failure Haskell-side
-    /// re-presents the form (the retry lives in `askUser`).
+    /// answer value ready for the Haskell decode. The transport is a full
+    /// `Value` because valid answers include scalars and `null`, not only
+    /// objects. A decode failure Haskell-side re-presents the form.
     fn present_form(&self, spec: &FormSpec) -> serde_json::Value;
 
     /// BLOCK until the operator advances to the next loop iteration (the
@@ -148,8 +66,8 @@ pub trait OperatorGate: Send + Sync {
 }
 
 /// Headless default: `await_continue` reads a line from stdin (the current
-/// between-loops behavior); `present_form` reads one JSON line as the flat
-/// submission, so non-web/CLI drives and tests still work. Used as the
+/// between-loops behavior); `present_form` reads one JSON value per line, so
+/// non-web/CLI drives and tests still work. Used as the
 /// default when no web gate is configured.
 #[derive(Debug, Default)]
 pub struct StdinGate;
@@ -158,13 +76,11 @@ impl OperatorGate for StdinGate {
     fn present_form(&self, _spec: &FormSpec) -> serde_json::Value {
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
-            return serde_json::Value::Object(Submission::new());
+            return serde_json::json!({});
         }
-        // Any JSON value passes through — a bare `"unit"` line answers a
-        // unit-shaped form. An unparseable line degrades to `{}`, which the
-        // Haskell decode rejects and re-presents (never a panic mid-drive).
-        serde_json::from_str(line.trim())
-            .unwrap_or_else(|_| serde_json::Value::Object(Submission::new()))
+        // An unparseable line degrades to `{}`, which the Haskell decoder
+        // rejects and re-presents.
+        serde_json::from_str(line.trim()).unwrap_or_else(|_| serde_json::json!({}))
     }
 
     fn await_continue(&self) {
@@ -174,8 +90,7 @@ impl OperatorGate for StdinGate {
 }
 
 // -------------------------------------------------------------------------
-// Recursive form shape/answer — mirrors Tidepool.Form.Shape (see module docs
-// for the JSON contract this section defines).
+// Form shape — mirrors Tidepool.Form.Shape.
 // -------------------------------------------------------------------------
 
 /// A datatype's own name — the form's title, and the key a sum is
@@ -186,15 +101,15 @@ pub type TypeKey = String;
 /// identity of a product node. Mirrors `Tidepool.Form.Shape.ConstructorKey`.
 pub type ConstructorKey = String;
 
-/// A field's key within one product node: an exact record selector name, or
-/// a one-based positional index rendered as text, scoped to its own product
-/// node. Mirrors `Tidepool.Form.Shape.FieldKey`.
+/// A field's key within one product node: the exact record selector name.
+/// Positional fields are rejected by the Haskell form derivation. Mirrors
+/// `Tidepool.Form.Shape.FieldKey`.
 pub type FieldKey = String;
 
 /// The structural description of a recursive form, derived from a type's
 /// generic representation without ever seeing a value of that type. Mirrors
 /// Haskell's `Tidepool.Form.Shape.FormShape` constructor for constructor.
-/// See the module docs for the frozen JSON encoding.
+/// See the module docs for the JSON encoding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FormShape {
@@ -206,7 +121,7 @@ pub enum FormShape {
     Number,
     /// A boolean leaf.
     Bool,
-    /// No payload — a nullary constructor's branch. Contributes no control.
+    /// The JSON unit value. Contributes no control and submits `null`.
     Unit,
     /// An optional shape, from `Maybe a`.
     Optional(Box<FormShape>),
@@ -231,7 +146,8 @@ pub struct FieldShape {
 }
 
 /// One alternative within a [`FormShape::Sum`]. Mirrors `VariantShape`. A
-/// nullary constructor's shape is [`FormShape::Unit`].
+/// nullary constructor is an empty [`FormShape::Product`]; `Unit` is reserved
+/// for an actual unit value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VariantShape {
     pub constructor: ConstructorKey,
@@ -249,12 +165,9 @@ pub struct VariantShape {
 /// would let an operator check two branches of the same choice.
 pub const ROOT_BIND_PATH: &str = "answer";
 
-/// Join a parent dotted-path bind key with a child field/constructor key —
-/// the ONE path-construction convention the recursive renderer
-/// (`tidepool-web`'s `render::generic_shape`) and the nested-submission
-/// collector (`tidepool-web`'s `server::collect_form_answer`) must share, so
-/// a bind path the renderer emits is always exactly the path the collector
-/// looks up. An empty parent (the form's root) yields the bare `key`.
+/// Join a parent dotted path with a child field or constructor key. The web
+/// renderer and submission collector both use this function. An empty parent
+/// yields the bare child key.
 #[must_use]
 pub fn child_path(parent: &str, key: &str) -> String {
     if parent.is_empty() {
@@ -268,10 +181,9 @@ pub fn child_path(parent: &str, key: &str) -> String {
 /// camelCase/PascalCase word boundaries, lowercase every word, capitalize
 /// the first letter of the joined result. `NeedsReview` → "Needs review",
 /// `releaseNote` → "Release note". This is a rendering-time-only transform —
-/// [`FormShape`]/[`FormAnswer`] and every wire path always carry the exact
-/// key verbatim; nothing here ever touches a submitted or serialized key.
-/// Not acronym-aware: a run of capitals (`HTTPServer`) splits per letter —
-/// out of scope, since the PRD's own examples are plain camelCase/PascalCase.
+/// [`FormShape`] and every wire path always carry the exact
+/// key verbatim; nothing here touches a submitted or serialized key. Runs of
+/// capitals currently split per letter (`HTTPServer` → `H t t p server`).
 #[must_use]
 pub fn humanize_key(key: &str) -> String {
     let mut words: Vec<String> = Vec::new();
@@ -386,15 +298,15 @@ mod tests {
             variants: vec![
                 VariantShape {
                     constructor: "Development".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Environment", "Development"),
                 },
                 VariantShape {
                     constructor: "Staging".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Environment", "Staging"),
                 },
                 VariantShape {
                     constructor: "Production".to_string(),
-                    shape: FormShape::Unit,
+                    shape: empty_product("Environment", "Production"),
                 },
             ],
         }
@@ -408,71 +320,30 @@ mod tests {
             json!({"sum": {
                 "type_key": "Environment",
                 "variants": [
-                    {"constructor": "Development", "shape": "unit"},
-                    {"constructor": "Staging", "shape": "unit"},
-                    {"constructor": "Production", "shape": "unit"}
+                    {"constructor": "Development", "shape": {"product": {"type_key": "Environment", "constructor": "Development", "fields": []}}},
+                    {"constructor": "Staging", "shape": {"product": {"type_key": "Environment", "constructor": "Staging", "fields": []}}},
+                    {"constructor": "Production", "shape": {"product": {"type_key": "Environment", "constructor": "Production", "fields": []}}}
                 ]
             }})
         );
     }
 
-    /// Flat [`FormSpec`]/[`Submission`] path stays green alongside the new
-    /// recursive types — the existing wire round trip test lives in
-    /// `tidepool-web`'s `server.rs`; this just confirms both type families
-    /// coexist in one module without collision.
-    #[test]
-    fn flat_and_recursive_types_coexist() {
-        let _flat = FormSpec {
-            fields: vec![Field {
-                key: "mood".to_string(),
-                label: "Mood".to_string(),
-                kind: FieldKind::Bool,
-            }],
-            shape: None,
-        };
-        let _recursive = FormShape::Bool;
-    }
-
-    /// The two wires are tellable apart BY DECODE, which is what
-    /// [`crate::engine::classify_hole`] relies on: a bare `FormShape` (what
-    /// `askUser @T` emits) must NOT deserialize into an empty flat
-    /// `FormSpec`. `fields` being required is the whole mechanism — serde
-    /// ignores unknown fields, so an optional `fields` would swallow it.
-    #[test]
-    fn a_bare_shape_is_not_a_flat_form_spec() {
-        let shape = serde_json::to_value(ssh_product_shape()).unwrap();
-        assert!(
-            serde_json::from_value::<FormSpec>(shape).is_err(),
-            "a bare FormShape must not decode as a flat FormSpec"
-        );
-    }
-
-    /// A shape-carrying spec round-trips, and a flat spec still serializes
-    /// WITHOUT a `shape` key (nothing on the existing wire changes shape).
-    #[test]
-    fn shape_carrying_spec_round_trips_and_flat_spec_is_unchanged() {
-        let shaped = FormSpec {
+    fn empty_product(type_key: &str, constructor: &str) -> FormShape {
+        FormShape::Product {
+            type_key: type_key.to_string(),
+            constructor: constructor.to_string(),
             fields: vec![],
-            shape: Some(ssh_product_shape()),
+        }
+    }
+
+    /// The in-process wrapper round-trips independently of the bare shape on
+    /// the effect wire.
+    #[test]
+    fn form_spec_round_trips() {
+        let shaped = FormSpec {
+            shape: ssh_product_shape(),
         };
         let wire = serde_json::to_string(&shaped).unwrap();
         assert_eq!(serde_json::from_str::<FormSpec>(&wire).unwrap(), shaped);
-
-        let flat = FormSpec {
-            fields: vec![Field {
-                key: "mood".to_string(),
-                label: "Mood".to_string(),
-                kind: FieldKind::Bool,
-            }],
-            shape: None,
-        };
-        // No `shape` key at all — `skip_serializing_if` keeps the existing
-        // flat wire byte-identical to what it was before `shape` existed.
-        // (`kind` nests because [`FieldKind`] is INTERNALLY tagged on `kind`;
-        // that is the pre-existing flat encoding, not something added here.)
-        assert_eq!(
-            serde_json::to_value(&flat).unwrap(),
-            json!({"fields": [{"key": "mood", "label": "Mood", "kind": {"kind": "bool"}}]})
-        );
     }
 }

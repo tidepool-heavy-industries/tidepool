@@ -76,9 +76,8 @@ pub enum Event {
     /// decode failure re-suspends on a fresh form (Haskell-side recursion,
     /// no `Either`), so a re-prompt shows as another `FormPresented` /
     /// `FormSubmitted` pair for the same [`FormSource`].
-    /// `submission` is the gate's answer VALUE — an object for legacy flat
-    /// forms, but any JSON value for a shape-carrying form (a unit answer is
-    /// the bare string `"unit"`).
+    /// `submission` is the gate's answer VALUE; valid forms can produce an
+    /// object, scalar, or `null`.
     FormSubmitted {
         source: FormSource,
         submission: serde_json::Value,

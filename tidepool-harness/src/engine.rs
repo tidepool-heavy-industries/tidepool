@@ -211,15 +211,10 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
 /// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
 /// mismatch — the caller falls back to the plain-Ask routing.
 ///
-/// TWO Haskell surfaces ride this one constructor, and they are told apart
-/// by decode rather than by a second routing arm: `askUser @T`
-/// (`Tidepool.Form`) sends a bare
+/// `askUser @T` (`Tidepool.Form`) sends a bare
 /// [`crate::selfharness::operator::FormShape`] — exactly the JSON
-/// `selfharness::operator`'s module docs specify — and the de-advertised
-/// applicative builder sends a flat `{"fields": [...]}` spec. A bare shape
-/// cannot decode as a `FormSpec` (`fields` is required there), so trying the
-/// flat wire first is unambiguous; a shape is lifted into
-/// [`crate::selfharness::operator::FormSpec::shape`] for the gate to render.
+/// `selfharness::operator`'s module docs specify. It is wrapped in a
+/// [`crate::selfharness::operator::FormSpec`] for the in-process gate.
 fn decode_askuser_spec(
     request: &Value,
     table: &DataConTable,
@@ -231,14 +226,8 @@ fn decode_askuser_spec(
     };
     let field = fields.first()?;
     let json = tidepool_runtime::value_to_json(field, table, 0);
-    if let Ok(spec) = serde_json::from_value::<FormSpec>(json.clone()) {
-        return Some(spec);
-    }
     let shape: FormShape = serde_json::from_value(json).ok()?;
-    Some(FormSpec {
-        fields: Vec::new(),
-        shape: Some(shape),
-    })
+    Some(FormSpec { shape })
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a

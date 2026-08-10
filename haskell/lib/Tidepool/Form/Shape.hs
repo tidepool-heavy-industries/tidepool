@@ -63,7 +63,7 @@ data FormShape
     -- two-constructor enum, even though @Bool@ has a generic representation.
     -- The user-facing meaning outranks the implementation structure.
     BoolShape
-  | -- | No payload: a nullary constructor's branch. Contributes no control.
+  | -- | The JSON unit value @()@. Contributes no control and submits @null@.
     UnitShape
   | -- | An optional shape, from @Maybe a@. A blessed container, not an
     -- ordinary sum: the operator sees an optional control, never a
@@ -88,7 +88,7 @@ data FormShape
 data FieldShape = FieldShape FieldKey FormShape
   deriving (Show, Eq)
 
--- | One alternative within a 'SumShape'. A nullary constructor's shape is
--- 'UnitShape'.
+-- | One alternative within a 'SumShape'. A nullary constructor is an empty
+-- 'ProductShape'; 'UnitShape' is reserved for an actual @()@ value.
 data VariantShape = VariantShape ConstructorKey FormShape
   deriving (Show, Eq)

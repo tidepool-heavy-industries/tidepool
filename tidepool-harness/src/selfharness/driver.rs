@@ -210,7 +210,7 @@ const ANSWERER_MAX_ROUNDS: u32 = 32;
 /// Cap on CONSECUTIVE `askUser` re-presentations within the servicing of ONE
 /// hole: `askUser` re-prompts by RECURSION on a decode failure — no
 /// `Either` — and the frozen headless `StdinGate::present_form` returns an EMPTY
-/// `Submission` on EOF rather than erroring, so a non-interactive gate with
+/// JSON object on EOF rather than erroring, so a non-interactive gate with
 /// closed stdin composes into an unbounded hot loop that NEITHER
 /// `ANSWERER_MAX_ROUNDS` nor `LOOP_INFERENCE_CALL_CAP` catches (both only
 /// count `drive_turn` model rounds, and a form resume deliberately does not

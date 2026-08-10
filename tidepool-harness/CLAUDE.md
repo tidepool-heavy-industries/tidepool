@@ -156,14 +156,9 @@ HUMAN OPERATOR with a typed [`FormSpec`]
 (`Tidepool.Form.GForm`) with no value of `T`, ships it as the RECURSIVE
 `FormShape` wire (`Tidepool.Form.Wire` encodes exactly the JSON
 `selfharness::operator`'s module docs specify), and rebuilds the typed value
-from the operator's `FormAnswer`. It rides the SAME `AskUserWith`
-constructor and the SAME routing arm as the flat v1 wire: the two are told
-apart by decode in `engine::decode_askuser_spec` (a bare `FormShape` cannot
-deserialize as a `FormSpec`, whose `fields` is required) and a shape is
-lifted into `FormSpec::shape` for the gate. The flat builder is
-de-advertised, moved to `Tidepool.Form.Legacy`, and no longer auto-imported
-or named in model-facing text; its deletion is the successor lane's
-(`plans/post-restart/checkpoint-persistence-lane.md`). `Tidepool.Form` is
+from ordinary JSON submitted by the operator. `engine::decode_askuser_spec`
+decodes that one bare shape and wraps it in `FormSpec` for the gate and
+observer. `Tidepool.Form` is
 auto-imported into a turn's preamble whenever `AskUser` is in the compiling
 decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
 it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
@@ -277,7 +272,7 @@ into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
 — consume it, never redefine it there: `present_form(&FormSpec) ->
-Submission` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
+serde_json::Value` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
 `OperatorGate` contract) even though the driver's turn loop is `async fn` and
 `.await`s the `Harness` directly. `SelfHarnessDriver` holds
 `gate: Arc<dyn OperatorGate>`, defaulting to
