@@ -109,14 +109,41 @@ pub struct Binding {
 pub struct BindingTable {
     root: PathBuf,
     bindings: Vec<Binding>,
+    /// Held (exclusively flocked) for this table's whole lifetime. The
+    /// enforcement decisions (`bind`'s already-bound refusal) run against the
+    /// IN-MEMORY rows, which is only sound while exactly one process owns the
+    /// root — two tables over one root could both see "unbound" and both
+    /// persist a binding. The lock turns that silent double-writer into a
+    /// loud open-time refusal. Released by drop.
+    _owner_lock: fs::File,
 }
 
 impl BindingTable {
     /// Open (creating if absent) a binding table rooted at `root`, loading
     /// every persisted binding into memory.
+    ///
+    /// SINGLE-OWNER: refuses (typed, loud) when another live `BindingTable` —
+    /// in this process or any other — already owns `root`. Isolation is
+    /// enforced from in-memory state, so one owning table per root is a
+    /// correctness precondition, not a deployment nicety.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
+
+        let lock_path = root.join(".owner.lock");
+        let owner_lock = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| storage_failure(&lock_path, e))?;
+        if owner_lock.try_lock().is_err() {
+            return Err(storage_failure(
+                &lock_path,
+                "another process (or another BindingTable in this one) already \
+                 owns this binding root — one worktree, one agent is enforced \
+                 from in-memory state, so exactly one owner may hold it",
+            ));
+        }
 
         let mut bindings = Vec::new();
         for entry in fs::read_dir(&root).map_err(|e| storage_failure(&root, e))? {
@@ -131,7 +158,11 @@ impl BindingTable {
             bindings.append(&mut rows);
         }
 
-        Ok(Self { root, bindings })
+        Ok(Self {
+            root,
+            bindings,
+            _owner_lock: owner_lock,
+        })
     }
 
     fn path_for(&self, worktree: &WorktreeId) -> PathBuf {

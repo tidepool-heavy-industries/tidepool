@@ -454,6 +454,9 @@ fn binding_refuses_second_agent_and_permits_rebind_after_settle() {
     assert_eq!(table.current(&worktree).expect("current").agent, agent_b);
 
     // Durability: a fresh table over the same root sees the current binding.
+    // The first owner must be gone first — the table is SINGLE-OWNER (a live
+    // second owner is refused), so a restart is drop-then-reopen.
+    drop(table);
     let fresh = BindingTable::open(base.path().join("bindings")).expect("reopen bindings");
     assert_eq!(fresh.current(&worktree).expect("current").agent, agent_b);
 }
@@ -500,4 +503,26 @@ fn registry_open_refuses_a_root_inside_a_working_tree() {
         }
         other => panic!("expected InvalidRegistryRoot, got {other:?}"),
     }
+}
+
+/// The binding table enforces isolation from IN-MEMORY rows, so exactly one
+/// live table may own a root — a second owner could see "unbound" and bind
+/// the same worktree to a second agent. A second `open` (same process or, via
+/// the same flock, another process) must refuse loudly; releasing the first
+/// owner frees the root.
+#[test]
+fn binding_table_refuses_a_second_live_owner_over_one_root() {
+    use tidepool_worktree::BindingTable;
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let root = base.path().join("bindings");
+
+    let first = BindingTable::open(&root).expect("first owner opens");
+    let second = BindingTable::open(&root);
+    assert!(
+        matches!(second, Err(WorktreeError::StorageFailure { .. })),
+        "a second live owner must be refused, got {second:?}"
+    );
+
+    drop(first);
+    BindingTable::open(&root).expect("the root is free once the owner drops");
 }
