@@ -493,6 +493,20 @@ impl ExtractCmd {
         self.bare_flag("--turn")
     }
 
+    /// `--turn-batch <plan.json>` — one spawn compiles N items in execution
+    /// order (`plans/post-restart/batch-turns-feasibility.md` §8's wire
+    /// contract), each writing its own `<batch-out>/i<k>/` directory
+    /// containing exactly today's single-turn output set.
+    pub fn turn_batch(&mut self, plan_path: impl AsRef<OsStr>) -> &mut Self {
+        self.flag("--turn-batch", plan_path)
+    }
+
+    /// `--batch-out <dir>` — the parent directory `--turn-batch` writes its
+    /// per-item `i<k>/` output directories into.
+    pub fn batch_out(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
+        self.flag("--batch-out", dir)
+    }
+
     /// `--turn-template <kind>=<path>`. Repeatable; order preserved.
     pub fn turn_template(&mut self, kind: &str, path: &Path) -> &mut Self {
         self.flag("--turn-template", format!("{kind}={}", path.display()))
@@ -700,6 +714,25 @@ mod tests {
                 "2",
                 "--turn-verdict",
                 "bind:x,y",
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_batch_mode_spells_every_flag() {
+        let mut cmd = ExtractCmd::with_bin("x");
+        cmd.turn_batch("/tmp/plan.json")
+            .batch_out("/tmp/batch-out")
+            .includes(["/inc/one"]);
+        assert_eq!(
+            strs(&cmd.argv()),
+            vec![
+                "--turn-batch",
+                "/tmp/plan.json",
+                "--batch-out",
+                "/tmp/batch-out",
+                "--include",
+                "/inc/one",
             ]
         );
     }

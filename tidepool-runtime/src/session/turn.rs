@@ -499,6 +499,19 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
         );
     }
 
+    decode_turn_output_dir(temp.path())
+}
+
+/// Decode one item's full output directory into a [`TurnResult`]: the
+/// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
+/// `result.cbor`/`meta.cbor` off the SAME directory. This is the ONE decode
+/// path [`run_turn`] and [`run_turn_batch`] both read through — a batched
+/// item's directory (`<batch-out>/i<k>/`) is, per §8, byte-for-byte today's
+/// single-turn output set, so pointing this function at either one must read
+/// identically. Do not add a second implementation of this decode; extend
+/// this one.
+fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
+    let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
         return Err(CompileError::MissingOutput(turn_out_path));
     }
@@ -514,7 +527,7 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(temp.path(), asks)?;
+            let compiled = read_compiled_turn(dir, asks)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -528,7 +541,7 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(temp.path(), asks)?;
+            let compiled = read_compiled_turn(dir, asks)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -536,6 +549,257 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             })
         }
     }
+}
+
+/// One item of a [`TurnBatchRequest`] — the per-item fields §8's `plan.json`
+/// entry carries (`plans/post-restart/batch-turns-feasibility.md`): the
+/// GHC-sourced verdict (forwarded from [`classify_block`], never re-derived
+/// here) and the session coordinates that item compiles against, which
+/// change from item to item as earlier items in the same batch mint new
+/// `Val.G<g>` generations.
+pub struct BatchTurnItem<'a> {
+    /// The raw turn text. Unlike [`run_turn`] there is no `turn.txt` file —
+    /// §8 embeds it directly in `plan.json`'s `turn_text` field.
+    pub turn_text: &'a str,
+    /// This item's GHC-sourced verdict.
+    pub verdict: TurnClassification,
+    /// Where this item's `Val` ifaces are written/read.
+    pub session_root: &'a Path,
+    /// Live `Tidepool.Session.Val.G<g'>` modules to inject for this item.
+    pub inject_modules: &'a [String],
+    /// The generation of the `Val.G<g>` module this item mints (used
+    /// whether or not the item actually binds, mirroring [`TurnRequest::gen`]).
+    pub gen: u64,
+}
+
+/// A [`run_turn_batch`] request: N items compiled in ONE spawn, plus the
+/// batch-wide fields §8's invocation carries outside `plan.json` — the
+/// wrapper templates (shared infra, keyed by [`TemplateSelector`], exactly as
+/// [`TurnRequest::templates`]) and `--include` dirs.
+pub struct TurnBatchRequest<'a> {
+    /// Items in execution order. Per §3 of the feasibility doc, compilation
+    /// stops at the first item that fails to compile — items after it are
+    /// never attempted, mirroring what N sequential [`run_turn`] calls would
+    /// do.
+    pub items: &'a [BatchTurnItem<'a>],
+    /// Wrapper templates, exactly as [`TurnRequest::templates`]: every
+    /// supplied template is forwarded to the extract in order, which does
+    /// its own per-item variant-retry selection.
+    pub templates: &'a [TurnTemplate],
+    /// Extra `--include` dirs, forwarded once for the whole batch (§8's wire
+    /// has no per-item `--include`).
+    pub include: &'a [&'a Path],
+}
+
+/// The item that stopped a [`run_turn_batch`] batch short of completion: its
+/// index into [`TurnBatchRequest::items`] and its own attributed compile
+/// diagnostics ([`CompileError::Diagnostics`]).
+#[derive(Debug)]
+pub struct BatchItemFailure {
+    pub index: usize,
+    pub error: CompileError,
+}
+
+/// The result of [`run_turn_batch`]: a decoded [`TurnResult`] for every item
+/// compiled before a failure (or every item, on full success), plus the
+/// failing item's own attribution when the batch stopped short.
+///
+/// An `Err` return from [`run_turn_batch`] itself — as opposed to `Ok` with
+/// `failure: Some(..)` — means the batch failure is NOT attributable to any
+/// specific item (a spawn failure, a malformed/version-skewed stdout report,
+/// or a wire-shape mismatch). Per §3's unconditional-fallback invariant, the
+/// caller's response in that case is N per-item [`run_turn`] calls; a
+/// `failure: Some(..)` batch, by contrast, already carries a real attributed
+/// compile error for the specific item that caused it and needs no fallback
+/// to learn anything a rerun would tell it.
+#[derive(Debug)]
+pub struct TurnBatchResult {
+    /// `results[i]` is `items[i]`'s decoded [`TurnResult`], for every `i`
+    /// before the failing item's index (or every item, on full success).
+    pub results: Vec<TurnResult>,
+    /// `Some` iff the batch stopped before compiling every item.
+    pub failure: Option<BatchItemFailure>,
+}
+
+/// One `plan.json` verdict entry (§8's wire shape).
+#[derive(serde::Serialize)]
+struct PlanVerdict<'a> {
+    kind: &'static str,
+    binders: &'a [String],
+}
+
+/// One `plan.json` item entry (§8's wire shape) — every field a `--turn`
+/// spawn takes today, plus `index` and `template` (the latter mirrors what
+/// [`TemplateSelector::for_verdict`] would derive from `verdict`, spelled out
+/// explicitly on the wire rather than re-derived extract-side).
+#[derive(serde::Serialize)]
+struct PlanItem<'a> {
+    index: usize,
+    turn_text: &'a str,
+    verdict: PlanVerdict<'a>,
+    template: &'static str,
+    session_root: String,
+    inject_vals: &'a [String],
+    bind_gen: u64,
+}
+
+/// `plan.json`'s top-level shape (§8): `{"version":1,"items":[…]}`.
+#[derive(serde::Serialize)]
+struct Plan<'a> {
+    version: u32,
+    items: Vec<PlanItem<'a>>,
+}
+
+/// The sibling of [`run_turn`] for a whole block of items: performs exactly
+/// ONE `tidepool-extract --turn-batch` spawn (§8 of
+/// `plans/post-restart/batch-turns-feasibility.md`), writing `plan.json` and
+/// reading back each item's output directory through the SAME
+/// [`decode_turn_output_dir`] [`run_turn`] uses — a batched item and a
+/// per-item item cannot diverge in what Rust reads.
+///
+/// Preflight (before any spawn): every item's verdict must have a matching
+/// supplied template, exactly as [`run_turn`] checks — a missing template is
+/// a caller wiring bug, not a GHC rejection.
+///
+/// §8 does not pin whether the extract process's own exit code reflects a
+/// mid-batch compile failure (a genuinely ambiguous point — see the receipt
+/// doc), so this never branches on it: it always attempts to parse the
+/// stdout batch report first, and only treats the spawn as an
+/// infrastructure failure (an `Err` return, never attributed to an item)
+/// when that report itself doesn't parse, over-reports items, or reports an
+/// item out of order/with an unrecognized status.
+pub fn run_turn_batch(req: TurnBatchRequest<'_>) -> Result<TurnBatchResult, CompileError> {
+    if req.items.is_empty() {
+        return Ok(TurnBatchResult {
+            results: Vec::new(),
+            failure: None,
+        });
+    }
+
+    let mut plan_items = Vec::with_capacity(req.items.len());
+    for (index, item) in req.items.iter().enumerate() {
+        let selector = TemplateSelector::for_verdict(item.verdict.kind, &item.verdict.binders)
+            .expect("TemplateSelector::for_verdict is total over TurnKind");
+        if select_template(req.templates, selector).is_none() {
+            return Err(missing_template_error(selector));
+        }
+        plan_items.push(PlanItem {
+            index,
+            turn_text: item.turn_text,
+            verdict: PlanVerdict {
+                kind: turn_kind_wire_name(item.verdict.kind),
+                binders: &item.verdict.binders,
+            },
+            template: selector.wire_name(),
+            session_root: item.session_root.to_string_lossy().into_owned(),
+            inject_vals: item.inject_modules,
+            bind_gen: item.gen,
+        });
+    }
+
+    let temp = TempDir::new()?;
+    let plan = Plan {
+        version: 1,
+        items: plan_items,
+    };
+    let plan_json = serde_json::to_string(&plan).map_err(|e| {
+        CompileError::ExtractFailed(format!(
+            "run_turn_batch: failed to serialize plan.json: {e}"
+        ))
+    })?;
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(&plan_path, plan_json)?;
+
+    let batch_out_dir = temp.path().join("batch-out");
+    std::fs::create_dir_all(&batch_out_dir)?;
+
+    let mut cmd = extract_cmd()?;
+    cmd.turn_batch(&plan_path)
+        .batch_out(&batch_out_dir)
+        .includes(req.include);
+    for (i, tmpl) in req.templates.iter().enumerate() {
+        let path = temp.path().join(format!("template-{i}.hs"));
+        std::fs::write(&path, &tmpl.source)?;
+        cmd.turn_template(tmpl.kind.wire_name(), &path);
+    }
+
+    let run = cmd.run().map_err(map_notfound)?;
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_EXTRACT_SPAWN,
+        run.elapsed,
+        0,
+    );
+    // A batch report with an attributed item failure is still a real spawn —
+    // attribute its extract phases the same as a clean one.
+    forward_extract_timing(&run.stderr_lossy(), "extract");
+
+    let report = crate::diag::parse_batch_diag_report(&run.output.stdout, &run.output.stderr)
+        .map_err(CompileError::MalformedDiagnostics)?;
+
+    if report.items.len() > req.items.len() {
+        return Err(CompileError::ExtractFailed(format!(
+            "run_turn_batch: extract reported {} item(s), requested {}",
+            report.items.len(),
+            req.items.len()
+        )));
+    }
+
+    let mut results = Vec::with_capacity(report.items.len());
+    let mut failure = None;
+    for (expected_index, item_status) in report.items.iter().enumerate() {
+        if item_status.index != expected_index {
+            return Err(CompileError::ExtractFailed(format!(
+                "run_turn_batch: item report out of order — expected index {expected_index}, got {}",
+                item_status.index
+            )));
+        }
+        match item_status.status.as_str() {
+            "ok" => {
+                let dir_name = item_status.dir.as_deref().ok_or_else(|| {
+                    CompileError::ExtractFailed(format!(
+                        "run_turn_batch: item {expected_index} status \"ok\" but no dir"
+                    ))
+                })?;
+                results.push(decode_turn_output_dir(&batch_out_dir.join(dir_name))?);
+            }
+            "failed" => {
+                // Prefer the item's own diagnostics; fall back to the flat
+                // top-level array (§8: both carry the failing item's
+                // diagnostics, but a sibling implementation might populate
+                // only one).
+                let diags = if item_status.diagnostics.is_empty() {
+                    report.diagnostics.clone()
+                } else {
+                    item_status.diagnostics.clone()
+                };
+                failure = Some(BatchItemFailure {
+                    index: expected_index,
+                    error: CompileError::Diagnostics(diags),
+                });
+                break;
+            }
+            other => {
+                return Err(CompileError::ExtractFailed(format!(
+                    "run_turn_batch: unknown item status {other:?} for item {expected_index}"
+                )));
+            }
+        }
+    }
+
+    // Fewer item reports than requested, with none of them marked failed:
+    // the batch was cut short by something other than an attributed compile
+    // error (e.g. a crash mid-item) — not attributable to a specific item.
+    if failure.is_none() && results.len() < req.items.len() {
+        return Err(CompileError::ExtractFailed(format!(
+            "run_turn_batch: extract reported only {} of {} item(s), none marked failed",
+            results.len(),
+            req.items.len()
+        )));
+    }
+
+    Ok(TurnBatchResult { results, failure })
 }
 
 /// Read `result.cbor`/`meta.cbor` off `output_dir` and register warning var
@@ -1529,6 +1793,297 @@ mod tests {
         assert!(
             !call.contains("--emit-stmt-binders") && !call.contains("--emit-binders"),
             "spawn carried a deleted classify/binder flag:\n{call}"
+        );
+    }
+
+    // ---- run_turn_batch (§8 stub-extractor tests) ----
+    //
+    // Every item below uses a `Decl` verdict: `decode_turn_output_dir` never
+    // reads `result.cbor`/`meta.cbor` for a `Decl` (see the `DecodedTurnOut::Decl`
+    // arm), so a fixture only needs a valid `TurnOut` CBOR sidecar — no
+    // fabricated `CoreExpr`/`DataConTable` payload required.
+
+    /// A `Decl`-kind `TurnOut` CBOR fixture for one binder name, matching
+    /// `decode_turn_out_decl_variant`'s shape above.
+    fn decl_turn_out_cbor(name: &str) -> Vec<u8> {
+        let v = CborValue::Array(vec![
+            CborValue::Text("Decl".into()),
+            CborValue::Array(vec![
+                CborValue::Array(vec![CborValue::Text(name.into())]),
+                CborValue::Array(vec![CborValue::Array(vec![
+                    CborValue::Text("EValue".into()),
+                    CborValue::Text(name.into()),
+                ])]),
+            ]),
+        ]);
+        build_cbor(&v)
+    }
+
+    /// A stub `tidepool-extract` that: (1) logs its argv to `log_path` (when
+    /// `Some`); (2) parses `--batch-out <dir>` out of argv with a plain shell
+    /// loop (no JSON tooling assumed); (3) `mkdir`s and `cp`s pre-built
+    /// `turn.cbor` fixtures into `<dir>/i<k>/` for each `(k, fixture path)`
+    /// pair in `item_fixtures`; (4) `cat`s `stdout_fixture` to stdout; (5)
+    /// exits `exit_code`. Mirrors `run_turn`'s existing fake-extractor tests'
+    /// style (a logged, hand-written `sh` script), extended only as far as
+    /// batch mode needs (locating `--batch-out` in argv).
+    fn write_stub_extract(
+        path: &Path,
+        log_path: Option<&Path>,
+        item_fixtures: &[(usize, &Path)],
+        stdout_fixture: &Path,
+        exit_code: u32,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut script = String::from("#!/bin/sh\n");
+        if let Some(log) = log_path {
+            script.push_str(&format!("echo \"$@\" >> {}\n", log.display()));
+        }
+        script.push_str(
+            "batch_out=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n\
+             if [ \"$prev\" = \"--batch-out\" ]; then batch_out=\"$arg\"; fi\nprev=\"$arg\"\ndone\n",
+        );
+        for (k, fixture) in item_fixtures {
+            script.push_str(&format!(
+                "mkdir -p \"$batch_out/i{k}\"\ncp {} \"$batch_out/i{k}/turn.cbor\"\n",
+                fixture.display()
+            ));
+        }
+        script.push_str(&format!("cat {}\n", stdout_fixture.display()));
+        script.push_str(&format!("exit {exit_code}\n"));
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn decl_batch_item<'a>(name: &'a str, session_root: &'a Path) -> BatchTurnItem<'a> {
+        BatchTurnItem {
+            turn_text: name,
+            verdict: TurnClassification {
+                kind: TurnKind::Decl,
+                binders: vec![name.to_string()],
+            },
+            session_root,
+            inject_modules: &[],
+            gen: 0,
+        }
+    }
+
+    fn decl_templates() -> Vec<TurnTemplate> {
+        vec![TurnTemplate {
+            kind: TemplateSelector::Decl,
+            source: DECL_TEMPLATE_SOURCE.to_string(),
+        }]
+    }
+
+    /// (a) N successful items decode to N results, through the SAME
+    /// `decode_turn_output_dir` `run_turn` uses per item.
+    #[test]
+    fn run_turn_batch_n_successes_decode_to_n_results() {
+        let dir = TempDir::new().unwrap();
+        let fixtures_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        let names = ["a", "b", "c"];
+        let mut item_fixtures = Vec::new();
+        for (k, name) in names.iter().enumerate() {
+            let path = fixtures_dir.join(format!("item{k}.cbor"));
+            std::fs::write(&path, decl_turn_out_cbor(name)).unwrap();
+            item_fixtures.push((k, path));
+        }
+        let item_fixture_refs: Vec<(usize, &Path)> = item_fixtures
+            .iter()
+            .map(|(k, p)| (*k, p.as_path()))
+            .collect();
+
+        let stdout_path = fixtures_dir.join("stdout.json");
+        std::fs::write(
+            &stdout_path,
+            r#"{"version":1,"diagnostics":[],"items":[
+                {"index":0,"status":"ok","dir":"i0"},
+                {"index":1,"status":"ok","dir":"i1"},
+                {"index":2,"status":"ok","dir":"i2"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let fake = dir.path().join("fake-extract");
+        write_stub_extract(&fake, None, &item_fixture_refs, &stdout_path, 0);
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let session_root = dir.path().join("session");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let templates = decl_templates();
+        let items: Vec<BatchTurnItem> = names
+            .iter()
+            .map(|n| decl_batch_item(n, &session_root))
+            .collect();
+        let req = TurnBatchRequest {
+            items: &items,
+            templates: &templates,
+            include: &[],
+        };
+
+        let result = run_turn_batch(req).unwrap();
+        assert!(
+            result.failure.is_none(),
+            "expected no failure: {:?}",
+            result.failure
+        );
+        assert_eq!(result.results.len(), 3);
+        for (r, name) in result.results.iter().zip(names) {
+            match r {
+                TurnResult::Decl { binders, .. } => assert_eq!(binders, &vec![name.to_string()]),
+                other => panic!("expected Decl, got {other:?}"),
+            }
+        }
+    }
+
+    /// (b) A mid-batch failure yields complete results for items before it,
+    /// an attributed error for it, and nothing after — even though the
+    /// stub's own process exit is non-zero (§8 does not pin the exit-code
+    /// convention; `run_turn_batch` must not depend on it).
+    #[test]
+    fn run_turn_batch_mid_batch_failure_attributes_and_stops() {
+        let dir = TempDir::new().unwrap();
+        let fixtures_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        let item0_path = fixtures_dir.join("item0.cbor");
+        std::fs::write(&item0_path, decl_turn_out_cbor("a")).unwrap();
+
+        let stdout_path = fixtures_dir.join("stdout.json");
+        std::fs::write(
+            &stdout_path,
+            r#"{"version":1,
+                "diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}],
+                "items":[
+                    {"index":0,"status":"ok","dir":"i0"},
+                    {"index":1,"status":"failed","dir":"i1","diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}]}
+                ]}"#,
+        )
+        .unwrap();
+
+        let fake = dir.path().join("fake-extract");
+        write_stub_extract(&fake, None, &[(0, &item0_path)], &stdout_path, 1);
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let session_root = dir.path().join("session");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let templates = decl_templates();
+        let items: Vec<BatchTurnItem> = ["a", "b", "c"]
+            .iter()
+            .map(|n| decl_batch_item(n, &session_root))
+            .collect();
+        let req = TurnBatchRequest {
+            items: &items,
+            templates: &templates,
+            include: &[],
+        };
+
+        let result = run_turn_batch(req).unwrap();
+        assert_eq!(
+            result.results.len(),
+            1,
+            "the item before the failure must have a complete result"
+        );
+        let failure = result.failure.expect("expected an attributed failure");
+        assert_eq!(failure.index, 1);
+        match failure.error {
+            CompileError::Diagnostics(diags) => {
+                assert_eq!(diags.len(), 1);
+                assert_eq!(diags[0].message, "boom in item 1");
+            }
+            other => panic!("expected Diagnostics, got {other:?}"),
+        }
+        // item 2 (index 2) is simply absent from the report — never attempted.
+    }
+
+    /// (c) An OLD (unmodified) `parse_diag_report` reader — never taught
+    /// about `--turn-batch`'s `items` array — must still parse a real
+    /// `--turn-batch` stub's stdout and still see a failing item's real
+    /// diagnostics via the flat top-level `diagnostics` array, exactly as it
+    /// would for a single-item `--turn` report.
+    #[test]
+    fn old_diag_reader_still_parses_batch_stub_stdout_and_sees_failing_item() {
+        let dir = TempDir::new().unwrap();
+        let fixtures_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        let stdout_path = fixtures_dir.join("stdout.json");
+        std::fs::write(
+            &stdout_path,
+            r#"{"version":1,
+                "diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}],
+                "items":[
+                    {"index":0,"status":"ok","dir":"i0"},
+                    {"index":1,"status":"failed","dir":"i1","diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}]}
+                ]}"#,
+        )
+        .unwrap();
+
+        let fake = dir.path().join("fake-extract");
+        write_stub_extract(&fake, None, &[], &stdout_path, 1);
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let plan_path = dir.path().join("plan.json");
+        std::fs::write(&plan_path, "{}").unwrap();
+        let batch_out = dir.path().join("batch-out");
+
+        let mut cmd = extract_cmd().unwrap();
+        cmd.turn_batch(&plan_path).batch_out(&batch_out);
+        let run = cmd.run().unwrap();
+
+        let report = crate::diag::parse_diag_report(&run.output.stdout, &run.output.stderr)
+            .expect("an old parse_diag_report reader must still parse the batch document");
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].message, "boom in item 1");
+    }
+
+    /// (d) `run_turn_batch` must spawn the extractor EXACTLY ONCE, carrying
+    /// `--turn-batch` (never the bare `--turn` flag). Mirrors
+    /// `run_turn_spawns_extract_exactly_once_with_turn_flag` above.
+    #[test]
+    fn run_turn_batch_spawns_extract_exactly_once_with_turn_batch_flag() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("calls.log");
+        let fixtures_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        let stdout_path = fixtures_dir.join("stdout.json");
+        std::fs::write(&stdout_path, r#"{"version":1,"diagnostics":[],"items":[]}"#).unwrap();
+
+        let fake = dir.path().join("fake-extract");
+        write_stub_extract(&fake, Some(&log_path), &[], &stdout_path, 1);
+        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+
+        let session_root = dir.path().join("session");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let templates = decl_templates();
+        let items: Vec<BatchTurnItem> = ["a", "b"]
+            .iter()
+            .map(|n| decl_batch_item(n, &session_root))
+            .collect();
+        let req = TurnBatchRequest {
+            items: &items,
+            templates: &templates,
+            include: &[],
+        };
+        let _ = run_turn_batch(req);
+
+        let calls = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert_eq!(
+            calls.lines().count(),
+            1,
+            "expected exactly one extract spawn, got:\n{calls}"
+        );
+        let call = calls.lines().next().unwrap_or_default();
+        assert!(
+            call.contains("--turn-batch"),
+            "spawn missing --turn-batch:\n{call}"
+        );
+        assert!(
+            call.contains("--batch-out"),
+            "spawn missing --batch-out:\n{call}"
+        );
+        assert!(
+            !call.split_whitespace().any(|tok| tok == "--turn"),
+            "spawn carried the bare --turn flag (should be --turn-batch only):\n{call}"
         );
     }
 

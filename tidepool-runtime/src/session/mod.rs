@@ -32,8 +32,9 @@ pub use engine::{
 pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
 
 pub use turn::{
-    classify_block, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
-    SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest,
+    classify_block, compile_session_turn, render_template, run_turn, run_turn_batch,
+    BatchItemFailure, BatchTurnItem, BoundBinder, CompiledTurn, SessionBind, SessionTurnResult,
+    TemplateSelector, TurnBatchRequest, TurnBatchResult, TurnClassification, TurnKind, TurnRequest,
     TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
