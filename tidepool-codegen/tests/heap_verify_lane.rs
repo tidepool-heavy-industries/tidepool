@@ -413,28 +413,26 @@ fn run_verified(expr: CoreExpr, nursery_size: usize, expected: i64, label: &str)
     );
 }
 
+/// Byte-for-byte the same `run_verified` assertions as the former four
+/// separate `heap_verify_fires_on_*` tests, looped over their
+/// (expr, nursery, expected, label) tuples.
 #[test]
-fn heap_verify_fires_on_cons_spine_sum() {
-    let (expr, expected) = build_cons_spine_sum(300);
-    run_verified(expr, 2 * 1024, expected, "cons_spine_sum");
-}
+fn heap_verify_fires_on_gc_forcing_shapes() {
+    let cons_spine_sum = build_cons_spine_sum(300);
+    let wide_live = build_wide_live(24);
+    let big_con = build_big_con(5);
+    let accum_loop = build_accum_loop(600);
 
-#[test]
-fn heap_verify_fires_on_wide_live() {
-    let (expr, expected) = build_wide_live(24);
-    run_verified(expr, 1024, expected, "wide_live");
-}
+    let cases: [((CoreExpr, i64), usize, &str); 4] = [
+        (cons_spine_sum, 2 * 1024, "cons_spine_sum"),
+        (wide_live, 1024, "wide_live"),
+        (big_con, 2 * 1024, "big_con"),
+        (accum_loop, 4 * 1024, "accum_loop"),
+    ];
 
-#[test]
-fn heap_verify_fires_on_big_con() {
-    let (expr, expected) = build_big_con(5);
-    run_verified(expr, 2 * 1024, expected, "big_con");
-}
-
-#[test]
-fn heap_verify_fires_on_accum_loop() {
-    let (expr, expected) = build_accum_loop(600);
-    run_verified(expr, 4 * 1024, expected, "accum_loop");
+    for ((expr, expected), nursery, label) in cases {
+        run_verified(expr, nursery, expected, label);
+    }
 }
 
 /// Forces the heap-DOUBLING path specifically (not just any GC): a 512-byte
