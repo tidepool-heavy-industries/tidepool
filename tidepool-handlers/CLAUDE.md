@@ -68,6 +68,38 @@ locked decision on union tags).
   lazy/streaming response channel; if an unbounded source ever needs
   exposure, add explicit pagination at the verb level.
 
+## Subagent handler: three verbs, one saga, one running agent
+
+`SubagentHandler` (`src/handlers/agent.rs`) serves `SubagentSpawn`,
+`SubagentBegin`, and `SubagentResume`. All three drive the SAME saga in
+`tidepool_agent::spawn` — `SubagentSpawn` is the no-tools combinator over
+`begin`/`answer`, not a second implementation.
+
+The shape worth knowing before you touch it: a child's tool call comes back to
+the parent as a RESULT (`StepToolCall`), the parent's authored Haskell handler
+runs between two effect calls, and `agentResumeRaw` answers it. The Rust
+handler never runs a parent handler and never re-enters the JIT — it cannot
+(`EffectHandler::handle` has no machine handle). See
+`tidepool-agent/CLAUDE.md` for the seam and
+`plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2 for why.
+
+Two consequences for handler work here:
+
+- **Model tier and effort are HANDLER CONFIGURATION** (`with_model_policy`),
+  not an authored-surface field. A model budget is granted to an operator, and
+  the operator is who wires the handler; an authored call choosing its own tier
+  would let any eval spend at any price. (A semantic tier vocabulary on the
+  authored surface is PRD 18 open decision 3, still open.)
+- **One agent at a time.** A second `begin` while one is mid-turn is a loud
+  typed failure, not a queue — multi-agent concurrency is chartered later work
+  and a handler that silently supported it would make the untested case
+  reachable by accident.
+
+Cycle-scoped and not `Clone` (the `RepoEventHandler` precedent): it owns a
+boxed backend and a flocked binding table. Dropping it kills the backend
+process, which is the ONLY thing bounding a child parked on an unanswered tool
+call — so a durable mailbox or a cross-cycle agent cannot live in this handler.
+
 ## Sandboxing
 
 Fs/Exec are rooted at `HandlerConfig.cwd` (the workspace/session sandbox).

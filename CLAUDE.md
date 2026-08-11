@@ -59,6 +59,7 @@ tidepool/
 ├── tidepool-macro/        ← Proc-macros embedding Haskell source as CBOR at build time (haskell_eval!/haskell_inline!)
 ├── tidepool-extract-cmd/  ← The ONE `tidepool-extract` invocation builder: bin resolution, typed args, the spawn + spawn counter. std-only leaf (zero deps)
 ├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList
+├── tidepool-agent/        ← Typed headless subagents: the backend seam + the Codex adapter (the ONLY place a coding backend is named)  [CLAUDE.md]
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
 ├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache
 ├── tidepool-mcp/          ← MCP server library (generic over effect handlers)  [CLAUDE.md]
@@ -92,6 +93,9 @@ in that directory):
   structural search, how to add an effect.
 - `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
   handler arm, the `cx.respond`/`respond_list` variants, sandbox enforcement.
+- `tidepool-agent/CLAUDE.md` — the containment boundary, the resumable
+  `AgentBackend` step seam (and why the tool-dispatch loop lives in Haskell),
+  model-policy allowlists, and the mock-vs-recording-vs-live testing tiers.
 - `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
   mechanism, repl-specific usage notes.

@@ -237,10 +237,8 @@ fn main() {
         .stack_size(256 * 1024 * 1024)
         .spawn(run)
         .expect("spawn the runner thread");
-    let code = match handle.join() {
-        Ok(code) => code,
-        Err(_) => 1,
-    };
+    // A panicked runner is a failed run, not a silent success.
+    let code = handle.join().unwrap_or(1);
     std::process::exit(code);
 }
 
