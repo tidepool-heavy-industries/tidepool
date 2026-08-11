@@ -16,10 +16,9 @@ pub mod provider;
 pub mod registry;
 pub mod replay;
 pub mod selfharness;
+pub mod synopsis;
 pub mod timing;
 pub mod tree;
-pub mod ui;
-pub mod uiof;
 
 pub use compile::{AsksSidecar, CompiledTurn};
 pub use engine::{
@@ -29,11 +28,9 @@ pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, Tr
 pub use harness::{Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
-    answerer_decls, load_harness_source, DriverError, Event, FormSpec, HarnessSource,
-    HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError,
-    SelfHarnessDriver, SelfHarnessState, StdinGate,
+    answerer_decls, load_harness_source, DriverError, Event, HarnessSource, HarnessSourceError,
+    JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError, SelfHarnessDriver,
+    SelfHarnessState, StdinGate,
 };
 pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
-pub use ui::{BadgeKind, Ui};
-pub use uiof::{defining_module, resume_expr_from_submission, ui_of};

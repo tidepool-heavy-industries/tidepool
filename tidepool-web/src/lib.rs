@@ -3,13 +3,14 @@
 //! A single clean form page served over HTTP + Datastar SSE. The harness
 //! driver blocks on an [`OperatorGate`](tidepool_harness::selfharness::operator::OperatorGate);
 //! [`server::WebGate`] implements that gate over a web round trip:
-//! `present_form` publishes a [`FormSpec`](tidepool_harness::selfharness::operator::FormSpec)
+//! `present_form` publishes a [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
 //! (rendered by [`render`]) and parks a channel resolved by `POST /submit`;
 //! `await_continue` parks a channel resolved by `POST /continue`.
 //!
 //! Four modules, one seam:
-//! - [`render`] — a [`FormSpec`] → maud form (enum/int/text/bool + a Submit /
-//!   Continue button); the `id="panel"` fragment patched over SSE.
+//! - [`render`] — a [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
+//!   → maud form (enum/int/text/bool + a Submit / Continue button); the
+//!   `id="panel"` fragment patched over SSE.
 //! - [`shell`] — the full HTML document (inline Swiss-minimal CSS + the
 //!   vendored Datastar patch-apply / form-collection JS; no CDN, no build step).
 //! - [`server`] — axum routes (`GET /`, `GET /sse`, `POST /submit`,

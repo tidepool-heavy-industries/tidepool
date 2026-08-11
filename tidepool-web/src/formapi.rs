@@ -1,5 +1,5 @@
 //! Testing-convenience HTTP surface on the operator gate: `GET /api/form`
-//! returns the pending form as JSON (the same [`FormSpec`] the web renderer
+//! returns the pending form as JSON (the same `FormShape` the web renderer
 //! consumes) plus a nonce; `POST /api/form` echoes that nonce back with an
 //! answer to resolve the SAME pending gate a browser `/submit` would — a
 //! second front door onto [`crate::server::WebGate`], not a second gate.
@@ -79,13 +79,13 @@ pub fn merge(router: Router<AppState>, config: FormApiConfig) -> Router<AppState
     router.route("/api/form", get(get_form).post(submit_form))
 }
 
-/// `{"test_only": ..., "pending": bool, "form": FormSpec | null, "nonce": u64 | null}`.
+/// `{"test_only": ..., "pending": bool, "form": FormShape | null, "nonce": u64 | null}`.
 async fn get_form(State(st): State<AppState>) -> Json<Jv> {
     Json(match st.pending_form() {
-        Some((spec, nonce)) => json!({
+        Some((shape, nonce)) => json!({
             "test_only": TEST_ONLY_NOTE,
             "pending": true,
-            "form": spec,
+            "form": shape,
             "nonce": nonce,
         }),
         None => json!({

@@ -17,8 +17,8 @@
 //!   answer that `run_child`s against the parent and resumes it.
 //! - `{typedSite}` (no fork) → `runLLMTurn`: the SAME model answers in
 //!   context by evaluating `resume expr :: T`.
-//! - `AskUserWith spec` (own constructor, answerer-only) → `askUserRaw`:
-//!   OPERATOR routing — the typed `FormSpec` renders as a form; the
+//! - `AskUserWith shape` (own constructor, answerer-only) → `askUserRaw`:
+//!   OPERATOR routing — the typed `FormShape` renders as a form; the
 //!   operator's submission resumes the turn.
 //!
 //! Answer validation is GHC end-to-end: an ill-typed `resume expr` fails to
@@ -52,7 +52,7 @@ use crate::tree::FanBadge;
 /// are each their own GADT/union-tag, see [`classify_hole`].
 ///
 /// `PartialEq` only (not `Eq`): [`HoleRouting::AskUser`] carries a
-/// [`crate::selfharness::operator::FormSpec`], which derives `PartialEq` but
+/// [`crate::selfharness::operator::FormShape`], which derives `PartialEq` but
 /// not `Eq` (the frozen `operator.rs` contract) — do not add `Eq` back there.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HoleRouting {
@@ -73,15 +73,12 @@ pub enum HoleRouting {
         fan: Option<FanBadge>,
         prompts: Vec<String>,
     },
-    /// `dialogAsk ui` — operator routing; the `Ui` value renders in the form
-    /// pane.
-    Dialog { ui: Json },
-    /// `askUserRaw spec` — a typed form
+    /// `askUserRaw shape` — a typed form
     /// suspends to a HUMAN OPERATOR, routed by CONSTRUCTOR NAME
-    /// (`AskUserWith`), not JSON-key probing. `spec` is the decoded
-    /// [`crate::selfharness::operator::FormSpec`] the operator gate renders.
+    /// (`AskUserWith`), not JSON-key probing. `shape` is the decoded
+    /// [`crate::selfharness::operator::FormShape`] the operator gate renders.
     AskUser {
-        spec: crate::selfharness::operator::FormSpec,
+        shape: crate::selfharness::operator::FormShape,
     },
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
@@ -128,16 +125,14 @@ pub struct ClassifiedHole {
 ///   site the same way as `RunLLMTurn`. The raw value itself is recovered from
 ///   the original request `Value` by the caller (`Harness` retains it), not
 ///   through this JSON-shaped `ClassifiedHole`.
-/// - `AskUserWith` (spec) — a real constructor arm, routed by CONSTRUCTOR
+/// - `AskUserWith` (shape) — a real constructor arm, routed by CONSTRUCTOR
 ///   NAME (no JSON-key probing): the request's sole field decodes as a
-///   [`crate::selfharness::operator::FormSpec`] → [`HoleRouting::AskUser`].
-///   A malformed spec (the decode fails) falls through to the plain-Ask
+///   [`crate::selfharness::operator::FormShape`] → [`HoleRouting::AskUser`].
+///   A malformed shape (the decode fails) falls through to the plain-Ask
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
-///   `ask schema prompt`). A Dialog hole is never PRODUCED here — no
-///   `payload` probe routes to it — though the `HoleRouting::Dialog` variant
-///   and its consumers still exist.
+///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
 pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
@@ -183,8 +178,8 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             }
         }
         Some("AskUserWith") => match decode_askuser_spec(request, table) {
-            Some(spec) => ClassifiedHole {
-                routing: HoleRouting::AskUser { spec },
+            Some(shape) => ClassifiedHole {
+                routing: HoleRouting::AskUser { shape },
                 prompt: String::new(),
             },
             None => {
@@ -207,27 +202,24 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
     hole
 }
 
-/// Decode an `AskUserWith`-shaped request (`Con(_, [spec])`) into a
-/// [`crate::selfharness::operator::FormSpec`]. `None` on any shape/decode
+/// Decode an `AskUserWith`-shaped request (`Con(_, [shape])`) into a
+/// [`crate::selfharness::operator::FormShape`]. `None` on any shape/decode
 /// mismatch — the caller falls back to the plain-Ask routing.
 ///
 /// `askUser @T` (`Tidepool.Form`) sends a bare
 /// [`crate::selfharness::operator::FormShape`] — exactly the JSON
-/// `selfharness::operator`'s module docs specify. It is wrapped in a
-/// [`crate::selfharness::operator::FormSpec`] for the in-process gate.
+/// `selfharness::operator`'s module docs specify — straight through for the
+/// in-process gate.
 fn decode_askuser_spec(
     request: &Value,
     table: &DataConTable,
-) -> Option<crate::selfharness::operator::FormSpec> {
-    use crate::selfharness::operator::{FormShape, FormSpec};
-
+) -> Option<crate::selfharness::operator::FormShape> {
     let Value::Con(_, fields) = request else {
         return None;
     };
     let field = fields.first()?;
     let json = tidepool_runtime::value_to_json(field, table, 0);
-    let shape: FormShape = serde_json::from_value(json).ok()?;
-    Some(FormSpec { shape })
+    serde_json::from_value(json).ok()
 }
 
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
@@ -461,12 +453,13 @@ pub fn assemble_request(
 
 /// A names-only type-shape line to append to a hole card, or an empty string
 /// when there is nothing to show: no table (the caller couldn't reach one —
-/// see call sites), or [`crate::uiof::type_synopsis`] degraded all the way to
-/// the bare type name (already stated elsewhere in the card, so repeating it
-/// here would add nothing). See `plans/post-restart/dev/hole-card-type-synopsis.md`:
-/// names only, never an invented/partial shape.
+/// see call sites), or [`crate::synopsis::type_synopsis`] degraded all the
+/// way to the bare type name (already stated elsewhere in the card, so
+/// repeating it here would add nothing). See
+/// `plans/post-restart/dev/hole-card-type-synopsis.md`: names only, never an
+/// invented/partial shape.
 fn type_shape_line(ty: &str, table: Option<&DataConTable>) -> String {
-    match table.map(|t| crate::uiof::type_synopsis(t, ty)) {
+    match table.map(|t| crate::synopsis::type_synopsis(t, ty)) {
         Some(synopsis) if synopsis != ty => format!("Its shape: `{synopsis}`\n\n"),
         _ => String::new(),
     }
@@ -898,7 +891,7 @@ pub struct TurnTarget {
 
 /// Wrap a model-written `M a` block as a full templated module the extract can
 /// compile, with optional extra `helpers` (e.g. the answerer's `resume`) and
-/// `imports` (e.g. `Tidepool.Ui`). The result is `toJSON`'d — the JSON-render
+/// `imports` (e.g. `Tidepool.Form`). The result is `toJSON`'d — the JSON-render
 /// contract of a NORMAL turn (its terminal value is displayed).
 ///
 /// `stack` is the promoted effect-row string this turn compiles against —

@@ -12,26 +12,24 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
 use tidepool_web::{router_with_form_api, AppState, FormApiConfig, WebGate};
 use tokio::net::TcpListener;
 
-fn sample_spec() -> FormSpec {
-    FormSpec {
-        shape: FormShape::Product {
-            type_key: "Sample".into(),
-            constructor: "Sample".into(),
-            fields: vec![
-                FieldShape {
-                    key: "mood".into(),
-                    shape: FormShape::String,
-                },
-                FieldShape {
-                    key: "count".into(),
-                    shape: FormShape::Int,
-                },
-            ],
-        },
+fn sample_spec() -> FormShape {
+    FormShape::Product {
+        type_key: "Sample".into(),
+        constructor: "Sample".into(),
+        fields: vec![
+            FieldShape {
+                key: "mood".into(),
+                shape: FormShape::String,
+            },
+            FieldShape {
+                key: "count".into(),
+                shape: FormShape::Int,
+            },
+        ],
     }
 }
 
@@ -108,13 +106,7 @@ async fn get_post_roundtrip() {
     .await;
     let v: Value = serde_json::from_str(&body).unwrap();
     assert!(v["test_only"].as_str().is_some());
-    assert_eq!(
-        v["form"]["shape"]["product"]["fields"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(v["form"]["product"]["fields"].as_array().unwrap().len(), 2);
     let nonce = v["nonce"]
         .as_u64()
         .expect("nonce present while a form is pending");

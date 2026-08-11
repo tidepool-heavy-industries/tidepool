@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::selfharness::operator::FormSpec;
+use crate::selfharness::operator::FormShape;
 use crate::tree::NodeId;
 
 /// Which side of the driver presented an `askUser` form: a nested answerer's
@@ -71,7 +71,10 @@ pub enum Event {
     /// A typed operator form (`askUser`) was presented — either a nested
     /// answerer's own form, or one the authored OUTER loop evaluated
     /// directly (see [`FormSource`]).
-    FormPresented { source: FormSource, spec: FormSpec },
+    FormPresented {
+        source: FormSource,
+        shape: FormShape,
+    },
     /// The operator's submission for the most recently presented form. A
     /// decode failure re-suspends on a fresh form (Haskell-side recursion,
     /// no `Either`), so a re-prompt shows as another `FormPresented` /

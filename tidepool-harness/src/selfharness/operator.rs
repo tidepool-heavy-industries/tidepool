@@ -10,7 +10,8 @@
 //! `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`)
 //! constructor for constructor. `askUser @T` emits a bare [`FormShape`]
 //! through the `AskUserWith` suspension; [`crate::engine::classify_hole`]
-//! wraps it in [`FormSpec`] for the in-process gate.
+//! decodes it directly for the in-process gate — [`FormShape`] IS the one
+//! operator-presentation algebra, carried bare end to end.
 //!
 //! ## Shape JSON
 //!
@@ -43,22 +44,15 @@
 //! `tidepool-web`'s submission path, guided by the same [`FormShape`].
 use serde::{Deserialize, Serialize};
 
-/// A typed form an agent spawned. Haskell sends the [`FormShape`] bare on the
-/// effect wire; the engine wraps it for the in-process gate and observer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FormSpec {
-    pub shape: FormShape,
-}
-
 /// The seam the driver blocks on for operator input. Sync-blocking by design
 /// (see module docs). A web GUI implements this by parking a channel
 /// resolved from an HTTP handler; [`StdinGate`] keeps headless runs working.
 pub trait OperatorGate: Send + Sync {
-    /// Present `spec` to the operator and BLOCK until they submit. Returns the
-    /// answer value ready for the Haskell decode. The transport is a full
-    /// `Value` because valid answers include scalars and `null`, not only
-    /// objects. A decode failure Haskell-side re-presents the form.
-    fn present_form(&self, spec: &FormSpec) -> serde_json::Value;
+    /// Present `shape` to the operator and BLOCK until they submit. Returns
+    /// the answer value ready for the Haskell decode. The transport is a
+    /// full `Value` because valid answers include scalars and `null`, not
+    /// only objects. A decode failure Haskell-side re-presents the form.
+    fn present_form(&self, shape: &FormShape) -> serde_json::Value;
 
     /// BLOCK until the operator advances to the next loop iteration (the
     /// human button-click gate that replaces the stdin between-loops gate).
@@ -73,7 +67,7 @@ pub trait OperatorGate: Send + Sync {
 pub struct StdinGate;
 
 impl OperatorGate for StdinGate {
-    fn present_form(&self, _spec: &FormSpec) -> serde_json::Value {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
             return serde_json::json!({});
@@ -336,14 +330,12 @@ mod tests {
         }
     }
 
-    /// The in-process wrapper round-trips independently of the bare shape on
-    /// the effect wire.
+    /// The bare shape round-trips through serde — the whole wire, end to
+    /// end, with no wrapper struct.
     #[test]
-    fn form_spec_round_trips() {
-        let shaped = FormSpec {
-            shape: ssh_product_shape(),
-        };
-        let wire = serde_json::to_string(&shaped).unwrap();
-        assert_eq!(serde_json::from_str::<FormSpec>(&wire).unwrap(), shaped);
+    fn form_shape_round_trips() {
+        let shape = ssh_product_shape();
+        let wire = serde_json::to_string(&shape).unwrap();
+        assert_eq!(serde_json::from_str::<FormShape>(&wire).unwrap(), shape);
     }
 }

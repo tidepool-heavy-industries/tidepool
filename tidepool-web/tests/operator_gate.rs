@@ -13,26 +13,24 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
 use tidepool_web::{router, AppState, WebGate};
 use tokio::net::TcpListener;
 
-fn sample_spec() -> FormSpec {
-    FormSpec {
-        shape: FormShape::Product {
-            type_key: "Sample".into(),
-            constructor: "Sample".into(),
-            fields: vec![
-                FieldShape {
-                    key: "mood".into(),
-                    shape: FormShape::String,
-                },
-                FieldShape {
-                    key: "count".into(),
-                    shape: FormShape::Int,
-                },
-            ],
-        },
+fn sample_spec() -> FormShape {
+    FormShape::Product {
+        type_key: "Sample".into(),
+        constructor: "Sample".into(),
+        fields: vec![
+            FieldShape {
+                key: "mood".into(),
+                shape: FormShape::String,
+            },
+            FieldShape {
+                key: "count".into(),
+                shape: FormShape::Int,
+            },
+        ],
     }
 }
 

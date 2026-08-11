@@ -37,9 +37,9 @@ Module map:
   effect) + `provider/{api_key,http,oauth,paths}` impls.
 - `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
   (crash-replay tree reconstruction) — see Replay below.
-- `ui`/`uiof` — the `Ui` eDSL wire mirror (Haskell `Tidepool.Ui`'s contract
-  partner) and `uiOf` (server-derived mechanical forms from a compiled
-  `DataConTable`, no Haskell Generic machinery).
+- `synopsis` — the names-only `type_synopsis` a hole card's shape line reads,
+  derived from a compiled `DataConTable` (constructor/selector NAMES only —
+  the table has no field TYPES, so this is honestly shallow, never a form).
 
 ## Machine lifecycle — the registry is the one session-lifecycle truth
 
@@ -148,8 +148,9 @@ rename of `Ask`: `Ask` suspends `ask schema prompt` to the CALLING LLM AGENT
 with a JSON Schema; `AskUser` suspends `askUserRaw :: Value -> M Value` (the
 raw wire escape; the typed surface authors write is `askUser @T`, plus
 `choose`/`chooseMany` for value-defined alternatives — `Tidepool.Form`) to a
-HUMAN OPERATOR with a typed [`FormSpec`]
-(`selfharness::operator`), routed by CONSTRUCTOR NAME (`AskUserWith`) in
+HUMAN OPERATOR with a typed [`FormShape`]
+(`selfharness::operator`) — the ONE operator-presentation algebra, carried
+bare end to end — routed by CONSTRUCTOR NAME (`AskUserWith`) in
 [`engine::classify_hole`] — no JSON-key probing.
 
 `askUser @T` derives its form from `T`'s own `GHC.Generics` representation
@@ -157,8 +158,8 @@ HUMAN OPERATOR with a typed [`FormSpec`]
 `FormShape` wire (`Tidepool.Form.Wire` encodes exactly the JSON
 `selfharness::operator`'s module docs specify), and rebuilds the typed value
 from ordinary JSON submitted by the operator. `engine::decode_askuser_spec`
-decodes that one bare shape and wraps it in `FormSpec` for the gate and
-observer. `Tidepool.Form` is
+decodes that one bare shape straight through for the gate and observer — no
+wrapper struct. `Tidepool.Form` is
 auto-imported into a turn's preamble whenever `AskUser` is in the compiling
 decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
 it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
@@ -271,7 +272,7 @@ model round, but left uncapped it composes with a non-interactive gate at EOF
 into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
-— consume it, never redefine it there: `present_form(&FormSpec) ->
+— consume it, never redefine it there: `present_form(&FormShape) ->
 serde_json::Value` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
 `OperatorGate` contract) even though the driver's turn loop is `async fn` and
 `.await`s the `Harness` directly. `SelfHarnessDriver` holds
@@ -310,8 +311,8 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
   `error` the UNTRUNCATED GHC error on a failed compile or `null` on a
   compiled round — the fold groups these by `site`; `Finalize{node,value}`
   (the finalized answer, rendered to JSON text, not just that one arrived);
-  `FormPresented{source,spec}`/`FormSubmitted{source,submission}` (an
-  `askUser` form's spec and the operator's reply — `source` distinguishes a
+  `FormPresented{source,shape}`/`FormSubmitted{source,submission}` (an
+  `askUser` form's shape and the operator's reply — `source` distinguishes a
   nested answerer's own form from one the AUTHORED OUTER loop raised
   directly); `OuterCompile{label,source}` (the OUTER session's own `render`/
   `loop` fragment compiles — `crate::log::Event::TurnStart` never covers

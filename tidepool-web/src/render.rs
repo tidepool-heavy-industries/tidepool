@@ -1,4 +1,4 @@
-//! `FormSpec` → maud markup for the operator panel.
+//! `FormShape` → maud markup for the operator panel.
 //!
 //! [`View`] and [`panel`] are consumed by [`crate::server`]. `panel` always
 //! yields the single `id="panel"` element
@@ -32,7 +32,7 @@
 
 use maud::{html, Markup, PreEscaped};
 use tidepool_harness::selfharness::operator::{
-    child_path, humanize_key, FieldShape, FormShape, FormSpec, VariantShape, ROOT_BIND_PATH,
+    child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
 /// What the operator panel is currently showing.
@@ -40,7 +40,7 @@ pub enum View<'a> {
     /// Nothing pending — the driver is between operator interactions.
     Idle,
     /// A pending `askUser` form: render the fields + a Submit button.
-    Form(&'a FormSpec),
+    Form(&'a FormShape),
     /// The between-loops gate: render a single Continue button.
     Continue,
 }
@@ -57,7 +57,7 @@ pub fn panel(view: &View, rev: u64) -> Markup {
         div id="panel" data-rev=(rev) {
             @match view {
                 View::Idle => (idle()),
-                View::Form(spec) => (form(spec)),
+                View::Form(shape) => (form(shape)),
                 View::Continue => (continue_prompt()),
             }
         }
@@ -78,10 +78,10 @@ fn idle() -> Markup {
 
 /// The pending form. The browser collector posts its leaf controls as a flat
 /// dotted-path object; the server reassembles it using this same shape.
-fn form(spec: &FormSpec) -> Markup {
+fn form(shape: &FormShape) -> Markup {
     html! {
         form class="form" data-on-submit="@post('/submit')" {
-            (generic_shape(ROOT_BIND_PATH, &spec.shape))
+            (generic_shape(ROOT_BIND_PATH, shape))
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
             }

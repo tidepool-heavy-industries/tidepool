@@ -5,7 +5,7 @@
 //! on for its two operator interactions (fill a form / click continue).
 //!
 //! `--demo` runs the server against a MOCK driver: a background thread that
-//! presents a representative `FormSpec`, prints the submitted answer, then
+//! presents a representative `FormShape`, prints the submitted answer, then
 //! parks on the continue gate — so the page and
 //! its aesthetic can be opened and reviewed on localhost with no harness, no
 //! model, and no API calls.
@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, FormSpec, OperatorGate};
+use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
 use tidepool_web::WebGate;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -52,26 +52,24 @@ fn demo_loop(gate: Arc<WebGate>) {
 }
 
 /// A representative derived-style product form.
-fn sample_form() -> FormSpec {
-    FormSpec {
-        shape: FormShape::Product {
-            type_key: "Demo".into(),
-            constructor: "Demo".into(),
-            fields: vec![
-                FieldShape {
-                    key: "iterations".into(),
-                    shape: FormShape::Int,
-                },
-                FieldShape {
-                    key: "note".into(),
-                    shape: FormShape::String,
-                },
-                FieldShape {
-                    key: "verbose".into(),
-                    shape: FormShape::Bool,
-                },
-            ],
-        },
+fn sample_form() -> FormShape {
+    FormShape::Product {
+        type_key: "Demo".into(),
+        constructor: "Demo".into(),
+        fields: vec![
+            FieldShape {
+                key: "iterations".into(),
+                shape: FormShape::Int,
+            },
+            FieldShape {
+                key: "note".into(),
+                shape: FormShape::String,
+            },
+            FieldShape {
+                key: "verbose".into(),
+                shape: FormShape::Bool,
+            },
+        ],
     }
 }
 

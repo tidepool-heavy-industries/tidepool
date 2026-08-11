@@ -91,8 +91,6 @@ pub enum HarnessError {
         routing: &'static str,
         actual: String,
     },
-    #[error("node {0:?}: no mechanical derived form for the pending hole (uiOf yields None, or the submission doesn't map) — fall back to the model-driven answerer")]
-    NoDerivedForm(NodeId),
     #[error("node {node:?} aborted: {reason}")]
     Aborted { node: NodeId, reason: String },
     #[error("node {0:?} has no pending operator escalation to resolve")]
@@ -1578,26 +1576,6 @@ impl Harness {
         })
     }
 
-    /// The SERVER-DERIVED `Ui` form (`uiof::ui_of`) for a
-    /// `runLLMTurn`/`runLLMTurnFork` hole on `node`, when the answer
-    /// type maps mechanically — what the hole card renders IN ADDITION TO
-    /// the raw Code+eval card, when `Some`. `None` when the node isn't
-    /// suspended on such a hole, its answer type is unknown, or `uiof::ui_of`
-    /// can't map the type (the caller falls back to the raw card as today).
-    pub fn pending_derived_ui(&self, node: NodeId) -> Option<crate::ui::Ui> {
-        let convos = self.convos.lock();
-        let convo = convos.get(&node)?;
-        let pending = convo.pending.as_ref()?;
-        let ty = match &pending.classified.routing {
-            HoleRouting::RunLLMTurn { ty: Some(ty), .. }
-            | HoleRouting::Fork { ty: Some(ty), .. } => ty.clone(),
-            _ => return None,
-        };
-        let table = convo.suspend_table.clone()?;
-        drop(convos);
-        crate::uiof::ui_of(&table, &ty)
-    }
-
     /// The harness-level primitive `service_runllm_hole`
     /// (`selfharness/driver.rs`) calls once a nested Agent node
     /// suspends on `finalize @T x`: read the
@@ -1886,14 +1864,14 @@ impl Harness {
         })
     }
 
-    /// The first node currently suspended on a Dialog (operator) hole, if any —
+    /// The first node currently suspended on an Ask (operator) hole, if any —
     /// what the inspector focuses by default.
     pub fn first_operator_hole(&self) -> Option<NodeId> {
         let convos = self.convos.lock();
         convos.iter().find_map(|(n, c)| {
             matches!(
                 c.pending.as_ref().map(|p| &p.classified.routing),
-                Some(HoleRouting::Dialog { .. }) | Some(HoleRouting::Ask { .. })
+                Some(HoleRouting::Ask { .. })
             )
             .then_some(*n)
         })
@@ -2160,115 +2138,6 @@ impl Harness {
         Ok(())
     }
 
-    /// Answer a `runLLMTurn`/`runLLMTurnFork` hole MECHANICALLY
-    /// from its server-derived form ([`Self::pending_derived_ui`]): ZERO model
-    /// turns. `submission` is a `{values, prose}` answer encoding; a
-    /// non-empty `prose` is NOT mechanical (that's the elaboration path's
-    /// job, unbuilt) — rejected here rather than guessed at. On the
-    /// mechanical path, `values` must map via
-    /// [`crate::uiof::resume_expr_from_submission`] against the hole's
-    /// derived `Ui`; the result is compiled as `resume <expr>` (specialized
-    /// to the hole's answer type, same as the model-driven answerer) and run
-    /// via `run_child` against `node`'s own suspended session, then resumes
-    /// it — the same discipline [`Self::answer_run_llm_turn`] uses, minus
-    /// the model loop. Any failure to derive a form or map the submission is
-    /// [`HarnessError::NoDerivedForm`] — the caller falls back to
-    /// [`Self::answer_run_llm_turn`]/[`Self::answer_fork`].
-    pub async fn answer_mechanical(
-        &self,
-        node: NodeId,
-        submission: Json,
-    ) -> Result<(), HarnessError> {
-        // Compiles + runs + publishes on `node` in one shot (no model
-        // loop) — one lease for the whole method.
-        let _lease = self.acquire_turn_lease(node)?;
-        let pending = self
-            .convos
-            .lock()
-            .get(&node)
-            .and_then(|c| c.pending.clone())
-            .ok_or(HarnessError::NotSuspended(node))?;
-        let ty = match &pending.classified.routing {
-            HoleRouting::RunLLMTurn { ty: Some(ty), .. }
-            | HoleRouting::Fork { ty: Some(ty), .. } => ty.clone(),
-            other => {
-                return Err(HarnessError::RoutingMismatch {
-                    node,
-                    routing: "mechanical",
-                    actual: format!("{other:?}"),
-                })
-            }
-        };
-        let prose_is_empty = submission
-            .get("prose")
-            .and_then(Json::as_str)
-            .is_none_or(str::is_empty);
-        if !prose_is_empty {
-            return Err(HarnessError::NoDerivedForm(node));
-        }
-        let values = submission
-            .get("values")
-            .and_then(Json::as_object)
-            .ok_or(HarnessError::NoDerivedForm(node))?;
-
-        let table = self
-            .convos
-            .lock()
-            .get(&node)
-            .and_then(|c| c.suspend_table.clone())
-            .ok_or(HarnessError::NoDerivedForm(node))?;
-        let ui = crate::uiof::ui_of(&table, &ty).ok_or(HarnessError::NoDerivedForm(node))?;
-        let expr = crate::uiof::resume_expr_from_submission(&ui, values)
-            .ok_or(HarnessError::NoDerivedForm(node))?;
-
-        // Compile `resume <expr>` as an answerer turn, specialized to the
-        // hole's answer type exactly like the model-driven answerer's helper
-        // (`drive_answerer_to_value`) — a mismatched mechanical mapping would
-        // fail here with a GHC error, same retry-worthy shape, though the
-        // mechanical mapping is constructed to already match the type.
-        let helpers = format!("resume :: {ty} -> M {ty}\nresume = pure");
-        let imports = crate::uiof::defining_module(&table, &ty).unwrap_or_default();
-        let src =
-            engine::template_answer_turn(&self.cfg, &format!("resume {expr}"), &imports, &helpers);
-        let cfg_bin = self.cfg.extract_bin.clone();
-        let include = self.cfg.include.clone();
-        let node_id = node.0;
-        let compiled = tokio::task::spawn_blocking(move || {
-            compile::compile_turn(
-                &cfg_bin,
-                &src,
-                "result",
-                &include,
-                node_id,
-                timing::NO_ROUND,
-            )
-        })
-        .await
-        .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?
-        .map_err(|e| HarnessError::Compile(e.to_string()))?;
-
-        let checkout = self.checkout_child(node)?;
-        let cexpr = compiled.expr;
-        let ctable = compiled.table.clone();
-        let out = self
-            .run_checked_out(node, checkout, move |mut session| {
-                let out = session.run_child(
-                    "mechanical",
-                    &cexpr,
-                    &ctable,
-                    &tidepool_codegen::emit::ExternalEnv::new(),
-                );
-                (session, out)
-            })
-            .await?;
-        self.flush_effects(node)?;
-
-        let value = out
-            .map_err(|e| HarnessError::Resident(e.to_string()))?
-            .into_value();
-        self.resume_parent(node, &pending.hole, value).await
-    }
-
     /// Answer an operator `dialogAsk` (or plain `ask`) hole with a form
     /// submission `{values, prose}`. `dialogAsk :: Ui -> M Value` returns the
     /// submission DIRECTLY as its value — the program that called `dialogAsk`
@@ -2286,7 +2155,7 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         match &pending.classified.routing {
-            HoleRouting::Dialog { .. } | HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } => {}
+            HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } => {}
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -2700,9 +2569,9 @@ impl Harness {
             })
             .await?;
         // Refresh suspend_table/suspend_asks explicitly on every restore, not
-        // just the first suspend — downstream lookups (`pending_derived_ui`,
-        // mechanical/dialog answers) must read the table the resident session
-        // is actually compiled against, not silently-preserved first-suspend
+        // just the first suspend — downstream lookups (hole-card synopsis,
+        // dialog answers) must read the table the resident session is
+        // actually compiled against, not silently-preserved first-suspend
         // state.
         {
             let mut convos = self.convos.lock();

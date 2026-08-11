@@ -8,7 +8,7 @@ self-iterating harness driver blocks on when it needs a human.
 
 - `server.rs` — axum [`router`], the SSE broadcast stream, and [`WebGate`]:
   the `OperatorGate` impl.
-- `render.rs` — a `FormSpec` → maud markup for the `id="panel"` fragment
+- `render.rs` — a `FormShape` → maud markup for the `id="panel"` fragment
   (owned by a sibling workstream; see the frozen-seam note in that file).
 - `shell.rs` — the full HTML document: inline CSS + the vendored Datastar
   client JS, no CDN, no build step (also sibling-owned).
@@ -128,7 +128,7 @@ this door is exactly as much operator authority as one through the page:
   hardcoded `127.0.0.1` listener (`lib.rs::bind_addr`). This module never
   opens a socket of its own, so there is no second bind to audit.
 - **Per-prompt nonce.** `AppState::pending_form()` returns the pending
-  `FormSpec` alongside `Slot::rev` — the same revision counter F10 already
+  `FormShape` alongside `Slot::rev` — the same revision counter F10 already
   bumps exactly once per `publish`/`take`, under the same lock as `pending`.
   `AppState::submit_form(nonce, submission)` only resolves when `nonce`
   matches the CURRENT revision; a missing, wrong, or stale nonce (the form

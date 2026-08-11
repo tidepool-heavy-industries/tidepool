@@ -49,7 +49,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, FormShape, FormSpec, OperatorGate, ROOT_BIND_PATH,
+    child_path, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -66,7 +66,7 @@ enum Pending {
     /// Carries the ANSWER VALUE (see `OperatorGate::present_form`), which may
     /// be an object, scalar, or `null` depending on the form shape.
     Form {
-        spec: FormSpec,
+        shape: FormShape,
         resolve: oneshot::Sender<Jv>,
     },
     /// The between-loops gate; `resolve` unparks `await_continue`.
@@ -77,7 +77,7 @@ impl Pending {
     fn view(&self) -> View<'_> {
         match self {
             Pending::Idle => View::Idle,
-            Pending::Form { spec, .. } => View::Form(spec),
+            Pending::Form { shape, .. } => View::Form(shape),
             Pending::Continue { .. } => View::Continue,
         }
     }
@@ -155,13 +155,13 @@ impl AppState {
         taken
     }
 
-    /// The form-api `GET` view: a clone of the pending form's spec plus its
+    /// The form-api `GET` view: a clone of the pending form's shape plus its
     /// nonce (the current revision), or `None` when nothing is pending or the
     /// pending interaction is a Continue gate rather than a form.
-    pub fn pending_form(&self) -> Option<(FormSpec, u64)> {
+    pub fn pending_form(&self) -> Option<(FormShape, u64)> {
         let slot = self.slot.lock().unwrap();
         match &slot.pending {
-            Pending::Form { spec, .. } => Some((spec.clone(), slot.rev)),
+            Pending::Form { shape, .. } => Some((shape.clone(), slot.rev)),
             _ => None,
         }
     }
@@ -182,13 +182,13 @@ impl AppState {
                 slot.rev += 1;
                 drop(slot);
                 self.ping();
-                let Pending::Form { spec, resolve } = taken else {
+                let Pending::Form { shape, resolve } = taken else {
                     unreachable!("matched Pending::Form above")
                 };
                 // Same reassembly as the browser `/submit` — this path used
                 // to forward the raw flat map, so a shape-carrying form
                 // submitted via the API was never decodable Haskell-side.
-                let _ = resolve.send(answer_value(&spec, submission));
+                let _ = resolve.send(answer_value(&shape, submission));
                 Ok(())
             }
             Pending::Form { .. } => Err(FormApiSubmitError::NonceMismatch { current: slot.rev }),
@@ -211,10 +211,10 @@ impl WebGate {
 }
 
 impl OperatorGate for WebGate {
-    fn present_form(&self, spec: &FormSpec) -> Jv {
+    fn present_form(&self, shape: &FormShape) -> Jv {
         let (resolve, wait) = oneshot::channel();
         self.state.publish(Pending::Form {
-            spec: spec.clone(),
+            shape: shape.clone(),
             resolve,
         });
         // The sender is dropped only if the pending slot is replaced (a newer
@@ -284,8 +284,8 @@ async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
         return err_json("submission must be a flat JSON object".to_string());
     };
     match st.take() {
-        Pending::Form { spec, resolve } => {
-            let _ = resolve.send(answer_value(&spec, submission));
+        Pending::Form { shape, resolve } => {
+            let _ = resolve.send(answer_value(&shape, submission));
             Json(json!({"ok": true})).into_response()
         }
         other => {
@@ -328,8 +328,8 @@ fn err_json(msg: String) -> Response {
 /// there is no intermediate answer language. An incomplete or wrong-typed
 /// submission resolves to `{}`, which that decode rejects and re-presents —
 /// the same path every malformed submission takes.
-fn answer_value(spec: &FormSpec, submission: Map<String, Jv>) -> Jv {
-    collect_form_json(&spec.shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
+fn answer_value(shape: &FormShape, submission: Map<String, Jv>) -> Jv {
+    collect_form_json(shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
 }
 
 /// Whether every variant of a sum is nullary — an enum, whose answer is the
@@ -432,22 +432,20 @@ mod tests {
     use super::*;
     use tidepool_harness::selfharness::operator::FieldShape;
 
-    fn spec() -> FormSpec {
-        FormSpec {
-            shape: FormShape::Product {
-                type_key: "Sample".into(),
-                constructor: "Sample".into(),
-                fields: vec![
-                    FieldShape {
-                        key: "mood".into(),
-                        shape: FormShape::String,
-                    },
-                    FieldShape {
-                        key: "count".into(),
-                        shape: FormShape::Int,
-                    },
-                ],
-            },
+    fn spec() -> FormShape {
+        FormShape::Product {
+            type_key: "Sample".into(),
+            constructor: "Sample".into(),
+            fields: vec![
+                FieldShape {
+                    key: "mood".into(),
+                    shape: FormShape::String,
+                },
+                FieldShape {
+                    key: "count".into(),
+                    shape: FormShape::Int,
+                },
+            ],
         }
     }
 
@@ -465,8 +463,8 @@ mod tests {
         }
         let body = json!({"mood": "calm", "count": 3});
         match st.take() {
-            Pending::Form { resolve, spec } => {
-                assert!(matches!(spec.shape, FormShape::Product { .. }));
+            Pending::Form { resolve, shape } => {
+                assert!(matches!(shape, FormShape::Product { .. }));
                 resolve.send(body.clone()).unwrap();
             }
             _ => panic!("expected a pending form"),
@@ -482,20 +480,14 @@ mod tests {
     /// which the decode rejects — an infinite re-prompt.
     #[test]
     fn unit_shaped_answer_survives_reassembly() {
-        let spec = FormSpec {
-            shape: FormShape::Unit,
-        };
-        assert_eq!(answer_value(&spec, Map::new()), Jv::Null);
+        assert_eq!(answer_value(&FormShape::Unit, Map::new()), Jv::Null);
     }
 
     /// An incomplete shape submission still degrades to `{}` (reject and
     /// re-present), not a panic and not a partial answer.
     #[test]
     fn incomplete_shape_submission_degrades_to_the_rejectable_empty_object() {
-        let spec = FormSpec {
-            shape: FormShape::String,
-        };
-        assert_eq!(answer_value(&spec, Map::new()), json!({}));
+        assert_eq!(answer_value(&FormShape::String, Map::new()), json!({}));
     }
 
     #[test]
@@ -516,10 +508,10 @@ mod tests {
 
     /// The wire round trip preserves the form shape.
     #[test]
-    fn form_spec_round_trips_through_serde() {
+    fn form_shape_round_trips_through_serde() {
         let s = spec();
         let wire = serde_json::to_string(&s).unwrap();
-        let back: FormSpec = serde_json::from_str(&wire).unwrap();
+        let back: FormShape = serde_json::from_str(&wire).unwrap();
         assert_eq!(s, back);
     }
 
@@ -643,10 +635,8 @@ mod tests {
     /// would let the operator check two branches of one choice.
     #[test]
     fn root_bind_path_renders_and_collects_a_root_sum() {
-        let spec = FormSpec {
-            shape: destination_shape(),
-        };
-        let html = crate::render::panel(&crate::render::View::Form(&spec), 1).into_string();
+        let shape = destination_shape();
+        let html = crate::render::panel(&crate::render::View::Form(&shape), 1).into_string();
         assert!(
             html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
             "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"

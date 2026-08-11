@@ -21,7 +21,7 @@ use tidepool_harness::log::{Actor, AnswerOutcome, Event, LogHeader, LogReader, L
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, HoleRouting, Ui};
+use tidepool_harness::{Harness, HoleRouting};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -743,10 +743,8 @@ async fn follow_up_after_dialog_resume_to_done() {
 /// do-block completes. This is the re-suspend arm of `resume_parent`: it must
 /// classify + publish the second hole's REAL site + type (`HoleRouting::RunLLMTurn
 /// { ty: Some("Bool"), .. }`), not `None`/`None`. Also asserts the typed-answer
-/// path works on hole 2: the mechanical
-/// `Ui::Choice` form is derivable from the SAME `Bool` type via
-/// `pending_derived_ui`, and answering it (in-context, via
-/// `answer_run_llm_turn` again) resumes the continuation to completion.
+/// path works on hole 2: answering it (in-context, via `answer_run_llm_turn`
+/// again) resumes the continuation to completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_second_sequential_hole_carries_its_type() {
     support::require_extract();
@@ -817,17 +815,6 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
         second_ty.as_deref(),
         Some("Bool"),
         "the SECOND hole must carry its real type from the fresh classification, not None"
-    );
-
-    // The typed-answer/derived-form path works on hole 2: `Bool` is a nullary
-    // sum, so the server-derived mechanical form is a Choice — provable only
-    // if the second hole's type resolved correctly.
-    let derived = harness
-        .pending_derived_ui(root)
-        .expect("hole 2's type resolves to a mechanically-derivable Ui");
-    assert!(
-        matches!(derived, Ui::Choice { .. }),
-        "Bool derives a Choice form, got {derived:?}"
     );
 
     // The durable log's second HolePublished record also carries site + ty.

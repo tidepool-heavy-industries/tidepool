@@ -37,8 +37,7 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, FormSpec, Harness, LogObserver, OperatorGate,
-    SelfHarnessDriver,
+    answerer_decls, load_harness_source, Harness, LogObserver, OperatorGate, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -158,8 +157,8 @@ impl ScriptedGate {
 }
 
 impl OperatorGate for ScriptedGate {
-    fn present_form(&self, spec: &FormSpec) -> serde_json::Value {
-        let shape = spec.shape.clone();
+    fn present_form(&self, shape: &FormShape) -> serde_json::Value {
+        let shape = shape.clone();
         self.seen.lock().unwrap().push(shape.clone());
 
         match &shape {

@@ -48,7 +48,7 @@ use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{Event, FormSource, Observer};
-use crate::selfharness::operator::{FormSpec, OperatorGate, StdinGate};
+use crate::selfharness::operator::{FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::timing;
@@ -1095,10 +1095,10 @@ impl SelfHarnessDriver {
                         // re-suspends on a fresh `AskUserWith`) and returns the first
                         // outcome that ISN'T another operator form — a `runLLMTurn`
                         // suspension the main loop then services, or a completion.
-                        HoleRouting::AskUser { spec } => {
+                        HoleRouting::AskUser { shape } => {
                             outcome = self.service_outer_askuser_hole(
                                 hole.clone(),
-                                spec.clone(),
+                                shape.clone(),
                                 &compiled,
                             )?;
                         }
@@ -1299,8 +1299,8 @@ impl SelfHarnessDriver {
                     if matches!(classified.routing, HoleRouting::Finalize { .. }) {
                         return Ok(out);
                     }
-                    if let HoleRouting::AskUser { spec } = &classified.routing {
-                        match self.service_askuser_hole(node, spec).await? {
+                    if let HoleRouting::AskUser { shape } = &classified.routing {
+                        match self.service_askuser_hole(node, shape).await? {
                             Some(finalize_outcome) => return Ok(finalize_outcome),
                             None => {
                                 // The askUser chain resolved (the answerer's block
@@ -1396,7 +1396,7 @@ impl SelfHarnessDriver {
     }
 
     /// Service a contiguous run of `askUser` suspensions on `node`, starting
-    /// from the just-classified `spec`: block on the operator gate for a
+    /// from the just-classified `shape`: block on the operator gate for a
     /// submission ([`OperatorGate::present_form`]),
     /// resume the answerer with it via [`Harness::answer_dialog`] (the same
     /// audited resume path a mechanical dialog answer uses — `answer_dialog`
@@ -1425,9 +1425,9 @@ impl SelfHarnessDriver {
     async fn service_askuser_hole(
         &mut self,
         node: NodeId,
-        spec: &FormSpec,
+        shape: &FormShape,
     ) -> Result<Option<TurnOutcome>, DriverError> {
-        let mut spec = spec.clone();
+        let mut shape = shape.clone();
         let mut reprompts: u32 = 0;
         loop {
             if reprompts >= ASKUSER_MAX_REPROMPTS {
@@ -1442,14 +1442,14 @@ impl SelfHarnessDriver {
             let form_source = FormSource::Answerer { node };
             self.emit(Event::FormPresented {
                 source: form_source.clone(),
-                spec: spec.clone(),
+                shape: shape.clone(),
             });
             // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
             // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
             // under `block_in_place` so that blocking wait yields the tokio
             // worker rather than stalling it.
             let gate = Arc::clone(&self.gate);
-            let form = spec.clone();
+            let form = shape.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
             self.emit(Event::FormSubmitted {
                 source: form_source,
@@ -1467,8 +1467,8 @@ impl SelfHarnessDriver {
                     classified,
                 }));
             }
-            if let HoleRouting::AskUser { spec: next_spec } = classified.routing {
-                spec = next_spec;
+            if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
+                shape = next_shape;
                 continue;
             }
             return Err(DriverError::Session(
@@ -1482,7 +1482,7 @@ impl SelfHarnessDriver {
 
     /// Service a run of `askUser` suspensions the AUTHORED OUTER loop itself
     /// raised (distinct from [`Self::service_askuser_hole`], which handles a
-    /// nested ANSWERER's form). Present `spec` via the operator gate
+    /// nested ANSWERER's form). Present `shape` via the operator gate
     /// ([`OperatorGate::present_form`]),
     /// convert the flat submission into the `Value` `askUserRaw :: Value -> M
     /// Value` returns ([`engine::json_answer_to_value`] against the outer
@@ -1507,11 +1507,11 @@ impl SelfHarnessDriver {
     fn service_outer_askuser_hole(
         &mut self,
         hole: String,
-        spec: FormSpec,
+        shape: FormShape,
         compiled: &CompiledTurn,
     ) -> Result<ResidentOutcome, DriverError> {
         let mut hole = hole;
-        let mut spec = spec;
+        let mut shape = shape;
         let mut reprompts: u32 = 0;
         loop {
             if reprompts >= ASKUSER_MAX_REPROMPTS {
@@ -1525,12 +1525,12 @@ impl SelfHarnessDriver {
 
             self.emit(Event::FormPresented {
                 source: FormSource::OuterLoop,
-                spec: spec.clone(),
+                shape: shape.clone(),
             });
             // Sync-blocking gate under `block_in_place` (see the frozen contract):
             // a web gate parks a channel here; yield the worker while it waits.
             let gate = Arc::clone(&self.gate);
-            let form = spec.clone();
+            let form = shape.clone();
             let submission = tokio::task::block_in_place(move || gate.present_form(&form));
             self.emit(Event::FormSubmitted {
                 source: FormSource::OuterLoop,
@@ -1555,11 +1555,11 @@ impl SelfHarnessDriver {
                 } => {
                     let classified =
                         engine::classify_hole(request, &compiled.table, &compiled.asks);
-                    if let HoleRouting::AskUser { spec: next_spec } = classified.routing {
+                    if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
                         // askUser's Haskell-side decode-retry re-suspended on a
                         // fresh form: re-present it (does NOT count as progress).
                         hole = next_hole.clone();
-                        spec = next_spec;
+                        shape = next_shape;
                         continue;
                     }
                     // A runLLMTurn suspension (or anything else) — hand it back
