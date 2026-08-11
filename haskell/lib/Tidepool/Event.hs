@@ -10,17 +10,15 @@
 --
 -- @
 -- 'withHandler' ('headChanged' parentTree) (\\change ->
---   for_ childAgents $ \\child ->
---     pokeAgent child (whenSafe (Rebase (newHead (value change))))
---   ) $ do
---     parent <- spawnAgent parentSpec parentTask
---     waitAgent parent
+--   say ("parent HEAD moved to " <> renderGitOid ('newHead' ('value' change)))
+--   ) $
+--   spawnAgent \@WorkerResult (spawnSpecIn (worktreeId parentTree) "parent" task)
 -- @
 --
 -- The handler closure runs in the SAME @M effs@ environment as the code around
--- it.  It may send a typed message, spawn a reviewer, ask the operator, or
--- record a receipt — whatever its effect row permits.  Nothing about it is a
--- restricted callback context.
+-- it.  It may spawn a reviewer, ask the operator, write a file, or record a
+-- receipt — whatever its effect row permits.  Nothing about it is a restricted
+-- callback context.
 --
 -- == Handler semantics
 --

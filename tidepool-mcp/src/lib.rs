@@ -755,6 +755,56 @@ mod tests {
             desc.contains("tidepool://capabilities"),
             "the qualified-namespace list points at the live capabilities index:\n{desc}"
         );
+        // #335: every verb in a modelled snippet returns `Either <Err> a`, so
+        // every snippet that USES a verb's result must unwrap it first. These
+        // two examples applied `<&> stake limit` / `<&> (^? …)` straight to the
+        // `Either` and could not typecheck; pin the unwrapped spellings.
+        assert!(
+            desc.contains("Right hits <- grepGlob target \"**/*.rs\""),
+            "the input-lane example must bind grepGlob's Right, not map over the Either:\n{desc}"
+        );
+        assert!(
+            desc.contains("Right v <- llm (SObj"),
+            "the llm extraction example must bind the Right before applying optics:\n{desc}"
+        );
+        assert!(
+            !desc.contains("<&> stake limit") && !desc.contains("p <&> (^? key"),
+            "no snippet may apply a pure function to an unwrapped Either result:\n{desc}"
+        );
+    }
+
+    /// The per-effect descriptions are served verbatim as
+    /// `tidepool://effect/{name}`, so their snippets are style guide too. Two
+    /// things they must model, because following them otherwise does not
+    /// compile: `askUser @T` needs `FromJSON` (its constraint is literally
+    /// `DerivedForm a = (FormRoot a, FromJSON a)` — `Generic` alone builds the
+    /// form but cannot read the submission back), and the typed spawn is
+    /// `spawnAgent @r`, whose result type additionally needs `JsonSchema`.
+    #[test]
+    fn effect_descriptions_model_the_typed_derive_sets() {
+        let ask = askuser_decl().description;
+        assert!(
+            ask.contains("derive `Generic` and `FromJSON`"),
+            "askUser's derive set must name FromJSON, not Generic alone:\n{ask}"
+        );
+        assert!(
+            ask.contains("deriving (Generic, FromJSON)") && ask.contains("askUser @Deploy"),
+            "askUser must carry a worked `askUser @T` example:\n{ask}"
+        );
+
+        let sub = subagent_decl().description;
+        assert!(
+            sub.contains("deriving (Generic, FromJSON, JsonSchema)"),
+            "a typed spawn result type needs JsonSchema in its derive set:\n{sub}"
+        );
+        assert!(
+            sub.contains("spawnAgent @WorkerResult (spawnSpec"),
+            "the typed spawn surface must be shown, not only recommended:\n{sub}"
+        );
+        assert!(
+            sub.contains("Tidepool.Agent.Spawn"),
+            "the typed spawn surface is not auto-imported — name its module:\n{sub}"
+        );
     }
 
     #[test]

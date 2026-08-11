@@ -23,10 +23,14 @@
 -- >   , caveats  :: [Text]
 -- >   } deriving (Show, Eq, Generic, FromJSON, JsonSchema)
 -- >
--- > result <- spawnAgent (spawnSpec wspec "porter" "port the handler")
+-- > result <- spawnAgent @WorkerResult (spawnSpec wspec "porter" "port the handler")
 -- > case result of
 -- >   Right (outcome, r) -> ...
 -- >   Left err           -> say (renderSpawnError err)
+--
+-- The @\@WorkerResult@ is what fixes @r@ — it is the only thing that says
+-- which schema the worker is held to, so it is written at the call site even
+-- when a later pattern match could in principle infer it.
 --
 -- __The result type must be a single-constructor RECORD, not a sum.__
 -- Established live against the pinned backend on 2026-08-11, not derived from

@@ -222,7 +222,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "into a typed record and the whole payload is available by field:\n",
         "```haskell\n",
         "data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
-        "do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); grepGlob target \"**/*.rs\" <&> stake limit }\n",
+        "do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (stake limit hits) }\n",
         "```\n",
         "For a single field, optics read straight off the `Value`: `input ^? key \"target\" . _String`. ",
         "For a whole-file write, put the body on `input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.\n\n",
@@ -232,7 +232,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "List-only: `length`, `take`, `drop`, `null`. tidepool://capabilities indexes the full shadow surface.\n\n",
         "## Examples (expression-first)\n",
         "```haskell\n",
-        "glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
+        "glob \"**/*.rs\" >>= liftEither >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
         "do { Right src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
         "```\n\n",
         "Per-effect helper signatures live in `tidepool://effect/{name}`; library verbs in ",
@@ -672,6 +672,40 @@ mod tests {
         assert!(!md.contains("Text -> Text -> M ()"));
         assert!(!md.contains("Value -> M ()"));
         assert!(!md.contains("Text -> Text -> M Value"));
+    }
+
+    /// The served guide's snippets ARE the style guide (see this crate's
+    /// CLAUDE.md review rule), so they must model the post-#335 surface: every
+    /// effect verb returns `Either <Err> a`, and a snippet that consumes a
+    /// verb's result unwraps it first (`Right x <- …` or `>>= liftEither`).
+    /// Both examples below used to apply a pure function straight to the
+    /// `Either` and could not have typechecked if pasted.
+    #[test]
+    fn guide_examples_unwrap_typed_effect_failure() {
+        let decls = crate::standard_decls();
+        let ctx = ResourceCtx {
+            effects: &decls,
+            lib_dirs: &[],
+            patterns_path: None,
+            stdlib_dir: None,
+        };
+        let md = guide_md(&ctx);
+        assert!(
+            md.contains("glob \"**/*.rs\" >>= liftEither >>= mapM"),
+            "the expression-first glob example must unwrap the Either:\n{md}"
+        );
+        assert!(
+            md.contains("Right hits <- grepGlob target \"**/*.rs\""),
+            "the input-lane example must bind grepGlob's Right:\n{md}"
+        );
+        assert!(
+            md.contains("Right src <- readFile"),
+            "the explicit-do example must bind readFile's Right:\n{md}"
+        );
+        assert!(
+            !md.contains("glob \"**/*.rs\" >>= mapM") && !md.contains("<&> stake limit"),
+            "no guide snippet may map a pure function over an unwrapped Either:\n{md}"
+        );
     }
 
     #[test]

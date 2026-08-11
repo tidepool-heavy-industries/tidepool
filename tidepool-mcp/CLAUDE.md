@@ -79,9 +79,9 @@ free-form intelligence window. `ask` is structured — the reply is validated
 against the schema, extract it with optics.
 
 ```haskell
-data   <- expensiveScan
-go     <- ask (SObj [("proceed", SBool)]) (formatMenu data) <&> (^? key "proceed" . _Bool)
-if go == Just True then expensiveAnalysis data else pure "skipped"
+scan <- expensiveScan
+go   <- ask (SObj [("proceed", SBool)]) (formatMenu scan) <&> (^? key "proceed" . _Bool)
+if go == Just True then expensiveAnalysis scan else pure "skipped"
 ```
 
 **Census**: one eval replaces N tool calls — `fsGlob` + `mapM fsMetadata` +
