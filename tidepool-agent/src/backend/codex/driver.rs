@@ -151,6 +151,17 @@ impl CodexAgentBackend {
         self.resolved_model.as_deref()
     }
 
+    /// Every JSONL frame exchanged so far, in wire order.
+    ///
+    /// Exists so a live run can commit its own transcript and have
+    /// [`replay`](crate::backend::codex::replay) drive the production pump over
+    /// it forever after. That is the whole record/replay bargain: one bounded
+    /// live spend buys repeatable protocol coverage, and a recording is
+    /// evidence where a hand-written imitation would be a guess.
+    pub fn frames(&self) -> &[crate::backend::codex::process::RecordedFrame] {
+        self.session.as_ref().map(Session::frames).unwrap_or(&[])
+    }
+
     /// Kill the app-server and confirm it was reaped. Best effort is not good
     /// enough here — [`Session::shutdown`] checks the pid rather than trusting
     /// that the signal was sent.
@@ -242,6 +253,16 @@ impl AgentBackend for CodexAgentBackend {
             .block_on(session.start_turn(&params, timeout))
             .map_err(map_session_error)?;
         project_stop(stop, session, &resolved_model)
+    }
+
+    /// The recorded frames, rendered one per line — the exact format
+    /// [`replay::TranscriptTransport`](crate::backend::codex::replay::TranscriptTransport)
+    /// reads back.
+    fn transcript_jsonl(&self) -> Vec<String> {
+        self.frames()
+            .iter()
+            .map(|f| serde_json::to_string(f).expect("a RecordedFrame always serializes"))
+            .collect()
     }
 
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {

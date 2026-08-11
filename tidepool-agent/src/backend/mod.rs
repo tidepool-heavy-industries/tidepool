@@ -73,6 +73,22 @@ pub trait AgentBackend {
     /// rather than answering the wrong call — a misrouted reply is exactly the
     /// failure the correlation triple exists to make detectable.
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError>;
+
+    /// This backend's own record of its wire traffic so far, as opaque JSONL
+    /// lines — empty when it keeps none.
+    ///
+    /// `Vec<String>` and NOT a typed frame, deliberately: the seam may not name
+    /// a backend's protocol types (`lib.rs`'s containment rule), and the only
+    /// consumer of a recording is a replay transport living inside the same
+    /// backend module, which can parse its own format. To everything above the
+    /// seam these are bytes to write to a file.
+    ///
+    /// It exists so ONE bounded live run can buy repeatable protocol coverage:
+    /// record once, replay in CI forever. A recording is evidence; a
+    /// hand-written imitation of a backend is drift waiting to happen.
+    fn transcript_jsonl(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Run one turn to completion, refusing every tool call it makes.

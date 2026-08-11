@@ -113,6 +113,14 @@ impl SubagentHandler {
         &self.spawner
     }
 
+    /// The backend's own transcript, as opaque JSONL lines — empty for a
+    /// backend that keeps none (every mock). The live acceptance writes this to
+    /// a fixture so the recording can drive the production pump in CI
+    /// afterwards.
+    pub fn backend_transcript_jsonl(&self) -> Vec<String> {
+        self.backend.transcript_jsonl()
+    }
+
     // ------------------------------------------------------------------
     // Verb methods (errors-tagged: typed Result, no cx — the generated
     // dispatch arm wraps with cx.respond, Ok→Right / Err→Left).
