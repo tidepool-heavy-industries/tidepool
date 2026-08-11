@@ -1,10 +1,7 @@
 //! The self-iterating harness (`plans/self-iterating-harness/`): the outer
-//! `render`/`loop` driver over the `Harness`/`Agent` monad split, layered
-//! on top of this crate's existing turn engine + node tree rather
-//! than replacing them — the nested Agent session that answers a
-//! `runLLMTurn` hole IS a [`crate::harness::Harness`] node, driven by the
-//! same `run_to_hole_or_done` turn loop the fork/return-control path already
-//! uses.
+//! `render`/`loop` driver over the `Harness`/`Agent` monad split. The nested
+//! Agent session that answers a `runLLMTurn` hole IS a
+//! [`crate::harness::Harness`] node.
 //!
 //! # Modules
 //!

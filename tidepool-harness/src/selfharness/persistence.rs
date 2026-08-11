@@ -265,12 +265,7 @@ mod tests {
     /// path ([`crate::selfharness::driver`]'s `SelfHarnessDriver` needs a
     /// compiled harness to run a cycle at all, so this exercises the
     /// envelope logic — [`save_checkpoint`]/[`load_checkpoint`] plus the
-    /// `Checkpoint.iteration` field — directly). Mirrors the three points
-    /// `selfharness_persistence::committed_cycles_restore_state_and_summary_from_the_same_generation`
-    /// asserts against a real driver: iteration 1 after "cycle 1" commits,
-    /// a bare reload (no cycle run) yields that SAME persisted iteration
-    /// rather than resetting to 0, and iteration 2 after "cycle 2" commits
-    /// CONTINUING from what was reloaded, not from a fresh 0.
+    /// `Checkpoint.iteration` field — directly).
     #[test]
     fn iteration_round_trips_through_save_and_load() {
         let dir = tempfile_dir();
@@ -284,11 +279,8 @@ mod tests {
         // THE point: a bare reload — no cycle run in between — must yield the
         // PERSISTED iteration, not 0. This covers the ENVELOPE half of restart
         // continuity: that `iteration` survives the write/read round trip at
-        // all. That the driver then RESUMES from it is a separate claim,
-        // covered end-to-end by `tidepool-web/tests/crash_recovery.rs` (which
-        // kills a process mid-turn and asserts the iteration continues 1 -> 3
-        // across the restart) and at the driver level by
-        // `selfharness_persistence`. Do not read this test as proving those.
+        // all. That the driver then RESUMES from it is a separate claim this
+        // test does not cover.
         let restored = load_checkpoint(&path)
             .expect("load after cycle 1")
             .expect("cycle 1's checkpoint is on disk");

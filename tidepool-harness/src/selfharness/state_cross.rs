@@ -6,18 +6,15 @@
 //! proven for other typed/opaque values crossing the Rust/Haskell boundary:
 //!
 //! - **outbound** (`state_out`): render an evaluated `Value` to
-//!   `serde_json::Value` via [`tidepool_runtime::value_to_json`] — the same
-//!   function `crate::engine::decode_askwith` already uses to pull an
-//!   `AskWith` payload out of a suspended request.
+//!   `serde_json::Value` via [`tidepool_runtime::value_to_json`].
 //! - **inbound** (`state_in`): splice the prior loop's JSON as a Haskell
-//!   literal bound to `__selfHarnessState :: State`, mirroring
-//!   `tidepool_mcp::eval_prep::input_binding_source`'s `input :: Aeson.Value`
-//!   splice — except decoded through the author's `FromJSON State` instance
-//!   (via `Aeson.eitherDecode`, always in scope: `import qualified
-//!   Tidepool.Aeson as Aeson` is in every harness turn's default preamble)
-//!   rather than left as a bare `Aeson.Value`. `None` (the very first loop)
-//!   splices a reference to the harness's own `initialState` instead of a
-//!   decode — there is no prior JSON to decode yet.
+//!   literal bound to `__selfHarnessState :: State`, decoded through the
+//!   author's `FromJSON State` instance (via `Aeson.eitherDecode`, always in
+//!   scope: `import qualified Tidepool.Aeson as Aeson` is in every harness
+//!   turn's default preamble) rather than left as a bare `Aeson.Value`.
+//!   `None` (the very first loop) splices a reference to the harness's own
+//!   `initialState` instead of a decode — there is no prior JSON to decode
+//!   yet.
 //!
 //! The prior compaction summary and the loop-iteration count are NOT
 //! spliced into Haskell at all: `driver::SelfHarnessDriver::render_framing`
@@ -71,10 +68,8 @@ pub fn state_out(value: &Value, table: &DataConTable) -> Json {
 /// Inbound: splice the prior loop's `State` JSON as a Haskell source
 /// fragment declaring `__selfHarnessState :: Loaded.State`, decoded via
 /// `Aeson.eitherDecode` against the author's `FromJSON State` instance — the
-/// source text to prepend to the next `loop`/`render` turn (mirrors
-/// `tidepool_mcp::eval_prep::input_binding_source`'s splice shape, targeting
-/// a typed `State` rather than a bare `Aeson.Value`). `None` only for the
-/// very first loop, before any `State` has been produced — that case
+/// source text to prepend to the next `loop`/`render` turn. `None` only for
+/// the very first loop, before any `State` has been produced — that case
 /// references the harness's own `initialState` instead of decoding
 /// anything.
 pub fn state_in(state_json: Option<&Json>) -> String {

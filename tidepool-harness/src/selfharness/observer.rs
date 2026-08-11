@@ -40,8 +40,7 @@ pub enum Event {
     /// hole — e.g. a nested dialog/operator elicitation mid-answer).
     TurnEnd { node: NodeId },
     /// `loop` suspended on a `runLLMTurn @A` hole; the driver is about to
-    /// service it (`site`/`ty` mirror `crate::engine::HoleRouting::RunLLMTurn`;
-    /// `prompt` is the hole's human-facing ask text).
+    /// service it (`prompt` is the hole's human-facing ask text).
     RunLLMTurnHole {
         site: u32,
         ty: Option<String>,
@@ -55,8 +54,7 @@ pub enum Event {
     /// [`Event::RunLLMTurnHole`]/[`Event::Finalize`]): `site` is the hole's
     /// yield site (correlates rounds to the hole they belong to — a hole's
     /// servicing may span several rounds before it finalizes); `round` is
-    /// 1-based WITHIN this hole's servicing (reset per hole, mirroring
-    /// `SelfHarnessDriver::drive_answerer_to_finalize`'s own local counter).
+    /// 1-based WITHIN this hole's servicing (reset per hole).
     /// `error` is the UNTRUNCATED GHC error when this round's block failed to
     /// compile; `None` when it compiled (whether it went on to suspend again
     /// or complete without finalizing). The fold this crate's acceptance test

@@ -7,10 +7,7 @@
 //!
 //! The outer session is an ordinary resident session on the one threadless
 //! (stow-as-data) suspension engine, the same mechanism `Harness`'s own nodes
-//! use — there is no second mechanism to opt out of any more (`plans/unpark/`
-//! deleted the repl's parked-thread one). It does not reimplement the turn loop:
-//! [`SelfHarnessDriver::service_runllm_hole`] reshapes
-//! `Harness::run_to_hole_or_done`, it does not duplicate it. Heaps are never
+//! use. Heaps are never
 //! copied — the nested Agent's `finalize` value crosses via
 //! [`Harness::take_finalized_value`] (deep-forced out of its own heap, never
 //! JSON) and is fed straight into [`ResidentSession::resume`] to resume the
@@ -268,12 +265,6 @@ When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
 ends your turn and hands the typed value back to the loop. `T` is the type \
 named in the request. Do not call any other effect to answer; `finalize` is \
 how you resolve the request.";
-// The "annotate the WHOLE expression :: M T" wording this suffix used to
-// carry was a stopgap for the ambiguous-`a0` defect; `__anchor`
-// (`template_turn_for`) fixed that at the source and
-// `finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
-// pins the bare shape — see `engine::answerer_hole_card`'s doc, whose voice
-// this now matches.
 
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
@@ -588,8 +579,7 @@ impl SelfHarnessDriver {
         };
         // Never actually dispatched to: `outer_cfg.suspend_tag == 0` means the
         // ONE declared effect (RunLLMTurn) always suspends before reaching a
-        // handler. Reused verbatim from `Harness::build_stack` for the same
-        // well-tested concrete stack type.
+        // handler.
         let stack: crate::harness::BoxedStack =
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
 
@@ -626,8 +616,7 @@ impl SelfHarnessDriver {
     /// [`Event::OuterCompile`] — the OUTER session has no per-node durable
     /// log of its own (`crate::log::Event::TurnStart` only ever covers a tree
     /// node's turns), so this event is the whole record of what the outer
-    /// session's fragments actually were, verbatim (dogfood-observability
-    /// deliverable 1).
+    /// session's fragments actually were, verbatim.
     fn compile_outer(
         &mut self,
         code: &str,
@@ -807,17 +796,15 @@ impl SelfHarnessDriver {
         // (`state_cross::state_in(None)`), so no redundant `pure initialState`
         // compile + round-trip through JSON is needed.
         //
-        // Since lazy boot, THIS compile — not `bootstrap` — is where "can we
-        // build a usable outer session at all" is actually answered (the
-        // eager boot seed that used to answer it is gone), so its failure
-        // (compile OR the render entry's run) takes the same
-        // Failed-vs-Poisoned classification as a bootstrap failure. A bare
-        // `?` here once returned early PAST the lifecycle update, leaving a
-        // failed driver reporting the cosmetic `Idle`, and a failed recovery
-        // reporting `Failed` forever instead of escalating. The fused compile
-        // now inherits this role for BOTH entries: a loop-entry compile
-        // failure surfaces here too, since it fails the same spawn the render
-        // entry's compile is part of.
+        // THIS compile — not `bootstrap` — is where "can we build a usable
+        // outer session at all" is actually answered, so its failure (compile
+        // OR the render entry's run) takes the same Failed-vs-Poisoned
+        // classification as a bootstrap failure. Being one fused spawn, a
+        // loop-entry compile failure surfaces here too. A bare `?` here would
+        // return early PAST the lifecycle update below, leaving a failed
+        // driver reporting the cosmetic `Idle` (or a failed recovery
+        // reporting `Failed` forever instead of escalating) — do not
+        // simplify this to one.
         let prior_compaction = self.last_compaction.clone();
         let (prompt_before, loop_turn) = match self.compile_cycle_entry(prior_state) {
             Ok((render_turn, loop_turn)) => {
@@ -1089,8 +1076,7 @@ impl SelfHarnessDriver {
     /// [`Self::service_runllm_hole`] until it completes. Returns the
     /// completed `State` value and the DataConTable its OWN compile produced
     /// (the table every hole along this same continuation classifies
-    /// against — `resume` never recompiles, mirroring
-    /// `Harness::resume_parent`'s snapshot-the-table discipline).
+    /// against — `resume` never recompiles).
     ///
     /// `precompiled`, when `Some`, is this cycle's loop entry from
     /// [`Self::compile_cycle_entry`] — used AS-IS instead of compiling one
@@ -1380,8 +1366,7 @@ impl SelfHarnessDriver {
             rounds += 1;
             let outcome = self.agent.drive_turn(node).await;
             // A retry loop that burns rounds must be visible while it is
-            // happening, not reconstructable afterwards (dogfood-observability
-            // deliverable 3) — one `AnswererRound` per round that reached a
+            // happening, not reconstructable afterwards — one `AnswererRound` per round that reached a
             // compile attempt, `error: None` on success regardless of what the
             // block went on to do. `NoBlock` never reaches a compile, so it is
             // not a round for this fold's purposes.

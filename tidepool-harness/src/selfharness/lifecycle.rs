@@ -1,10 +1,9 @@
 //! The self-harness [`driver`](crate::selfharness::driver)'s outer lifecycle
 //! — one owned enum, transitioned atomically at the driver's dispatch
-//! boundary. Modeled on `tidepool_repl::state::SessionState`
-//! (`tidepool-repl/src/state.rs:56-72`): a single source of truth rather
-//! than state smeared across booleans/`Option`s, so a composite condition
-//! (e.g. "servicing a hole while a compaction is also due") has to be
-//! resolved into one variant instead of going unrepresented.
+//! boundary: a single source of truth rather than state smeared across
+//! booleans/`Option`s, so a composite condition (e.g. "servicing a hole
+//! while a compaction is also due") has to be resolved into one variant
+//! instead of going unrepresented.
 //!
 //! This is the OUTER hylo's lifecycle (one `render`→`loop` driver), distinct
 //! from [`crate::tree::NodeState`] (one Agent node's lifecycle) — a single
