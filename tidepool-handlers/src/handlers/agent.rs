@@ -45,7 +45,7 @@ tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 /// `BindingTable` holds the single-owner lifetime flock for its binding root)
 /// and an [`AgentBackend`]. Production wires the codex adapter; every
 /// committed test wires [`tidepool_agent::backend::mock::MockBackend`] — no
-/// live-model turns in tests, ever (standing rule, Inanna 2026-08-09).
+/// live-model turns in tests, ever.
 ///
 /// **A parked turn lives exactly as long as this handler does.** Between a
 /// `StepToolCall` and its `SubagentResume` the child's request is parked with
@@ -626,10 +626,8 @@ mod tests {
     }
 
     // ==================================================================
-    // Named gates that drive the real saga. These call
-    // `CoupledSpawner::spawn_one_cycle`, which the `saga` dev implements on
-    // a sibling branch; until the wave fold they panic on its `todo!()`,
-    // deliberately un-gated so the gap is loud rather than skipped-as-passed.
+    // Named gates that drive the real saga, through
+    // `CoupledSpawner::spawn_one_cycle`.
     // ==================================================================
 
     #[test]
