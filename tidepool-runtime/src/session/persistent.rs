@@ -244,12 +244,11 @@ impl PersistentSession {
         self.machine = Some(machine);
     }
 
-    /// Drop the resident machine, freeing the session heap (its `Drop` reclaims
-    /// the persistent roots). The value-plane [`RootSlot`]s become dangling, so
-    /// only call this when the session is being torn down.
-    pub fn drop_machine(&mut self) {
-        self.machine = None;
-    }
+    // There is deliberately no `drop_machine`: tearing a session down means
+    // dropping the whole `PersistentSession` (which frees the heap through the
+    // machine's own `Drop`). A method that emptied the machine slot in place
+    // would leave a live session whose value-plane `RootSlot`s all dangle — a
+    // state with no legitimate use and no way to detect from the outside.
 
     // -- fragment preparation (CALLER thread; touches the `!Send` env) ------
 

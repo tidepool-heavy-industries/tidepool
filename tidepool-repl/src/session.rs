@@ -489,6 +489,13 @@ impl Session {
         })
     }
 
+    /// This session's id — the identity its include-tree root is named after
+    /// (`session-<id>`), and how a caller distinguishes one session from the one
+    /// that replaced it.
+    pub fn id(&self) -> SessionId {
+        self.cfg.id
+    }
+
     /// The directory the session's `Val.G<g>.hi` ifaces are written to / read
     /// from. The same include root the Lane-A `Lib` modules live under, so a
     /// reference turn's `import Tidepool.Session.Val.G<g>` resolves from the

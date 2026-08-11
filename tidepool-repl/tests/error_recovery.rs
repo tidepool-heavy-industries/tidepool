@@ -161,10 +161,6 @@ async fn empty_and_whitespace_eval() {
     // session survives whatever the empty turns did.
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-empty pure 1: {}", t.text);
-
-    // MANDATORY: close to avoid the WorkerHandle::drop deadlock (see
-    // `drop_without_close_deadlocks` below). Without this the test hangs on
-    // teardown even though every turn succeeded.
 }
 
 /// Case 7 — A bind that genuinely FAILS (to typecheck) must leave NO state:
@@ -197,18 +193,21 @@ async fn failed_bind_leaves_no_state() {
 
 /// REGRESSION — dropping a session WITHOUT explicit teardown must NOT hang.
 ///
-/// History: `WorkerHandle::drop` (tidepool-repl/src/worker.rs) used to call
-/// `t.join()` BEFORE `cmd_tx` was dropped. Rust drops struct fields only after
-/// `Drop::drop` returns, so the sender was still alive during join(); the worker
-/// thread, parked in `rx.recv()` (which returns `Err` only once EVERY sender
-/// drops), never woke → join blocked forever → teardown deadlock. ANY session
-/// never torn down (a crashed/abandoned MCP client, a panicking turn)
-/// would wedge the process on shutdown. Fix: drop/replace `cmd_tx` with a dead
-/// sender BEFORE join (mirrors `shutdown()`).
+/// History: the repl used to own a resident worker THREAD, and its handle's
+/// `Drop` joined that thread before dropping the command sender — so the
+/// worker, parked in `rx.recv()` (which returns `Err` only once EVERY sender
+/// drops), never woke and teardown deadlocked forever. ANY session never torn
+/// down (a crashed/abandoned MCP client, a panicking turn) would wedge the
+/// process on shutdown.
+///
+/// The parked-thread mechanism is gone (`plans/unpark/`): a session is plain
+/// owned data in a manager slot, so dropping it joins nothing. This test is now
+/// the standing guard that teardown stays join-free — a future "just wait for
+/// the in-flight turn" in a `Drop` would reintroduce exactly this hang.
 ///
 /// A hang can't be asserted directly, so the proof is that this test simply
 /// COMPLETES under the suite's run timeout: we open a session, run one good
-/// turn, then let `Repl` (and thus the server + `WorkerHandle`) drop at end of
+/// turn, then let `Repl` (and thus the server and its session) drop at end of
 /// scope with NO close — and still reach the final assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_without_close_does_not_hang() {
@@ -217,8 +216,7 @@ async fn drop_without_close_does_not_hang() {
         let repl = Repl::new();
         let t = repl.eval("pure (1 :: Int)").await;
         assert!(t.contains("1"), "pure 1: {}", t.text);
-        // NO close(): `repl` drops HERE → server → WorkerHandle::drop. Before the
-        // fix this deadlocked; now it must return promptly.
+        // NO close(): `repl` drops HERE → server → the session in its slot.
     }
     // Reaching this line proves teardown did not hang — the test completing
     // (no deadlock, no panic) IS the assertion; no explicit check needed.

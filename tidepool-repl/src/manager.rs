@@ -245,13 +245,37 @@ impl SessionManager {
 mod tests {
     use super::*;
 
-    /// The slot transitions, exercised without a real session: `install` is the
-    /// only constructor and it needs a live `Session`, so this drives the shape
-    /// through the public surface a GHC-free unit test can reach — presence,
-    /// the shared slots, and the not-installed empty case. The full
-    /// checkout/restore round trip is covered end-to-end by the suspension
-    /// suites (`tests/ask_resume.rs`, `tests/lifecycle_state.rs`), which drive
-    /// real sessions through `dispatch_tool`.
+    use tidepool_repr::SessionId;
+
+    use crate::session::{BoxedStack, SessionConfig, DEFAULT_NURSERY_SIZE};
+
+    /// A real, openable `Session` tagged with `id`. `Session::open` only creates
+    /// the session include dir and an empty decl log — no GHC, no machine (that
+    /// boots lazily on the first real turn) — so the slot machine is testable
+    /// with genuine sessions rather than a stand-in, and `Session::id` gives the
+    /// tests a way to say WHICH session is in the slot.
+    fn test_session(id: u64, root: &std::path::Path) -> Box<Session> {
+        let cfg = SessionConfig {
+            id: SessionId(id),
+            root: root.join(format!("session-{id}")),
+            base_include: Vec::new(),
+            decls: Vec::new(),
+            preamble: String::new(),
+            effect_stack: String::new(),
+            ask_tag: 0,
+            module_env: tidepool_runtime::session::ModuleEnv::standalone_default(),
+            nursery_size: DEFAULT_NURSERY_SIZE,
+        };
+        let session = Session::open(cfg, Box::new(|| Box::new(frunk::HNil) as BoxedStack))
+            .expect("a session opens on a fresh dir");
+        Box::new(session)
+    }
+
+    /// The slot transitions on an absent entry: every operation is inert rather
+    /// than a panic. The full checkout/restore round trip on a live machine is
+    /// covered end-to-end by the suspension suites (`tests/ask_resume.rs`,
+    /// `tests/lifecycle_state.rs`), which drive real turns through
+    /// `dispatch_tool`.
     #[test]
     fn empty_manager_has_no_entry() {
         let mgr = SessionManager::new();
@@ -265,5 +289,110 @@ mod tests {
         // Restoring/dropping against an absent entry is inert, not a panic.
         mgr.drop_entry(1);
         mgr.remove();
+    }
+
+    /// The POSITIVE half of the wedge path: `drop_entry` with the CURRENT epoch
+    /// really does retire the entry, so a wedged turn's session slot is freed
+    /// rather than left `Running` forever. (The stale-epoch half — the same call
+    /// arriving after a reset — is the ABA test below.)
+    #[test]
+    fn drop_entry_on_the_current_epoch_retires_the_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = SessionManager::new();
+        assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
+        let checkout = mgr.checkout_run().expect("idle → running");
+
+        mgr.drop_entry(checkout.epoch);
+        assert!(
+            mgr.state().is_none(),
+            "a wedged turn's entry must be retired, not left Running"
+        );
+        // The slot is free again: a fresh session installs.
+        assert!(
+            mgr.install(test_session(2, dir.path())).is_ok(),
+            "the freed slot accepts a fresh session"
+        );
+    }
+
+    /// THE EPOCH GUARD — an ABA on the session slot.
+    ///
+    /// The pre-cutover model serialized every operation through one worker
+    /// thread and one job channel, so this race could not arise. Now a turn
+    /// owns its session out on the blocking pool while `session_reset` can
+    /// remove the entry and install a FRESH session underneath it, and the
+    /// epoch is the ONLY thing distinguishing "hand back / retire the entry I
+    /// was checked out of" from "…whatever is there now".
+    ///
+    /// The interleaving, driven here at the manager level (no GHC needed): a
+    /// turn checks out, a reset swaps the entry, and only THEN does the stale
+    /// turn take each of its three exits. All three must be inert, and the
+    /// fresh session must still be the one in the slot — asserted by session
+    /// id, because a missing guard would silently leave the STALE session
+    /// installed and drop the fresh one.
+    #[test]
+    fn a_stale_turn_cannot_clobber_a_session_installed_after_a_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = SessionManager::new();
+
+        // --- exit 1: `drop_entry` (the two wedge paths) ----------------------
+        assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
+        let stale = mgr.checkout_run().expect("idle → running");
+
+        // `session_reset` lands mid-turn: entry removed, fresh session installed.
+        mgr.remove();
+        assert!(
+            mgr.install(test_session(2, dir.path())).is_ok(),
+            "a fresh session installs after the reset"
+        );
+        let fresh_state = mgr.state().expect("fresh entry present");
+
+        // The stale turn now declares itself wedged. It must NOT take the fresh
+        // entry with it.
+        mgr.drop_entry(stale.epoch);
+        let after_wedge = mgr
+            .state()
+            .expect("a stale wedge must not remove the entry installed after the reset");
+        assert!(
+            Arc::ptr_eq(&after_wedge, &fresh_state),
+            "the fresh entry must be untouched, not replaced"
+        );
+
+        // --- exit 2: `restore_idle` (the completed-turn path) ---------------
+        let Checkout {
+            session: stale_session,
+            epoch: stale_epoch,
+        } = stale;
+        mgr.restore_idle(stale_epoch, stale_session);
+        let fresh = mgr
+            .checkout_run()
+            .expect("the fresh session is still Idle and checkoutable");
+        assert_eq!(
+            fresh.session.id(),
+            SessionId(2),
+            "a stale restore must drop its session, not install it over the fresh one"
+        );
+
+        // --- exit 3: `restore_suspended` (the stowed-ask path) --------------
+        // The same interleaving again, now with session 2 as the stale turn.
+        let Checkout {
+            session: stale2,
+            epoch: stale2_epoch,
+        } = fresh;
+        mgr.remove();
+        assert!(
+            mgr.install(test_session(3, dir.path())).is_ok(),
+            "a third session installs"
+        );
+        mgr.restore_suspended(stale2_epoch, stale2, ContinuationId("scont_stale".into()));
+        // `checkout_run` refuses a Suspended slot, so its success is itself the
+        // proof that the stale hole was not installed on the fresh entry.
+        let third = mgr
+            .checkout_run()
+            .expect("the third session is still Idle — not Suspended on a stale hole");
+        assert_eq!(
+            third.session.id(),
+            SessionId(3),
+            "a stale suspend-restore must drop its session, not install it over the fresh one"
+        );
     }
 }

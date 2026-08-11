@@ -15,14 +15,14 @@
 //!   so a slow cold-cache GHC compile isn't misdiagnosed as a runaway, and
 //!   `parked_or_in_effect` to distinguish "will park at the next boundary" from
 //!   "pure-compute runaway" at the grace deadline.
-//! - `tidepool-repl`'s resident-worker `ReplAskDispatcher` uses the abort latch
-//!   only: on a turn timeout it requests an abort and reads `is_in_effect` at the
-//!   grace deadline (a long external Exec/Http call, not a pure loop). It never
-//!   requests a pause — the pause states and grace machinery are simply unused
+//! - `tidepool_runtime::session::GateDispatcher` — the shared timeout-yield
+//!   checkpoint the oneshot eval engine and every `tidepool-repl` turn wrap
+//!   their handler stack in — uses the abort latch only: on a turn timeout the
+//!   server requests an abort and reads `is_in_effect` at the grace deadline (a
+//!   long external Exec/Http call, not a pure loop). It never requests a pause,
+//!   and it never intercepts the ask tag (the JIT's own suspend driver catches
+//!   that first) — the pause states and grace machinery are simply unused
 //!   there, but the gate is one type.
-//!
-//! Only the gate is shared; the DISPATCHERS and worker/thread-parking mechanics
-//! stay crate-local (see each `ask.rs`).
 //!
 //! ## The two cancellation channels (deliberate layering, one surfaced cause)
 //!

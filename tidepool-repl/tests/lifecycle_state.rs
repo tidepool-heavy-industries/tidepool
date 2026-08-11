@@ -3,13 +3,13 @@
 //! These guard the concurrency bug class the smeared lifecycle allowed, all
 //! through the real `dispatch_tool` entry point:
 //!   - H1: `session_reset` while a turn is suspended on an `ask` must NOT hang
-//!     (the worker is parked on `response_rx`, not the command channel; reset
-//!     releases the suspension so it can unwind and observe the `Close`) and it
-//!     must DROP the pending ask (abort folds into reset).
+//!     (reset removes the manager entry outright, dropping the session and the
+//!     stowed continuation with it) and it must DROP the pending ask (abort
+//!     folds into reset).
 //!   - M5: a `session_run` on a suspended session is REJECTED with a clear error
-//!     (the busy-guard), not silently queued behind the parked worker.
+//!     (the busy-guard), not silently queued behind the suspension.
 //!   - H2: an abandoned suspension (never resumed) is reaped back to `Idle` so it
-//!     doesn't leak a worker thread + JIT machine.
+//!     doesn't leak a JIT machine.
 //!   - H3: a runaway turn is cancelled at a JIT safepoint and self-heals to Idle.
 //!
 //! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); panics loudly otherwise.
@@ -36,9 +36,9 @@ fn parse_suspended(text: &str) -> String {
         .to_string()
 }
 
-/// H1: resetting a session that is parked on an `ask` must return promptly — it
-/// must NOT deadlock on `WorkerHandle::shutdown`'s `join()` — and it must DROP
-/// the pending continuation (abort folds into reset). We wrap the reset in a
+/// H1: resetting a session that is suspended on an `ask` must return promptly —
+/// it must not block on the in-flight turn in any way — and it must DROP the
+/// pending continuation (abort folds into reset). We wrap the reset in a
 /// generous timeout: a hang fails the test instead of stalling the suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_while_suspended_drops_ask_and_recovers() {
@@ -54,8 +54,7 @@ async fn reset_while_suspended_drops_ask_and_recovers() {
         "unexpected cont id: {cont_id}"
     );
 
-    // Reset WITHOUT resuming — must come back well within the worker's 30s ack
-    // window, not hang.
+    // Reset WITHOUT resuming — must come back promptly, not hang.
     let reset = tokio::time::timeout(Duration::from_secs(45), repl.reset()).await;
     let turn = reset.expect("H1 REGRESSION: session_reset hung while a continuation was parked");
     assert!(

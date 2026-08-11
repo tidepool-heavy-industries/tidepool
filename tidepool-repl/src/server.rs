@@ -1390,6 +1390,113 @@ pub struct EmptyRequest {}
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A server with a session root under `dir` and NO background reaper (both
+    /// TTLs `None`, so `spawn_reaper` returns early) — the wedge tests below
+    /// call [`reap_once`] directly with an explicit TTL instead, so a sweep
+    /// happens exactly when the test says it does.
+    ///
+    /// Everything here is GHC-free: constructing a server builds strings, and
+    /// `ensure_session` only creates the session include dir. No turn is run.
+    fn wedge_test_server(dir: &std::path::Path) -> TidepoolReplServer {
+        let cfg = ReplServerConfig {
+            decls: Vec::new(),
+            ask_tag: 0,
+            base_include: Vec::new(),
+            module_env: ModuleEnv::standalone_default(),
+            session_root_base: dir.to_path_buf(),
+            nursery_size: None,
+            continuation_ttl: None,
+            wedged_ttl: None,
+            turn_timeout: None,
+        };
+        TidepoolReplServer::new(frunk::HNil, cfg)
+    }
+
+    /// `Wedged` is this lane's new reclaim path: the pre-cutover model tore a
+    /// session down through a `Close` job on the worker's channel, and that
+    /// channel is gone. A wedged turn now holds the only copy of its session, so
+    /// the entry is DROPPED — and the two ways an operator gets unstuck from
+    /// there are the reaper's TTL sweep and `session_reset`.
+    ///
+    /// Driven at the transition level rather than by manufacturing a runaway: a
+    /// pure loop that outruns the JIT cancel through the full abort grace is
+    /// neither reliable nor cheap to construct, and a flaky test here would be
+    /// worse than none. `SessionState` is already the server's own public
+    /// vocabulary, so installing `Wedged` needs no test-only production
+    /// surface.
+    #[tokio::test]
+    async fn reaper_removes_a_wedged_entry_only_once_past_its_ttl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = wedge_test_server(dir.path());
+        let state = server.ensure_session().expect("session auto-opens");
+        *state.lock() = SessionState::Wedged {
+            since: Instant::now(),
+        };
+
+        // A sweep with a TTL the wedge has NOT outlived leaves it alone — this
+        // is what makes the assertion below mean "the TTL was consulted" rather
+        // than "reaping always fires".
+        reap_once(
+            Arc::clone(&server.inner),
+            None,
+            Some(Duration::from_secs(3600)),
+        );
+        assert!(
+            server.inner.manager.state().is_some(),
+            "a wedge younger than the TTL must survive the sweep"
+        );
+
+        // Past the TTL, the entry goes — freeing the slot so the next
+        // `session_run` auto-opens a fresh session.
+        reap_once(Arc::clone(&server.inner), None, Some(Duration::ZERO));
+        assert!(
+            server.inner.manager.state().is_none(),
+            "a wedge past its TTL must be removed, not left occupying the slot"
+        );
+        let reopened = server.ensure_session().expect("a fresh session auto-opens");
+        assert!(
+            reopened.lock().is_idle(),
+            "the reopened session must be Idle and usable"
+        );
+    }
+
+    /// The other way out of a wedge: `session_reset`, the universal get-unstuck
+    /// button. It must REPLACE the entry — a fresh `Idle` one, not the wedged
+    /// one nursed back — which is what keeps reset working uniformly whether
+    /// the session was idle, suspended, or wedged.
+    #[tokio::test]
+    async fn reset_reclaims_a_wedged_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = wedge_test_server(dir.path());
+        let wedged = server.ensure_session().expect("session auto-opens");
+        *wedged.lock() = SessionState::Wedged {
+            since: Instant::now(),
+        };
+
+        let result = server.session_reset();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "reset must succeed from a wedged session"
+        );
+
+        let fresh = server
+            .inner
+            .manager
+            .state()
+            .expect("reset installs a fresh entry");
+        assert!(
+            !Arc::ptr_eq(&fresh, &wedged),
+            "reset must REPLACE the wedged entry, not revive it"
+        );
+        assert!(
+            fresh.lock().is_idle(),
+            "the replacement session must be Idle"
+        );
+    }
+
     /// Byte-identity check: `PaginateMode::Passthrough` must produce the same
     /// Haskell text as hand-patching the `Truncate`-mode preamble's
     /// `paginateResult = paginateTrunc` binding line to a pass-through no-op.
