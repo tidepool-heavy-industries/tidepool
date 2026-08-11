@@ -105,7 +105,8 @@ Env-gated, OFF by default. For the JIT-runtime / effect-machine / cache knobs se
 |------|---------------|-------------------|
 | `TIDEPOOL_DUMP_CLOSED=<needle>` | Closed Core for bindings whose binder name matches needle | Inspecting what Core the JIT actually receives for a binding |
 | `TIDEPOOL_VARID_AUDIT=1` | VarId collision report (distinct binders → same 64-bit id) | SIGILL/case-trap hunts; ruling out id collisions |
-| `TIDEPOOL_VARID_AUDIT=<hex>,<hex>` | Resolves specific VarIds to source names + enclosing top-level binder | Naming the function a JIT trace implicates |
+| `TIDEPOOL_VARID_AUDIT=<hex>,<hex>` | Resolves specific VarIds to source names: binding sites render with their enclosing top-level binder and unique, reference-only ids (externals, DataCon workers, dangling refs) as the plain qualified name | Naming the function a JIT trace implicates |
+| `TIDEPOOL_DANGLING_DEBUG=1` | `[DANGLING NVAR]` line per id the emitted program references but nothing binds — **including** the legit `Tidepool.Session.Val.*` repl-session class the hard failure subtracts | An `unresolved_var_trap` at runtime, or auditing which danglings a repl turn legitimately carries |
 | `TIDEPOOL_JOINREC_DEBUG=1` | joinrec-translation forensics (`[313-joinrec]` spew) | Join-point conversion bugs (jumps compiled as calls, wrong continuation) |
 | `TIDEPOOL_IFACE_DEBUG=1` | `[fat-iface]` interface-loading trace | Missing unfoldings / "unresolved external" mysteries |
 | `TIDEPOOL_TEST_DROP_DC=<module-qualified-name>` | D1 mutation-test fault injection: `recordDC` silently skips recording exactly the one constructor whose qualified name matches | Proving the D1 hard-fail metadata-subset defense (`Main.assertMetaCoversEmitted`) actually fires — never set outside `extract-fidelity-test` |

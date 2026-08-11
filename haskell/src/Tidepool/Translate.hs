@@ -743,35 +743,36 @@ translateModuleClosed hscEnv allBinds targetName = do
            ("=== CLOSED BIND " ++ occNameString (nameOccName (idName b)) ++ "\n"
             ++ Tidepool.GhcPipeline.dumpCore [NonRec b rhs])) matches
     Nothing -> pure ()
+  -- THE VarId index for this extraction: binding sites AND reference sites,
+  -- one describe ('describeVarId'). Every forensic consumer below reads it —
+  -- the VARID_AUDIT knob, the DANGLING_DEBUG knob, the dangling-NVar hard
+  -- failure, and meta.cbor's var_names table. Lazy: unforced unless one of
+  -- them actually needs a name.
+  let varIdSites = varIdSiteIndex closedBinds
+      nameVarId = describeVarId varIdSites
+      -- Binding sites only — a reference is not a second BINDING, so it must
+      -- not read as a collision.
+      bindSitesOf ss = [ s | s@BoundAt{} <- ss ]
   -- TIDEPOOL_VARID_AUDIT=1: report VarId collisions — distinct binding
   -- sites whose varId hashes coincide. The JIT's emit env is a flat map
   -- keyed by VarId; a collision aliases two closures (#313 t11 class).
   auditEnv <- System.Environment.lookupEnv "TIDEPOOL_VARID_AUDIT"
   case auditEnv of
     Just _ -> do
-      let sites = filter (not . isErasedBinder . fst) (concatMap bindingSites closedBinds)
-          grouped = Map.fromListWith (++)
-            [ (varId b, [(b, top)]) | (b, top) <- sites ]
-          collisions = Map.filter (\xs -> length xs > 1) grouped
-          describe (b, mtop) =
-            (case mtop of
-               Nothing -> "TOP "
-               Just t  -> "in " ++ occNameString (nameOccName (varName t))
-                          ++ "_" ++ showPprUnsafe (varUnique t) ++ ": ")
-            ++ occNameString (nameOccName (varName b))
-            ++ "_" ++ showPprUnsafe (varUnique b)
-            ++ (case nameModule_maybe (varName b) of
-                  Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
-                  Nothing -> "")
-      mapM_ (\(vid, xs) -> hPutStrLn stderr
+      let bindSiteCount = sum (map (length . bindSitesOf) (Map.elems varIdSites))
+          collisions = Map.filter (\ss -> length (bindSitesOf ss) > 1) varIdSites
+      mapM_ (\(vid, ss) -> hPutStrLn stderr
                ("[VARID COLLISION] 0x" ++ Numeric.showHex vid ""
-                ++ " sites=" ++ show (length xs) ++ ": "
-                ++ Data.List.intercalate " | " (map describe xs)))
+                ++ " sites=" ++ show (length (bindSitesOf ss)) ++ ": "
+                ++ Data.List.intercalate " | " (map describeVarSite (bindSitesOf ss))))
             (Map.toList collisions)
-      hPutStrLn stderr ("[VARID AUDIT] " ++ show (length sites)
+      hPutStrLn stderr ("[VARID AUDIT] " ++ show bindSiteCount
         ++ " binding sites, " ++ show (Map.size collisions) ++ " collisions")
       -- TIDEPOOL_VARID_AUDIT=<hex>,<hex>,...: additionally resolve specific
       -- VarIds (e.g. lam_binder values from TIDEPOOL_TRACE=calls) to names.
+      -- Resolves through the FULL index, so a dangling id — one with only
+      -- reference sites, which this knob used to answer "<not a binding
+      -- site>" for — now names itself here too.
       case auditEnv of
         Just spec | spec /= "1" -> do
           let parseHex h = case Numeric.readHex (dropWhile (== 'x') (dropWhile (== '0') h)) of
@@ -783,9 +784,7 @@ translateModuleClosed hscEnv allBinds targetName = do
                 (a, _)        -> [a]
           mapM_ (\vid -> hPutStrLn stderr
                    ("[VARID NAME] 0x" ++ Numeric.showHex vid "" ++ " = "
-                    ++ maybe "<not a binding site>"
-                             (Data.List.intercalate " | " . map describe)
-                             (Map.lookup vid grouped)))
+                    ++ nameVarId vid))
                 wanted
         _ -> pure ()
     Nothing -> pure ()
@@ -843,27 +842,23 @@ translateModuleClosed hscEnv allBinds targetName = do
   --
   -- TIDEPOOL_DANGLING_DEBUG=1 additionally prints EVERY dangling id
   -- (session-val ones included) for forensics.
-  let refVars = Map.fromListWith (++)
-        [ (varId v, [v]) | cb <- closedBinds, v <- deepVarRefsOfCB cb ]
-      describeRef v = occNameString (nameOccName (varName v))
-        ++ (case nameModule_maybe (varName v) of
-              Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
-              Nothing -> "")
-      isSessionValRef v = case nameModule_maybe (varName v) of
+  let isSessionValRef v = case nameModule_maybe (varName v) of
         Just m  -> "Tidepool.Session.Val." `isPrefixOf` moduleNameString (moduleName m)
         Nothing -> False
-      nameDangling vid = case Map.findWithDefault [] vid refVars of
-        [] -> "<no reference site in closed graph>"
-        vs -> Data.List.intercalate " | " (Data.List.nub (map describeRef vs))
+      -- Deliberately consults REFERENCE sites only, not the whole index: this
+      -- decides which extracts hard-fail, and a session val is recognized by
+      -- how the emitted program refers to it. Naming (below) reads the full
+      -- index; the fail/pass set is exactly what it always was.
+      sessionValRefs vid =
+        [ v | ReferencedAt v <- Map.findWithDefault [] vid varIdSites, isSessionValRef v ]
       hardDangling =
-        [ vid | vid <- Set.toList danglingIds
-              , not (any isSessionValRef (Map.findWithDefault [] vid refVars)) ]
+        [ vid | vid <- Set.toList danglingIds, null (sessionValRefs vid) ]
   danglingEnv <- System.Environment.lookupEnv "TIDEPOOL_DANGLING_DEBUG"
   case danglingEnv of
     Just _ ->
       mapM_ (\vid -> hPutStrLn stderr
                ("[DANGLING NVAR] 0x" ++ Numeric.showHex vid "" ++ " = "
-                ++ nameDangling vid))
+                ++ nameVarId vid))
             (Set.toList danglingIds)
     Nothing -> pure ()
   case hardDangling of
@@ -872,7 +867,7 @@ translateModuleClosed hscEnv allBinds targetName = do
       "Dangling NVar reference(s) — the emitted program references these but "
       ++ "nothing binds them; forcing one at runtime would trap as an "
       ++ "unresolved variable:\n"
-      ++ unlines [ "  0x" ++ Numeric.showHex vid "" ++ " = " ++ nameDangling vid
+      ++ unlines [ "  0x" ++ Numeric.showHex vid "" ++ " = " ++ nameVarId vid
                  | vid <- vids ]
       ++ "This is an extract-pipeline bug (a binding was renamed, culled, or "
       ++ "missed by reachability) — not a user error."
@@ -888,10 +883,12 @@ translateModuleClosed hscEnv allBinds targetName = do
   -- that can surface as a runtime "unresolved variable" — the 0x45-poisoned
   -- unresolved externals plus any dangling reference (session vals are the
   -- legit class) — shipped in meta.cbor so the JIT names the symbol instead
-  -- of a bare hex.
+  -- of a bare hex. Named through the SAME index and describe the forensic
+  -- knobs use ('describeVarId'), so a name the JIT reports back and a name
+  -- TIDEPOOL_VARID_AUDIT prints for the same id are the same string.
   let varNames =
         [ (uvKey uv, T.pack (uvModule uv ++ "." ++ uvName uv)) | uv <- unresolved ]
-        ++ [ (vid, T.pack (nameDangling vid)) | vid <- Set.toList danglingIds ]
+        ++ [ (vid, T.pack (nameVarId vid)) | vid <- Set.toList danglingIds ]
   return ClosedModule
     { cmNodes      = nodes
     , cmUsedDCs    = usedDCs
@@ -913,22 +910,6 @@ translateModuleClosed hscEnv allBinds targetName = do
     collectBound acc _ = acc
     bindersOfCB (NonRec b _) = [b]
     bindersOfCB (Rec pairs)  = map fst pairs
-    -- Walk into all expressions to find ALL variable references (for debug naming)
-    deepVarRefsOfCB :: CoreBind -> [Id]
-    deepVarRefsOfCB (NonRec _ rhs) = deepVarRefsOfExpr rhs
-    deepVarRefsOfCB (Rec pairs) = concatMap (deepVarRefsOfExpr . snd) pairs
-    deepVarRefsOfExpr :: CoreExpr -> [Id]
-    deepVarRefsOfExpr (Var v) = [v]
-    deepVarRefsOfExpr (Lit _) = []
-    deepVarRefsOfExpr (App f a) = deepVarRefsOfExpr f ++ deepVarRefsOfExpr a
-    deepVarRefsOfExpr (Lam _ e) = deepVarRefsOfExpr e
-    deepVarRefsOfExpr (Let bind e) = deepVarRefsOfCB bind ++ deepVarRefsOfExpr e
-    deepVarRefsOfExpr (Case scrut _ _ alts) =
-      deepVarRefsOfExpr scrut ++ concatMap (\(Alt _ _ rhs) -> deepVarRefsOfExpr rhs) alts
-    deepVarRefsOfExpr (Cast e _) = deepVarRefsOfExpr e
-    deepVarRefsOfExpr (Tick _ e) = deepVarRefsOfExpr e
-    deepVarRefsOfExpr (Type _) = []
-    deepVarRefsOfExpr (Coercion _) = []
 
 -- | #313 t11 fix: globally freshen duplicate binder uniques.
 --
@@ -1020,9 +1001,93 @@ uniquifyDuplicateBinders binds = do
           (env'', bs') <- goBs env' bs
           Alt c bs' <$> goE env'' rhs
 
+-- | One place a VarId is mentioned in the closed graph: a site that BINDS it
+-- (with its enclosing top-level binder — 'Nothing' when the site IS
+-- top-level) or a site that REFERENCES it.
+data VarSite
+  = BoundAt !Var !(Maybe Var)
+  | ReferencedAt !Var
+
+-- | The 'Var' a site is about, whichever kind of site it is.
+varSiteVar :: VarSite -> Var
+varSiteVar (BoundAt b _)   = b
+varSiteVar (ReferencedAt v) = v
+
+-- | THE VarId index over a closed bind graph: every binding site AND every
+-- reference site, keyed by 'varId'.
+--
+-- One index, because the two forensic knobs used to carry one each and
+-- their coverage was DISJOINT — @TIDEPOOL_VARID_AUDIT=\<hex\>@ resolved
+-- through a binding-site index and answered "not a binding site" for
+-- exactly the ids @TIDEPOOL_DANGLING_DEBUG@ could name through its
+-- reference-site index, and meta.cbor's @var_names@ (built from the same
+-- dangling naming) saw only the latter. Both knobs and that table now read
+-- this, so an id nameable by one is nameable by all three.
+--
+-- Callers hold it in a lazy @let@: nothing forces it unless a knob is set or
+-- the dangling check actually has something to name, so the happy path
+-- still never walks the closed graph for forensics.
+varIdSiteIndex :: [CoreBind] -> Map.Map Word64 [VarSite]
+varIdSiteIndex closedBinds = Map.fromListWith (++) $
+  -- Erased (type/coercion) binders are not program identity — the collision
+  -- audit has always excluded them.
+  [ (varId b, [BoundAt b top])
+  | cb <- closedBinds, (b, top) <- bindingSites cb, not (isErasedBinder b) ]
+  ++
+  [ (varId v, [ReferencedAt v]) | cb <- closedBinds, v <- deepVarRefsOfCB cb ]
+
+-- | THE renderer for one site. A binding site reports its enclosing
+-- top-level binder and its unique (that is what tells two colliding binders
+-- apart); a reference site has neither to report, so it renders as the plain
+-- qualified name — which is also what meta.cbor's @var_names@ has always
+-- shipped for a dangling id.
+describeVarSite :: VarSite -> String
+describeVarSite (ReferencedAt v) = occNameString (nameOccName (varName v)) ++ inModule v
+describeVarSite (BoundAt b mtop) =
+  (case mtop of
+     Nothing -> "TOP "
+     Just t  -> "in " ++ occNameString (nameOccName (varName t))
+                ++ "_" ++ showPprUnsafe (varUnique t) ++ ": ")
+  ++ occNameString (nameOccName (varName b))
+  ++ "_" ++ showPprUnsafe (varUnique b)
+  ++ inModule b
+
+-- | @ [Module]@ suffix, or empty for a wired-in / module-less name.
+inModule :: Var -> String
+inModule v = case nameModule_maybe (varName v) of
+  Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
+  Nothing -> ""
+
+-- | Name a VarId from 'varIdSiteIndex' — every site it has, deduplicated.
+-- The single naming path behind @TIDEPOOL_VARID_AUDIT=\<hex\>@,
+-- @TIDEPOOL_DANGLING_DEBUG=1@, the dangling-NVar hard failure, and
+-- meta.cbor's @var_names@.
+describeVarId :: Map.Map Word64 [VarSite] -> Word64 -> String
+describeVarId index vid = case Map.findWithDefault [] vid index of
+  [] -> "<no binding or reference site in closed graph>"
+  ss -> Data.List.intercalate " | " (Data.List.nub (map describeVarSite ss))
+
+-- | Every variable REFERENCE in a bind, walking into all expressions.
+deepVarRefsOfCB :: CoreBind -> [Id]
+deepVarRefsOfCB (NonRec _ rhs) = deepVarRefsOfExpr rhs
+deepVarRefsOfCB (Rec pairs) = concatMap (deepVarRefsOfExpr . snd) pairs
+
+deepVarRefsOfExpr :: CoreExpr -> [Id]
+deepVarRefsOfExpr (Var v) = [v]
+deepVarRefsOfExpr (Lit _) = []
+deepVarRefsOfExpr (App f a) = deepVarRefsOfExpr f ++ deepVarRefsOfExpr a
+deepVarRefsOfExpr (Lam _ e) = deepVarRefsOfExpr e
+deepVarRefsOfExpr (Let bind e) = deepVarRefsOfCB bind ++ deepVarRefsOfExpr e
+deepVarRefsOfExpr (Case scrut _ _ alts) =
+  deepVarRefsOfExpr scrut ++ concatMap (\(Alt _ _ rhs) -> deepVarRefsOfExpr rhs) alts
+deepVarRefsOfExpr (Cast e _) = deepVarRefsOfExpr e
+deepVarRefsOfExpr (Tick _ e) = deepVarRefsOfExpr e
+deepVarRefsOfExpr (Type _) = []
+deepVarRefsOfExpr (Coercion _) = []
+
 -- | All binding sites (binder, enclosing top-level binder) in a CoreBind,
 -- including nested Lam/Let/Case binders (Nothing = the site IS top-level).
--- Used by the TIDEPOOL_VARID_AUDIT collision check / name resolver.
+-- Feeds 'varIdSiteIndex'.
 bindingSites :: CoreBind -> [(Var, Maybe Var)]
 bindingSites (NonRec b rhs) = (b, Nothing) : map (\v -> (v, Just b)) (nestedBinders rhs)
 bindingSites (Rec ps) =
