@@ -63,6 +63,18 @@
 //!   eval; verified by inspection that the new keying matches
 //!   `tsUsedDCs`/`mergeMetaPreserving`'s existing `(varId, qname)` convention
 //!   (`src/Tidepool/Translate.hs`).
+//!
+//! Most of the above findings bundle into three `#[test]` fns via the
+//! check-list idiom (`generic_form_roundtrip.rs`/`jit_surface.rs`), grouped
+//! by theme AND by import needs (the `[fmt|...|]` checks need the
+//! conditional `Tidepool.QQ` import `eval_raw` already injects via
+//! `uses_qq`, so they get their own bundle rather than forcing that import
+//! on every other check). Eight probes stay standalone — see each one's
+//! comment for why (the sanctioned red, two deliberate-failure assertions,
+//! one crash-class regression, and the four `Patch.*` checks, which hit a
+//! real cross-check corruption bug when bundled — see the CROSS-CHECK
+//! CORRUPTION note above `works_patch_tab_timestamp_not_treated_as_rename`)
+//! — and the commit message carries the full value-vs-crash sort.
 
 use std::path::Path;
 use tidepool_runtime::compile_and_run;
@@ -145,66 +157,100 @@ fn fails(code: &str, marker: &str) {
 }
 
 // =========================================================================
-// M1 — non-finite Doubles JSON-encode as Null, not garbage finite numbers.
+// M1 (non-finite Double -> Null) + M2 (bounds-checked Int decode/prism,
+// minus the sanctioned red) + LOW (parseDoubleM e-notation/overflow,
+// addUTCTime rounding). VALUE-class throughout: every regression here is a
+// wrong-but-obtained value from a successfully-compiled, successfully-run
+// probe — none of these mechanisms crash or hang on regression.
 // =========================================================================
 
+/// Absorbed: works_tojson_double_infinity_is_null,
+/// works_tojson_double_nan_is_null, works_tojson_double_finite_unaffected,
+/// works_eitherdecode_int_out_of_range_is_left,
+/// works_eitherdecode_int_in_range_unaffected,
+/// works_int_prism_out_of_range_is_nothing,
+/// works_parsedoublem_accepts_exponent_notation,
+/// works_parsedoublem_roundtrips_showdouble_extreme_magnitudes,
+/// works_addutctime_rounds_ms_conversion.
+///
+/// NOT absorbed: `works_int_prism_floors_not_truncates` is a sanctioned red
+/// (rule 3) — never bundle it, it must keep failing standalone.
 #[test]
-fn works_tojson_double_infinity_is_null() {
-    works(r#"pure (toJSON (1/0 :: Double))"#, serde_json::Value::Null);
-}
-
-#[test]
-fn works_tojson_double_nan_is_null() {
-    works(r#"pure (toJSON (0/0 :: Double))"#, serde_json::Value::Null);
-}
-
-#[test]
-fn works_tojson_double_finite_unaffected() {
-    works(r#"pure (toJSON (2.5 :: Double))"#, serde_json::json!(2.5));
-}
-
-// =========================================================================
-// M2 — out-of-range integer JSON decode is a typed failure, not a silent
-// wraparound; `_Int`/`_Integer` floor fractional numbers and bounds-check.
-// =========================================================================
-
-#[test]
-fn works_eitherdecode_int_out_of_range_is_left() {
+fn works_numeric_json_and_parsing_family() {
     works(
-        r#"pure (case (eitherDecode "18446744073709551615" :: Either Text Int) of { Right _ -> False; Left _ -> True })"#,
-        serde_json::json!(true),
+        r#"pure (concat
+            [ check "tojson_double_infinity_is_null"
+                -- M1: pre-fix, 1/0 rendered as a garbage finite number from
+                -- fromDouble parsing the LETTERS of "Infinity" as decimal
+                -- digits; must be JSON Null (upstream aeson parity).
+                (toJSON (1/0 :: Double) == Null)
+            , check "tojson_double_nan_is_null"
+                -- M1: same for 0/0 (NaN).
+                (toJSON (0/0 :: Double) == Null)
+            , check "tojson_double_finite_unaffected"
+                -- M1 control: the isFiniteDouble guard must not touch finite
+                -- Doubles.
+                ((toJSON (2.5 :: Double) ^? _Double) == Just 2.5)
+            , check "eitherdecode_int_out_of_range_is_left"
+                -- M2: pre-fix silently wrapped to Right (-1) instead of a
+                -- bounds-checked Left (toBoundedInteger).
+                (case (eitherDecode "18446744073709551615" :: Either Text Int) of { Right _ -> False; Left _ -> True })
+            , check "eitherdecode_int_in_range_unaffected"
+                -- M2 control: in-range decode unaffected by the bounds
+                -- check.
+                ((case (eitherDecode "42" :: Either Text Int) of { Right n -> n; Left _ -> -999 }) == 42)
+            , check "int_prism_out_of_range_is_nothing"
+                -- M2: the _Int prism (Aeson/Lens.hs) bounds-checks like
+                -- upstream lens-aeson; out-of-range must be Nothing.
+                (not (isJust ((toJSON (1.0e30 :: Double)) ^? _Int)))
+            , check "parsedoublem_accepts_exponent_notation.e1"
+                -- LOW: parseDoubleM accepts e-notation.
+                ((case parseDoubleM "1.25e1" of { Just dA -> dA; Nothing -> -1 }) == 12.5)
+            , check "parsedoublem_accepts_exponent_notation.eneg2"
+                ((case parseDoubleM "1e-2" of { Just dB -> dB; Nothing -> -1 }) == 0.01)
+            , check "parsedoublem_roundtrips_extreme.e19"
+                -- LOW: digits accumulate as a Double (no Int overflow past
+                -- ~19 digits) — round-trips showT at extreme magnitudes.
+                (case parseDoubleM (showT (1.0e19 :: Double)) of { Just dC -> dC == (1.0e19 :: Double); Nothing -> False })
+            , check "parsedoublem_roundtrips_extreme.eneg10"
+                (case parseDoubleM (showT (1.5e-10 :: Double)) of { Just dD -> dD == (1.5e-10 :: Double); Nothing -> False })
+            , check "addutctime_rounds_ms_conversion"
+                -- LOW: addUTCTime rounds (not truncates) the
+                -- seconds->milliseconds conversion, so diffUTCTime
+                -- round-trips 1.005s exactly.
+                ((let t0 = UTCTime 0 in diffUTCTime (addUTCTime 1.005 t0) t0) == 1.005)
+            ])
+         where { check nm ok = if ok then [] else [nm] }"#,
+        serde_json::json!([]),
     );
 }
 
-#[test]
-fn works_eitherdecode_int_in_range_unaffected() {
-    works(
-        r#"pure (case (eitherDecode "42" :: Either Text Int) of { Right n -> n; Left _ -> -999 })"#,
-        serde_json::json!(42),
-    );
-}
-
-#[test]
-fn works_int_prism_floors_not_truncates() {
-    // lens-aeson: "-3.7" floors to -4 (truncation toward zero would give -3).
-    works(
-        r#"pure (case (toJSON (-3.7 :: Double) ^? _Int) of { Just n -> n; Nothing -> -999 })"#,
-        serde_json::json!(-4),
-    );
-}
-
-#[test]
-fn works_int_prism_out_of_range_is_nothing() {
-    works(
-        r#"pure (case (toJSON (1.0e30 :: Double) ^? _Int) of { Just _ -> False; Nothing -> True })"#,
-        serde_json::json!(true),
-    );
-}
-
 // =========================================================================
-// M3 — a `diff -u` timestamp header (`path\t<timestamp>`) must not corrupt
-// the path.
+// M3 (diff -u timestamp headers) + M4 (no-newline markers, both
+// directions). NOT bundled — see the CROSS-CHECK CORRUPTION note below.
 // =========================================================================
+
+// CROSS-CHECK CORRUPTION — these four stay STANDALONE, unlike every other
+// VALUE-class group in this file. A first bundling attempt combined them
+// into one `works_patch_family` probe via the check-list idiom (unique
+// binder names per check, exactly like the other bundles below) and hit a
+// real, reproducible bug: with `patch_devnull_create_with_tab_timestamp`'s
+// check listed BEFORE `patch_apply_marker_new_side_loses_trailing_newline`'s
+// in the same `concat`, the earlier check's `Patch.fpCreate` result comes
+// back `False` (wrong — it's `True` standalone); reordering the same two
+// checks (loses-trailing-newline first, devnull-create second) makes both
+// pass. Renaming every pattern-bound variable to be unique across checks
+// (`fp1`/`fp2`/`fp3`/`fp4`, `out3`/`out4`) did NOT fix it — this is not a
+// binder-collision bug, it's order-dependent cross-check state corruption
+// somewhere in `Patch.parsePatch`/`Patch.fpCreate`/`Patch.applyFilePatch`'s
+// compiled interaction, reproduced directly against `compile_and_run` (not
+// a caching artifact of the interactive MCP eval server). That's a real JIT
+// or `Tidepool.Patch` correctness bug, but chasing its root cause is well
+// outside this task's scope (bundling test suites) and boundary (`Patch.hs`
+// isn't a named file here) — flagged to the parent instead. Per rule 4
+// ("group by COMPILE COMPATIBILITY, not just theme"), multiple `Patch.*`
+// probes sharing one eval is UNSAFE until that's understood, so these keep
+// their original one-compile-per-test shape.
 
 #[test]
 fn works_patch_tab_timestamp_not_treated_as_rename() {
@@ -221,11 +267,6 @@ fn works_patch_devnull_create_with_tab_timestamp() {
         serde_json::json!(true),
     );
 }
-
-// =========================================================================
-// M4 — a `\ No newline at end of file` marker must be applied, not
-// discarded, in both directions (losing and gaining the trailing newline).
-// =========================================================================
 
 #[test]
 fn works_patch_apply_marker_new_side_loses_trailing_newline() {
@@ -248,135 +289,118 @@ fn works_patch_apply_marker_new_side_gains_trailing_newline() {
 }
 
 // =========================================================================
-// M6 — `Slice [a]` clamps negative n like base take/drop.
+// M6 (Slice clamping) + M7 (camelToSnake) + M8 (Unicode char classes) + M9
+// (center padding) + LOW (nubBy argument order, Tab.parseCsv quoting).
+// VALUE-class throughout.
 // =========================================================================
 
+/// Absorbed: works_slice_list_stake_negative_clamps_to_empty,
+/// works_slice_list_sdrop_negative_clamps_to_whole,
+/// works_cameltosnake_no_leading_underscore, works_isalpha_unicode_letter,
+/// works_isspace_unicode_nbsp, works_center_pads_odd_char_left,
+/// works_textformat_centerwith_agrees, works_nubby_argument_order_matches_base,
+/// works_parsecsv_quoted_field_with_embedded_comma.
 #[test]
-fn works_slice_list_stake_negative_clamps_to_empty() {
-    works(r#"pure (stake (-1) [1,2,3::Int])"#, serde_json::json!([]));
-}
-
-#[test]
-fn works_slice_list_sdrop_negative_clamps_to_whole() {
+fn works_text_slice_and_csv_family() {
     works(
-        r#"pure (sdrop (-1) [1,2,3::Int])"#,
-        serde_json::json!([1, 2, 3]),
+        r#"pure (concat
+            [ check "slice_list_stake_negative_clamps_to_empty"
+                -- M6: Slice [a]'s stake/sdrop now clamp n<=0 like base
+                -- take/drop and the Slice Text instance.
+                (stake (-1) [1,2,3::Int] == [])
+            , check "slice_list_sdrop_negative_clamps_to_whole"
+                (sdrop (-1) [1,2,3::Int] == [1,2,3])
+            , check "cameltosnake_no_leading_underscore"
+                -- M7: TF.camelToSnake no longer emits a leading underscore
+                -- for PascalCase input.
+                (TF.camelToSnake "HelloWorld" == "hello_world")
+            , check "isalpha_unicode_letter"
+                -- M8: isAlpha/isUpper/isSpace now match Data.Char's Unicode
+                -- semantics instead of an ASCII-only range check. 'é'
+                -- (U+00E9) is alphabetic under Unicode but outside the old
+                -- ASCII a-z/A-Z range.
+                (isAlpha '\233' == True)
+            , check "isspace_unicode_nbsp"
+                -- M8: U+00A0 (NO-BREAK SPACE) is whitespace under Unicode
+                -- (category Zs) but outside the old ASCII whitespace set.
+                (isSpace '\160' == True)
+            , check "center_pads_odd_char_left"
+                -- M9: center/TF.centerWith pad the ODD leftover character on
+                -- the LEFT (matching their own haddock), not the right.
+                (center 10 '-' "hello" == "---hello--")
+            , check "textformat_centerwith_agrees"
+                (TF.centerWith 10 '-' "hello" == "---hello--")
+            , check "nubby_argument_order_matches_base"
+                -- LOW: nubBy's predicate argument order now matches base
+                -- (kept-element first): eq keptItem candidate.
+                (nubBy (\a b -> a > b) [3,1,4,1,5,9,2,6::Int] == [3,4,5,9])
+            , check "parsecsv_quoted_field_with_embedded_comma"
+                -- LOW: Tab.parseCsv is now quote-aware (RFC-4180): a quoted
+                -- field may contain the delimiter.
+                (Tab.parseCsv "a,\"b,c\",d" == [["a", "b,c", "d"]])
+            ])
+         where { check nm ok = if ok then [] else [nm] }"#,
+        serde_json::json!([]),
     );
 }
 
 // =========================================================================
-// M7 — camelToSnake suppresses the leading underscore at position 0.
+// LOW — `[fmt|...|]` digit grouping (size 4, not 3, for hex/octal/binary)
+// and `fmtFrac`'s overflow-past-2^63 fix. Own bundle: these need the
+// conditional `Tidepool.QQ` import `eval_raw` injects via `uses_qq`, so
+// keeping them separate avoids forcing that import onto every other check
+// in this file (rule 4: group by compile compatibility).
 // =========================================================================
 
+/// Absorbed: works_fmt_hex_grouping_is_four_not_three,
+/// works_fmtfrac_beyond_2_63_does_not_saturate.
+///
+/// NOT absorbed: `fails_fmt_hex_comma_grouping_rejected` is a
+/// compile/runtime-FAIL assertion (structurally incompatible with a bundle
+/// whose eval must SUCCEED to return a check list) — stays standalone below.
 #[test]
-fn works_cameltosnake_no_leading_underscore() {
+fn works_fmt_quoter_family() {
     works(
-        r#"pure (TF.camelToSnake "HelloWorld")"#,
-        serde_json::json!("hello_world"),
+        r#"pure (concat
+            [ check "fmt_hex_grouping_is_four_not_three"
+                -- 4886718345 == 0x123456789 (9 hex digits): grouped by 4
+                -- from the right -> "1_2345_6789" (grouping by 3 would give
+                -- "123_456_789").
+                ([fmt|{hexGroupN:_x}|] == "1_2345_6789")
+            , check "fmtfrac_beyond_2_63_does_not_saturate"
+                -- fmtFrac's {1.0e19:.0f} no longer saturates to garbage past
+                -- 2^63 (matches Rust's own correctly-rounded f64->decimal
+                -- {:.0}, computed once at the value's exact IEEE-754 bit
+                -- pattern — round is a no-op at this magnitude).
+                ([fmt|{bigFracN:.0f}|] == "10000000000000000000")
+            ])
+         where
+           { check nm ok = if ok then [] else [nm]
+           ; hexGroupN = 4886718345 :: Int
+           ; bigFracN = 1.0e19 :: Double
+           }"#,
+        serde_json::json!([]),
     );
 }
 
 // =========================================================================
-// M8 — isAlpha/isUpper/isSpace match Data.Char's Unicode semantics.
+// Standalone probes — the value-vs-crash sort (see also the commit message).
 // =========================================================================
 
+/// SANCTIONED RED (rule 3) — `_Int` currently truncates toward zero instead
+/// of flooring; kept failing individually, never inside a green bundle.
 #[test]
-fn works_isalpha_unicode_letter() {
-    // 'é' (U+00E9) is alphabetic under Unicode but outside the old ASCII
-    // a-z/A-Z range check.
-    works(r#"pure (isAlpha '\233')"#, serde_json::json!(true));
-}
-
-#[test]
-fn works_isspace_unicode_nbsp() {
-    // U+00A0 (NO-BREAK SPACE) is whitespace under Unicode (category Zs) but
-    // outside the old ASCII whitespace set.
-    works(r#"pure (isSpace '\160')"#, serde_json::json!(true));
-}
-
-// =========================================================================
-// M9 — center/TF.centerWith pad the odd leftover character on the LEFT.
-// =========================================================================
-
-#[test]
-fn works_center_pads_odd_char_left() {
+fn works_int_prism_floors_not_truncates() {
+    // lens-aeson: "-3.7" floors to -4 (truncation toward zero would give -3).
     works(
-        r#"pure (center 10 '-' "hello")"#,
-        serde_json::json!("---hello--"),
+        r#"pure (case (toJSON (-3.7 :: Double) ^? _Int) of { Just n -> n; Nothing -> -999 })"#,
+        serde_json::json!(-4),
     );
 }
 
-#[test]
-fn works_textformat_centerwith_agrees() {
-    works(
-        r#"pure (TF.centerWith 10 '-' "hello")"#,
-        serde_json::json!("---hello--"),
-    );
-}
-
-// =========================================================================
-// LOW — parseDoubleM: e-notation + no Int overflow past ~19 digits.
-// =========================================================================
-
-#[test]
-fn works_parsedoublem_accepts_exponent_notation() {
-    works(
-        // 1.25e1 (not a whole number, and exactly representable as a binary
-        // fraction — 0.25 = 1/4 — so it avoids both the JSON int-vs-float
-        // representation ambiguity a whole Double would introduce AND any
-        // decimal-fraction rounding noise from the digit-by-digit summation).
-        r#"pure (case parseDoubleM "1.25e1" of { Just d -> d; Nothing -> -1 })"#,
-        serde_json::json!(12.5),
-    );
-    works(
-        r#"pure (case parseDoubleM "1e-2" of { Just d -> d; Nothing -> -1 })"#,
-        serde_json::json!(0.01),
-    );
-}
-
-#[test]
-fn works_parsedoublem_roundtrips_showdouble_extreme_magnitudes() {
-    works(
-        r#"pure (case parseDoubleM (showT (1.0e19 :: Double)) of { Just d -> d == (1.0e19 :: Double); Nothing -> False })"#,
-        serde_json::json!(true),
-    );
-    works(
-        r#"pure (case parseDoubleM (showT (1.5e-10 :: Double)) of { Just d -> d == (1.5e-10 :: Double); Nothing -> False })"#,
-        serde_json::json!(true),
-    );
-}
-
-// =========================================================================
-// LOW — nubBy's predicate argument order matches base (kept element first).
-// =========================================================================
-
-#[test]
-fn works_nubby_argument_order_matches_base() {
-    // A directional (non-equivalence) predicate distinguishes argument
-    // order: eq keptItem candidate = keptItem > candidate. Pre-fix (flipped
-    // to eq candidate keptItem) this list nubs to [3,1,4,1]; base (and this
-    // fix) give [3,4,5,9].
-    works(
-        r#"pure (nubBy (\a b -> a > b) [3,1,4,1,5,9,2,6::Int])"#,
-        serde_json::json!([3, 4, 5, 9]),
-    );
-}
-
-// =========================================================================
-// LOW — [fmt|...|] digit grouping: size 4 (not 3) for hex/octal/binary, and
-// ',' is rejected for them (Python semantics).
-// =========================================================================
-
-#[test]
-fn works_fmt_hex_grouping_is_four_not_three() {
-    // 4886718345 == 0x123456789 (9 hex digits): grouped by 4 from the right
-    // -> "1_2345_6789" (grouping by 3 would give "123_456_789").
-    works(
-        r#"pure ([fmt|{n:_x}|]) where { n = 4886718345 :: Int }"#,
-        serde_json::json!("1_2345_6789"),
-    );
-}
-
+/// COMPILE-FAIL assertion — STANDALONE: asserts the probe itself fails, so
+/// it cannot share an eval whose contract is "succeeds and returns a check
+/// list".
 #[test]
 fn fails_fmt_hex_comma_grouping_rejected() {
     fails(
@@ -385,11 +409,11 @@ fn fails_fmt_hex_comma_grouping_rejected() {
     );
 }
 
-// =========================================================================
-// LOW — fmtInt minBound no longer crashes; fmtFrac no longer overflows past
-// 2^63.
-// =========================================================================
-
+/// CRASH-class — STANDALONE: `Runtime.hs`'s own comment names this
+/// literally — negating `Int` `minBound` overflows, which "would otherwise
+/// crash `digitsInBase` on `tbl !! r` with a negative index". A regression
+/// here is `Prelude.!!: negative index`-shaped, not a wrong value — bundling
+/// it risks taking out sibling checks' diagnosis if it recurs.
 #[test]
 fn works_fmtint_minbound_does_not_crash() {
     works(
@@ -398,55 +422,12 @@ fn works_fmtint_minbound_does_not_crash() {
     );
 }
 
-#[test]
-fn works_fmtfrac_beyond_2_63_does_not_saturate() {
-    // Compute the expected digit string the same way Rust's own
-    // correctly-rounded f64->decimal formatting would (both GHC and Rust
-    // parse the `1.0e19` literal to the identical IEEE-754 double, and at
-    // this magnitude the value is already an exact integer, so `round` is a
-    // no-op and the expected string is exactly Rust's `{:.0}` of that f64).
-    let expected = format!("{:.0}", 1.0e19_f64);
-    works(
-        r#"pure ([fmt|{n:.0f}|]) where { n = 1.0e19 :: Double }"#,
-        serde_json::Value::String(expected),
-    );
-}
-
-// =========================================================================
-// LOW — addUTCTime rounds (not truncates) the seconds->milliseconds
-// conversion, so diffUTCTime round-trips it.
-// =========================================================================
-
-#[test]
-fn works_addutctime_rounds_ms_conversion() {
-    works(
-        r#"pure (let t0 = UTCTime 0 in diffUTCTime (addUTCTime 1.005 t0) t0)"#,
-        serde_json::json!(1.005),
-    );
-}
-
-// =========================================================================
-// LOW — a negative civil year errors loudly in formatISO8601 instead of
-// rendering garbage digits.
-// =========================================================================
-
+/// COMPILE-FAIL assertion — STANDALONE, same reasoning as
+/// `fails_fmt_hex_comma_grouping_rejected`.
 #[test]
 fn fails_formatiso8601_negative_year_errors_loudly() {
     fails(
         r#"pure (show (UTCTime (-100000000000000)))"#,
         "negative year",
-    );
-}
-
-// =========================================================================
-// LOW — Tab.parseCsv is quote-aware (RFC-4180): a quoted field may contain
-// the delimiter.
-// =========================================================================
-
-#[test]
-fn works_parsecsv_quoted_field_with_embedded_comma() {
-    works(
-        r#"pure (Tab.parseCsv "a,\"b,c\",d")"#,
-        serde_json::json!([["a", "b,c", "d"]]),
     );
 }
