@@ -222,10 +222,31 @@ surface here — it drifts. Module map:
   docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
   (it builds on `askUserRaw`), and auto-imported whenever it is.
 
-- `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (mode-
+- `Agent/*` — PRD 18 surfaces (provisional): `Contract` (mode-
   interpreted endpoint records compiled to declarations and dispatch),
-  `Spawn` (typed `spawnAgent` over the generated `spawnAgentRaw`; compiles
+  `Spawn` (typed `spawnAgent`/`spawnAgentWithTools`; compiles
   only in rows containing Subagent + Worktree, same row-gating as Form).
+  **The parent serves the child's tool calls, and the loop that does it is
+  Haskell.** `spawnAgentWithTools rounds tools spec` runs `compileTools`
+  ONCE, declares the result through `agentBeginRaw`, and then answers each
+  parked call with the authored record's OWN handler — in the parent's `M`,
+  performing ordinary parent effects — before `agentResumeRaw` drives the
+  turn on. The parent is never suspended while a handler runs; what is
+  parked is the child's request, on the far side of the seam (the loop lives
+  here because a `Tool`'s `handler :: input -> m output` is parent Haskell
+  that Rust cannot run — see `plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2).
+  Three things are answered as REFUSALS rather than dispatched, so the child
+  always finishes its turn: a name absent from `dispatchNames` (`dispatch`'s
+  own fallthrough `error`s, which would abort the eval with the turn still
+  parked), a call past the `ToolRounds` cap (resident POLICY — distinct from
+  the runtime's `MAX_TOOL_ROUNDS` catastrophe backstop), and — before any
+  process is spawned — a tools record that does not compile
+  (`SpawnDriveFailed StageAllocating`). `spawnAgent` keeps its signature and
+  IS this loop at zero tools (`NoTools`), so there is no second
+  implementation to drift. Gates:
+  `tidepool-handlers/tests/subagent_tool_loop.rs` (the whole loop on the real
+  extract/JIT against `MockBackend`) and `subagent_one_cycle.rs` (the
+  no-tools vertical).
   **There is no model codec.** A model reads and writes ordinary JSON through
   the vendored `ToJSON`/`FromJSON` generic defaults (TaggedObject wire for
   payload sums, bare constructor-name strings for enums, `Maybe` fields
