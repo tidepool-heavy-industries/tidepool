@@ -126,6 +126,7 @@ cargo nextest run --ignore-default-filter -p tidepool-runtime -E 'test(test_name
 cargo clippy --workspace                 # Lint
 cargo fmt --all -- --check               # Format check
 cargo install --path tidepool            # Install the MCP server binary (`tidepool`)
+scripts/bench-turn.sh                    # Turn-latency instrument: one table, cold/warm/session/block/harness rows (median-of-3)
 ```
 
 **Test runner is `cargo-nextest`** (`cargo install cargo-nextest --locked` if not

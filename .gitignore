@@ -5,6 +5,8 @@
 !.tidepool/PATTERNS.md
 target/
 dist-newstyle/
+# scripts/bench-turn.sh results (timestamped, machine-specific — not committed)
+bench/
 *.hi
 *.o
 *.dyn_hi
