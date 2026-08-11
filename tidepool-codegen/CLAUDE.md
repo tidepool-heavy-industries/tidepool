@@ -11,10 +11,12 @@ SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
 bindings zero-copy — while its stowed continuation is a REGISTERED GC ROOT. The
 full invariant is in the `jit_machine.rs` module docstring; the essentials:
 
-- The GC root assembly (`perform_gc`, `host_fns/gc.rs`) folds FIVE sources:
+- The GC root assembly (`perform_gc`, `host_fns/gc.rs`) folds SIX sources:
   frame-walked stack, run-scoped `rust_roots`, session `persistent_roots`, the
-  vmctx tail-call slots, and — new — the nested-child-scoped `stowed_roots`
-  (`MachineState`). `stowed_roots` is DELIBERATELY separate from
+  nested-child-scoped `stowed_roots` (`MachineState`), write-barrier
+  `remembered_slots` (tenured-array payload slots touched by a later
+  `writeSmallArray#`/`WriteArray`/`casSmallArray#`/copy), and the vmctx
+  tail-call slots. `stowed_roots` is DELIBERATELY separate from
   `persistent_roots` so intent is auditable: a persistent root is a
   machine-lifetime tenured value; a stowed root is a *transient* parent
   continuation rooted only while a child runs.
@@ -147,11 +149,11 @@ Almost all PrimOpKind variants are implemented; a clean runtime error is
 surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
 SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine
 language-level error reaches a signal.) Two variants are NOT emitted:
-`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2154`).
+`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2170`).
 `TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs`, grep the
-`pop == TagToEnumOp` guard; ~L1463),
+`pop == TagToEnumOp` guard; ~L1796),
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
-handled by the eval oracle (`tidepool-eval/src/eval.rs:1544`) but NOT the JIT.
+handled by the eval oracle (`tidepool-eval/src/eval.rs:1546`) but NOT the JIT.
 The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
 (checked 2026-07-07, re-verified 2026-08-08: zero SeqOp references in tidepool-testing/src), so this gap is not exercised today; if the generator is
 extended to cover it, either implement `SeqOp` in the JIT or exclude it from
