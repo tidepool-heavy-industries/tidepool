@@ -49,7 +49,7 @@ import Tidepool.Session
   , sessionModuleString, parseSessionModule, sessionBinderName
   , mkThinSessionIface, writeSessionIface
   , scaffoldTargetName, scaffoldOutputBase )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, siblingCloseDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -499,6 +499,7 @@ data TargetWrite = TargetWrite
   , twNodeCount   :: Int
   , twCbor        :: BS.ByteString
   , twUsedMeta    :: [DCMeta]
+  , twUsedDCs     :: [DataCon]
   , twReachBinds  :: [CoreBind]
   , twVarNames    :: [(Word64, Text)]
   , twHasIO       :: Bool
@@ -561,7 +562,7 @@ writeClosedTargets
   :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text]
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
   -> IO [(String, [(Word64, Text)])]   -- ^ outFileBase -> runLLMTurn sites
-writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
+writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = do
   let multi = length targets > 1
 
   -- Encode step: every target's tree, timed together as one accumulated
@@ -579,6 +580,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
             , twNodeCount   = Seq.length nodes
             , twCbor        = cbor
             , twUsedMeta    = map dcToMeta (Map.elems usedDCs)
+            , twUsedDCs     = Map.elems usedDCs
             , twReachBinds  = reachBinds
             , twVarNames    = varNames
             , twHasIO       = targetBindingHasIO binds targetName
@@ -588,11 +590,45 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
       return (acc ++ [w], msAcc + ms)
     ) ([], 0) targets
 
-  -- Merge metadata: TyCon-derived + translation-derived (all targets) +
-  -- raw-binding-scan + transitive + wired-in. See the multi-target scalar
-  -- rule in this function's doc comment above.
+  -- Merge metadata: D2's RuntimeTypeClosure — runtime-observable roots only,
+  -- no reachability-blind mg_tcs sweep. Three sources, all scoped to what
+  -- this compile can actually observe at runtime:
+  --   * wired-in: the small fixed floor (Bool/Int/tuples/...).
+  --   * translation-derived (all targets) + its sibling closure: every
+  --     DataCon actually built or matched in reachable Core, plus — for each
+  --     such DataCon's parent TyCon — every OTHER constructor of that TyCon,
+  --     so Rust can resolve a rendered type name to its full constructor set
+  --     even for a variant this compile's Core never itself constructs (see
+  --     'siblingCloseDCons').
+  --   * transitive: the binder-type closure over the reachable binds
+  --     ('collectTransitiveDCons') — target/result + boundary +
+  --     session-bound types, and (per
+  --     plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md's
+  --     root ruling) the ONLY route by which the five freer-simple
+  --     scaffolding constructors (Val/E/Union/Leaf/Node) are ever supplied,
+  --     since they live in an external package and can never appear in any
+  --     home module's mg_tcs. Do NOT replace or bypass this closure.
+  --
+  -- The home-TyCon sweep ('collectDataCons' over mg_tcs, formerly
+  -- @tyconMeta@) is deliberately GONE from this merge: it swept every
+  -- constructor of every home-module TyCon regardless of whether this
+  -- compile ever touches it (measured 6.8:1 / 11.1:1 over-collection,
+  -- plans/post-restart/extract-wave/spawn-latency/03-d2-handoff.md), and it
+  -- structurally cannot supply anything the two sources above don't already
+  -- cover for a runtime-observable root. Safe to remove ONLY because
+  -- 'assertMetaCoversEmitted' CHECK A (below) hard-fails extraction the
+  -- moment a narrowed table under-covers what the emitted program actually
+  -- references — see D1. ('processFile's un-unified per-binding mode keeps
+  -- its own unfiltered 'collectDataCons' call: it has no CHECK A, no
+  -- 'cmReachBinds', and is not on any production path — narrowing it has no
+  -- detector, so it is deliberately out of this change's scope.)
+  --
+  -- Highest priority first; mergeMetaPreserving keeps colliding
+  -- (same-varId, different-qualified-name) entries distinct so the
+  -- loader rejects them loudly instead of one silently winning.
   let allReachBinds  = concatMap twReachBinds writes
-      tyconMeta      = collectDataCons tycons
+      allUsedDCs     = concatMap twUsedDCs writes
+      siblingMeta    = siblingCloseDCons allUsedDCs
       transitiveMeta = collectTransitiveDCons allReachBinds
       wiredInMeta    = wiredInDataCons
       -- D1-B: 'scanMeta = collectUsedDataCons allReachBinds' is DELIBERATELY
@@ -613,12 +649,8 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
       -- check this line survived the move.
       -- ('processFile's --all-closed branch keeps its own scanMeta — that path
       -- has no CHECK A and is out of D1-B's scope.)
-      --
-      -- Highest priority first; mergeMetaPreserving keeps colliding
-      -- (same-varId, different-qualified-name) entries distinct so the
-      -- loader rejects them loudly instead of one silently winning.
       allMeta = mergeMetaPreserving
-                  [ wiredInMeta, tyconMeta, concatMap twUsedMeta writes, transitiveMeta ]
+                  [ wiredInMeta, concatMap twUsedMeta writes, siblingMeta, transitiveMeta ]
       hasIO       = or (map twHasIO writes)
       allVarNames = concatMap twVarNames writes
       allPoisoned = mergePoisonedTables (map twPoisoned writes)

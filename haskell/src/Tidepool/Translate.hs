@@ -7,6 +7,7 @@ module Tidepool.Translate
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
+  , siblingCloseDCons
   , emittedConIds
   , collectReachableConDCs
   , collectReachableConDCsRaw
@@ -59,7 +60,7 @@ import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet, isEmptyVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
-import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet, mkUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe, renderWithContext, defaultSDocContext, ppr)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -1324,6 +1325,23 @@ tyConToDCMeta :: TyCon -> [DCMeta]
 tyConToDCMeta tc = case tyConDataCons_maybe tc of
   Just dcs -> map dcToMeta dcs
   Nothing  -> []
+
+-- | Sibling-complete metadata for DataCons actually built or matched in
+-- Core (D2's @RuntimeTypeClosure@, the runtime-observable-roots half):
+-- for every distinct non-GHC-compiler parent TyCon among @dcs@, include ALL
+-- of that TyCon's constructors, not just the one(s) Core happened to touch.
+-- This is what lets Rust resolve a rendered type name to its full
+-- constructor set (@DataConTable::constructors_of_type@) even when the
+-- fragment's own Core constructs/matches only SOME of a sum type's variants
+-- — e.g. JSON-decoding a variant this particular compile never builds
+-- itself. 'collectTransitiveDCons' already gives full sibling sets for
+-- every TyCon reachable through a top-level binder's TYPE (via
+-- 'closeTyCons'); this covers the complementary case, a TyCon reached only
+-- through Core CONSTRUCTION with no binder of that type in scope.
+siblingCloseDCons :: [DataCon] -> [DCMeta]
+siblingCloseDCons dcs =
+  concatMap tyConToDCMeta
+    (nonDetEltsUniqSet (mkUniqSet (filter (not . isGhcCompilerTyCon) (map dataConTyCon dcs))))
 
 translate :: CoreExpr -> TransM Int
 translate expr =

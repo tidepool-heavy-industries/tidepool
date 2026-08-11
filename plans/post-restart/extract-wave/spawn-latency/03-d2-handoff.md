@@ -1,4 +1,18 @@
-# D2 — `RuntimeTypeClosure` — SPECIFIED, UN-STARTED, ROUTED FORWARD
+# D2 — `RuntimeTypeClosure` — EXECUTED
+
+**Status 2026-08-11 (lane `d2-exec`, branch `root.d2-exec`, base `fe1ade55`):
+EXECUTED.** Landed per the re-validated spec (`04-turn-latency-plan.md` §1/
+§1a) and its root ruling (do not replace or bypass the binder-type closure;
+the requirement's intent is satisfied that way, not by a hand-list on either
+side). Receipt, including the mandatory empirical freer-roots attribution,
+the warm-matched before/after, and full verify:
+`plans/post-restart/extract-wave/spawn-latency/06-d2-measurement.md`.
+
+Below this line is the ORIGINAL hand-off (2026-08-09/11, pre-execution) —
+kept verbatim as the spec this receipt executes against; where it disagrees
+with `06-d2-measurement.md`, the receipt is newer.
+
+---
 
 **Status 2026-08-11 (lane `spawn-latency`): STILL UN-STARTED — BLOCKED ON A
 SIBLING LANE, not on doubt.** Every claim below has been re-validated against
