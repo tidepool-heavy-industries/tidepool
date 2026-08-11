@@ -5,7 +5,8 @@ use syn::{LitStr, Token};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use tidepool_extract_cmd::{resolve_bin, BinSource, ExtractCmd, Launcher, ResolvedBin};
 
 /// A resolved local `.hs` input: its canonicalized path and content.
 type HsDep = (PathBuf, Vec<u8>);
@@ -661,58 +662,43 @@ fn run_tidepool_extract(
     // $TIDEPOOL_EXTRACT (the same override every test tier honors) wins over
     // PATH — a repo with a freshly built extract must never be trumped by a
     // stale installed one. A SET-but-unreadable $TIDEPOOL_EXTRACT is a hard
-    // error here, not a silent fall-through to PATH/nix: falling through
-    // would run a DIFFERENT binary than `extract_identity()` hashed into the
-    // content key, a producer/key divergence. An UNSET env still falls back
-    // to PATH then nix below, same as always.
-    let extract_env = std::env::var_os("TIDEPOOL_EXTRACT").map(std::path::PathBuf::from);
-    let extract_bin = match &extract_env {
-        Some(path) => {
-            if !path.is_file() {
-                return Err(format!(
-                    "$TIDEPOOL_EXTRACT is set to {} but that is not a readable file",
-                    path.display()
-                ));
-            }
-            path.clone()
-        }
-        None => std::path::PathBuf::from("tidepool-extract"),
-    };
-    let mut cmd = Command::new(&extract_bin);
-    cmd.arg(hs_path);
-    cmd.arg("--output-dir");
-    cmd.arg(&tmp_dir);
+    // error, not a silent fall-through to PATH/nix: falling through would run
+    // a DIFFERENT binary than `extract_identity()` hashed into the content
+    // key, a producer/key divergence. An UNSET env still falls back to PATH
+    // then nix below, same as always. That policy is now `ExtractCmd`'s
+    // DEFAULT (`tidepool-extract-cmd`) rather than this function's local rule.
+    let mut cmd = ExtractCmd::new().map_err(|e| e.to_string())?;
+    // The argument list is built ONCE and launched by whichever launcher wins
+    // — the nix fallback below re-runs this same argv through
+    // `Launcher::nix_run` instead of spelling every flag a second time.
+    cmd.input(hs_path).output_dir(&tmp_dir);
     if let Some(name) = target {
-        cmd.arg("--target");
-        cmd.arg(name);
+        cmd.target(name);
     }
-    for dir in extra_includes {
-        cmd.arg("--include");
-        cmd.arg(dir);
-    }
+    cmd.includes(extra_includes);
 
-    match cmd.output() {
-        Ok(output) if output.status.success() => return publish_extract_dir(&tmp_dir, output_dir),
-        Ok(output) => {
+    match cmd.run() {
+        Ok(run) if run.success() => return publish_extract_dir(&tmp_dir, output_dir),
+        Ok(run) => {
             // The binary ran and failed — this IS the diagnostic (a GHC type
             // error, a missing binding, ...). Surface it verbatim; falling
             // back to nix here would only re-run the SAME failing compile.
             return Err(format!(
                 "tidepool-extract failed (exit {}):\n{}",
-                output.status,
-                extract_failure_text(&output.stdout, &output.stderr)
+                run.output.status,
+                extract_failure_text(&run.output.stdout, &run.output.stderr)
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && extract_env.is_none() => {
+        Err(e) if e.is_not_found() && cmd.bin_source() == BinSource::PathLookup => {
             // Bare "tidepool-extract" not on PATH, and $TIDEPOOL_EXTRACT was
             // never set — fall back to nix run below.
         }
         Err(e) => {
             // Either a genuine spawn failure, or $TIDEPOOL_EXTRACT was set
-            // (and passed the `is_file` check above, so this is a race —
+            // (and passed the readable-file check above, so this is a race —
             // e.g. removed between check and spawn). Either way: fail loud,
             // never silently fall back to a different binary.
-            return Err(format!("failed to spawn {}: {e}", extract_bin.display()));
+            return Err(e.to_string());
         }
     }
 
@@ -721,32 +707,17 @@ fn run_tidepool_extract(
         "tidepool-extract not found on PATH and no flake.nix in any parent directory".to_string()
     })?;
 
-    let mut cmd = Command::new("nix");
-    cmd.args([
-        "run",
-        &format!("{}#tidepool-extract", flake_root.display()),
-        "--",
-    ]);
-    cmd.arg(hs_path);
-    cmd.arg("--output-dir");
-    cmd.arg(&tmp_dir);
-    if let Some(name) = target {
-        cmd.arg("--target");
-        cmd.arg(name);
-    }
-    for dir in extra_includes {
-        cmd.arg("--include");
-        cmd.arg(dir);
-    }
-
-    match cmd.output() {
-        Ok(output) if output.status.success() => publish_extract_dir(&tmp_dir, output_dir),
-        Ok(output) => Err(format!(
+    match cmd.run_with(&Launcher::nix_run(&flake_root)) {
+        Ok(run) if run.success() => publish_extract_dir(&tmp_dir, output_dir),
+        Ok(run) => Err(format!(
             "nix run tidepool-extract failed (exit {}):\n{}",
-            output.status,
-            extract_failure_text(&output.stdout, &output.stderr)
+            run.output.status,
+            extract_failure_text(&run.output.stdout, &run.output.stderr)
         )),
-        Err(e) => Err(format!("Failed to run nix: {}. Is nix installed?", e)),
+        Err(e) => Err(format!(
+            "Failed to run nix: {}. Is nix installed?",
+            e.source
+        )),
     }
 }
 
@@ -904,22 +875,21 @@ fn extract_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        // Same resolution order as `run_tidepool_extract`: $TIDEPOOL_EXTRACT,
-        // then PATH — the key must hash the binary that will actually run.
-        let resolved = match std::env::var_os("TIDEPOOL_EXTRACT") {
-            Some(path) => {
-                let path = std::path::PathBuf::from(path);
-                if !path.is_file() {
-                    panic!(
-                        "$TIDEPOOL_EXTRACT is set to {} but that is not a readable file",
-                        path.display()
-                    );
-                }
-                Some(path)
-            }
-            None => std::env::var_os("PATH").and_then(|paths| {
+        // Same resolution order as `run_tidepool_extract` — literally the same
+        // policy function (`tidepool_extract_cmd::resolve_bin`), so the key
+        // hashes the binary that will actually run. Beyond it: `resolve_bin`
+        // hands back the BARE name for an unset env (the OS resolves it at
+        // spawn time), but a key has to hash file BYTES, so this walks PATH
+        // itself for the file to hash.
+        let resolved = match resolve_bin() {
+            Err(e) => panic!("{e}"),
+            Ok(ResolvedBin {
+                path,
+                source: BinSource::Env,
+            }) => Some(path),
+            Ok(_) => std::env::var_os("PATH").and_then(|paths| {
                 std::env::split_paths(&paths)
-                    .map(|d| d.join("tidepool-extract"))
+                    .map(|d| d.join(tidepool_extract_cmd::DEFAULT_BIN))
                     .find(|p| p.is_file())
             }),
         };

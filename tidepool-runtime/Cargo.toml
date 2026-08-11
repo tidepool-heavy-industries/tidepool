@@ -13,6 +13,7 @@ readme = "../README.md"
 thiserror.workspace = true
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
+tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-codegen.workspace = true
 tidepool-bridge.workspace = true

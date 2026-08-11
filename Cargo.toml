@@ -11,6 +11,7 @@ members = [
     "tidepool-bridge-effects",
     "tidepool-macro",
     "tidepool-effect",
+    "tidepool-extract-cmd",
     "tidepool-codegen",
     "tidepool-runtime",
     "tidepool-mcp",
@@ -47,6 +48,7 @@ tidepool-bridge-effects = { version = "0.1.0", path = "tidepool-bridge-effects" 
 tidepool-codegen = { version = "0.1.0", path = "tidepool-codegen" }
 tidepool-effect = { version = "0.1.0", path = "tidepool-effect" }
 tidepool-eval = { version = "0.1.0", path = "tidepool-eval" }
+tidepool-extract-cmd = { version = "0.1.0", path = "tidepool-extract-cmd" }
 tidepool-handlers = { version = "0.1.0", path = "tidepool-handlers" }
 tidepool-harness = { version = "0.1.0", path = "tidepool-harness" }
 tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }

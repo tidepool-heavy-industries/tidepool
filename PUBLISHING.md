@@ -6,26 +6,27 @@ Crates must be published in dependency order. Wait for each crate to appear on c
 
 ```
 1.  tidepool-bignum
-2.  tidepool-repr
-3.  tidepool-eval
-4.  tidepool-bridge
-5.  tidepool-bridge-derive
-6.  tidepool-effect
-7.  tidepool-heap
-8.  tidepool-codegen
-9.  tidepool-bridge-effects
-10. tidepool-runtime
-11. tidepool-mcp
-12. tidepool-worktree
-13. tidepool-agent
-14. tidepool-handlers
-15. tidepool-harness
-16. tidepool-macro
-17. tidepool-optimize
-18. tidepool (binary)
-19. tidepool-lsp (binary)
-20. tidepool-repl (binary)
-21. tidepool-web (binary)
+2.  tidepool-extract-cmd
+3.  tidepool-repr
+4.  tidepool-eval
+5.  tidepool-bridge
+6.  tidepool-bridge-derive
+7.  tidepool-effect
+8.  tidepool-heap
+9.  tidepool-codegen
+10. tidepool-bridge-effects
+11. tidepool-runtime
+12. tidepool-mcp
+13. tidepool-worktree
+14. tidepool-agent
+15. tidepool-handlers
+16. tidepool-harness
+17. tidepool-macro
+18. tidepool-optimize
+19. tidepool (binary)
+20. tidepool-lsp (binary)
+21. tidepool-repl (binary)
+22. tidepool-web (binary)
 ```
 
 This order is derived from the workspace dependency graph (`cargo metadata`,

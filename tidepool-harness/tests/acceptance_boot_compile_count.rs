@@ -9,17 +9,24 @@
 //!
 //! # Traced call chain (every extract-spawn site the self-harness launch
 //! path reaches before the first model call — see this crate's `compile.rs`
-//! module doc and `EXTRACT_SPAWNS`' doc comment for the full site survey)
+//! module doc and the counter's doc comment in `tidepool-extract-cmd` for the
+//! full site survey)
 //!
-//! All FOUR pre-model compiles below funnel through the ONE spawn function
-//! [`tidepool_harness::compile::compile_turn`] (`tidepool-harness/src/compile.rs`,
-//! at its single `cmd.output()` call) — the harness's turn-compile path is
-//! deliberately independent of `tidepool_runtime::compile_haskell`/
-//! `cache.rs` (the MCP eval path, never reached from the self-harness
-//! driver) and of `tidepool_runtime::session::turn.rs`'s `run_turn`/
-//! `classify_block`/`compile_session_turn` (reached only via
-//! `Harness::run_block`, i.e. only AFTER a model turn produces a Haskell
-//! block to run — never before the first model call):
+//! The counter now sees EVERY `tidepool-extract` spawn in the process, not
+//! just this crate's: it lives in `tidepool_extract_cmd`, which owns the one
+//! builder every site goes through (`plans/post-restart/extract-manifest.md`,
+//! D-B — before that, spawns through `tidepool_runtime` were invisible here).
+//! The constant below is unaffected, because the other sites are not on the
+//! pre-model path: all FOUR pre-model compiles below funnel through the ONE
+//! spawn function [`tidepool_harness::compile::compile_turn`]
+//! (`tidepool-harness/src/compile.rs`, at its single `cmd.run()` call) — the
+//! harness's turn-compile path is deliberately independent of
+//! `tidepool_runtime::compile_haskell`/`cache.rs` (the MCP eval path, never
+//! reached from the self-harness driver) and of
+//! `tidepool_runtime::session::turn.rs`'s `run_turn`/`classify_block`/
+//! `compile_session_turn` (reached only via `Harness::run_block`, i.e. only
+//! AFTER a model turn produces a Haskell block to run — never before the
+//! first model call):
 //!
 //! 1. `Harness::new` (`tidepool-harness/src/harness.rs` ~430) — the answerer
 //!    `Harness`'s own boot seed, `pure (toJSON (0 :: Int))` compiled to seed

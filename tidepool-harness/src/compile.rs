@@ -6,9 +6,9 @@
 //! a `runLLMTurn`/`runLLMTurnFork` site id to the rendered answer type.
 //! `tidepool_runtime::compile_haskell` drops the extract tempdir before it
 //! returns, so this module invokes `tidepool-extract` directly into a
-//! kept-alive tempdir (mirroring `compile_haskell`'s own `Command`
-//! construction) and reads all three outputs — `<target>.cbor`, `meta.cbor`,
-//! `asks.json` — from it.
+//! kept-alive tempdir (through the shared `tidepool_extract_cmd::ExtractCmd`
+//! builder, the same one `compile_haskell` drives) and reads all three
+//! outputs — `<target>.cbor`, `meta.cbor`, `asks.json` — from it.
 //!
 //! This is deliberately NOT a fork of the runtime's caching compile: turns are
 //! one-shot `M a` expressions, the sidecar is small, and the extract call is
@@ -25,44 +25,26 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::Deserialize;
+use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 use crate::timing;
 
-/// Process-global count of `tidepool-extract` spawns paid by
-/// [`compile_turn`] — the extract-wave `boot` item's done-criterion needs a
-/// live receipt that the self-iterating harness's pre-model-call compile
-/// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
-/// and this is the single spawn function every path the self-harness launch
-/// reaches funnels through (the outer session's boot seed and its
-/// `render`/`loop` compiles, and the answerer `Harness`'s own boot seed — see
-/// `tidepool-harness/tests/acceptance_boot_compile_count.rs` for the traced
-/// call chain). PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
-/// on it must run as its own test binary so no other test's compiles land on
-/// the same count (nextest already gives one process per test binary).
-static EXTRACT_SPAWNS: AtomicU64 = AtomicU64::new(0);
-
-/// Number of `tidepool-extract` spawns [`compile_turn`] has paid in this
-/// process so far. `Ordering::SeqCst` so a reader on another thread (the
-/// acceptance test's snapshot, taken from inside a model-provider callback
-/// running on a different thread than the compiling turn) is guaranteed to
-/// see every increment a compiling thread has performed before this call.
-pub fn extract_spawn_count() -> u64 {
-    EXTRACT_SPAWNS.load(Ordering::SeqCst)
-}
-
-/// Reset the process-global spawn counter to zero. For test isolation within
-/// a single test binary that drives more than one `compile_turn`-reaching
-/// launch and wants each launch's count in isolation.
-pub fn reset_extract_spawn_count() {
-    EXTRACT_SPAWNS.store(0, Ordering::SeqCst);
-}
+/// The process-global `tidepool-extract` spawn counter, re-exported so this
+/// crate's public surface is unchanged. It USED to live here and count only
+/// [`compile_turn`]'s spawns, which made the extract-wave `boot` item's
+/// done-criterion wrong by construction: the harness also reaches
+/// `tidepool_runtime::session::turn`'s `run_turn`/`classify_block`/
+/// `compile_session_turn`, and those spawns were invisible to it. It now
+/// lives in `tidepool-extract-cmd` — the ONE builder every spawn site in the
+/// workspace goes through — so every spawn is counted by construction
+/// (`plans/post-restart/extract-manifest.md`, D-B). Still PROCESS-GLOBAL, and
+/// still `SeqCst` on the read; see the counter's own docs there.
+pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 
 /// One `asks.json` entry: a yield-site id and its rendered answer type.
 #[derive(Debug, Clone, Deserialize)]
@@ -214,43 +196,34 @@ pub fn compile_turns(
     let input_path = temp_dir.path().join(format!("{module}.hs"));
     std::fs::write(&input_path, source)?;
 
-    let mut cmd = Command::new(extract_bin);
-    cmd.arg(&input_path);
-    cmd.arg("--output-dir").arg(temp_dir.path());
-    cmd.arg("--targets").arg(targets.join(","));
-    for path in include {
-        cmd.arg("--include").arg(path);
-    }
-    let spawn_start = Instant::now();
-    let output = cmd.output().map_err(|source| CompileError::Spawn {
+    // The caller resolved the binary once at construction, so this site takes
+    // it as given (`with_bin`) rather than re-reading the env per turn.
+    let mut cmd = ExtractCmd::with_bin(extract_bin);
+    cmd.input(&input_path)
+        .output_dir(temp_dir.path())
+        .targets(targets)
+        .includes(include);
+    // The spawn counter lives inside `run()` now, so it counts every spawn in
+    // the process, not just this site's — see this module's re-export above.
+    let run = cmd.run().map_err(|e| CompileError::Spawn {
         bin: extract_bin.to_string(),
-        source,
+        source: e.source,
     })?;
-    // Counted on a successful spawn (the process actually launched and ran to
-    // exit) — a `Spawn` error above (bad path, `Command::output` I/O failure)
-    // never paid a real `tidepool-extract` cost and must not count as one.
-    EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
-    timing::record_stage(
-        node,
-        round,
-        timing::STAGE_EXTRACT_SPAWN,
-        spawn_start.elapsed(),
-        0,
-    );
+    timing::record_stage(node, round, timing::STAGE_EXTRACT_SPAWN, run.elapsed, 0);
     // A failed compile is still a real answerer round — attribute its extract
     // phases the same as a successful one, before returning the error below.
-    let extract_timing = timing::ExtractTiming::parse(&String::from_utf8_lossy(&output.stderr));
+    let extract_timing = timing::ExtractTiming::parse(&run.stderr_lossy());
     timing::record_extract_phases(node, round, &extract_timing);
-    if !output.status.success() {
+    if run.verdict != ExitVerdict::Success {
         tracing::warn!(
             targets = %targets.join(","),
             "extract failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            run.stderr_lossy()
         );
         return Err(CompileError::Extract(format!(
             "stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+            run.stdout_lossy(),
+            run.stderr_lossy(),
         )));
     }
 

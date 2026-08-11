@@ -1,0 +1,16 @@
+[package]
+name = "tidepool-extract-cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "The one builder for `tidepool-extract` invocations: binary resolution, typed arguments, the spawn, and the process-global spawn counter"
+
+# ZERO dependencies, deliberately (`plans/post-restart/extract-manifest.md`, D-A):
+# `tidepool-macro` is a proc-macro crate that must be able to depend on this
+# without dragging Cranelift and the rest of the runtime graph into every
+# downstream crate's BUILD graph. std only. Keep it that way.
+[dependencies]

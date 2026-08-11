@@ -20,10 +20,10 @@
 //! mutable session state (the injected ifaces), so a cache hit would be wrong.
 
 use std::path::Path;
-use std::process::Command;
 
 use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
+use tidepool_extract_cmd::{ExitPolicy, ExitVerdict, ExtractCmd, SpawnError};
 
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -380,12 +380,15 @@ fn missing_template_error(selector: TemplateSelector) -> CompileError {
     CompileError::ExtractFailed(format!("run_turn: no template supplied for {selector:?}"))
 }
 
-fn extract_bin() -> String {
-    std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string())
+/// A fresh [`ExtractCmd`] with this crate's error mapping already applied: a
+/// misconfigured `$TIDEPOOL_EXTRACT` is an environment problem, reported the
+/// same way a failed spawn is (`Io`, never a user-Haskell variant).
+fn extract_cmd() -> Result<ExtractCmd, CompileError> {
+    ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))
 }
 
-fn map_notfound(e: std::io::Error) -> CompileError {
-    CompileError::Io(crate::extract_spawn_error(e))
+fn map_notfound(e: SpawnError) -> CompileError {
+    CompileError::Io(crate::extract_spawn_error(e.source))
 }
 
 /// Scan `stderr` for `tidepool-timing phase=<name> ms=<int>` lines and re-emit
@@ -459,43 +462,36 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
 
-    let mut cmd = Command::new(extract_bin());
-    cmd.arg(&turn_path).arg("--turn");
+    let mut cmd = extract_cmd()?;
+    cmd.input(&turn_path).turn();
 
     for (i, tmpl) in req.templates.iter().enumerate() {
         let path = temp.path().join(format!("template-{i}.hs"));
         std::fs::write(&path, &tmpl.source)?;
-        cmd.arg("--turn-template")
-            .arg(format!("{}={}", tmpl.kind.wire_name(), path.display()));
+        cmd.turn_template(tmpl.kind.wire_name(), &path);
     }
 
-    cmd.arg("--turn-out")
-        .arg(&turn_out_path)
-        .arg("--output-dir")
-        .arg(temp.path());
-    for p in req.include {
-        cmd.arg("--include").arg(p);
-    }
-    cmd.arg("--session-root").arg(req.session_root);
-    for m in req.inject_modules {
-        cmd.arg("--inject-val").arg(m);
-    }
-    cmd.arg("--bind-gen").arg(req.gen.to_string());
+    cmd.turn_out(&turn_out_path)
+        .output_dir(temp.path())
+        .includes(req.include)
+        .session_root(req.session_root)
+        .inject_vals(req.inject_modules)
+        .bind_gen(req.gen);
     if let Some(target) = req.target {
-        cmd.arg("--target").arg(target);
+        cmd.target(target);
     }
     if let Some(arg) = verdict_arg {
-        cmd.arg("--turn-verdict").arg(arg);
+        cmd.turn_verdict(arg);
     }
 
-    let spawn_start = std::time::Instant::now();
-    let output = cmd.output().map_err(map_notfound)?;
-    super::record_turn_stage("extract_spawn", spawn_start.elapsed(), 0);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let run = cmd.run().map_err(map_notfound)?;
+    super::record_turn_stage("extract_spawn", run.elapsed, 0);
+    let output = &run.output;
+    let stderr = run.stderr_lossy();
     // A failed compile is still a real spawn — attribute its extract phases
     // the same as a successful one, before the early return below.
     forward_extract_timing(&stderr, "extract");
-    if !output.status.success() {
+    if run.verdict != ExitVerdict::Success {
         return Err(
             match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(report) => CompileError::Diagnostics(report.diagnostics),
@@ -808,36 +804,34 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     }
     let out_path = temp.path().join("classify.json");
 
-    let mut cmd = Command::new(extract_bin());
+    let mut cmd = extract_cmd()?;
     for path in &paths {
-        cmd.arg(path);
+        cmd.input(path);
     }
-    cmd.arg("--classify").arg("--classify-out").arg(&out_path);
+    cmd.classify()
+        .classify_out(&out_path)
+        // THIS LANE HAS NO USER-ERROR MODE, so a non-zero exit is always an
+        // infrastructure problem and never the user's Haskell — the named
+        // exception to the default `DiagnosticReport` policy every other
+        // extract call site takes. `ExitPolicy::InfrastructureOnly`'s own doc
+        // carries the full reasoning (rule 6, the stale-extract shape, and
+        // why routing this into the user-Haskell lane misleads the operator);
+        // the handling below is what that verdict obliges.
+        .exit_policy(ExitPolicy::InfrastructureOnly);
 
-    let output = cmd.output().map_err(map_notfound)?;
+    let run = cmd.run().map_err(map_notfound)?;
+    let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
     // its extract phases the same as a successful one, before the early
     // return below.
-    forward_extract_timing(&String::from_utf8_lossy(&output.stderr), "classify");
-    if !output.status.success() {
-        // THIS LANE HAS NO USER-ERROR MODE, so a non-zero exit is always an
-        // infrastructure problem and never the user's Haskell.
-        // `classifyTurn`'s rule 6 turns an item that parses as neither a
-        // declaration nor a statement into an `expr` verdict — the classify
-        // itself cannot reject input. What a non-zero exit really means is a
-        // stale extract: one predating `--classify` swallows the flag as a
-        // positional file and falls through to the ordinary compile path,
-        // which then reports a perfectly parseable GHC diagnostic about a
-        // target it cannot find. Classifying that as `ExtractFailed` would
-        // route a version skew into the caller's user-Haskell lane, where the
-        // repl degrades resiliently and the operator sees `parse error on
-        // input '<-'` on every bind instead of "your extract is stale".
-        //
-        // So both shapes are `MalformedDiagnostics` (→ VersionSkew), the same
-        // fails-loud reading every other call site gives an unparseable
-        // report. This is what makes the one-format wire policy true here:
-        // `--emit-stmt-binders`' removal means a new runtime REQUIRES a
-        // matching extract, and `scripts/redeploy.sh` ships both together.
+    forward_extract_timing(&run.stderr_lossy(), "classify");
+    if run.verdict == ExitVerdict::Infrastructure {
+        // Both shapes — a parseable report and an unparseable one — are
+        // `MalformedDiagnostics` (→ VersionSkew), the same fails-loud reading
+        // every other call site gives an unparseable report. This is what
+        // makes the one-format wire policy true here: `--emit-stmt-binders`'
+        // removal means a new runtime REQUIRES a matching extract, and
+        // `scripts/redeploy.sh` ships both together.
         let detail = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
             Ok(report) => report
                 .diagnostics
@@ -958,40 +952,31 @@ pub fn compile_session_turn(
     std::fs::write(&input, wrapped_source)?;
     let bb_path = temp.path().join("bound_binders.json");
 
-    let mut cmd = Command::new(extract_bin());
-    cmd.arg(&input)
-        .arg("--output-dir")
-        .arg(temp.path())
+    let mut cmd = extract_cmd()?;
+    cmd.input(&input)
+        .output_dir(temp.path())
         // Scaffold-reserved binding name (never a plain user-choosable
         // identifier like "result") — Main.hs's session path always compiles
         // this exact target but still writes the output as result.cbor
         // below, so this rename needs no change to the read-back path.
-        .arg("--target")
-        .arg("__result")
-        .arg("--session-root")
-        .arg(session_root);
-    for m in inject_modules {
-        cmd.arg("--inject-val").arg(m);
-    }
-    for p in include {
-        cmd.arg("--include").arg(p);
-    }
+        .target("__result")
+        .session_root(session_root)
+        .inject_vals(inject_modules)
+        .includes(include);
     let is_bind = bind.is_some();
     if let Some(ref b) = bind {
-        cmd.arg("--session-bind")
-            .arg("--bind-gen")
-            .arg(b.gen.to_string())
-            .arg("--emit-bound-binders")
-            .arg(&bb_path);
+        cmd.session_bind()
+            .bind_gen(b.gen)
+            .emit_bound_binders(&bb_path);
         for name in b.names {
-            cmd.arg("--bind-name").arg(name);
+            cmd.bind_name(name);
         }
     }
 
-    let spawn_start = std::time::Instant::now();
-    let output = cmd.output().map_err(map_notfound)?;
-    super::record_turn_stage("extract_spawn", spawn_start.elapsed(), 0);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let run = cmd.run().map_err(map_notfound)?;
+    super::record_turn_stage("extract_spawn", run.elapsed, 0);
+    let output = &run.output;
+    let stderr = run.stderr_lossy();
     if !stderr.is_empty() {
         eprintln!("[tidepool-extract stderr]\n{stderr}");
     }
@@ -1000,7 +985,7 @@ pub fn compile_session_turn(
     // "extract", not "classify": this is a full-pipeline spawn, the same lane
     // `compile.rs::compile_turn` instruments.
     forward_extract_timing(&stderr, "extract");
-    if !output.status.success() {
+    if run.verdict != ExitVerdict::Success {
         return Err(
             match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(report) => CompileError::Diagnostics(report.diagnostics),

@@ -15,6 +15,7 @@ tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
 tidepool-eval.workspace = true
+tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
 tidepool-codegen.workspace = true

@@ -57,6 +57,7 @@ tidepool/
 ├── tidepool-bridge-derive/← Proc-macro for bridge derives
 ├── tidepool-bridge-effects/← Single-source bridged-record types shared by handlers + test mocks
 ├── tidepool-macro/        ← Proc-macros embedding Haskell source as CBOR at build time (haskell_eval!/haskell_inline!)
+├── tidepool-extract-cmd/  ← The ONE `tidepool-extract` invocation builder: bin resolution, typed args, the spawn + spawn counter. std-only leaf (zero deps)
 ├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
 ├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache

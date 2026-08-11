@@ -17,6 +17,7 @@ syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 serde_json.workspace = true
+tidepool-extract-cmd.workspace = true
 
 [dev-dependencies]
 tidepool-repr.workspace = true

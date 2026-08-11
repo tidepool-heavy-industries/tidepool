@@ -5,7 +5,6 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::TempDir;
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
@@ -13,6 +12,7 @@ pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
+use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -180,27 +180,25 @@ pub fn compile_haskell_salted(
 
     // 2. Execute tidepool-extract
     // Arguments: <file.hs> --output-dir <dir> --target <name> [--include <dir> ...]
-    let extract_bin =
-        std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
-    let mut cmd = Command::new(&extract_bin);
-    cmd.arg(&input_path);
-    cmd.arg("--output-dir").arg(temp_dir.path());
-    cmd.arg("--target").arg(target);
+    let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
+    cmd.input(&input_path)
+        .output_dir(temp_dir.path())
+        .target(target)
+        .includes(include);
 
-    for path in include {
-        cmd.arg("--include").arg(path);
-    }
-
-    let output = cmd.output().map_err(extract_spawn_error)?;
+    let run = cmd
+        .run()
+        .map_err(|e| CompileError::Io(extract_spawn_error(e.source)))?;
+    let output = &run.output;
 
     // Always print stderr for diagnostics (trace output from Haskell); purely
     // a human debug channel now — stdout is the authoritative contract.
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let stderr_str = run.stderr_lossy();
     if !stderr_str.is_empty() {
         eprintln!("[tidepool-extract stderr]\n{}", stderr_str);
     }
 
-    if !output.status.success() {
+    if run.verdict != ExitVerdict::Success {
         return Err(
             match diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(report) => CompileError::Diagnostics(report.diagnostics),

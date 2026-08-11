@@ -39,6 +39,7 @@ pub use turn::{
 
 use std::path::{Path, PathBuf};
 
+use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
 pub use render::{
@@ -531,50 +532,40 @@ impl SessionLib {
         let wrapper_path = temp.path().join("TidepoolValidate.hs");
         std::fs::write(&wrapper_path, &wrapper_src)?;
 
-        let extract_bin =
-            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
-
-        let mut cmd = std::process::Command::new(&extract_bin);
-        cmd.arg(&wrapper_path)
-            .arg("--output-dir")
-            .arg(temp.path())
-            .arg("--target")
-            .arg("result")
-            .arg("--include")
-            .arg(&self.root);
+        // A misconfigured $TIDEPOOL_EXTRACT is the same environment problem a
+        // spawn failure is (`Io` → Infra), never the user's declaration.
+        let mut cmd = ExtractCmd::new().map_err(|e| SessionError::Io(e.into()))?;
+        cmd.input(&wrapper_path)
+            .output_dir(temp.path())
+            .target("result")
+            .include(&self.root);
 
         // Caller-supplied include dirs (e.g. the generated `Tidepool.Effects`
         // dir + stdlib `lib/` under the full-eval decl surface). Required so a
         // decl importing `Tidepool.Effects` resolves at validation time.
-        for dir in &self.extra_include {
-            cmd.arg("--include").arg(dir);
-        }
+        cmd.includes(&self.extra_include);
 
         // The candidate module imports stdlib sources (e.g. Tidepool.Data.Text)
         // that live next to `dist-newstyle` in the project tree. Auto-discover
         // that sibling `lib/` from TIDEPOOL_EXTRACT's path so validation finds
         // them without any extra configuration.
-        for dir in derive_stdlib_include() {
-            cmd.arg("--include").arg(dir);
-        }
+        cmd.includes(derive_stdlib_include());
 
         if !inject_modules.is_empty() {
             // `--inject-val` ifaces are looked up under `--session-root`
             // (`Tidepool.Session.ssRoot`) — required whenever we inject any,
             // same as a stmt turn's `compile_session_turn` call.
-            cmd.arg("--session-root").arg(&self.root);
-            for m in inject_modules {
-                cmd.arg("--inject-val").arg(m);
-            }
+            cmd.session_root(&self.root).inject_vals(inject_modules);
         }
 
         // Spawn failure is an environment problem (`Io` → Infra), never
         // `BinderExtraction` (which classifies as the user's Haskell).
-        let output = cmd
-            .output()
-            .map_err(|e| SessionError::Io(crate::extract_spawn_error(e)))?;
+        let run = cmd
+            .run()
+            .map_err(|e| SessionError::Io(crate::extract_spawn_error(e.source)))?;
+        let output = &run.output;
 
-        if !output.status.success() {
+        if run.verdict != ExitVerdict::Success {
             // An unparseable report is a stale/skewed extractor, not the
             // user's declaration — the same split every extract call site makes.
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
