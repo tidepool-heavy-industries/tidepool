@@ -40,7 +40,7 @@ use session_scaffold_reference::build_reference_fragment;
 use session_scaffold_value::build_value_fragment;
 
 /// High-byte tag a real Option-C session binder carries (`stableVarId`,
-/// 0xFE-tagged external) — mirrors `converge_proof.rs`'s fixture helper.
+/// 0xFE-tagged external).
 const EXTERNAL_TAG: u64 = 0xFE;
 
 fn external_var_id(key: u64) -> VarId {

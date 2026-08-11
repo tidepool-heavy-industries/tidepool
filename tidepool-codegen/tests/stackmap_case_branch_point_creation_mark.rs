@@ -1,8 +1,7 @@
 //! Targeted proof for cluster F (D6, jit-chain-2): does removing the
 //! per-branch-point `EmitContext::declare_env` sweep (formerly called at
-//! every case alt-body entry and merge block, see the commit that removed
-//! it) leave a live heap pointer unrooted across a case's internal GC
-//! safepoints?
+//! every case alt-body entry and merge block) leave a live heap pointer
+//! unrooted across a case's internal GC safepoints?
 //!
 //! Contract established from the pinned `cranelift-frontend` 0.129.1 source
 //! (`declare_value_needs_stack_map` inserts into a per-Function set consumed
@@ -33,22 +32,17 @@
 //!
 //! Nursery sizes are swept (rather than hand-computing the exact
 //! bump-allocator offset at which the noise Con's construction straddles a
-//! GC) — same rationale as `apply_acceptance.rs`'s
-//! `apply_gc_during_application_relocates_forced_callee` and
-//! `proptest_gc_recursion.rs`.
+//! GC).
 //!
-//! Mutation-both-directions proof (Step 6), performed by hand against
-//! `closure_survives_case_branch_gc_on_creation_mark_alone` and reverted —
-//! not committed as a toggle, since the mark lives in `emit_alloc_zeroed`
-//! (`emit/expr.rs:75`), the ONE allocation helper shared by every Con/
-//! Closure/Thunk allocation, not something this file can scope narrower than
-//! that without a source edit.
-//!
-//! Removing `builder.declare_value_needs_stack_map(ptr);` at `emit/expr.rs:75`
-//! (the allocation-result mark `clo`'s closure allocation depends on) made
-//! this test fail deterministically, at `nursery_size=256` (the first swept
-//! size), with the exact predicted signature on stderr: `[JIT] App:
-//! fun_ptr=0x... has tag 221 (UNKNOWN) — expected Closure!` and
+//! Mutation proof, performed by hand and reverted — not committed as a
+//! toggle, since the mark lives in `emit_alloc_zeroed` (`emit/expr.rs:75`),
+//! the ONE allocation helper shared by every Con/Closure/Thunk allocation,
+//! not something this file can scope narrower than that without a source
+//! edit. Removing `builder.declare_value_needs_stack_map(ptr);` at
+//! `emit/expr.rs:75` (the allocation-result mark `clo`'s closure allocation
+//! depends on) made this test fail deterministically, at `nursery_size=256`
+//! (the first swept size), with the exact predicted signature on stderr:
+//! `[JIT] App: fun_ptr=0x... has tag 221 (UNKNOWN) — expected Closure!` and
 //! `result.result_ptr == host_fns::error_poison_ptr()`. Restoring the line
 //! made the test pass again (all 77 swept nursery sizes, 1-4 real GCs each
 //! per `gc_trigger_call_count`).
@@ -56,11 +50,10 @@
 //! This mutation is necessarily coarser than "one value class" — it disables
 //! marking for every allocation, not just closures — but it durably confirms
 //! the allocation-result class specifically, `clo`'s own class, is
-//! load-bearing. The block-param and capture-load classes (case.rs:317/330,
-//! join.rs:163, expr.rs:1175/1212/1440/2522/2564 etc.) were not separately
-//! mutated — each follows the identical one-line-before-use
-//! `declare_value_needs_stack_map` shape audited in the commit message's
-//! 14-site table, but this file does not carry an independent test per class.
+//! load-bearing. The block-param and capture-load classes (in `case.rs` and
+//! `join.rs`) follow the identical one-line-before-use
+//! `declare_value_needs_stack_map` shape but were not separately mutated —
+//! this file does not carry an independent test per class.
 
 use tidepool_codegen::host_fns;
 use tidepool_heap::layout;

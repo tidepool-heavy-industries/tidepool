@@ -1,19 +1,15 @@
 //! Lane A — per-realm fields onto the frame (realm-verdict §7 step 2).
 //!
-//! Step 1 (`realm_multi_continuation.rs`) landed a registry so N parked
-//! continuations coexist in ONE machine, each a registered GC root, resumable
-//! in any order. But `last_bound_root`, `suspended_finalized_root`, and
-//! `cancel_flag` were still MACHINE-LEVEL singletons written by whichever
-//! realm ran last. With two realms live, realm B's bind silently overwrites
-//! realm A's — `materialize_binder` binds the WRONG value under realm A's
-//! name, with nothing panicking or type-erroring (both are valid
-//! `RootSlot`s). That is realm-checklist Item 3; this file is the
-//! red-then-green receipt that it is closed, plus the sibling A2/A3/A4
-//! relocations from the same verdict step.
+//! `last_bound_root`, `suspended_finalized_root`, and `cancel_flag` used to be
+//! MACHINE-LEVEL singletons written by whichever realm ran last. With two
+//! realms live, realm B's bind would silently overwrite realm A's —
+//! `materialize_binder` binding the WRONG value under realm A's name, with
+//! nothing panicking or type-erroring (both are valid `RootSlot`s). This file
+//! is the red-then-green receipt that moving those fields onto the frame
+//! closes that hole (A1), plus the sibling A2/A3/A4 relocations.
 //!
-//! A1's RED run (against yesterday's machine-level `last_bound_root`, before
-//! any production change in this file's sibling commit) failed with the
-//! silent-wrong-value shape the fix targets, not a panic or a `None`:
+//! A1's RED run (against the old machine-level `last_bound_root`) failed with
+//! the silent-wrong-value shape the fix targets, not a panic or a `None`:
 //!
 //! ```text
 //! assertion `left == right` failed: materialize_binder must bind realm A's value under realm A's name
@@ -23,8 +19,7 @@
 //!
 //! Every heap-touching test here runs under `TIDEPOOL_GC_POISON` +
 //! `TIDEPOOL_HEAP_VERIFY`, asserting `stowed_roots_count() == parked_count()`
-//! at every quiescent point — the same discipline `realm_multi_continuation.rs`
-//! uses, copied rather than reinvented.
+//! at every quiescent point.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
@@ -51,8 +46,7 @@ mod session_scaffold_expect;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 
-// ─── freer-simple constructor IDs — identical to realm_multi_continuation.rs's
-// table (same synthetic effect stack), plus FINALIZE_ID for A2. ─────────────
+// ─── freer-simple constructor IDs, plus FINALIZE_ID for A2. ────────────────
 const VAL_ID: DataConId = DataConId(10);
 const E_ID: DataConId = DataConId(11);
 const UNION_ID: DataConId = DataConId(12);
@@ -143,8 +137,7 @@ fn build_val_fragment(n: i64) -> CoreExpr {
     b.build()
 }
 
-/// Build a SUSPENDING entry — identical shape to
-/// `realm_multi_continuation::build_suspending_parent`:
+/// Build a SUSPENDING entry:
 ///
 /// ```text
 /// let captured = C1 CAPTURED_N in
@@ -319,9 +312,9 @@ fn disarm_gc_hazards() {
     tidepool_codegen::host_fns::set_heap_verify(false);
 }
 
-/// Same receipt as `realm_multi_continuation.rs`: at every quiescent point on
-/// the parked path, parked continuations and registered stowed roots must be
-/// equal, and the single slot must stay empty.
+/// At every quiescent point on the parked path, parked continuations and
+/// registered stowed roots must be equal, and the single slot must stay
+/// empty.
 fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
     assert_eq!(machine.parked_count(), expect, "parked continuation count");
     assert_eq!(

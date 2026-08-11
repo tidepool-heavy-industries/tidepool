@@ -1,11 +1,10 @@
-//! Throwaway measurement scaffolding for the realm-lifetime spike, COST A
-//! (persistent-root retirement). See
-//! `plans/post-restart/spike-notes/realm-lifetime.md` for the receipts this
-//! feeds and the static-analysis half of the finding.
+//! Measures persistent-root growth cost: whether the JIT's tenure-on-bind
+//! path leaks roots (and the old-space bytes they retain) unboundedly as a
+//! session accumulates binds.
 //!
 //! Drives ONE session machine through N successive value-plane bind
-//! fragments (`add_function` + `run_pure_and_bind`, the same primitive
-//! `converge_proof.rs` exercises) and reports, at N in {1, 8, 64}:
+//! fragments (`add_function` + `run_pure_and_bind`) and reports, at N in
+//! {1, 8, 64}:
 //! `persistent_roots_count()`, `heap_stats()` (nursery high-water bytes +
 //! GC count), and `old_space_bytes_used()` (the retained-bytes number
 //! `heap_stats().live_bytes` does NOT capture, since it resets to 0 across a
@@ -43,8 +42,8 @@ fn table_with_c1() -> DataConTable {
 }
 
 /// N in {1, 8, 64} value-plane binds against one session machine. Reports
-/// the root/heap numbers at each checkpoint and asserts the two claims the
-/// findings doc makes: (1) `persistent_roots_count` grows STRICTLY
+/// the root/heap numbers at each checkpoint and asserts two claims:
+/// (1) `persistent_roots_count` grows STRICTLY
 /// monotonically (one root per bind, no dedup, no shrink short of drop),
 /// and (2) `old_space_bytes_used` grows with it (the retained bytes a
 /// growing root set keeps alive).

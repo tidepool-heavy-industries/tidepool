@@ -31,9 +31,8 @@
 //! This file does not exercise dispatch itself (that machinery is unchanged
 //! by this lane) — `handled_prefix` here is pure metadata threaded through
 //! the park path, so most fragments reuse the same ASK_TAG=0 suspending
-//! shape `realm_multi_continuation.rs`/`realm_per_realm_fields.rs` use
-//! (varying only the `handled_prefix` argument), except the two cases above
-//! which use a non-suspending fragment on purpose.
+//! shape (varying only the `handled_prefix` argument), except the two cases
+//! above which use a non-suspending fragment on purpose.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
@@ -57,8 +56,7 @@ use serial_test::serial;
 mod session_scaffold_expect;
 use session_scaffold_expect::expect_int;
 
-// ─── freer-simple constructor IDs — identical shape to
-//     realm_multi_continuation.rs's synthetic effect stack. ────────────────
+// ─── freer-simple constructor IDs ──────────────────────────────────────────
 const VAL_ID: DataConId = DataConId(10);
 const E_ID: DataConId = DataConId(11);
 const UNION_ID: DataConId = DataConId(12);
@@ -113,7 +111,6 @@ fn adversarial_table() -> DataConTable {
     table
 }
 
-/// Identical shape to `realm_multi_continuation.rs`'s `build_suspending_parent`:
 /// `let captured = C1 CAPTURED_N in E (Union (W# ASK_TAG) (I# req)) (Leaf (\v -> Val (Pair captured (C1 v))))`.
 fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
     let mut b = TreeBuilder::new();
@@ -223,9 +220,8 @@ fn disarm_gc_hazards() {
     tidepool_codegen::host_fns::set_heap_verify(false);
 }
 
-/// The rooting receipt, same idiom as `realm_multi_continuation.rs`'s
-/// `assert_rooting_receipt`: at every quiescent point on the parked path,
-/// registered stowed roots must equal parked continuations.
+/// At every quiescent point on the parked path, registered stowed roots must
+/// equal parked continuations.
 fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
     assert_eq!(machine.parked_count(), expect, "parked continuation count");
     assert_eq!(
@@ -239,9 +235,9 @@ fn owned(strs: &[&str]) -> Vec<String> {
     strs.iter().map(|s| s.to_string()).collect()
 }
 
-/// Attempt to park a suspending fragment tagged with `handled_prefix`. Unlike
-/// `realm_multi_continuation.rs`'s `park_fragment`, this does NOT unwrap —
-/// several cases in this file expect `Err`, and the caller inspects it.
+/// Attempt to park a suspending fragment tagged with `handled_prefix`. Does
+/// NOT unwrap — several cases in this file expect `Err`, and the caller
+/// inspects it.
 fn try_park_fragment(
     machine: &mut JitEffectMachine,
     table: &DataConTable,

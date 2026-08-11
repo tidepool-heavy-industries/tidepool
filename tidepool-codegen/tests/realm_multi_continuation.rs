@@ -1,72 +1,22 @@
 //! REALM FALSIFIER — many continuations parked in ONE machine, resumed out of
-//! order, with GC forced between the parks.
+//! order, with GC forced between the parks. Tests the claim that PERMANENT
+//! ROOTING — not the temporal argument the single-slot path relies on (safe
+//! only because no GC can run on a suspended machine, or because a nested
+//! child's continuation is a registered GC root) — is what keeps a parked
+//! continuation safe: every parked continuation is a REGISTERED GC ROOT for
+//! its whole parked lifetime.
 //!
-//! The design claim under test: PERMANENT ROOTING REPLACES THE TEMPORAL
-//! ARGUMENT. Today a stowed continuation is safe for two different reasons
-//! depending on state — idle-suspended it is safe because no GC can run on a
-//! suspended machine (the L7 `suspended_continuation.is_none()` asserts), and
-//! while a nested child runs it is instead safe because it is a REGISTERED GC
-//! ROOT. The realm generalization drops the temporal half entirely and roots
-//! EVERY parked continuation for its whole parked lifetime.
+//! Every test runs under `TIDEPOOL_GC_POISON` + `TIDEPOOL_HEAP_VERIFY` with a
+//! nursery small enough to collect for real, so a missed root surfaces as a
+//! DETERMINISTIC poisoned tag 221 rather than a flaky segfault. Each case's
+//! section comment below states whether it is a safety case (dies under the
+//! negative control that deletes `register_stowed_root` in
+//! `park_continuation`) or an ordering/bookkeeping case (stays green under
+//! that control).
 //!
-//! This file is the fast kill-or-confirm. It parks a parent AND a child that
-//! itself suspends — exactly what `ChildSuspended` forbids one level up —
-//! resumes them out of order, and forces real collections (including heap
-//! doubling) between the parks. Every test runs under
-//! `TIDEPOOL_GC_POISON` + `TIDEPOOL_HEAP_VERIFY` with a nursery small enough to
-//! collect for real, so a missed root surfaces as a DETERMINISTIC poisoned tag
-//! 221 rather than a flaky segfault.
-//!
-//! Cases:
-//!   F1 — park A, park B (a fragment that also suspends), resume B then A.
-//!   F2 — the same two parks resumed in the OTHER order (A then B).
-//!   F3 — park A, park B, run a GC-forcing fragment that collects AND doubles
-//!        the heap, THEN resume both.
-//!   F4 — eight parks with distinct captured values, a GC forced between each,
-//!        resumed in a fixed shuffled order.
-//!   W1 — NESTED/MID-EFFECT: parked partway through an effect sequence (one
-//!        DISPATCHED effect answered inline, then a suspending ask) rather
-//!        than at a clean top-level ask.
-//!   W2 — STREAMED RESPONSE TAIL: the dispatched effect's answer is an
-//!        unforced lazily-streamed list, embedded unforced in the parked
-//!        continuation and only forced after resume.
-//!   W3 — FINALIZED CLOSURE PARK: suspended on a closure-valued `finalize`
-//!        (`ContinuationFrame::finalized_root` populated).
-//!   W4a/W4b — BINDING PARK: `ParkKind::Binding { forced: true }` /
-//!        `{ forced: false }`.
-//! (codex-review-2026-08-08.md item 5: F1-F4/A5 above only ever falsify ONE
-//! heap shape — a captured constructor chain across a clean top-level ask.
-//! W1-W4 widen that to the four shapes the review found unfalsified.)
-//!
-//! `stowed_roots_count() == parked_count()` is asserted at every step. That
-//! equality is the receipt that rooting — not luck, not timing — is what
-//! protects the parked continuations.
-//!
-//! WHICH CASES CARRY THE SAFETY CLAIM. Deleting the `register_stowed_root` call
-//! in `park_continuation` (the negative control) kills F3, F4, the A5 case,
-//! and ALL FIVE of W1/W2/W3/W4a/W4b — every one of those forces a real
-//! collection (tripping the heap-doubling branch) with the continuation
-//! parked and nothing else protecting it, and every one dies with the same
-//! deterministic poisoned tag 221 (`force_ptr: unexpected heap tag 221`) on
-//! the resume that follows. F1 and F2 stay GREEN under the control, because
-//! neither forces a collection between its parks — they test the registry's
-//! ordering and bookkeeping, not memory safety. Read the results that way.
-//!
-//! W3 is a SPLIT CASE, confirmed by the same control run: its finalized
-//! PAYLOAD (taken via `take_parked_finalized_root` and checked for a live
-//! `TAG_CLOSURE` tag) stays GREEN under the control — that value is tenured
-//! into old-space and persistent-rooted by `tenure_finalized_payload` at
-//! SUSPEND time, before `park_continuation` (and therefore
-//! `register_stowed_root`) ever runs, so its safety comes from the OLD-SPACE
-//! persistent-root mechanism, not the stowed-roots registry. The frame's
-//! `resume_parked` call that follows (which threads `captured` — an ordinary
-//! nursery allocation — through the continuation) is what actually dies. Read
-//! W3 as: finalized-payload read = bookkeeping/independent-mechanism;
-//! continuation resume = safety case.
-//!
-//! The single-slot machinery (`suspended_continuation`, `run_child_fragment`,
-//! `enter_nested_child`, the L7 asserts) is the CONTROL GROUP and is untouched;
-//! `nested_child_gc_rooting.rs` remains its suite.
+//! `stowed_roots_count() == parked_count()` is asserted at every step — the
+//! receipt that rooting, not luck or timing, protects the parked
+//! continuations.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
@@ -102,7 +52,6 @@ use session_scaffold_gc_forcing::build_gc_forcing_fragment;
 use session_scaffold_value::build_value_fragment;
 
 // ─── freer-simple constructor IDs (must match ConTags::from_table lookup) ────
-// Identical to nested_child_gc_rooting.rs's table — same synthetic effect stack.
 const VAL_ID: DataConId = DataConId(10);
 const E_ID: DataConId = DataConId(11);
 const UNION_ID: DataConId = DataConId(12);
@@ -126,8 +75,8 @@ const NIL_ID: DataConId = DataConId(4);
 /// Boxed Int, what `ToCore for i64` wraps a streamed element in
 /// (`respond_list`'s pull-time conversion) — used by W2.
 const I_HASH_ID: DataConId = DataConId(5);
-/// `FinalizeWith site closure` (W4 shape in `realm_per_realm_fields.rs`'s
-/// numbering) — a 2-field Con whose field 1 is a raw closure. Used by W3.
+/// `FinalizeWith site closure` — a 2-field Con whose field 1 is a raw
+/// closure. Used by W3.
 const FINALIZE_ID: DataConId = DataConId(16);
 /// 3-field constructor for W1/W2's deep-verify: `Triple captured mid answer`.
 const TRIPLE_ID: DataConId = DataConId(17);
@@ -462,10 +411,9 @@ fn build_streamed_tail_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -
     b.build()
 }
 
-/// W3's shape — identical to `realm_per_realm_fields.rs`'s
-/// `build_suspending_finalize` (closure-valued `finalize`), reproduced here
-/// (test binaries are separate crates) since W3 additionally forces a real
-/// collection while parked, which that file's A2 case does not:
+/// W3's shape: suspends on a closure-valued `finalize`. Reproduced here
+/// (test binaries are separate crates, so this can't just import a sibling's
+/// helper) because W3 additionally forces a real collection while parked:
 ///
 /// ```text
 /// let captured = C1 CAPTURED_N in

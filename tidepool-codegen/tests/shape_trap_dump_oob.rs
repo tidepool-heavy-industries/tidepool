@@ -1,4 +1,3 @@
-//! L3 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
 //! `runtime_shape_trap`'s diagnostic dump unconditionally read 32 bytes from
 //! the scrutinee, but every heap object is only GUARANTEED to be 24 bytes
 //! (Lit's total size). A 24-byte `Lit` sitting at the very end of the

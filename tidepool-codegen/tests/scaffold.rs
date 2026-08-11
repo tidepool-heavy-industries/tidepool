@@ -10,7 +10,6 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
 use serial_test::serial;
 
-/// Test 1: JIT boots, empty fn compiles and calls without crash.
 #[test]
 fn test_jit_boot_empty_fn() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
@@ -50,7 +49,6 @@ fn test_jit_boot_empty_fn() {
     assert_eq!(result, 42);
 }
 
-/// Test 2: VMContext field offsets correct.
 #[test]
 fn test_vmcontext_offsets() {
     assert_eq!(std::mem::offset_of!(VMContext, alloc_ptr), 0);
@@ -59,7 +57,6 @@ fn test_vmcontext_offsets() {
     assert_eq!(std::mem::align_of::<VMContext>(), 16);
 }
 
-/// Test 3: Stack map registry populates after compiling fn with declared heap-ptr values.
 #[test]
 fn test_stack_map_registry_populates() {
     extern "C" fn dummy_callee(_vmctx: i64) -> i64 {
@@ -131,12 +128,9 @@ fn test_stack_map_registry_populates() {
     );
 }
 
-/// Test 4: gc_trigger can be called from JIT code with the correct VMContext.
 #[test]
 #[serial]
 fn test_gc_trigger_called_from_jit() {
-    // We'll create a JIT function that calls gc_trigger, and verify via
-    // host_fns counters that it was invoked with the expected VMContext.
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Declare gc_trigger as importable
@@ -202,7 +196,6 @@ fn test_gc_trigger_called_from_jit() {
     );
 }
 
-/// Test 5: Alloc fast-path IR: allocates object, bumps pointer.
 #[test]
 #[serial]
 fn test_alloc_fast_path() {
@@ -268,8 +261,6 @@ fn test_alloc_fast_path() {
     assert_eq!(vmctx.alloc_ptr as usize, start as usize + 24);
 }
 
-/// Test 6: Stack map end-to-end — compile fn with 2+ heap-ptr locals,
-/// call gc_trigger, verify stack map entries are present and correct.
 #[test]
 #[serial]
 fn test_stack_map_end_to_end() {
@@ -326,10 +317,6 @@ fn test_stack_map_end_to_end() {
     // Verify stack maps have entries with 2 offsets at the safepoint
     assert!(!pipeline.stack_maps.is_empty());
 
-    // Check that at least one entry has exactly 2 root offsets
-    // This verifies that both ptr1 and ptr2 are tracked at the safepoint.
-    // Note: We don't have a public iterator for entries, but we know there's one.
-    // In Wave 2 we will verify the exact pointer values via frame walking.
     assert!(!pipeline.stack_maps.is_empty());
 
     // Actually call the function to verify ptrs survive
