@@ -104,20 +104,15 @@ class GFromJSON f where
 class GFromRecord f where
   gParseRecord :: Object -> Result (f a)
 
--- Datatype metadata layer: transparent.
 instance GFromJSON f => GFromJSON (M1 D d f) where
   gParseJSON v = M1 <$> gParseJSON v
 
--- Constructor layer: a record decodes from a JSON object.
 instance GFromRecord f => GFromJSON (M1 C c f) where
   gParseJSON = withObject "record" (\o -> M1 <$> gParseRecord o)
 
--- Product: each field group reads its own keys out of the shared object.
 instance (GFromRecord a, GFromRecord b) => GFromRecord (a :*: b) where
   gParseRecord o = (:*:) <$> gParseRecord o <*> gParseRecord o
 
--- Selector leaf: look the field up by its exact selector name, decode via its
--- own 'FromJSON' instance (so nested records recurse through the default).
 instance (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R c)) where
   gParseRecord o = (M1 . K1) <$> (o .: fieldName)
     -- The proxy is a real (non-bottom) 'Proxy' constructor rather than
@@ -134,7 +129,6 @@ instance {-# OVERLAPPING #-} (Selector s, FromJSON c) => GFromRecord (M1 S s (K1
   gParseRecord o = (M1 . K1) <$> (o .:? fieldName)
     where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
--- Nullary constructor: an empty record decodes from any object.
 instance GFromRecord U1 where
   gParseRecord _ = Success U1
 

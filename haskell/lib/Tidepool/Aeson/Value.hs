@@ -172,23 +172,18 @@ class GToJSON f where
 class GToRecord f where
   gToRecord :: f a -> [Pair]
 
--- Datatype metadata layer: transparent.
 instance GToJSON f => GToJSON (M1 D d f) where
   gToJSON (M1 x) = gToJSON x
 
--- Constructor layer: a record becomes a JSON object.
 instance GToRecord f => GToJSON (M1 C c f) where
   gToJSON (M1 x) = object (gToRecord x)
 
--- Product: concatenate the pairs from both field groups.
 instance (GToRecord a, GToRecord b) => GToRecord (a :*: b) where
   gToRecord (a :*: b) = gToRecord a ++ gToRecord b
 
--- Selector leaf: one pair, keyed by exact selector name.
 instance (Selector s, ToJSON c) => GToRecord (M1 S s (K1 R c)) where
   gToRecord m@(M1 (K1 c)) = [(T.pack (selName m), toJSON c)]
 
--- Nullary constructor: an empty record is an empty object.
 instance GToRecord U1 where
   gToRecord _ = []
 
