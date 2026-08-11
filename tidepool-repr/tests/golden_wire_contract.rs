@@ -1,4 +1,4 @@
-//! Golden wire-contract (T5 — see notes/wire-single-source-spike.md).
+//! Golden wire-contract (T5).
 //!
 //! Contract: every Haskell-encoder-produced fixture must (1) decode, (2)
 //! re-encode through the Rust writer to a byte-identical payload — trees AND

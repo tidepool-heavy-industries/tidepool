@@ -1,10 +1,10 @@
-//! Session identifiers for the `tidepool-repl` planes (domain model §1–2).
+//! Session identifiers for the `tidepool-repl` planes.
 //!
 //! Newtypes — never bare `u64`/`String` — so the invariants (monotonic
 //! generation, the single gen-versioned module-name string) live on the type.
-//! Lane A (declaration accumulation) needs [`Generation`], [`SessionId`],
+//! Declaration accumulation needs [`Generation`], [`SessionId`],
 //! [`BindingName`], and [`SessionModule`]; the value-plane id [`SessionVarId`]
-//! is the Wave-3b bridge between the GHC type plane and the JIT value plane.
+//! is the bridge between the GHC type plane and the JIT value plane.
 
 use std::fmt;
 
@@ -48,8 +48,9 @@ pub struct BindingName(pub String);
 
 /// Which session plane a gen-versioned module belongs to.
 ///
-/// - `Lib`: user-written declarations (Lane A) accumulated as source text.
-/// - `Val`: synthesized value-binding ifaces (Option C, Wave 3 — not built here).
+/// - `Lib`: user-written declarations, accumulated as source text.
+/// - `Val`: synthesized value-binding ifaces; construction lives in
+///   `tidepool-repl`/`tidepool-runtime`, not in this crate.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SessionModuleKind {
     Val,
@@ -67,7 +68,7 @@ impl SessionModuleKind {
 
 /// A gen-versioned session module. **The one place** the module-name string
 /// `"Tidepool.Session.{Val|Lib}.G<g>"` is constructed — render through this type
-/// so no bare module strings drift across the codebase (domain model §2).
+/// so no bare module strings drift across the codebase.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct SessionModule {
     pub kind: SessionModuleKind,
@@ -116,14 +117,12 @@ impl fmt::Display for SessionModule {
 
 /// The stable `VarId` of a session value binder — `Tidepool.Session.Val.G<g>.x`.
 ///
-/// Always `0xFE`-tagged (a real external under Option C). **The hash is minted
+/// Always `0xFE`-tagged (a real external). **The hash is minted
 /// exactly once, in the Haskell extract** (`Translate.stableVarId`, the
 /// `0xFE<<56 | fingerprintString("<module>:<occ>").hi64` rule), and carried to
 /// Rust on the bind turn's `BoundBinder.var_id`. Rust **stores** that id and
 /// re-seeds it into the `ExternalEnv` for later reference turns — it never
-/// recomputes the MD5 fingerprint, so there is no cross-language drift risk
-/// (this is the deliberate single-source refinement of domain model §3's
-/// `SessionVarId::of`: the one place is the Haskell stable-id rule).
+/// recomputes the MD5 fingerprint, so there is no cross-language drift risk.
 ///
 /// Both the bind turn (the binder's `Name` in the synthesized `Val.G<g>` iface)
 /// and every later reference turn (the imported `Name` from that injected iface)

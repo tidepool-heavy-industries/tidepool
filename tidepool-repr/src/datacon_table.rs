@@ -82,8 +82,9 @@ pub struct DataConTable {
     /// Mapping from module-qualified name to its DataConId.
     by_qualified_name: HashMap<String, DataConId>,
     /// Mapping from parent-type name (e.g. "Verdict") to all DataConIds of
-    /// that type, in insertion order — the constructor's declaration order,
-    /// since the Haskell side emits `tyConDataCons` in that order.
+    /// that type, kept sorted by constructor TAG (declaration order) by
+    /// [`Self::sort_type_name_bucket`] — see that function for why insertion
+    /// order cannot be trusted to already be in that order.
     by_type_name: HashMap<String, Vec<DataConId>>,
     /// Type-sibling groups: DataConIds that appear together in case branches.
     /// If Bin and Tip appear as alternatives in the same Case, they're siblings.
@@ -111,18 +112,14 @@ impl DataConTable {
     /// two encodings of "the same" constructor that disagree on its actual
     /// shape indicate a corrupt or mismatched metadata source, not a harmless
     /// re-encounter, and silently keeping the last-inserted shape (as plain
-    /// `insert` would) risks a runtime tag/arity mismatch downstream. Zero
-    /// extra cost in the no-collision case beyond the existing `by_id` lookup
-    /// that `insert` already performs.
+    /// `insert` would) risks a runtime tag/arity mismatch downstream.
     ///
     /// This is the always-on table-integrity guard; it covers every producer,
     /// including future non-extract ones. (The Haskell extractor additionally
     /// stops coalescing colliding entries so they actually reach this check.)
     ///
     /// Also guards the `by_qualified_name` axis: two DISTINCT ids claiming one
-    /// qualified name is a hard error too, for the same reason — see
-    /// [`Self::check_collision`], which this and [`Self::extend_checked`] both
-    /// route through so neither route can drift out of sync with the other.
+    /// qualified name is a hard error too — see [`Self::check_collision`].
     pub fn insert_checked(&mut self, dc: DataCon) -> Result<(), DataConCollision> {
         self.check_collision(&dc)?;
         self.insert(dc);
@@ -192,10 +189,8 @@ impl DataConTable {
     /// containing `id` with a possibly-changed tag). Callers are responsible
     /// for sorting that bucket afterward — [`Self::insert`] does so
     /// immediately; [`Self::extend_checked`] batches it across many calls.
-    ///
-    /// This is the entire index-maintenance body `insert` used to run
-    /// inline; factored out so both callers share exactly one implementation
-    /// of the retain/re-push bookkeeping.
+    /// Shared by both so there is exactly one implementation of the
+    /// retain/re-push bookkeeping.
     fn upsert_no_sort(&mut self, dc: DataCon) -> String {
         let id = dc.id;
         let name = dc.name.clone();
@@ -861,9 +856,7 @@ mod tests {
     // ---- insert_checked / extend_checked: by_qualified_name collision guard ----
 
     /// Two DISTINCT ids claiming one qualified name must be rejected loudly,
-    /// naming both ids — the mirror-image of the by-id guard above, and the
-    /// fix for finding 2 in
-    /// `plans/self-iterating-harness/12-contags-staleness-findings.md`.
+    /// naming both ids — the mirror-image of the by-id guard above.
     #[test]
     fn insert_checked_rejects_distinct_ids_sharing_a_qualified_name() {
         let mut table = DataConTable::new();

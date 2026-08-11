@@ -18,8 +18,7 @@ pub struct RecursiveTree<F> {
 
 /// A single step of an explicit-stack post-order walk over a flat tree.
 /// `Enter` discovers a node's children (scheduling them first); `Exit` rebuilds
-/// the node once all its children have new indices. Two `usize` per frame keeps
-/// the work item pointer-sized.
+/// the node once all its children have new indices.
 enum WalkStep {
     Enter(usize),
     Exit(usize),
@@ -36,16 +35,15 @@ impl RecursiveTree<CoreFrame<usize>> {
     /// root emitted last) with index memoization — no call-stack growth per
     /// tree level, so arbitrarily deep towers extract without overflowing.
     ///
-    /// Output is identical to the former recursive `collect`: nodes land in
-    /// left-to-right post-order, and DAG sharing is preserved (a node reachable
-    /// from several parents is emitted exactly once, via `old_to_new`).
+    /// Nodes land in left-to-right post-order, and DAG sharing is preserved
+    /// (a node reachable from several parents is emitted exactly once, via
+    /// `old_to_new`).
     pub fn extract_subtree(&self, idx: usize) -> Self {
         let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
         // old index -> new index, written at Exit; presence marks "emitted"
         // and is the sole bookkeeping (no separate "seen" set): an Enter or
-        // Exit for an already-emitted index is skipped, which both preserves
-        // DAG sharing and — for the common pure-tree case (in-degree 1) — costs
-        // exactly the one map probe the recursive `collect` did.
+        // Exit for an already-emitted index is skipped, which preserves DAG
+        // sharing for a node reachable from multiple parents.
         let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
         let mut stack = vec![WalkStep::Enter(idx)];
@@ -56,13 +54,11 @@ impl RecursiveTree<CoreFrame<usize>> {
                         continue;
                     }
                     stack.push(WalkStep::Exit(i));
-                    // Children pop left-to-right, matching the recursive walk's
-                    // child order (and thus node ordering).
                     for_each_child_rev(&self.nodes[i], |c| {
-                        // Complements the wire-decode `child < my_idx` check
-                        // (`serial/read.rs`'s `validate_indices`, F1) for trees
-                        // built directly by internal constructors, which skip
-                        // that decode-time gate entirely.
+                        // The wire-decode `child < my_idx` check (`serial/read.rs`,
+                        // F1) doesn't run for trees built directly by internal
+                        // constructors, so this debug_assert is the only guard
+                        // against a cycle/forward-reference for those.
                         debug_assert!(
                             c < i,
                             "extract_subtree: child {c} is not strictly earlier than parent {i}"
@@ -196,10 +192,9 @@ pub fn replace_subtree(
     let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
     // Stack-safe rebuild: explicit-stack post-order copy of `expr`, splicing
-    // `replacement` wholesale wherever the walk reaches `target_idx`. Mirrors
-    // the former recursive `rebuild` (same node ordering, same memoized DAG
-    // sharing) without per-level call-stack growth. `old_to_new` is the sole
-    // bookkeeping — an Enter/Exit for an already-emitted index is skipped.
+    // `replacement` wholesale wherever the walk reaches `target_idx`, without
+    // per-level call-stack growth. `old_to_new` is the sole bookkeeping — an
+    // Enter/Exit for an already-emitted index is skipped.
     let mut stack = vec![WalkStep::Enter(expr.nodes.len() - 1)];
     while let Some(step) = stack.pop() {
         match step {
@@ -209,8 +204,7 @@ pub fn replace_subtree(
                 }
                 if i == target_idx {
                     // Splice the replacement here and stop — the original
-                    // subtree at `target_idx` is discarded (no Exit, no
-                    // descent), exactly as the recursive version returned early.
+                    // subtree at `target_idx` is discarded (no Exit, no descent).
                     let offset = new_nodes.len();
                     for node in &replacement.nodes {
                         new_nodes.push(node.clone().map_layer(|j| j + offset));

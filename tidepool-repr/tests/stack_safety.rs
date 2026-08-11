@@ -1,12 +1,11 @@
 //! Stack-safety tests for the structural tree walks (`extract_subtree`,
 //! `replace_subtree`, `free_vars`).
 //!
-//! These walks run in the JIT emit hot path over the same deep trees that
-//! produced the emit stack cliff. Each was converted from native recursion to
-//! an explicit-stack post-order walk; these tests build trees far deeper than a
-//! small thread's call budget and run each walk on a 256 KiB thread, asserting
-//! clean completion AND correct results. Under the former recursive walks these
-//! overflowed (process abort); the explicit-stack versions complete.
+//! These walks run in the JIT emit hot path over deep trees, using an
+//! explicit-stack post-order walk rather than native recursion so arbitrarily
+//! deep towers don't grow the Rust call stack. These tests build trees far
+//! deeper than a small thread's call budget and run each walk on a 256 KiB
+//! thread, asserting clean completion AND correct results.
 
 use tidepool_repr::free_vars::free_vars;
 use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame, Literal, RecursiveTree, VarId};

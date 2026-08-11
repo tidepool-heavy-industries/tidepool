@@ -459,12 +459,11 @@ fn duplicate_ids_within_one_turn_diverge_but_cannot_occur_in_production() {
 /// Turns drawn from the same small overlapping pool as `arb_datacon`, so
 /// consecutive turns mostly re-present what's already accumulated (subset,
 /// the documented steady state) with occasional new-or-changed entries.
-/// `arb_datacon`'s `qualified_name` is keyed to `id` (see there) so the
-/// fuzzer stays within the domain real sessions actually exercise — the
-/// pre-existing qualified-name collision hole is covered by dedicated
-/// explicit tests above instead, per the standing instruction not to widen
-/// or "fix" that axis in this pass. Each generated turn is deduped by id
-/// (see `dedup_turn_by_id_keep_last`) to keep it within the one-entry-per-id
+/// `arb_datacon`'s `qualified_name` is independent of `id` (see there), so
+/// this property also exercises cross-id qualified-name collisions — safe to
+/// fuzz because every path this file compares routes through the same
+/// `check_collision`. Each generated turn is deduped by id (see
+/// `dedup_turn_by_id_keep_last`) to keep it within the one-entry-per-id
 /// domain production can actually produce.
 fn arb_turns() -> impl Strategy<Value = Vec<Vec<DataCon>>> {
     prop::collection::vec(

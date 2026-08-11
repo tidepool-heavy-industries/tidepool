@@ -28,7 +28,7 @@ pub struct SentinelPayload {
     pub slot: u64,
 }
 
-/// Decoded high-byte tag of a [`VarId`] (domain model §3). Replaces bare byte
+/// Decoded high-byte tag of a [`VarId`]. Replaces bare byte
 /// comparisons (`v >> 56 == 0x..`) at resolution sites with an exhaustive match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {

@@ -15,9 +15,8 @@
 //! drifting apart (#F5): the oracle (`tidepool_effect::machine::EffectMachine::new`,
 //! via `tidepool-effect`'s thin `pub use` re-export of this module), the JIT
 //! (`tidepool-codegen`'s `effect_machine::ConTags::try_from`, also via that
-//! re-export), and — the production-path variant of the same collision,
-//! plan 05 F2 — this crate's own `normalize.rs`
-//! (`transform_canonicalize_effect_tag`).
+//! re-export), and — the production-path variant of the same collision, F2 —
+//! this crate's own `normalize.rs` (`transform_canonicalize_effect_tag`).
 
 /// Unqualified constructor name for `Val` (pure result).
 pub const VAL: &str = "Val";

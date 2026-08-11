@@ -86,9 +86,8 @@ fn find_max_var_id(tree: &CoreExpr) -> VarId {
 /// on is unsound here. A faithful explicit-stack conversion would have to thread
 /// per-frame env state through a two-phase work item and re-pair the
 /// `copy_with_env` sub-walks by construction, whose failure mode is SILENT
-/// miscapture rather than a crash — the #313-class risk the stack-safety plan
-/// explicitly defers (`plans/stack-safety.md`, "stacker at the emit spine"
-/// rationale). `subst` is also confined to the optimize passes, which are not on
+/// miscapture rather than a crash — a #313-class risk, deliberately deferred
+/// rather than fixed here. `subst` is also confined to the optimize passes, which are not on
 /// the JIT compile path, so its residual recursion depth (the substitution
 /// target's subtree depth) is not reachable from production eval. Revisit only
 /// if the optimizer is wired into the compile path over deep trees.

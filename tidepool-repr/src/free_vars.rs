@@ -11,9 +11,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// free-variable set by node index, so arbitrarily deep trees (this runs in the
 /// emit hot path) are analyzed without per-level call-stack growth. A subtree's
 /// free-var set is intrinsic to that subtree (binder removal happens at the
-/// binding node, never propagated inward), so memoizing by index yields the
-/// same result as the former recursive walk — and is strictly cheaper on shared
-/// (DAG) subtrees, which the recursive version recomputed per occurrence.
+/// binding node, never propagated inward), so memoizing by index is correct —
+/// and cheap on shared (DAG) subtrees, computed once rather than once per
+/// occurrence.
 pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
         return Vec::new();
@@ -62,7 +62,7 @@ pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
 }
 
 /// Compute one node's free-variable set from its already-computed children's
-/// sets (`memo`). Scoping is identical to the former recursive `free_vars_at`.
+/// sets (`memo`).
 fn node_free_vars(
     tree: &CoreExpr,
     idx: usize,

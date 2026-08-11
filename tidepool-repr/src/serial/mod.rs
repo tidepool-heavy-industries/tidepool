@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_read_metadata_bad_entry() {
-        // Entry with only 2 fields instead of 5
+        // Entry with only 2 fields instead of the required 8
         let bad_entry = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Integer(1.into()),
             ciborium::value::Value::Text("Bad".to_string()),
