@@ -96,7 +96,13 @@ echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --workspace --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2)
+# No hardcoded --workspace: the root manifest is VIRTUAL, so a bare
+# invocation already defaults to every member (script cd's to repo root
+# above) — while an explicit `--workspace` OVERRIDES any caller-passed
+# `-p <crate>`, silently building and listing the whole workspace when
+# the caller asked for one crate (found live: `-p tidepool-mcp` ran 3612
+# tests, not 175). Passing "$@" bare lets `-p` actually scope.
+cargo nextest run --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2)
 run_status=$?
 set -e
 
