@@ -2,7 +2,6 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
-/// Helper: read con_tag from a ConObject.
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
     assert_eq!(layout::read_tag(ptr), layout::TAG_CON);
     *(ptr.add(8) as *const u64)

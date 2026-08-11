@@ -49,7 +49,6 @@ fn install_test_machine() -> TestMachineGuard {
     TestMachineGuard { _ms: ms, prev }
 }
 
-/// Helper to build a JIT function for testing.
 fn build_test_fn<F>(
     name: &str,
     build_body: F,
@@ -108,7 +107,6 @@ where
     (pipeline, func)
 }
 
-/// Helper to emit allocation of a LitInt object.
 fn emit_alloc_lit_int(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
@@ -136,7 +134,6 @@ fn emit_alloc_lit_int(
     ptr
 }
 
-/// Helper to emit allocation of a LitWord object.
 fn emit_alloc_lit_word(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
@@ -164,7 +161,6 @@ fn emit_alloc_lit_word(
     ptr
 }
 
-/// Helper to emit allocation of a Con object with 1 field.
 fn emit_alloc_con1(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
@@ -197,7 +193,6 @@ fn emit_alloc_con1(
     ptr
 }
 
-/// Helper to emit allocation of a Con object with 2 fields.
 fn emit_alloc_con2(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
@@ -233,7 +228,6 @@ fn emit_alloc_con2(
     ptr
 }
 
-/// Test 1: Yield::Done from Val result.
 #[test]
 fn test_yield_done_val() {
     let (_pipeline, func) = build_test_fn("test_val", |builder, vmctx, gc_sig, oom_func| {
@@ -270,7 +264,6 @@ fn test_yield_done_val() {
     assert_eq!(val, 42);
 }
 
-/// Test 2: Yield::Request from E result.
 #[test]
 fn test_yield_request_e() {
     let (_pipeline, func) = build_test_fn("test_e", |builder, vmctx, gc_sig, oom_func| {
@@ -334,9 +327,9 @@ fn test_yield_request_e() {
 }
 
 /// Yield::Request when the Union's position field is a *boxed* `W# n`
-/// (`Con(W#, [Lit(Word, n)])`) rather than the unboxed `Lit(Word, n)`.
-///
-/// This now works via the fallback in CompiledEffectMachine::step.
+/// (`Con(W#, [Lit(Word, n)])`) rather than the unboxed `Lit(Word, n)` —
+/// covered by `CompiledEffectMachine::step`'s boxed-tag fallback (needed for
+/// cross-module variables the unboxing rule can't see).
 #[test]
 fn test_yield_request_e_boxed_tag_now_works() {
     let (_pipeline, func) =
@@ -405,7 +398,6 @@ fn test_yield_request_e_boxed_tag_now_works() {
     assert!(!continuation.is_null());
 }
 
-/// Test 4: Unexpected tag → YieldError.
 #[test]
 fn test_unexpected_tag() {
     let (_pipeline, func) = build_test_fn("test_lit_result", |builder, vmctx, gc_sig, oom_func| {
@@ -434,7 +426,6 @@ fn test_unexpected_tag() {
     assert_eq!(result, Yield::Error(YieldError::UnexpectedTag(TAG_LIT)));
 }
 
-/// Test 5: runtime_error(0) → YieldError::Runtime(RuntimeError::DivisionByZero).
 #[test]
 fn test_runtime_error_div_zero() {
     let (_pipeline, func) =
@@ -479,7 +470,6 @@ fn test_runtime_error_div_zero() {
     );
 }
 
-/// Test 6: runtime_error(1) → YieldError::Runtime(RuntimeError::Overflow).
 #[test]
 fn test_runtime_error_overflow() {
     let (_pipeline, func) =
@@ -523,7 +513,8 @@ fn test_runtime_error_overflow() {
     );
 }
 
-/// Test 7: null without runtime_error → YieldError::NullPointer (not a false positive).
+/// A null return with no pending `runtime_error` must still be reported —
+/// not silently treated as if an error had already fired.
 #[test]
 fn test_null_without_runtime_error() {
     let (_pipeline, func) = build_test_fn("test_null", |builder, _vmctx, _gc_sig, _oom_func| {
@@ -552,7 +543,6 @@ fn test_null_without_runtime_error() {
     assert_eq!(result, Yield::Error(YieldError::NullPointer));
 }
 
-/// Test 8: Unknown con_tag → YieldError.
 #[test]
 fn test_unexpected_con_tag() {
     let (_pipeline, func) =
@@ -633,8 +623,7 @@ unsafe fn alloc_con_heap(
     ptr
 }
 
-/// Test 9: resume(Leaf(f), x) -> f(x)
-
+/// resume(Leaf(f), x) -> f(x)
 #[test]
 
 fn test_resume_leaf_identity() {
@@ -688,10 +677,6 @@ fn test_resume_leaf_identity() {
 
     // Build Lit(42) as argument
 
-    // Actually let's use a real Lit if we can, but a Val(null) is fine for identity.
-
-    // Wait, let's use a Lit to be sure.
-
     let lit_ptr = unsafe {
         let size = 24;
 
@@ -718,8 +703,7 @@ fn test_resume_leaf_identity() {
     assert_eq!(val, 42);
 }
 
-/// Test 10: resume(Node(Leaf(f), Leaf(g)), x) -> g(f(x))
-
+/// resume(Node(Leaf(f), Leaf(g)), x) -> g(f(x))
 #[test]
 
 fn test_resume_node_identity() {
@@ -799,8 +783,7 @@ fn test_resume_node_identity() {
     assert_eq!(val, 100);
 }
 
-/// Test 11: resume(null, x) -> Error(NullPointer)
-
+/// resume(null, x) -> Error(NullPointer)
 #[test]
 
 fn test_resume_null_continuation() {
@@ -819,8 +802,8 @@ fn test_resume_null_continuation() {
     assert_eq!(result, Yield::Error(YieldError::NullPointer));
 }
 
-/// Test 12: resume(Lit(0), x) -> Error(NullPointer) (because apply_cont returns null on unknown tag)
-
+/// resume(Lit(0), x) -> a runtime error (apply_cont_heap rejects a non-Con/Closure
+/// continuation) rather than a silent null.
 #[test]
 
 fn test_resume_unknown_tag() {
@@ -855,8 +838,7 @@ fn test_resume_unknown_tag() {
     );
 }
 
-/// Test 13: Node(Leaf(f), Leaf(g)) where f(x) returns Request E
-
+/// Node(Leaf(f), Leaf(g)) where f(x) returns Request E
 #[test]
 
 fn test_resume_node_with_effect_result() {
@@ -920,13 +902,7 @@ fn test_resume_node_with_effect_result() {
 
     let leaf_g = leaf_id;
 
-    // k1 = identity, but we'll cheat and make resume call it.
-
     // If k1(x) returns E(union, k_prime), then Node(k1, k2) returns E(union, Node(k_prime, k2))
-
-    // To test this, we need k1 to return E.
-
-    // We can compile a function that returns E.
 
     let tree_returns_e = CoreExpr {
         nodes: vec![

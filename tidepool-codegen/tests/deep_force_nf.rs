@@ -1,5 +1,5 @@
-//! Wave 1.B component K — the iterative, stack-safe heap `deep_force`-to-NF
-//! primitive (`host_fns::deep_force`).
+//! The iterative, stack-safe heap `deep_force`-to-NF primitive
+//! (`host_fns::deep_force`).
 //!
 //! `heap_force` only reaches WHNF (the outermost constructor); `deep_force`
 //! drives the entire first-order (Tier-0) data spine to normal form with an
@@ -209,8 +209,7 @@ fn deep_force_null_is_identity() {
     assert!(r.is_null());
 }
 
-/// M3 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
-/// without an address-keyed visited set, a shared DAG like
+/// Without an address-keyed visited set, a shared DAG like
 /// `iterate (\v -> (v,v)) x !! 40` — where EVERY level's two fields alias the
 /// SAME previous-level object — re-descends into that shared object from
 /// both fields at every level, unfolding 2^40 work items for a depth-40

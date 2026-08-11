@@ -21,13 +21,10 @@
 //! resolution and do not exist as far as any installed package's own build
 //! is concerned.
 //!
-//! VERIFIED, not merely argued (extract-wave TL, 2026-08-09): `--include`
-//! dirs enter `importPaths` at `GhcPipeline.hs:293` — GHC's SOURCE search
-//! path, disjoint from the package database. Re-run that check if you doubt
-//! the paragraph above; it is the anchor the whole scope justification rests
-//! on. An argument in a comment is a claim, an argument plus its
-//! verification anchor is a claim a later reader can re-run rather than
-//! having to trust that someone once did.
+//! `--include` dirs enter `importPaths` at `GhcPipeline.hs:509`
+//! (`extractionDynFlags`) — GHC's SOURCE search path, disjoint from the
+//! package database. This is the anchor the whole scope justification above
+//! rests on.
 //!
 //! So a package RULE can rewrite one package call into
 //! another, but can never CONJURE a reference to, say,

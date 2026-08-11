@@ -2,7 +2,6 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
-/// Helper: read field i from a ConObject.
 unsafe fn read_con_field(ptr: *const u8, i: usize) -> *const u8 {
     *(ptr.add(24 + 8 * i) as *const *const u8)
 }

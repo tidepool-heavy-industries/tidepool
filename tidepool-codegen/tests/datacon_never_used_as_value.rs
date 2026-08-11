@@ -32,12 +32,15 @@
 //!   `post_normalize_corpora_never_reference_a_constructor_as_a_free_variable`
 //!   asks it on the tree the compile path actually sees.
 //!
-//! A third check, `accumulated_corpora_keep_one_id_per_qualified_name`, guards
-//! a different table-accumulation hazard on the same path: `DataConTable`
-//! resolves the freer `Val`/`E`/`Union`/`Leaf`/`Node` by module-qualified name,
-//! `insert` writes `by_qualified_name` last-writer-wins, and `merge_table`
-//! feeds it from a randomized `HashMap` iteration — so two ids under one
-//! qualified name make constructor identity order-dependent per process.
+//! A third check, `accumulated_corpora_keep_one_id_per_qualified_name`, is an
+//! independent verification of a different table-accumulation invariant on
+//! the same path: `DataConTable` resolves the freer `Val`/`E`/`Union`/`Leaf`/
+//! `Node` by module-qualified name via `by_qualified_name`, which
+//! `insert_checked`/`extend_checked` (both routed through
+//! `DataConTable::check_collision`) already guard against two distinct ids
+//! claiming one qualified name — this check confirms that guarantee holds
+//! over the real accumulated corpus, not just in `datacon_table.rs`'s own
+//! unit tests.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -49,10 +52,10 @@ use tidepool_repr::types::{DataConId, Literal, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
 /// Corpora reachable from this crate via plain relative paths, no new
-/// dev-dependency: `tidepool_repr::serial::read` and `free_vars` are already
-/// used elsewhere in this crate's test suite (`real_core_corpus.rs`), and the
-/// other two directories are read as plain files. Skipped (not failed) if
-/// absent, for a partial checkout.
+/// dev-dependency: `tidepool_repr::serial::read` is already used elsewhere in
+/// this crate's test suite (`real_core_corpus.rs`), and `free_vars` in
+/// `free_vars_index_equivalence.rs`; the other two directories are read as
+/// plain files. Skipped (not failed) if absent, for a partial checkout.
 fn corpora() -> Vec<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     vec![
@@ -259,12 +262,12 @@ fn post_normalize_corpora_never_reference_a_constructor_as_a_free_variable() {
 /// A module-qualified constructor name must denote ONE id across an accumulated
 /// session table. `freer_names::resolve` — which `ConTags` uses to find `Val`,
 /// `E`, `Union`, `Leaf` and `Node` — consults `by_qualified_name` first, and
-/// that map is written last-writer-wins by `DataConTable::insert` with no
-/// collision check (`insert_checked` guards only the `by_id` axis). Because
-/// `merge_table` drives those inserts from `DataConTable::iter()` —
-/// `by_id.values()` over a `std::collections::HashMap` — the winner is selected
-/// by an iteration order randomized per process, making constructor identity
-/// vary between otherwise identical runs.
+/// depends on that map actually being one-to-one for its result to be
+/// deterministic. `insert_checked`/`extend_checked` (via `check_collision`)
+/// already reject a second distinct id claiming a qualified name already in
+/// use, so this test re-derives the same one-to-one property independently,
+/// straight off the accumulated table, as a check on that guard rather than
+/// a restatement of it.
 #[test]
 fn accumulated_corpora_keep_one_id_per_qualified_name() {
     let (table, trees, _) = accumulated_corpora();

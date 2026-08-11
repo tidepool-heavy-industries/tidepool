@@ -1,5 +1,5 @@
-// Tests use 3.14 / 3.14159 as round-trip float literals for expression codegen,
-// not as math constants.
+// Float literals here (e.g. 3.5, 2.5) are round-trip values for expression
+// codegen, not math constants.
 #![allow(clippy::approx_constant)]
 
 use tidepool_codegen::emit::expr::compile_expr;
@@ -10,13 +10,11 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
-/// Helper: read con_tag from a ConObject.
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
     assert_eq!(layout::read_tag(ptr), layout::TAG_CON);
     *(ptr.add(8) as *const u64)
 }
 
-/// Helper: read field i from a ConObject.
 unsafe fn read_con_field(ptr: *const u8, i: usize) -> *const u8 {
     *(ptr.add(24 + 8 * i) as *const *const u8)
 }
@@ -1286,14 +1284,12 @@ fn test_thunk_con_recursive() {
 }
 
 // =============================================================================
-// BUG REPRO: ThunkCon fields not forced in strict contexts
-//
-// When a Con has non-trivial fields (PrimOp, App, Case), they become thunks
-// via ThunkCon. These thunks must be forced when used in:
-//   1. Literal case dispatch (emit_lit_dispatch)
-//   2. PrimOp arguments (unbox_int / unbox_double)
-// Currently neither forces thunks — they read from LIT_VALUE_OFFSET (offset 16)
-// which in a thunk object is the code pointer, not a value.
+// Regression guard: a Con with non-trivial fields (PrimOp, App, Case) becomes
+// ThunkCon, and those thunks must be forced before use in literal case
+// dispatch (emit_lit_dispatch) and PrimOp arguments (unbox_int / unbox_double)
+// — otherwise the read hits LIT_VALUE_OFFSET (offset 16), which on a
+// still-unforced thunk object is the code pointer, not a value. Each test
+// below documents the wrong result an unforced read would produce.
 // =============================================================================
 
 #[test]

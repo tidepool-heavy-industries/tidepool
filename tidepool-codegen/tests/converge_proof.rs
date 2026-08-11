@@ -1,24 +1,13 @@
-//! Wave 1.B — THE CONVERGE PROOF: live-heap value persistence end-to-end.
-//!
-//! Assembles the full value-plane re-entry path on ONE live session machine:
-//!
-//!   1. `compile_session` a machine (dummy entry).
-//!   2. `add_function` fragment-1 that builds a `Con` value (the "bound value").
-//!   3. `run_pure_and_bind` it: run → `deep_force`-to-NF (K) → tenure into
-//!      old-space (E) → `register_persistent_root` (D) → stable `RootSlot`.
-//!   4. Seed `ExternalEnv[stableVarId] = slot` (the GC-safe slot indirection).
-//!   5. `add_function` fragment-2 (`case x of C n -> n`) referencing that id.
-//!   6. `run_fragment_pure` it against the RETAINED session heap → resolves the
-//!      tenured value from fragment-1. Assert it reads back correctly.
+//! Live-heap value persistence end-to-end: on one live session machine, a
+//! second fragment resolves a value tenured (deep-forced, moved to
+//! old-space, persistent-rooted) by an earlier fragment via `ExternalEnv`
+//! slot indirection.
 //!
 //! VARIANT: force a REAL GC (a heavy filler fragment that overflows the small
 //! nursery) BETWEEN the bind and the read, then read again — proving the tenured
 //! value + its persistent root survive a collection and fragment-2 still
 //! resolves correctly (the value lives in old-space, outside the minor-GC
 //! from-range; its slot is a persistent root the GC traces but never relocates).
-//!
-//! This is the mechanical smoke proof of the §4 1.B seam — necessary, not the
-//! full acceptance proof (that is the Wave-2/3 multi-turn real-entry-point test).
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -345,7 +334,7 @@ fn converge_survives_real_gc_between_runs() {
         .unwrap();
 }
 
-/// Wave 3b — effectful bind (Tier0, forced=true):
+/// Effectful bind (Tier0, forced=true):
 ///
 /// A fragment producing `Val (C1 42)` goes through the freer-simple step loop
 /// (`step()` → `Yield::Done(c1_ptr)`) inside `run_fragment_and_bind`. The Done
@@ -416,7 +405,7 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
         .unwrap();
 }
 
-/// Wave 3b — effectful bind (Tier1, forced=false):
+/// Effectful bind (Tier1, forced=false):
 ///
 /// A fragment producing `Val (\x -> x)` goes through the step loop to Done,
 /// and `run_fragment_and_bind(forced=false)` tenures the closure as-is (no

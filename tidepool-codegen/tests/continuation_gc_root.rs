@@ -9,19 +9,14 @@
 //! continuation tree is then not evacuated, from-space is freed, and resume
 //! reads freed memory (UB: garbage tag, SIGSEGV, or silent corruption).
 //!
-//! This test forces that exact window deterministically: a one-effect program
-//! whose handler responds with a 3000-cell list, materialized EAGERLY
-//! into a 16 KiB nursery — the materialization
-//! must collect (repeatedly, with heap doubling) while the continuation is
-//! live, and the test ASSERTS the collections fired (gc_trigger_call_count).
-//!
 //! An unrooted-continuation failure is a silent use-after-free — the
 //! allocator does not scrub freed pages, so result assertions alone can pass
 //! by luck. What this test pins is the invariant path: a collection provably
-//! fires inside the request window and the run completes correctly, which the
-//! rooted slot makes true by construction (the GC rewrites it in place).
-//! The rooting is required by `host_alloc_gc`'s contract: any heap pointers
-//! the caller holds across it must be RUST_ROOTS-registered.
+//! fires inside the request window (asserted via `gc_trigger_call_count`) and
+//! the run still completes correctly, which the rooted slot makes true by
+//! construction (the GC rewrites it in place). The rooting is required by
+//! `host_alloc_gc`'s contract: any heap pointers the caller holds across it
+//! must be RUST_ROOTS-registered.
 
 use tidepool_codegen::effect_machine::EffContKind;
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -57,7 +52,6 @@ fn test_table() -> DataConTable {
             type_name: String::new(),
         });
     }
-    // List constructors for the handler's response.
     table.insert(tidepool_repr::datacon::DataCon {
         id: DataConId(CONS_ID),
         name: ":".to_string(),
@@ -147,7 +141,6 @@ impl DispatchEffect<()> for ListResponder {
     }
 }
 
-/// Count the cells of a cons-list `Value` and check the first/last payloads.
 fn assert_full_list(v: &Value) {
     let mut len = 0usize;
     let mut cur = v;
@@ -181,10 +174,6 @@ fn assert_full_list(v: &Value) {
 
 #[test]
 fn continuation_survives_gc_during_response_materialization() {
-    // Kill-switch: force EAGER in-arm materialization (materialize_cons_list →
-    // host_alloc_gc), so the collection is guaranteed to fire while the
-    // continuation is live. Env is per-process; this file has one test.
-
     let table = test_table();
     let expr = build_one_effect_program(&table);
 
