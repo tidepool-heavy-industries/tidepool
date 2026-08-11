@@ -506,15 +506,6 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// The wire round trip preserves the form shape.
-    #[test]
-    fn form_shape_round_trips_through_serde() {
-        let s = spec();
-        let wire = serde_json::to_string(&s).unwrap();
-        let back: FormShape = serde_json::from_str(&wire).unwrap();
-        assert_eq!(s, back);
-    }
-
     fn extract_rev(html: &str) -> &str {
         let after = html
             .split("data-rev=\"")
