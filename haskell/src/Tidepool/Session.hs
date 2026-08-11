@@ -55,6 +55,8 @@ module Tidepool.Session
   , SessionModule(..)
   , renderSessionModule
   , sessionModuleString
+  , parseSessionModule
+  , isSessionValModule
   , sessionHiPath
     -- * Session scope (what a turn injects; empty = inert)
   , SessionScope(..)
@@ -67,6 +69,10 @@ module Tidepool.Session
   , injectSessionScope
     -- * Binder identity (for the value-plane stableVarId)
   , sessionBinderName
+    -- * Scaffold binder-name protocol (the eval-wrapper's reserved names)
+  , scaffoldTargetName
+  , scaffoldOutputBase
+  , evalUserBinder
   ) where
 
 import GHC.Driver.Env
@@ -101,7 +107,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable )
 import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot)
-import GHC.Unit.Module (ModuleName, mkModuleName)
+import GHC.Unit.Module (ModuleName, mkModuleName, moduleNameString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
@@ -111,6 +117,8 @@ import qualified GHC.Data.Maybe as MErr
 
 import Control.Monad (foldM)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Char (isDigit)
+import Data.List (isPrefixOf, stripPrefix)
 import Data.Word (Word64)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory, (</>), (<.>))
@@ -145,6 +153,32 @@ sessionModuleString (SessionModule k (Generation g)) =
 
 renderSessionModule :: SessionModule -> ModuleName
 renderSessionModule = mkModuleName . sessionModuleString
+
+-- | Inverse of 'sessionModuleString': parse @"Tidepool.Session.<Kind>.G<n>"@
+-- back into a 'SessionModule'. 'Nothing' for any other string. The other half
+-- of the invariant this module states (§ above) — every PARSE of a session
+-- module string must go through here, just as every RENDER goes through
+-- 'sessionModuleString'.
+parseSessionModule :: String -> Maybe SessionModule
+parseSessionModule s = do
+  rest <- stripPrefix "Tidepool.Session." s
+  (kind, rest') <- parseKind rest
+  genStr <- stripPrefix ".G" rest'
+  if not (null genStr) && all isDigit genStr
+    then Just (SessionModule kind (Generation (read genStr)))
+    else Nothing
+  where
+    parseKind rest
+      | Just rest' <- stripPrefix (sessionKindString ValMod) rest = Just (ValMod, rest')
+      | Just rest' <- stripPrefix (sessionKindString LibMod) rest = Just (LibMod, rest')
+      | otherwise = Nothing
+
+-- | True when a module name belongs to the Val session-kind — i.e.
+-- @Tidepool.Session.Val.G<g>@ for any generation @g@. The one predicate every
+-- "is this a repl-session value module" check must share (domain model §2).
+isSessionValModule :: ModuleName -> Bool
+isSessionValModule mn =
+  ("Tidepool.Session." ++ sessionKindString ValMod ++ ".") `isPrefixOf` moduleNameString mn
 
 -- | Path of the session @.hi@ this module's iface is written to / read from,
 -- under @root@. E.g. @root/Tidepool/Session/Val/G3.hi@. (The dotted module name
@@ -291,3 +325,28 @@ sourcelessModLocation hi = ModLocation
 injectSessionScope :: MonadIO m => SessionScope -> HscEnv -> m HscEnv
 injectSessionScope scope hsc =
   foldM (\h sm -> injectSessionIface (ssRoot scope) sm h) hsc (ssValIfaces scope)
+
+--------------------------------------------------------------------------------
+-- Scaffold binder-name protocol — the eval-wrapper's reserved names
+--------------------------------------------------------------------------------
+
+-- | The scaffold-reserved binder a SESSION turn's wrapper compiles — never a
+-- user's own binding name (it can't collide with one promoted into a later
+-- turn's session-lib import). A one-shot eval's wrapper compiles
+-- 'scaffoldOutputBase' instead; 'GhcPipeline.cpResultBinders' tries both, in
+-- that order, to capture the bound value's type regardless of which wrapper
+-- ran (see 'GhcPipeline.processSessionFile' callers).
+scaffoldTargetName :: String
+scaffoldTargetName = "__result"
+
+-- | Base name of the CBOR file(s) every Rust caller reads for the scaffold
+-- target (@result.cbor@), and the Haskell binder name the ONE-SHOT eval
+-- wrapper compiles (a later session turn's wrapper compiles
+-- 'scaffoldTargetName' instead, but the emitted CBOR still uses this base).
+scaffoldOutputBase :: String
+scaffoldOutputBase = "result"
+
+-- | The binder the eval template wraps the user's top-level expression in
+-- (@eval_prep.rs@). Its inferred type is the type of the eval's result.
+evalUserBinder :: String
+evalUserBinder = "__user"

@@ -84,6 +84,7 @@ import System.IO (hPutStrLn, stderr)
 
 import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
+import Tidepool.Session (isSessionValModule)
 import qualified System.Environment
 import qualified Data.List
 import qualified Data.Maybe
@@ -843,7 +844,7 @@ translateModuleClosed hscEnv allBinds targetName = do
   -- TIDEPOOL_DANGLING_DEBUG=1 additionally prints EVERY dangling id
   -- (session-val ones included) for forensics.
   let isSessionValRef v = case nameModule_maybe (varName v) of
-        Just m  -> "Tidepool.Session.Val." `isPrefixOf` moduleNameString (moduleName m)
+        Just m  -> isSessionValModule (moduleName m)
         Nothing -> False
       -- Deliberately consults REFERENCE sites only, not the whole index: this
       -- decides which extracts hard-fail, and a session val is recognized by

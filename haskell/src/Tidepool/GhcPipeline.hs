@@ -54,7 +54,8 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Char (toUpper)
 import Tidepool.Session
-  ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule )
+  ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
+  , scaffoldTargetName, scaffoldOutputBase, evalUserBinder )
 import Tidepool.Timing (readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs)
 
 data PipelineResult = PipelineResult
@@ -538,7 +539,7 @@ normalVariant path = PipelineVariant
         -- (no prior bindings to inject, so 'isSessionScopeActive' is still
         -- False) and its wrapper compiles @__result@, the scaffold-reserved
         -- name — see 'processSessionFile'. Try both, in that order.
-      , cpResultBinders = ["result", "__result"]
+      , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpAfterModule = \_ _ _ _ -> pure ()
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
@@ -681,7 +682,7 @@ sessionVariant scope path = PipelineVariant
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@ — see 'processSessionFile').
-        , cpResultBinders = ["__result"]
+        , cpResultBinders = [scaffoldTargetName]
           -- A deferred module (target ∪ transitive Val-importers, computed
           -- above) was deliberately excluded from the @load'@, so nothing has
           -- registered it in the HPT yet — do that here, now that the Val
@@ -742,7 +743,7 @@ sessionVariant scope path = PipelineVariant
 capturedUserType :: TcGblEnv -> Maybe String
 capturedUserType tcg =
   case [ i | i <- typeEnvIds (tcg_type_env tcg)
-           , occNameString (nameOccName (idName i)) == "__user" ] of
+           , occNameString (nameOccName (idName i)) == evalUserBinder ] of
     (i:_) -> Just (renderWithContext defaultSDocContext (ppr (idType i)))
     []    -> Nothing
 

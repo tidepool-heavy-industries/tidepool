@@ -9,7 +9,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Numeric (showHex)
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
+import Data.Char (toUpper, isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
@@ -43,8 +43,9 @@ import Tidepool.GhcPipeline
 import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
-  , sessionModuleString, sessionBinderName
-  , mkThinSessionIface, writeSessionIface )
+  , sessionModuleString, parseSessionModule, sessionBinderName
+  , mkThinSessionIface, writeSessionIface
+  , scaffoldTargetName, scaffoldOutputBase )
 import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
@@ -798,7 +799,7 @@ processSessionFile args path = do
       -- chosen bind name promoted into a later turn's session-lib import —
       -- see 'writeWholeModuleClosed''s doc for why the CBOR file it's
       -- written to stays named @result.cbor@ regardless.
-      targetName = fromMaybe "__result" (argTarget args)
+      targetName = fromMaybe scaffoldTargetName (argTarget args)
   res <- try $ do
     result <- runPipelineSession (Just scope) path (argIncludes args)
     let binds  = prBinds result
@@ -815,7 +816,7 @@ processSessionFile args path = do
     -- The JIT-able Core for the target (same emission as whole-module mode).
     -- File base name is always "result" — every Rust session-turn caller
     -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
-    void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
+    void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName scaffoldOutputBase
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
   reportDiags res
@@ -909,8 +910,8 @@ runTurnMode args path = do
         -- caller whose template names its own target says so with --target
         -- (the same knob 'processSessionFile' honours). The output file base
         -- stays "result" regardless — every Rust caller reads result.cbor.
-        let targetName = fromMaybe "__result" (argTarget args)
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
+        let targetName = fromMaybe scaffoldTargetName (argTarget args)
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName scaffoldOutputBase
         let wrapped = T.pack spliced
         case selector of
           SBind -> do
@@ -1083,12 +1084,13 @@ emitBindArtifacts args result = do
     Nothing -> return ()
 
 -- | Parse a @--inject-val@ module name (@Tidepool.Session.Val.G<n>@) back into a
--- 'SessionModule'. 'Nothing' for any other string (silently dropped — the
--- runtime only ever passes well-formed Val module names).
+-- 'SessionModule'. 'Nothing' for any other string — including a well-formed
+-- @Lib@ module, since only @Val@ modules are ever passed to @--inject-val@
+-- (silently dropped, matching the prior behavior: the runtime only ever
+-- passes well-formed Val module names).
 parseValModule :: String -> Maybe SessionModule
-parseValModule s = case stripPrefix "Tidepool.Session.Val.G" s of
-  Just gs | not (null gs), all isDigit gs ->
-    Just (SessionModule ValMod (Generation (read gs)))
+parseValModule s = case parseSessionModule s of
+  Just sm@(SessionModule ValMod _) -> Just sm
   _ -> Nothing
 
 requireArg :: String -> Maybe a -> IO a

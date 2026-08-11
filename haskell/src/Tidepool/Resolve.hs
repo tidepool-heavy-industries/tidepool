@@ -47,6 +47,10 @@ import GHC.Data.FastString (fsLit)
 -- unfoldings are not exposed via realIdUnfolding even with threshold bumps.
 import Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface)
 
+-- The single "is this a session value module" predicate (Session.hs's own
+-- stated invariant: no bare @Tidepool.Session.…@ strings anywhere else).
+import Tidepool.Session (isSessionValModule)
+
 data UnresolvedVar = UnresolvedVar
   { uvKey    :: !Word64
   , uvName   :: !String
@@ -221,7 +225,7 @@ resolveExternals varIdFn hscEnv binds = do
     -- Translate emits directly as @NVar (stableVarId name)@ — the contract.
     isSessionValVar :: Var -> Bool
     isSessionValVar v = case nameModule_maybe (varName v) of
-      Just m  -> "Tidepool.Session.Val." `isPrefixOf` moduleNameString (moduleName m)
+      Just m  -> isSessionValModule (moduleName m)
       Nothing -> False
 
     -- | Check if a variable has a module association (i.e., belongs to some package

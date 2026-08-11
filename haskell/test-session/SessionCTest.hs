@@ -46,6 +46,7 @@ import GHC.Unit.Types (mkModule)
 import Tidepool.Session
   ( Generation(..), SessionModuleKind(..), SessionModule(..)
   , SessionScope(..), renderSessionModule
+  , sessionModuleString, parseSessionModule, isSessionValModule
   , mkThinSessionIface, writeSessionIface )
 import Tidepool.GhcPipeline (runPipelineSession, PipelineResult(..))
 import Tidepool.Translate
@@ -135,7 +136,7 @@ data Verdict = GO | NOGO deriving (Eq, Show)
 checkBinder :: FilePath -> String -> String -> IO Verdict
 checkBinder libdir targetName occ = do
   putStrLn $ "\n--- target " ++ targetName ++ "  (session binder "
-             ++ "Tidepool.Session.Val.G1." ++ occ ++ ") ---"
+             ++ sessionModuleString g1 ++ "." ++ occ ++ ") ---"
   let scope = SessionScope { ssRoot = workDir, ssValIfaces = [g1] }
   r <- try $ do
     res <- runPipelineSession (Just scope) usePath []
@@ -170,6 +171,35 @@ checkBinder libdir targetName occ = do
       pure (if go then GO else NOGO)
   where hex w = "0x" ++ showHex w ""
 
+-- | Round-trip property for the module-name string invariant Session.hs
+-- states: 'sessionModuleString' is the ONE render, 'parseSessionModule' is its
+-- inverse, and 'isSessionValModule' agrees with the kind tag. Swept over both
+-- 'SessionModuleKind's and a spread of generations (including a large one, to
+-- exercise 'read' past small fixtures) rather than one hand-picked value.
+checkRoundTrip :: IO Verdict
+checkRoundTrip = do
+  putStrLn "\n--- round-trip: sessionModuleString / parseSessionModule ---"
+  let gens  = [0, 1, 2, 41, 999, 1234567890]
+      kinds = [ValMod, LibMod]
+      sms   = [ SessionModule k (Generation g) | k <- kinds, g <- gens ]
+      roundTripFailures =
+        [ sm | sm <- sms, parseSessionModule (sessionModuleString sm) /= Just sm ]
+      -- Non-session / malformed strings must never parse.
+      junk = [ "Tidepool.Session.Foo.G1", "Tidepool.Session.Val.G"
+             , "Tidepool.Session.Val.Gx", "Tidepool.Session.Val.G1x"
+             , "Data.Map", "" ]
+      junkParsed = [ j | j <- junk, parseSessionModule j /= Nothing ]
+      valMismatches =
+        [ sm | sm@(SessionModule k _) <- sms
+             , isSessionValModule (renderSessionModule sm) /= (k == ValMod) ]
+  mapM_ (\sm -> putStrLn ("  " ++ sessionModuleString sm)) sms
+  let go = null roundTripFailures && null junkParsed && null valMismatches
+  putStrLn $ "  round-trip failures     : " ++ show (map sessionModuleString roundTripFailures)
+  putStrLn $ "  junk strings that parsed: " ++ show junkParsed
+  putStrLn $ "  isSessionValModule mismatches: " ++ show (map sessionModuleString valMismatches)
+  putStrLn $ "  RESULT: " ++ show (if go then GO else NOGO)
+  pure (if go then GO else NOGO)
+
 main :: IO ()
 main = do
   libdir <- getLibdir
@@ -190,12 +220,14 @@ main = do
     if b then removeFile srcLeak >> putStrLn "  removed stray session source"
          else putStrLn "  confirmed: only the synthesized .hi exists"
 
-  vSimple <- checkBinder libdir "useX"  "x"
-  vExotic <- checkBinder libdir "useXe" "xe"
+  vSimple    <- checkBinder libdir "useX"  "x"
+  vExotic    <- checkBinder libdir "useXe" "xe"
+  vRoundTrip <- checkRoundTrip
 
   putStrLn "\n================ VERDICT ================"
   let rs = [ ("simple   Int -> Int", vSimple)
-           , ("exotic   (Ord a,Num a)=>a->Map a a", vExotic) ]
+           , ("exotic   (Ord a,Num a)=>a->Map a a", vExotic)
+           , ("round-trip sessionModuleString/parseSessionModule", vRoundTrip) ]
   mapM_ (\(l, v) -> printf "  %-38s %s\n" l (show v)) rs
   if all ((== GO) . snd) rs
     then putStrLn "  OVERALL: GO" >> exitSuccess
