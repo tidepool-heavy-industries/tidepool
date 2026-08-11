@@ -106,16 +106,11 @@ const NURSERY_LADDER: &[usize] = &[64 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 *
 // The oracle: the full ladder as one DiffConfig. The runner runs the JIT once
 // per nursery size and reads BOTH eval-vs-JIT agreement (`Verdict::
 // ValueMismatch`) and JIT-vs-JIT-across-nurseries agreement (`Verdict::
-// NurseryVariance`) off that single recorded run — AT LEAST as strong as the
-// hand-rolled check this replaces: the old check only compared JIT results
-// against each other (relying on separate `check_jit_vs_eval` calls, one per
-// nursery, to catch a JIT-vs-eval mismatch); the runner's `classify_run`
-// checks every nursery's JIT value against eval FIRST (`ValueMismatch` takes
-// precedence), then checks the surviving JIT values against each other
+// NurseryVariance`) off that single recorded run: `classify_run` checks every
+// nursery's JIT value against eval FIRST (`ValueMismatch` takes precedence),
+// then checks the surviving JIT values against each other
 // (`NurseryVariance`) — so two nurseries that happen to agree with each other
-// but disagree with eval are still caught, which the old two-separate-checks
-// version also caught (via `check_jit_vs_eval`) but not through the SAME
-// mechanism the nursery-invariance check itself used.
+// but disagree with eval are still caught.
 // ---------------------------------------------------------------------------
 fn dcfg() -> DiffConfig {
     DiffConfig::new("gc-recursion")
@@ -519,18 +514,21 @@ fn build_bigcon(spec: &BigConSpec) -> CoreExpr {
 // ===========================================================================
 // (d) AccumLoop
 //
-// A join-point counting loop that allocates a fresh boxed Con EVERY iteration
-// (immediate garbage) while threading a live accumulator. Targets GC x deep
-// recursion: many collection cycles, one long-lived root (the accumulator)
-// surrounded by a torrent of dead allocations + a per-iteration live temporary.
+// A self-recursive LetRec-lambda counting loop (NOT a join point — the
+// tree-walking interpreter oracle doesn't support self-recursive join points;
+// see push_list_fold's rationale above) that allocates a fresh boxed Con
+// EVERY iteration (immediate garbage) while threading a live accumulator.
+// Targets GC x deep recursion: many collection cycles, one long-lived root
+// (the accumulator) surrounded by a torrent of dead allocations + a
+// per-iteration live temporary.
 //
-//   join go (acc, i) =
+//   letrec go = \acc -> \i ->
 //     case (i ># LIMIT) of
 //       1# -> acc
 //       _  -> let box  = I# (acc +# i)        -- live this iteration
 //             in let junk = Just (Just (I# i)) -- immediate garbage
-//                in case box of I# n -> jump go (n, i +# 1)
-//   in jump go (start, 0)
+//                in case box of I# n -> go n (i +# 1)
+//   in go start 0
 //
 // LIMIT up to ~2000 -> thousands of allocations through a 2-4 KiB nursery ->
 // dozens of GC cycles, each of which must preserve `acc`/`box` and reclaim the
@@ -700,14 +698,13 @@ fn build_accumloop(spec: &AccumLoopSpec) -> CoreExpr {
 // Properties.
 //
 // One DiffConfig (the full NURSERY_LADDER) per case: every case is a nursery
-// sweep. We run 400 cases per property (the spec's 300-500 band). Each
-// property drives `TestRunner` directly (not the `proptest!` macro) so it can
-// own a local `ReachCounter` and assert its 0.90 floor in the SAME process as
-// the cases that fed it, plus its own "GC-completed at <=4KiB nursery" count
-// (this lane's `N_GC_COMPLETED_TINY` proxy for "GC actually fired and the
-// program still completed") — both were previously read from `static`s
-// populated by OTHER `#[test]` fns, which nextest's process-per-test
-// isolation makes structurally unable to ever see a nonzero total.
+// sweep. Each property drives `TestRunner` directly (not the `proptest!`
+// macro) so it can own a local `ReachCounter` and assert its 0.90 floor, plus
+// its own "GC-completed at <=4KiB nursery" count, in the SAME process as the
+// cases that fed it — nextest's process-per-test isolation means a `static`
+// populated by one `#[test]` fn and read by another can never see a nonzero
+// total, so these counters must stay local to the property that both bumps
+// and reads them.
 // ===========================================================================
 
 fn cfg() -> Config {
@@ -897,8 +894,7 @@ fn anchor_accum_loop_tiny_nursery_body() {
     }
 }
 
-// Reach + "GC-completed at <=4KiB" reporting is now per-shape, local to each
-// `gc_property!`-generated test (see the macro above) — no trailing zzz_
-// aggregate test needed, and none of the four properties' floors can silently
-// pass over zero cases the way the old cross-process static-counter design
-// could.
+// Reach + "GC-completed at <=4KiB" reporting is per-shape, local to each
+// `gc_property!`-generated test (see the macro above): each floor asserts
+// against its own process-local counter, so none of the four properties can
+// silently pass over zero cases.

@@ -70,12 +70,10 @@ fn bump(c: &AtomicU64) {
 }
 
 // ---------------------------------------------------------------------------
-// Differential config: the nursery pair, determinism repeats, and fork probe
-// that used to be reinvented per-lane now live in one DiffConfig. Nothing is
-// tolerated: an empty-policy run against all five properties (see the
-// migration commit message) came back 100% Compared, so despite this lane's
-// skeletons being more exotic than case-dispatch's, none of them actually
-// produces a legitimate JIT/eval error.
+// Differential config: the nursery pair, determinism repeats, and fork probe.
+// Nothing is tolerated: an empty-policy run against all five properties came
+// back 100% Compared, so despite this lane's skeletons being more exotic than
+// case-dispatch's, none of them actually produces a legitimate JIT/eval error.
 // ---------------------------------------------------------------------------
 fn dcfg(label: &'static str) -> DiffConfig {
     DiffConfig::new(label)

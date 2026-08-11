@@ -1,4 +1,4 @@
-//! Workstream W3: boundary-roundtrip property tests.
+//! Boundary-roundtrip property tests.
 //!
 //! Hunts bugs in `value_to_heap` / `heap_to_value_forcing` (tidepool-codegen
 //! `heap_bridge`) and `FromCore`/`ToCore` (tidepool-bridge `impls`).
@@ -983,11 +983,12 @@ fn reach_counters_capstraddle_coverage() {
 //              caught panic; no memory unsafety — the slice start always
 //              exceeds the end, so it is a guaranteed panic in both profiles,
 //              never an out-of-bounds read).
-//   component: tidepool-bridge/src/impls.rs:390 — `String::from_value`, Text
-//              constructor arm.
+//   component: tidepool-eval/src/shapes.rs — `text_bytes_checked` (called
+//              from tidepool-bridge's `String::from_value` Text arm; the
+//              bounds check has since moved into this shared function).
 //   seed:      minimal failing input off=-1, len=1 (ba = "hi"); proptest
 //              regression seed committed under
-//              tidepool-codegen/proptest-regressions/tests/proptest_boundary_roundtrip.txt
+//              tidepool-codegen/tests/proptest-regressions/proptest_boundary_roundtrip.txt
 //              for `prop_text_offset_malformed_clean_err`.
 //
 // Real GHC `Text` never carries a negative offset, but the bridge is a trust
@@ -995,8 +996,8 @@ fn reach_counters_capstraddle_coverage() {
 // the slice (`if off + len > ba.len()`) and merely does the arithmetic
 // unsafely. A `checked_add` (treating overflow as out-of-range) closes it.
 // FIXED 2026-06-10: off/len are now validated as signed and combined with
-// checked arithmetic in `String::from_value`; every malformed slice is a clean
-// `Err(TypeMismatch)`. This is the active regression test.
+// checked arithmetic in `text_bytes_checked`; every malformed slice is a
+// clean `Err(TypeMismatch)`. This is the active regression test.
 #[test]
 fn repro_b2_text_offset_overflow_panic() {
     let table = std_table();
@@ -1043,8 +1044,9 @@ fn repro_b2_text_offset_overflow_panic() {
 //              layout can represent / the documented MAX_FIELDS), or a
 //              round-trip-identical decode. Never a silently smaller `Con`.
 //   class:     B5 (silent roundtrip non-identity / data corruption).
-//   component: tidepool-codegen/src/heap_bridge.rs:402 — `value_to_heap`,
-//              `*(.. CON_NUM_FIELDS_OFFSET ..) = field_ptrs.len() as u16`.
+//   component: tidepool-codegen/src/heap_bridge.rs — `value_to_heap`'s
+//              `ValueFrame::Con` arm, the
+//              `*(.. CON_NUM_FIELDS_OFFSET ..) = field_ptrs.len() as u16` write.
 //   seed:      deterministic (n = 65536); no random input.
 //
 // This is far beyond the 1024 field cap of interest, but the ENCODE side has

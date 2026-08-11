@@ -1,5 +1,5 @@
-//! PROTOTYPE (investigate.proptest-widen): widening the JIT-vs-eval differential
-//! to surface VALUE-REPRESENTATION bugs on GHC base-internal optimized-Core shapes.
+//! Widening the JIT-vs-eval differential to surface VALUE-REPRESENTATION bugs
+//! on GHC base-internal optimized-Core shapes.
 //!
 //! Targets the distribution GAP vs `proptest_ghc_idioms.rs` (which maxes out at
 //! 2-alt Maybe/Bool dispatch and single-field I# boxing):
@@ -23,15 +23,12 @@
 //! `CrashContainment::ForkProbe`. Every program is TOTAL + GROUND (returns an
 //! Int#) by construction, so ~100% of cases reach value comparison.
 //!
-//! This lane previously had NO fork crash probe while its siblings
-//! (`proptest_case_dispatch.rs`, `proptest_ghc_idioms.rs`) did — an
-//! unexplained inconsistency. Resolved here by enabling
-//! `CrashContainment::ForkProbe`: these are the same class of generated,
-//! hand-built `TreeBuilder` program as the other two lanes (closures stored in
+//! `CrashContainment::ForkProbe` is enabled here as in its siblings
+//! (`proptest_case_dispatch.rs`, `proptest_ghc_idioms.rs`): closures stored in
 //! Con fields and applied through mixed-representation dispatch are, if
 //! anything, MORE likely to hit a bad-pointer/heap-bridge fault than plain
-//! Int# dispatch), so there is no principled reason for this lane alone to
-//! accept a JIT fault taking down the whole test process.
+//! Int# dispatch, so a JIT fault here should not take down the whole test
+//! process either.
 //!
 //! Construction: hand-built `RecursiveTree<CoreFrame<usize>>` via `TreeBuilder`,
 //! same style as `proptest_ghc_idioms.rs`. Self-contained: re-implements the tiny

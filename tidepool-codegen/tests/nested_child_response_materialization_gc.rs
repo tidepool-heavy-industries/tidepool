@@ -1,22 +1,22 @@
-//! NurseryExhausted gc-retry CLASS load test for the effect-RESPONSE
+//! NurseryExhausted gc-retry regression for the effect-RESPONSE
 //! materialization path inside `materialize_response_and_resume`
 //! (`jit_machine.rs`), driven from a nested CHILD run against a suspended
-//! parent (segment 40) — as opposed to `tests/nested_child_gc_rooting.rs`,
-//! which exercises PURE nested-child value evaluation and never reaches
+//! parent — as opposed to `tests/nested_child_gc_rooting.rs`, which exercises
+//! PURE nested-child value evaluation and never reaches
 //! `materialize_response_and_resume` at all (its runs go through
 //! `run_child_fragment_pure`, which never dispatches an effect).
 //!
 //! The scenario: a child fragment allocates a genuinely LIVE nested-Con chain
-//! (kept alive by closing over it in its own continuation lambda — the same
-//! "captured" shape `nested_child_gc_rooting.rs` uses to prove a stowed root
-//! survives child GC), sized against a small nursery so it consumes nearly
-//! all of it, then issues an effect request. The handler responds with
-//! `Response::Stream`, which — with lazy results enabled (the default) —
-//! takes `ResponsePlan::Park` in `materialize_response_and_resume` and calls
-//! `host_fns::alloc_stream_tail_thunk`. With the live chain occupying nearly
-//! the whole nursery, that allocation exhausts it, and — since the chain is
-//! genuinely reachable (rooted via the child's own stowed continuation) — the
-//! GC cannot reclaim it, so recovery needs `gc_trigger`'s heap-doubling growth.
+//! (kept alive by closing over it in its own continuation lambda), sized
+//! against a small nursery so it consumes nearly all of it, then issues an
+//! effect request. The handler responds via `respond_list`
+//! (`Response::List`), which always takes the iterative
+//! `ResponsePlan::Ready` arm in `materialize_response_and_resume`, allocating
+//! through `host_fns::materialize_cons_list`. With the live chain occupying
+//! nearly the whole nursery, that allocation exhausts it, and — since the
+//! chain is genuinely reachable (rooted via the child's own stowed
+//! continuation) — the GC cannot reclaim it, so recovery needs
+//! `gc_trigger`'s heap-doubling growth.
 //!
 //! Reach/exercise is proven by an OBSERVABLE, not by trusting the test merely
 //! passing: `heap_bridge::gc_retry_fired_count()` counts every time the
@@ -26,52 +26,6 @@
 //! `gc_retry` helper) — so a nonzero delta here is specific evidence that a
 //! *host-side* retry-protected site on this path both exhausted on its first
 //! attempt and used the retry.
-//!
-//! HONEST LIMIT, found while tuning this test (not asserted, just recorded):
-//! `alloc_stream_tail_thunk` was never a *zero*-retry site — it already goes
-//! through `host_fns::gc::host_alloc_gc`, which had its own one-shot
-//! gc-trigger-then-retry before this change (now itself routed through the
-//! same shared `gc_retry` helper, ref STEP 4). Because `perform_gc`'s
-//! heap-doubling always succeeds in a single collection below
-//! `TIDEPOOL_MAX_HEAP` (`live_bytes` after one Cheney pass is bounded by the
-//! from-space size, so it always fits the doubled space), a single retry
-//! cycle at ANY layer is enough to rescue every depth this test could
-//! reproduce — reverting ONLY the new outer wrap in `jit_machine.rs`'s Park
-//! arm (leaving `host_alloc_gc`'s pre-existing inner retry intact) was tried
-//! and did NOT reproduce failure at any tuned depth. The mutation this test
-//! actually proves load-bearing is the CLASS-LEVEL one: neutering the shared
-//! `gc_retry` helper itself (which both the pre-existing inner retry and the
-//! new outer wrap now route through) reproduces
-//! `Run(Jit(HeapBridge(NurseryExhausted)))` deterministically at
-//! `CHAIN_DEPTH`/`NURSERY_BYTES` below. The outer wrap's independent value is
-//! architectural, not independently reproducible under allocation pressure at
-//! this scale: it keeps the Park arm consistent with the Eager arm's already-
-//! fixed pattern, and it is what stops a FUTURE change (e.g. `alloc_stream_
-//! tail_thunk` growing past a single-collection-fits-below-cap allocation, or
-//! a refactor that drops `host_alloc_gc`'s own retry) from silently
-//! reintroducing a zero-retry site at this call.
-//!
-//! ELIMINATION, for the next investigator who sees this failure resurface:
-//! by the enumeration in this branch's commit message, every allocation site
-//! reachable on the nested-child/stowed-continuation path was ALREADY
-//! retry-protected before this branch (the Park arm was the sole asymmetry —
-//! no OUTER retry, but transitively protected by `host_alloc_gc`'s inner
-//! one) — none was a genuine zero-retry gap. That means the intermittent
-//! `Run(Jit(HeapBridge(NurseryExhausted)))` reported on
-//! `resident_session::nested_child_runs_while_parent_suspended_then_resumes`
-//! is very likely NOT explained by a missing retry, and this branch likely
-//! does NOT fix that intermittent — three green GHC runs (this branch's own
-//! confirmation) don't clear an intermittent; repetition is the gate and the
-//! rate sets the count, and three is not that count. Re-auditing retry
-//! coverage on this path is a dead end for that failure; look elsewhere.
-//! Hypotheses this branch's evidence does NOT eliminate (unconfirmed, not
-//! investigated further here): something live across a retry that is not
-//! actually registered as a GC root in the REAL resident-session shape
-//! (unlike this test's synthetic one); heap-cap exhaustion where even
-//! `perform_gc`'s doubling cannot satisfy the request (a real session's live
-//! set, or `TIDEPOOL_MAX_HEAP`, may differ from what this test can reach);
-//! or a distinct failure upstream of response materialization entirely that
-//! only presents with this same error signature.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
@@ -212,10 +166,7 @@ fn suspend_parent(table: &DataConTable, nursery: usize, req: i64) -> JitEffectMa
 /// chain (genuinely live — closed over by the continuation lambda below, so
 /// it survives the effect dispatch and any GC it forces), followed by an
 /// effect request whose continuation pairs the captured chain with the
-/// answer. Structurally identical in shape to
-/// `nested_child_gc_rooting.rs::build_suspending_parent`'s captured-value
-/// pattern, just with a deep chain instead of a single `C1 n` so its live
-/// footprint is large and controllable via `depth`.
+/// answer.
 fn build_effect_child(depth: usize, req: i64) -> CoreExpr {
     let mut b = TreeBuilder::new();
 
@@ -271,10 +222,10 @@ fn build_effect_child(depth: usize, req: i64) -> CoreExpr {
     b.build()
 }
 
-/// Responds to `EFFECT_TAG` with a lazily-streamed list — any size, even
-/// this trivially small one, takes `ResponsePlan::Park` in
-/// `materialize_response_and_resume` when lazy results are enabled (the
-/// default), which is the arm under test.
+/// Responds to `EFFECT_TAG` with a list — any size, even this trivially
+/// small one, takes the iterative `ResponsePlan::Ready` arm in
+/// `materialize_response_and_resume` via `respond_list`, which is the arm
+/// under test.
 struct StreamHandler;
 impl DispatchEffect<()> for StreamHandler {
     fn dispatch(
@@ -289,23 +240,16 @@ impl DispatchEffect<()> for StreamHandler {
 }
 
 /// Depth of the live `C1` chain the child fragment builds, and the nursery
-/// size it runs against. Both were found EMPIRICALLY (a scratch tuning scan
-/// swept nursery/depth pairs and read `gc_retry_fired_count()`'s delta, plus
-/// — separately — the exact error message under the class-level mutation
-/// described above), not hand-derived from the heap-object byte layout: the
-/// exact allocation size the compiled Con-constructor code emits, and how
-/// much of the nursery the parent's own suspend + this child's own
-/// effect-request scaffold consume before the live chain even starts, are
-/// both internal to `emit/**` (out of this lane's scope) rather than stable,
-/// cheap-to-derive constants. The execution is fully deterministic (no
-/// timing/threading variance in the allocation sequence), so a pair confirmed
-/// to land in the exhaustion window stays there on every future run against
-/// an unchanged compiler — confirmed here over 20 repetitions via
-/// `repeated_effect_response_park_arm_survives_nursery_exhaustion` (opt-in,
-/// see below) with the fix in place, and by hand against the class-level
-/// mutation (both directions, see the module doc). If a codegen change to
-/// Con/thunk layout ever shifts this window, `retry_after == retry_before`
-/// below fails loudly and names exactly what to retune.
+/// size it runs against. Both were found EMPIRICALLY, not hand-derived from
+/// the heap-object byte layout: the exact allocation size the compiled
+/// Con-constructor code emits, and how much of the nursery the parent's own
+/// suspend + this child's own effect-request scaffold consume before the
+/// live chain even starts, are internal to `emit/**` rather than stable,
+/// cheap-to-derive constants. Execution is fully deterministic, so a pair
+/// confirmed to land in the exhaustion window stays there on every future
+/// run against an unchanged compiler. If a codegen change to Con/thunk
+/// layout ever shifts this window, `retry_after == retry_before` below fails
+/// loudly and names exactly what to retune.
 const CHAIN_DEPTH: usize = 115;
 const NURSERY_BYTES: usize = 4096;
 
@@ -331,10 +275,8 @@ fn run_with(depth: usize, nursery: usize) -> Result<(), String> {
     let retry_after = tidepool_codegen::heap_bridge::gc_retry_fired_count();
 
     // The machine's `run`/`run_child_fragment` result is already the
-    // unwrapped freer-simple `Val` payload (same shape
-    // `nested_child_gc_rooting.rs::assert_pair_result` matches on directly
-    // off `resume_suspended`'s outcome — no outer `Val` Con survives to the
-    // bridged Rust `Value`).
+    // unwrapped freer-simple `Val` payload — no outer `Val` Con survives to
+    // the bridged Rust `Value`.
     let v = result.map_err(|e| format!("{e}"))?;
     match v {
         Value::Con(id, ref fields) if id == PAIR_ID && fields.len() == 2 => {
@@ -377,7 +319,7 @@ fn effect_response_park_arm_survives_nursery_exhaustion_under_live_pressure() {
         .unwrap();
 }
 
-/// Mutation-proof companion, gated OFF by default: 15+ repetitions of the
+/// Mutation-proof companion, gated OFF by default: 20 repetitions of the
 /// same scenario, each in its own thread/process-counters reset, proving the
 /// green outcome is not a one-shot fluke. Run explicitly:
 /// `TIDEPOOL_RUN_REPETITION_PROOF=1 cargo nextest run -p tidepool-codegen \

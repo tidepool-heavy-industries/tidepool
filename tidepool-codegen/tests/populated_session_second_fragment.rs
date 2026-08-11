@@ -20,15 +20,17 @@
 //! which claims it can actually hold.
 //!
 //! **The RUN's yield-boundary classification: CONSTRAINED.** `ConTags` (the
-//! `Val`/`E` discrimination in `effect_machine`) is resolved once, in
-//! `compile_inner`, from the bootstrap turn's table. `add_function` refreshes
-//! `lit_wrappers`, `json_con_ids` and `time_con_ids` from each later turn's
-//! table but never re-resolves `tags`, so every later turn is classified by the
-//! bootstrap ids. Minting `Val` in the bootstrap table under a different id
-//! than the fragment emits turns all four tests in this file red, the child run
-//! failing as `Yield(UnexpectedConTag(10))` — the same error variant, and the
-//! same class of oversized-looking tag word, that this investigation started
-//! from.
+//! `Val`/`E` discrimination in `effect_machine`) is re-resolved on every
+//! `add_function` call against THAT fragment's table (Err -> Ok heals;
+//! Ok -> Ok re-installs; Ok -> Err never clobbers — see the GLOBAL-ID
+//! INVARIANT comment in `add_function`), not frozen at bootstrap. Because
+//! `tags` always reflects the MOST RECENTLY compiled fragment's table, a
+//! fragment compiled earlier against a table that disagrees with a later one
+//! on `Val`'s id has its baked constructor id go stale once a later
+//! `add_function` call re-resolves `tags` from a different table. Minting
+//! `Val` in the bootstrap table under a different id than the fragment emits
+//! turns all four tests in this file red, the child run failing as
+//! `Yield(UnexpectedConTag(10))`.
 //!
 //! **Emission resolving constructors against the accumulated table: NOT
 //! constrained, and it cannot be.** Compiling the second fragment against the
@@ -134,8 +136,11 @@ fn turn2_table() -> DataConTable {
     table
 }
 
-/// Accumulate `turn` onto `session` exactly as `PersistentSession::merge_table`
-/// does: `insert_checked` per constructor.
+/// Accumulate `turn` onto `session`. `PersistentSession::merge_table` filters
+/// out already-identical entries and batches the rest through
+/// `DataConTable::extend_checked`; this test helper collision-checks each
+/// constructor individually via `insert_checked` instead, which rejects the
+/// same collisions.
 fn merge_table(session: &mut DataConTable, turn: &DataConTable) {
     for dc in turn.iter() {
         session
@@ -484,10 +489,12 @@ fn tag_tuple(t: &ConTags) -> (u64, u64, u64, u64, u64) {
     (t.val, t.e, t.union, t.leaf, t.node)
 }
 
-/// `JitEffectMachine.tags` is resolved once from the bootstrap table and never
-/// refreshed, so every later turn is classified by the bootstrap turn's
-/// `Val`/`E` ids. That is sound exactly while re-resolving against the
-/// accumulated table would give the same answer. Assert it does.
+/// `add_function` re-resolves `JitEffectMachine.tags` against each fragment's
+/// own table (see the GLOBAL-ID INVARIANT comment on `add_function`), but this
+/// file's suspend flow never calls `add_function` before suspending, so the
+/// parent classifies against the bootstrap table's `Val`/`E` ids. That is
+/// sound exactly while re-resolving against the accumulated table would give
+/// the same answer. Assert it does.
 #[test]
 fn bootstrap_contags_still_classify_the_accumulated_table() {
     let boot = bootstrap_table();

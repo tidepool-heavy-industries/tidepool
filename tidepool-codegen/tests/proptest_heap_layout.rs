@@ -213,10 +213,10 @@ mod group3_lit {
 
     #[test]
     fn test_lit_tag_drift() {
-        // LitTag is the single unified source of truth shared by both crates
-        // (commit 000932c3, "unify LitTag ABI"): 0-4 are scalar literals,
-        // 5-9 are the pointer-carrying shapes (String/Addr/ByteArray/
-        // SmallArray/Array). Anything beyond the last variant stays invalid.
+        // LitTag is the single unified source of truth shared by both crates:
+        // 0-4 are scalar literals, 5-9 are the pointer-carrying shapes
+        // (String/Addr/ByteArray/SmallArray/Array). Anything beyond the last
+        // variant stays invalid.
         for tag_val in 0..=9u8 {
             let guard = alloc_buf(LIT_SIZE);
             unsafe {
@@ -459,9 +459,9 @@ mod group5_thunk {
 
     #[test]
     fn test_thunk_pointer_fields_blackhole() {
-        // C6 FIXED 2026-06-11: blackhole captures are visited like an
-        // unevaluated thunk's (the thunk's code may still read them after a
-        // GC it triggered itself).
+        // C6 FIXED: blackhole captures are visited like an unevaluated
+        // thunk's (the thunk's code may still read them after a GC it
+        // triggered itself).
         let ncaps = 5;
         let byte_size = 24 + 8 * ncaps;
         let guard = alloc_buf(byte_size);
@@ -497,8 +497,8 @@ mod group5_thunk {
                 let to_space = std::slice::from_raw_parts_mut(to_guard.ptr, 1024);
                 cheney_copy(&roots, from_guard.ptr, from_guard.ptr.add(1024), to_space);
 
-                // 4. C6 FIXED 2026-06-11: blackhole captures are now visited
-                // by for_each_pointer_field, so the Lit MUST be evacuated and
+                // 4. C6 FIXED: blackhole captures are now visited by
+                // for_each_pointer_field, so the Lit MUST be evacuated and
                 // the capture slot updated to its to-space copy.
                 assert_ne!(root, thunk_ptr); // thunk moved
                 let captured_in_new = *(root.add(THUNK_CAPTURED_OFFSET) as *const *mut u8);

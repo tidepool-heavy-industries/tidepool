@@ -1,33 +1,35 @@
-//! Lane: Case-dispatch edges — a JIT-vs-eval differential net.
+//! Case-dispatch edges — a JIT-vs-eval differential net.
 //!
 //! Complements the already-green N-way constructor-case coverage
-//! (`proptest_ghc_idioms_widen.rs`, another agent's lane) with the *dispatch
-//! shapes* that the synthetic generators in `tidepool-testing/strategy.rs`
-//! never exercise:
+//! (`proptest_ghc_idioms_widen.rs`) with the *dispatch shapes* that the
+//! synthetic generators in `tidepool-testing/src/gen/strategy.rs` never
+//! exercise:
 //!
-//!   (A) literal-alt cases on `Int#` — both DENSE (0,1,..,N consecutive) and
-//!       SPARSE (scattered, including `i64::MIN`/`i64::MAX`), with and without a
-//!       `Default`. The JIT lowers BOTH to a linear `icmp`-chain over the
-//!       unboxed scrutinee (`emit_lit_dispatch`, tidepool-codegen/src/emit/
-//!       case.rs); whether Cranelift turns a dense chain into a jump table is an
-//!       internal decision we want to stress on both sides of the boundary.
-//!   (B) literal-alt cases on `Char#` — dense ASCII runs and sparse Unicode
+//!   (A) DENSE literal-alt cases on `Int#` (0,1,..,N consecutive), with and
+//!       without a `Default`. The JIT lowers this to a linear `icmp`-chain
+//!       over the unboxed scrutinee (`emit_lit_dispatch`,
+//!       tidepool-codegen/src/emit/case.rs); whether Cranelift turns a dense
+//!       chain into a jump table is an internal decision we want to stress
+//!       on both sides of the boundary.
+//!   (B) SPARSE literal-alt cases on `Int#` (scattered, including
+//!       `i64::MIN`/`i64::MAX`), with and without a `Default`.
+//!   (C) literal-alt cases on `Char#` — dense ASCII runs and sparse Unicode
 //!       codepoints (`emit_lit_dispatch` `LitChar` arm: compares `*c as i64`).
-//!   (C) VERY-WIDE constructor cases — 10..16 distinct nullary `DataConId`s in
+//!   (D) VERY-WIDE constructor cases — 10..16 distinct nullary `DataConId`s in
 //!       one `Case`. Data dispatch is a linear `icmp`-chain over `con_tag`
 //!       (== `DataConId.0`) (`emit_data_dispatch`); width stresses the chain
 //!       length and the trailing trap/default fall-through.
-//!   (D) NESTED case-of-case at depth — a chain where each `Case`'s scrutinee is
+//!   (E) NESTED case-of-case at depth — a chain where each `Case`'s scrutinee is
 //!       the *result* of the previous `Case`, 3..8 deep. The GHC join-point
 //!       factory shape, but here driven purely through nested literal dispatch.
-//!   (E) PARTIAL constructor set + `Default` — a wide constructor `Case` that
+//!   (F) PARTIAL constructor set + `Default` — a wide constructor `Case` that
 //!       lists only a SUBSET of the type's constructors and relies on a trailing
 //!       `Default` to catch the rest (both the matched-constructor and the
 //!       fall-through-to-default dynamic paths are swept).
 //!
-//! Construction style (mirrors `proptest_ghc_idioms.rs`): hand-built
-//! `RecursiveTree<CoreFrame<usize>>` via `TreeBuilder`, every program TOTAL and
-//! GROUND by construction so ~100% of cases reach a JIT-vs-eval value compare.
+//! Construction style: hand-built `RecursiveTree<CoreFrame<usize>>` via
+//! `TreeBuilder`, every program TOTAL and GROUND by construction so ~100% of
+//! cases reach a JIT-vs-eval value compare.
 //!
 //! TOTALITY DISCIPLINE for literal/data cases WITHOUT a `Default`: the scrutinee
 //! is a *constant chosen from the alt key set*, so it always matches some alt —
@@ -94,10 +96,9 @@ fn fresh_var() -> VarId {
 }
 
 // ---------------------------------------------------------------------------
-// Differential config: the nursery pair, determinism repeats, and fork probe
-// that used to be reinvented per-lane now live in one DiffConfig. Nothing is
-// tolerated — this generator is total and ground by construction, so an eval
-// or JIT error is a failure, not a skip.
+// Differential config: the nursery pair, determinism repeats, and fork probe.
+// Nothing is tolerated — this generator is total and ground by construction,
+// so an eval or JIT error is a failure, not a skip.
 // ---------------------------------------------------------------------------
 fn dcfg(label: &'static str) -> DiffConfig {
     DiffConfig::new(label)
@@ -114,7 +115,7 @@ fn push_int(b: &mut TreeBuilder, n: i64) -> usize {
 }
 
 /// Wrap `root` so it is the LAST node in the tree (eval/compile treat the final
-/// node as the root). Mirrors `fixup_root` in proptest_ghc_idioms.rs.
+/// node as the root).
 fn fixup_root(tree: &mut CoreExpr, root: usize) -> CoreExpr {
     if root == tree.nodes.len() - 1 {
         return tree.clone();
@@ -649,7 +650,7 @@ fn build_nested(spec: &NestedSpec) -> CoreExpr {
 // is chosen either INSIDE the listed subset (a matched-constructor path) or
 // OUTSIDE it (the default fall-through path). This is the GHC "incomplete
 // pattern with wildcard" shape — the partial-set-then-default ordering that the
-// existing strategy.rs `gen_case` Maybe/Bool arms never widen.
+// existing `gen/strategy.rs` `gen_case` Maybe/Bool arms never widen.
 // ===========================================================================
 
 #[derive(Clone, Debug)]

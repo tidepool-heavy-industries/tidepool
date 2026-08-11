@@ -2,9 +2,8 @@
 //! `ctz#`/`ctzN#`).
 //!
 //! These were missing from the tree-walking interpreter's primop dispatch
-//! (`UnsupportedPrimOp`), so on the corpus's Double-literal / Rational→Double
-//! paths eval errored while the JIT ran — the (now-retired) shim's both-fail /
-//! eval-fail arms then MASKED whatever the JIT did. Now that eval implements
+//! (`UnsupportedPrimOp`), so eval errored while the JIT ran and the failure
+//! was masked rather than surfaced as a divergence. Now that eval implements
 //! them to spec, this pins eval == JIT == the defined semantics via the
 //! classified `tidepool_testing::differential` runner (nursery [64KiB],
 //! nothing tolerated — every input here is total/ground).

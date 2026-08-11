@@ -10,7 +10,6 @@ use tidepool_testing::compare::assert_values_eq;
 
 fn test_table() -> DataConTable {
     let mut table = DataConTable::new();
-    // I#, W#, C#, F#, D#
     let boxes = [
         (100, "I#", 1),
         (101, "W#", 2),
@@ -58,7 +57,6 @@ fn differential_flatten_nested_int_boxes() {
     let table = test_table();
     let i_hash_id = table.get_by_name("I#").unwrap();
 
-    // canonical: Con(I#, [Lit(Int, 42)])
     let mut bld_can = TreeBuilder::new();
     let lit_42 = bld_can.push(CoreFrame::Lit(Literal::LitInt(42)));
     bld_can.push(CoreFrame::Con {
@@ -67,7 +65,6 @@ fn differential_flatten_nested_int_boxes() {
     });
     let canonical = bld_can.build();
 
-    // pre_canonical: Con(I#, [Con(I#, [Lit(Int, 42)])])
     let mut bld_pre = TreeBuilder::new();
     let lit_42_pre = bld_pre.push(CoreFrame::Lit(Literal::LitInt(42)));
     let inner_box = bld_pre.push(CoreFrame::Con {
@@ -91,7 +88,6 @@ fn differential_unbox_primop_args() {
     let table = test_table();
     let i_hash_id = table.get_by_name("I#").unwrap();
 
-    // canonical: PrimOp { IntAdd, [Lit(Int, 1), Lit(Int, 2)] }
     let mut bld_can = TreeBuilder::new();
     let lit_1 = bld_can.push(CoreFrame::Lit(Literal::LitInt(1)));
     let lit_2 = bld_can.push(CoreFrame::Lit(Literal::LitInt(2)));
@@ -101,7 +97,6 @@ fn differential_unbox_primop_args() {
     });
     let canonical = bld_can.build();
 
-    // pre_canonical: PrimOp { IntAdd, [Con(I#, [Lit(Int, 1)]), Con(I#, [Lit(Int, 2)])] }
     let mut bld_pre = TreeBuilder::new();
     let lit_1_pre = bld_pre.push(CoreFrame::Lit(Literal::LitInt(1)));
     let box_1 = bld_pre.push(CoreFrame::Con {
@@ -123,7 +118,6 @@ fn differential_unbox_primop_args() {
     let val_pre = run_pure_fixture(&pre_canonical, &table);
 
     assert_values_eq(&val_can, &val_pre);
-    // Sanity check for the specific value
     assert!(
         matches!(val_can, Value::Lit(Literal::LitInt(3))),
         "Expected LitInt(3), got {:?}",
@@ -137,7 +131,6 @@ fn differential_canonicalize_effect_tags() {
     let union_id = table.get_by_name("Union").unwrap();
     let w_hash_id = table.get_by_name("W#").unwrap();
 
-    // canonical: Con(Union, [Lit(Word, 7), Var(10)])
     let mut bld_can_run = TreeBuilder::new();
     let lit_100 = bld_can_run.push(CoreFrame::Lit(Literal::LitInt(100)));
     let lit_7_r = bld_can_run.push(CoreFrame::Lit(Literal::LitWord(7)));
@@ -153,7 +146,6 @@ fn differential_canonicalize_effect_tags() {
     });
     let canonical_run = bld_can_run.build();
 
-    // pre_canonical: Con(Union, [Con(W#, [Lit(Word, 7)]), Var(10)])
     let mut bld_pre_run = TreeBuilder::new();
     let lit_100_pre = bld_pre_run.push(CoreFrame::Lit(Literal::LitInt(100)));
     let lit_7_p = bld_pre_run.push(CoreFrame::Lit(Literal::LitWord(7)));
@@ -184,7 +176,6 @@ fn differential_normalize_idempotent_at_runtime() {
     let table = test_table();
     let i_hash_id = table.get_by_name("I#").unwrap();
 
-    // Con(I#, [Lit(Int, 42)])
     let mut bld = TreeBuilder::new();
     let lit_42 = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
     bld.push(CoreFrame::Con {
@@ -196,7 +187,6 @@ fn differential_normalize_idempotent_at_runtime() {
     let norm1 = tidepool_repr::normalize(&expr, &table);
     let norm2 = tidepool_repr::normalize(&norm1, &table);
 
-    // Assert IR-level idempotence (addresses Copilot comment)
     assert_eq!(norm1, norm2, "normalize must be idempotent at the IR level");
 
     let val1 = run_pure_fixture(&norm1, &table);
@@ -209,8 +199,6 @@ fn differential_normalize_idempotent_at_runtime() {
 fn differential_var_set_preserved() {
     let table = test_table();
     let i_hash_id = table.get_by_name("I#").unwrap();
-
-    // Con(I#, [Con(I#, [Var(1)])]) -> Con(I#, [Var(1)])
 
     let mut bld_pre2 = TreeBuilder::new();
     let lit_5_2 = bld_pre2.push(CoreFrame::Lit(Literal::LitInt(5)));
@@ -257,7 +245,6 @@ proptest! {
         let table = test_table();
         let i_hash_id = table.get_by_name("I#").unwrap();
 
-        // Build canonical: Con(I#, [Lit(n)])
         let mut bld_can = TreeBuilder::new();
         let lit_n = bld_can.push(CoreFrame::Lit(Literal::LitInt(n)));
         bld_can.push(CoreFrame::Con {
@@ -266,7 +253,6 @@ proptest! {
         });
         let canonical = bld_can.build();
 
-        // Build pre-canonical: Con(I#, [Con(I#, ... [Lit(n)])])
         let mut bld_pre = TreeBuilder::new();
         let mut current = bld_pre.push(CoreFrame::Lit(Literal::LitInt(n)));
         for _ in 0..=layers {
