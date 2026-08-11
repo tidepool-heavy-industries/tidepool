@@ -1312,15 +1312,16 @@ fn works_from_json_float() {
     );
 }
 
-/// `FromJSON ()` decodes an EMPTY array, and nothing else — pinning aeson
-/// 1.5.x's shape (aeson 2.x relaxed `()` to accept any value; this instance
-/// deliberately mirrors the older, stricter shape) —
-/// https://hackage.haskell.org/package/aeson-1.5.6.0/docs/src/Data.Aeson.Types.FromJSON.html.
+/// `FromJSON ()` decodes JSON `null`, and nothing else — the symmetric
+/// partner of `ToJSON () = Null` (one spelling for the unit wire, which
+/// `askUser @()` feeds operator JSON straight back through). The vendored
+/// aeson-1.5 empty-array decode was retired with that symmetry fix; `[]` is
+/// now REJECTED like any other non-null shape.
 #[test]
 fn works_from_json_unit() {
     works(
-        r#"pure (object ["ok" .= either (const False) (const True) (eitherDecode "[]" :: Either Text ()), "nonEmpty" .= either (const True) (const False) (eitherDecode "[1]" :: Either Text ()), "notArray" .= either (const True) (const False) (eitherDecode "{}" :: Either Text ())])"#,
-        serde_json::json!({"ok": true, "nonEmpty": true, "notArray": true}),
+        r#"pure (object ["ok" .= either (const False) (const True) (eitherDecode "null" :: Either Text ()), "emptyArray" .= either (const True) (const False) (eitherDecode "[]" :: Either Text ()), "notNull" .= either (const True) (const False) (eitherDecode "{}" :: Either Text ())])"#,
+        serde_json::json!({"ok": true, "emptyArray": true, "notNull": true}),
     );
 }
 
