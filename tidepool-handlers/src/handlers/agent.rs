@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use tidepool_agent::backend::AgentBackend;
 use tidepool_agent::seam::{
-    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, ModelPolicy, ReasoningEffort,
+    AgentActivity, AgentBackendError, AgentId, BackendThreadId, CycleResultPayload,
+    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, TokenUsage, ToolCallId, ToolOutcome,
 };
 use tidepool_agent::spawn::{
     CoupledSpawner, OneCycleRun, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest,
-    SpawnStage, SpawnWorkspace, WorkerRun,
+    SpawnStage, SpawnStep, SpawnWorkspace, WorkerRun,
 };
 use tidepool_worktree::error::WorktreeError as DomainWorktreeError;
 use tidepool_worktree::git::GitCli;
@@ -19,8 +20,9 @@ use crate::handlers::worktree::{
     worktree_id_to_wire, WorktreeError as WireWorktreeError,
 };
 use tidepool_bridge_effects::{
-    AgAgentId, AgBackendFailure, AgBackendThreadId, AgCyclePayload, AgSpawnOutcome, AgSpawnReceipt,
-    AgSpawnSpec, AgSpawnStage, AgSpawnWorkspace, AgWorkerRun,
+    AgAgentActivity, AgAgentId, AgAgentStep, AgBackendFailure, AgBackendThreadId, AgCyclePayload,
+    AgSpawnOutcome, AgSpawnReceipt, AgSpawnSpec, AgSpawnStage, AgSpawnWorkspace, AgTokenUsage,
+    AgWorkerRun,
 };
 
 // ============================================================================
@@ -35,13 +37,22 @@ use tidepool_bridge_effects::{
 // struct and the per-verb method bodies below are hand-written.
 tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 
-/// Serves `SubagentSpawn`: the whole coupled-spawn saga behind ONE verb.
+/// Serves `SubagentSpawn` (the whole saga behind one verb) plus
+/// `SubagentBegin`/`SubagentResume` (the same saga driven one stop at a time,
+/// for an agent that holds dynamic tools).
 ///
 /// Owns the worktree substrate handles (via [`CoupledSpawner`] — whose
 /// `BindingTable` holds the single-owner lifetime flock for its binding root)
-/// and a [`OneCycleBackend`]. Production wires the codex adapter; every
+/// and an [`AgentBackend`]. Production wires the codex adapter; every
 /// committed test wires [`tidepool_agent::backend::mock::MockBackend`] — no
 /// live-model turns in tests, ever (standing rule, Inanna 2026-08-09).
+///
+/// **A parked turn lives exactly as long as this handler does.** Between a
+/// `StepToolCall` and its `SubagentResume` the child's request is parked with
+/// no response written, so if the eval driving the loop dies mid-dispatch the
+/// call is never answered and the child's turn hangs until its own timeout.
+/// The mitigation is ownership, not a protocol trick: this handler owns the
+/// backend, and dropping it takes the app-server process with it.
 ///
 /// Not `Clone`, deliberately (RepoEventHandler precedent): it owns a boxed
 /// backend and a flocked binding table, neither of which has a meaningful
@@ -128,6 +139,57 @@ impl SubagentHandler {
             .map_err(spawn_error_to_wire)?;
         Ok(outcome_to_wire(&run))
     }
+
+    /// Serves `SubagentBegin`: the same saga as `subagent_spawn`, stopped at
+    /// its first stop instead of driven to the end, for an agent that holds
+    /// dynamic tools.
+    ///
+    /// `tools` arrives as a flat `Value` rather than inside `spec` because
+    /// `serde_json::Value` has no `FromCore` — see `AgAgentStep`'s docs for the
+    /// asymmetry that forces. Parsing it is the FIRST thing that happens: a
+    /// malformed declaration fails at `StageAllocating`, where nothing has been
+    /// allocated, bound, or spawned.
+    fn subagent_begin(
+        &mut self,
+        spec: AgSpawnSpec,
+        tools: JsonArg,
+        schema: JsonArg,
+    ) -> Result<AgAgentStep, SpawnError> {
+        let tools = tool_declarations_from_wire(&tools.0)?;
+        let request = request_from_wire(spec, schema, tools, self.model, self.effort)?;
+        let step = self
+            .spawner
+            .begin(&mut *self.backend, &request)
+            .map_err(spawn_error_to_wire)?;
+        Ok(step_to_wire(&step))
+    }
+
+    /// Serves `SubagentResume`: answer the parked tool call and drive on.
+    ///
+    /// `ok` false is a REFUSAL, not a transport failure — the child reads the
+    /// text and reacts to it, so the call is always answered. Which agent and
+    /// which call are checked by [`CoupledSpawner::answer`] before anything
+    /// reaches the backend; a mismatch is `SpawnDriveFailed`, because the
+    /// backend did nothing wrong.
+    fn subagent_resume(
+        &mut self,
+        agent: AgAgentId,
+        call: String,
+        ok: bool,
+        body: JsonArg,
+    ) -> Result<AgAgentStep, SpawnError> {
+        let agent = agent_id_from_wire(agent)?;
+        let outcome = if ok {
+            ToolOutcome::Answered(body.0)
+        } else {
+            ToolOutcome::Refused(refusal_text(body.0))
+        };
+        let step = self
+            .spawner
+            .answer(&mut *self.backend, agent, ToolCallId(call), outcome)
+            .map_err(spawn_error_to_wire)?;
+        Ok(step_to_wire(&step))
+    }
 }
 
 // ============================================================================
@@ -189,6 +251,92 @@ fn allocating_worktree_failure(e: WireWorktreeError) -> SpawnError {
     SpawnError::SpawnWorktreeFailed(AgSpawnStage::StageAllocating, e)
 }
 
+/// Parse the flat `tools` argument into declarations.
+///
+/// Reported at `StageAllocating` because that is the truth: nothing has been
+/// allocated while the declarations are still being READ. It is a
+/// `SpawnDriveFailed` rather than a backend or worktree failure because a
+/// malformed declaration is the driver handing Rust something it cannot mean —
+/// neither the backend nor the filesystem has been touched.
+///
+/// Field spelling is `inputSchema`, matching the JSON Schema vocabulary every
+/// backend speaks and the array `compileTools` builds. Strict about shape: a
+/// non-array is refused rather than read as "no tools", so a caller that
+/// mis-built the argument learns it instead of silently spawning a toolless
+/// agent that then refuses every call it makes.
+fn tool_declarations_from_wire(
+    tools: &serde_json::Value,
+) -> Result<Vec<DynamicToolDeclaration>, SpawnError> {
+    let drive_failure = |detail: String| {
+        SpawnError::SpawnDriveFailed(AgSpawnStage::StageAllocating, format!("tools: {detail}"))
+    };
+    let serde_json::Value::Array(items) = tools else {
+        return Err(drive_failure(format!(
+            "expected a JSON array of tool declarations, got {}",
+            json_type_name(tools)
+        )));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let field = |name: &str| {
+                item.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| drive_failure(format!("declaration {i} has no {name} string")))
+            };
+            Ok(DynamicToolDeclaration {
+                name: field("name")?.to_string(),
+                description: field("description")?.to_string(),
+                input_schema: item
+                    .get("inputSchema")
+                    .cloned()
+                    .ok_or_else(|| drive_failure(format!("declaration {i} has no inputSchema")))?,
+            })
+        })
+        .collect()
+}
+
+/// The JSON kind of a value, for a diagnostic that says what arrived instead of
+/// only what was wanted.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// What a refusal's `body` says to the CHILD.
+///
+/// A refusal authored as a plain string is passed through verbatim — that is
+/// the shape the Haskell loop writes, and quoting it would put JSON escapes in
+/// front of a model. Anything else is rendered as JSON rather than dropped:
+/// the child is better served by a structured refusal it can read than by a
+/// handler deciding its text was the wrong shape.
+fn refusal_text(body: serde_json::Value) -> String {
+    match body {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
+/// A wire `AgentId` back into the domain. Ids are minted from 0 upward, so a
+/// negative one was never minted — reported as a drive failure (the caller sent
+/// an id nothing could be running under) rather than wrapped into a huge `u64`
+/// that would fail later as a confusing "no such agent".
+fn agent_id_from_wire(id: AgAgentId) -> Result<AgentId, SpawnError> {
+    u64::try_from(id.raw).map(AgentId).map_err(|_| {
+        SpawnError::SpawnDriveFailed(
+            AgSpawnStage::StageRunning,
+            format!("agent id {} was never minted", id.raw),
+        )
+    })
+}
+
 fn agent_id_to_wire(id: AgentId) -> AgAgentId {
     AgAgentId { raw: id.0 as i64 }
 }
@@ -240,9 +388,35 @@ fn worker_run_to_wire(r: &WorkerRun) -> AgWorkerRun {
     }
 }
 
+/// Total, no catch-all arm — `handlers::worktree::error_to_wire`'s precedent, so
+/// a new activity kind is a compile error here rather than a silently dropped
+/// observation.
+fn activity_to_wire(a: &AgentActivity) -> AgAgentActivity {
+    match a {
+        AgentActivity::Command { command, exit_code } => {
+            AgAgentActivity::ActivityCommand(command.clone(), exit_code.map(i64::from))
+        }
+        AgentActivity::FileChanged { path } => AgAgentActivity::ActivityFileChanged(path.clone()),
+    }
+}
+
+/// Every counter crosses. Widening the seam's `TokenUsage` without widening
+/// this is a compile error, which is the point of writing it out field by
+/// field instead of deriving it.
+fn usage_to_wire(u: &TokenUsage) -> AgTokenUsage {
+    AgTokenUsage {
+        usage_input: u.input_tokens,
+        usage_cached_input: u.cached_input_tokens,
+        usage_output: u.output_tokens,
+        usage_reasoning_output: u.reasoning_output_tokens,
+        usage_total: u.total_tokens,
+    }
+}
+
 /// `receipt_model` carries the backend's EXACT resolved model verbatim — never
 /// a tier name, never re-derived here (`ModelPolicy`'s rule: a receipt naming
-/// a tier is not checkable).
+/// a tier is not checkable). `receipt_usage` is `None` when the backend
+/// reported no usage, which is not the same fact as zero.
 fn spawn_receipt_to_wire(r: &SpawnReceipt) -> AgSpawnReceipt {
     AgSpawnReceipt {
         receipt_agent: agent_id_to_wire(r.agent),
@@ -251,17 +425,33 @@ fn spawn_receipt_to_wire(r: &SpawnReceipt) -> AgSpawnReceipt {
         receipt_thread: thread_id_to_wire(&r.thread),
         receipt_model: r.resolved_model.clone(),
         receipt_turn: r.turn.0.clone(),
+        receipt_rounds: i64::from(r.rounds),
+        receipt_usage: r.usage.as_ref().map(usage_to_wire),
     }
 }
 
-/// `OneCycleRun::activity` has no wire field in lane 1's `SpawnOutcome` — the
-/// authored surface gets the run, the payload, and the receipt. Adding it is a
-/// `type_defs` change (root's call), not a silent widening here.
 fn outcome_to_wire(run: &OneCycleRun) -> AgSpawnOutcome {
     AgSpawnOutcome {
         outcome_run: worker_run_to_wire(&run.run),
         outcome_payload: payload_to_wire(&run.payload),
         outcome_receipt: spawn_receipt_to_wire(&run.receipt),
+        outcome_activity: run.activity.iter().map(activity_to_wire).collect(),
+    }
+}
+
+/// Where the driven saga stopped, projected TOTALLY — a parked call carries its
+/// correlation fields verbatim (the caller echoes them straight back to
+/// `SubagentResume`, so re-deriving any of them here would be the misroute the
+/// triple exists to catch).
+fn step_to_wire(step: &SpawnStep) -> AgAgentStep {
+    match step {
+        SpawnStep::ToolCall { agent, call } => AgAgentStep::StepToolCall(
+            agent_id_to_wire(*agent),
+            call.call.0.clone(),
+            call.tool.clone(),
+            call.arguments.clone(),
+        ),
+        SpawnStep::Done(run) => AgAgentStep::StepDone(Box::new(outcome_to_wire(run))),
     }
 }
 
@@ -318,8 +508,8 @@ fn spawn_error_to_wire(e: DomainSpawnError) -> SpawnError {
 mod tests {
     use super::*;
 
-    use tidepool_agent::backend::mock::{MockBackend, MockFailure};
-    use tidepool_agent::seam::TurnId;
+    use tidepool_agent::backend::mock::{MockBackend, MockFailure, MockStep};
+    use tidepool_agent::seam::{ToolCall, TurnId};
     use tidepool_worktree::create::WorktreeHandle;
     use tidepool_worktree::id::{BranchName, GitOid, WorktreeId};
     use tidepool_worktree::registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus};
@@ -706,7 +896,13 @@ mod tests {
                 // Verbatim: the receipt records the model that ran, never the tier.
                 receipt_model: "gpt-5.4-mini".to_string(),
                 receipt_turn: "turn-1".to_string(),
+                receipt_rounds: 0,
+                receipt_usage: None,
             }
+        );
+        assert!(
+            wire.outcome_activity.is_empty(),
+            "the sample run reported no activity"
         );
     }
 
@@ -844,5 +1040,335 @@ mod tests {
             }
             other => panic!("expected SpawnRollbackFailed, got {other:?}"),
         }
+    }
+
+    // ==================================================================
+    // The tool-dispatch verbs: `SubagentBegin` / `SubagentResume`.
+    // ==================================================================
+
+    #[test]
+    fn handler_activity_to_wire_covers_every_variant() {
+        assert_eq!(
+            activity_to_wire(&AgentActivity::Command {
+                command: "cargo test".to_string(),
+                exit_code: Some(101),
+            }),
+            AgAgentActivity::ActivityCommand("cargo test".to_string(), Some(101))
+        );
+        // A command with no reported exit code stays `Nothing` — "the backend
+        // said nothing", which is a different fact from "it succeeded".
+        assert_eq!(
+            activity_to_wire(&AgentActivity::Command {
+                command: "sleep 1".to_string(),
+                exit_code: None,
+            }),
+            AgAgentActivity::ActivityCommand("sleep 1".to_string(), None)
+        );
+        assert_eq!(
+            activity_to_wire(&AgentActivity::FileChanged {
+                path: "src/lib.rs".to_string(),
+            }),
+            AgAgentActivity::ActivityFileChanged("src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn handler_usage_to_wire_carries_every_counter() {
+        assert_eq!(
+            usage_to_wire(&TokenUsage {
+                input_tokens: 11,
+                cached_input_tokens: 22,
+                output_tokens: 33,
+                reasoning_output_tokens: 44,
+                total_tokens: 55,
+            }),
+            AgTokenUsage {
+                usage_input: 11,
+                usage_cached_input: 22,
+                usage_output: 33,
+                usage_reasoning_output: 44,
+                usage_total: 55,
+            },
+            "each counter lands on its own field — a transposition here would \
+             misreport a budget"
+        );
+    }
+
+    /// The correlation fields the caller echoes back to `SubagentResume` cross
+    /// VERBATIM. Re-deriving any of them would be the misroute the triple
+    /// exists to catch.
+    #[test]
+    fn handler_step_to_wire_carries_the_parked_call_verbatim() {
+        let arguments = serde_json::json!({ "question": "which file?", "n": 3 });
+        let step = SpawnStep::ToolCall {
+            agent: AgentId(7),
+            call: ToolCall {
+                call: ToolCallId("call-abc".to_string()),
+                thread: BackendThreadId("mock-thread-0".to_string()),
+                turn: TurnId("turn-1".to_string()),
+                tool: "ask_parent".to_string(),
+                arguments: arguments.clone(),
+            },
+        };
+
+        assert_eq!(
+            step_to_wire(&step),
+            AgAgentStep::StepToolCall(
+                AgAgentId { raw: 7 },
+                "call-abc".to_string(),
+                "ask_parent".to_string(),
+                arguments,
+            )
+        );
+    }
+
+    #[test]
+    fn handler_step_to_wire_done_carries_activity_and_usage() {
+        let mut run = sample_run(CycleResultPayload::Absent);
+        run.activity = vec![
+            AgentActivity::Command {
+                command: "git status".to_string(),
+                exit_code: Some(0),
+            },
+            AgentActivity::FileChanged {
+                path: "notes.md".to_string(),
+            },
+        ];
+        run.receipt.rounds = 2;
+        run.receipt.usage = Some(TokenUsage {
+            input_tokens: 1,
+            cached_input_tokens: 2,
+            output_tokens: 3,
+            reasoning_output_tokens: 4,
+            total_tokens: 10,
+        });
+
+        let AgAgentStep::StepDone(outcome) = step_to_wire(&SpawnStep::Done(Box::new(run))) else {
+            panic!("a finished cycle is StepDone");
+        };
+        assert_eq!(
+            outcome.outcome_activity,
+            vec![
+                AgAgentActivity::ActivityCommand("git status".to_string(), Some(0)),
+                AgAgentActivity::ActivityFileChanged("notes.md".to_string()),
+            ],
+            "activity reaches the wire in the order the backend reported it"
+        );
+        assert_eq!(outcome.outcome_receipt.receipt_rounds, 2);
+        assert_eq!(
+            outcome.outcome_receipt.receipt_usage,
+            Some(AgTokenUsage {
+                usage_input: 1,
+                usage_cached_input: 2,
+                usage_output: 3,
+                usage_reasoning_output: 4,
+                usage_total: 10,
+            }),
+            "usage lands on the RECEIPT — it is a checkable fact about the run"
+        );
+    }
+
+    fn one_declaration() -> serde_json::Value {
+        serde_json::json!([{
+            "name": "ask_parent",
+            "description": "ask the parent a question",
+            "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } },
+        }])
+    }
+
+    #[test]
+    fn handler_tool_declarations_from_wire_reads_a_well_formed_array() {
+        let decls = tool_declarations_from_wire(&one_declaration()).expect("a well-formed array");
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].name, "ask_parent");
+        assert_eq!(decls[0].description, "ask the parent a question");
+        assert_eq!(
+            decls[0].input_schema,
+            serde_json::json!({ "type": "object", "properties": { "q": { "type": "string" } } }),
+            "the schema crosses verbatim — nothing here rewrites it"
+        );
+        // Zero tools is an empty array, not an error.
+        assert!(tool_declarations_from_wire(&serde_json::json!([]))
+            .expect("an empty array is zero tools")
+            .is_empty());
+    }
+
+    /// A malformed declaration fails at `StageAllocating` — and the claim that
+    /// stage makes is checked, not just asserted: no worktree is registered and
+    /// no binding row exists.
+    #[test]
+    fn handler_begin_refuses_a_malformed_tools_array_at_allocating() {
+        let fx = Fixture::new();
+        let mut handler = fx.handler(MockBackend::completing(CycleResultPayload::Absent));
+
+        for (tools, expected) in [
+            (
+                serde_json::json!([{ "name": "ask_parent" }]),
+                "tools: declaration 0 has no description string",
+            ),
+            (
+                serde_json::json!([{ "name": "ask_parent", "description": "d" }]),
+                "tools: declaration 0 has no inputSchema",
+            ),
+            (
+                serde_json::json!([{ "description": "d", "inputSchema": {} }]),
+                "tools: declaration 0 has no name string",
+            ),
+            (
+                serde_json::json!({ "ask_parent": {} }),
+                "tools: expected a JSON array of tool declarations, got an object",
+            ),
+            (
+                serde_json::Value::Null,
+                "tools: expected a JSON array of tool declarations, got null",
+            ),
+        ] {
+            let err = handler
+                .subagent_begin(
+                    new_worktree_spec("reviewer", "summarize the diff"),
+                    JsonArg(tools.clone()),
+                    JsonArg(sample_schema()),
+                )
+                .expect_err("a malformed tools array cannot begin a spawn");
+
+            assert_eq!(
+                err,
+                SpawnError::SpawnDriveFailed(AgSpawnStage::StageAllocating, expected.to_string()),
+                "{tools} is refused at Allocating, naming what was wrong"
+            );
+        }
+
+        assert!(
+            fx.persisted_binding_files().is_empty(),
+            "nothing is allocated while the declarations are still being read: {:?}",
+            fx.persisted_binding_files()
+        );
+        assert!(
+            handler
+                .spawner()
+                .manager()
+                .list()
+                .expect("list the registry")
+                .is_empty(),
+            "no worktree was created for a spawn that never began"
+        );
+    }
+
+    /// Answering when nothing is running is the DRIVER's sequencing failure.
+    /// `SpawnBackendFailed` would point an operator at the wrong system — the
+    /// backend was never asked anything.
+    #[test]
+    fn handler_resume_with_no_agent_running_is_a_drive_failure() {
+        let fx = Fixture::new();
+        let mut handler = fx.handler(MockBackend::completing(CycleResultPayload::Absent));
+
+        let err = handler
+            .subagent_resume(
+                AgAgentId { raw: 0 },
+                "call-abc".to_string(),
+                true,
+                JsonArg(serde_json::json!({ "answer": "42" })),
+            )
+            .expect_err("nothing is parked, so nothing can be answered");
+
+        assert_eq!(
+            err,
+            SpawnError::SpawnDriveFailed(
+                AgSpawnStage::StageRunning,
+                "agent 0: no agent is mid-turn".to_string(),
+            )
+        );
+        assert!(
+            !matches!(err, SpawnError::SpawnBackendFailed(..)),
+            "the backend did nothing wrong: {err:?}"
+        );
+    }
+
+    /// An id below the mint's floor was never handed out. Refusing it here
+    /// keeps the failure legible instead of wrapping to a huge `u64` that
+    /// surfaces later as a confusing "no such agent".
+    #[test]
+    fn handler_agent_id_from_wire_refuses_a_never_minted_id() {
+        assert_eq!(agent_id_from_wire(AgAgentId { raw: 3 }), Ok(AgentId(3)));
+        assert_eq!(
+            agent_id_from_wire(AgAgentId { raw: -1 }),
+            Err(SpawnError::SpawnDriveFailed(
+                AgSpawnStage::StageRunning,
+                "agent id -1 was never minted".to_string(),
+            ))
+        );
+    }
+
+    /// A refusal is written FOR THE CHILD: a plain string crosses verbatim
+    /// rather than as a quoted JSON literal.
+    #[test]
+    fn handler_refusal_text_is_written_for_the_child() {
+        assert_eq!(
+            refusal_text(serde_json::json!("no such tool: frobnicate")),
+            "no such tool: frobnicate"
+        );
+        assert_eq!(
+            refusal_text(serde_json::json!({ "reason": "cap reached" })),
+            "{\"reason\":\"cap reached\"}",
+            "a structured refusal is rendered, never dropped"
+        );
+    }
+
+    /// The whole verb pair on the real saga: begin parks on the child's call,
+    /// resume answers it, and the turn finishes.
+    #[test]
+    fn handler_begin_parks_and_resume_drives_the_turn_to_done() {
+        let fx = Fixture::new();
+        let payload = serde_json::json!({ "summary": "asked and answered" });
+        let mut handler = fx.handler(
+            MockBackend::scripted([
+                MockStep::Calls {
+                    tool: "ask_parent".to_string(),
+                    arguments: serde_json::json!({ "q": "which file?" }),
+                },
+                MockStep::Completes(CycleResultPayload::Structured(payload.clone())),
+            ])
+            .with_activity(vec![AgentActivity::FileChanged {
+                path: "notes.md".to_string(),
+            }]),
+        );
+
+        let step = handler
+            .subagent_begin(
+                new_worktree_spec("reviewer", "summarize the diff"),
+                JsonArg(one_declaration()),
+                JsonArg(sample_schema()),
+            )
+            .expect("the scripted turn parks on a tool call");
+        let AgAgentStep::StepToolCall(agent, call, tool, arguments) = step else {
+            panic!("the scripted turn parks, so begin returns StepToolCall, got {step:?}");
+        };
+        assert_eq!(tool, "ask_parent");
+        assert_eq!(arguments, serde_json::json!({ "q": "which file?" }));
+
+        let step = handler
+            .subagent_resume(
+                agent,
+                call,
+                true,
+                JsonArg(serde_json::json!({ "file": "notes.md" })),
+            )
+            .expect("answering the parked call drives the turn on");
+        let AgAgentStep::StepDone(outcome) = step else {
+            panic!("the second scripted stop completes the turn, got {step:?}");
+        };
+        assert_eq!(
+            outcome.outcome_payload,
+            AgCyclePayload::PayloadStructured(payload)
+        );
+        assert_eq!(
+            outcome.outcome_receipt.receipt_rounds, 1,
+            "one answered call is one round, and the receipt says so"
+        );
+        assert_eq!(
+            outcome.outcome_activity,
+            vec![AgAgentActivity::ActivityFileChanged("notes.md".to_string())],
+            "activity reaches the authored surface — the deferral this lane closed"
+        );
     }
 }

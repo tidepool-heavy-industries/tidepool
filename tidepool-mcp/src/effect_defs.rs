@@ -1843,7 +1843,13 @@ macro_rules! subagent_effect_def {
                 "— or a case-matchable `SpawnError` naming the saga stage that failed, ",
                 "with the rollback already done: no binding is left active, and a created ",
                 "worktree is retained and rebindable, never deleted. Build the spec with ",
-                "`spawnSpec` (new worktree) or `spawnSpecIn` (existing unbound worktree).",
+                "`spawnSpec` (new worktree) or `spawnSpecIn` (existing unbound worktree). ",
+                "`agentBeginRaw`/`agentResumeRaw` are the same saga driven one STOP at a ",
+                "time, for an agent that holds dynamic tools: begin returns either a ",
+                "parked `StepToolCall` (the child called one of your tools; its turn is ",
+                "stopped until you answer) or a `StepDone`, and resume answers the parked ",
+                "call and drives on. Prefer the typed `spawnAgentWithTools`, which runs ",
+                "that loop against your own Haskell tool handlers.",
             ],
             type_defs [
                 "data AgentId = AgentId Int deriving (Show, Eq)",
@@ -1854,8 +1860,14 @@ macro_rules! subagent_effect_def {
                 "data BackendFailure = BackendUnavailable Text | ProtocolRejected Text | RunFailed Text deriving (Show, Eq)",
                 "data CyclePayload = PayloadStructured Value | PayloadUnstructured Text | PayloadAbsent deriving (Show, Eq)",
                 "data WorkerRun = WorkerRun { runAgent :: AgentId, runWorktree :: WorktreeHandle, runThread :: BackendThreadId } deriving (Show, Eq)",
-                "data SpawnReceipt = SpawnReceipt { receiptAgent :: AgentId, receiptWorktree :: WorktreeId, receiptBindingRef :: Text, receiptThread :: BackendThreadId, receiptModel :: Text, receiptTurn :: Text } deriving (Show, Eq)",
-                "data SpawnOutcome = SpawnOutcome { outcomeRun :: WorkerRun, outcomePayload :: CyclePayload, outcomeReceipt :: SpawnReceipt } deriving (Show, Eq)",
+                "data AgentActivity = ActivityCommand Text (Maybe Int) | ActivityFileChanged Text deriving (Show, Eq)",
+                "data TokenUsage = TokenUsage { usageInput :: Int, usageCachedInput :: Int, usageOutput :: Int, usageReasoningOutput :: Int, usageTotal :: Int } deriving (Show, Eq)",
+                // Field ORDER is the wire contract, so every widening APPENDS —
+                // `receiptRounds`/`receiptUsage` and `outcomeActivity` are the
+                // tool-dispatch lane's additions, positioned last on purpose.
+                "data SpawnReceipt = SpawnReceipt { receiptAgent :: AgentId, receiptWorktree :: WorktreeId, receiptBindingRef :: Text, receiptThread :: BackendThreadId, receiptModel :: Text, receiptTurn :: Text, receiptRounds :: Int, receiptUsage :: Maybe TokenUsage } deriving (Show, Eq)",
+                "data SpawnOutcome = SpawnOutcome { outcomeRun :: WorkerRun, outcomePayload :: CyclePayload, outcomeReceipt :: SpawnReceipt, outcomeActivity :: [AgentActivity] } deriving (Show, Eq)",
+                "data AgentStep = StepToolCall AgentId Text Text Value | StepDone SpawnOutcome deriving (Show, Eq)",
                 // ToJSON for every type reachable from a SpawnError field (the
                 // errors block templates the SpawnError instance itself). The
                 // vendored generic default rejects multi-constructor sums, so
@@ -1884,6 +1896,17 @@ macro_rules! subagent_effect_def {
                 { ctor SubagentSpawn, method subagent_spawn,
                   args { spec: "SpawnSpec" as tidepool_bridge_effects::AgSpawnSpec, schema: "Value" as crate::effect_glue::JsonArg },
                   ret "SpawnOutcome", errors SpawnError },
+                // The tool-dispatch pair. `tools` and the tool answer ride FLAT
+                // `Value` arguments rather than bridged records because
+                // `serde_json::Value` has ToCore but no FromCore — inbound JSON
+                // cannot ride inside a bridged record, and `SubagentSpawn`'s
+                // `schema` is the same lane.
+                { ctor SubagentBegin, method subagent_begin,
+                  args { spec: "SpawnSpec" as tidepool_bridge_effects::AgSpawnSpec, tools: "Value" as crate::effect_glue::JsonArg, schema: "Value" as crate::effect_glue::JsonArg },
+                  ret "AgentStep", errors SpawnError },
+                { ctor SubagentResume, method subagent_resume,
+                  args { agent: "AgentId" as tidepool_bridge_effects::AgAgentId, call: "Text" as String, ok: "Bool" as bool, body: "Value" as crate::effect_glue::JsonArg },
+                  ret "AgentStep", errors SpawnError },
             ],
             helpers [
                 { raw ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
@@ -1894,6 +1917,27 @@ macro_rules! subagent_effect_def {
                        "-- this is its substrate.",
                        "spawnAgentRaw :: SpawnSpec -> Value -> M (Either SpawnError SpawnOutcome)",
                        "spawnAgentRaw spec schema = send (SubagentSpawn spec schema)"] },
+                { raw ["-- | RAW begin of a coupled spawn that carries dynamic tools: it does",
+                       "-- everything `spawnAgentRaw` does, then drives the turn to its FIRST",
+                       "-- stop instead of to the end — either `StepToolCall agent callId tool",
+                       "-- args` (the child called one of your tools and its turn is PARKED",
+                       "-- until you answer) or `StepDone outcome` (it never called one).",
+                       "-- `tools` is a JSON array of {name, description, inputSchema};",
+                       "-- `schema` is the JSON Schema the terminal result must conform to.",
+                       "-- Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`, which",
+                       "-- compiles both from your types and runs the answer loop for you.",
+                       "agentBeginRaw :: SpawnSpec -> Value -> Value -> M (Either SpawnError AgentStep)",
+                       "agentBeginRaw spec tools schema = send (SubagentBegin spec tools schema)"] },
+                { raw ["-- | RAW answer to the parked tool call, driving the turn on to its next",
+                       "-- stop (another `StepToolCall`, or `StepDone`). `agent` and `callId`",
+                       "-- are echoed from the `StepToolCall` you are answering; naming a",
+                       "-- different agent or a different call is refused (`SpawnDriveFailed`)",
+                       "-- rather than misrouted. `ok` False is a REFUSAL the child reads and",
+                       "-- reacts to — an ordinary conversational fact, not a transport error,",
+                       "-- and never a way to leave the call unanswered; `body` is then the",
+                       "-- text it sees. Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`.",
+                       "agentResumeRaw :: AgentId -> Text -> Bool -> Value -> M (Either SpawnError AgentStep)",
+                       "agentResumeRaw agent callId ok body = send (SubagentResume agent callId ok body)"] },
                 { raw ["-- | Spawn in a NEW managed worktree: worktree spec, agent label, task.",
                        "spawnSpec :: WorktreeSpec -> Text -> Text -> SpawnSpec",
                        "spawnSpec wspec lbl task = SpawnSpec (SpawnNewWorktree wspec) lbl task"] },

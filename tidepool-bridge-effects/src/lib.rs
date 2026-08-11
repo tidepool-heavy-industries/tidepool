@@ -402,6 +402,31 @@ pub enum AgCyclePayload {
     PayloadAbsent,
 }
 
+/// Haskell `AgentActivity` — receipt-bearing observations from the run. Model
+/// prose is never the source of any field (PRD 18: "runtime receipts are
+/// authoritative"), so `ActivityCommand`'s exit code is what the process
+/// returned, and `Nothing` is "the backend reported no exit code" (killed by a
+/// signal, or still the only thing it said), never "it succeeded".
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+pub enum AgAgentActivity {
+    ActivityCommand(String, Option<i64>),
+    ActivityFileChanged(String),
+}
+
+/// Haskell `TokenUsage` — what one turn actually cost, as the backend reported
+/// it. Every counter is present or the whole record is absent
+/// (`AgSpawnReceipt::receipt_usage`'s `Option`): a backend that reports usage
+/// reports all of it.
+#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+#[core(name = "TokenUsage")]
+pub struct AgTokenUsage {
+    pub usage_input: i64,
+    pub usage_cached_input: i64,
+    pub usage_output: i64,
+    pub usage_reasoning_output: i64,
+    pub usage_total: i64,
+}
+
 /// Haskell `WorkerRun` — the coupled pair one spawn yields (PRD 19's result
 /// shape) plus the backend thread identity.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
@@ -423,6 +448,13 @@ pub struct AgSpawnReceipt {
     pub receipt_thread: AgBackendThreadId,
     pub receipt_model: String,
     pub receipt_turn: String,
+    /// How many tool-call rounds the child actually took — checkable against
+    /// the backend's own transcript, and the number a budget conversation
+    /// needs. APPENDED after the lane-1 fields: field order is the wire
+    /// contract.
+    pub receipt_rounds: i64,
+    /// `None` is "the backend said nothing about usage", never "it was free".
+    pub receipt_usage: Option<AgTokenUsage>,
 }
 
 /// Haskell `SpawnOutcome` — the verb's success payload. ToCore-only (carries
@@ -433,6 +465,28 @@ pub struct AgSpawnOutcome {
     pub outcome_run: AgWorkerRun,
     pub outcome_payload: AgCyclePayload,
     pub outcome_receipt: AgSpawnReceipt,
+    /// What the run actually did, in the order the backend reported it.
+    /// APPENDED, per the same rule as `AgSpawnReceipt`'s new tail.
+    pub outcome_activity: Vec<AgAgentActivity>,
+}
+
+/// Haskell `AgentStep` — where a driven spawn stopped. The authored loop
+/// alternates: a `StepToolCall` is answered and driving continues, a
+/// `StepDone` ends the agent's life.
+///
+/// `StepToolCall`'s fields are positional — agent, call id, tool name,
+/// arguments — matching `AgCyclePayload`'s style for a sum carrying a `Value`.
+/// ToCore-only: this is OUTBOUND, and `serde_json::Value` has no `FromCore`
+/// (which is also why the inbound tool declarations and tool answer ride flat
+/// `Value` verb arguments through `JsonArg` instead of a bridged record).
+/// The outcome is BOXED — transparently, since `ToCore for Box<T>` delegates
+/// to `T`, so the wire shape is still `StepDone SpawnOutcome`. Same reason the
+/// domain's `SpawnStep::Done` boxes: a whole outcome inside a two-variant enum
+/// makes every parked call pay for the finished one.
+#[derive(ToCore, Clone, Debug, PartialEq)]
+pub enum AgAgentStep {
+    StepToolCall(AgAgentId, String, String, serde_json::Value),
+    StepDone(Box<AgSpawnOutcome>),
 }
 
 /// Build the `Tidepool.Records.Bridged` Haskell module — the GENERATED home of
