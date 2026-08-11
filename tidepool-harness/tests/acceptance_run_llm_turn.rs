@@ -10,6 +10,14 @@
 //!   - answer_run_llm_turn exercised end-to-end -> run_llm_turn_end_to_end_...
 //!   - bottom answer does not consume -> run_llm_turn_bottom_answer_...
 //!     (this one surfaced a production-path finding — see its doc comment)
+//!
+//! (test-diet, coverage-overlap census): `run_llm_turn_end_to_end_...`'s hole
+//! is typed `@Decision` (a NESTED ADT — an outer record whose `confidence`
+//! field is itself a sum type), not the originally flat `@Int` — a formerly
+//! separate `run_llm_turn_nested_adt_type_retry_and_answer` test covered only
+//! the flat-vs-nested distinction with a THINNER set of event-log assertions;
+//! retyping the one surviving test's hole covers both (the zero-coverage-loss
+//! variant) instead of running the same production path twice.
 
 mod support;
 
@@ -92,25 +100,30 @@ fn event_node(e: &Event) -> Option<NodeId> {
     }
 }
 
-/// `runLLMTurn @Int "..."` (NOT `runLLMTurnFork`) — the same node
-/// answers in its own context. `answer_run_llm_turn` has never been
+/// `runLLMTurn @Decision "..."` (NOT `runLLMTurnFork`) — the same node
+/// answers in its own context, at a NESTED ADT answer type (`Decision` is a
+/// record whose `confidence` field is itself a sum type, `Confidence` — not
+/// a flat enum like a bare `Int`). `answer_run_llm_turn` has never been
 /// exercised by any existing test (golden_path.rs and run_llm_turn_sidecar.rs
 /// both drive the FORK verb, or the extract-only rejection paths).
 ///
 /// This test drives the full arc through the Harness (the production entry
 /// point, not `fold_tree_state` or a hand-built `NodeTree`):
 ///
-///   1. root suspends on a `runLLMTurn @Int` hole — asserts the published
-///      hole's routing carries the RENDERED type ("Int") from the asks.json
-///      sidecar (A1).
+///   1. root suspends on a `runLLMTurn @Decision` hole — asserts the
+///      published hole's routing carries the RENDERED nested-ADT type
+///      ("Decision") from the asks.json sidecar (A1).
 ///   2. `answer_run_llm_turn` drives the SAME node's own turn loop to an
-///      answer. Its first attempt (`resume "nope"`) is ill-typed — asserts
-///      the retry is a REJECTED `HoleAnswerAttempt` (continuation intact: no
+///      answer. Its first attempt (`resume (42 :: Int)`) is ill-typed (a
+///      bare `Int` where a whole `Decision` record is wanted) — asserts the
+///      retry is a REJECTED `HoleAnswerAttempt` (continuation intact: no
 ///      `HoleConsumed` yet, same hole id throughout) whose logged error text
 ///      is the GHC compiler's own diagnostic (not a synthesized message) and
 ///      is fed back to the model VERBATIM as its next user turn.
-///   3. the corrected attempt (`resume (42 :: Int)`) compiles, resumes the
-///      parent, and the node completes.
+///   3. the corrected attempt (a whole `Decision`, its `confidence` field a
+///      NESTED `Confidence` value) compiles, resumes the parent, and the
+///      node completes — proving the `RunLLMTurn` effect carries a nested ADT
+///      through GHC-as-validator exactly like a flat type.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     support::require_extract();
@@ -118,23 +131,28 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("rc.jsonl");
     let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let lib_dir = decision_lib_dir();
+    let cfg = EngineConfig::standard(prelude_dir(), Some(lib_dir.path().to_path_buf()))
+        .expect("engine config");
 
     let replies = vec![
         reply(
-            "```haskell\ndo\n  n <- runLLMTurn @Int \"pick a number between 1 and 100\"\n  \
-             pure (toJSON n)\n```",
+            "```haskell\nimport Decision\n\ndo\n  d <- runLLMTurn @Decision \"decide\"\n  \
+             pure (toJSON (show (d :: Decision)))\n```",
         ),
-        // Deliberately ill-typed: a String where Int is wanted.
-        reply("```haskell\nresume \"nope\"\n```"),
-        // Corrected.
-        reply("Right, an Int.\n\n```haskell\nresume (42 :: Int)\n```"),
+        // Deliberately ill-typed: a bare Int where a Decision record is wanted.
+        reply("```haskell\nimport Decision\nresume (42 :: Int)\n```"),
+        // Corrected: a whole Decision, its `confidence` field a NESTED enum value.
+        reply(
+            "Right, a Decision.\n\n```haskell\nimport Decision\n\
+             resume (Decision { action = \"proceed\", confidence = High })\n```",
+        ),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
     let root = harness
-        .create_root("rc root", "Get a number in-context, finish.")
+        .create_root("rc root", "Decide with a nested Confidence, finish.")
         .unwrap();
     harness.force(root, Actor::Operator).unwrap();
 
@@ -150,8 +168,8 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
                 HoleRouting::RunLLMTurn { ty, .. } => {
                     assert_eq!(
                         ty.as_deref(),
-                        Some("Int"),
-                        "the published hole must carry the RENDERED answer type from asks.json, got {ty:?}"
+                        Some("Decision"),
+                        "the published hole must carry the RENDERED nested-ADT answer type from asks.json, got {ty:?}"
                     );
                 }
                 other => panic!("expected a RunLLMTurn hole, got {other:?}"),
@@ -177,7 +195,7 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     assert_eq!(
         harness.tree().state(root),
         Some(NodeState::Done),
-        "the node completes once the corrected answer resumes it"
+        "the node completes once the corrected nested-ADT answer resumes it"
     );
 
     // --- durable-log assertions: continuation intact across the bad attempt ---
@@ -205,7 +223,7 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
         published_hole.0, hole_before,
         "published hole id matches the classified outcome"
     );
-    assert_eq!(ty.as_deref(), Some("Int"));
+    assert_eq!(ty.as_deref(), Some("Decision"));
 
     let attempts: Vec<&Event> = events
         .iter()
@@ -230,9 +248,10 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
     );
     // The rejected attempt's logged error is the GHC compiler's OWN
     // diagnostic (extract's stdout+stderr), not a harness-synthesized
-    // message — it must name the mismatched types.
+    // message — it must name the mismatched types (the wanted nested ADT,
+    // and/or the bare Int that was actually offered).
     assert!(
-        error.contains("Int") || error.contains("Char"),
+        error.contains("Decision") || error.contains("Int"),
         "the logged rejection must be GHC's verbatim type-mismatch diagnostic, got:\n{error}"
     );
 
@@ -306,117 +325,6 @@ fn decision_lib_dir() -> tempfile::TempDir {
     )
     .unwrap();
     dir
-}
-
-/// `runLLMTurn @Decision` — a NESTED typed
-/// answer: `Decision` is a record whose `confidence` field is itself a sum
-/// type (`Confidence`), not a flat enum like the `Int`/`Bool` cases above.
-/// Asserts the `RunLLMTurn` effect (its own GADT/union-tag,
-/// `runLLMTurn @T` does not ride `Ask`'s `AskWith`) carries a whole nested
-/// ADT through GHC-as-validator exactly like a flat type: an ill-typed
-/// answer (`42 :: Int` where a `Decision` is wanted) does NOT consume the
-/// continuation, and the corrected nested-record answer resumes it. Same
-/// production entry point (`Harness::answer_run_llm_turn`) and event-log
-/// assertions as `run_llm_turn_end_to_end_type_retry_and_answer`, condensed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_llm_turn_nested_adt_type_retry_and_answer() {
-    support::require_extract();
-
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("rc-nested.jsonl");
-    let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let lib_dir = decision_lib_dir();
-    let cfg = EngineConfig::standard(prelude_dir(), Some(lib_dir.path().to_path_buf()))
-        .expect("engine config");
-
-    let replies = vec![
-        reply(
-            "```haskell\nimport Decision\n\ndo\n  d <- runLLMTurn @Decision \"decide\"\n  \
-             pure (toJSON (show (d :: Decision)))\n```",
-        ),
-        // Deliberately ill-typed: a bare Int where a Decision record is wanted.
-        reply("```haskell\nimport Decision\nresume (42 :: Int)\n```"),
-        // Corrected: a whole Decision, its `confidence` field a NESTED enum value.
-        reply(
-            "Right, a Decision.\n\n```haskell\nimport Decision\n\
-             resume (Decision { action = \"proceed\", confidence = High })\n```",
-        ),
-    ];
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
-
-    let root = harness
-        .create_root("nested rc root", "Decide with a nested Confidence, finish.")
-        .unwrap();
-    harness.force(root, Actor::Operator).unwrap();
-
-    let outcome = harness
-        .run_to_hole_or_done(root)
-        .await
-        .expect("root drives to a hole");
-    match &outcome {
-        tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::RunLLMTurn { ty, .. } => {
-                assert_eq!(
-                    ty.as_deref(),
-                    Some("Decision"),
-                    "the published hole must carry the RENDERED nested-ADT answer type, got {ty:?}"
-                );
-            }
-            other => panic!("expected a RunLLMTurn hole, got {other:?}"),
-        },
-        other => panic!(
-            "root should suspend at runLLMTurn, got {}",
-            outcome_tag(other)
-        ),
-    }
-
-    harness
-        .answer_run_llm_turn(root)
-        .await
-        .expect("nested-ADT answer resolved end to end incl. the GHC retry");
-
-    assert_eq!(
-        harness.tree().state(root),
-        Some(NodeState::Done),
-        "the node completes once the corrected nested-ADT answer resumes it"
-    );
-
-    // The ill-typed attempt must not have consumed the continuation: exactly
-    // one Rejected then one Consumed HoleAnswerAttempt on the SAME hole, same
-    // discipline as the flat-Int case above.
-    let events = events_for(&log_path, root);
-    let attempts: Vec<&Event> = events
-        .iter()
-        .filter(|e| matches!(e, Event::HoleAnswerAttempt { .. }))
-        .collect();
-    assert_eq!(
-        attempts.len(),
-        2,
-        "one rejected attempt, one consuming attempt, got {attempts:?}"
-    );
-    assert!(
-        matches!(
-            attempts[0],
-            Event::HoleAnswerAttempt {
-                outcome: AnswerOutcome::Rejected { .. },
-                ..
-            }
-        ),
-        "first attempt must be Rejected, got {:?}",
-        attempts[0]
-    );
-    assert!(
-        matches!(
-            attempts[1],
-            Event::HoleAnswerAttempt {
-                outcome: AnswerOutcome::Consumed,
-                ..
-            }
-        ),
-        "second attempt must be Consumed, got {:?}",
-        attempts[1]
-    );
 }
 
 /// A deliberately BOTTOM answer (`error "boom"`) to a `runLLMTurn @Int`
