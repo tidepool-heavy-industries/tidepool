@@ -1,7 +1,8 @@
 //! Session registry — the resident-machine lifecycle guardian.
 //!
 //! A `HashMap<SessionId, Slot<M>>` where `Slot` (defined in [`crate::tree`]) is
-//! `Idle(M) | Running | Suspended { machine, hole }`. Every machine access goes
+//! `Idle(M) | Running | RunningChild { hole } | Suspended { machine, hole }`.
+//! Every machine access goes
 //! through this map — the stowed-XOR-running discipline that justifies
 //! `unsafe impl Send for JitEffectMachine` maps directly onto the slot variants:
 //! a machine is in EXACTLY one slot, and `Running` means it is out on a turn (no
