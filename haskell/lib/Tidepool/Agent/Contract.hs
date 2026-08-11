@@ -24,8 +24,10 @@
 -- and dispatch entry from the same selector and 'Tool' value. Other
 -- interpretations can be added without changing the authored record.
 --
--- 'AgentSchema' supports primitive fields and single-constructor records.
--- Multi-constructor tool inputs are rejected at compile time.
+-- A tool input's @input_schema@ is 'Tidepool.Aeson.Schema.JsonSchema' — the
+-- schema of the SAME generic encoding 'Tidepool.Aeson.FromJSON.FromJSON'
+-- decodes the dispatched argument with, re-exported here so an authored tools
+-- record needs one import.
 module Tidepool.Agent.Contract
   ( -- * Endpoint algebra and server interpretation
     Call
@@ -38,9 +40,8 @@ module Tidepool.Agent.Contract
   , tool
   , notify
 
-    -- * Structural schema (shallow: records + primitives only)
-  , AgentSchema (..)
-  , GAgentSchema (..)
+    -- * Input schema (re-exported; the schema of the generic JSON encoding)
+  , JsonSchema (..)
 
     -- * Generic compilation
   , HasAgentApi
@@ -64,8 +65,9 @@ import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
-import Tidepool.Aeson.Value (Value (..), object, ToJSON (..))
+import Tidepool.Aeson.Value (Value, ToJSON (..))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
+import Tidepool.Aeson.Schema (JsonSchema (..))
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -117,95 +119,6 @@ tool = Tool
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool m input ()
 notify = Tool
-
--- ---------------------------------------------------------------------------
--- Structural schema — shallow: single-constructor records + primitives
--- ---------------------------------------------------------------------------
-
--- | A JSON-Schema-shaped structural description of a tool input type, used
--- for 'DynamicToolDeclaration''s @input_schema@. Reuses 'GHC.Generics' the
--- same way 'Tidepool.Aeson.Value.ToJSON' does: a default method resolves via
--- @deriving (Generic, AgentSchema)@ (needs @DeriveAnyClass@ at the use site).
-class AgentSchema a where
-  agentSchema :: Proxy a -> Value
-  default agentSchema :: (Generic a, GAgentSchema (Rep a)) => Proxy a -> Value
-  agentSchema _ = gAgentSchema (Proxy :: Proxy (Rep a))
-
-instance AgentSchema Int where
-  agentSchema _ = object [(T.pack "type", String (T.pack "integer"))]
-
-instance AgentSchema Text where
-  agentSchema _ = object [(T.pack "type", String (T.pack "string"))]
-
-instance AgentSchema Bool where
-  agentSchema _ = object [(T.pack "type", String (T.pack "boolean"))]
-
-instance AgentSchema Double where
-  agentSchema _ = object [(T.pack "type", String (T.pack "number"))]
-
-instance AgentSchema () where
-  agentSchema _ = object [(T.pack "type", String (T.pack "null"))]
-
--- | A 'Maybe' field's schema is its payload's schema; its OPTIONALITY is
--- carried by the field walk ('gAgentSchemaFields' marks it non-required).
-instance AgentSchema a => AgentSchema (Maybe a) where
-  agentSchema _ = agentSchema (Proxy :: Proxy a)
-
--- | Structural walk over a 'GHC.Generics' representation, mirroring
--- 'Tidepool.Aeson.Value.GToJSON''s shape (transparent @M1 D@, object-from-record
--- @M1 C@, 'TypeError' on any sum).
-class GAgentSchema (f :: Type -> Type) where
-  gAgentSchema :: Proxy f -> Value
-
-instance GAgentSchema f => GAgentSchema (M1 D d f) where
-  gAgentSchema _ = gAgentSchema (Proxy :: Proxy f)
-
-instance GAgentSchemaObj f => GAgentSchema (M1 C c f) where
-  gAgentSchema _ =
-    object
-      [ (T.pack "type", String (T.pack "object"))
-      , (T.pack "properties", Object (Map.fromList [(n, v) | (n, v, _) <- fields]))
-      -- Only genuinely required fields: a 'Maybe' field is optional and
-      -- must NOT appear here — a schema that lists an optional key in
-      -- @required@ forces the model to invent a value for it.
-      , (T.pack "required", Array [String n | (n, _, req) <- fields, req])
-      ]
-    where
-      fields = gAgentSchemaFields (Proxy :: Proxy f)
-
--- | This gate's schema is single-constructor records only — tool INPUTS are
--- flat argument records by design; a sum-shaped input belongs on the
--- model-output side ('Tidepool.Agent.ModelCodec').
-instance
-  TypeError
-    ( 'Text "Tidepool.Agent.Contract's structural schema supports single-constructor records only; "
-        ':<>: 'Text "this endpoint type has multiple constructors."
-        ':$$: 'Text "Use a single-constructor record for tool input."
-    ) =>
-  GAgentSchema (a :+: b)
-  where
-  gAgentSchema _ = error "unreachable: multi-constructor schema is a compile-time TypeError"
-
--- | Per field: (name, schema, required?). 'Maybe' fields report
--- @required = False@; everything else 'True'.
-class GAgentSchemaObj (f :: Type -> Type) where
-  gAgentSchemaFields :: Proxy f -> [(Text, Value, Bool)]
-
-instance (GAgentSchemaObj a, GAgentSchemaObj b) => GAgentSchemaObj (a :*: b) where
-  gAgentSchemaFields _ = gAgentSchemaFields (Proxy :: Proxy a) ++ gAgentSchemaFields (Proxy :: Proxy b)
-
-instance GAgentSchemaObj U1 where
-  gAgentSchemaFields _ = []
-
-instance (Selector s, AgentSchema c) => GAgentSchemaObj (M1 S s (K1 R c)) where
-  gAgentSchemaFields _ = [(fieldName, agentSchema (Proxy :: Proxy c), True)]
-    where
-      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
-
-instance {-# OVERLAPPING #-} (Selector s, AgentSchema c) => GAgentSchemaObj (M1 S s (K1 R (Maybe c))) where
-  gAgentSchemaFields _ = [(fieldName, agentSchema (Proxy :: Proxy c), False)]
-    where
-      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 -- ---------------------------------------------------------------------------
 -- compileTools — one field-ordered traversal, declaration + dispatch from
@@ -352,7 +265,7 @@ instance
 -- | Every record leaf is exactly @Tool m input output@; unit-output tools use
 -- the same instance as request/response tools.
 instance
-  (Selector s, FromJSON input, AgentSchema input, ToJSON output, Functor m) =>
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
   GCompileTools (M1 S s (K1 R (Tool m input output))) m
   where
   gCompileEntries (M1 (K1 (Tool desc h))) =
@@ -361,7 +274,7 @@ instance
         , entrySelector = fieldName
         , entryWireName = fieldName
         , entryDescription = desc
-        , entryInputSchema = agentSchema (Proxy :: Proxy input)
+        , entryInputSchema = jsonSchema (Proxy :: Proxy input)
         , entryRun = \sv -> case fromJSON sv of
             Success input' -> toJSON <$> h input'
             Error msg -> error (T.unpack fieldName ++ ": compileTools dispatch could not decode tool input: " ++ msg)

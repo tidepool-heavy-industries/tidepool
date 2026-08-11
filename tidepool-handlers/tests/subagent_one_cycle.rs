@@ -2,7 +2,8 @@
 //! extract/JIT.
 //!
 //! A Haskell program calls the typed `spawnAgent` (`Tidepool.Agent.Spawn`,
-//! built on `Tidepool.Agent.ModelCodec`'s named-field model-boundary codec),
+//! which derives the worker's `outputSchema` from the caller's result type and
+//! decodes the terminal payload with that type's ordinary `FromJSON`),
 //! the Rust saga (`tidepool_agent::spawn::CoupledSpawner`) runs it against
 //! [`MockBackend`] and a REAL temporary git repository, and the Haskell
 //! caller gets back a `Generic`-decoded `WorkerResult` plus a receipt, or a
@@ -168,12 +169,21 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The extra imports every program here needs: the typed wrapper and the
-/// model-boundary codec (which also brings `WorkerResult`/`Completed`/
-/// `Blocked` into scope). Everything else (`spawnSpec`, `SpawnError`,
-/// `fromCurrentRepository`, `renderSpawnError`, …) comes from the generated
-/// `Tidepool.Effects`, auto-imported by the preamble.
-const IMPORTS: &str = "Tidepool.Agent.Spawn\nTidepool.Agent.ModelCodec\n";
+/// The extra imports every program here needs: the typed wrapper, and the
+/// schema class its result type derives. Everything else (`spawnSpec`,
+/// `SpawnError`, `fromCurrentRepository`, `renderSpawnError`, …) comes from
+/// the generated `Tidepool.Effects`, auto-imported by the preamble.
+const IMPORTS: &str = "Tidepool.Agent.Spawn\nTidepool.Aeson.Schema\n";
+
+/// The caller's result type, declared HERE rather than shipped by the stdlib:
+/// `spawnAgent @r` needs nothing of `r` but `Generic`-derived `FromJSON` (to
+/// read the terminal payload) and `JsonSchema` (to describe it to the worker),
+/// so an acceptance fixture is an ordinary user type, not a library one. Its
+/// two constructors exercise the tag discriminator, named record fields, and a
+/// list leaf in one shape.
+const HELPERS: &str = "data WorkerResult = Completed { summary :: Text, caveats :: [Text] }\n\
+                       \x20                 | Blocked { blocker :: Text, evidence :: [Text] }\n\
+                       \x20 deriving (Show, Eq, Generic, FromJSON, JsonSchema)\n";
 
 /// A compiled program plus the machine and handler stack driving it on the
 /// parked path — `repo_event_with_handler.rs`'s `Session`, minus ask/answer:
@@ -210,7 +220,7 @@ impl Session {
             &row,
             &tidepool_mcp::wrap_do(code),
             IMPORTS,
-            "",
+            HELPERS,
             None,
             None,
         );
@@ -561,8 +571,9 @@ fn malformed_payload_is_a_typed_decode_failure_never_a_success() {
 
         assert_eq!(out["case"], "malformed", "unexpected program branch: {out}");
         assert_eq!(
-            out["message"], "$.caveats: required field is missing",
-            "the message must name the missing field per ModelCodec's pinned error shape"
+            out["message"], "key \"caveats\" not present",
+            "the plain vendored decode error, naming the missing field — there is no \
+             codec on this boundary and no path-carrying error machinery"
         );
     });
 }
@@ -595,9 +606,9 @@ fn unstructured_payload_is_typed_malformed() {
 // Gate 5 — the schema that reaches the backend is the NAMED-FIELD shape
 // ============================================================================
 
-/// `modelSchema (Proxy :: Proxy WorkerResult)`'s exact rendering, pinned
-/// verbatim in `Tidepool.Agent.ModelCodec`'s module haddock — the acceptance
-/// pin this gate exists to check against reality. `oneOf` order follows
+/// `jsonSchema (Proxy :: Proxy WorkerResult)`'s exact rendering — aeson's
+/// `TaggedObject` shape, which is what the `FromJSON` instance on the other
+/// side of this same payload actually reads. `oneOf` order follows
 /// constructor declaration order (`Completed` then `Blocked`); each
 /// constructor's `required` array is `["tag", ...]` in the same order, since
 /// JSON arrays (unlike the sorted `Object` map) preserve declaration order.
@@ -663,8 +674,8 @@ fn schema_reaches_the_backend_named_field_shape() {
         assert_eq!(
             *schema,
             pinned_worker_result_schema(),
-            "the schema reaching the backend must be the NAMED-FIELD shape ModelCodec pins — \
-             not gate-1(b)'s positional {{tag, fields:[..]}} shape"
+            "the schema reaching the backend must be the NAMED-FIELD shape the caller's \
+             own FromJSON reads — not a positional {{tag, fields:[..]}} shape"
         );
     });
 }

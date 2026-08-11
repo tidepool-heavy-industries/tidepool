@@ -186,9 +186,10 @@ fn backend_failure_to_wire(e: AgentBackendError) -> AgBackendFailure {
 }
 
 /// `PayloadStructured` is NOT a typed success on the far side — decoding it
-/// against the caller's result type is `Tidepool.Agent.ModelCodec`'s job, and
-/// its failure is the Haskell-side `SpawnResultMalformed`. Nothing here ever
-/// constructs that variant.
+/// against the caller's result type is the Haskell side's job (`spawnAgent`
+/// runs the caller's ordinary `FromJSON` instance over it), and its failure is
+/// the Haskell-side `SpawnResultMalformed`. Nothing here ever constructs that
+/// variant.
 fn payload_to_wire(p: &CycleResultPayload) -> AgCyclePayload {
     match p {
         CycleResultPayload::Structured(v) => AgCyclePayload::PayloadStructured(v.clone()),

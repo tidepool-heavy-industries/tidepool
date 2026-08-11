@@ -14,8 +14,7 @@
 --
 -- > data WorkerResult = Completed { summary :: Text, caveats :: [Text] }
 -- >                   | Blocked   { blocker :: Text, evidence :: [Text] }
--- >   deriving (Show, Eq, Generic)
--- > instance ModelCodec WorkerResult
+-- >   deriving (Show, Eq, Generic, FromJSON, JsonSchema)
 -- >
 -- > result <- spawnAgent (spawnSpec wspec "porter" "port the handler")
 -- > case result of
@@ -48,18 +47,21 @@ import Tidepool.Effects
   , SpawnSpec
   , spawnAgentRaw
   )
-import Tidepool.Agent.ModelCodec (ModelCodec (..))
+import Tidepool.Aeson.FromJSON (FromJSON, fromJSON, resultToEither)
+import Tidepool.Aeson.Schema (JsonSchema (..))
 
 -- | One-cycle coupled spawn, typed by its result.
 --
--- The schema handed to the backend and the decoder applied to what comes back
--- are the SAME 'Tidepool.Agent.ModelCodec' traversal of @r@, so a worker that
--- satisfied the schema decodes by construction.
+-- The schema handed to the backend describes exactly what
+-- 'Tidepool.Aeson.FromJSON.FromJSON' reads back — 'Tidepool.Aeson.Schema' is
+-- the schema OF that generic encoding, over the same @Generic@ metadata — so
+-- a worker that satisfied the schema decodes by construction. There is no
+-- codec on this boundary: the model writes ordinary JSON.
 --
 -- A payload that does not decode is a typed FAILURE — 'SpawnResultMalformed',
--- carrying the decoder's path-bearing message (@\"$.caveats[1]: expected
--- string, got number\"@). It is never a success with a defaulted field, and
--- never an exception. The three ways a result can fail to be an @r@ are
+-- carrying the decoder's message (@\"key \\\"caveats\\\" not present\"@). It
+-- is never a success with a defaulted field, and never an exception. The
+-- three ways a result can fail to be an @r@ are
 -- distinguished in the message, because they call for different fixes:
 --
 -- * @'PayloadStructured' v@ that misses the schema — the model produced JSON of
@@ -75,15 +77,15 @@ import Tidepool.Agent.ModelCodec (ModelCodec (..))
 -- record of the run.
 spawnAgent ::
   forall r.
-  ModelCodec r =>
+  (FromJSON r, JsonSchema r) =>
   SpawnSpec ->
   M (Either SpawnError (SpawnOutcome, r))
 spawnAgent spec = do
-  raw <- spawnAgentRaw spec (modelSchema (Proxy :: Proxy r))
+  raw <- spawnAgentRaw spec (jsonSchema (Proxy :: Proxy r))
   pure $ case raw of
     Left err -> Left err
     Right outcome -> case outcomePayload outcome of
-      PayloadStructured v -> case decodeModel v of
+      PayloadStructured v -> case resultToEither (fromJSON v) of
         Right value -> Right (outcome, value)
         Left detail -> Left (SpawnResultMalformed detail)
       PayloadUnstructured t ->

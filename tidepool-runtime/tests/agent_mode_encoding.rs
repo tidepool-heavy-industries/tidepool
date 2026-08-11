@@ -35,17 +35,16 @@ use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, DataKinds, TypeOperators, FlexibleContexts #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
-     import Tidepool.Agent.Contract\n\
-     import Tidepool.Agent.ModelCodec\n";
+     import Tidepool.Agent.Contract\n";
 
 /// `Question`/`Decision` are the shared `Call` input/output pair used by
 /// every fixture below. `compileTools`'s leaf constraint only needs
-/// `(FromJSON input, AgentSchema input, ToJSON output)` — `Question` doesn't
+/// `(FromJSON input, JsonSchema input, ToJSON output)` — `Question` doesn't
 /// need `ToJSON` for that — but several fixtures ALSO call `toJSON` on a
 /// `Question` directly (to build a dispatch argument from Rust-side test
 /// code, outside any generated `Tool` handler), so it derives `ToJSON` too.
 const SHARED_TYPES: &str =
-    "data Question = Question { questionText :: Text } deriving (Generic, FromJSON, ToJSON, AgentSchema)\n\
+    "data Question = Question { questionText :: Text } deriving (Generic, FromJSON, ToJSON, JsonSchema)\n\
      data Decision = Decision { approved :: Bool } deriving (Generic, ToJSON)\n";
 
 fn run_pure(source: &str, target: &str) -> serde_json::Value {
@@ -285,33 +284,137 @@ fn compile_fail_unsupported_endpoint_type() {
     }
 }
 
-/// "input or output lacks the required structural interpreter" — a
-/// multi-constructor endpoint type hits `AgentSchema`'s own `TypeError`
-/// branch (the same restriction `Tidepool.Aeson.Value.ToJSON` already
-/// carries). Not one of the PRD's required four, but the same
-/// `GAgentSchema (a :+: b)` instance that keeps this gate's schema shallow
-/// buys it for free, so it's pinned too.
+// ---------------------------------------------------------------------------
+// The input schema IS the schema of the generic JSON encoding
+// ---------------------------------------------------------------------------
+
+/// A one-endpoint tools record whose `Call` input is `input_ty`, preceded by
+/// whatever `decls` define it. `result` is the compiled declaration's
+/// `input_schema` — the value `compileTools` actually hands a backend.
+///
+/// One fixture serves both polarities below: the schema-shape pins read
+/// `result`, and the compile-fail diagnostics never get that far because
+/// `JsonSchema`/`FromJSON` reject the endpoint's input type at the
+/// `GCompileTools` leaf.
+fn input_schema_module(decls: &str, input_ty: &str) -> String {
+    format!(
+        "{HEADER}\n{SHARED_TYPES}\n{decls}\n\
+         data InputTools mode = InputTools\n\
+         \x20 {{ recordInput :: mode :- Call {input_ty} Decision }} deriving (Generic)\n\n\
+         inputTools :: InputTools (AsServerT Maybe)\n\
+         inputTools = InputTools {{ recordInput = tool \"record the input\" (\\_ -> Just (Decision True)) }}\n\n\
+         result :: Value\n\
+         result = case compileTools inputTools of\n\
+         \x20 Left _ -> toJSON (\"compile-error\" :: Text)\n\
+         \x20 Right compiled -> case declarations compiled of\n\
+         \x20   (d : _) -> dtdInputSchema d\n\
+         \x20   [] -> toJSON (\"no declarations\" :: Text)\n"
+    )
+}
+
+/// A record input: an object keyed by VERBATIM selector names (no
+/// normalization anywhere on this path), with a `Maybe` field present in
+/// `properties` and absent from `required` — the schema statement of what
+/// `FromJSON`'s `.:?` already accepts.
 #[test]
-fn compile_fail_multi_constructor_call_input() {
+fn tool_input_schema_is_the_generic_record_shape() {
+    let src = input_schema_module(
+        "data Note = Note { noteFile :: Text, noteLine :: Int, noteFix :: Maybe Text }\n\
+         \x20 deriving (Generic, FromJSON, JsonSchema)\n",
+        "Note",
+    );
+    assert_eq!(
+        run_pure(&src, "result"),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "noteFile": { "type": "string" },
+                "noteLine": { "type": "integer" },
+                "noteFix": { "type": "string" }
+            },
+            "required": ["noteFile", "noteLine"]
+        }),
+        "an optional field is expressed by ABSENCE from required, never by omission \
+         from properties"
+    );
+}
+
+/// A multi-constructor input is now SUPPORTED, and its schema is the shape the
+/// vendored encoder/decoder actually use: an all-nullary sum is a bare
+/// constructor-name string, so its schema is a string enum.
+///
+/// This replaces `compile_fail_multi_constructor_call_input`, which pinned the
+/// old shallow tool schema's blanket rejection of sums. That rejection was
+/// drift, not policy: `FromJSON` has always decoded these, so the schema
+/// refusing to describe them made the declaration and the decoder disagree.
+#[test]
+fn nullary_sum_tool_input_schema_is_a_string_enum() {
+    let src = input_schema_module(
+        "data Verdict = Yes | No deriving (Generic, FromJSON, JsonSchema)\n",
+        "Verdict",
+    );
+    assert_eq!(
+        run_pure(&src, "result"),
+        json!({ "type": "string", "enum": ["Yes", "No"] })
+    );
+}
+
+/// A payload sum is `oneOf` tagged objects — aeson's `TaggedObject` shape,
+/// which is exactly what the vendored `ToJSON`/`FromJSON` defaults produce and
+/// consume.
+#[test]
+fn payload_sum_tool_input_schema_is_oneof_tagged_objects() {
+    let src = input_schema_module(
+        "data Verdict = Yes | Because { reason :: Text }\n\
+         \x20 deriving (Generic, FromJSON, JsonSchema)\n",
+        "Verdict",
+    );
+    assert_eq!(
+        run_pure(&src, "result"),
+        json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "tag": { "type": "string", "enum": ["Yes"] } },
+                    "required": ["tag"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "tag": { "type": "string", "enum": ["Because"] },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["tag", "reason"]
+                }
+            ]
+        }),
+        "a nullary constructor in a MIXED sum is the zero-field case of the same \
+         tagged object, never a bare string"
+    );
+}
+
+/// The surviving compile-time rejection on this boundary: a payload
+/// constructor whose fields are positional has no JSON key to name them. The
+/// `TypeError` comes from `Tidepool.Aeson.Value`'s `GAllFieldsNamed`, which
+/// `JsonSchema` imports rather than restates — so a type the tool surface
+/// accepts is a type the encoder and decoder accept.
+#[test]
+fn compile_fail_positional_payload_call_input() {
     require_extract();
-    let src = format!(
-        "{HEADER}\n\
-         data Verdict = Yes | No deriving (Generic, FromJSON, AgentSchema)\n\
-         data Decision = Decision {{ approved :: Bool }} deriving (Generic, ToJSON)\n\n\
-         data BadTools3 mode = BadTools3\n\
-         \x20 {{ askParent :: mode :- Call Verdict Decision }} deriving (Generic)\n\n\
-         result :: Int\n\
-         result = case compileTools (undefined :: BadTools3 (AsServerT Maybe)) of\n\
-         \x20 Left _ -> 0\n\
-         \x20 Right _ -> 1\n"
+    let src = input_schema_module(
+        "data Verdict = Yes | Because Text deriving (Generic, FromJSON, JsonSchema)\n",
+        "Verdict",
     );
     match EvalHarness::new().with_stdlib().compile(&src, "result") {
-        Ok(_) => panic!("a multi-constructor Call input must not compile"),
+        Ok(_) => panic!("a positional payload constructor must not compile"),
         Err(e) => {
             let msg = tidepool_runtime::classify_compile(&e).message;
             assert!(
-                msg.contains("single-constructor records only"),
-                "expected AgentSchema's multi-constructor TypeError, got:\n{msg}"
+                msg.contains("must use record syntax"),
+                "expected the positional-payload TypeError, got:\n{msg}"
             );
         }
     }
@@ -425,42 +528,39 @@ fn compiletools_time_well_formed_record_compiles() {
     );
 }
 
-#[test]
-fn model_codec_rejects_normalized_field_collisions() {
-    let src = format!(
-        "{HEADER}\n\
-         data Collision = Collision {{ fooBar :: Text, foo_bar :: Text }} deriving (Generic)\n\
-         instance ModelCodec Collision\n\n\
-         result :: Text\n\
-         result = case decodeModel (object []) :: Either Text Collision of\n\
-         \x20 Left problem -> problem\n\
-         \x20 Right _ -> \"unexpectedly decoded\"\n"
-    );
-    let v = run_pure(&src, "result");
-    assert!(
-        v.as_str()
-            .unwrap_or_default()
-            .contains("duplicate normalized model field name"),
-        "snake_case normalization must not silently merge fields: {v}"
-    );
-}
+// `model_codec_rejects_normalized_field_collisions` used to live here. It has
+// no successor because the failure it guarded is now unconstructible: it
+// existed only because the deleted `Tidepool.Agent.ModelCodec` snake_cased
+// selector names before they reached JSON, so `fooBar` and `foo_bar` could
+// collapse to one key and silently lose a field. Nothing on this path
+// normalizes any more — every JSON key is the selector name VERBATIM — and
+// two record fields of one constructor cannot share a source name, so the
+// collision has no way to occur. A test asserting it can't would be asserting
+// that Haskell rejects duplicate record selectors.
 
+/// The OTHER collision `ModelCodec` used to catch at runtime — a payload field
+/// named `tag`, shadowing the constructor discriminator — is a compile-time
+/// `TypeError` on the vendored path, and this pins that it fires on the agent
+/// tool surface specifically. (`generic_recursive_sums.rs`'s
+/// `payload_field_cannot_collide_with_sum_tag` pins the same guard through
+/// `ToJSON`; this one proves the guard reaches a type arriving as a `Call`
+/// input, which is what the deleted runtime check was protecting.)
 #[test]
-fn model_codec_rejects_payload_tag_collision() {
-    let src = format!(
-        "{HEADER}\n\
-         data Collision = Empty | Payload {{ tag :: Text }} deriving (Generic)\n\
-         instance ModelCodec Collision\n\n\
-         result :: Text\n\
-         result = case decodeModel (object [(\"tag\", String \"Payload\")]) :: Either Text Collision of\n\
-         \x20 Left problem -> problem\n\
-         \x20 Right _ -> \"unexpectedly decoded\"\n"
+fn compile_fail_payload_field_named_tag() {
+    require_extract();
+    let src = input_schema_module(
+        "data Verdict = Yes | Because { tag :: Text }\n\
+         \x20 deriving (Generic, FromJSON, JsonSchema)\n",
+        "Verdict",
     );
-    let v = run_pure(&src, "result");
-    assert!(
-        v.as_str()
-            .unwrap_or_default()
-            .contains("constructor discriminator"),
-        "the sum tag must not be overwritten by a payload field: {v}"
-    );
+    match EvalHarness::new().with_stdlib().compile(&src, "result") {
+        Ok(_) => panic!("a payload field named `tag` must not compile"),
+        Err(e) => {
+            let msg = tidepool_runtime::classify_compile(&e).message;
+            assert!(
+                msg.contains("reserved for the constructor discriminator"),
+                "expected the reserved-tag TypeError, got:\n{msg}"
+            );
+        }
+    }
 }
