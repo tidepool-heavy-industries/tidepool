@@ -33,8 +33,8 @@
 //!
 //! ## No live model, ever
 //!
-//! Every test wires [`MockBackend`] (Inanna, 2026-08-09: no live-model turns
-//! in tests or automated code). [`RecordingBackend`] wraps it to observe the
+//! Every test wires [`MockBackend`] — no live-model turns in tests or
+//! automated code. [`RecordingBackend`] wraps it to observe the
 //! `CycleSpec` the saga actually hands the backend, without adding an
 //! accessor to `SubagentHandler` or `MockBackend` for it.
 //!

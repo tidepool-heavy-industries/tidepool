@@ -41,15 +41,18 @@
 //! ## The observation source, and why it is not a mock
 //!
 //! Reconciliation is injected ([`tidepool_handlers::ObservationSource`]). In
-//! production the implementation adapts `WorktreeMonitor`, which owns the git
-//! reasoning. `WorktreeMonitor::reconcile` is `todo!()` until lane L3 lands, so
-//! these tests supply [`RealGitObservations`], which computes the same facts
-//! from REAL git reads (`rev-parse`, `merge-base --is-ancestor`, `rev-list`,
-//! `show`) against the same repository `ScriptedWriter` is writing to. It reads
-//! git; it does not pretend to be git.
+//! production the implementation ([`tidepool_handlers::MonitorObservations`])
+//! adapts `WorktreeMonitor`, which owns the git reasoning and journals its
+//! baseline. These tests instead supply [`RealGitObservations`] — a second,
+//! independent implementation that computes the same facts from REAL git
+//! reads (`rev-parse`, `merge-base --is-ancestor`, `rev-list`, `show`) against
+//! the same repository `ScriptedWriter` is writing to, with its baseline held
+//! in process memory (legitimate only for the single-cycle harness this is —
+//! see the struct doc below). It reads git; it does not pretend to be git.
 //!
 //! Needs `TIDEPOOL_EXTRACT` (a built `tidepool-extract-bin`) + GHC on PATH;
-//! skips (passes) otherwise, like the other extract-dependent suites.
+//! fails loudly otherwise (see `require_ghc`) rather than skipping as a silent
+//! pass.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

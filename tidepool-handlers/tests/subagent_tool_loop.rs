@@ -26,7 +26,7 @@
 //!
 //! ## No live model, ever
 //!
-//! Every gate wires [`MockBackend`] (Inanna, 2026-08-09), scripted with
+//! Every gate wires [`MockBackend`], scripted with
 //! [`MockStep`]s: arrange-step input ("given exactly these stops, the loop does
 //! X"), not a simulation of a model. [`RecordingBackend`] wraps it to observe
 //! the `ThreadSpec` and the `ToolReply`s the loop actually produced —

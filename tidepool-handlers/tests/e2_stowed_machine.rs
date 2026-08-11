@@ -1,17 +1,16 @@
-//! E2 — end-to-end coverage for threadless ask suspension driven through the
-//! real [`SessionEngine`] production path (start_turn → SuspendedAsk → resume /
+//! End-to-end coverage for threadless ask suspension driven through the real
+//! [`SessionEngine`] production path (start_turn → SuspendedAsk → resume /
 //! abort), on genuine GHC + JIT compiled Haskell that calls `ask`.
 //!
-//! These exercise the whole stow → resume choreography the E1 → E2 restructure
-//! introduced:
+//! These exercise the whole stow → resume choreography:
 //!   1. a turn that `ask`s suspends as a STOWED machine (no parked thread) and
 //!      resumes on a fresh thread with the answer delivered intact;
 //!   2. THE GC HAZARD (root's mandatory test): a heap value live at the ask
 //!      boundary survives the suspension AND a GC triggered during resume — if
 //!      the stowed continuation's rooting were wrong, the post-resume result
 //!      would be corrupt or crash;
-//!   3. abort-while-stowed produces the same terminal `Error` a pre-E2
-//!      answer-channel abort did.
+//!   3. abort-while-stowed produces the same terminal `Error` outcome an
+//!      answer-channel abort does.
 //!
 //! Needs `TIDEPOOL_EXTRACT` (a built `tidepool-extract-bin`) + GHC on PATH;
 //! panics loudly otherwise (see `require_ghc`) rather than skipping as a
@@ -202,7 +201,7 @@ pure (n + filler + sum xs)";
 }
 
 /// Aborting a stowed ask continuation drives the machine to the same terminal
-/// error a pre-E2 answer-channel abort produced: an `Error` outcome whose detail
+/// error an answer-channel abort produces: an `Error` outcome whose detail
 /// carries the "ask aborted by caller" message.
 #[tokio::test]
 async fn e2_abort_while_stowed() {
