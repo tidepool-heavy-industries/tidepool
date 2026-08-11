@@ -1,7 +1,6 @@
 //! Feasibility spike — Option-C binder-resolution BACK-HALF.
 //!
-//! Proves the production claim of `plans/ghci-implementation-plan.md` §2/§3: a
-//! GHCi-style session reference reaches codegen as an **external**
+//! Proves: a GHCi-style session reference reaches codegen as an **external**
 //! `NVar(stableVarId)` (0xFE-tagged), and when the JIT's `ExternalEnv` maps that
 //! id to a live binding, the Var-miss site resolves it to the bound value — NOT
 //! a poison / `unresolved_var_trap`.

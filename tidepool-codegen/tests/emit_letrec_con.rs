@@ -32,8 +32,6 @@ unsafe fn read_con_field(ptr: *const u8, i: usize) -> *const u8 {
 //
 //   let rec x = Con_7(42#)
 //   in x
-//
-// Verifies: Con RHS compiles, fields are filled, result is correct.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_letrec_single_con() {
@@ -67,8 +65,6 @@ fn test_letrec_single_con() {
 //   let rec a = Con_1(10#)
 //              b = Con_2(a)
 //   in b
-//
-// Verifies: Con fields can reference other LetRec binders.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_letrec_con_mutual_reference() {
@@ -112,9 +108,6 @@ fn test_letrec_con_mutual_reference() {
 //   let rec f = λx. x
 //              node = Con_5(f)
 //   in node
-//
-// Verifies: Con fields can reference Lam closure pointers.
-// The Con's field[0] should be a valid closure with TAG_CLOSURE.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_letrec_mixed_con_and_lam() {
@@ -160,7 +153,6 @@ fn test_letrec_mixed_con_and_lam() {
 //   in case leaf of Con_5 g -> g 41
 //
 // This mimics the freer-simple pattern: Leaf(continuation_closure).
-// Verifies the closure stored in the Con has a valid code pointer.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_letrec_con_closure_is_callable() {
@@ -224,8 +216,6 @@ fn test_letrec_con_closure_is_callable() {
 //              f = λx. case base of Con_1 n -> x + n
 //              wrapper = Con_2(f)
 //   in case wrapper of Con_2 g -> g 5
-//
-// Verifies closures in Con nodes correctly capture other LetRec binders.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_letrec_con_lam_captures_sibling() {
@@ -309,7 +299,7 @@ fn test_letrec_con_lam_captures_sibling() {
 //              g = λx. x * 2
 //   in node
 //
-// Verifies the exact pattern from the tide repl Core: multiple Con bindings
+// Mirrors the tide repl Core's actual shape: multiple Con bindings
 // referencing each other and Lam bindings in a single LetRec group.
 // ---------------------------------------------------------------------------
 #[test]

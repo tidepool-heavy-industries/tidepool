@@ -3,9 +3,8 @@
 //! These tests compile expressions with tiny nurseries to force GC cycles,
 //! then verify the results match expected values at the language level.
 //!
-//! Note: this module no longer exercises `gc::frame_walker` root
-//! enumeration behavior directly. Dedicated unit tests for frame-walker
-//! internals should live in a separate test module.
+//! Note: despite the filename, this module does not exercise `gc::frame_walker`
+//! root enumeration directly — see `frame_walker_hardening.rs` for that.
 
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
@@ -56,15 +55,10 @@ fn build_con_chain(depth: usize) -> CoreExpr {
     tidepool_testing::gen::make_gc_forcing_setup(depth).0
 }
 
-/// Merges the former `test_gc_actually_frees_memory` (shallow chain, single
-/// GC) and `test_multiple_gc_cycles` (deep chain, multiple GC cycles) — both
-/// pinned the same claim: "GC fires and the program still computes",
-/// differing only in depth/cycle-count. Also subsumes the former
-/// `test_gc_preserves_values` (Con(1,[Lit(42)]) round-tripped through a
-/// nursery too small for GC to ever actually fire there): the chain-leaf
-/// check below (`Lit(42)` surviving at the bottom of a nested `Con` spine,
-/// across a nursery that DOES force multiple verified GC cycles) is a
-/// strictly stronger version of the same value-preservation claim.
+/// Pins "GC fires and the program still computes" at two depths: a shallow
+/// chain (single GC cycle) and a deep chain (multiple GC cycles), the latter
+/// also verifying the nested `Con(...Lit(42))` spine survives intact —
+/// value preservation across a nursery that forces repeated collection.
 #[test]
 fn test_gc_fires_and_program_computes() {
     std::thread::Builder::new()

@@ -1,25 +1,9 @@
 // Test fixture builders use explicit .push() per line for readability.
 #![allow(clippy::vec_init_then_push)]
 
-/*
-GC Audit (2026-02-18):
-- Audited codegen/src/emit/expr.rs:
-    - Lit, Con, App, Lam, LetRec all correctly call `declare_value_needs_stack_map` for heap pointers.
-    - `ensure_heap_ptr` correctly declares new Lit objects.
-    - Lambda inner functions correctly declare `closure_self`, `arg_param`, and loaded captures.
-- Audited codegen/src/emit/case.rs:
-    - Merge block parameter correctly declared.
-    - DataAlt field loads correctly declared.
-    - Scrutinee binder in environment correctly tracks heap pointers.
-- Audited codegen/src/emit/join.rs:
-    - Join block parameters correctly declared.
-    - Merge block parameter correctly declared.
-- Audited codegen/src/emit/primop.rs:
-    - Unboxed values (Raw) correctly NOT declared.
-
-All heap-pointer SSA values identified are properly tracked in stack maps.
-The following tests verify these properties programmatically.
-*/
+// Asserts that App/Case/Join safepoints produce non-empty stack maps —
+// i.e. heap-pointer SSA values live across the call are declared via
+// `builder.declare_value_needs_stack_map`.
 
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;

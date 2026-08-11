@@ -2,8 +2,7 @@
 //!
 //! `FreeVarsIndex::compute` replaces eight `emit/expr.rs` call sites that used
 //! to call `tree.extract_subtree(idx)` (a full subtree copy) followed by
-//! `free_vars` (a walk over that copy) — see `plans/self-iterating-harness/
-//! 11-jit-codegen-latency-receipt.md`. A wrongly-computed free-variable set is
+//! `free_vars` (a walk over that copy). A wrongly-computed free-variable set is
 //! a MISCOMPILE (a closure captures the wrong set of variables), not merely a
 //! perf regression, so this test is the license for converting any call
 //! site: for every node index of every tree in a real + generated corpus, it

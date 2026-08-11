@@ -13,12 +13,11 @@
 //! see the call sites in `primop.rs`), so hardening it covers all of them;
 //! `FfiStrlen` is exercised directly here as the primop this finding named.
 //!
-//! Mirrors `case_trap_scrut_ptr.rs`'s style: build a minimal `CoreExpr` by
-//! hand, compile, and assert `run_pure()` surfaces a clean typed
-//! `RuntimeError` (`Err(Yield(Runtime(_)))`) rather than a caught signal
-//! (`Err(Yield(Signal(_)))`, meaning the process actually SIGSEGV'd and
-//! `with_signal_protection` only kept the test binary alive) or a silent
-//! wrong answer.
+//! Builds a minimal `CoreExpr` by hand, compiles, and asserts `run_pure()`
+//! surfaces a clean typed `RuntimeError` (`Err(Yield(Runtime(_)))`) rather
+//! than a caught signal (`Err(Yield(Signal(_)))`, meaning the process
+//! actually SIGSEGV'd and `with_signal_protection` only kept the test binary
+//! alive) or a silent wrong answer.
 
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;

@@ -19,11 +19,10 @@
 //! `load` at offset 0, no host-fn indirection), making it the sharpest
 //! reproducer.
 //!
-//! Mirrors `ffi_strlen_unbox_hardening.rs`'s style: build a minimal
-//! `CoreExpr` by hand, compile, and assert `run_pure()` surfaces a clean
-//! typed `RuntimeError` (`Err(Yield(Runtime(_)))`) rather than a caught
-//! signal (`Err(Yield(Signal(_)))`, meaning the process actually SIGSEGV'd)
-//! or a silent wrong answer.
+//! Builds a minimal `CoreExpr` by hand, compiles, and asserts `run_pure()`
+//! surfaces a clean typed `RuntimeError` (`Err(Yield(Runtime(_)))`) rather
+//! than a caught signal (`Err(Yield(Signal(_)))`, meaning the process
+//! actually SIGSEGV'd) or a silent wrong answer.
 
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
