@@ -79,8 +79,9 @@ loop st
   | otherwise =
       createWorktree (rootWorktreeSpec st) >>= \case
         -- Matching the SPECIFIC Left is what earns a better message than the
-        -- generic one: name the files the operator has to deal with, and point
-        -- at the flag that skips the requirement.
+        -- generic one: this is the only failure the operator can act on
+        -- directly, so it says how much is uncommitted and names the flag that
+        -- drops the requirement.
         Left (SourceDirty summary) ->
           let dirtyFiles =
                 length summary.staged + length summary.unstaged + length summary.untracked

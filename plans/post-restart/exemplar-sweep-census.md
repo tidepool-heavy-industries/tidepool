@@ -2,6 +2,32 @@
 
 Date: 2026-08-11. Branch `root.exemplar-sweep`.
 
+> **EXECUTED 2026-08-11.** Every DRIFTED entry below is fixed; every
+> REPORT-ONLY entry is reported and deliberately untouched. Verify legs:
+> `cargo check --workspace --all-targets` (green — this is also the
+> `examples/{guess,tide}` exercise path, since their `haskell_eval!` macros run
+> `tidepool-extract` at BUILD time), `cargo fmt --all -- --check` (clean),
+> `cargo clippy --workspace --all-targets` (clean, zero warnings),
+> `scripts/battery.sh -p tidepool-mcp -E 'all()'` (162 passed, 7 skipped), and
+> the new `tidepool-harness::dogfood_harness_typecheck` (2 passed).
+>
+> **Two failures only the compile surfaced,** both pre-existing in
+> `dev-tree/HarnessTypes.hs` and neither visible to `cargo check` (these are
+> Haskell sources loaded at runtime, not cargo targets):
+> - `Blocked Text` — a positional payload in a SUM has no generic-JSON key, and
+>   `State` is checkpointed through `ToJSON`/`FromJSON`. The derive was rejected
+>   outright: *"a payload constructor in a sum must use record syntax"*. Now
+>   `Blocked { blockedReason :: Text }`.
+> - `[fmt|{phase st}|]` and `[fmt|Last run: {summary}|]` — `Tidepool.Render` has
+>   instances for `Text`/`String`/`Int`/`Double`/`Bool`/`Char` and nothing else,
+>   so an author-defined type has no rendering the quoter could guess. Both now
+>   get an explicit rendering, which is where that decision belongs anyway.
+>
+> These are the reason the sweep added
+> `tidepool-harness/tests/dogfood_harness_typecheck.rs`: `examples/harness` has
+> ~8 driver tests covering it, the authored dogfood harnesses had none, and
+> `dev-tree` had rotted past the point where reading it was enough to tell.
+
 **Why.** The API is the prompt. Every model-facing exemplar — an example crate,
 an authored harness, a code snippet inside a tool description or a served
 resource — is imitated verbatim. A snippet that no longer typechecks against
@@ -98,6 +124,11 @@ include path and load `Harness.hs` through the real driver.
 
 ### `dev-tree/HarnessTypes.hs`
 
+- `data Phase = … | Blocked Text` — a positional payload in a sum has no
+  generic-JSON key, so the `ToJSON`/`FromJSON` derive is rejected. Found by
+  compiling, not by reading.
+- `[fmt|{phase st}|]` / `[fmt|Last run: {summary}|]` — `Render` covers the
+  scalars only; an author-defined type needs an explicit rendering. Same.
 - `render :: State -> Maybe Text -> Text` — **violates the LOCKED signature**
   `render :: State -> Text`. The driver invokes `render` with one argument;
   compaction context is the runtime's job to compose, per
@@ -227,7 +258,7 @@ examples are model-facing exemplars in the same sense as a tool description.
 |---|---|---|
 | `examples/guess`, `examples/tide` | 8 | 0 |
 | `examples/harness` | 2 | 0 |
-| `harness-dogfooding` | 3 | 3 |
+| `harness-dogfooding` | 3 | 3 (5 defects) |
 | `preamble.rs` description | 7 | 2 |
 | `resources.rs` resources | 6 | 2 |
 | `effect_defs.rs` descriptions | 2 | 2 |
