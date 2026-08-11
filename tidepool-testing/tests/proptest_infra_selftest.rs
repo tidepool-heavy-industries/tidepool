@@ -564,7 +564,7 @@ fn nan_characterization() {
     assert!(!tp::values_equal(&nan1, &nan2));
 }
 
-// --- THE 3 #[ignore] REPROS ---
+// --- THE 3 FIXED-BUG REGRESSION TESTS ---
 
 #[test]
 // BUG-1 FIXED 2026-06-10: the wildcard now skips only when EITHER side is an

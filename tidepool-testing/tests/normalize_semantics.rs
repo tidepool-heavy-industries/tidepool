@@ -24,11 +24,10 @@ proptest! {
     /// and semantic identity. The hand-built tests in `tidepool-repr::normalize`
     /// cover the actual rule transformations on synthesized shapes.
     ///
-    /// History: the prior version of this test renamed `Just` → `W#` to force
-    /// Rule 1 to fire on generated `Maybe (Maybe a)` shapes. That made it
-    /// flaky: Rule 1 only preserves semantics for true boxing wrappers around
-    /// primitives (a precondition GHC enforces but the rename violated), so
-    /// when the generator hit a `Just (Just x)` case the values diverged. #311.
+    /// Do not force Rule 1 to fire by renaming `Just` → `W#` in generated
+    /// `Maybe (Maybe a)` shapes: Rule 1 only preserves semantics for true
+    /// boxing wrappers around primitives (a precondition GHC enforces but the
+    /// rename violates), so a `Just (Just x)` case then diverges. #311.
     #[test]
     fn prop_normalize_identity_on_user_data(expr in arb_ground_expr()) {
         let table = standard_datacon_table();

@@ -297,7 +297,6 @@ fn deep_diff_worker() {
     let opt = std::env::var(ENV_OPT).map(|s| s == "1").unwrap_or(false);
     let phase_path = std::env::var(ENV_PHASE).ok().map(std::path::PathBuf::from);
 
-    // Force a flush of any diagnostics before exiting.
     let code = run_one_case(&expr, nursery, opt, phase_path.as_deref());
     std::process::exit(code);
 }

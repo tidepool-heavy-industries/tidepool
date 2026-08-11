@@ -2,9 +2,8 @@
 //! Map.fromList/lookup/insert/union, Set.fromList/member/union (over Int keys
 //! and values).
 //!
-//! Stub: filled in by the `map_set` leaf. Follows the patterns in
-//! `fmap.rs` / `text.rs` / `cousins.rs`. ASCII-only, Int-only, pinned types,
-//! `ProptestConfig::with_cases(50)` per template.
+//! Follows the patterns in `fmap.rs` / `text.rs` / `cousins.rs`: ASCII-only,
+//! Int-only, pinned types, `ProptestConfig::with_cases(50)` per template.
 
 use crate::{arb_int, run_template_with_imports};
 use proptest::prelude::*;
