@@ -159,8 +159,10 @@ story.
 This crate used to serve a 7-pane "observatory" (tree/inspector/transcript/
 meters/trace/heap/log) over `tidepool-harness`'s general session-tree engine,
 with its own binary (`tidepool-harness`). That surface, its binary, and its
-Haskell-side `dialogAsk`/`dialogForm`/`AskWith`-grab-bag counterpart are all
-deleted — see `plans/self-iterating-harness/09-askuser-form-gui.md` for why
-(the self-iterating harness's `askUser` effect replaced it) and
-`plans/README.md` for where that plan sits relative to the superseded
-`harness-r0/` plan that originally built the observatory.
+Haskell-side `dialogAsk`/`dialogForm` grab-bag counterpart are all deleted —
+the self-iterating harness's `askUser` effect replaced it (`AskWith` itself
+was kept and repurposed: it's the live wire constructor `ask`/`llm` still
+send today, not part of what was deleted). See `plans/README.md` for the
+current plan index; the wave that made this cut
+(`self-iterating-harness/09-askuser-form-gui.md`) was purged from the working
+tree in the 2026-08-08 plans restructure and lives only in git history.
