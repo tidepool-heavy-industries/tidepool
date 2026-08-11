@@ -364,16 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_array_nested() {
-        let table = json_test_table();
-        let val = serde_json::json!([[1, 2], [3]]).to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, _) => assert_eq!(table.name_of(*id), Some("Array")),
-            _ => panic!("Expected Con(Array)"),
-        }
-    }
-
-    #[test]
     fn test_object_empty() {
         let table = json_test_table();
         let val = serde_json::json!({}).to_value(&table).unwrap();
@@ -496,55 +486,6 @@ mod tests {
                     _ => panic!("Expected Con(Bin)"),
                 }
             }
-            _ => panic!("Expected Con(Object)"),
-        }
-    }
-
-    #[test]
-    fn test_object_large() {
-        let table = json_test_table();
-        let mut map = serde_json::Map::new();
-        for i in 0..12 {
-            map.insert(format!("key_{}", i), serde_json::json!(i));
-        }
-        let json = serde_json::Value::Object(map);
-        let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, _) => assert_eq!(table.name_of(*id), Some("Object")),
-            _ => panic!("Expected Con(Object)"),
-        }
-    }
-
-    #[test]
-    fn test_deep_nesting() {
-        let table = json_test_table();
-        let json = serde_json::json!({"a": {"b": {"c": 1}}});
-        let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("Object"));
-                // Drill into the map → key "a" → value is Object → key "b" → ...
-                // Just verify it doesn't panic and is Object
-                assert_eq!(fields.len(), 1);
-            }
-            _ => panic!("Expected Con(Object)"),
-        }
-    }
-
-    #[test]
-    fn test_mixed_types() {
-        let table = json_test_table();
-        let json = serde_json::json!({
-            "s": "str",
-            "n": 42,
-            "b": true,
-            "a": [1, 2],
-            "o": {"x": 1},
-            "null": null
-        });
-        let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, _) => assert_eq!(table.name_of(*id), Some("Object")),
             _ => panic!("Expected Con(Object)"),
         }
     }

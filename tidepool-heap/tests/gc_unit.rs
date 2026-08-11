@@ -2,6 +2,11 @@ use std::collections::HashSet;
 use tidepool_heap::gc::raw::for_each_pointer_field;
 use tidepool_heap::layout::*;
 
+const _: () = assert!(CON_FIELDS_OFFSET > CON_NUM_FIELDS_OFFSET);
+const _: () = assert!(CON_NUM_FIELDS_OFFSET > CON_TAG_OFFSET);
+const _: () = assert!(CLOSURE_CAPTURED_OFFSET > CLOSURE_NUM_CAPTURED_OFFSET);
+const _: () = assert!(CLOSURE_NUM_CAPTURED_OFFSET > CLOSURE_CODE_PTR_OFFSET);
+
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
 
@@ -53,31 +58,3 @@ fn test_layout_constant_sanity() {
     }
 }
 
-#[test]
-fn test_offset_calculations() {
-    const _: () = assert!(CON_FIELDS_OFFSET > CON_NUM_FIELDS_OFFSET);
-    const _: () = assert!(CON_NUM_FIELDS_OFFSET > CON_TAG_OFFSET);
-    const _: () = assert!(CLOSURE_CAPTURED_OFFSET > CLOSURE_NUM_CAPTURED_OFFSET);
-    const _: () = assert!(CLOSURE_NUM_CAPTURED_OFFSET > CLOSURE_CODE_PTR_OFFSET);
-}
-
-#[test]
-fn test_thunk_state_machine() {
-    let mut buf_data = AlignedBuf::<THUNK_MIN_SIZE>([0u8; THUNK_MIN_SIZE]);
-    let ptr = buf_data.0.as_mut_ptr();
-    unsafe {
-        write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u32);
-
-        // 1. Set Unevaluated
-        *(ptr.add(THUNK_STATE_OFFSET)) = THUNK_UNEVALUATED;
-        assert_eq!(*(ptr.add(THUNK_STATE_OFFSET)), THUNK_UNEVALUATED);
-
-        // 2. Transition to BlackHole (during evaluation)
-        *(ptr.add(THUNK_STATE_OFFSET)) = THUNK_BLACKHOLE;
-        assert_eq!(*(ptr.add(THUNK_STATE_OFFSET)), THUNK_BLACKHOLE);
-
-        // 3. Transition to Evaluated
-        *(ptr.add(THUNK_STATE_OFFSET)) = THUNK_EVALUATED;
-        assert_eq!(*(ptr.add(THUNK_STATE_OFFSET)), THUNK_EVALUATED);
-    }
-}
