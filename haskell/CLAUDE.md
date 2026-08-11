@@ -264,7 +264,13 @@ and GADT type-indexed dispatch all compile and execute — write the polymorphic
 version. A few functions carry monomorphic shadows in the Prelude only for
 genuine FFI gaps (`round`, `showDouble`); `Opt_FullLaziness` and `Opt_CprAnal`
 are disabled in `GhcPipeline.hs`. The JIT-safe surface is enforced end-to-end by
-`tidepool-runtime/tests/jit_surface.rs` — add a `works_*` probe when you add a function.
+`tidepool-runtime/tests/jit_surface.rs` — add a `check` line to the relevant
+stdlib family bundle when you add a function (e.g. a new `Data.Text` shadow
+goes in `works_text_family`), or a standalone `works_*`/`fails_loudly`
+probe when your addition falls into one of that file's documented exclusion
+classes (compile-fail assertions, real-effect dispatch, a distinct compiler
+mechanism rather than a stdlib function, or render-fidelity across the outer
+JSON boundary — see the module doc at the top of `jit_surface.rs`).
 
 ## Known Limits / Gotchas
 
