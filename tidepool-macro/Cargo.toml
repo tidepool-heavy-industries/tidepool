@@ -22,4 +22,3 @@ tidepool-extract-cmd.workspace = true
 [dev-dependencies]
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
-tidepool-bridge.workspace = true
