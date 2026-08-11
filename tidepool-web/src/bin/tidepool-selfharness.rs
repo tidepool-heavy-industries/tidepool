@@ -79,9 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // — W1 effect-scoping), not the full Agent stack.
     let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?;
     // So a sibling `HarnessTypes` module the harness source depends on
-    // resolves under the answerer's own compile too (mirrors the outer
-    // session's `outer_cfg.include.push(source.source_dir.clone())` in
-    // `driver.rs::bootstrap`).
+    // resolves under the answerer's own compile too.
     cfg.include.push(source.source_dir.clone());
 
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
@@ -178,8 +176,7 @@ fn default_harness_source_path() -> PathBuf {
 ///
 /// # Errors
 /// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table
-/// finds a stdlib root. Previously an unconditional manifest-relative path,
-/// returned even when it did not exist.
+/// finds a stdlib root.
 fn prelude_dir() -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError> {
     let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
         bundle: None,
