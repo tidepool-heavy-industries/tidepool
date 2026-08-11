@@ -30,11 +30,25 @@
 //! (cheaper is not the same as granted) and including `gpt-5.6-terra`, which is
 //! banned outright.
 //!
-//! # One attempt
+//! # One attempt — and exactly where the free part ends
 //!
-//! Retry freely BEFORE `turn/start` — everything up to it is free, and that is
-//! how this run is de-risked. Once a turn starts, there is ONE attempt: capture
-//! the frame log, report, stop. Do not loop this on failure.
+//! "Retry freely before `turn/start`" is only actionable if you know which
+//! failures land on which side of it. In this example, THREE of the four ways
+//! the run can fail happen strictly before any turn is sent, and are therefore
+//! free to fix and re-run as often as needed:
+//!
+//! 1. **The authored Haskell does not elaborate** — the extract/JIT compile
+//!    below runs before the handler is ever touched.
+//! 2. **The model is not on offer** — `start_turn` resolves the model
+//!    (`model/list`) BEFORE it builds or sends `turn/start`, so a catalogue
+//!    without `gpt-5.6-luna` aborts having spent nothing.
+//! 3. **The declarations are refused** — `thread/start` carries the dynamic
+//!    tools and completes before the turn exists, so a schema the server will
+//!    not accept fails there.
+//!
+//! Only the fourth — the turn itself — costs anything. Once it starts there is
+//! ONE attempt: capture the frame log, report, stop. Do not loop this on
+//! failure.
 //!
 //! # Credentials
 //!
@@ -127,8 +141,12 @@ data BudgetQuery = BudgetQuery { budgetTopic :: Text }
 data Budget = Budget { remaining :: Int }
   deriving (Show, Eq, Generic, ToJSON)
 
-data WorkerResult = Completed { summary :: Text, secret :: Text }
-                  | Blocked { blocker :: Text }
+-- A single-constructor RECORD, not a sum. Proven live on 2026-08-11: a
+-- top-level sum renders `{"oneOf": [...]}` and the backend refuses the whole
+-- turn at request validation with
+-- `invalid_json_schema: In context=(), 'oneOf' is not permitted`.
+-- See PROTOCOL-NOTES.md §5.
+data WorkerResult = WorkerResult { summary :: Text, secret :: Text }
   deriving (Show, Eq, Generic, FromJSON, JsonSchema)
 
 data WorkerTools mode = WorkerTools
@@ -156,12 +174,15 @@ workerTools = WorkerTools
 /// run tests the PLUMBING, not the model's ingenuity. It needs exactly one
 /// `askParent` and one `reportProgress`, and it cannot be completed by guessing
 /// — the passphrase exists only in the parent's handler.
+///
+/// `WorkerResult` is a single-constructor RECORD for a reason the first live
+/// attempt found: see the note beside its declaration above.
 const PROGRAM: &str = r#"let wspec = fromCurrentRepository "live-tool-loop"
 let task = "You have tools. To finish you need a secret passphrase that ONLY the parent knows; you cannot guess it and it is not in any file. Call askParent to get it. Also call reportProgress exactly once to say what you are doing. Do not run commands and do not edit files. Then finish with your result."
 result <- spawnAgentWithTools @WorkerTools @WorkerResult (ToolRounds 4) workerTools (spawnSpec wspec "live-tool-loop" task)
 case result of
   Left err -> pure (object ["ok" .= False, "error" .= renderSpawnError err])
-  Right (outcome, Completed s sec) -> pure (object
+  Right (outcome, WorkerResult s sec) -> pure (object
     [ "ok" .= True
     , "summary" .= s
     , "secret" .= sec
@@ -171,12 +192,6 @@ case result of
     , "worktree" .= show (receiptWorktree (outcomeReceipt outcome))
     , "binding" .= receiptBindingRef (outcomeReceipt outcome)
     , "activity" .= show (outcomeActivity outcome)
-    , "usage" .= show (receiptUsage (outcomeReceipt outcome))
-    ])
-  Right (outcome, Blocked b) -> pure (object
-    [ "ok" .= False
-    , "blocked" .= b
-    , "model" .= receiptModel (outcomeReceipt outcome)
     , "usage" .= show (receiptUsage (outcomeReceipt outcome))
     ])
 "#;
@@ -352,6 +367,65 @@ fn run() -> i32 {
         Err(e) => eprintln!("\nWARNING: could not write the transcript: {e}"),
     }
 
+    // Worktree resolution: what the coupled spawn actually LEFT BEHIND.
+    //
+    // Retain-first is locked (PRD 19), so "rolling back" never deletes
+    // anything — the question a receipt has to answer is what STATE the
+    // worktree and its binding were left in, and whether the child moved the
+    // tree at all. A settled binding plus a retained, rebindable worktree is
+    // the successful end state; the git head and dirtiness say whether there
+    // is anything to roll forward.
+    println!("\n--- worktree resolution ---");
+    {
+        let handler: &SubagentHandler = stack.get();
+        let spawner = handler.spawner();
+        match spawner.manager().list() {
+            Ok(trees) if trees.is_empty() => println!("(no worktree was registered)"),
+            Ok(trees) => {
+                for summary in &trees {
+                    let id = &summary.receipt.worktree_id;
+                    // `current` reports only ACTIVE bindings, so ABSENCE here
+                    // is the success condition, not a missing record: the
+                    // binding was settled and the worktree is rebindable. An
+                    // Active binding after a completed run is the orphan the
+                    // saga exists to prevent, so it is spelled as the alarming
+                    // case rather than as the neutral one.
+                    let binding = spawner
+                        .bindings()
+                        .current(id)
+                        .map(|b| {
+                            format!(
+                                "STILL ACTIVE ({:?}, agent {}) — settle did not happen",
+                                b.state,
+                                b.agent.as_str()
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            "settled — no active binding remains, worktree rebindable".to_string()
+                        });
+                    println!("worktree:  {}", id.as_str());
+                    println!("binding:   {binding}");
+                    match spawner.manager().lookup(id) {
+                        Ok(Some(handle)) => {
+                            let cwd = handle.cwd();
+                            println!("retained:  yes, at {}", cwd.display());
+                            println!("head:      {}", git_line(cwd, &["rev-parse", "HEAD"]));
+                            let dirty = git_line(cwd, &["status", "--porcelain"]);
+                            if dirty.is_empty() {
+                                println!("changes:   none — nothing to roll forward");
+                            } else {
+                                println!("changes:   the child modified the tree:\n{dirty}");
+                            }
+                        }
+                        Ok(None) => println!("retained:  NO — the registry lost it"),
+                        Err(e) => println!("retained:  lookup failed: {e}"),
+                    }
+                }
+            }
+            Err(e) => println!("(could not list the registry: {e})"),
+        }
+    }
+
     println!("\n--- isolation (a mutated ~/.codex is a FAILURE even on success) ---");
     let after = ConfigSnapshot::capture(&home).expect("capture the post-run config snapshot");
     let report = before.compare(&after);
@@ -395,6 +469,20 @@ fn run() -> i32 {
         eprintln!("\nFAIL");
         1
     }
+}
+
+/// One line of `git` output from `cwd`, or empty. Read-only inspection for the
+/// receipt — this example never writes to the child's tree.
+fn git_line(cwd: &Path, args: &[&str]) -> String {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// The backend's recorded lines, one per line — the format

@@ -17,15 +17,32 @@
 -- "Tidepool.Form"'s @askUser@ applies to operator input, applied to model
 -- output.
 --
--- > data WorkerResult = Completed { summary :: Text, caveats :: [Text] }
--- >                   | Blocked   { blocker :: Text, evidence :: [Text] }
--- >   deriving (Show, Eq, Generic, FromJSON, JsonSchema)
+-- > data WorkerResult = WorkerResult
+-- >   { summary  :: Text
+-- >   , blocked  :: Maybe Text
+-- >   , caveats  :: [Text]
+-- >   } deriving (Show, Eq, Generic, FromJSON, JsonSchema)
 -- >
 -- > result <- spawnAgent (spawnSpec wspec "porter" "port the handler")
 -- > case result of
--- >   Right (outcome, Completed s _) -> ...
--- >   Right (_, Blocked b _)         -> ...
--- >   Left err                       -> say (renderSpawnError err)
+-- >   Right (outcome, r) -> ...
+-- >   Left err           -> say (renderSpawnError err)
+--
+-- __The result type must be a single-constructor RECORD, not a sum.__
+-- Established live against the pinned backend on 2026-08-11, not derived from
+-- the docs: a sum renders @{\"oneOf\": [...]}@ at the schema root, and the
+-- turn is refused whole at request validation —
+-- @invalid_json_schema: In context=(), \'oneOf\' is not permitted@. So model
+-- an alternative as a field (@blocked :: Maybe Text@ above), not as a
+-- constructor.
+--
+-- This is a constraint on the RESULT type only. Tool INPUT types are
+-- unaffected — they are declared through a different field
+-- (@dynamicTools[].inputSchema@) which the same run confirmed accepts the
+-- schemas "Tidepool.Aeson.Schema" emits, sums included. The failure is loud,
+-- immediate, and costs no tokens (the request never reaches the model), so a
+-- sum-typed result is a mistake you find in seconds rather than one that
+-- corrupts a run.
 --
 -- @spawnAgentWithTools@ is the same call for a child that may CALL BACK: the
 -- tools it declares are an authored "Tidepool.Agent.Contract" record, and each

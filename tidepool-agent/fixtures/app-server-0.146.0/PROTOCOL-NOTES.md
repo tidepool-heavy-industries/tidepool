@@ -167,6 +167,47 @@ Present in `codex-codes` 0.146.4's generated `TurnStartParams`
 (`src/protocol_generated/types.rs:7797`, `rename = "outputSchema"`) — no
 hand-rolling needed for this one.
 
+## 5. `outputSchema` is NOT arbitrary JSON Schema — no root `oneOf`
+
+"Arbitrary JSON Schema" is what the CLI's own doc comment says, and it is
+**wrong at the API boundary**. Established by live observation on 2026-08-11
+(codex-live lane, first live attempt), not by reading anything:
+
+```json
+{"type":"error","error":{"type":"invalid_request_error",
+ "code":"invalid_json_schema",
+ "message":"Invalid schema for response_format 'codex_output_schema': In context=(), 'oneOf' is not permitted.",
+ "param":"text.format.schema"},"status":400}
+```
+
+The schema is forwarded to the model API's structured-output `response_format`,
+which is stricter than JSON Schema: the ROOT must be an object.
+
+Consequences, in the order they matter:
+
+1. **A sum-typed result is refused.** `Tidepool.Aeson.Schema` renders a
+   multi-constructor type as `{"oneOf": [...]}` at the root, so
+   `spawnAgent @SomeSum` cannot work against this backend. Model the
+   alternative as a FIELD (`blocked :: Maybe Text`), not as a constructor.
+   `Tidepool.Agent.Spawn`'s haddock carries this rule and its example obeys it.
+2. **Tool INPUT schemas are unaffected.** The same run had all three
+   `dynamicTools[].inputSchema` values accepted at `thread/start`. Different
+   field, different validator — do not generalize this restriction to them.
+3. **It fails free and loud.** The 400 is request validation: the turn is
+   rejected before the model runs, no `thread/tokenUsage/updated` frame is
+   emitted, and the seam reports `RunFailed` naming `oneOf` verbatim. A
+   sum-typed result costs seconds, not tokens.
+
+Whether a NESTED `oneOf` is permitted is **not established** — the observed
+message says `context=()`, i.e. the root, and one observation does not license
+a claim about nested positions. Left open rather than guessed; a local
+precheck that refused root-`oneOf` before dispatch would be a reasonable
+mechanism-level fix, but it would be generalizing this backend's rule to every
+backend on n=1 evidence, so it is a design item and not something this lane
+built.
+
+Transcript: `live-tool-loop.jsonl` (this exact exchange, frames 11→30).
+
 ## Summary: what needs hand-rolled types vs. what codex-codes covers
 
 | Surface | codex-codes 0.146.4 | Action |
