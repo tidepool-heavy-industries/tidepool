@@ -20,7 +20,7 @@ below, instead of once per component. Four non-production components exist as
 | Component | Purpose | Run |
 |---|---|---|
 | `spike-extract` | scratch pipeline spike | `cabal test spike-extract` |
-| `session-c-test` | Wave-3a session-binder acceptance pin | `cabal test session-c-test` |
+| `session-c-test` | session-binder acceptance pin | `cabal test session-c-test` |
 | `varid-mechanism-test` | `stableVarId`/`fieldParentDisamb` contract pin | `cabal test varid-mechanism-test` |
 | `extract-fidelity-test` | erasure symmetry, recognizer qualification, unboxed-tuple arity — through the real pipeline | `cabal test extract-fidelity-test` |
 
@@ -60,9 +60,9 @@ file does not count as a hit.
 
 ### Deploy handshake
 
-Deploy coupling — extract, both servers, and the stdlib must move together
-(`scripts/redeploy.sh`) — used to be enforced by script discipline alone. It is
-now checked at startup:
+Extract, both servers, and the stdlib must move together
+(`scripts/redeploy.sh`). This is checked at startup, not left to script
+discipline:
 
 - `scripts/redeploy.sh` finishes (after clearing `~/.cache/tidepool/`) by
   running `tidepool --write-toolchain-stamp`, which fingerprints the CONTENT
@@ -197,21 +197,17 @@ surface here — it drifts. Module map:
   `GAllFieldsNamed` compile-time rejection; this is what agent tool
   `input_schema` and subagent `outputSchema` publish).
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters, all defined
-  entirely in this stdlib (not shipped with GHC). A new stdlib module needs
-  no build-time registration to be eval-importable (the extract binary
-  resolves `haskell/lib` as a GHC include path at runtime).
-  `tidepool-extract-bin`'s derived import closure contains ZERO
-  `lib/Tidepool/**` modules — `app/Main.hs` only ever reaches
-  `tidepool-extract-internal` (the `src/` implementation), never `lib/`, so
-  `lib/` is a pure runtime asset tree as far as the production component's
-  build is concerned; nothing there is host-compiled or needs listing. That a
-  stdlib-defined quoter survives the extract pipeline end-to-end (splice
-  evaluation and all), and that a malformed quote fails loudly at COMPILE
-  time rather than misparsing silently, is proven by
+  entirely in this stdlib (not shipped with GHC). A new stdlib module needs no
+  build-time registration to be eval-importable: `lib/` is a pure runtime
+  asset tree (the extract binary resolves `haskell/lib` as a GHC include path
+  at runtime, and `tidepool-extract-bin`'s import closure reaches only
+  `tidepool-extract-internal`, never `lib/`), so nothing there is
+  host-compiled or needs listing. Gated by
   `works_stdlib_quoter_survives_extract` and
   `stdlib_quoter_bad_input_fails_loudly_at_compile_time`
-  (`tidepool-runtime/tests/jit_surface.rs`), built on `[uri|]`. (Doc-history
-  note on this passage's prior wording: `plans/decision-archive/haskell.md`.)
+  (`tidepool-runtime/tests/jit_surface.rs`, built on `[uri|]`): a stdlib
+  quoter survives the pipeline splice-and-all, and a malformed quote fails at
+  COMPILE time rather than misparsing silently.
 - `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
   (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
   `choose`/`chooseMany` for alternatives that exist only as runtime VALUES.
@@ -252,9 +248,9 @@ surface here — it drifts. Module map:
   payload sums, bare constructor-name strings for enums, `Maybe` fields
   absent-or-null; `tidepool-runtime/tests/generic_recursive_sums.rs`), so a
   result type needs only `deriving (Generic, FromJSON, JsonSchema)`. Decode
-  errors are the plain vendored ones (`key "caveats" not present`) — the
-  deleted `Agent.ModelCodec`'s snake_case normalization and JSONPath-carrying
-  errors are not coming back (settled 2026-08-10).
+  errors are the plain vendored ones (`key "caveats" not present`);
+  snake_case normalization and JSONPath-carrying errors are deliberately
+  absent and are not coming back.
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 

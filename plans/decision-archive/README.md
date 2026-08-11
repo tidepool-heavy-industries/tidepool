@@ -1,31 +1,28 @@
 # Decision archive
 
-Historical/narrative context extracted out of `CLAUDE.md` files (root and
-per-crate) during the 2026-08-08 restructure, so the working guides stay
-build/test/hazard-focused instead of accumulating doc-history asides.
+Backstory pulled out of `CLAUDE.md` files so the working guides stay
+build/test/hazard-focused.
 
-This directory holds two kinds of thing, kept separate from each other and
-from the working guides:
+**Scope is narrow, and narrower than it was.** The default for inline
+doc-history is DELETION, not archival — git is the store (root `CLAUDE.md`,
+"Doc history"). A note earns a page here only when losing the backstory
+invites re-tripping a hazard: the class where a fix was silently re-derived
+from scratch because nobody wrote down that it had already been made. Such a
+note gets a ONE-LINE pointer at its site in the working guide, never inline
+prose.
 
-1. **Doc-history notes** — "why does this sentence exist / why does it say
-   what it says" backstory that was previously inline. Purely explanatory;
-   removing it changes no rule.
-2. Nothing here is an architecture contract. Current, load-bearing
-   architecture decisions live in the root `CLAUDE.md` **Key Decisions
-   Reference** (authoritative, verbatim, not archived) and in each crate's
-   own `CLAUDE.md`. If you're looking for "what's true now," look there
-   first — this directory is "what used to be written down about how we got
-   here."
+Nothing here is an architecture contract. Current decisions live in the root
+`CLAUDE.md` **Key Decisions Reference** (authoritative, verbatim, never
+archived) and in each crate's own `CLAUDE.md`. If you want "what's true now,"
+look there.
 
 ## Index
 
-- [haskell.md](haskell.md) — doc-history notes extracted from
-  `haskell/CLAUDE.md` (call-graph workspace-scoping backstory, the
-  `formqq-parser-test` module-listing note's prior wording).
+- [haskell.md](haskell.md) — extracted from `haskell/CLAUDE.md`.
+  §1 (call-graph workspace scoping) is the live pointer: a fix made once and
+  re-derived from scratch a session later. §2 (`formqq-parser-test`
+  module-listing wording) is no longer pointed at from anywhere — it is
+  superseded prose kept only because archive pages are append-only.
 
-No other `CLAUDE.md` file (root, `tidepool-codegen`, `tidepool-repr`,
-`tidepool-mcp`, `tidepool-handlers`, `tidepool-repl`, `tidepool-lsp`,
-`tidepool-eval`) had extractable historical/narrative content as of this
-restructure — see `plans/decision-archive/RESTRUCTURE-RECEIPT.md` for the
-full per-file inventory and reasoning, and the suspected-stale list for items
-that were left in place (not moved) but may be worth a human's second look.
+`plans/decision-archive/RESTRUCTURE-RECEIPT.md` holds the per-file inventory
+from the 2026-08-08 restructure that created this directory.
