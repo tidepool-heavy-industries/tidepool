@@ -251,7 +251,7 @@ pub fn compile_turns(
                 load_start.elapsed(),
                 bytes,
             );
-            return assemble(&meta_bytes, raw, &module, node, round);
+            return assemble(&meta_bytes, &raw, &module, node, round);
         }
     }
 
@@ -313,14 +313,15 @@ pub fn compile_turns(
         memo_bytes(&meta_bytes, &raw),
     );
 
-    // Store only a SUCCESSFUL compile's artifacts — every failure path above
-    // returned already. Best-effort: an unwritable memo costs a recompile, it
-    // never fails a compile.
+    // Store only what DESERIALIZED — the same discipline
+    // `tidepool_runtime::compile_haskell` keeps, so a malformed artifact set is
+    // never memoized into a permanently-failing entry. Best-effort: an
+    // unwritable memo costs a recompile, it never fails a compile.
+    let turns = assemble(&meta_bytes, &raw, &module, node, round)?;
     if let Some(key) = &key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
     }
-
-    assemble(&meta_bytes, raw, &module, node, round)
+    Ok(turns)
 }
 
 /// The logical artifact names of one invocation's output set — exactly the
@@ -416,12 +417,11 @@ fn store_memo(
 /// two branches kept in sync by hand.
 fn assemble(
     meta_bytes: &[u8],
-    raw: Vec<RawTargetOutput>,
+    raw: &[RawTargetOutput],
     module: &str,
     node: u64,
     round: u64,
 ) -> Result<HashMap<String, CompiledTurn>, CompileError> {
-    let targets_len = raw.len();
     let deserialize_start = Instant::now();
     let (table, warnings) =
         read_metadata(meta_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
@@ -444,14 +444,14 @@ fn assemble(
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     let asks_start = Instant::now();
-    let mut turns = HashMap::with_capacity(targets_len);
-    for (r, expr) in raw.into_iter().zip(exprs.into_iter()) {
+    let mut turns = HashMap::with_capacity(raw.len());
+    for (r, expr) in raw.iter().zip(exprs.into_iter()) {
         let RawTargetOutput {
             target,
             expr_bytes,
             asks_bytes,
         } = r;
-        let asks = parse_asks(asks_bytes)?;
+        let asks = parse_asks(asks_bytes.as_deref())?;
         let mut sites: Vec<_> = asks.by_site.iter().collect();
         sites.sort_by_key(|(site, _)| **site);
         tracing::info!(
@@ -462,7 +462,7 @@ fn assemble(
             "compiled turn"
         );
         turns.insert(
-            target,
+            target.clone(),
             CompiledTurn {
                 expr,
                 table: table.clone(),
@@ -495,12 +495,12 @@ fn read_asks_bytes(path: &Path) -> Result<Option<Vec<u8>>, CompileError> {
 /// Parse the `asks.json` sidecar's bytes (if the extract wrote one) into a
 /// sidecar. `None` (file absent) yields an empty sidecar; present-but-malformed
 /// bytes are a hard error (a real regression to surface).
-fn parse_asks(bytes: Option<Vec<u8>>) -> Result<AsksSidecar, CompileError> {
+fn parse_asks(bytes: Option<&[u8]>) -> Result<AsksSidecar, CompileError> {
     let Some(bytes) = bytes else {
         return Ok(AsksSidecar::default());
     };
     let sites: Vec<AskSite> =
-        serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
+        serde_json::from_slice(bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
     Ok(AsksSidecar {
         by_site: sites.into_iter().map(|s| (s.site, s.ty)).collect(),
     })

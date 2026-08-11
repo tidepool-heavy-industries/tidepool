@@ -149,6 +149,11 @@ the measurement working, not a divergence — the `cbor_read` /
 `cbor_deserialize` / `asks_parse` stages are still recorded, over the memo's
 bytes.
 
+Only a compile that both SUCCEEDED and DESERIALIZED is stored — the same
+discipline `compile_haskell` keeps ("only store in cache if deserialization
+succeeded"), so a malformed artifact set can never be memoized into a
+permanently-failing entry. A failed extract is never stored at all.
+
 ### Store format
 
 `{key}.a{i}` per present artifact, plus a `{key}.ok` sentinel written LAST
