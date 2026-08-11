@@ -405,13 +405,6 @@ fn test_yield_request_e_boxed_tag_now_works() {
     assert!(!continuation.is_null());
 }
 
-/// Test 3: CompiledEffectMachine is Send.
-#[test]
-fn test_machine_is_send() {
-    fn assert_send<T: Send>() {}
-    assert_send::<CompiledEffectMachine>();
-}
-
 /// Test 4: Unexpected tag → YieldError.
 #[test]
 fn test_unexpected_tag() {

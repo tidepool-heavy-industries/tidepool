@@ -259,6 +259,11 @@ pub struct CompiledEffectMachine {
 // SAFETY: All fields are raw pointers or function pointers, which are Send.
 unsafe impl Send for CompiledEffectMachine {}
 
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    let _ = assert_send::<CompiledEffectMachine>;
+};
+
 impl CompiledEffectMachine {
     /// Read the constructor tag from a Con heap object.
     ///

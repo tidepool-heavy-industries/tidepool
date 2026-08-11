@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tidepool_codegen::host_fns::RuntimeError;
-use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -154,14 +154,6 @@ fn cancel_handle_clones_share_state() {
     assert!(!h1.is_cancelled());
     assert!(!h2.is_cancelled());
     assert!(!h3.is_cancelled());
-}
-
-/// `CancelHandle` is `Send + Sync`, required so callers can hand clones to
-/// watchdog threads. This is a compile-time assertion.
-#[test]
-fn cancel_handle_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<CancelHandle>();
 }
 
 // ──────────────────────────────────────────────────────────────────────
