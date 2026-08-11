@@ -210,3 +210,42 @@ One engine. The repl becomes a single-node client of it.
 - **Behavioral oracle is the repl suite** (`scripts/battery-shard.sh
   tidepool-repl`). Decl/stmt/meta classification, `it`/rebinding, `:commands`,
   ask/suspend/resume, `session_reset`, render stubbing must be byte-identical.
+
+---
+
+## 6. Decisions taken during the lane
+
+### 6.1 A completion carries what its policy produces — no fabricated products
+
+The first cut of the suspendable Project policy completed with
+`Value::Con(con_id, vec![])` — the result tuple's real constructor with its
+fields ELIDED — and rode its actual products (N tenured roots) out through a
+`last_bound_roots` side-channel.
+
+The reasoning for not bridging the tuple was right and is kept: bridging would
+import the heap bridge's depth/size failure modes into a path that today
+cannot fail after a successful tenure. The error was accepting that constraint
+and then inventing a value anyway.
+
+Root cause: `SuspendableOutcome::Completed` is fixed as `Completed(Value)`, so
+every materialization policy must produce a `Value` — even one that genuinely
+has none. The fabricated value existed only to fill a slot the type demanded,
+and was then guarded by a comment saying never to render it. **A hazard
+maintained by vigilance is the wrong shape of fix.**
+
+Resolution: the four NEW suspendable entries return a type carrying what each
+policy actually produces (Project → `Vec<RootSlot>`; Render → the slot and the
+rendered value together). `last_bound_roots`/`take_last_bound_roots` and the
+elided-`Con` site are deleted. There is nothing left to render, so the
+"never render it" instruction is unnecessary rather than merely obeyed.
+
+`SuspendableOutcome` and the pre-existing pair
+(`run_fragment_suspendable{,_binding}` / `resume_suspended{,_binding}`) are
+deliberately left alone: `tidepool-harness` matches those variants, and
+changing them would push this lane into an engine it exists to conform to, not
+rework. That leaves Bind's slot on the `last_bound_root` stash while Render's
+rides inline — a real asymmetry, commented AT the stash as a compatibility
+boundary so it does not read as an oversight.
+
+Generalization worth carrying: when a fixed-shape return type forces a variant
+to invent data, the type is wrong — not the variant.
