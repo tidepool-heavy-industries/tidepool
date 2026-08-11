@@ -244,10 +244,7 @@ runCompile variant path includes = do
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): session DynFlags setup +
     -- guessTarget/setTargets + this 'depanal' call, nothing else. FLAT and
     -- non-overlapping with 'ghc_load' below — see Tidepool.Timing's module
-    -- haddock and the 'PHASE_GHC_SESSION' tombstone in timing.rs: this pair
-    -- retired the old 'ghc_session' bracket on the compile lane (a
-    -- collector recovers the historical figure as 'ghc_setup' + 'ghc_load').
-    -- SAME MEANING on both pipeline variants.
+    -- haddock. SAME MEANING on both pipeline variants.
     setupT1 <- monotonicTime
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     plan <- pvPlan variant timing modGraphRaw
@@ -264,8 +261,8 @@ runCompile variant path includes = do
                (mapMG unpoison (cpLoadGraph plan))
     loadT1 <- monotonicTime
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
-    -- else. FLAT — see 'ghc_setup' above; the two rows partition what
-    -- 'ghc_session' used to bracket, they do not nest inside it.
+    -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
+    -- they do not nest inside each other.
     liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     cpAfterLoad plan loadFlag
     -- hs-boot summaries are EXCLUDED from extraction (item 20, 2026-08-10) —
@@ -877,8 +874,7 @@ normalVariant path = PipelineVariant
 --   1. The source-less @Val.G<g>@ modules are EXCLUDED from @depanal@ (no
 --      source to summarise) and their thin ifaces are INJECTED into the HPT +
 --      finder ('injectSessionScope', 'cpAfterLoad') so a turn module's
---      @import Val.G<g>@ resolves
---      (plans/ghci-implementation-plan.md §2 step 4 / §5.3 "C GATE").
+--      @import Val.G<g>@ resolves.
 --   2. Every module that (transitively) imports one of those — the turn target
 --      included — is excluded from the @load'@ graph (it cannot be compiled
 --      before the Val ifaces exist) and compiled instead in the
@@ -1215,8 +1211,7 @@ canonicalizeDFlags dflags =
   -- genericPlatform spoof that .s is x86_64/ELF and the macOS Mach-O assembler
   -- rejects it (`.type …, @object`; x86 mnemonics on aarch64). Bytecode is
   -- architecture-neutral, so the spoof stays confined to extracted Core while
-  -- splices run host-agnostically. (Was the aarch64-darwin assembler failure
-  -- that broke every eval on Apple Silicon.)
+  -- splices run host-agnostically.
   (`gopt_set` Opt_UseBytecodeRatherThanObjects) $
   -- Valid-hole-fits stay ON: with ~200 stdlib/verb names in scope, "fits"
   -- on a typed hole is the interface's vocabulary-discovery engine (an LLM
