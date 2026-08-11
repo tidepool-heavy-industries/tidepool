@@ -58,10 +58,6 @@ impl StackMapRegistry {
     /// `size` is the total size of the function in bytes.
     /// `raw_entries` come from `CompiledCode.buffer.user_stack_maps()`:
     ///   each tuple is (code_offset, frame_size, UserStackMap).
-    ///
-    /// We key by `base_ptr + code_offset` as the return address. Cranelift's
-    /// `code_offset` for user stack maps points to the instruction AFTER the call
-    /// (the return point), so `base_ptr + code_offset` IS the absolute return address.
     pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[RawStackMap]) {
         Self::insert_disjoint_range(&mut self.ranges, base_ptr, base_ptr + size as usize);
 
@@ -94,13 +90,10 @@ impl StackMapRegistry {
     }
 
     /// Check if an address falls within the known JIT code region.
-    /// Used by the frame walker to determine when to stop walking, on every
-    /// frame of every stack walk — i.e. inside GC. This is a binary
-    /// search over `ranges`, relying on the sorted+disjoint invariant
-    /// documented on that field. `partition_point` finds how many ranges have
-    /// `start <= addr`; the only one that could possibly contain `addr` is
-    /// the last of those (disjointness rules out any earlier range, since its
-    /// `end` is `<=` this one's `start`, hence `<= addr` too).
+    ///
+    /// Binary search: sound only because `ranges` is sorted AND pairwise
+    /// disjoint (see the invariant on that field), which makes the last range
+    /// with `start <= addr` the only one that can contain `addr`.
     pub fn contains_address(&self, addr: usize) -> bool {
         let idx = self.ranges.partition_point(|&(start, _)| start <= addr);
         match idx.checked_sub(1) {
@@ -115,15 +108,9 @@ impl StackMapRegistry {
     /// Insert `[start, end)` into `ranges`, merging with any range(s) it
     /// overlaps or touches so the sorted+disjoint invariant holds afterward.
     ///
-    /// In production this is normally a same-length splice: two JIT
-    /// functions' code ranges never overlap (`ArenaMemoryProvider` hands out
-    /// disjoint code regions per function, once per `register()` call), so
-    /// there is nothing to merge. The merge logic exists so the invariant is
-    /// upheld even under adversarial/synthetic input (overlapping or nested
-    /// ranges) — that is what makes `contains_address`'s binary search sound
-    /// rather than merely fast for the common case. Not on the frame walker's
-    /// hot path (`register()` runs once per compiled function, at
-    /// `finalize()` time), so an O(n) insert here is the right trade.
+    /// Real JIT code ranges never overlap, so this is normally a same-length
+    /// splice; the merge exists so the invariant survives overlapping or
+    /// nested input rather than silently breaking `contains_address`.
     fn insert_disjoint_range(ranges: &mut Vec<(usize, usize)>, start: usize, end: usize) {
         let mut merged_start = start;
         let mut merged_end = end;
