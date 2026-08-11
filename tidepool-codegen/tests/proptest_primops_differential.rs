@@ -945,6 +945,8 @@ fn prop_float_unary() {
                 PrimOpKind::FloatNegate,
                 PrimOpKind::Float2Int,
                 PrimOpKind::Float2Double,
+                PrimOpKind::FloatSqrt,
+                PrimOpKind::FloatFabs,
             ] {
                 check(
                     prog_op(op, |b_| {
