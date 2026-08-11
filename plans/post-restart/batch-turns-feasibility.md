@@ -473,12 +473,10 @@ slower, without it.
 1. ~~**Measure the real phase table.**~~ **DONE — §7.2.** The lane is worth
    building: floor of ~25% on the worst-measured shape, ~66% on decl-shaped
    blocks, before the memo.
-2. **Probe the dep-guts memo** (§7.3). Green → the per-item cost is the turn
-   module alone and the win is much larger than the floor. Red → the batch
-   still wins §7.2's fixed costs, and the memo is a written finding.
-   *(in flight: `batch-gutsmemo`)*
-3. Then steps 2-4 of §6, with the `ModIfaceCache` thread (§7.1) included from
-   the start.
+2. ~~**Probe the dep-guts memo.**~~ **DONE — §7.6. GREEN.**
+3. Then steps 2-4 of §6, with the `ModIfaceCache` thread (§7.1) and the
+   per-module guts memo (§7.6) included from the start, and §8's wire contract
+   as the seam between the two build halves.
 
 ### 7.5 The bare-expression retry: not a competing win — a worked example of this lane
 
@@ -527,3 +525,113 @@ dominant `core2core` cost sits in modules that are *identical across items of
 a block*. It also sharpens the known condition — the stdlib closure is stable
 within a block, but `Lib.G<g>` changes whenever a decl item lands, so the memo
 must be per-module and invalidated for the modules that actually changed.
+
+### 7.6 The dep-guts memo: GREEN, with the headline calibrated
+
+Settled: `plans/post-restart/batch-turns-gutsmemo-findings.md`. Scenario C
+memoizes cycle 1's post-`core2core`, post-`externalizeInternalTops` dependency
+`ModGuts` and reuses them unchanged for later cycles, computing the fresh-deps
+and memoized-deps merges **in the same run and cycle** off the same `HscEnv`
+and diffing the real `translateModuleClosed`.
+
+- `cmUnresolved` and `cmPoisoned`: **empty and identical on both paths, every
+  cycle.** This is the instrument that mattered — a poisoned entry is the
+  silent failure the `sessionVariant` rationale predicted, and it did not
+  appear.
+- Node counts: **exact match** (2283, then 481/481).
+- Compile loop on memo-reusing cycles: **3114 ms → 9 ms, 3215 ms → 4 ms.**
+
+So §7.3's by-construction argument holds under measurement: external
+references key on `(module, occ)`, which `externalizeInternalTops` /
+`stableVarId` make invariant to *which* compile produced the binding, and a
+memoized module's internal floats stay self-consistent because they all come
+from one compile.
+
+**Calibrating the headline, because the probe's own targets undercut it.**
+Those single-digit millisecond figures are the *spike's* targets — one-line
+expressions. The residual per-item cost in production is `load'` (~1 ms) plus
+**the real target module's own typecheck + `core2core`**, and nobody has
+measured that under the memo. The baseline's `typecheck` 424ms / `core` 5079ms
+for a real bare expression describes the *dependency* side of that split, not
+the target's own delta. **The correct claim is that the memo removes the
+dep-recompile share — which the baseline's phase table shows is the dominant
+part of `core` — not that per-item cost goes to zero.** That residual is the
+first thing the build wave must measure.
+
+**Two named gaps, neither closed:**
+
+1. **The incremental-population case was argued, not measured.** The probe's
+   dep closure is fixed across cycles. A decl item introduces a *new*
+   `Lib.G<g>` home module mid-batch, which a frozen-after-cycle-1 memo would
+   either miss (an unresolved external) or have to recompile every cycle
+   (forfeiting the win for exactly the items that add modules). The fix is a
+   generalization, not a different mechanism — memoize **per module**,
+   populated **incrementally** on that module's first compile in the batch —
+   and the soundness argument is unchanged by it. But it is extrapolation.
+   Build it with a probe, not on faith.
+2. **This is a translate-level check, not an execution-level one.** It cannot
+   rule out a **VarId collision of the #313 class** between a memoized
+   internal float and a later cycle's fresh target compile — which by
+   construction would show *clean* unresolved/poisoned sets on both paths and
+   surface only as two source bindings sharing one JIT heap slot at run. The
+   end-to-end oracle (JIT-compile and *run* both paths, differential) is
+   mandatory before production traffic, and the repl shard is that oracle.
+
+---
+
+## 8. The wire contract
+
+Fixed here so the two build halves can proceed in parallel without
+negotiating. Extends `plans/one-spawn-turn-protocol.md` from one spawn per
+TURN to one spawn per BLOCK.
+
+```
+tidepool-extract --turn-batch <plan.json> --batch-out <dir> [--include <dir>]…
+```
+
+**`plan.json`** — `{"version":1,"items":[…]}`, one entry per item in execution
+order. Each item carries exactly the fields its equivalent `--turn` spawn
+takes today, so the batch introduces no new per-item semantics:
+
+```json
+{ "index": 0,
+  "turn_text": "…",                  // verbatim, as --turn's input file
+  "verdict": {"kind":"bind","binders":["x"]},   // from the block's existing classify
+  "template": "bind",                 // TemplateSelector wire name
+  "session_root": "/…",
+  "inject_vals": ["Tidepool.Session.Val.G3"],
+  "bind_gen": 4 }
+```
+
+**Output** — item `k` writes `<dir>/i<k>/` containing **exactly today's
+single-turn output set, byte for byte**: `result.cbor`, `meta.cbor`,
+`asks.json`, and the `TurnOut` sidecar. This is load-bearing: `run_turn`'s
+existing decode path (`turn.rs:435-590`) is reused per item with no new
+decoder, so a batched item and a per-item item cannot diverge in what Rust
+reads.
+
+**stdout** — one JSON document, a strict superset of today's report:
+
+```json
+{ "version": 1,
+  "diagnostics": [ … the failing item's diagnostics, verbatim … ],
+  "items": [ {"index":0,"status":"ok","dir":"i0"},
+             {"index":1,"status":"failed","dir":"i1","diagnostics":[…]} ] }
+```
+
+The flat top-level `diagnostics` stays and carries the failing item's
+diagnostics, so `parse_diag_report`'s exact-match `SUPPORTED_VERSION = 1`
+(`tidepool-runtime/src/diag.rs:48`) parses it unchanged and an un-upgraded
+reader still sees the real error. Compilation **stops at the first item that
+fails**; items before it still have complete output directories, items after
+it are absent. That is what preserves run-until-first-error (§3).
+
+**Rust side** — `ExtractCmd` gains `turn_batch(path)` + `batch_out(dir)`
+(`tidepool-extract-cmd` stays the one invocation builder); exactly one new
+spawn site, `run_turn_batch`, a sibling of `run_turn`.
+
+**Invariants no implementation may weaken:** the per-item path stays the
+primary, always-correct implementation and is never removed; any block the
+planner cannot batch, and any batch failure not attributable to a specific
+item, reruns per-item unchanged; run-until-first-error and per-item
+attribution are observationally identical to today (§3).
