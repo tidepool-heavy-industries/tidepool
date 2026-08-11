@@ -635,3 +635,28 @@ primary, always-correct implementation and is never removed; any block the
 planner cannot batch, and any batch failure not attributable to a specific
 item, reruns per-item unchanged; run-until-first-error and per-item
 attribution are observationally identical to today (§3).
+
+### 8.1 Ratified rulings (raised by `batch-rust` during implementation)
+
+Four points §8 left underspecified. **These are now binding on both halves.**
+
+1. **Exit code.** `--turn-batch` exits **non-zero whenever any item failed**,
+   matching the existing single-`--turn` convention, so shell callers behave
+   sanely. Independently, `run_turn_batch` **does not read the exit code** and
+   drives entirely off the stdout document — deliberate, since per-item
+   attribution lives there and a process-wide code cannot carry it. Both
+   halves are correct as built; neither may start depending on the other's
+   choice.
+2. **Templates and `--include` are BATCH-WIDE**, supplied once as repeated
+   top-level flags exactly as `run_turn` passes them today — not per item.
+   The per-item `"template"` field in `plan.json` is a **selector**
+   (the `TemplateSelector` wire name picking among the supplied templates),
+   never a path.
+3. **No per-item `target`.** `plan.json` has no `target` field, so a batch
+   cannot carry a custom `--target` binder per item. Every shape §5 marks
+   batchable uses the scaffold-reserved default, so this costs nothing today.
+   If a caller ever needs it, **amend §8** — do not work around it on the
+   Rust side.
+4. **The per-item `TurnOut` sidecar is `turn.cbor`**, matching `run_turn`'s
+   own `turn_out_path` convention. "Byte-identical single-turn output set"
+   means literally that, filename included.
