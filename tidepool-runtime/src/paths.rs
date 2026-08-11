@@ -227,10 +227,17 @@ mod tests {
         std::fs::create_dir_all(tmp.join(".tidepool")).unwrap();
         // From a deep subdir, the nearest ancestor with .tidepool/ is `tmp`.
         assert_eq!(find_project_root(&nested), Some(tmp.clone()));
-        // No .tidepool above a bare temp path → None.
+        // A bare temp path adds NO project root of its own: its answer is
+        // whatever the environment's answer for temp_dir already is (usually
+        // None — but a stray `/tmp/.tidepool` left by an unrelated process
+        // must not fail THIS test, which pins the walk-up rule, not the
+        // box's hygiene; observed live 2026-08-11).
         let orphan = std::env::temp_dir().join(format!("tp-orphan-{}", std::process::id()));
         std::fs::create_dir_all(&orphan).unwrap();
-        assert_eq!(find_project_root(&orphan), None);
+        assert_eq!(
+            find_project_root(&orphan),
+            find_project_root(&std::env::temp_dir())
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&orphan);
     }

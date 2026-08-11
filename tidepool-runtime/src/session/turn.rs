@@ -1884,7 +1884,7 @@ mod tests {
             Some(idx) => {
                 let mut out = String::with_capacity(preamble.len() + 64);
                 out.push_str(&preamble[..idx]);
-                out.push_str("import Tidepool.QQ (fmt, j, patch, uri, form)\n");
+                out.push_str("import Tidepool.QQ (fmt, j, patch, uri)\n");
                 out.push_str(&preamble[idx..]);
                 out
             }
