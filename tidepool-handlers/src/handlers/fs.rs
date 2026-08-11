@@ -5,10 +5,11 @@ use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 
 /// Run `f` while holding an exclusive advisory lock (`flock(LOCK_EX)`) on
-/// `lock_dir`, serializing a compare-and-swap across PROCESSES. The resident
-/// eval worker is single-threaded (`tidepool-repl/src/worker.rs`), so within
-/// one server there is no eval-vs-eval race; the only real contention is
-/// between separate agent processes sharing a repo's `.tidepool/` or files.
+/// `lock_dir`, serializing a compare-and-swap across PROCESSES. A resident
+/// session runs at most one turn at a time (`tidepool-repl/src/manager.rs`'s
+/// atomic checkout/restore), so within one server there is no eval-vs-eval
+/// race; the only real contention is between separate agent processes
+/// sharing a repo's `.tidepool/` or files.
 /// Locking the parent directory (not a per-file sidecar) avoids littering the
 /// sandbox with lock files a glob could sweep up; it is coarse but CAS is never
 /// a hot path. The lock releases when the directory handle drops. `lock_dir`
