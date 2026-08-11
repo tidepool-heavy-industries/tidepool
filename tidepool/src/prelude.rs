@@ -29,8 +29,8 @@ fn stdlib_content_hash() -> String {
 /// macOS cache reaper.
 ///
 /// The bundle is the COMPLETE tree and is keyed on content, so it can't go
-/// stale across binary versions (the old `.version` stamp froze it) and can't
-/// drift from a hand-maintained subset.
+/// stale across binary versions and can't drift from a hand-maintained
+/// subset.
 fn materialize_bundle() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = stdlib_content_hash();
     let base = tidepool_runtime::paths::stdlib_dir(&hash);

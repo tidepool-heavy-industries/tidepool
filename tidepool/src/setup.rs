@@ -8,11 +8,11 @@ use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer,
 /// ([`tidepool_runtime::toolchain::locate_extract`], whose module docs carry
 /// the precedence table).
 ///
-/// This used to fall back to `$PATH` when `$TIDEPOOL_EXTRACT` was set but
-/// pointed at nothing — silently serving a *different* extract than the
-/// operator asked for. A set-but-broken override now yields `None`, so the
-/// degraded setup server (whose instructions name `TIDEPOOL_EXTRACT`) is what
-/// the caller sees.
+/// HAZARD: do not fall back to `$PATH` when `$TIDEPOOL_EXTRACT` is set but
+/// points at nothing — that would silently serve a *different* extract than
+/// the operator asked for. A set-but-broken override must yield `None`, so
+/// the degraded setup server (whose instructions name `TIDEPOOL_EXTRACT`) is
+/// what the caller sees.
 pub(crate) fn find_tidepool_extract() -> Option<PathBuf> {
     tidepool_runtime::toolchain::locate_extract()
         .ok()

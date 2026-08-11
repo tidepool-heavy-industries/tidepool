@@ -62,9 +62,9 @@ struct Args {
 /// Install a panic hook that writes crash dumps to `<cwd>/.tidepool/crash.log`
 /// — the SAME path the JIT signal handler writes to
 /// (`tidepool_codegen::signal_safety::install`) and the Crashed-outcome
-/// forensics reader (`tidepool-mcp/src/server.rs`) reads from. A
-/// home-relative path here meant a Rust-side panic's forensics never
-/// surfaced unless CWD happened to equal $HOME.
+/// forensics reader (`tidepool-mcp/src/server.rs`) reads from. HAZARD: a
+/// home-relative path here means a Rust-side panic's forensics never
+/// surfaces unless CWD happens to equal $HOME.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{}\n{:?}\n", info, std::backtrace::Backtrace::capture());
@@ -84,8 +84,7 @@ fn install_panic_hook() {
 }
 
 /// Body of `--write-toolchain-stamp`. Prints the recorded fingerprints so the
-/// deploy log carries which pair was blessed — the same detail the skew message
-/// prints later, making a stamp/skew pair diffable by eye.
+/// deploy log carries which pair was blessed.
 fn write_toolchain_stamp(prelude_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use tidepool_runtime::toolchain;
     let extract = toolchain::locate_extract()?;
@@ -184,10 +183,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    /// A Rust-side panic's crash log must land at `<cwd>/.tidepool/crash.log`
-    /// — the same path the JIT signal handler writes to and the forensics
-    /// reader reads from — not under `$HOME` (F4: they used to disagree, so
-    /// "Recent Crash Log Entries" silently never surfaced a Rust panic).
+    /// See the hazard note on [`install_panic_hook`]: must land cwd-relative,
+    /// not under `$HOME`.
     #[test]
     fn panic_hook_writes_crash_log_relative_to_cwd() {
         let dir = tempfile::tempdir().unwrap();

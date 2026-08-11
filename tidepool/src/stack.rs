@@ -5,9 +5,8 @@ use tidepool_handlers::HandlerConfig;
 use tidepool_mcp::TidepoolMcpServer;
 
 /// First non-comment line of a generated helper's Haskell source — its
-/// signature. Every generated helper now starts with a `-- |` doc comment
-/// (`helper_text!` in `tidepool-mcp/src/effect_defs.rs`), so `.lines().next()`
-/// picks up a comment fragment instead of the signature; skip lines starting
+/// signature. Every generated helper starts with a `-- |` doc comment, so
+/// `.lines().next()` would pick up the comment instead; skip lines starting
 /// with `--`.
 fn first_sig_line(helper: &str) -> Option<&str> {
     helper.lines().find(|l| !l.trim_start().starts_with("--"))
@@ -15,18 +14,17 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 
 /// The debug decl list: base effects (Console..Time, `base_effects!` order)
 /// with Meta appended, then the interposed effects (Ask, RunLLMTurn, Fork)
-/// appended last. This is the SAME order `build_debug_stack`'s handler HList wires
-/// (the interposed effects are appended separately by `TidepoolMcpServer::new`,
-/// which pushes `ask_decl()`/`runllmturn_decl()`/`fork_decl()` onto whatever
-/// `H::collect_decls()` reports) — so a `TidepoolMcpServer` built on
-/// `build_debug_stack`'s handlers reproduces this exact list independently,
-/// and `effect_names`/`helper_sigs` (derived from it below) can never drift
-/// from the real dispatch order again (that drift was F1).
+/// appended last. HAZARD: this must independently reproduce the SAME order
+/// `build_debug_stack`'s handler HList actually wires (Ask/RunLLMTurn/Fork
+/// are appended separately by `TidepoolMcpServer::new`) — a past drift
+/// between this list and the real dispatch order silently broke Meta's
+/// reported effect/helper list. `debug_stack_handler_order_matches_debug_decls`
+/// below pins the two against each other.
 ///
 /// Splits off everything from `Ask` onward (found by name, not a fixed
-/// count) rather than popping exactly one — self-iterating-harness WS-B
-/// appends `RunLLMTurn` after `Ask` in `standard_decls()`, and both must stay
-/// interposed, after Meta, for the JIT's suspend-tag threshold to hold.
+/// count) rather than popping exactly one: `standard_decls()` appends
+/// `RunLLMTurn` after `Ask`, and both must stay interposed, after Meta, for
+/// the JIT's suspend-tag threshold to hold.
 fn debug_decls() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = tidepool_mcp::standard_decls();
     let ask_idx = decls
@@ -39,10 +37,10 @@ fn debug_decls() -> Vec<tidepool_mcp::EffectDecl> {
     decls
 }
 
-/// Meta's `effect_names`/`helper_sigs` payload, derived from [`debug_decls`]
-/// (never a hand-maintained parallel list). Helper signatures are extracted
-/// by the first NON-comment line, since every generated helper now starts
-/// with a `-- |` doc comment (see [`first_sig_line`]).
+/// Meta's `effect_names`/`helper_sigs` payload, derived from [`debug_decls`].
+/// Helper signatures are extracted by the first NON-comment line, since
+/// every generated helper starts with a `-- |` doc comment (see
+/// [`first_sig_line`]).
 fn debug_effect_names_and_helper_sigs() -> (Vec<String>, Vec<String>) {
     let decls = debug_decls();
     let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
@@ -127,9 +125,6 @@ mod tests {
     fn debug_effect_names_and_helper_sigs_are_real_signatures() {
         let (effect_names, helper_sigs) = debug_effect_names_and_helper_sigs();
         assert_eq!(effect_names, EXPECTED_ORDER);
-        // metaHelp must extract real signatures — every generated helper now
-        // starts with a `-- |` doc comment, so a naive `.lines().next()`
-        // regression would surface as comment fragments here.
         assert!(
             helper_sigs.iter().any(|s| s.starts_with("gitStatus ::")),
             "gitStatus signature missing from helper_sigs: {helper_sigs:?}"
@@ -140,13 +135,8 @@ mod tests {
         );
     }
 
-    /// The handler HList `build_debug_stack` actually wires must report the
-    /// SAME order via `collect_decls()` as [`debug_decls`] — this is what
-    /// `TidepoolMcpServer::new` uses to build the real, compiled
-    /// `Tidepool.Effects` module, so a pass here means `gitStatus`/
-    /// `getCurrentTime` are genuinely reachable in the running `--debug`
-    /// server (and `metaEffects`'s report matches it), not just present in a
-    /// decl list nobody wires up (the F1 drift).
+    /// Pins `build_debug_stack`'s real handler order against [`debug_decls`]
+    /// — see the hazard note there.
     #[tokio::test]
     async fn debug_stack_handler_order_matches_debug_decls() {
         let dir = tempfile::tempdir().unwrap();
