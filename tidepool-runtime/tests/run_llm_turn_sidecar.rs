@@ -1,5 +1,5 @@
-//! runLLMTurn (#R0 typed-yield pass, plans/harness-r0/10-extract-pass):
-//! extract-side interception + asks.json sidecar tests.
+//! runLLMTurn (#R0 typed-yield pass): extract-side interception + asks.json
+//! sidecar tests.
 //!
 //! Positive: a monomorphic `runLLMTurn @Verdict` site under both a branch
 //! (an opaque NOINLINE'd `Bool`, so GHC can't const-fold away the untaken

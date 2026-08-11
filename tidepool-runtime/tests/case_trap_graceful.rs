@@ -1,7 +1,7 @@
 //! Regression guard: the case-trap path is GRACEFUL.
 //!
 //! Component **M** of the tidepool-repl GHCi-style session work (the "empirical
-//! gate" in `plans/ghci-session-persistence.md`). The world-age type story relies on
+//! gate"). The world-age type story relies on
 //! cross-generation type access being a clean *error*, not a process crash: a
 //! `case` over a value whose `DataConId` matches no alternative must call the
 //! host fn `runtime_shape_trap` (sets `RuntimeError::CaseTrap`, returns a poison

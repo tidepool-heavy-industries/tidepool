@@ -6,9 +6,7 @@
 //! can compile a self-contained module without wiring
 //! `with_effects_module()`/`Tidepool.Orchestrate` — they are a STATIC mirror
 //! of `tidepool_mcp::base_effects!`, not a derivation from it, so THEY can
-//! drift. That already happened once: the SG effect was cut in commit
-//! f1a480e6 and Lsp/Time were added later, but the mock kept declaring SG and
-//! Meta (never part of the base stack) long after both changes landed.
+//! drift.
 //!
 //! `mock::EFFECT_NAMES` is no longer part of that hand-maintained surface —
 //! it's computed directly from `tidepool_mcp::standard_decls()`
