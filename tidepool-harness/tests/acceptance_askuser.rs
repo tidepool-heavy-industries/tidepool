@@ -1,28 +1,10 @@
 //! Acceptance coverage: the answerer `askUser @T` operator-form round-trip
 //! (`plans/self-iterating-harness/14-generic-derived-askuser-prd.md`, delivery
-//! step 5).
+//! step 5), driven through the production entry point
+//! (`SelfHarnessDriver::run_one_cycle`) against the reference harness module
+//! (`examples/harness/Harness.hs`).
 //!
-//! ONE `render` -> `loop` -> `runLLMTurn @Decision` -> (answerer suspends on
-//! `askUser @Decision`, a scripted [`OperatorGate`] submits, the typed value
-//! resumes and flows into `finalize`) -> `render` cycle, driven through the
-//! production entry point (`SelfHarnessDriver::run_one_cycle`), against the
-//! reference harness module (`examples/harness/Harness.hs`).
-//!
-//! Three things ride that one cycle:
-//!
-//! - the form the operator is presented is the shape DERIVED from `Decision`'s
-//!   own `Generic` representation — asserted here structurally, which is what
-//!   proves the Haskell encoder (`Tidepool.Form.Wire`) and the Rust wire
-//!   (`selfharness::operator`) agree through the real extract/JIT;
-//! - a MALFORMED submission re-presents the SAME form rather than surfacing an
-//!   error — `askUser` re-prompts by recursion, no `Either` reaches the caller,
-//!   and the driver's bounded servicing loop is untouched;
-//! - `chooseMany` selects among runtime VALUES by their labels and returns the
-//!   typed values.
-//!
-//! Also asserts the durable per-node log's `turn_start` record carries the
-//! EXTRACTED executed Haskell, not a coarse "model" provenance tag. Needs
-//! `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
+//! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -193,11 +175,7 @@ impl OperatorGate for ScriptedGate {
 /// A driver-emitted form event, reduced to what this test needs to compare:
 /// which side raised the form ([`FormSource::Answerer`] vs
 /// [`FormSource::OuterLoop`], collapsed to a bool since this cycle only
-/// exercises the nested answerer) and the shape/submission payload. Proves
-/// the servicing loop still emits `FormPresented`/`FormSubmitted` in the same
-/// order and pairing as before the `service_askuser_hole`/
-/// `service_outer_askuser_hole` dedupe — the durable transcript jsonl
-/// (dogfood-observability) is a straight fold over this exact event stream.
+/// exercises the nested answerer) and the shape/submission payload.
 #[derive(Debug, Clone, PartialEq)]
 enum CapturedForm {
     Presented {
@@ -340,10 +318,8 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     );
 
     // The driver's own emitted event stream — not just what the gate saw —
-    // is the same PRESENTED/SUBMITTED pairing in the same order: the
-    // malformed submission, the corrected `Decision`, then `chooseMany`'s
-    // choice. All three forms are the nested answerer's own
-    // (`FormSource::Answerer`), never `OuterLoop`.
+    // is the same PRESENTED/SUBMITTED pairing in order, all from the nested
+    // answerer (`FormSource::Answerer`), never `OuterLoop`.
     let forms = observer.forms.lock().unwrap().clone();
     assert_eq!(
         forms,

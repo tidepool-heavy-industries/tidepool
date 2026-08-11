@@ -1,69 +1,26 @@
-//! Extract-wave `boot` lane, item 0 steps 1-3 (+6): pins the LAZY boot
-//! contract end to end, through the REAL production path
-//! (`Harness::new` -> `force` -> `run_to_hole_or_done`).
-//!
-//! Before this item, `Harness::new` paid a GHC extract compile of a FAKE
-//! program (`pure (toJSON (0 :: Int))`) up front to seed a boot-shaped
-//! `ResidentSession::bootstrap`, and `force` bootstrapped every node's
-//! session from that seed before any real turn ran. `ResidentSession`
-//! construction is now lazy (`unbootstrapped`): `force` registers a
+//! Pins the LAZY boot contract end to end, through the REAL production path
+//! (`Harness::new` -> `force` -> `run_to_hole_or_done`): `force` registers a
 //! machine-less session, and the machine comes up on the node's first REAL
 //! turn (`ResidentSession::run`, reached via `Harness::run_to_hole_or_done`).
-//!
-//! This test proves step 6 falls out as claimed: no machine right after
-//! `force`, a live machine right after the first turn completes. It observes
-//! this through `Harness::heap_stats`, which is `None` when the node has no
-//! live session machine (never forced, terminal, OR — the new case this item
-//! adds — forced but not yet bootstrapped) and `Some` once a machine is live.
+//! Observed through `Harness::heap_stats`: `None` when the node has no live
+//! session machine (never forced, terminal, or forced but not yet
+//! bootstrapped), `Some` once a machine is live.
 //!
 //! GHC-heavy tier: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
 //!
-//! # The ConTags leg — what this file actually pins
-//!
-//! An earlier draft of this item's spec worried that the OUTER
-//! (self-iterating-harness) session's lazy bootstrap might boot from a
-//! ConTags-free expr, since its first real compile is the pure `render`
-//! (`SelfHarnessDriver::render_framing`) rather than an effectful seed. That
-//! concern does not hold: `ConTags::try_from` (`tidepool-codegen/src/effect_machine.rs`
-//! 203-250) resolves the freer-simple SCAFFOLDING constructors (`Val`/`E`/
-//! `Union`/`Leaf`/`Node`), not per-effect GADT constructors like
-//! `RunLLMTurnWith` — and any `Eff`-typed term carries them, `pure` included
-//! (`pure` at `Eff` literally builds a `Val`). The seed this item deletes was
-//! ITSELF a pure `pure (toJSON (0 :: Int))` and that always resolved fine;
-//! `render` cannot be worse-conditioned than the seed it replaces.
-//!
-//! So `outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole`
-//! below pins the REAL invariant instead: the outer machine boots from
-//! render's own `(expr, table)` and runs that fragment to completion, and a
-//! SUBSEQUENT loop fragment carrying a real `runLLMTurn` call then runs on
-//! that SAME machine and suspends correctly at its hole. `add_function`'s
-//! ConTags re-resolution (`jit_machine.rs` ~1940-1956) still carries a named
-//! `log::info!` breadcrumb on the `Err -> Ok` transition as a regression
-//! guard, but — per the correction above — that transition is not expected
-//! to fire on this path, so it is not what this test asserts.
-//!
-//! ## This is ALSO a cross-lane regression guard — do not delete as redundant
+//! # Do not delete `outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole` as redundant
 //!
 //! `render`'s own reachable Core only directly builds `Val` (via `pure`); the
-//! other four freer scaffolding constructors (`E`/`Union`/`Leaf`/`Node`) end
-//! up in its compiled table via `collectTransitiveDCons`
-//! (`haskell/src/Tidepool/Translate.hs` 1092-1129, traced directly, not
-//! `collectDataCons` at ~2718 as an earlier note here mis-stated): it walks
-//! the TYPE closure of every binder's type (`Eff` -> `Val`/`E` -> `E`'s field
-//! types `Union effs b` / `FTCQueue (Eff effs) b a`), so all five arrive
-//! because `render`'s binder is `Eff`-typed, independent of which
-//! constructors its own expression syntactically touches. A parallel lane's
-//! D2 item touches this closure computation; as originally specified, a
-//! version of that change would have stripped four of the five and silently
-//! broken exactly this boot path. D2 now carries a correctness requirement to
-//! keep the five freer constructors reachable regardless — and THIS TEST is
-//! what catches it if that requirement regresses, because it is deliberately
-//! placed in `tidepool-harness/tests/acceptance_*.rs`, which
-//! `scripts/battery-shard.sh tidepool-harness -E 'binary(/^acceptance_/)'`
-//! runs — that gate is in D2's own mandatory gate set. A guard sitting
-//! anywhere else (e.g. `tidepool-runtime/tests/`) would not be in that lane's
-//! path and would catch nothing.
+//! other four freer scaffolding constructors (`E`/`Union`/`Leaf`/`Node`) reach
+//! its compiled table only via the transitive DataCon-closure walk over the
+//! `Eff`-typed binder (`collectTransitiveDCons`,
+//! `haskell/src/Tidepool/Translate.hs`). If that walk ever regresses to miss
+//! one of the five, the outer session's lazy bootstrap off `render`'s pure
+//! fragment would silently fail to carry the constructor the SUBSEQUENT real
+//! `runLLMTurn` fragment needs on the same machine — this test is what would
+//! catch that, because it lives in `tidepool-harness/tests/acceptance_*.rs`,
+//! which is a mandatory gate for changes to that closure computation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -120,10 +77,7 @@ fn reply(content: &str) -> RecordedReply {
     }
 }
 
-/// The step-6 pin: `Harness::new` and `Harness::force` register a node
-/// without paying any GHC compile or bringing up a machine — `heap_stats`
-/// reads `None` right after `force`. The node's FIRST real turn is what
-/// bootstraps the machine — `heap_stats` reads `Some` right after it.
+/// Pins the lazy-boot contract above for a plain node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_machine_after_force_a_machine_after_the_first_turn() {
     if !extract_available() {
@@ -142,9 +96,8 @@ async fn no_machine_after_force_a_machine_after_the_first_turn() {
         "Here's the answer.\n\n```haskell\npure (toJSON (21 * 2 :: Int))\n```",
     )];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    // `Harness::new` itself pays no GHC compile any more (both boot seeds are
-    // gone) — this constructs instantly even without `TIDEPOOL_EXTRACT`, but
-    // the rest of this test needs it, hence the guard above.
+    // `Harness::new` itself needs no GHC compile and would succeed without
+    // `TIDEPOOL_EXTRACT`; the guard above covers what the rest of this test needs.
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
     let root = harness
@@ -191,9 +144,7 @@ fn decision_block(action: &str, confidence: &str) -> String {
 }
 
 /// A [`tidepool_harness::provider::ModelProvider`] that always succeeds with
-/// a scripted `finalize` reply — no failure injection, unlike
-/// `selfharness_lifecycle.rs`'s `FlakyProvider`. This test's whole point is a
-/// completely ordinary first cycle.
+/// a scripted `finalize` reply.
 struct AlwaysReply(String);
 
 impl tidepool_harness::provider::ModelProvider for AlwaysReply {
@@ -215,16 +166,12 @@ impl tidepool_harness::provider::ModelProvider for AlwaysReply {
     }
 }
 
-/// The ConTags-leg pin (see this file's module doc for why the invariant
-/// changed from the spec's first draft): a FRESH `SelfHarnessDriver`'s outer
-/// session bootstraps lazily (`SelfHarnessDriver::bootstrap` ->
-/// `crate::harness::Session::unbootstrapped`, no GHC compile of its own), so
-/// its machine comes up on `render_framing`'s pure compile — the outer
-/// session's first REAL fragment. A single ordinary cycle then drives `loop`
-/// (a REAL `runLLMTurn` call) on that SAME machine to a suspend, services the
-/// hole through a real nested Agent turn, and resumes to `finalize` — proving
-/// the machine that booted off a pure fragment correctly classifies and
-/// dispatches a genuinely effectful one afterward.
+/// A FRESH `SelfHarnessDriver`'s outer session bootstraps lazily off
+/// `render_framing`'s pure compile (its first REAL fragment). A single
+/// ordinary cycle then drives `loop` (a REAL `runLLMTurn` call) on that SAME
+/// machine to a suspend, services the hole through a real nested Agent turn,
+/// and resumes to `finalize` — see the module doc for why this pins the
+/// ConTags-reachability invariant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole() {
     if !extract_available() {
@@ -266,9 +213,7 @@ async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole(
         driver.lifecycle()
     );
     // The loop-iteration count lives in the checkpoint ENVELOPE
-    // (`driver.iteration()`), never in the authored `State` — asserting a
-    // `loopCount` key in `state_json` was this test's original spelling,
-    // stale once runtime iteration moved out of authored state.
+    // (`driver.iteration()`), never in the authored `State`.
     assert_eq!(
         driver.iteration(),
         1,

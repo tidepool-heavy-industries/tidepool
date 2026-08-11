@@ -13,8 +13,7 @@
 //!     ambiguous sidecar.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH (run inside
-//! `nix develop`; see `haskell/CLAUDE.md`) — same GHC tier as
-//! `agent_stack_scoping.rs`, which this file's harness setup mirrors.
+//! `nix develop`; see `haskell/CLAUDE.md`).
 
 use tidepool_harness::compile;
 use tidepool_harness::engine::EngineConfig;

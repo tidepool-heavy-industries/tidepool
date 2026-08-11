@@ -80,16 +80,6 @@ fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedRe
 /// the latest replayed `Decision`, `notes` accumulates (most-recent-first),
 /// and each cycle's post-loop `render` reflects the new `State`.
 ///
-/// TRIMMED (test-diet, coverage-overlap census) from three cycles to two:
-/// cycle 1 alone (`Observing -> Deciding`, decision "observe"/Medium) is a
-/// byte-for-byte duplicate of `selfharness_spine.rs`'s single-cycle
-/// assertions — it still RUNS here (its `state_json` seeds cycle 2 exactly
-/// like the production loop does), but the unique claim this test exists to
-/// pin — that `State` keeps accumulating across a SECOND loop boundary, not
-/// just one — begins at cycle 2. The former cycle 3 (`Acting -> Observing`,
-/// the mode enum wrapping back to its start) is a fact about the reference
-/// fixture's `nextMode` cycle length, not additional accumulation coverage,
-/// so it is dropped rather than trimmed down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     support::require_extract();

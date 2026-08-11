@@ -13,17 +13,12 @@
 //! then child 1's turn — `Harness::answer_fanout` drives fanout children in
 //! declaration order.
 //!
-//! MERGED (test-diet, coverage-overlap census): formerly split across this
-//! file and `exact_context_fork.rs` — the two drove the byte-identical
-//! scenario (same reply script, same config, same `run_one_cycle` call) with
-//! disjoint assertion sets. The provider is wrapped in a [`CapturingProvider`]
-//! so ONE drive of the scenario now asserts both blocks: fork servicing +
-//! the finalized `Decision` reaching `State` (this file's original coverage),
-//! AND forked children inheriting the parent's byte-identical transcript
-//! prefix + render-derived framing (`exact_context_fork.rs`'s original
-//! coverage — the regression it guards is `Harness::force` resetting a
-//! forked child's framing to `None`, which made the child send the default
-//! `SYSTEM_FRAMING` instead of the inherited one).
+//! The provider is wrapped in a [`CapturingProvider`] so one drive of the
+//! scenario asserts both fork-servicing/finalize AND that forked children
+//! inherit the parent's byte-identical transcript prefix + render-derived
+//! framing — guarding against `Harness::force` resetting a forked child's
+//! framing to `None`, which would make the child send the default
+//! `SYSTEM_FRAMING` instead of the inherited one.
 
 use std::sync::{Arc, Mutex};
 
@@ -216,7 +211,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
     );
 
     // --- block 2: children inherit the parent's byte-identical transcript
-    // --- prefix + render-derived framing (formerly exact_context_fork.rs) ---
+    // --- prefix + render-derived framing ---
 
     let reqs = requests.lock().unwrap();
     assert_eq!(

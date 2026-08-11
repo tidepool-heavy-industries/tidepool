@@ -174,10 +174,7 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
         "the child's FIRST event is NodeCreated, got {:?}",
         child_events[0]
     );
-    // No turn/effect event for the child precedes its own Forced event —
-    // exactly the invariant `forcing.rs` enforces structurally at the
-    // NodeTree layer, now confirmed to hold when the trigger is a REAL
-    // compiled `runLLMTurnFork` request driven through the turn engine.
+    // No turn/effect event for the child precedes its own Forced event.
     let forced_idx = child_events
         .iter()
         .position(|e| matches!(e, Event::Forced { .. }))

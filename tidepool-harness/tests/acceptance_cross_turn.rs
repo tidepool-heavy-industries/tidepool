@@ -1,17 +1,11 @@
-//! W1b acceptance: cross-turn binding persistence on a single node.
+//! Cross-turn binding persistence on a single node: a declaration turn
+//! accumulates into the node's `Tidepool.Session.Lib.G<g>` module, and a
+//! later expression turn compiles session-aware (importing that module), so
+//! a prior turn's declaration resolves as a live binding.
 //!
-//! The harness used to bootstrap a FRESH Haskell module per turn, so a value
-//! introduced in turn N was gone in turn N+1. W1b turned on the shared
-//! persistent-session core's decl plane per node: a declaration turn accumulates
-//! into the node's `Tidepool.Session.Lib.G<g>` module, and a later expression
-//! turn compiles session-aware (importing that module), so a prior turn's
-//! declaration resolves as a live binding.
-//!
-//! This drives that through the REAL turn path (`drive_turn` → `run_block`) via
+//! Drives that through the REAL turn path (`drive_turn` → `run_block`) via
 //! the record-replay provider: turn 1 declares `steps`, turn 2 (a follow-up)
-//! computes from `steps`. On pre-W1b code turn 2's fresh module does not know
-//! `steps`, so the reference fails to compile and the turn never completes with
-//! the value — this test would fail.
+//! computes from `steps`.
 //!
 //! GHC-heavy tier: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).

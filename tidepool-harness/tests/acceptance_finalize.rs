@@ -102,13 +102,10 @@ async fn finalize_hands_up_a_plain_data_value() {
 
     // Bare, no annotation of any kind — the shape the answerer prompt
     // prescribes. `finalize`'s result type is fully free (it never actually
-    // returns; the send diverges via suspension), which used to leave the
-    // shared template's `toJSON _r` wrapper ambiguous (GHC's defaulting
-    // never resolves a solitary `ToJSON a0`). `template_turn_for`
-    // (`tidepool-harness/src/engine.rs`) routes a turn compiled against a
-    // real `Finalize T` row through `tidepool_mcp::template_haskell_anchored`
-    // instead, which adds a redundant `Show` constraint alongside — additive,
-    // not an annotation this block needs to write itself.
+    // returns; the send diverges via suspension); `template_turn_for`
+    // (`tidepool-harness/src/engine.rs`) anchors the shared template's
+    // `toJSON _r` wrapper for a turn compiled against a real `Finalize T`
+    // row, so this block does not need to write an annotation itself.
     let replies = vec![reply("```haskell\nfinalize @Int (41 + 1)\n```")];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
@@ -194,9 +191,8 @@ async fn finalize_hands_up_a_plain_data_value() {
     );
 }
 
-/// EXTRACT-LEVEL proof of the relaxed function-arrow rule (mirrors
-/// `run_llm_turn_sidecar.rs`'s `runllmturn_rejects_function_typed_site`,
-/// which asserts the OPPOSITE for `runLLMTurn`): `finalize @(Int -> Int) f`
+/// EXTRACT-LEVEL proof of the relaxed function-arrow rule:
+/// `finalize @(Int -> Int) f`
 /// compiles cleanly — `checkFinalizeType` (Translate.hs) deliberately skips
 /// `typeHasFunctionArrow`, unlike `checkRunLLMTurnType`. This is the
 /// achievable half of "finalize may carry a closure" today; see this file's

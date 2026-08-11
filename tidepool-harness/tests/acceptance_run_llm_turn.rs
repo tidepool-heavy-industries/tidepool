@@ -10,14 +10,6 @@
 //!   - answer_run_llm_turn exercised end-to-end -> run_llm_turn_end_to_end_...
 //!   - bottom answer does not consume -> run_llm_turn_bottom_answer_...
 //!     (this one surfaced a production-path finding — see its doc comment)
-//!
-//! (test-diet, coverage-overlap census): `run_llm_turn_end_to_end_...`'s hole
-//! is typed `@Decision` (a NESTED ADT — an outer record whose `confidence`
-//! field is itself a sum type), not the originally flat `@Int` — a formerly
-//! separate `run_llm_turn_nested_adt_type_retry_and_answer` test covered only
-//! the flat-vs-nested distinction with a THINNER set of event-log assertions;
-//! retyping the one surviving test's hole covers both (the zero-coverage-loss
-//! variant) instead of running the same production path twice.
 
 mod support;
 
@@ -64,8 +56,7 @@ fn reply(content: &str) -> RecordedReply {
 }
 
 /// Node-filtered raw log events, in `seq` order — for asserting the DURABLE
-/// record (not just in-memory state), same technique as `forcing.rs`'s
-/// consent-integrity unit tests.
+/// record, not just in-memory state.
 fn events_for(log_path: &std::path::Path, node: NodeId) -> Vec<Event> {
     let (_h, events) = LogReader::open(log_path).expect("open log");
     events
@@ -332,23 +323,13 @@ fn decision_lib_dir() -> tempfile::TempDir {
 /// `forall a. ... -> a`), so this is NOT the ill-typed-retry path (that one's
 /// covered above); the fault is a RUNTIME error.
 ///
-/// OBSERVED BEHAVIOR (verified by running this against the real GHC/JIT
-/// pipeline): forcing `error "boom"` faults INSIDE `run_child`'s evaluation of
-/// the answerer's own block, before `Harness::resume_parent` is ever called.
-/// `drive_answerer_to_value`'s runtime-fault branch (harness.rs, the `Err(e)`
-/// arm after `run_child`) feeds `"The answer failed at runtime: {e}. Try
-/// again."` back to the answerer and loops — the SAME retry shape as an
-/// ill-typed compile failure. So: the continuation genuinely is NOT consumed
-/// by a bottom answer; `HoleConsumed` and `NodeDone` are correctly withheld
-/// until a valid answer resumes it. A5 ("forced to NF before consumption")
-/// reads as satisfied for this case, at least incidentally — WHNF-forcing an
-/// `Int` during the answerer's own eval is enough to trip `error` before it
-/// ever reaches the parent.
-///
-/// AUDIT FIX (B1 widen): the runtime-fault branch now logs a `Rejected`
-/// `HoleAnswerAttempt` too, same as the compile-failure branch — the durable
-/// audit trail now shows every attempt (bottom answers included), not just
-/// the one that eventually consumes.
+/// Forcing `error "boom"` faults INSIDE `run_child`'s evaluation of the
+/// answerer's own block, before `Harness::resume_parent` is ever called —
+/// the SAME retry shape as an ill-typed compile failure. The continuation is
+/// NOT consumed by a bottom answer; `HoleConsumed` and `NodeDone` are
+/// withheld until a valid answer resumes it, and the runtime-fault branch
+/// logs a `Rejected` `HoleAnswerAttempt` too, same as the compile-failure
+/// branch, so the durable audit trail shows every attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_llm_turn_bottom_answer_faults_before_consumption_and_retries() {
     support::require_extract();

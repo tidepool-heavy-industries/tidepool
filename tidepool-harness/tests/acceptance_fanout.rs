@@ -195,9 +195,6 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
 /// grants a small extra budget, and the child recovers on its very next
 /// reply. The fan completes with its one child `Done`; no operator
 /// involvement, no escalation ever appears.
-///
-/// TRIMMED (test-diet, coverage-overlap census) from 2 prompts to 1: a
-/// second, unrelated child carried no assertion the rung-1 claim needs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
     support::require_extract();

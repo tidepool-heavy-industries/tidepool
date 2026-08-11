@@ -3,15 +3,6 @@
 //! same discipline as `acceptance_fanout.rs`. Record-replay, CI-shaped, zero
 //! live calls.
 //!
-//! `forkFilter` always answers at a fixed `Bool`; it composes over the `Fork`
-//! effect's fanout with no extra machinery. (test-diet, coverage-overlap
-//! census: the harness-level `forkFilter` acceptance test that lived here was
-//! deleted — its semantics [keeps True verdicts, declaration order] are
-//! pinned at the JIT tier by `jit_surface::works_fork`, and its fanout hole
-//! shape [FanBadge, per-child prompts in declaration order] is pinned by
-//! `acceptance_fanout.rs` via the same `runLLMTurnFanout` machinery
-//! `forkFilter` composes over.)
-//!
 //! `forkMap`/`forkCata` need a CALLER-chosen answer type. `Translate.hs`
 //! recognizes them by name (like `fork`/`forkAll`) and head-swaps each call
 //! site to its `Fork`-effect `*Sited` sibling, capturing the answer type at
@@ -106,13 +97,6 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
 /// fanout (fan = 1) on the SAME node, both dispatches sharing the SAME
 /// site-id (so both report the SAME "[Int]" sidecar type — the answer type
 /// captured once, at forkCata's own call site).
-///
-/// TRIMMED (test-diet, coverage-overlap census): a leaf's ill-typed-first-
-/// attempt retry used to be scripted here too, but by this test's own doc
-/// comment the retry is "not some new mechanism" — forkCata's head-swapped
-/// call site retries exactly like a bare `runLLMTurnFanout` site, which
-/// `acceptance_fanout.rs` already exercises directly. Every leaf now answers
-/// validly on its first attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
     support::require_extract();
