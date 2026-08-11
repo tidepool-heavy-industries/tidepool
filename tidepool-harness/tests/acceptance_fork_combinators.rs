@@ -4,7 +4,13 @@
 //! live calls.
 //!
 //! `forkFilter` always answers at a fixed `Bool`; it composes over the `Fork`
-//! effect's fanout with no extra machinery.
+//! effect's fanout with no extra machinery. (test-diet, coverage-overlap
+//! census: the harness-level `forkFilter` acceptance test that lived here was
+//! deleted — its semantics [keeps True verdicts, declaration order] are
+//! pinned at the JIT tier by `jit_surface::works_fork`, and its fanout hole
+//! shape [FanBadge, per-child prompts in declaration order] is pinned by
+//! `acceptance_fanout.rs` via the same `runLLMTurnFanout` machinery
+//! `forkFilter` composes over.)
 //!
 //! `forkMap`/`forkCata` need a CALLER-chosen answer type. `Translate.hs`
 //! recognizes them by name (like `fork`/`forkAll`) and head-swaps each call
@@ -13,13 +19,6 @@
 //! `jit_surface.rs`'s `works_fork_map` for the JIT-tier half of this coverage.
 //!
 //! Coverage:
-//! - `forkFilter` over 3 elements ("1", "2", "3") with scripted verdicts
-//!   `[True, False, True]` — the harness answers the SAME
-//!   `runLLMTurnFanout` fanout hole `acceptance_fanout.rs` pins directly
-//!   (fan badge, per-child prompts in declaration order), and the
-//!   combinator's own `zip`/`filter` keeps only the `True`-verdict
-//!   elements, in original order, regardless of which child the harness
-//!   happened to drive.
 //! - `forkCata` over a 2-level `RoseTree` (root + 3 leaf children) with a
 //!   CALLER-chosen `@Int` answer type: the leaves batch into ONE fanout
 //!   (fan = 3, "children before parents"), then the root's own prompt —
@@ -99,117 +98,6 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
     }
 }
 
-/// `forkFilter` over 3 elements: fans out prompts "1"/"2"/"3" (in
-/// declaration order), scripted verdicts `[True, False, True]` — the final
-/// `[Int]` keeps only 1 and 3, in original order.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
-    support::require_extract();
-
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("fork_combinators.jsonl");
-    let writer = LogWriter::create(&log_path, &header()).unwrap();
-    let cfg = fork_cfg();
-
-    let replies = vec![
-        // 1. Root turn: forkFilter over [1,2,3], keep the True verdicts.
-        reply(
-            "I'll judge each number and keep the ones that pass.\n\n\
-             ```haskell\n\
-             import Tidepool.Fork\n\
-             \n\
-             do\n\
-             \x20 ys <- forkFilter (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]\n\
-             \x20 pure (toJSON (ys :: [Int]))\n\
-             ```",
-        ),
-        // 2. Child 0 ("1"): keep it.
-        reply("```haskell\nresume True\n```"),
-        // 3. Child 1 ("2"): drop it.
-        reply("```haskell\nresume False\n```"),
-        // 4. Child 2 ("3"): keep it.
-        reply("```haskell\nresume True\n```"),
-    ];
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
-
-    let root = harness
-        .create_root("forkFilter root", "Judge 1, 2, 3 and keep the good ones.")
-        .unwrap();
-    harness.force(root, Actor::Operator).unwrap();
-
-    let outcome = harness
-        .run_to_hole_or_done(root)
-        .await
-        .expect("root drives to a hole");
-    match outcome {
-        tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Fork {
-                ty,
-                fan: Some(fan),
-                prompts,
-                ..
-            } => {
-                assert_eq!(
-                    ty.as_deref(),
-                    Some("[Bool]"),
-                    "forkFilter's fanout answers a fixed [Bool], got {ty:?}"
-                );
-                assert_eq!(*fan, FanBadge::Exact { n: 3 });
-                assert_eq!(
-                    prompts,
-                    &vec!["1".to_string(), "2".to_string(), "3".to_string()],
-                    "per-element prompts are carried in declaration order"
-                );
-            }
-            other => panic!("expected a fanout Fork hole, got {other:?}"),
-        },
-        other => panic!(
-            "root should suspend on the fanout hole, got {}",
-            outcome_tag(&other)
-        ),
-    }
-
-    let children = harness
-        .answer_fanout(root, Actor::Operator)
-        .await
-        .expect("fanout answered end to end");
-    assert_eq!(children.len(), 3, "one child per element");
-    for child in &children {
-        assert_eq!(
-            harness.tree().state(*child),
-            Some(NodeState::Done),
-            "every fanout child completes once it delivers its answer"
-        );
-    }
-
-    assert_eq!(
-        harness.tree().state(root),
-        Some(NodeState::Done),
-        "the parent completes once the assembled [Bool] resumes it and forkFilter's own zip/filter runs"
-    );
-
-    let (_header, events) = tidepool_harness::log::LogReader::open(&log_path).expect("open log");
-    let rendered = events
-        .filter_map(|r| r.ok())
-        .find_map(|r| match r.event {
-            tidepool_harness::log::Event::NodeDone {
-                node,
-                result_rendered,
-            } if node == root => Some(result_rendered),
-            _ => None,
-        })
-        .expect("root's NodeDone event is in the log");
-    assert!(
-        rendered.contains('1') && rendered.contains('3'),
-        "the rendered [Int] keeps the True-verdict elements 1 and 3, got: {rendered}"
-    );
-    assert!(
-        !rendered.contains('2'),
-        "the rendered [Int] must drop the False-verdict element 2, got: {rendered}"
-    );
-}
-
 /// `forkCata @Int` over a 2-level `RoseTree` (root + 3 leaf children) — the
 /// GHC-tier test the blocked leaf couldn't write (see the module doc). The
 /// leaves batch into ONE fanout (fan = 3, "children before parents"); the
@@ -217,11 +105,14 @@ async fn forkfilter_keeps_true_verdicts_in_declaration_order() {
 /// ("prompts see child verdicts") and answered as a SECOND, singleton
 /// fanout (fan = 1) on the SAME node, both dispatches sharing the SAME
 /// site-id (so both report the SAME "[Int]" sidecar type — the answer type
-/// captured once, at forkCata's own call site). Leaf 1's first attempt is
-/// deliberately ill-typed, exercising the SAME GHC-verbatim retry a plain
-/// fork/fanout uses (`acceptance_fanout.rs`) — proving forkCata's
-/// head-swapped call site retries exactly like a bare runLLMTurnFanout
-/// site, not some new mechanism.
+/// captured once, at forkCata's own call site).
+///
+/// TRIMMED (test-diet, coverage-overlap census): a leaf's ill-typed-first-
+/// attempt retry used to be scripted here too, but by this test's own doc
+/// comment the retry is "not some new mechanism" — forkCata's head-swapped
+/// call site retries exactly like a bare `runLLMTurnFanout` site, which
+/// `acceptance_fanout.rs` already exercises directly. Every leaf now answers
+/// validly on its first attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
     support::require_extract();
@@ -248,13 +139,11 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
         ),
         // 2. Leaf 0 (prompt \"0\", no children): verdict 1.
         reply("```haskell\nresume (1 :: Int)\n```"),
-        // 3. Leaf 1 (prompt \"0\"): DELIBERATELY ill-typed first attempt.
-        reply("```haskell\nresume \"nope\"\n```"),
-        // 4. Leaf 1, corrected.
-        reply("Right, an Int.\n\n```haskell\nresume (2 :: Int)\n```"),
-        // 5. Leaf 2 (prompt \"0\"): verdict 3.
+        // 3. Leaf 1 (prompt \"0\"): verdict 2.
+        reply("```haskell\nresume (2 :: Int)\n```"),
+        // 4. Leaf 2 (prompt \"0\"): verdict 3.
         reply("```haskell\nresume (3 :: Int)\n```"),
-        // 6. Root's own turn (prompt \"6\" — sum of the 3 leaf verdicts,
+        // 5. Root's own turn (prompt \"6\" — sum of the 3 leaf verdicts,
         //    visibly carrying them forward): verdict 16.
         reply("The children summed to 6.\n\n```haskell\nresume (16 :: Int)\n```"),
     ];
