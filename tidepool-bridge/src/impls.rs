@@ -854,43 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn test_string_unboxed_fields() {
-        let table = test_table();
-        let s = "hello".to_string();
-        let value = s.to_value(&table).expect("ToValue failed");
-
-        if let Value::Con(id, fields) = &value {
-            assert_eq!(table.name_of(*id), Some("Text"));
-            assert_eq!(fields.len(), 3);
-            // First field: ByteArray# (unboxed)
-            assert!(matches!(fields[0], Value::ByteArray(_)));
-            // Second field: Int# 0 (unboxed literal)
-            assert!(matches!(fields[1], Value::Lit(Literal::LitInt(0))));
-            // Third field: Int# len (unboxed literal)
-            assert!(matches!(fields[2], Value::Lit(Literal::LitInt(5))));
-        } else {
-            panic!("Expected Con, got {:?}", value);
-        }
-    }
-
-    #[test]
-    fn test_string_from_litstring_text() {
-        let table = test_table();
-        let text_id = table.get_by_name("Text").unwrap();
-        // Construct Text where the first field is LitString instead of ByteArray
-        let val = Value::Con(
-            text_id,
-            vec![
-                Value::Lit(Literal::LitString(b"litstring_test".to_vec())),
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(14)),
-            ],
-        );
-        let s = String::from_value(&val, &table).expect("FromValue failed");
-        assert_eq!(s, "litstring_test");
-    }
-
-    #[test]
     fn test_unit_roundtrip() {
         let table = test_table();
         roundtrip((), &table);

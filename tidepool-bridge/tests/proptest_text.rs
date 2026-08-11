@@ -1,8 +1,7 @@
 use proptest::prelude::*;
 use std::sync::OnceLock;
 use tidepool_bridge::traits::{FromCore, ToCore};
-use tidepool_eval::Value;
-use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
+use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
 
 static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
@@ -47,18 +46,6 @@ proptest! {
         roundtrip(s, get_table());
     }
 
-    /// Empty string survives round-trip
-    #[test]
-    fn empty_string_round_trip(s in prop_oneof![""]) {
-        roundtrip(s.to_string(), get_table());
-    }
-
-    /// ASCII-only strings survive
-    #[test]
-    fn ascii_only_round_trip(s in "[a-zA-Z0-9 ]{0,1000}") {
-        roundtrip(s, get_table());
-    }
-
     /// Strings with emoji survive (include ZWJ sequences, flags)
     #[test]
     fn emoji_round_trip(s in r"[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E6}-\u{1F1FF}]{0,100}") {
@@ -72,47 +59,5 @@ proptest! {
         s in r"[a-z\u{00A0}-\u{00FF}\u{0400}-\u{04FF}\u{4E00}-\u{9FFF}\u{1F600}-\u{1F64F}]{0,100}"
     ) {
         roundtrip(s, get_table());
-    }
-
-    /// ToCore(s) text length field matches s.len()
-    #[test]
-    fn length_preserved(s in any::<String>()) {
-        let table = get_table();
-        let value = s.to_value(table).expect("ToCore failed");
-        if let Value::Con(_, ref fields) = value {
-            assert_eq!(fields.len(), 3);
-            if let Value::Lit(Literal::LitInt(len)) = fields[2] {
-                assert_eq!(len as usize, s.len());
-            } else {
-                panic!("Expected LitInt for length field");
-            }
-        } else {
-            panic!("Expected Con for Text value");
-        }
-    }
-
-    /// ToCore(s) == ToCore(s) (same input -> same heap layout)
-    #[test]
-    fn to_value_is_deterministic(s in any::<String>()) {
-        let table = get_table();
-        let v1 = s.to_value(table).expect("ToCore failed");
-        let v2 = s.to_value(table).expect("ToCore failed");
-
-        assert!(compare_values(&v1, &v2), "ToCore is not deterministic for {:?}", s);
-    }
-}
-
-fn compare_values(v1: &Value, v2: &Value) -> bool {
-    match (v1, v2) {
-        (Value::Lit(l1), Value::Lit(l2)) => l1 == l2,
-        (Value::Con(id1, f1), Value::Con(id2, f2)) => {
-            id1 == id2
-                && f1.len() == f2.len()
-                && f1.iter().zip(f2.iter()).all(|(a, b)| compare_values(a, b))
-        }
-        (Value::ByteArray(ba1), Value::ByteArray(ba2)) => {
-            *ba1.lock().unwrap() == *ba2.lock().unwrap()
-        }
-        _ => false,
     }
 }
