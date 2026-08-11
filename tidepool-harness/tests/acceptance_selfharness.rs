@@ -70,15 +70,26 @@ fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedRe
     }
 }
 
-/// THREE render -> loop -> runLLMTurn @Decision -> finalize -> render
+/// TWO render -> loop -> runLLMTurn @Decision -> finalize -> render
 /// cycles, each `run_one_cycle` call threading the prior cycle's
 /// `state_json` into the next as `prior_state` — the exact shape
 /// `SelfHarnessDriver::run_loop`'s production loop uses, just bounded to
-/// three iterations instead of forever. Asserts `State` keeps accumulating
+/// two iterations instead of forever. Asserts `State` keeps accumulating
 /// across repeated loop boundaries: `loopCount` increments every cycle,
 /// `mode` advances `Observing -> Deciding -> Acting`, `lastDecision` tracks
 /// the latest replayed `Decision`, `notes` accumulates (most-recent-first),
 /// and each cycle's post-loop `render` reflects the new `State`.
+///
+/// TRIMMED (test-diet, coverage-overlap census) from three cycles to two:
+/// cycle 1 alone (`Observing -> Deciding`, decision "observe"/Medium) is a
+/// byte-for-byte duplicate of `selfharness_spine.rs`'s single-cycle
+/// assertions — it still RUNS here (its `state_json` seeds cycle 2 exactly
+/// like the production loop does), but the unique claim this test exists to
+/// pin — that `State` keeps accumulating across a SECOND loop boundary, not
+/// just one — begins at cycle 2. The former cycle 3 (`Acting -> Observing`,
+/// the mode enum wrapping back to its start) is a fact about the reference
+/// fixture's `nextMode` cycle length, not additional accumulation coverage,
+/// so it is dropped rather than trimmed down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     support::require_extract();
@@ -93,7 +104,6 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     let replies = vec![
         decision_reply("observe", "first loop", "Medium"),
         decision_reply("decide", "second loop", "High"),
-        decision_reply("act", "third loop", "Low"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let writer = tidepool_harness::log::LogWriter::create(
@@ -113,7 +123,6 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     let expected = [
         ("Deciding", 1i64, "observe", "Medium"),
         ("Acting", 2i64, "decide", "High"),
-        ("Observing", 3i64, "act", "Low"),
     ];
 
     let mut prior_state = None;
