@@ -146,8 +146,9 @@ Binds `127.0.0.1` only; reachability IS the authorization boundary — there is
 no auth token on the HTTP surface itself. Off-box access is via SSH
 port-forward or tailnet, not a password. There's no untrusted-input surface
 to defend against here the way the old observatory had to worry about
-model-supplied `Ui` content: form labels come from Haskell type metadata, and
-maud escapes text
+model-authored display content: a form is derived from a type's own metadata,
+never authored by a model, so every label the page renders traces back to a
+Haskell declaration — and maud escapes text
 content by construction — this crate doesn't need a separate injection-surface
 story.
 
