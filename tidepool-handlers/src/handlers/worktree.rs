@@ -361,62 +361,60 @@ mod tests {
     // values. Pure, testable today without touching any todo!().
     // -----------------------------------------------------------------
 
+    /// Every `WorktreeSource` variant crossed with a `DirtyPolicy` value —
+    /// pure, testable today without touching any `todo!()`.
     #[test]
-    fn spec_from_wire_round_trips_current_repository_require_clean() {
-        let wire = WtWorktreeSpec {
-            spec_source: WtWorktreeSource::SourceCurrentRepository,
-            spec_label: "dev-tree/root".to_string(),
-            spec_dirty_policy: WtDirtyPolicy::RequireClean,
-        };
-        let domain = spec_from_wire(wire).expect("valid wire spec");
-        assert_eq!(
-            domain,
-            WorktreeSpec {
-                source: WorktreeSource::CurrentRepository,
-                label: "dev-tree/root".to_string(),
-                dirty_policy: DirtyPolicy::RequireClean,
-            }
-        );
-    }
+    fn spec_from_wire_round_trips() {
+        let cases: Vec<(&str, WtWorktreeSpec, WorktreeSpec)> = vec![
+            (
+                "current_repository_require_clean",
+                WtWorktreeSpec {
+                    spec_source: WtWorktreeSource::SourceCurrentRepository,
+                    spec_label: "dev-tree/root".to_string(),
+                    spec_dirty_policy: WtDirtyPolicy::RequireClean,
+                },
+                WorktreeSpec {
+                    source: WorktreeSource::CurrentRepository,
+                    label: "dev-tree/root".to_string(),
+                    dirty_policy: DirtyPolicy::RequireClean,
+                },
+            ),
+            (
+                "ref_allow_dirty_snapshot",
+                WtWorktreeSpec {
+                    spec_source: WtWorktreeSource::SourceRef(WtGitRef {
+                        raw: "refs/heads/main".to_string(),
+                    }),
+                    spec_label: "reviewer".to_string(),
+                    spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
+                },
+                WorktreeSpec {
+                    source: WorktreeSource::Ref(GitRef::from_raw("refs/heads/main")),
+                    label: "reviewer".to_string(),
+                    dirty_policy: DirtyPolicy::AllowDirtySnapshot,
+                },
+            ),
+            (
+                "worktree_source",
+                WtWorktreeSpec {
+                    spec_source: WtWorktreeSource::SourceWorktree(WtWorktreeId {
+                        raw: "wt-abc123".to_string(),
+                    }),
+                    spec_label: "child-of-abc123".to_string(),
+                    spec_dirty_policy: WtDirtyPolicy::RequireClean,
+                },
+                WorktreeSpec {
+                    source: WorktreeSource::Worktree(WorktreeId::from_raw("wt-abc123")),
+                    label: "child-of-abc123".to_string(),
+                    dirty_policy: DirtyPolicy::RequireClean,
+                },
+            ),
+        ];
 
-    #[test]
-    fn spec_from_wire_round_trips_ref_allow_dirty_snapshot() {
-        let wire = WtWorktreeSpec {
-            spec_source: WtWorktreeSource::SourceRef(WtGitRef {
-                raw: "refs/heads/main".to_string(),
-            }),
-            spec_label: "reviewer".to_string(),
-            spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
-        };
-        let domain = spec_from_wire(wire).expect("valid wire spec");
-        assert_eq!(
-            domain,
-            WorktreeSpec {
-                source: WorktreeSource::Ref(GitRef::from_raw("refs/heads/main")),
-                label: "reviewer".to_string(),
-                dirty_policy: DirtyPolicy::AllowDirtySnapshot,
-            }
-        );
-    }
-
-    #[test]
-    fn spec_from_wire_round_trips_worktree_source() {
-        let wire = WtWorktreeSpec {
-            spec_source: WtWorktreeSource::SourceWorktree(WtWorktreeId {
-                raw: "wt-abc123".to_string(),
-            }),
-            spec_label: "child-of-abc123".to_string(),
-            spec_dirty_policy: WtDirtyPolicy::RequireClean,
-        };
-        let domain = spec_from_wire(wire).expect("valid wire spec");
-        assert_eq!(
-            domain,
-            WorktreeSpec {
-                source: WorktreeSource::Worktree(WorktreeId::from_raw("wt-abc123")),
-                label: "child-of-abc123".to_string(),
-                dirty_policy: DirtyPolicy::RequireClean,
-            }
-        );
+        for (label, wire, expected) in cases {
+            let domain = spec_from_wire(wire).expect("valid wire spec");
+            assert_eq!(domain, expected, "case: {label}");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -493,139 +491,104 @@ mod tests {
     // variant and its payload.
     // -----------------------------------------------------------------
 
+    /// One row per `DomainWorktreeError` variant. `error_to_wire`'s own
+    /// match (worktree.rs) has no wildcard arm, so a new domain variant
+    /// fails THAT compile first — same exhaustiveness discipline as
+    /// agent.rs's `handler_stage_to_wire_covers_every_stage`; this table
+    /// just needs to stay in sync with it.
     #[test]
-    fn error_to_wire_source_dirty() {
-        let wire = error_to_wire(DomainWorktreeError::SourceDirty(sample_dirty_summary()));
-        assert_eq!(
-            wire,
-            WorktreeError::SourceDirty(WtDirtySummary {
-                staged: vec!["a.txt".to_string()],
-                unstaged: vec!["b.txt".to_string()],
-                untracked: vec!["c.txt".to_string()],
-                ignored_excluded: 3,
-            })
-        );
-    }
-
-    #[test]
-    fn error_to_wire_not_a_repository() {
-        let wire = error_to_wire(DomainWorktreeError::NotARepository(PathBuf::from(
-            "/not/a/repo",
-        )));
-        assert_eq!(
-            wire,
-            WorktreeError::NotARepository("/not/a/repo".to_string())
-        );
-    }
-
-    #[test]
-    fn error_to_wire_worktree_lost() {
-        let wire = error_to_wire(DomainWorktreeError::WorktreeLost(WorktreeId::from_raw(
-            "wt-9",
-        )));
-        assert_eq!(
-            wire,
-            WorktreeError::WorktreeLost(WtWorktreeId {
-                raw: "wt-9".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn error_to_wire_dirty_submodule_unsupported() {
-        let wire = error_to_wire(DomainWorktreeError::DirtySubmoduleUnsupported(
-            PathBuf::from("vendor/sub"),
-        ));
-        assert_eq!(
-            wire,
-            WorktreeError::DirtySubmoduleUnsupported("vendor/sub".to_string())
-        );
-    }
-
-    #[test]
-    fn error_to_wire_source_operation_in_progress() {
-        let wire = error_to_wire(DomainWorktreeError::SourceOperationInProgress(
-            InProgressKind::Rebase,
-        ));
-        assert_eq!(
-            wire,
-            WorktreeError::SourceOperationInProgress(WtInProgressKind::InProgressRebase)
-        );
-    }
-
-    #[test]
-    fn error_to_wire_worktree_busy() {
-        let wire = error_to_wire(DomainWorktreeError::WorktreeBusy {
-            worktree: WorktreeId::from_raw("wt-2"),
-            holder: "agent-7".to_string(),
-        });
-        assert_eq!(
-            wire,
-            WorktreeError::WorktreeBusy(
-                WtWorktreeId {
-                    raw: "wt-2".to_string()
+    fn error_to_wire_covers_every_variant() {
+        let cases: Vec<(&str, DomainWorktreeError, WorktreeError)> = vec![
+            (
+                "source_dirty",
+                DomainWorktreeError::SourceDirty(sample_dirty_summary()),
+                WorktreeError::SourceDirty(WtDirtySummary {
+                    staged: vec!["a.txt".to_string()],
+                    unstaged: vec!["b.txt".to_string()],
+                    untracked: vec!["c.txt".to_string()],
+                    ignored_excluded: 3,
+                }),
+            ),
+            (
+                "not_a_repository",
+                DomainWorktreeError::NotARepository(PathBuf::from("/not/a/repo")),
+                WorktreeError::NotARepository("/not/a/repo".to_string()),
+            ),
+            (
+                "worktree_lost",
+                DomainWorktreeError::WorktreeLost(WorktreeId::from_raw("wt-9")),
+                WorktreeError::WorktreeLost(WtWorktreeId {
+                    raw: "wt-9".to_string(),
+                }),
+            ),
+            (
+                "dirty_submodule_unsupported",
+                DomainWorktreeError::DirtySubmoduleUnsupported(PathBuf::from("vendor/sub")),
+                WorktreeError::DirtySubmoduleUnsupported("vendor/sub".to_string()),
+            ),
+            (
+                "source_operation_in_progress",
+                DomainWorktreeError::SourceOperationInProgress(InProgressKind::Rebase),
+                WorktreeError::SourceOperationInProgress(WtInProgressKind::InProgressRebase),
+            ),
+            (
+                "worktree_busy",
+                DomainWorktreeError::WorktreeBusy {
+                    worktree: WorktreeId::from_raw("wt-2"),
+                    holder: "agent-7".to_string(),
                 },
-                "agent-7".to_string()
-            )
-        );
-    }
+                WorktreeError::WorktreeBusy(
+                    WtWorktreeId {
+                        raw: "wt-2".to_string(),
+                    },
+                    "agent-7".to_string(),
+                ),
+            ),
+            (
+                "git_failure",
+                DomainWorktreeError::GitFailure(sample_git_failure_receipt()),
+                WorktreeError::GitFailure(WtGitFailureReceipt {
+                    git_args: vec!["status".to_string()],
+                    git_cwd: "/repo".to_string(),
+                    git_exit_code: Some(128),
+                    git_stdout: String::new(),
+                    git_stderr: "fatal: not a git repository".to_string(),
+                }),
+            ),
+            (
+                "worktree_not_registered",
+                DomainWorktreeError::WorktreeNotRegistered(WorktreeId::from_raw("wt-typo")),
+                WorktreeError::WorktreeNotRegistered(WtWorktreeId {
+                    raw: "wt-typo".to_string(),
+                }),
+            ),
+            (
+                "invalid_registry_root",
+                DomainWorktreeError::InvalidRegistryRoot {
+                    root: PathBuf::from("/repo/.tidepool-registry"),
+                    inside: PathBuf::from("/repo"),
+                },
+                WorktreeError::InvalidRegistryRoot(
+                    "/repo/.tidepool-registry".to_string(),
+                    "/repo".to_string(),
+                ),
+            ),
+            (
+                "storage_failure",
+                DomainWorktreeError::StorageFailure {
+                    path: PathBuf::from("/registry/wt-1.json"),
+                    detail: "No space left on device".to_string(),
+                },
+                WorktreeError::StorageFailure(
+                    "/registry/wt-1.json".to_string(),
+                    "No space left on device".to_string(),
+                ),
+            ),
+        ];
 
-    #[test]
-    fn error_to_wire_git_failure() {
-        let wire = error_to_wire(DomainWorktreeError::GitFailure(sample_git_failure_receipt()));
-        assert_eq!(
-            wire,
-            WorktreeError::GitFailure(WtGitFailureReceipt {
-                git_args: vec!["status".to_string()],
-                git_cwd: "/repo".to_string(),
-                git_exit_code: Some(128),
-                git_stdout: String::new(),
-                git_stderr: "fatal: not a git repository".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn error_to_wire_worktree_not_registered() {
-        let wire = error_to_wire(DomainWorktreeError::WorktreeNotRegistered(
-            WorktreeId::from_raw("wt-typo"),
-        ));
-        assert_eq!(
-            wire,
-            WorktreeError::WorktreeNotRegistered(WtWorktreeId {
-                raw: "wt-typo".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn error_to_wire_invalid_registry_root() {
-        let wire = error_to_wire(DomainWorktreeError::InvalidRegistryRoot {
-            root: PathBuf::from("/repo/.tidepool-registry"),
-            inside: PathBuf::from("/repo"),
-        });
-        assert_eq!(
-            wire,
-            WorktreeError::InvalidRegistryRoot(
-                "/repo/.tidepool-registry".to_string(),
-                "/repo".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn error_to_wire_storage_failure() {
-        let wire = error_to_wire(DomainWorktreeError::StorageFailure {
-            path: PathBuf::from("/registry/wt-1.json"),
-            detail: "No space left on device".to_string(),
-        });
-        assert_eq!(
-            wire,
-            WorktreeError::StorageFailure(
-                "/registry/wt-1.json".to_string(),
-                "No space left on device".to_string()
-            )
-        );
+        for (label, domain, expected) in cases {
+            assert_eq!(error_to_wire(domain), expected, "case: {label}");
+        }
     }
 
     #[test]
