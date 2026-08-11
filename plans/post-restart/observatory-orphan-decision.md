@@ -1,3 +1,13 @@
+**EXECUTED 2026-08-11** (`root.observatory-retire`, commit `ccaaea52`) — the
+cut in this doc landed once already, at `1b44f1b7`. Every symbol below except
+`first_operator_hole` was still gone at this HEAD. `first_operator_hole` had
+been reintroduced with zero callers by an intervening merge (`6619e643`, same
+day as the original cut — a rebase artifact, not a deliberate restoration);
+`ccaaea52` deletes it again. `HeapSummary`/`heap_stats` were also restored
+after the original cut, but deliberately: `b6180c16` found a real caller
+(`tests/acceptance_lazy_boot.rs`) and kept them per this doc's own "if a
+consumer emerges, check before cutting" caveat — that restoration stands.
+
 # Decision: retire the observatory-orphan API cluster
 
 Queued architectural call from `plans/post-restart/README.md` and this lane's
