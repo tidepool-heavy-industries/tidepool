@@ -108,24 +108,24 @@ families:
   already cascaded in it returns poison immediately, and a lazy poison-closure
   scrutinee is triggered to set the error flag.
 
-  The `AddrKind`/`ArrayKind` family did NOT cover every escape: `unbox_addr`'s
-  `SsaVal::Raw(v, tag)` branch trusts its *static* literal tag unconditionally
-  (a compile-time label, not a runtime check on `v`) — correct for `unbox_addr`
-  itself, since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
-  `minusAddr#`) must be free to hold a null/out-of-range address without
-  tripping a trap. But the class of `Addr#`-consuming primop that never calls a
-  host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`, `WriteWord8OffAddr`,
-  `IndexAddrOffAddr`, `IndexInt8OffAddr`, `IndexWord32OffAddr`,
-  `IndexWideCharOffAddr`, `WriteWideCharOffAddr`) dereferenced that raw
-  pointer directly via a Cranelift `load`/`store` with `MemFlags::trusted()`,
-  with nothing between a bad address and the memory access — an uncaught
-  SIGSEGV, not the clean `RuntimeError` every other fault here surfaces.
-  `emit_addr_deref_guard` (`src/emit/primop.rs`, found by code audit, not tied
-  to any specific reported crash) closes this: a runtime null/low-address
-  check immediately before each of those sites' load/store, reusing
-  `ShapeTrapKind::AddrKind`. Pinned by `tests/addr_deref_unbox_hardening.rs`
-  (A/B'd: a real SIGSEGV pre-fix, via `IndexAddrArray` reading a legitimately
-  zero-filled `ByteArray#` slot as an address).
+  **`unbox_addr` does not guard the address itself, so raw dereferences need
+  their own check.** Its `SsaVal::Raw(v, tag)` branch trusts a *static*
+  literal tag (a compile-time label, not a runtime check on `v`) — correct
+  there, since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
+  `minusAddr#`) must be free to hold a null or out-of-range address without
+  tripping a trap. The hazard is the class of `Addr#`-consuming primop that
+  never calls a host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`,
+  `WriteWord8OffAddr`, `IndexAddrOffAddr`, `IndexInt8OffAddr`,
+  `IndexWord32OffAddr`, `IndexWideCharOffAddr`, `WriteWideCharOffAddr`): those
+  dereference the raw pointer through a Cranelift `load`/`store` with
+  `MemFlags::trusted()`, so a bad address is an uncaught SIGSEGV rather than
+  the clean `RuntimeError` every other fault here surfaces.
+  `emit_addr_deref_guard` (`src/emit/primop.rs`) closes it with a runtime
+  null/low-address check immediately before each of those load/stores,
+  reusing `ShapeTrapKind::AddrKind`. **A new `Addr#`-dereferencing primop must
+  call it.** Pinned by `tests/addr_deref_unbox_hardening.rs` (A/B'd against a
+  real SIGSEGV: `IndexAddrArray` reading a zero-filled `ByteArray#` slot as an
+  address).
 
 - **Runtime domain errors** (division by zero, `Prelude.chr: bad argument`) →
   the `runtime_error`/`runtime_error_with_msg` machinery, same as a Haskell
@@ -154,10 +154,10 @@ language-level error reaches a signal.) Two variants are NOT emitted:
 `pop == TagToEnumOp` guard; ~L1796),
 so that half is an unreachable backstop. `SeqOp` is a real differential gap —
 handled by the eval oracle (`tidepool-eval/src/eval.rs:1546`) but NOT the JIT.
-The proptest generator (`tidepool-testing`) does not currently emit `SeqOp`
-(checked 2026-07-07, re-verified 2026-08-08: zero SeqOp references in tidepool-testing/src), so this gap is not exercised today; if the generator is
-extended to cover it, either implement `SeqOp` in the JIT or exclude it from
-generation explicitly.
+It is latent rather than firing only because the proptest generator
+(`tidepool-testing`) emits no `SeqOp`; **extending the generator to cover it
+means either implementing `SeqOp` in the JIT or excluding it from generation
+explicitly.**
 
 The boxed-array primops (`IndexArray`/`ReadArray`/`IndexSmallArray`/etc.) are
 the same status class as `SeqOp`: JIT-real (`emit/primop.rs` implements them)

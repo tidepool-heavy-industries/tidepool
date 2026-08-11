@@ -7,23 +7,25 @@ observing HEAD movement, journalling what was observed. No effects, no JIT, no
 Haskell, no agents — that separation is what lets every behaviour be tested
 against a real temporary repository.
 
-See the root `CLAUDE.md` for the project map and
-`plans/post-restart/worktree-lanes/README.md` for the lane split.
+See the root `CLAUDE.md` for the project map.
 
 ## Module map
 
-| Module | Owns | Lane |
-|---|---|---|
-| `id.rs` | opaque newtypes (`WorktreeId`, `EventId`, `GitOid`, `BranchName`, `GitRef`, `SubscriptionId`) | scaffold (frozen) |
-| `error.rs` | `WorktreeError` + `DirtySummary` + `GitFailureReceipt` | scaffold (frozen) |
-| `git.rs` | the ONLY `git` subprocess call site + `inspect::` helpers | scaffold (frozen) |
-| `registry.rs` | durable `WorktreeReceipt` storage, restart lookup | L1 |
-| `create.rs` | `WorktreeSpec`/`WorktreeManager` — creation, lookup, listing | L1 (+ L2 for the dirty path) |
-| `binding.rs` | one worktree, one agent — the binding state machine | L1 |
-| `snapshot.rs` | temp-index synthetic commit + the untouched-source proof | L2 |
-| `monitor.rs` | poll/reconcile, coalesced deltas, honest classification | L3 |
-| `journal.rs` | durable append-only event journal (no replay) | L3 |
-| `testing.rs` | `ScriptedWriter` — drives a real temp repo with plain git commands, standing in for a coding agent | testing |
+The three **frozen** modules are the shared vocabulary every other module is
+written against; changing one is a cross-cutting change, not a local edit.
+
+| Module | Owns |
+|---|---|
+| `id.rs` | **frozen** — opaque newtypes (`WorktreeId`, `EventId`, `GitOid`, `BranchName`, `GitRef`, `SubscriptionId`) |
+| `error.rs` | **frozen** — `WorktreeError` + `DirtySummary` + `GitFailureReceipt` |
+| `git.rs` | **frozen** — the ONLY `git` subprocess call site + `inspect::` helpers |
+| `registry.rs` | durable `WorktreeReceipt` storage, restart lookup |
+| `create.rs` | `WorktreeSpec`/`WorktreeManager` — creation, lookup, listing (incl. the dirty path) |
+| `binding.rs` | one worktree, one agent — the binding state machine |
+| `snapshot.rs` | temp-index synthetic commit + the untouched-source proof |
+| `monitor.rs` | poll/reconcile, coalesced deltas, honest classification |
+| `journal.rs` | durable append-only event journal (no replay) |
+| `testing.rs` | `ScriptedWriter` — drives a real temp repo with plain git commands, standing in for a coding agent |
 
 ## Rules that are not negotiable here
 

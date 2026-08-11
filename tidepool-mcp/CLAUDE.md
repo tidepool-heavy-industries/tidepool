@@ -39,8 +39,7 @@ in `Tidepool.Shell`/`Tidepool.Cargo`). That one edit is picked up by both the
 stmt/eval plane (`preamble::pragmas_and_imports`) and the decl plane
 (`preamble::session_decl_module_env`) automatically — both fold over
 `EffectDecl::extra_imports` the same way, so there is no second gate to keep
-in sync by hand (the two used to be hand-mirrored `type_name == "..."`
-checks that drifted — friction #23).
+in sync by hand.
 
 ## On-disk paths & config (`tidepool_runtime::paths`)
 

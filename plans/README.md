@@ -46,9 +46,8 @@ forward-facing design documents; no chronology is implied by their numbers.
 
 ## Reference
 
-- [Decision archive](decision-archive/README.md): doc-history asides
-  extracted out of `CLAUDE.md` files (root + per-crate) during the
-  2026-08-08 restructure, so those files stay working guides instead of
-  accumulating backstory. Current architecture contracts are NOT here —
-  they stay in each `CLAUDE.md` (root's Key Decisions Reference is
-  authoritative and verbatim).
+- [Decision archive](decision-archive/README.md): the narrow exception to
+  "inline doc-history is deleted, git is the store" — backstory whose loss
+  would invite re-tripping a hazard already fixed once. Current architecture
+  contracts are NOT here; they stay in each `CLAUDE.md` (root's Key Decisions
+  Reference is authoritative and verbatim).

@@ -27,7 +27,7 @@ One module per effect under `src/handlers/`:
 - `src/handlers/time.rs` — `TimeReq`/`TimeHandler`
 - `src/handlers/meta.rs` — `MetaReq`/`MetaHandler` (debug path only)
 - `src/handlers/event.rs` — repository-event subscribe/drain/unsubscribe over
-  `tidepool_worktree::EventJournal` (PRD 19 lane L4); not in the `base_effects!`
+  `tidepool_worktree::EventJournal` (PRD 19); not in the `base_effects!`
   default row
 - `src/handlers/worktree.rs` — `WorktreeReq`/`WorktreeHandler` over
   `tidepool_worktree::create`/`registry`/`git` (PRD 19); also not in the
@@ -35,9 +35,8 @@ One module per effect under `src/handlers/`:
 
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
 `build_base_stack`, `build_minimal_stack`, `base_decls_with_ask`) and
-re-exports everything via `pub use handlers::*;` — the external surface is
-unchanged from the single-file era (consumers import `tidepool_handlers::FsHandler`
-etc. exactly as before). Each module carries its own `#[cfg(test)] mod tests`;
+re-exports everything via `pub use handlers::*;`, so the external surface is
+flat (`tidepool_handlers::FsHandler`). Each module carries its own `#[cfg(test)] mod tests`;
 shared test helpers (`full_effect_test_table`, `jit_eval`, `response_value`, …)
 live in `src/test_support.rs` (`pub(crate)`, test builds only).
 

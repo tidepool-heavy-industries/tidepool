@@ -37,8 +37,8 @@ start_turn ──► ToolCall ──► (the parent's Haskell handler runs) ─�
        └────► Completed                                              └────► Completed
 ```
 
-**Why it is shaped this way, and why it replaced the lane-1 trait rather than
-widening it.** A tool call has to be answered by the PARENT's handler, and a
+**Why it is a step function.** A tool call has to be answered by the
+PARENT's handler, and a
 parent handler is authored Haskell (`Tidepool.Agent.Contract`'s `Tool` carries
 `handler :: input -> m output`). No Rust closure can run one:
 `EffectHandler::handle` has no machine handle, the machine is already
