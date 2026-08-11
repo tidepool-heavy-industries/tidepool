@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use tidepool_bridge_effects::{GitCommit, GitFileDelta, GitStatusEntry};
 
 // ============================================================================
-// Tag 8: Git (read-only repository queries)
+// Tag 7: Git (read-only repository queries)
 // ============================================================================
 
 // GitReq + DescribeEffect + EffectHandler dispatch are generated from the
