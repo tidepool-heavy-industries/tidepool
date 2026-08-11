@@ -330,7 +330,7 @@ fn eval_lam_leaf(expr: &CoreExpr, idx: usize, env: &Env) -> Value {
 /// nested Rust recursion, mirroring an actual Haskell function call or the
 /// join trampoline's own re-entry, bounded by program logic rather than by
 /// this walker's per-node overhead. Converting those would fight the
-/// documented trampoline design instead of fixing gotcha #5.
+/// documented trampoline design.
 enum Frame {
     /// `App`: still need `arg`'s value (under the App's own `env`) before
     /// applying; produced once `fun` is evaluated and forced.
