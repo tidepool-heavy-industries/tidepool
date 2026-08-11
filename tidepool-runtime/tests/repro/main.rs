@@ -1,5 +1,5 @@
-//! Consolidated `repro` theme binary: historical minimal-repro regression
-//! guards, merged from separate top-level test binaries into one.
+//! Consolidated `repro` theme binary: minimal-repro regression guards for
+//! historical bugs.
 mod lazy_minimal_repro;
 mod nubby_stack_overflow;
 mod repro313;

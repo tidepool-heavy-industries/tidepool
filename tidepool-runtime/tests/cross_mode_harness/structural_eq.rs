@@ -57,9 +57,7 @@ fn check_node(
             // match it. Otherwise this is a free reference (typically a
             // top-level binder visible in both compilations) and we record
             // the pairing so subsequent occurrences of `s_v` are checked
-            // for consistency. Without this insert, the original code
-            // accepted *any* `p_v` for a previously-unseen `s_v`, which
-            // would mask real divergences on free references.
+            // for consistency.
             match var_map.get(s_v) {
                 Some(&expected_p) => {
                     if expected_p != *p_v {

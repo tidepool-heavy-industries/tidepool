@@ -58,8 +58,7 @@ fn test_numeric_nan() {
 #[test]
 fn test_unicode_length() {
     // "héllo" is 5 CHARACTERS (6 bytes in UTF-8) — length is character count,
-    // matching base/text. The byte-count behavior this test once pinned was
-    // the plan-02 H1 literal-decode bug.
+    // matching base/text.
     let json = run_plain("len \"héllo\"");
     assert_eq!(json, serde_json::json!(5));
 }

@@ -65,7 +65,7 @@ result = do
     )
 }
 
-// === Bug repro tests (expected to FAIL until fix) ===
+// === Bug repro tests ===
 
 #[test]
 fn test_foldl_over_effect_returned_list() {

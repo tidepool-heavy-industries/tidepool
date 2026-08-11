@@ -54,9 +54,6 @@ fn checks_pure(body: &str) -> serde_json::Value {
 // overflow/ratio-error throw) — the error-deferral check did not recognise a
 // `PrimOp Raise` RHS, so the strict spine threw it regardless of control flow.
 // Fix: the error-call walkers also treat `raise#` as a bottoming, deferred RHS.
-//
-// Absorbed: big_double_e308, big_double_max_finite, big_double_neg_exp,
-// from_integral_to_double.
 #[test]
 fn double_literal_and_fromintegral_family() {
     let v = checks_pure(
@@ -77,8 +74,6 @@ fn double_literal_and_fromintegral_family() {
     assert_eq!(v, json!([]), "failed checks: {v}");
 }
 
-// Absorbed: diag_computed_pos, diag_computed_t64, diag_literal_ip,
-// diag_computed_eq_literal, big_integer_literal, pow_2_100.
 #[test]
 fn integer_literal_and_dispatch_family() {
     let v = checks_pure(
@@ -100,7 +95,6 @@ fn integer_literal_and_dispatch_family() {
     assert_eq!(v, json!([]), "failed checks: {v}");
 }
 
-// Absorbed: factorial_30, big_div, big_mod, big_gcd, read_int.
 #[test]
 fn integer_multilimb_ops_and_read_family() {
     let v = checks_pure(

@@ -92,9 +92,9 @@ fn eval_result(body: &str) -> Option<serde_json::Value> {
 /// (`askUser @T` ships this exact JSON) and a deliberate avoidance: batching
 /// many encoded shape literals into one module trips a live codegen defect on
 /// this branch — the `runtime_strlen: bad pointer 0x0` / `TypeMetadata`
-/// class that `generic_form_roundtrip::derived_sum_shape_equals_its_literal`
-/// tracks. It is aggregation-sensitive, not encoding-sensitive: each
-/// comparison passes alone, and the production path is green. Keeping each
+/// class described below. It is aggregation-sensitive, not encoding-
+/// sensitive: each comparison passes alone, and the production path is
+/// green. Keeping each
 /// assertion to ONE crossed `Value` sidesteps it without weakening anything —
 /// these are still the documented JSON literals, matched structurally.
 #[test]
@@ -173,10 +173,10 @@ result = encodeShape
 // Measured on this branch (2026-08-09): a ONE-variant literal sum is green,
 // a literal product with two and with six fields is green, and the same
 // multi-variant sum DERIVED via `formShape @T` is green. That inverts the
-// isolation recorded for `generic_form_roundtrip::derived_sum_shape_equals_its_literal`
-// ("literal-vs-literal sums are fine") — the sum LITERAL is the trigger, and
-// `==` is not required to reach it. Same defect class, escalated with this
-// repro; nothing here works around it beyond not building that literal.
+// prior isolation ("literal-vs-literal sums are fine") — the sum LITERAL is
+// the trigger, and `==` is not required to reach it. Same defect class,
+// escalated with this repro; nothing here works around it beyond not
+// building that literal.
 
 /// The two halves tied together: a shape DERIVED from a type — no value of
 /// it exists — encoded and handed ACROSS the boundary as JSON, which is
@@ -188,9 +188,7 @@ result = encodeShape
 /// it exercises the real crossing (`value_to_json` over the encoded
 /// `Value`), and Haskell `==` between a DERIVED SUM and a literal is a live
 /// codegen defect on this branch (`runtime_strlen` bad pointer /
-/// `[CASE TRAP]`, tracked by
-/// `generic_form_roundtrip::derived_sum_shape_equals_its_literal`) that has
-/// nothing to do with the encoding under test here.
+/// `[CASE TRAP]`) that has nothing to do with the encoding under test here.
 #[test]
 fn derived_shape_crosses_the_wire_as_documented_json() {
     let Some(v) = eval_result("result :: Value\nresult = encodeShape (formShape @DeployRequest)\n")

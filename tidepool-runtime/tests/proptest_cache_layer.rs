@@ -19,16 +19,8 @@
 //! Convention: non-`#[ignore]` tests assert *current* behavior and keep the
 //! suite green. A confirmed-but-unfixed bug keeps an `#[ignore = "BUG: ..."]`
 //! twin asserting the *correct* behavior (run with `--ignored` to see it
-//! fail). FIXED 2026-06-11: F1a/F1b (length-framed key fields), F2 (include
-//! order preserved), F3a (binary content hash, memoized), F3b/F4 (.hs content
-//! hash through symlinks), F5 (quoted exec targets). FIXED 2026-07-06: F6
-//! (payload integrity — the `.ok` sentinel now carries blake3(expr) ||
-//! blake3(meta), so a bit-flip that still decodes as plausible CBOR fails the
-//! checksum and MISSes instead of being served). All fixed findings' twins
-//! are now the ACTIVE regression tests and the old buggy-behavior pins are
-//! deleted.
-//!
-//! Findings table: `plans/proptest-findings-cache.md`.
+//! fail). All fixed findings' twins are now the ACTIVE regression tests and
+//! the old buggy-behavior pins are deleted.
 
 #![cfg(unix)]
 
@@ -826,7 +818,7 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
 }
 
 // ---------------------------------------------------------------------------
-// F7 / repo-review-2026-07-06 plan 03 cache edge: symlink cycle in an include dir
+// F7: symlink cycle in an include dir
 // ---------------------------------------------------------------------------
 
 /// `fingerprint_dir` recurses via `path.is_dir()`, which follows symlinks, so

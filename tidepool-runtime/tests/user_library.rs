@@ -117,7 +117,7 @@ fn test_until() {
 
 #[test]
 fn test_apo_m() {
-    // apoM: unfold counting up, bail with precomputed tail at 3
+    // apo: unfold counting up, bail with precomputed tail at 3
     let r = run_expr(
         r#"let go n = if n >= 3 then Left [99, 100 :: Int] else Right (n, n+1) in apo go (0 :: Int)"#,
     );
@@ -235,8 +235,7 @@ fn test_fold_early() {
 
 #[test]
 fn test_retry_pure() {
-    // retry over Maybe: succeed on 3rd try (simulated via list consumption)
-    // We'll use a simpler test: retry with always-Nothing gives Nothing
+    // retry over Maybe: retry with always-Nothing gives Nothing
     let r = run_expr(r#"retry 5 (Just (Nothing :: Maybe Int))"#);
     assert_eq!(r, serde_json::json!(null));
 }
