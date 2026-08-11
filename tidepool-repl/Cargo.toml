@@ -42,3 +42,4 @@ clap.workspace = true
 tempfile.workspace = true
 tidepool-testing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
+tidepool-extract-cmd.workspace = true

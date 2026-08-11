@@ -3963,6 +3963,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-repr",
