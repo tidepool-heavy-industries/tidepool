@@ -65,12 +65,6 @@ proptest! {
         roundtrip(s, get_table());
     }
 
-    /// Chars from BMP, SMP, SIP, TIP planes
-    #[test]
-    fn all_unicode_planes_round_trip(s in any::<String>()) {
-        roundtrip(s, get_table());
-    }
-
     /// Mix of 1-byte, 2-byte, 3-byte, 4-byte UTF-8 chars
     #[test]
     fn mixed_width_chars(

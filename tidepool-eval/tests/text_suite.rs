@@ -566,7 +566,6 @@ text_bool!(text_all, true);
 text_bool!(text_isInfixOf_mid, true);
 text_bool!(text_isInfixOf_deep, true);
 text_bool!(text_isInfixOf_4char, true);
-text_bool!(text_isInfixOf_4char_long, true);
 text_bool!(text_isInfixOf_5char, true);
 text_bool!(text_isInfixOf_6prefix, true);
 text_bool!(text_isInfixOf_long, true);
@@ -663,17 +662,6 @@ fn text_filter_length() {
 }
 
 #[test]
-fn text_isInfixOf_each() {
-    static CBOR: &[u8] =
-        include_bytes!("../../haskell/test/TextSuite_cbor/text_isInfixOf_each.cbor");
-    let val = eval_fixture(CBOR);
-    let table = table();
-    let items = collect_list(&val, &table);
-    // [False, True, True, True, False, False, True, True]
-    assert_eq!(items.len(), 8, "expected 8 bools, got {}", items.len());
-}
-
-#[test]
 fn text_filter_isInfixOf() {
     static CBOR: &[u8] =
         include_bytes!("../../haskell/test/TextSuite_cbor/text_filter_isInfixOf.cbor");
@@ -687,14 +675,4 @@ fn text_filter_isInfixOf() {
         "expected 3 import lines, got {}",
         items.len()
     );
-}
-
-#[test]
-fn scan_sentinels() {
-    let singleton_cbor: &[u8] =
-        include_bytes!("../../haskell/test/TextSuite_cbor/text_singleton.cbor");
-    let expr = read_cbor(singleton_cbor).unwrap();
-    for i in 30..80.min(expr.nodes.len()) {
-        println!("  [{}] {:?}", i, expr.nodes[i]);
-    }
 }

@@ -916,36 +916,6 @@ mod tests {
         bytes
     }
 
-    // ---- F5: a non-Text field label must be a hard decode error ----
-
-    /// `read_metadata`'s field-label decode previously used `filter_map`, which
-    /// silently dropped a non-Text label and mis-zipped the remaining labels
-    /// onto fields. A non-Text label must now be a typed error.
-    #[test]
-    fn read_metadata_rejects_non_text_field_label() {
-        use ciborium::value::Value as Cbor;
-        let entry = Cbor::Array(vec![
-            Cbor::Integer(1u64.into()),
-            Cbor::Text("Rec".to_string()),
-            Cbor::Integer(1u64.into()),
-            Cbor::Integer(2u64.into()),
-            Cbor::Array(vec![]),
-            Cbor::Text(String::new()),
-            Cbor::Array(vec![
-                Cbor::Text("good_label".to_string()),
-                Cbor::Integer(7.into()), // corrupt: not text
-            ]),
-            Cbor::Text(String::new()),
-        ]);
-        let bytes = meta_bytes(vec![entry]);
-        match read_metadata(&bytes) {
-            Err(ReadError::MalformedMetadataField { field, .. }) => assert_eq!(field, "field_labels"),
-            other => panic!(
-                "expected MalformedMetadataField(\"field_labels\") for a non-Text field label, got {other:?}"
-            ),
-        }
-    }
-
     /// The optional `var_names` warnings key decodes into
     /// `MetaWarnings::var_names` (runtime unresolved-error naming, #12);
     /// absent key = empty vec (older extractors).

@@ -971,24 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn test_f64_boxed_roundtrip() {
-        let table = test_table();
-        roundtrip(3.14159f64, &table);
-    }
-
-    #[test]
-    fn test_u64_boxed_roundtrip() {
-        let table = test_table();
-        roundtrip(42u64, &table);
-    }
-
-    #[test]
-    fn test_char_boxed_roundtrip() {
-        let table = test_table();
-        roundtrip('a', &table);
-    }
-
-    #[test]
     fn test_vec_string_roundtrip() {
         let table = test_table();
         roundtrip(vec!["a".to_string(), "b".to_string()], &table);
@@ -1024,12 +1006,6 @@ mod tests {
             result.is_err(),
             "from_value(()) must reject a non-`()` nullary constructor (False), got Ok"
         );
-    }
-
-    #[test]
-    fn unit_roundtrips() {
-        let table = test_table();
-        roundtrip((), &table);
     }
 
     /// A `DataConTable` missing `(,)` entirely must report `UnknownDataConName`

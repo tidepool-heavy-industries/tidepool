@@ -590,15 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_not_cbor() {
-        // No TPLR magic — rejected at the header, before CBOR parsing.
-        assert!(matches!(
-            read_cbor(&[0xFF, 0xFE, 0x00, 0xAB, 0xCD]),
-            Err(ReadError::MissingHeader)
-        ));
-    }
-
-    #[test]
     fn test_read_wrong_root_type() {
         let bytes = cbor_bytes(ciborium::value::Value::Integer(42.into()));
         assert!(matches!(

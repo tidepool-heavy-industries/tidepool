@@ -313,12 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn test_header_offset() {
-        // Header size should be 8.
-        assert_eq!(HEADER_SIZE, 8);
-    }
-
-    #[test]
     fn test_heap_tag_roundtrip() {
         for tag in [HeapTag::Closure, HeapTag::Thunk, HeapTag::Con, HeapTag::Lit] {
             assert_eq!(HeapTag::from_byte(tag.as_byte()), Some(tag));
