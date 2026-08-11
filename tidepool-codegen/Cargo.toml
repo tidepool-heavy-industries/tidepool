@@ -15,7 +15,6 @@ cranelift-frontend = "=0.129.1"
 cranelift-jit = "=0.129.1"
 cranelift-module = "=0.129.1"
 cranelift-native = "=0.129.1"
-target-lexicon = "0.13"
 tidepool-repr.workspace = true
 tidepool-bignum.workspace = true
 tidepool-heap.workspace = true
