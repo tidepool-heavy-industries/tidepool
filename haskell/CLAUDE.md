@@ -12,7 +12,7 @@ After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.).
 the production executable. Its `Main.hs` depends on the internal library
 `tidepool-extract-internal` (`hs-source-dirs: src`), which holds the extractor
 implementation (`Tidepool.Binders`, `.GhcPipeline`, `.Session`, `.Translate`,
-`.Resolve`, `.FatIface`, `.CborEncode`, `.DiagJson`, `.Timing`) — compiled ONCE
+`.Resolve`, `.FatIface`, `.CborEncode`, `.DiagJson`, `.Timing`, `.Json`) — compiled ONCE
 and shared by the production binary and the four `src`-dependent test-suites
 below, instead of once per component. Four non-production components exist as
 `test-suite` stanzas, so `cabal build` skips them by default:
@@ -38,7 +38,7 @@ follows here mirrors it.
 
 | # | Source | Notes |
 |---|--------|-------|
-| 1 | `$TIDEPOOL_EXTRACT` | Explicit override. Honored verbatim — a bare name is still PATH-resolved, an absolute path is used as-is. |
+| 1 | `$TIDEPOOL_EXTRACT` | Explicit override, and STRICT: set-but-unreadable is a hard error, never a silent fall-through to `$PATH` — falling through would run a different binary than the caller believes it is running. |
 | 2 | `tidepool-extract` on `$PATH` | Normally `~/.nix-profile/bin/tidepool-extract`, a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH and `exec`s the `tidepool-extract-bin` binary **in the nix store**. |
 
 Deploying a new extract means updating that nix profile entry (see below) —
