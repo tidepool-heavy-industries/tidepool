@@ -193,8 +193,11 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
 /// reply) does NOT hard-fail the fan — [`Harness::answer_fanout`] (via
 /// `drive_answerer_to_value`) injects ONE auto corrective-retry turn and
 /// grants a small extra budget, and the child recovers on its very next
-/// reply. The fan completes with both children `Done`; no operator
+/// reply. The fan completes with its one child `Done`; no operator
 /// involvement, no escalation ever appears.
+///
+/// TRIMMED (test-diet, coverage-overlap census) from 2 prompts to 1: a
+/// second, unrelated child carried no assertion the rung-1 claim needs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
     support::require_extract();
@@ -209,11 +212,11 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
     cfg.max_child_turns = 1;
 
     let replies = vec![
-        // 1. Root turn: fan out two prompts.
+        // 1. Root turn: fan out ONE prompt.
         reply(
             "```haskell\n\
              do\n\
-             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\", \"pick 2\"]\n\
+             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),
@@ -222,15 +225,12 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
         reply("Let me think about this for a moment."),
         // 3. Child 0, after rung 1's corrective nudge: answers validly.
         reply("```haskell\nresume (1 :: Int)\n```"),
-        // 4. Child 1 ("pick 2"): valid on the first attempt (its own fresh
-        //    1-turn budget is enough).
-        reply("```haskell\nresume (2 :: Int)\n```"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
     let root = harness
-        .create_root("fanout rung1", "Fan out for two numbers, finish.")
+        .create_root("fanout rung1", "Fan out for one number, finish.")
         .unwrap();
     harness.force(root, Actor::Operator).unwrap();
     harness
@@ -246,12 +246,12 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
         .answer_fanout(root, Actor::Operator)
         .await
         .expect("the fan recovers via rung 1 and completes, despite child 0's cap exhaustion");
-    assert_eq!(children.len(), 2);
+    assert_eq!(children.len(), 1);
     for child in &children {
         assert_eq!(
             harness.tree().state(*child),
             Some(NodeState::Done),
-            "every fanout child completes, including the one that needed rung 1"
+            "the fanout child completes after recovering via rung 1"
         );
     }
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
