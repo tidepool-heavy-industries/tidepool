@@ -1,5 +1,37 @@
 # Unparking the repl: feasibility map
 
+> **OUTCOME (landed).** The survey below held: no mechanism conflict was found
+> in implementation either. The cutover is `root.unpark.cutover`
+> (`refactor(repl): delete the parked-thread suspension; one threadless
+> engine`, plus a follow-up commit adding the epoch-guard and wedge-reclaim
+> tests). Everything §1 lists as "deleted" is deleted. Two things the survey
+> did not anticipate, both recorded here because a future reader will look for
+> them:
+>
+> * **`SessionHandle<Open/Closed>` and `SessionCommand::Close` went too.** The
+>   worker loop was their only consumer. The type-state fenced a genuinely
+>   reachable bad state — a live `Session` whose machine had been dropped out
+>   from under its dangling value-plane roots — so the fence was only safe to
+>   remove because its constructor (`Session::free` →
+>   `PersistentSession::drop_machine`) went with it. Teardown is now ownership:
+>   the entry is removed, the `Session` drops, the machine's `Drop` frees the
+>   heap. A torn-down session is not a value in a wrong state; it is a value
+>   that no longer exists.
+> * **The manager entry needed an EPOCH.** §4's target shape has the slot but
+>   not this. The old model serialized everything through one worker thread and
+>   one job channel; with `spawn_blocking` turns, a reaper sweep and two wedge
+>   paths, a stale turn can now try to restore or retire an entry a
+>   `session_reset` has already replaced — an ABA on the session slot. Every
+>   checkout carries the entry's epoch and a mismatch drops the session rather
+>   than clobbering the fresh one, pinned by
+>   `manager.rs::a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`.
+>
+> One residual gap, carried forward rather than closed: there is no end-to-end
+> coverage of the timeout → grace-expiry → `Wedged` transition. The reclaim
+> paths OUT of `Wedged` are pinned; entry INTO it needs a JIT-cancel-resistant
+> runaway or a seam to simulate one, and a flaky test there would be worse than
+> a named gap.
+
 Question: can `tidepool-repl` drop its parked-OS-thread suspension and run on
 the threadless (stow-as-data) engine the harness already uses?
 
