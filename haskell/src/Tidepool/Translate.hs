@@ -79,7 +79,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Foldable
 import qualified Data.Map.Strict as Map
 import Control.Monad.State
-import Control.Monad (foldM, forM, when)
+import Control.Monad (foldM, forM, replicateM, when)
 import System.IO (hPutStrLn, stderr)
 
 import GHC.Driver.Env (HscEnv)
@@ -1808,6 +1808,44 @@ translate expr =
             emitNode $ NCase argIdx 0 altData
           _ -> error $ "tagToEnum# without resolvable type argument"
 
+    -- dataToTag# @lev @T arg → case arg of { C0 _.. → 0#; C1 _.. → 1#; ... }
+    -- The INVERSE of the tagToEnum# arm above, desugared here for the same
+    -- reason and it must be: GHC's contract is the constructor's 0-based index
+    -- WITHIN ITS OWN data type, and that type is erased downstream. Emitting a
+    -- `DataToTag` primop instead left both backends answering with the runtime
+    -- constructor tag — a 'stableVarId' hash of the constructor's NAME, e.g.
+    -- 0xfe6150b1b818a688 for `True` — so every `dataToTag#` silently returned
+    -- garbage. `mapPrimOp` therefore no longer names these ops at all: an
+    -- occurrence this arm cannot desugar hits its `Unsupported primop` error
+    -- rather than falling through to the broken encoding.
+    --
+    -- GHC reaches for this primop on shapes like `boolExpr == True` when the
+    -- result feeds a shared `Int#` join point — which is why the wrong answer
+    -- surfaced as ORDER-dependent cross-talk between two unrelated checks in
+    -- one module (adding a second check is what creates the join point).
+    Var v | Just pop <- isPrimOpId_maybe v
+          , pop == DataToTagSmallOp || pop == DataToTagLargeOp
+          , [arg] <- args -> do
+        -- The scrutinee's type is the LAST type argument: the primop's
+        -- signature is `forall {lev} (a :: TYPE (BoxedRep lev)). a -> Int#`,
+        -- so a levity argument precedes the type we want.
+        let typeArgs = [ ty | Type ty <- allArgs ]
+        case reverse typeArgs of
+          (ty : _) | Just (tc, _) <- splitTyConApp_maybe ty
+                   , dcs@(_:_) <- tyConDataCons tc -> do
+            argIdx <- translate arg
+            binderId <- freshSynthVarId
+            altData <- forM (zip [0..] dcs) $ \(i :: Int, dc) -> do
+              recordDC dc
+              idxIdx <- emitNode $ NLit (LEInt (fromIntegral i))
+              -- Field binders are unused but must be arity-exact: the
+              -- interpreter checks `fields.len() == alt.binders.len()` and
+              -- reports ArityMismatch otherwise (tidepool-eval eval.rs).
+              fieldIds <- replicateM (valueRepArity dc) freshSynthVarId
+              return $ FlatAlt (FDataAlt (varId (dataConWorkId dc))) fieldIds idxIdx
+            emitNode $ NCase argIdx binderId altData
+          _ -> error $ "dataToTag# without resolvable type argument"
+
     -- EVERY sited verb's call site — @runLLMTurn \@T prompt@,
     -- @runLLMTurnFork@, @runLLMTurnFanout@, @fork@, @forkAll@, @forkMap@,
     -- @forkCata@, @finalize@ — through ONE arm driven by 'sitedVerbs'.
@@ -2544,8 +2582,12 @@ mapPrimOp = \case
   CharGeOp    -> "CharGe"
   IndexArrayOp -> "IndexArray"
   TagToEnumOp -> "TagToEnum"
-  DataToTagSmallOp -> "DataToTag"
-  DataToTagLargeOp -> "DataToTag"
+  -- No DataToTagSmallOp/DataToTagLargeOp arm on purpose: `translateHead`
+  -- desugars both into a `case` over the type's constructors, because the
+  -- primop's answer is the constructor's index within its own data type and
+  -- the backends' `DataToTag` yields the runtime constructor tag instead.
+  -- Falling through to the generic `Unsupported primop` error is the point —
+  -- an occurrence that arm cannot reach must be loud, not silently garbage.
   IntQuotOp -> "IntQuot"
   IntRemOp  -> "IntRem"
   ChrOp     -> "Chr"
