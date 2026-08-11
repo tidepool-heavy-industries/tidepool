@@ -134,6 +134,34 @@ test-suite varid-mechanism-test
   default-language: GHC2024
   default-extensions: OverloadedStrings
 
+-- batch-turns feasibility spike (plans/post-restart/batch-turns-feasibility.md
+-- §2.3): can ONE runGhc session run N sequential setTargets/depanal/load'
+-- cycles with items 2..N skipping the stdlib compile? A standalone probe —
+-- lifts the compile-loop mechanism from GhcPipeline.runCompile's
+-- sessionVariant (that function is not exported) rather than modifying
+-- GhcPipeline.hs/Session.hs/app/Main.hs.
+-- Run: cabal test spike-batch  (needs the nix with-packages GHC on PATH;
+-- `cabal build --enable-tests` builds it without running).
+test-suite spike-batch
+  type:             exitcode-stdio-1.0
+  main-is:          Spike.hs
+  hs-source-dirs:   spike-batch
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    tidepool-extract-internal,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    mtl,
+    exceptions
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+
 -- Extract-fidelity regressions: coercion-binder erasure symmetry, intrinsic
 -- recognizer module qualification, unboxed-tuple result-arity fail-loud.
 -- Drives the real runPipeline + translateModuleClosed path on synthetic

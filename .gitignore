@@ -85,6 +85,7 @@ viz/index.html
 # extract test harness scratch (synthetic fixture modules + their .hi/.o)
 haskell/test-session/work/
 haskell/test-fidelity/work/
+haskell/spike-batch/work-*/
 examples/guess/haskell/Game_cbor/
 
 # per-worktree XDG_CACHE_HOME target. Harness tests write the real
