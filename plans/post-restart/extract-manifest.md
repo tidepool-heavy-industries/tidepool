@@ -89,6 +89,48 @@ everything up to that point, then stop and report. `tidepool-repr`'s own
 the minor bump moves its bytes, updating it in-crate is in scope — say so
 explicitly in the receipts.
 
+### D-C addendum (at the sentinels fold, 2026-08-10) — my step-6 spec was WRONG
+
+The `sentinels` spec said: "`trulyUnresolved` becomes a read of the emitted
+program — scan emitted nodes for kind=4 sentinels and map their slots back to
+names." The lane implemented exactly that, measured it, and correctly refused
+it. Recording the mechanism so it is not re-derived:
+
+`cmUnresolved` is the **fatal** channel — `Main.translateTargetClosed` `error`s
+on a non-empty list. Feeding it the poison list turns every LAZY poison into a
+hard extract failure: the item-20 fixture died with `Unresolved external(s):
+Dep.helper` and wrote ZERO `.cbor`. That contradicts the item-20 fix's own
+rationale (a hard error is wrong because poisons are lazy by design and
+dead-branch poisons are legitimate), makes the whole D-C/D-D mechanism dead
+code (no emitted program ⇒ no slot, no table, no named trap), and makes the
+JIT-names-the-symbol step unsatisfiable.
+
+The correct factoring — two distinct concepts, BOTH now derived from the
+emitted program, which is what lets them be stated apart at all:
+
+- `trulyUnresolved` = unresolved externals referenced **raw**, uncovered by any
+  poison ⇒ stays the FATAL channel.
+- the poison list = the lazy poisons ⇒ feeds the loud stderr line and the
+  `poisoned` meta table, non-fatal.
+
+The lesson is the one this lane keeps re-learning: "collapse both recovery
+channels into reads of the program" was right about the MECHANISM and wrong
+about the MERGE. Deriving two things from one source does not make them one
+thing.
+
+### D-E. Poison slots are per-target; `--targets` shares one `meta.cbor`
+
+Found by the `sentinels` lane, in neither spec. Slots are per-target counters,
+so two targets can assign the SAME slot to DIFFERENT externals while sharing
+one merged `meta.cbor`. `Main.mergePoisonedTables` drops a non-unanimous slot
+rather than guessing — a missing name is honest, a wrong one is not.
+
+OPEN FOLLOW-UP (not this wave): deriving the slot from a hash of the qualified
+name instead of a counter removes the ambiguity at the source — same symbol
+⇒ same slot across targets, different symbols ⇒ different slots — and deletes
+`mergePoisonedTables` entirely. 48 bits is ample. Costs a wire re-bump, so it
+wants to ride with the next `meta.cbor` change rather than standing alone.
+
 ## Wave decomposition
 
 Wave 1 (parallel, disjoint files):
