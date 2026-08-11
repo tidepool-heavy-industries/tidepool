@@ -10,6 +10,7 @@ module Tidepool.Binders
   ( ExportItem(..)
   , extractBindersNamed
   , exportItemName
+  , declItems
     -- * Statement binders (session-eval bind-vs-expr classification)
   , TurnKind(..)
   , turnKindWireName

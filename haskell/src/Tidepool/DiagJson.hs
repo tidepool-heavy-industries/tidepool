@@ -7,6 +7,7 @@ module Tidepool.DiagJson
   , diagsFromSourceError
   , diagFromException
   , renderDiagsJson
+  , renderDiag
   ) where
 
 import Control.Exception (SomeException)

@@ -81,6 +81,7 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import Data.Text (Text)
 import Data.Maybe (fromMaybe)
+import Data.List (foldl')
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import Control.Monad (forM, forM_, when, (>=>))
 import Control.Monad.IO.Class (liftIO)
@@ -691,6 +692,253 @@ runGutsMemoScenario libdir = do
     _ <- setSessionDynFlags (extractionDynFlags dflags [wd, "lib"])
     goGutsMemoCycles wd cache [1, 2, 3] [] Nothing
 
+--------------------------------------------------------------------------------
+-- SCENARIO D (§7.6's named gap, batch-extract lane): scenario C's memo is
+-- FROZEN after cycle 1 — sound only because its dep closure never changes
+-- shape across cycles. §7.6 names the real-world case that breaks that
+-- assumption: a module introduced PARTWAY through the batch (a decl item's
+-- own @Lib.G<g>@, or — the shape probed here, which needs no decl machinery
+-- to demonstrate the same mechanism — a later item's target simply importing
+-- one more home module than an earlier item's did). The fix is a
+-- generalization, not a different mechanism: memoize PER MODULE, populated
+-- INCREMENTALLY on that module's FIRST compile in the batch, whichever cycle
+-- that is. This scenario measures it directly: cycle 1's target imports only
+-- @Tidepool.Prelude@; cycles 2 and 3 ALSO import a new home module, @Extra@,
+-- which therefore has NOTHING to memoize at cycle 1 and must be memoized for
+-- the FIRST time at cycle 2, then reused (not recompiled) at cycle 3.
+--------------------------------------------------------------------------------
+
+-- | @Extra@'s own source: a small, genuine home-package module (real source
+-- on disk, mirroring how a decl item's @Lib.G<g>@ is "genuine source the
+-- Rust side renders and writes" per the feasibility doc §2.1) that only
+-- cycles 2 and 3's targets import — cycle 1's target never references it.
+extraModuleSrc :: String
+extraModuleSrc = unlines
+  [ "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}"
+  , "module Extra where"
+  , "import Tidepool.Prelude"
+  , ""
+  , "helper :: Text -> Text"
+  , "helper t = t <> \"_extra\""
+  ]
+
+-- | The 3-target chain for scenario D. Unlike 'inputSrc' (scenario A/B/C),
+-- this is NOT a Val-injection chain — deliberately, to isolate the ONE
+-- variable this scenario probes (a new home module appearing mid-batch) from
+-- the (already-settled, §2.1/§7.1) binder-chain question. Cycle 1 imports
+-- only 'Tidepool.Prelude'; cycles 2 and 3 ALSO import 'Extra'.
+incInputSrc :: Int -> String
+incInputSrc 1 = unlines
+  [ "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}"
+  , "module IncInput1 where"
+  , "import Tidepool.Prelude"
+  , ""
+  , "__result :: Text"
+  , "__result = toUpper \"hello1\""
+  ]
+incInputSrc k = unlines
+  [ "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}"
+  , "module IncInput" ++ show k ++ " where"
+  , "import Tidepool.Prelude"
+  , "import Extra (helper)"
+  , ""
+  , "__result :: Text"
+  , "__result = helper (toUpper \"hello" ++ show k ++ "\")"
+  ]
+
+data IncMemoCycleReport = IncMemoCycleReport
+  { imCycle             :: Int
+  , imTargetModule      :: String
+  , imNewModules        :: [String]
+    -- ^ Modules compiled and memoized for the FIRST time THIS cycle
+    -- (excluding the target, which is never memoized — see the module doc).
+  , imReusedModules     :: [String]
+    -- ^ Modules whose binds were REUSED from the memo this cycle (populated
+    -- by an EARLIER cycle — possibly, but not necessarily, cycle 1).
+  , imLoadMs            :: Integer
+  , imFreshLoopMs       :: Integer
+    -- ^ Wall-clock of compiling every summary (deps + target) fresh, no
+    -- memo — the production-shape cost the incremental memo is compared
+    -- against.
+  , imIncMemoLoopMs     :: Integer
+    -- ^ Wall-clock of the incremental-memo pass: reuse what's memoized,
+    -- compile (and memoize) only what's new this cycle, plus the target.
+  , imFreshUnresolved   :: [String]
+  , imIncMemoUnresolved :: [String]
+  , imFreshPoisoned     :: [(Word64, Text)]
+  , imIncMemoPoisoned   :: [(Word64, Text)]
+  , imFreshNodeCount    :: Int
+  , imIncMemoNodeCount  :: Int
+  , imFailure           :: Maybe String
+  }
+
+-- | One §7.6-gap cycle: load' (ModIfaceCache-threaded) + the same
+-- deferred-target dance 'runGutsMemoCycle' uses, then TWO independent
+-- compile passes over the SAME post-load'/post-inject session state —
+--
+--   PASS FRESH:     compile EVERY summary (deps + target), no memo at all —
+--                    what production's per-cycle loop does with the memo
+--                    disabled, replayed here for an apples-to-apples
+--                    same-cycle comparison.
+--   PASS INC-MEMO:   for each summary, reuse its binds from @memoSoFar@ if
+--                    present (populated by ANY earlier cycle, not just
+--                    cycle 1); otherwise compile it fresh and record it as
+--                    newly memoized THIS cycle. The target is always
+--                    recompiled (never memoized — each item's own turn text
+--                    differs by construction).
+--
+-- Both merges are fed to the SAME, unmodified 'translateModuleClosed', off
+-- the SAME 'hscFinal' — the only variable is which dep binds were used.
+runIncrementalMemoCycle
+  :: FilePath -> ModIfaceCache -> Int -> Map.Map ModuleName [CoreBind]
+  -> Ghc (IncMemoCycleReport, Map.Map ModuleName [CoreBind])
+runIncrementalMemoCycle wd cache k memoSoFar = do
+  let path          = wd </> ("IncInput" ++ show k ++ ".hs")
+      modName       = "IncInput" ++ show k
+      targetModName' = mkModuleName modName
+  attempt <- try $ do
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    modGraphRaw <- depanal [] False
+    let deferredMods = Set.singleton targetModName'
+        depGraph = mkModuleGraph
+          [ node | node <- mgModSummaries' modGraphRaw
+                 , case node of
+                     ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
+                     _               -> True ]
+        unpoison ms =
+          ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    recompRef <- liftIO (newIORef [])
+    (loadFlag, loadMs) <- timeSection $
+      load' (Just cache) LoadAllTargets mkUnknownDiagnostic (Just (spikeMessager recompRef))
+            (mapMG unpoison depGraph)
+    case loadFlag of
+      Failed    -> liftIO $ ioError $ userError $
+        "spike-batch incmemo cycle " ++ show k ++ ": PHASE 1 dependency load failed"
+      Succeeded -> pure ()
+    do hscMG <- getSession
+       setSession hscMG { hsc_mod_graph = modGraphRaw }
+    let summaries =
+          [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
+               , ms_hsc_src ms == HsSrcFile ]
+        depOrder = [ ms_mod_name ms | ms <- summaries, ms_mod_name ms /= targetModName' ]
+    -- PASS FRESH: every summary, deps + target, no memo.
+    (freshResults, freshLoopMs) <- timeSection $ forM summaries (compileOneModule deferredMods)
+    -- PASS INC-MEMO: reuse from 'memoSoFar' where present; compile+memoize
+    -- what's new; always recompile the target.
+    (incResults, incLoopMs) <- timeSection $ forM summaries $ \ms -> do
+      let mn = ms_mod_name ms
+      if mn == targetModName'
+        then do
+          (_, binds, ty) <- compileOneModule deferredMods ms
+          pure (mn, binds, ty, True)
+        else case Map.lookup mn memoSoFar of
+          Just binds -> pure (mn, binds, Nothing, False)
+          Nothing    -> do
+            (_, binds, ty) <- compileOneModule deferredMods ms
+            pure (mn, binds, ty, True)
+    let newModNames    = [ moduleNameString mn | (mn, _, _, isNew) <- incResults, isNew, mn /= targetModName' ]
+        reusedModNames = [ moduleNameString mn | (mn, _, _, isNew) <- incResults, not isNew ]
+        updatedMemo = foldl' (\m (mn, binds, _, isNew) ->
+                                if mn /= targetModName' && isNew then Map.insert mn binds m else m)
+                              memoSoFar incResults
+        incByMod    = Map.fromList [ (mn, binds) | (mn, binds, _, _) <- incResults ]
+        freshByMod  = Map.fromList [ (mn, binds) | (mn, binds, _) <- freshResults ]
+        freshTargetTy = case [ ty | (mn, _, ty) <- freshResults, mn == targetModName' ] of
+          (Just t : _) -> Just t
+          _            -> Nothing
+        freshTargetBinds = Map.findWithDefault [] targetModName' freshByMod
+        incTargetBinds   = Map.findWithDefault [] targetModName' incByMod
+        allBindsFresh = concat [ Map.findWithDefault [] mn freshByMod | mn <- depOrder ] ++ freshTargetBinds
+        allBindsInc   = concat [ Map.findWithDefault [] mn incByMod   | mn <- depOrder ] ++ incTargetBinds
+    hscFinal <- getSession
+    closedFresh <- liftIO (translateModuleClosed hscFinal allBindsFresh resultBinder)
+    closedInc   <- liftIO (translateModuleClosed hscFinal allBindsInc   resultBinder)
+    case freshTargetTy of
+      Just _  -> pure ()
+      Nothing -> liftIO $ ioError $ userError $
+        "spike-batch incmemo cycle " ++ show k ++ ": no " ++ resultBinder ++ " binder captured"
+    let report = IncMemoCycleReport
+          { imCycle = k, imTargetModule = modName
+          , imNewModules = newModNames, imReusedModules = reusedModNames
+          , imLoadMs = loadMs, imFreshLoopMs = freshLoopMs, imIncMemoLoopMs = incLoopMs
+          , imFreshUnresolved   = map fmtUnresolved (cmUnresolved closedFresh)
+          , imIncMemoUnresolved = map fmtUnresolved (cmUnresolved closedInc)
+          , imFreshPoisoned     = cmPoisoned closedFresh
+          , imIncMemoPoisoned   = cmPoisoned closedInc
+          , imFreshNodeCount    = Seq.length (cmNodes closedFresh)
+          , imIncMemoNodeCount  = Seq.length (cmNodes closedInc)
+          , imFailure = Nothing
+          }
+    pure (report, updatedMemo)
+  case attempt of
+    Left (e :: SomeException) ->
+      pure ( IncMemoCycleReport k modName [] [] 0 0 0 [] [] [] [] 0 0 (Just (show e))
+           , memoSoFar )
+    Right r -> pure r
+
+goIncMemoCycles :: FilePath -> ModIfaceCache -> [Int] -> Map.Map ModuleName [CoreBind] -> Ghc [IncMemoCycleReport]
+goIncMemoCycles _ _ [] _ = pure []
+goIncMemoCycles wd cache (k : ks) memoSoFar = do
+  (report, updatedMemo) <- runIncrementalMemoCycle wd cache k memoSoFar
+  case imFailure report of
+    Just _  -> pure [report]
+    Nothing -> (report :) <$> goIncMemoCycles wd cache ks updatedMemo
+
+-- | Print scenario D's per-cycle table and return whether it went GREEN:
+-- for every cycle, the fresh and incremental-memo merges must agree exactly
+-- on cmUnresolved/cmPoisoned — INCLUDING cycle 2, where @Extra@ has nothing
+-- to reuse yet and must be memoized fresh for the first time, and cycle 3,
+-- where @Extra@ IS reused from the memo cycle 2 populated (not cycle 1).
+printIncMemoReport :: [IncMemoCycleReport] -> IO Bool
+printIncMemoReport reports = do
+  putStrLn "\n################ SCENARIO: D: incremental per-module memo, new module mid-batch (§7.6 gap) ################"
+  forM_ reports $ \r -> do
+    printf "\n--- cycle %d  target=%s ---\n" (imCycle r) (imTargetModule r)
+    case imFailure r of
+      Just e -> putStrLn ("  FAILED: " ++ unwords (words e))
+      Nothing -> do
+        printf "  new-this-cycle (memoized now): %s\n" (show (imNewModules r))
+        printf "  reused-from-memo:              %s\n" (show (imReusedModules r))
+        printf "  load' wall-clock:              %d ms\n" (imLoadMs r)
+        printf "  fresh (deps+target) loop ms:   %d ms\n" (imFreshLoopMs r)
+        printf "  inc-memo loop ms:              %d ms\n" (imIncMemoLoopMs r)
+        printf "  fresh:   unresolved=%s poisoned=%s nodes=%d\n"
+          (show (imFreshUnresolved r)) (show (imFreshPoisoned r)) (imFreshNodeCount r)
+        printf "  inc-memo: unresolved=%s poisoned=%s nodes=%d\n"
+          (show (imIncMemoUnresolved r)) (show (imIncMemoPoisoned r)) (imIncMemoNodeCount r)
+        when (imFreshNodeCount r /= imIncMemoNodeCount r) $
+          printf "  ** NODE COUNT DIVERGES: fresh=%d inc-memo=%d **\n" (imFreshNodeCount r) (imIncMemoNodeCount r)
+  putStrLn "\n================ VERDICT ================"
+  let allSucceeded = length reports == 3 && all ((== Nothing) . imFailure) reports
+      agree r = setEq (imFreshUnresolved r) (imIncMemoUnresolved r)
+             && setEq (imFreshPoisoned r) (imIncMemoPoisoned r)
+      allAgree = allSucceeded && all agree reports
+      go = allSucceeded && allAgree
+  forM_ reports $ \r -> when (imFailure r == Nothing) $ printf "  cycle %d: agree=%s\n" (imCycle r) (show (agree r))
+  putStrLn $ if go
+    then "  GREEN: the incremental (populated-on-first-sight, never frozen) per-module memo agrees with a fresh recompile on cmUnresolved/cmPoisoned, on every cycle -- INCLUDING the cycle a module first appears (cycle 2) and the cycle that reuses it from a memo entry NOT seeded at cycle 1 (cycle 3)."
+    else "  RED: see the per-cycle detail above -- the incremental memo diverged from a fresh recompile on an unresolved or poisoned external."
+  pure go
+
+-- | Run the 3-cycle chain in one fresh 'runGhc' session, ModIfaceCache
+-- threaded throughout, for scenario D's own scratch dir (+ 'Extra.hs',
+-- written once, present for every cycle regardless of whether that cycle's
+-- own target imports it).
+runIncrementalMemoScenario :: FilePath -> IO [IncMemoCycleReport]
+runIncrementalMemoScenario libdir = do
+  let wd = workDir "incMemo"
+  exists <- doesDirectoryExist wd
+  when exists (removeDirectoryRecursive wd)
+  createDirectoryIfMissing True wd
+  writeFile (wd </> "Extra.hs") extraModuleSrc
+  forM_ [1, 2, 3] $ \k -> writeFile (wd </> ("IncInput" ++ show k ++ ".hs")) (incInputSrc k)
+  cache <- newIfaceCache
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    _ <- setSessionDynFlags (extractionDynFlags dflags [wd, "lib"])
+    goIncMemoCycles wd cache [1, 2, 3] Map.empty
+
 -- | Two scenarios, both inside ONE 'runGhc' session each (the actual §2.3
 -- question — N cycles, one session):
 --
@@ -711,12 +959,20 @@ runGutsMemoScenario libdir = do
 -- resolve identically (same cmUnresolved/cmPoisoned) to a fresh-deps merge
 -- computed the SAME cycle? See 'runGutsMemoCycle''s haddock.
 --
+-- A fourth scenario, D (batch-extract lane, §7.6's named-but-unmeasured
+-- gap): does the GENERALIZATION — memoize per module, populated
+-- INCREMENTALLY on that module's first compile in the batch, rather than
+-- frozen after cycle 1 — still agree with a fresh recompile once a module
+-- appears for the first time PARTWAY through the batch (cycle 2, not cycle
+-- 1) and is then reused from a memo entry cycle 1 never seeded? See
+-- 'runIncrementalMemoCycle''s haddock.
+--
 -- Exit code: NOT gated on any scenario's GREEN/RED verdict — A's own RED
 -- (production's real `load' Nothing ...` behaviour) is the documented,
 -- correct answer to §2.3 as posed, and forcing the process to fail because
 -- of a truthfully-reported RED would be exactly the "force a green"
 -- anti-pattern this probe (and the one before it) is told not to commit.
--- The exit code instead reports whether all three scenarios RAN CLEANLY —
+-- The exit code instead reports whether all four scenarios RAN CLEANLY —
 -- every cycle completed without an internal exception — which is the
 -- correct pass/fail contract for an instrument whose job is to gather
 -- trustworthy evidence, not to pre-judge what that evidence says.
@@ -730,8 +986,11 @@ main = do
   _goB <- printReport "B: WITH a live ModIfaceCache threaded across all 3 cycles" reportsB
   reportsC <- runGutsMemoScenario libdir
   _goC <- printGutsMemoReport reportsC
+  reportsD <- runIncrementalMemoScenario libdir
+  _goD <- printIncMemoReport reportsD
   let cleanRun rs failureOf = length rs == 3 && all ((== Nothing) . failureOf) rs
       ranCleanly = cleanRun reportsA crFailure
                 && cleanRun reportsB crFailure
                 && cleanRun reportsC gmFailure
+                && cleanRun reportsD imFailure
   if ranCleanly then exitSuccess else exitFailure

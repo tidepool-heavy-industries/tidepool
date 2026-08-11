@@ -12,6 +12,7 @@ import qualified Fidelity.Erasure as Erasure
 import qualified Fidelity.PrimopArity as PrimopArity
 import qualified Fidelity.Recognizers as Recognizers
 import qualified Fidelity.D1Defense as D1Defense
+import qualified Fidelity.TurnBatch as TurnBatch
 
 import Control.Monad (forM_)
 import System.Exit (exitFailure, exitSuccess)
@@ -22,6 +23,7 @@ groups =
   , ("intrinsic recognizers",   Recognizers.checks)
   , ("pipeline barriers + unboxed-tuple arity", PrimopArity.checks)
   , ("D1 hard-fail metadata-subset defense (mutation test)", D1Defense.checks)
+  , ("turn-batch per-item error attribution (§8)", TurnBatch.checks)
   ]
 
 main :: IO ()

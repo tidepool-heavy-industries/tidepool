@@ -7,12 +7,13 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Numeric (showHex)
+import Numeric (showHex, readHex)
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isAlphaNum, isSpace)
+import Data.Char (toUpper, isAlphaNum, isSpace, isDigit)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
@@ -39,8 +40,10 @@ import Tidepool.Binders
   , renderBoundBinderJson, renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
-  , stripMonadHead, isClosureType, renderType, splitTupleType )
-import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
+  , stripMonadHead, isClosureType, renderType, splitTupleType
+  , BatchItem(..), BatchItemResult(..), runBatchPipeline )
+import Tidepool.DiagJson (Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson, renderDiag)
+import Tidepool.Json (jsonString)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, parseSessionModule, sessionBinderName
@@ -72,26 +75,32 @@ main = do
   args <- if argHarnessProfile parsedArgs
             then spliceHarnessProfilePragma parsedArgs
             else pure parsedArgs
-  case argFiles args of
-    [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
-      putStrLn (renderDiagsJson [])
-    (file : _)
-      -- Block classify lane: every positional file is one item, classified
-      -- in ONE GHC session boot. Checked before '--turn' since it reads the
-      -- FULL 'argFiles' list rather than just the head.
-      | argClassify args                    -> runClassifyMode timing args
-      -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
-      -- + rich-result emission, in one process. Checked before 'isSessionMode'
-      -- since a bind/expr turn also carries --session-root/--inject-val.
-      | argTurn args                        -> runTurnMode args file
-      -- Session mode (Wave 3b): bind/reference turn with iface injection +
-      -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
-      -- file is processed (matching the two guards above) — one invocation,
-      -- one stdout report, per the module doc.
-      | isSessionMode args                  -> processSessionFile args file
-      -- Normal one-shot extraction (byte-identical to historical behaviour).
-      | otherwise                           -> timePhase timing "total" (processFile timing args file)
+  case () of
+    -- Turn-batch mode (plans/post-restart/batch-turns-feasibility.md §8): N
+    -- item compiles in one GHC session. No positional file at all (the plan
+    -- is a flag, not argFiles) — checked FIRST, ahead of the argFiles
+    -- dispatch every other mode shares.
+    _ | isJust (argTurnBatch args) -> runTurnBatchMode args
+    _ -> case argFiles args of
+      [] -> do
+        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] <file.hs> ..."
+        putStrLn (renderDiagsJson [])
+      (file : _)
+        -- Block classify lane: every positional file is one item, classified
+        -- in ONE GHC session boot. Checked before '--turn' since it reads the
+        -- FULL 'argFiles' list rather than just the head.
+        | argClassify args                    -> runClassifyMode timing args
+        -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
+        -- + rich-result emission, in one process. Checked before 'isSessionMode'
+        -- since a bind/expr turn also carries --session-root/--inject-val.
+        | argTurn args                        -> runTurnMode args file
+        -- Session mode (Wave 3b): bind/reference turn with iface injection +
+        -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
+        -- file is processed (matching the two guards above) — one invocation,
+        -- one stdout report, per the module doc.
+        | isSessionMode args                  -> processSessionFile args file
+        -- Normal one-shot extraction (byte-identical to historical behaviour).
+        | otherwise                           -> timePhase timing "total" (processFile timing args file)
 
 -- | Rewrites the FIRST target file (`argFiles`'s head) to a scratch copy
 -- with 'harnessProfilePragmaLine' prepended — the harness compilation
@@ -224,6 +233,9 @@ data Args = Args
   -- --classify mode (block classify lane, plans/one-spawn-turn-protocol-phase-b.md):
   , argClassify :: Bool
   , argClassifyOut :: Maybe FilePath
+  -- --turn-batch mode (plans/post-restart/batch-turns-feasibility.md §8):
+  , argTurnBatch :: Maybe FilePath
+  , argBatchOut :: Maybe FilePath
   -- Harness compilation profile (generic-surface wave item 4, PART 2): the
   -- standard extension set applied to the target module by prepending one
   -- LANGUAGE pragma line to a SCRATCH COPY of its source (see
@@ -240,6 +252,7 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
                      False [] Nothing Nothing [] Nothing
                      False [] Nothing Nothing
                      False Nothing
+                     Nothing Nothing
                      False)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
@@ -260,6 +273,8 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
     go a ("--classify" : rest) = go a { argClassify = True } rest
     go a ("--classify-out" : out : rest) = go a { argClassifyOut = Just out } rest
+    go a ("--turn-batch" : p : rest) = go a { argTurnBatch = Just p } rest
+    go a ("--batch-out" : d : rest) = go a { argBatchOut = Just d } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a ("--harness-profile" : rest) = go a { argHarnessProfile = True } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
@@ -943,6 +958,383 @@ runClassifyMode timing args =
     verdicts <- classifyBlock timing srcs
     writeFile out (renderVerdictsJson verdicts)
     hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
+
+--------------------------------------------------------------------------------
+-- Turn-batch mode (--turn-batch <plan.json> --batch-out <dir>,
+-- plans/post-restart/batch-turns-feasibility.md §8, ratified rulings in
+-- §8.1): N item compiles in ONE tidepool-extract spawn, sharing GHC session
+-- state (Tidepool.GhcPipeline's ModIfaceCache + per-module dep-guts memo)
+-- across items. Every item writes the byte-identical single-turn output set
+-- (result.cbor / meta.cbor / asks.json / turn.cbor) into its own
+-- <batch-out>/i<k>/ directory — 'writeBatchItemOutput' below reuses the SAME
+-- 'writeWholeModuleClosed' / 'mkBoundBinders' / 'encodeTurnOut' calls
+-- 'runTurnMode' uses for a single turn, so a batched item cannot diverge in
+-- what it writes from a per-item spawn.
+--
+-- §8.1 rulings this mode is built to (binding, not re-derived here):
+--   1. Exits NON-ZERO whenever any item failed (mirrors a single --turn
+--      spawn); the Rust caller does not read the exit code, only the stdout
+--      document, but shell callers still need a sane code.
+--   2. --turn-template / --include are BATCH-WIDE (repeated top-level
+--      flags), never per item. A plan item's own "template" field is a
+--      SELECTOR (a TemplateSelector wire name) into that shared table, never
+--      a file path.
+--   3. No per-item --target: every batchable shape compiles the
+--      scaffold-reserved default ('scaffoldTargetName').
+--   4. The per-item TurnOut sidecar is named literally "turn.cbor" inside
+--      <batch-out>/i<k>/, matching run_turn's own convention.
+--------------------------------------------------------------------------------
+
+-- | One item's disposition, for the §8 stdout report's @items@ array.
+data ItemStatus = ItemOk | ItemFailed [Diag]
+
+-- | One parsed plan.json item (§8's wire shape). @piTemplate@ is a
+-- TemplateSelector wire name ("decl"/"bind"/"binddiscard"/"expr") selecting
+-- among the BATCH-WIDE @--turn-template@ table (§8.1 ruling 2) — never a
+-- file path.
+data PlanItem = PlanItem
+  { piIndex       :: Int
+  , piTurnText    :: String
+  , piVerdictKind :: String
+  , piBinders     :: [String]
+  , piTemplate    :: String
+  , piSessionRoot :: FilePath
+  , piInjectVals  :: [String]
+  , piBindGen     :: Maybe Word64
+  }
+
+-- | Parse @plan.json@'s @{"version":1,"items":[...]}@ shape into
+-- 'PlanItem's, in order. Hand-rolled (no @aeson@ dependency — matches
+-- "Tidepool.Json"'s own rationale: the shape here is small and fixed).
+-- Malformed input 'error's, caught by 'runTurnBatchMode''s surrounding
+-- 'try' like any other extraction failure.
+parsePlanItems :: String -> IO [PlanItem]
+parsePlanItems src = case parseJsonValue src of
+  Left e -> error ("--turn-batch: malformed plan.json: " ++ e)
+  Right v -> case jField "items" v of
+    Just (JArr items) -> mapM parseOneItem items
+    _ -> error "--turn-batch: plan.json missing an \"items\" array"
+  where
+    parseOneItem iv = do
+      idx      <- reqInt "index" iv
+      tt       <- reqStr "turn_text" iv
+      verdictV <- reqField "verdict" iv
+      kind     <- reqStr "kind" verdictV
+      binders  <- case jField "binders" verdictV of
+        Just (JArr bs) -> mapM reqJStr bs
+        _              -> pure []
+      tmpl  <- reqStr "template" iv
+      root  <- case jField "session_root" iv of
+        Just (JStr s) -> pure s
+        _             -> pure ""
+      injects <- case jField "inject_vals" iv of
+        Just (JArr xs) -> mapM reqJStr xs
+        _              -> pure []
+      bg <- case jField "bind_gen" iv of
+        Just (JNum n) -> pure (Just (fromInteger n))
+        _             -> pure Nothing
+      pure PlanItem
+        { piIndex = fromInteger idx, piTurnText = tt
+        , piVerdictKind = kind, piBinders = binders
+        , piTemplate = tmpl, piSessionRoot = root
+        , piInjectVals = injects, piBindGen = bg
+        }
+    reqField k iv = maybe (error ("--turn-batch: plan item missing \"" ++ k ++ "\"")) pure (jField k iv)
+    reqStr k iv = reqField k iv >>= \v -> maybe (error ("--turn-batch: field \"" ++ k ++ "\" must be a string")) pure (jStr v)
+    reqInt k iv = reqField k iv >>= \v -> maybe (error ("--turn-batch: field \"" ++ k ++ "\" must be a number")) pure (jInt v)
+    reqJStr v = maybe (error "--turn-batch: expected a string in a JSON array") pure (jStr v)
+
+--------------------------------------------------------------------------------
+-- A minimal hand-rolled JSON parser (object/array/string/number/bool/null) —
+-- everything plan.json's fixed shape needs, no more. Mirrors "Tidepool.Json"'s
+-- own no-aeson-dependency rationale.
+--------------------------------------------------------------------------------
+
+data JValue
+  = JObj [(String, JValue)]
+  | JArr [JValue]
+  | JStr String
+  | JNum Integer
+  | JBool Bool
+  | JNull
+  deriving (Eq, Show)
+
+jField :: String -> JValue -> Maybe JValue
+jField k (JObj kvs) = lookup k kvs
+jField _ _           = Nothing
+
+jStr :: JValue -> Maybe String
+jStr (JStr s) = Just s
+jStr _        = Nothing
+
+jInt :: JValue -> Maybe Integer
+jInt (JNum n) = Just n
+jInt _        = Nothing
+
+parseJsonValue :: String -> Either String JValue
+parseJsonValue s = case pValue s of
+  Right (v, rest) | all isSpace rest -> Right v
+  Right (_, rest) -> Left ("trailing content: " ++ take 30 rest)
+  Left e -> Left e
+
+skipWs :: String -> String
+skipWs = dropWhile (\c -> c == ' ' || c == '\t' || c == '\r' || c == '\n')
+
+pValue :: String -> Either String (JValue, String)
+pValue s0 = case skipWs s0 of
+  ('{' : s) -> pObject s
+  ('[' : s) -> pArray s
+  ('"' : s) -> do (str, s') <- pStringLit s; pure (JStr str, s')
+  s@(c : _) | c == '-' || isDigit c -> pNumber s
+  s -> case stripPrefix "true" s of
+    Just s' -> Right (JBool True, s')
+    Nothing -> case stripPrefix "false" s of
+      Just s' -> Right (JBool False, s')
+      Nothing -> case stripPrefix "null" s of
+        Just s' -> Right (JNull, s')
+        Nothing -> Left ("unexpected input: " ++ take 30 s)
+
+pObject :: String -> Either String (JValue, String)
+pObject s0 = case skipWs s0 of
+  ('}' : s) -> Right (JObj [], s)
+  s         -> goPairs s []
+  where
+    goPairs s acc = do
+      (k, s1) <- case skipWs s of
+        ('"' : s') -> pStringLit s'
+        s'         -> Left ("expected an object key, got: " ++ take 30 s')
+      s2      <- expectChar ':' (skipWs s1)
+      (v, s3) <- pValue s2
+      let acc' = acc ++ [(k, v)]
+      case skipWs s3 of
+        (',' : s4) -> goPairs s4 acc'
+        ('}' : s4) -> Right (JObj acc', s4)
+        s4         -> Left ("expected ',' or '}' in object, got: " ++ take 30 s4)
+
+pArray :: String -> Either String (JValue, String)
+pArray s0 = case skipWs s0 of
+  (']' : s) -> Right (JArr [], s)
+  s         -> goItems s []
+  where
+    goItems s acc = do
+      (v, s1) <- pValue s
+      let acc' = acc ++ [v]
+      case skipWs s1 of
+        (',' : s2) -> goItems s2 acc'
+        (']' : s2) -> Right (JArr acc', s2)
+        s2         -> Left ("expected ',' or ']' in array, got: " ++ take 30 s2)
+
+-- | Parses a string literal's BODY (the caller has already consumed the
+-- opening quote), up to and including the closing quote.
+pStringLit :: String -> Either String (String, String)
+pStringLit = go id
+  where
+    go acc ('"' : rest)        = Right (acc [], rest)
+    go acc ('\\' : c : rest)   = unescape c rest >>= \(ch, rest') -> go (acc . (ch :)) rest'
+    go acc (c : rest)          = go (acc . (c :)) rest
+    go _   []                  = Left "unterminated string literal"
+    unescape 'n' rest  = Right ('\n', rest)
+    unescape 't' rest  = Right ('\t', rest)
+    unescape 'r' rest  = Right ('\r', rest)
+    unescape '"' rest  = Right ('"', rest)
+    unescape '\\' rest = Right ('\\', rest)
+    unescape '/' rest  = Right ('/', rest)
+    unescape 'b' rest  = Right ('\b', rest)
+    unescape 'f' rest  = Right ('\f', rest)
+    unescape 'u' rest = case splitAt 4 rest of
+      (hex, rest') | length hex == 4, [(n, "")] <- readHex hex ->
+        Right (toEnum n, rest')
+      _ -> Left "bad \\u escape"
+    unescape c _ = Left ("bad escape: \\" ++ [c])
+
+pNumber :: String -> Either String (JValue, String)
+pNumber s0 =
+  let (numStr, rest) = span (\c -> isDigit c || c == '-') s0
+  in if null numStr || numStr == "-"
+       then Left ("expected a number, got: " ++ take 30 s0)
+       else Right (JNum (read numStr), rest)
+
+expectChar :: Char -> String -> Either String String
+expectChar c (x : xs) | x == c = Right xs
+expectChar c s = Left ("expected '" ++ [c] ++ "', got: " ++ take 30 s)
+
+--------------------------------------------------------------------------------
+-- Splicing + module-header renaming
+--------------------------------------------------------------------------------
+
+-- | One item's splice-ready pieces: which item shape it is, what module it
+-- compiled to (a UNIQUE per-item name, never the template's own literal
+-- header — see 'renameModuleHeader'), and everything 'writeBatchItemOutput'
+-- needs to render this item's TurnOut sidecar the same way 'runTurnMode'
+-- would have for one spawn.
+data BatchPlanned = BatchPlanned
+  { bpKind        :: TurnKind
+  , bpBinders     :: [String]
+  , bpModName     :: String
+  , bpModulePath  :: FilePath
+  , bpOutDir      :: FilePath
+  , bpTurnOutPath :: FilePath
+  , bpWrapped     :: String
+  , bpBindGen     :: Maybe Word64
+  , bpSessionRoot :: FilePath
+  , bpInjectVals  :: [String]
+  }
+
+-- | Splice item @idx@'s template against its turn text, rewrite the module
+-- header to a name UNIQUE to this item (@TurnItem<idx>@ — every item may
+-- otherwise share the very same template, and hence the very same literal
+-- @module X where@ header, which would collide in the shared HPT the moment
+-- a second item tried to compile), and write the result under
+-- @<batch-out>/i<idx>/@. Mirrors 'runTurnMode''s own @spliceInto@, plus the
+-- renaming this mode alone needs (a single-turn spawn never shares a session
+-- with a second module of the same name).
+planBatchItem :: FilePath -> [(String, FilePath)] -> PlanItem -> IO BatchPlanned
+planBatchItem batchOut templates item = do
+  let kind       = parseTurnKind (piVerdictKind item)
+      binders    = piBinders item
+      itemOutDir = batchOut </> ("i" ++ show (piIndex item))
+      bindersStr = intercalate ", " binders
+      newModName = "TurnItem" ++ show (piIndex item)
+  createDirectoryIfMissing True itemOutDir
+  tmplFile <- case lookup (piTemplate item) templates of
+    Just f  -> return f
+    Nothing -> error ("--turn-batch: no --turn-template for kind " ++ piTemplate item
+                        ++ " (item " ++ show (piIndex item) ++ ")")
+  tmplSrc <- readFile tmplFile
+  let spliced0    = spliceTemplate tmplSrc (piTurnText item) bindersStr
+      spliced     = renameModuleHeader newModName spliced0
+      modulePath  = itemOutDir </> newModName ++ ".hs"
+  writeFile modulePath spliced
+  pure BatchPlanned
+    { bpKind = kind, bpBinders = binders, bpModName = newModName
+    , bpModulePath = modulePath, bpOutDir = itemOutDir
+    , bpTurnOutPath = itemOutDir </> "turn.cbor"
+    , bpWrapped = spliced, bpBindGen = piBindGen item
+    , bpSessionRoot = piSessionRoot item, bpInjectVals = piInjectVals item
+    }
+
+-- | Replace the module name in a source's FIRST @module <Name> ...@ header
+-- line, leaving everything else (an export list, "where", indentation)
+-- untouched. Everything after the first match is returned as-is — a
+-- well-formed template has exactly one header.
+renameModuleHeader :: String -> String -> String
+renameModuleHeader newName src = unlines (go (lines src))
+  where
+    go [] = []
+    go (l : ls) =
+      let (indent, rest0) = span (== ' ') l
+      in case stripPrefix "module " rest0 of
+           Just rest1 ->
+             let (nameSpace, rest2) = span (== ' ') rest1
+                 oldName    = takeWhile (\c -> isAlphaNum c || c == '.' || c == '_') rest2
+                 afterName  = drop (length oldName) rest2
+             in if null oldName
+                  then l : ls
+                  else (indent ++ "module " ++ nameSpace ++ newName ++ afterName) : ls
+           Nothing -> l : go ls
+
+-- | 'PlanItem'/'BatchPlanned' -> the GhcPipeline-side compile request.
+toGhcBatchItem :: BatchPlanned -> BatchItem
+toGhcBatchItem bp = case bpKind bp of
+  KDecl -> BatchDecl (bpModulePath bp) (bpModName bp)
+  _     -> BatchCompile (bpModulePath bp)
+             (SessionScope (bpSessionRoot bp) (mapMaybe parseValModule (bpInjectVals bp)))
+
+-- | Write one item's byte-identical single-turn output set — reuses
+-- 'writeWholeModuleClosed' / 'mkBoundBinders' / 'encodeTurnOut' exactly as
+-- 'runTurnMode' does for a single spawn, so a batched item cannot diverge in
+-- what it writes. A decl item writes only @turn.cbor@ (no result.cbor /
+-- meta.cbor / asks.json — a decl turn never compiles, matching
+-- 'runTurnMode''s KDecl branch).
+writeBatchItemOutput :: Bool -> BatchPlanned -> BatchItemResult -> IO ()
+writeBatchItemOutput _timing bp (BatchDeclResult items) = do
+  let binders = if null (bpBinders bp)
+                  then map (T.pack . exportItemName) items
+                  else map T.pack (bpBinders bp)
+      turnOut = TDecl binders items
+  BS.writeFile (bpTurnOutPath bp) (encodeTurnOut turnOut)
+writeBatchItemOutput timing bp (BatchCompileResult result) = do
+  let binds       = prBinds result
+      tycons      = prTyCons result
+      hscEnv      = prHscEnv result
+      mCapturedTy = fmap T.pack (prCapturedType result)
+      warnTexts   = map T.pack (prWarnings result)
+  asksSites <- writeWholeModuleClosed timing (bpOutDir bp) hscEnv binds tycons mCapturedTy warnTexts
+                 scaffoldTargetName scaffoldOutputBase
+  let wrapped = T.pack (bpWrapped bp)
+  turnOut <- case (bpKind bp, bpBinders bp) of
+    (KBind, ns@(_ : _)) -> do
+      g   <- requireArg ("bind_gen (batch item, module " ++ bpModName bp ++ ")") (bpBindGen bp)
+      bbs <- mkBoundBinders ns g (bpSessionRoot bp) result
+      return (TBind (map T.pack ns) 0 bbs asksSites wrapped)
+    (KBind, [])   -> return (TBind [] 0 [] asksSites wrapped)
+    (KExpr, _)    -> return (TExpr 0 asksSites wrapped)
+    (KDecl, _)    -> error "writeBatchItemOutput: unexpected KDecl on the compile path"
+  BS.writeFile (bpTurnOutPath bp) (encodeTurnOut turnOut)
+
+-- | The §8 stdout document: @{"version":1,"diagnostics":[...],"items":[...]}@.
+-- @diags@ is the FLAT top-level array — the failing item's diagnostics
+-- verbatim, or @[]@ on a clean batch — kept as a strict superset of today's
+-- single-report shape so @parse_diag_report@'s exact-match version-1 reader
+-- still parses this document and still sees the real error (§8's own
+-- no-flag-day migration story).
+renderBatchReportJson :: [Diag] -> [(Int, ItemStatus)] -> String
+renderBatchReportJson diags items =
+  "{\"version\":1,\"diagnostics\":[" ++ intercalate "," (map renderDiag diags)
+    ++ "],\"items\":[" ++ intercalate "," (map renderItemStatus items) ++ "]}"
+  where
+    renderItemStatus (idx, ItemOk) =
+      "{\"index\":" ++ show idx ++ ",\"status\":\"ok\",\"dir\":" ++ jsonString ("i" ++ show idx) ++ "}"
+    renderItemStatus (idx, ItemFailed ds) =
+      "{\"index\":" ++ show idx ++ ",\"status\":\"failed\",\"dir\":" ++ jsonString ("i" ++ show idx)
+        ++ ",\"diagnostics\":[" ++ intercalate "," (map renderDiag ds) ++ "]}"
+
+-- | The @--turn-batch <plan.json> --batch-out <dir>@ entry point. Plans every
+-- item (splice + unique module rename), runs the shared session via
+-- 'runBatchPipeline' (ModIfaceCache + guts memo threaded), writing each
+-- item's output the moment its own compile succeeds — so an item BEFORE a
+-- mid-batch failure keeps a complete output directory even though the batch
+-- stops there (§3's run-until-first-error contract). Exits non-zero whenever
+-- any item failed (§8.1 ruling 1); every failure mode (bad args, malformed
+-- plan.json, a missing template, a compile failure, a write failure) reports
+-- through the SAME §8 JSON document on stdout.
+runTurnBatchMode :: Args -> IO ()
+runTurnBatchMode args = do
+  timing <- readTimingEnabled
+  attempt <- timePhase timing "total" $ try $ do
+    planPath  <- requireArg "--turn-batch" (argTurnBatch args)
+    batchOut  <- requireArg "--batch-out" (argBatchOut args)
+    hPutStrLn stderr $ "Processing (turn-batch): " ++ planPath
+    createDirectoryIfMissing True batchOut
+    planSrc   <- readFile planPath
+    items     <- parsePlanItems planSrc
+    templates <- mapM parseTurnTemplate (argTurnTemplates args)
+    planned   <- mapM (planBatchItem batchOut templates) items
+    let ghcItems = map toGhcBatchItem planned
+        byIdx    = Map.fromList (zip [0 ..] planned)
+    statusRef <- newIORef []
+    (nDone, mExc) <- runBatchPipeline (argIncludes args) ghcItems $ \idx result -> do
+      let bp = byIdx Map.! idx
+      writeBatchItemOutput timing bp result
+      modifyIORef' statusRef ((idx, ItemOk) :)
+    statuses0 <- reverse <$> readIORef statusRef
+    pure (statuses0, nDone, mExc)
+  case attempt of
+    Left (e :: SomeException) -> do
+      putStrLn (renderBatchReportJson (diagOf e) [])
+      hPutStrLn stderr ("Error: " ++ show e)
+      exitFailure
+    Right (statuses0, _nDone, Nothing) ->
+      putStrLn (renderBatchReportJson [] statuses0)
+    Right (statuses0, nDone, Just e) -> do
+      let diags = diagOf e
+      putStrLn (renderBatchReportJson diags (statuses0 ++ [(nDone, ItemFailed diags)]))
+      hPutStrLn stderr ("Error: " ++ show e)
+      exitFailure
+  where
+    diagOf e = case fromException e of
+      Just (se :: SourceError) -> diagsFromSourceError se
+      Nothing                  -> [diagFromException e]
 
 -- | Parse one raw @--turn-template kind=file@ argument. Validated here (not in
 -- 'parseArgs', which stays total) so a malformed flag surfaces through

@@ -2,15 +2,20 @@ module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
     -- * Bound-value type analysis (Wave 3b BIND mode)
   , stripMonadHead, isClosureType, renderType
-  , splitTupleType ) where
+  , splitTupleType
+    -- * Batch turns (plans/post-restart/batch-turns-feasibility.md §8)
+  , BatchItem(..), BatchItemResult(..), runBatchPipeline
+  ) where
 
 import GHC
+import GHC.Hs (hsmodDecls)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
+import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home (homeUnitId)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHpt)
-import GHC.Driver.Make (load')
+import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Types.SafeHaskell (SafeHaskellMode(Sf_None))
 import GHC.Types.SourceFile (HscSource(..))
@@ -43,6 +48,7 @@ import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import GHC.Types.Unique (getKey)
 import Control.Applicative ((<|>))
+import Control.Exception (SomeException, try)
 import Data.Maybe (fromMaybe)
 import Data.List (nub)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
@@ -57,6 +63,7 @@ import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder )
 import Tidepool.Timing (readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs)
+import Tidepool.Binders (ExportItem, declItems)
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -473,6 +480,304 @@ runPipelineSession mscope path includes
   | Just scope <- mscope, isSessionScopeActive scope =
       runCompile (sessionVariant scope path) path includes
   | otherwise = runCompile (normalVariant path) path includes
+
+-- ---------------------------------------------------------------------------
+-- Batch turns (plans/post-restart/batch-turns-feasibility.md §8): N item
+-- compiles in ONE GHC session, threading GHC's own 'ModIfaceCache' (§7.1 —
+-- cycles 2..N skip stdlib recompilation) and a per-module dep-guts memo
+-- (§7.6/§7.3 — a module's guts, once compiled in ANY cycle, are reused
+-- verbatim by every LATER cycle that compiles the same module again). The
+-- memo is populated INCREMENTALLY — on a module's FIRST compile in the
+-- batch, whichever cycle that is — which is what closes §7.6's
+-- incremental-population gap: a module that only appears partway through the
+-- batch still gets memoized from that point on, without needing to be known
+-- up front.
+--
+-- 'runCompileCycle' is 'runCompile''s inner (post-session-bootstrap) body,
+-- factored out so it can run MULTIPLE times inside ONE 'runGhc'. 'runCompile'
+-- ITSELF IS UNTOUCHED — still one bootstrap, one cycle, @load' Nothing ...@,
+-- no memo — so the normal and single-turn session paths stay byte-identical
+-- ('cross_mode_targeted' is the guard on that). This is deliberate
+-- duplication of 'runCompile''s body rather than a shared refactor of it: the
+-- lane boundary is "extend the seams, do not rework the skeleton", and the
+-- existing single-cycle callers must not change AT ALL, not even in the
+-- exact millisecond boundary of a timing phase.
+-- ---------------------------------------------------------------------------
+
+-- | One memoized module's compile artifacts, keyed by 'ModuleName' across a
+-- batch's cycles. A module's SOURCE cannot change within one batch spawn (a
+-- stdlib/library module is stable; a batch item's own turn module is always
+-- freshly, uniquely named by the caller — see app/Main.hs's per-item module
+-- renaming), so once compiled in ANY cycle its guts are valid for every later
+-- cycle that sees the same module name again.
+data GutsMemoEntry = GutsMemoEntry
+  { gmeFront      :: ModuleFront
+    -- ^ For 'allTyCons' (TyCons never change across cycles — 'core2core'
+    -- transforms 'mg_binds' only, see the comment at 'runCompileCycle''s own
+    -- 'allTyCons' computation).
+  , gmeSimplified :: ModGuts
+    -- ^ Post-'core2core', PRE-'externalizeInternalTops' — needed to redo
+    -- 'cpAfterModule''s HPT (re-)registration on a later cycle: 'load''
+    -- clears the whole HPT on every call (§7.1), so a module 'cpAfterModule'
+    -- deferred and hand-registered in an EARLIER cycle needs that
+    -- registration REDONE (cheaply — no recompilation, just 'hscTidy' +
+    -- 'mkIfaceTc' over already-computed guts) whenever it is deferred again
+    -- in a LATER cycle.
+  , gmeResult     :: (ModGuts, Maybe String, Maybe Type)
+    -- ^ Post-externalize triple, exactly the shape 'results' carries.
+  }
+
+type GutsMemo = Map.Map ModuleName GutsMemoEntry
+
+-- | 'runCompile''s inner body (everything inside its 'runGhc'), factored out
+-- so a batch driver can run it N times against ONE session. Two new
+-- parameters vs. what 'runCompile' hardcodes: 'mCache' (threaded 'load''
+-- 'ModIfaceCache' — 'Nothing' matches 'runCompile''s own @load' Nothing ...@
+-- byte for byte) and 'mMemoRef' (the per-module dep-guts memo — 'Nothing'
+-- disables it entirely, compiling every module fresh every cycle exactly as
+-- 'runCompile' does). This function does NOT itself set session DynFlags —
+-- the caller ('runBatchPipeline') does that ONCE, before any cycle, mirroring
+-- the proven spike shape (@runScenario@/@runGutsMemoScenario@ in
+-- @spike-batch/Spike.hs@: @setSessionDynFlags@ outside the per-cycle loop).
+runCompileCycle
+  :: Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
+  -> Bool -> PipelineVariant -> FilePath -> Ghc PipelineResult
+runCompileCycle mCache mMemoRef timing variant path = do
+    sessionT0 <- monotonicTime
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    warnRef <- liftIO (newIORef [])
+    pushLogHookM (warnCollectorHook path warnRef)
+    modGraphRaw <- depanal (pvDownsweepExcludes variant) False
+    setupT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
+    plan <- pvPlan variant timing modGraphRaw
+    let unpoison ms =
+          ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    loadT0 <- monotonicTime
+    loadFlag <- load' mCache LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
+               (mapMG unpoison (cpLoadGraph plan))
+    loadT1 <- monotonicTime
+    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
+    cpAfterLoad plan loadFlag
+    summaries0 <- cpSummaries plan
+    let summaries = [ ms | ms <- summaries0, ms_hsc_src ms == HsSrcFile ]
+    when (null summaries) $
+      liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
+    tcMsRef   <- liftIO (newIORef (0 :: Integer))
+    coreMsRef <- liftIO (newIORef (0 :: Integer))
+    dsMsRef  <- liftIO (newIORef (0 :: Integer))
+    c2cMsRef <- liftIO (newIORef (0 :: Integer))
+    let targetModName  = capitalize (takeBaseName path)
+        targetModName' = mkModuleName targetModName
+        compileFront modSum0 = do
+          let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+          (typechecked, tcMs) <- timeSection $ do
+            parsed <- parseModule modSum
+            typecheckModule parsed
+          liftIO (modifyIORef' tcMsRef (+ tcMs))
+          hscEnv0 <- getSession
+          let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
+              tcGblEnv = fst (tm_internals_ typechecked)
+              mCapTy   = capturedUserType tcGblEnv
+              mResTy   = foldr (<|>) Nothing
+                           [ capturedBindingType occ tcGblEnv
+                           | occ <- cpResultBinders plan ]
+          (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+          liftIO (modifyIORef' coreMsRef (+ dsMs))
+          liftIO (modifyIORef' dsMsRef (+ dsMs))
+          pure ModuleFront { mfSummary    = modSum
+                           , mfHscEnv     = hscEnv
+                           , mfTcGblEnv   = tcGblEnv
+                           , mfDesugared  = desugared
+                           , mfUserType   = mCapTy
+                           , mfResultType = mResTy }
+        -- Unlike 'runCompile''s own local 'compileBack' (untouched, still
+        -- returns just the post-externalize triple), this one ALSO returns
+        -- the pre-externalize 'simplified' guts — the memo needs them to
+        -- redo 'cpAfterModule''s HPT registration on a later cycle.
+        compileBack mf = do
+          (simplified, coreMs) <- timeSection $
+            liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
+          liftIO (modifyIORef' coreMsRef (+ coreMs))
+          liftIO (modifyIORef' c2cMsRef (+ coreMs))
+          cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+          pure (simplified, (externalizeInternalTops simplified, mfUserType mf, mfResultType mf))
+    (fronts, results, mReachable) <- case cpTier plan of
+      OptimizeEveryModule -> do
+        pairs <- forM summaries $ \modSum -> do
+          let mn = ms_mod_name modSum
+          cached <- case mMemoRef of
+            Nothing  -> pure Nothing
+            Just ref -> liftIO (Map.lookup mn <$> readIORef ref)
+          case cached of
+            -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
+            -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
+            -- re-run 'cpAfterModule' unconditionally: it is a no-op for any
+            -- module not deferred THIS cycle (the overwhelming common case —
+            -- see the haddock above), and for a module that IS deferred
+            -- again this cycle (the incremental-population gap this memo
+            -- closes) it cheaply re-registers the already-computed iface
+            -- into the HPT that 'load'' just wiped.
+            Just entry -> do
+              cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+              pure (gmeFront entry, gmeResult entry)
+            Nothing -> do
+              mf <- compileFront modSum
+              (simplified, r) <- compileBack mf
+              case mMemoRef of
+                Just ref -> liftIO (modifyIORef' ref (Map.insert mn (GutsMemoEntry mf simplified r)))
+                Nothing  -> pure ()
+              pure (mf, r)
+        pure (map fst pairs, map snd pairs, Nothing)
+      OptimizeCoreReachable -> do
+        fs <- forM summaries compileFront
+        forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
+        let gutsByMod = Map.fromList [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
+            reachableMods0 = reachableModuleClosure targetModName' gutsByMod
+            reachableMods = case forceValidationOnly of
+              Just m  -> Set.delete (mkModuleName m) reachableMods0
+              Nothing -> reachableMods0
+        rs <- fmap concat $ forM fs $ \f ->
+          if ms_mod_name (mfSummary f) `Set.member` reachableMods
+            then (:[]) . snd <$> compileBack f
+            else pure []
+        pure (fs, rs, Just reachableMods)
+    totalTcMs   <- liftIO (readIORef tcMsRef)
+    totalCoreMs <- liftIO (readIORef coreMsRef)
+    liftIO (emitPhase timing "typecheck" totalTcMs)
+    liftIO (emitPhase timing "core" totalCoreMs)
+    case mReachable of
+      Just reachableMods | timing -> liftIO $ do
+        totalDsMs  <- readIORef dsMsRef
+        totalC2cMs <- readIORef c2cMsRef
+        let allModNames = [ ms_mod_name (mfSummary f) | f <- fronts ]
+            moduleCount = length allModNames
+            reachableCount = Set.size reachableMods
+            validationOnly = [ moduleNameString m | m <- allModNames, not (m `Set.member` reachableMods) ]
+        hPutStrLn stderr $
+          "e6-tier modules=" ++ show moduleCount
+          ++ " reachable=" ++ show reachableCount
+          ++ " desugar_ms=" ++ show totalDsMs
+          ++ " core2core_ms=" ++ show totalC2cMs
+          ++ " validation_only=" ++ show validationOnly
+          ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
+      _ -> pure ()
+    cpBeforeMerge plan loadFlag
+    let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+        fst3 (g, _, _) = g
+        allGuts = map fst3 results
+    (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
+      ((tgt, ty, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty, rty)
+      []      -> liftIO $ ioError $ userError $
+        pvLabel variant ++ ": target module '" ++ targetModName
+        ++ "' not found among compiled modules: "
+        ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
+    let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
+        allTyCons = concatMap (mg_tcs . mfDesugared) fronts
+    hscFinal <- getSession
+    warnings <- liftIO (nub . reverse <$> readIORef warnRef)
+    return PipelineResult
+      { prBinds  = allBinds
+      , prTyCons = allTyCons
+      , prHscEnv = cpFinalEnv plan hscFinal
+      , prCapturedType = capturedTy
+      , prResultType   = resultTy
+      , prWarnings     = warnings
+      }
+
+-- | The batch-item variant: structurally 'sessionVariant' (same deferred-
+-- module injection logic, same 'OptimizeEveryModule' tier) with its own
+-- error-message label — batch items are compiled via 'runCompileCycle'
+-- directly rather than through 'runCompile'/'runPipelineSession'. See
+-- 'runBatchPipeline'.
+batchVariant :: SessionScope -> FilePath -> PipelineVariant
+batchVariant scope path = (sessionVariant scope path) { pvLabel = "runBatchPipeline" }
+
+-- | Catch any exception from a 'Ghc' action without losing the live session
+-- (a bare 'IO'-level 'Control.Exception.try' cannot wrap a 'Ghc' action
+-- directly). Standard 'reifyGhc'/'reflectGhc' bridge — see their haddocks in
+-- @GHC.Driver.Monad@ for the canonical form this mirrors.
+gTryAny :: Ghc a -> Ghc (Either SomeException a)
+gTryAny act = reifyGhc (\session -> try (reflectGhc act session))
+
+-- | Parse-only decl extraction against the ALREADY-OPEN batch session (no
+-- separate 'runGhc' bootstrap — mirrors 'Tidepool.Binders.extractBindersNamed'
+-- minus its own session setup, reusing its 'declItems' walker). A decl-kind
+-- batch item never enters the compile loop (matches @runTurnMode@'s KDecl
+-- branch — a decl turn is a name harvest, not a compile), so it costs
+-- neither the 'ModIfaceCache' nor the guts memo: one 'depanal' and one parse
+-- against the batch's already-booted session.
+runBatchDeclItems :: FilePath -> String -> Ghc [ExportItem]
+runBatchDeclItems path expectedModuleName = do
+  target <- guessTarget path Nothing Nothing
+  setTargets [target]
+  _ <- depanal [] False
+  graph <- getModuleGraph
+  case filter isExpected (mgModSummaries graph) of
+    (chosen : _) -> do
+      pm <- parseModule chosen
+      pure (concatMap declItems (hsmodDecls (unLoc (pm_parsed_source pm))))
+    [] -> liftIO (ioError (userError
+            ("runBatchDeclItems: no module named " ++ expectedModuleName
+              ++ " in the parsed module graph")))
+  where
+    isExpected ms = moduleNameString (moduleName (ms_mod ms)) == expectedModuleName
+
+-- | One batch item's compile request. A decl item never enters the compile
+-- loop ('BatchDecl' — parse-only, see 'runBatchDeclItems'); a bind/expr item
+-- ('BatchCompile') goes through 'runCompileCycle' with the batch's cache and
+-- guts memo threaded.
+data BatchItem
+  = BatchDecl { biPath :: FilePath, biExpectedModule :: String }
+  | BatchCompile { biPath :: FilePath, biScope :: SessionScope }
+
+-- | One batch item's outcome, tagged by which 'BatchItem' constructor
+-- produced it.
+data BatchItemResult
+  = BatchDeclResult [ExportItem]
+  | BatchCompileResult PipelineResult
+
+-- | Run a whole batch — ONE GHC boot, ONE 'runGhc', a live 'ModIfaceCache'
+-- (§7.1) and per-module dep-guts memo (§7.6) threaded across every item, in
+-- order — per plans/post-restart/batch-turns-feasibility.md §8.
+--
+-- @onItem index result@ is called for each item that FINISHES COMPILING, in
+-- order, immediately after that item's own artifacts are ready — so a caller
+-- that writes an item's output to disk from inside @onItem@ leaves every item
+-- before a mid-batch failure with a complete output directory (§3's
+-- run-until-first-error contract; app/Main.hs's @--turn-batch@ mode is that
+-- caller). Stops at the first item — its own compile, OR its @onItem@
+-- callback — that throws, returning how many items fully completed and the
+-- exception that stopped the batch (if any); the caller attributes that
+-- exception to the item immediately after the returned count.
+runBatchPipeline
+  :: [FilePath] -> [BatchItem] -> (Int -> BatchItemResult -> IO ())
+  -> IO (Int, Maybe SomeException)
+runBatchPipeline includes items onItem = do
+  timing <- readTimingEnabled
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    _ <- setSessionDynFlags (extractionDynFlags dflags includes)
+    cache   <- liftIO newIfaceCache
+    memoRef <- liftIO (newIORef Map.empty)
+    go cache memoRef timing (0 :: Int) items
+  where
+    go _ _ _ n [] = pure (n, Nothing)
+    go cache memoRef timing n (item : rest) = do
+      attempt <- gTryAny $ do
+        result <- case item of
+          BatchDecl path expected ->
+            BatchDeclResult <$> runBatchDeclItems path expected
+          BatchCompile path scope ->
+            BatchCompileResult <$>
+              runCompileCycle (Just cache) (Just memoRef) timing (batchVariant scope path) path
+        liftIO (onItem n result)
+      case attempt of
+        Left e   -> pure (n, Just e)
+        Right () -> go cache memoRef timing (n + 1) rest
 
 capitalize :: String -> String
 capitalize [] = []
