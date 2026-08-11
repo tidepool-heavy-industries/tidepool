@@ -18,9 +18,8 @@
 --   * @uri@ — must start @http:\/\/@ or @https:\/\/@, have a non-empty host,
 --     and contain no whitespace.  Structural only.
 --
--- (An @[sg|...|]@ ast-grep-pattern quoter used to live here; it was removed
--- with the SG effect. A @[glob|...|]@ quoter was deliberately OMITTED from v1:
--- the name collides with the eval-visible @glob :: Text -> M [Text]@ Fs verb.)
+-- (A @[glob|...|]@ quoter is deliberately OMITTED: the name collides with the
+-- eval-visible @glob :: Text -> M [Text]@ Fs verb.)
 module Tidepool.QQ.Validate
   ( uri
   , mkValidatorQQ
