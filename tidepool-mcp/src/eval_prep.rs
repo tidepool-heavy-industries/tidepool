@@ -325,11 +325,7 @@ pub(crate) fn emits_helpers_for(eff: &EffectDecl, row_effects: &[EffectDecl]) ->
 /// cannot false-negative. A false positive (the token inside a string
 /// literal) only costs the ~+385ms quoter-module import, never correctness.
 pub fn uses_qq(src: &str) -> bool {
-    src.contains("[fmt|")
-        || src.contains("[j|")
-        || src.contains("[patch|")
-        || src.contains("[uri|")
-        || src.contains("[form|")
+    src.contains("[fmt|") || src.contains("[j|") || src.contains("[patch|") || src.contains("[uri|")
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -817,15 +813,17 @@ mod tests {
     // can be hit directly: determinism and structural invariants. Failure
     // classification moved to `tidepool_runtime::failclass` (tested there).
 
-    /// The five quasi-quoter open-tokens `uses_qq` must recognize.
-    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|", "[form|"];
+    /// The quasi-quoter open-tokens `uses_qq` must recognize.
+    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|"];
 
     proptest! {
         /// Any text containing a quoter open-token is detected as QQ, no matter
         /// what surrounds it.
         #[test]
         fn prop_uses_qq_detects_every_token(
-            tok in 0usize..4,
+            // Bound by the table's ACTUAL length — a literal here once drifted
+            // below a 5-element table, so the last token was never generated.
+            tok in 0usize..QQ_TOKENS.len(),
             prefix in "[a-zA-Z0-9 ]{0,40}",
             suffix in "[a-zA-Z0-9 ]{0,40}",
         ) {
@@ -925,11 +923,12 @@ mod tests {
         // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
         assert!(uses_qq("apply [patch|--- a/x|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
-        assert!(uses_qq("askUserRaw (toJSON [form|choice ok?: yes no|])"));
-        // dropped quoters are NOT special: glob (removed) and sg (cut with the
-        // SG effect) must both classify as non-QQ.
+        // dropped quoters are NOT special: glob (removed), sg (cut with the
+        // SG effect), and form (deleted with the forms one-algebra
+        // consolidation) must all classify as non-QQ.
         assert!(!uses_qq("pure [glob|src/*.rs|]"));
         assert!(!uses_qq("pure [sg|fn $NAME|]"));
+        assert!(!uses_qq("askUserRaw (toJSON [form|choice ok?: yes no|])"));
         // list comprehensions with conventional spacing are NOT tokens
         assert!(!uses_qq("pure [x | x <- xs]"));
         assert!(!uses_qq("pure [ fmt | fmt <- fs ]"));
