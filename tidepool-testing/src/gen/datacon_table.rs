@@ -120,3 +120,57 @@ pub fn standard_datacon_table() -> DataConTable {
     });
     table
 }
+
+/// A `DataConTable` holding the freer-simple continuation constructors
+/// (`Val`, `E`, `Leaf`, `Node`, `Union`) `EffectMachine` needs to walk an
+/// `Eff` expression. Shared by `tidepool-effect`'s unit tests
+/// (`machine.rs`) and its `proptest_effect_machine.rs` integration suite.
+pub fn freer_effect_test_table() -> DataConTable {
+    let mut table = DataConTable::new();
+    table.insert(DataCon {
+        id: DataConId(1),
+        name: "Val".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: DataConId(2),
+        name: "E".to_string(),
+        tag: 2,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: DataConId(3),
+        name: "Leaf".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: DataConId(4),
+        name: "Node".to_string(),
+        tag: 2,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: DataConId(5),
+        name: "Union".to_string(),
+        tag: 1,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table
+}

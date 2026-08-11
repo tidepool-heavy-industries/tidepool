@@ -55,7 +55,7 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
 }
 
 #[test]
-fn alpha_roundtrips_when_beta_shares_name() {
+fn qualified_name_alpha_roundtrips_when_beta_shares_name() {
     let (table, _, _) = build_collision_table();
     let original = Alpha::Read;
     let value = original.to_value(&table).expect("to_value");

@@ -313,56 +313,7 @@ mod tests {
     use tidepool_repr::datacon_table::DataConTable;
     use tidepool_repr::types::{DataConId, Literal, VarId};
     use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree};
-
-    fn make_test_table() -> DataConTable {
-        let mut table = DataConTable::new();
-        table.insert(DataCon {
-            id: DataConId(1),
-            name: "Val".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(2),
-            name: "E".to_string(),
-            tag: 2,
-            rep_arity: 2,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(3),
-            name: "Leaf".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(4),
-            name: "Node".to_string(),
-            tag: 2,
-            rep_arity: 2,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(5),
-            name: "Union".to_string(),
-            tag: 1,
-            rep_arity: 2,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        });
-        table
-    }
+    use tidepool_testing::gen::freer_effect_test_table as make_test_table;
 
     /// A user program defining/importing its own `Node`/`Leaf` (e.g.
     /// `data Tree = Node Tree Tree | Leaf Int`, colliding on the bare name

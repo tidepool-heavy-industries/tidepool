@@ -644,6 +644,7 @@ impl<A: ToCore, B: ToCore, C: ToCore> ToCore for (A, B, C) {
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};
+    use tidepool_testing::bridge_roundtrip::roundtrip;
 
     fn test_table() -> DataConTable {
         let mut t = DataConTable::new();
@@ -794,12 +795,6 @@ mod tests {
             type_name: String::new(),
         });
         t
-    }
-
-    fn roundtrip<T: FromCore + ToCore + PartialEq + std::fmt::Debug>(val: T, table: &DataConTable) {
-        let value = val.to_value(table).expect("ToValue failed");
-        let back = T::from_value(&value, table).expect("FromValue failed");
-        assert_eq!(val, back);
     }
 
     #[test]

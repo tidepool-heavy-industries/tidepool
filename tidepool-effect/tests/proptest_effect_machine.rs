@@ -5,60 +5,9 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::machine::EffectMachine;
 use tidepool_eval::heap::VecHeap;
 use tidepool_eval::value::Value;
-use tidepool_repr::datacon::DataCon;
-use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree};
-
-fn make_test_table() -> DataConTable {
-    let mut table = DataConTable::new();
-    table.insert(DataCon {
-        id: DataConId(1),
-        name: "Val".into(),
-        tag: 1,
-        rep_arity: 1,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: DataConId(2),
-        name: "E".into(),
-        tag: 2,
-        rep_arity: 2,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: DataConId(3),
-        name: "Leaf".into(),
-        tag: 1,
-        rep_arity: 1,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: DataConId(4),
-        name: "Node".into(),
-        tag: 2,
-        rep_arity: 2,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: DataConId(5),
-        name: "Union".into(),
-        tag: 1,
-        rep_arity: 2,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table
-}
+use tidepool_testing::gen::freer_effect_test_table as make_test_table;
 
 struct CountingHandler {
     count: u32,

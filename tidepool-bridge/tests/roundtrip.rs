@@ -2,6 +2,7 @@ use proptest::prelude::*;
 use std::sync::OnceLock;
 use tidepool_bridge::traits::{FromCore, ToCore};
 use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
+use tidepool_testing::bridge_roundtrip::roundtrip;
 
 static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
@@ -40,12 +41,6 @@ fn get_table() -> &'static DataConTable {
         });
         table
     })
-}
-
-fn roundtrip<T: FromCore + ToCore + PartialEq + std::fmt::Debug>(val: T, table: &DataConTable) {
-    let value = val.to_value(table).expect("ToCore failed");
-    let back = T::from_value(&value, table).expect("FromCore failed");
-    assert_eq!(val, back, "Roundtrip failed for {:?}", val);
 }
 
 proptest! {

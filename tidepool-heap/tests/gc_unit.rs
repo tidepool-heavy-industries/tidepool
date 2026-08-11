@@ -57,4 +57,3 @@ fn test_layout_constant_sanity() {
         assert!(set.insert(tag), "Duplicate tag found: {}", tag);
     }
 }
-

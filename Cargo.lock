@@ -3839,6 +3839,7 @@ dependencies = [
  "tidepool-bridge",
  "tidepool-eval",
  "tidepool-repr",
+ "tidepool-testing",
 ]
 
 [[package]]

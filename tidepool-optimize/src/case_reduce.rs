@@ -445,5 +445,4 @@ mod tests {
             panic!("Expected field to be 42");
         };
     }
-
 }

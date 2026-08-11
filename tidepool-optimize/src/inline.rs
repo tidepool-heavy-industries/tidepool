@@ -190,5 +190,4 @@ mod tests {
         };
         assert_eq!(*v, y);
     }
-
 }

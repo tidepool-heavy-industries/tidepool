@@ -52,7 +52,7 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
 }
 
 #[test]
-fn alpha_roundtrips_when_beta_shares_name() {
+fn arity_alpha_roundtrips_when_beta_shares_name() {
     let (table, alpha_id, _) = ambiguous_table();
     let original = Alpha::Read(17);
 

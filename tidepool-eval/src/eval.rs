@@ -3292,7 +3292,7 @@ mod tests {
         {
             let nodes = vec![
                 CoreFrame::Lit(Literal::LitInt(42)), // 0
-                CoreFrame::Var(VarId(1)),             // 1: x
+                CoreFrame::Var(VarId(1)),            // 1: x
                 CoreFrame::Case {
                     scrutinee: 0,
                     binder: VarId(1),
