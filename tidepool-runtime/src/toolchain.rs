@@ -84,7 +84,7 @@ const REDEPLOY: &str = "scripts/redeploy.sh";
 /// A toolchain *configuration* failure: the extract or the stdlib could not be
 /// located, or the located pair is skewed. Distinct from a compile failure —
 /// nothing the user's Haskell can cause.
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error)]
 pub enum ToolchainError {
     /// Neither `$TIDEPOOL_EXTRACT` nor `$PATH` yields a runnable extract.
     #[error(
@@ -135,6 +135,27 @@ pub enum ToolchainError {
         /// Underlying I/O or JSON failure.
         source: std::io::Error,
     },
+}
+
+/// `Debug` renders the variant name plus the operator-facing `Display` text,
+/// NOT a field dump.
+///
+/// This error reaches `main()` in both server binaries, and Rust prints a
+/// returned `Err` with `Debug` — a derived `Debug` there spilled the whole
+/// `SkewReport` struct (every fingerprint, the entire stamp) and buried the
+/// one sentence saying to run `scripts/redeploy.sh`. The struct dump had no
+/// consumer; the message has one.
+impl std::fmt::Debug for ToolchainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tag = match self {
+            Self::ExtractNotFound { .. } => "ExtractNotFound",
+            Self::PreludeDirInvalid { .. } => "PreludeDirInvalid",
+            Self::StdlibNotFound { .. } => "StdlibNotFound",
+            Self::Skew(_) => "Skew",
+            Self::Stamp { .. } => "Stamp",
+        };
+        write!(f, "{tag}: {self}")
+    }
 }
 
 fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
