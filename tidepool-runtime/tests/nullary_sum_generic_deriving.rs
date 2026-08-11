@@ -1,14 +1,9 @@
 //! Nullary-sum (enum) `Generic`-derived `ToJSON`/`FromJSON`, executed on the
 //! JIT through the real extract pipeline (`EvalHarness::run_pure`).
 //!
-//! Before this fix, the vendored Aeson's Generic machinery rejected EVERY
-//! multi-constructor sum at compile time — including a plain enum like
-//! `data Mode = Observing | Deciding | Acting`, forcing authors to hand-write
-//! `ToJSON`/`FromJSON` for such fields (see `examples/harness/Harness.hs`'s
-//! former `Mode`/`Confidence` instances). Now a NULLARY sum (every
-//! constructor has zero fields) derives generically, encoding each
-//! constructor as its bare name string; a sum with any non-nullary
-//! constructor is still rejected at compile time (unchanged, exercised by
+//! A NULLARY sum (every constructor has zero fields) derives generically,
+//! encoding each constructor as its bare name string; a sum with any
+//! non-nullary constructor is still rejected at compile time (exercised by
 //! `generic_deriving_337.rs::sum_type_rejected_at_compile_time`).
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,

@@ -343,11 +343,6 @@ fn tool_input_schema_is_the_generic_record_shape() {
 /// A multi-constructor input is now SUPPORTED, and its schema is the shape the
 /// vendored encoder/decoder actually use: an all-nullary sum is a bare
 /// constructor-name string, so its schema is a string enum.
-///
-/// This replaces `compile_fail_multi_constructor_call_input`, which pinned the
-/// old shallow tool schema's blanket rejection of sums. That rejection was
-/// drift, not policy: `FromJSON` has always decoded these, so the schema
-/// refusing to describe them made the declaration and the decoder disagree.
 #[test]
 fn nullary_sum_tool_input_schema_is_a_string_enum() {
     let src = input_schema_module(
@@ -528,23 +523,12 @@ fn compiletools_time_well_formed_record_compiles() {
     );
 }
 
-// `model_codec_rejects_normalized_field_collisions` used to live here. It has
-// no successor because the failure it guarded is now unconstructible: it
-// existed only because the deleted `Tidepool.Agent.ModelCodec` snake_cased
-// selector names before they reached JSON, so `fooBar` and `foo_bar` could
-// collapse to one key and silently lose a field. Nothing on this path
-// normalizes any more — every JSON key is the selector name VERBATIM — and
-// two record fields of one constructor cannot share a source name, so the
-// collision has no way to occur. A test asserting it can't would be asserting
-// that Haskell rejects duplicate record selectors.
-
-/// The OTHER collision `ModelCodec` used to catch at runtime — a payload field
-/// named `tag`, shadowing the constructor discriminator — is a compile-time
-/// `TypeError` on the vendored path, and this pins that it fires on the agent
-/// tool surface specifically. (`generic_recursive_sums.rs`'s
-/// `payload_field_cannot_collide_with_sum_tag` pins the same guard through
-/// `ToJSON`; this one proves the guard reaches a type arriving as a `Call`
-/// input, which is what the deleted runtime check was protecting.)
+/// A payload field named `tag` shadows the constructor discriminator and is
+/// rejected as a compile-time `TypeError` on the vendored path; this pins
+/// that it fires on the agent tool surface specifically.
+/// (`generic_recursive_sums.rs`'s `payload_field_cannot_collide_with_sum_tag`
+/// pins the same guard through `ToJSON`; this one proves the guard reaches a
+/// type arriving as a `Call` input.)
 #[test]
 fn compile_fail_payload_field_named_tag() {
     require_extract();

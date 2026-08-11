@@ -40,10 +40,7 @@ x = Helper.y
         target: "x",
     };
 
-    // Assert structural equivalence (Core trees modulo IDs)
     assert_cross_mode_structurally_equivalent(&fixture);
-
-    // Assert runtime equivalence
     assert_cross_mode_pure_equivalent(&fixture);
 }
 
@@ -109,7 +106,6 @@ main = Def.echo 42
         target: "main",
     };
 
-    // For effects, we assert runtime equivalence.
     assert_cross_mode_runtime_equivalent(
         &fixture,
         || frunk::hlist![EchoHandler],
@@ -148,7 +144,6 @@ x = Helper.y
         target: "x",
     };
 
-    // Runtime equivalence should fail because 1 != 2
     let result = std::panic::catch_unwind(|| {
         assert_cross_mode_pure_equivalent(&fixture);
     });
