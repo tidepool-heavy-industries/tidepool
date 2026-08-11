@@ -2,8 +2,9 @@
 
 A frontend over the eval substrate, peer to `tidepool-repl`. Both share ONE
 suspension engine: the threadless stow-as-data mechanism in
-`tidepool_runtime::session::PersistentSession`. There is no parked-thread
-mechanism anywhere in this crate.
+`tidepool_runtime::session::PersistentSession`. Suspension here is threadless
+throughout: no JIT continuation is ever held by a parked thread. (The
+operator gate parks a thread, but it holds no continuation — see below.)
 
 Module map:
 - `tree`/`forcing` — `NodeId`/`NodeState`/`HoleId`/`SiteId`, forcing badges,
@@ -142,18 +143,19 @@ Two independent pieces, both in `replay.rs`:
   `tail -f log.jsonl`. It is NOT the startup recovery path: that is the
   generation-tagged `persistence::Checkpoint` the driver restores from at
   boot (`SelfHarnessDriver::restore`) — a second recovery source folding the
-  log at startup would be dual lifecycle machinery.
-  `golden_path`'s crash-replay assertion (a killed
-  process's log folds back to the terminal tree) is what pins this contract.
+  log at startup would be dual lifecycle machinery. `golden_path`'s
+  crash-replay assertion (a killed process's log folds back to the terminal
+  tree) is what pins this contract.
 
 **Effects are RECORDED live; they are never SUBSTITUTED on replay.**
 `Harness::flush_effects` drains a node's `effect_trace` after each
 `run_block`/`answer_*` into `NodeTree::effect`, so every turn that dispatches
 a HANDLED (non-suspending) effect writes one `Event::Effect{req,resp}` per
 effect. A SUSPENDING effect (`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never
-reaches a handler, so it logs as `HolePublished`/`HoleConsumed`, not
-`Effect`. **Scoped-stack caveat:** the
-self-iterating harness's answerer (`[AskUser, Finalize]`) and outer loop
+reaches a handler, so it logs as `HolePublished`/`HoleConsumed`, not `Effect`.
+
+**Scoped-stack caveat:** the self-iterating harness's answerer (`[AskUser,
+Finalize]`) and outer loop
 (`[RunLLMTurn, AskUser]`) declare ONLY suspending effects — no base
 `Console`/`Fs`/`Http`/… — so `flush_effects` runs but drains an empty trace:
 those nodes produce NO `Event::Effect` BY CONSTRUCTION (that absence IS the
