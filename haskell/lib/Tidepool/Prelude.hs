@@ -548,7 +548,8 @@ tReverse = T.reverse
 -- Thin alias for the vendored @T.takeWhile@ (@Tidepool.Data.Text@), kept for
 -- source compatibility. MUST stay a home-module delegation (see the import
 -- above) — the equivalent wrapper over external @Data.Text.takeWhile@
--- corrupts under the JIT.
+-- corrupts under the JIT (guard:
+-- @tidepool-runtime/tests/repro/repro_takewhilet_alias_pap.rs@).
 takeWhileT :: (Char -> Bool) -> Text -> Text
 takeWhileT = T.takeWhile
 {-# INLINE takeWhileT #-}
