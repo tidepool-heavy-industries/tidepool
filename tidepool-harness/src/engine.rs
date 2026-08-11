@@ -501,13 +501,11 @@ pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -
 /// compile instead (e.g. a `Text`/tuple) rather than the real type.
 ///
 /// Prescribes bare `finalize @{ty} value`, with no outer `:: M {ty}`
-/// annotation — the earlier "annotate the WHOLE expression" wording was a
-/// stopgap for the ambiguous-`a0` defect; `__anchor` (`template_turn_for`)
-/// fixed that at the source, and
-/// `finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`
-/// proves the bare shape compiles for a pinned `Finalize T` row. The
-/// annotated form still compiles too (a relaxation, not a prohibition) — it
-/// is simply no longer necessary to prescribe.
+/// annotation — `__anchor` (`template_turn_for`) resolves the
+/// ambiguous-`a0` defect at the template level, so the bare shape compiles
+/// for a pinned `Finalize T` row
+/// (`finalize_type_pinning::bare_finalize_with_no_annotation_compiles_when_pinned`).
+/// An annotated form still compiles too; it is just unnecessary to prescribe.
 ///
 /// `table` is the [`DataConTable`] the hole's answer type was resolved from,
 /// when the caller has one in hand — used only to render a names-only shape

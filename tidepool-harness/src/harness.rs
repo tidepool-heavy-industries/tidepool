@@ -382,9 +382,9 @@ fn candidate_window(
 /// `CompileError::Diagnostics`' own `Display` reports only how many
 /// diagnostics there were, not what they said — fine for a log line, useless
 /// as the corrective user turn [`Harness::run_to_hole_or_done`] feeds back,
-/// which is the whole mechanism by which a model fixes its own Haskell.
-/// `9c2b14ff` restored the content (severity/span/message per entry); this
-/// restores the COORDINATES, reusing `tidepool_runtime::diag`'s remapper (the
+/// which is the whole mechanism by which a model fixes its own Haskell. This
+/// renders the full content (severity/span/message per entry) with the
+/// COORDINATES remapped, reusing `tidepool_runtime::diag`'s remapper (the
 /// same one `tidepool-mcp`'s eval path uses) rather than a second one.
 ///
 /// `run_turn` builds up to TWO full module sources before it knows which
@@ -396,9 +396,9 @@ fn candidate_window(
 /// ONLY when its raw line falls inside THAT candidate's own (deterministically
 /// computed, from `block`) user-code window — tried EXPR first, then BIND.
 /// A diagnostic outside every candidate's window (or when there is no
-/// candidate at all) keeps its raw template-space span, exactly as before
-/// this fix: picking the wrong candidate would silently shift every line
-/// number by a wrong constant, which is worse than not remapping.
+/// candidate at all) keeps its raw template-space span: picking the wrong
+/// candidate would silently shift every line number by a wrong constant,
+/// which is worse than not remapping.
 fn render_compile_error(
     e: &tidepool_runtime::CompileError,
     block: &str,
@@ -3185,7 +3185,7 @@ mod tests {
     }
 
     /// A non-`Diagnostics` variant carries no GHC coordinates to remap —
-    /// renders verbatim via `Display`, exactly as before this fix.
+    /// renders verbatim via `Display`.
     #[test]
     fn render_compile_error_non_diagnostics_variant_renders_verbatim() {
         let err = tidepool_runtime::CompileError::IOTypeDetected;
@@ -3244,9 +3244,9 @@ mod tests {
     /// path, for a test that reads the durable log back after driving the
     /// harness — `test_harness`'s own tempdir is dropped (and the file
     /// unlinked) before it returns. `Harness::force` needs no GHC/extract
-    /// compile at all now (it registers an [`ResidentSession::unbootstrapped`]
+    /// compile at all (it registers an [`ResidentSession::unbootstrapped`]
     /// session — the machine comes up on the node's first real turn), so this
-    /// fixture no longer needs to fabricate a boot expr either.
+    /// fixture does not fabricate a boot expr either.
     fn test_harness_with_log() -> (Harness, std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
