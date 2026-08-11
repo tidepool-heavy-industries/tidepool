@@ -20,10 +20,10 @@
 //!   worktree is retained, registered, UNBOUND, rebindable. That IS the
 //!   rolled-back state; "orphaned" means "left Active-bound to an agent that
 //!   will never run", not "exists".
-//! - success: settle the binding `Terminal` — a lane-1 agent is one cycle by
-//!   construction, so cycle completion is agent completion. `Terminal` vs
-//!   `Released` is the finished-vs-stopped-waiting distinction `binding.rs`
-//!   documents; both permit rebinding.
+//! - success: settle the binding `Terminal` — an agent from this spawner is
+//!   one cycle by construction, so cycle completion is agent completion.
+//!   `Terminal` vs `Released` is the finished-vs-stopped-waiting distinction
+//!   `binding.rs` documents; both permit rebinding.
 //! - a rollback that itself fails is [`SpawnError::RollbackFailed`], loud,
 //!   carrying both the original failure and the rollback failure — never a
 //!   silent swallow of either.

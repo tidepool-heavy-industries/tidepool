@@ -1,7 +1,6 @@
-//! The lane-1 live leg: ONE real coupled spawn, ONE real model turn, with
+//! The one-cycle live leg: ONE real coupled spawn, ONE real model turn, with
 //! receipts. **A human runs this deliberately** — it spends the operator's
-//! ChatGPT tokens and is never wired into a suite or a battery tier (standing
-//! rule, Inanna 2026-08-09).
+//! ChatGPT tokens and is never wired into a suite or a battery tier.
 //!
 //!     cargo run -p tidepool-agent --example live_one_cycle
 //!
@@ -18,7 +17,7 @@
 //!    run is checkable after the fact.
 //! 3. Run one [`CoupledSpawner::spawn_one_cycle`] against the real
 //!    [`CodexAgentBackend`] with a tiny synthetic task and a
-//!    `{"result": string}` output schema — no dynamic tools (lane 1).
+//!    `{"result": string}` output schema — no dynamic tools.
 //! 4. Print the receipt (worktree id, binding ref, thread id, EXACT resolved
 //!    model, turn id), the payload, and the binding's on-disk final state.
 //! 5. Re-snapshot the config surface and compare, loudly.
@@ -40,8 +39,8 @@ use tidepool_worktree::{GitCli, WorktreeManager, WorktreeRegistry, WorktreeSpec}
 
 /// The word the worker is asked to produce. Distinctive enough that finding it
 /// in the payload is evidence the turn actually ran, not that a default
-/// matched — and it is NOT the phase-4 passphrase, so a stale transcript
-/// cannot be mistaken for this run.
+/// matched — and it is NOT the replay fixture's passphrase, so a stale
+/// transcript cannot be mistaken for this run.
 const EXPECTED_WORD: &str = "tidepool-lane1-halite";
 
 fn main() -> ExitCode {
@@ -98,8 +97,8 @@ fn run() -> Result<(), String> {
         )),
         agent_label: "lane1-live".to_string(),
         // Blunt on purpose: the cheap-plumbing tier is a weaker model than the
-        // one the phase-4 transcript was recorded on, and the point of this
-        // task is to exercise the plumbing, not the model.
+        // one the replay fixture was recorded on, and the point of this task
+        // is to exercise the plumbing, not the model.
         task: format!(
             "Do not run any commands and do not edit any files. Respond with exactly \
              {{\"result\": \"{EXPECTED_WORD}\"}} and nothing else."
@@ -110,8 +109,8 @@ fn run() -> Result<(), String> {
             "required": ["result"],
             "additionalProperties": false
         })),
-        // Lane 1's shape: no tools, so the child has nothing to call and the
-        // no-tools combinator drives the turn straight through.
+        // No tools: the child has nothing to call, so the no-tools combinator
+        // drives the turn straight through.
         tools: Vec::new(),
         model: ModelPolicy::CheapPlumbing,
         effort: ReasoningEffort::Low,

@@ -1,4 +1,4 @@
-//! LANE 1 acceptance tests for the coupled-spawn saga.
+//! Acceptance tests for the coupled-spawn saga.
 //!
 //! Two disciplines, both load-bearing:
 //!
@@ -7,8 +7,7 @@
 //!    the same reason that crate gives: a git mock proves the mock agrees with
 //!    the author's model of git, which is the thing in doubt.
 //! 2. **The model IS mocked, always.** [`MockBackend`] is the only backend any
-//!    committed test drives (standing rule, Inanna 2026-08-09) — no live turn,
-//!    no token, no `~/.codex`.
+//!    committed test drives — no live turn, no token, no `~/.codex`.
 //!
 //! Rollback is asserted from DISK, not from the live table: each gate drops the
 //! spawner (releasing `BindingTable`'s lifetime flock), reopens the table at the
@@ -172,8 +171,8 @@ fn spawn_completes_and_settles_binding_terminal() {
     // `agent-<id>-<sanitized label>`: the space and `!` collapse to one dash.
     assert_eq!(run.receipt.binding_ref, "agent-0-worker-one");
 
-    // Call-log shape: lane 1 threads are ephemeral with no dynamic tools, and
-    // the cycle runs in the bound worktree with the caller's schema.
+    // Call-log shape: threads are ephemeral with no dynamic tools, and the
+    // cycle runs in the bound worktree with the caller's schema.
     assert_eq!(backend.started.len(), 1);
     assert!(backend.started[0].ephemeral);
     assert!(backend.started[0].dynamic_tools.is_empty());
@@ -569,9 +568,8 @@ fn rollback_failure_reports_both_causes() {
 // disciplines as above — real git, mocked model — plus the same rule that the
 // rolled-back end state is read back off DISK.
 //
-// The mock stays a scripted list of stops (root/human, 2026-08-11): every row
-// below is "given exactly these events, the saga does X". Nothing here teaches
-// it protocol behavior.
+// The mock stays a scripted list of stops: every row below is "given exactly
+// these events, the saga does X". Nothing here teaches it protocol behavior.
 // ============================================================================
 
 /// The only worktree the fixture's registry knows about. Every driven row
