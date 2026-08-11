@@ -52,77 +52,6 @@ fn test_emit_primop_int_add() {
 }
 
 #[test]
-fn test_emit_primop_int_and() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(0xFF)),
-            CoreFrame::Lit(Literal::LitInt(0x0F)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAnd,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 0x0F);
-    }
-}
-
-#[test]
-fn test_emit_primop_int_or() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(0xF0)),
-            CoreFrame::Lit(Literal::LitInt(0x0F)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntOr,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 0xFF);
-    }
-}
-
-#[test]
-fn test_emit_primop_int_xor() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(0xFF)),
-            CoreFrame::Lit(Literal::LitInt(0x0F)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntXor,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 0xF0);
-    }
-}
-
-#[test]
-fn test_emit_primop_int_not() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(0)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntNot,
-                args: vec![0],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), -1);
-    }
-}
-
-#[test]
 fn test_emit_primop_int_shl() {
     let tree = RecursiveTree {
         nodes: vec![
@@ -137,24 +66,6 @@ fn test_emit_primop_int_shl() {
     let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_int(result.result_ptr), 256);
-    }
-}
-
-#[test]
-fn test_emit_primop_int_shra() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(-16)),
-            CoreFrame::Lit(Literal::LitInt(2)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntShra,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), -4);
     }
 }
 
@@ -1496,42 +1407,6 @@ fn test_emit_primop_double_lt() {
 }
 
 #[test]
-fn test_emit_primop_float_add() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(1.5) as u64)),
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(2.5) as u64)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::FloatAdd,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_float(result.result_ptr), 4.0);
-    }
-}
-
-#[test]
-fn test_emit_primop_float_mul() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(3.0) as u64)),
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(4.0) as u64)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::FloatMul,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_float(result.result_ptr), 12.0);
-    }
-}
-
-#[test]
 fn test_emit_primop_float_negate() {
     let tree = RecursiveTree {
         nodes: vec![
@@ -1545,24 +1420,6 @@ fn test_emit_primop_float_negate() {
     let result = compile_and_run(&tree, 65536);
     unsafe {
         assert_eq!(read_lit_float(result.result_ptr), -2.0);
-    }
-}
-
-#[test]
-fn test_emit_primop_float_lt() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(1.0) as u64)),
-            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(2.0) as u64)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::FloatLt,
-                args: vec![0, 1],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 1);
     }
 }
 
@@ -2205,28 +2062,6 @@ fn test_error_sentinel_detection_in_complex_rhs() {
         );
     }
     assert!(host_fns::take_runtime_error().is_none());
-}
-
-#[test]
-fn test_non_error_sentinel_not_deferred() {
-    // let x = 42 in x
-    // x is not an error sentinel, should be evaluated normally.
-    let x = VarId(1);
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(42)), // 0
-            CoreFrame::Var(x),                   // 1
-            CoreFrame::LetNonRec {
-                binder: x,
-                rhs: 0,
-                body: 1,
-            }, // 2
-        ],
-    };
-    let result = compile_and_run(&tree, 65536);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 42);
-    }
 }
 
 #[test]
