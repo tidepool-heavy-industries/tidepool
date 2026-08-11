@@ -319,3 +319,15 @@ stating this rather than running them for show. What applies:
 
 plus `binary(acceptance_multi_target)` — the `--targets` guard wave-3 now leans
 on — and `binary(selfharness_spine)`. One GHC leg at a time.
+
+## Root ruling on D2's freer-roots requirement (2026-08-11, at wave-3 fold)
+
+The headline requirement "five freer roots DERIVED from
+`tidepool_repr::freer_names`, never hand-listed" is unsatisfiable as
+written: `freer_names` is Rust; the narrowing lives in Haskell, which
+cannot import a Rust const, and no Haskell mirror exists (adding one would
+BE the banned hand-list, twice). RULING: the requirement's intent is "no
+hand-list to drift" — D2's executor satisfies it in the intent-preserving
+form spawn-latency identified: do not replace or bypass the binder-type
+closure, which supplies all five roots structurally, with no list on
+either side of the language boundary. Cite this ruling when executing.
