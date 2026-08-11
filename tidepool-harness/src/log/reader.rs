@@ -1,14 +1,7 @@
 //! Reads an event-log file written by [`super::LogWriter`]: a from-start
 //! iterator (torn-tail tolerant) for replay, and a follow/tail mode for
-//! the protocol server's SSE stream.
-//!
-//! Follow mode polls rather than using a filesystem watcher (`notify` et
-//! al.): the contract crate stays dependency-light (see `lib.rs`), the
-//! poll loop is a few lines of `std`, and correctness doesn't depend on
-//! watcher-backend quirks (inotify coalescing, network-filesystem
-//! fallback, etc). A fixed interval is simplest-correct for R0; if SSE
-//! latency ever matters a watcher can replace the sleep without changing
-//! the `Follower` API.
+//! the protocol server's SSE stream. Follow mode polls at a fixed interval
+//! rather than using a filesystem watcher.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};

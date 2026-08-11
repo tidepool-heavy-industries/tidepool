@@ -10,34 +10,25 @@
 //! builder, the same one `compile_haskell` drives) and reads all three
 //! outputs — `<target>.cbor`, `meta.cbor`, `asks.json` — from it.
 //!
-//! **These compiles are MEMOIZED.** This module used to be deliberately
-//! cache-free ("turns are one-shot, the extract call is the ~2s floor either
-//! way"), which was right about one turn and wrong about the suite: the
-//! fixed-source compiles here — the boot seeds, the answerer's turns, the
-//! outer `render`/`loop` fragments — are the same bytes, the same includes and
-//! the same extract binary, recompiled once per test PROCESS across ~200 of
-//! them. That path is gone; there is no cache-free variant and no bypass flag.
-//! What survives is the sidecar contract, still owned end-to-end here: the memo
-//! stores the FULL artifact set this module reads (`meta.cbor`, every
+//! **These compiles are MEMOIZED** through `tidepool_runtime::cache` (there
+//! is no cache-free path). Keying, and why sharing one memo across test
+//! processes is safe, are specified in `plans/compile-memo.md`. A hit stores
+//! and restores the FULL artifact set this module reads (`meta.cbor`, every
 //! `<target>.cbor`, and the asks sidecar in whichever shape the target count
-//! selects — with ABSENT distinct from empty), and hit and miss rejoin at
-//! [`assemble`], so a hit is observationally identical by code shape rather
-//! than by two branches kept in sync. Keying, and why sharing one memo across
-//! test processes is safe, are specified in `plans/compile-memo.md`; the
-//! mechanism is `tidepool_runtime::cache`, not a fork of it.
+//! selects — with ABSENT distinct from empty); see [`assemble`] for why a
+//! hit is observationally identical to a cold compile.
 //!
 //! The one deliberate difference on a hit: no `extract_spawn` stage and no
-//! `extract.*` phases are recorded, because no process was spawned. That is
-//! the measurement working. The `cbor_read`/`cbor_deserialize`/`asks_parse`
-//! stages are still recorded, over the memo's bytes.
+//! `extract.*` phases are recorded, because no process was spawned — that is
+//! the measurement working correctly, not a gap to fix. The
+//! `cbor_read`/`cbor_deserialize`/`asks_parse` stages are still recorded,
+//! over the memo's bytes.
 //!
 //! [`compile_turns`] is the multi-target entry point (extract's `--targets`
 //! mode, `haskell/app/Main.hs`'s `runMultiTargetClosed` — see
 //! `plans/post-restart/extract-wave/boot/03-targets-prereq.md`): ONE extract
 //! spawn compiles N named targets against a SHARED merged `meta.cbor` /
-//! `DataConTable`, returning one [`CompiledTurn`] per target. [`compile_turn`]
-//! is now a thin single-target wrapper over it, so every existing caller's
-//! signature and on-disk contract are unchanged.
+//! `DataConTable`, returning one [`CompiledTurn`] per target.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,15 +43,11 @@ use tidepool_runtime::cache;
 use crate::timing;
 
 /// The process-global `tidepool-extract` spawn counter, re-exported so this
-/// crate's public surface is unchanged. It USED to live here and count only
-/// [`compile_turn`]'s spawns, which made the extract-wave `boot` item's
-/// done-criterion wrong by construction: the harness also reaches
-/// `tidepool_runtime::session::turn`'s `run_turn`/`classify_block`/
-/// `compile_session_turn`, and those spawns were invisible to it. It now
-/// lives in `tidepool-extract-cmd` — the ONE builder every spawn site in the
-/// workspace goes through — so every spawn is counted by construction
-/// (`plans/post-restart/extract-manifest.md`, D-B). Still PROCESS-GLOBAL, and
-/// still `SeqCst` on the read; see the counter's own docs there.
+/// crate's public surface is unchanged. Lives in `tidepool-extract-cmd` — the
+/// ONE builder every spawn site in the workspace goes through — so every
+/// spawn is counted by construction (`plans/post-restart/extract-manifest.md`,
+/// D-B). Still PROCESS-GLOBAL, and still `SeqCst` on the read; see the
+/// counter's own docs there.
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 
 /// One `asks.json` entry: a yield-site id and its rendered answer type.
@@ -139,12 +126,7 @@ pub enum CompileError {
 /// [`timing::NO_ROUND`] when the caller has no answerer-round context (only a
 /// node id).
 ///
-/// A thin wrapper over [`compile_turns`] (a one-element target slice) — the
-/// multi-target `--targets` extract mode reduces to exactly this single-target
-/// shape for N=1 (one plain `asks.json`, no cross-target meta merge to
-/// perform), so every existing caller here gets byte-for-byte the same
-/// on-disk contract it always has, now exercised through the shared
-/// implementation instead of a separate one.
+/// A thin wrapper over [`compile_turns`] (a one-element target slice).
 pub fn compile_turn(
     extract_bin: &str,
     source: &str,
@@ -170,30 +152,20 @@ struct RawTargetOutput {
 /// Compile `source` against MULTIPLE named targets in ONE `tidepool-extract`
 /// spawn: `targets.len()` `<target>.cbor` trees over a SINGLE shared merged
 /// `meta.cbor` / [`DataConTable`], returning one [`CompiledTurn`] per target.
-/// Mirrors [`compile_turn`]'s single-spawn contract but drives the extract's
-/// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`)
-/// instead of `--target` — see
+/// Drives the extract's `--targets a,b` mode (`haskell/app/Main.hs`'s
+/// `runMultiTargetClosed`) instead of `--target` — see
 /// `plans/post-restart/extract-wave/boot/03-targets-prereq.md`.
 ///
-/// A REQUESTED target is a contract: the extract mode this drives fails the
-/// WHOLE spawn (a nonzero exit, surfaced as [`CompileError::Extract`]) if
-/// ANY target can't translate, rather than silently emitting the targets that
-/// succeeded — this function adds no `try`/skip of its own on top of that,
-/// so it inherits the same all-or-nothing guarantee.
+/// A REQUESTED target is a contract: a nonzero exit
+/// ([`CompileError::Extract`]) fails the WHOLE spawn if ANY target can't
+/// translate, rather than silently emitting the targets that succeeded.
 ///
-/// asks sidecar shape: for exactly one target, the extract writes the plain
-/// `asks.json` array — the single-target contract every extract build has
-/// always produced (see [`compile_turn`]'s doc above). For more than one
-/// target it additionally writes `<target>.asks.json` per target, so two
-/// targets' DIFFERENT runLLMTurn/runLLMTurnFork sites never collapse into one
-/// ambiguous file (`writeClosedTargets`'s doc comment, `Main.hs`) — this
-/// function reads whichever shape the spawn actually produced, keyed on the
-/// same `targets.len() > 1` test the Haskell side uses to decide which shape
-/// to write.
-///
-/// `node`/`round` attribute this compile's [`timing`] stages exactly as
-/// [`compile_turn`] does, now summed across every requested target instead of
-/// just one.
+/// Asks sidecar shape: exactly one target writes the plain `asks.json`
+/// array; more than one additionally writes `<target>.asks.json` per target
+/// (`writeClosedTargets`'s doc comment, `Main.hs`), so two targets' different
+/// `runLLMTurn`/`runLLMTurnFork` sites never collapse into one ambiguous
+/// file. This function reads whichever shape the spawn produced, keyed on
+/// the same `targets.len() > 1` test the Haskell side uses.
 pub fn compile_turns(
     extract_bin: &str,
     source: &str,
@@ -255,8 +227,6 @@ pub fn compile_turns(
         }
     }
 
-    // The spawn counter lives inside `run()` now, so it counts every spawn in
-    // the process, not just this site's — see this module's re-export above.
     let run = cmd.run().map_err(|e| CompileError::Spawn {
         bin: extract_bin.to_string(),
         source: e.source,
@@ -313,10 +283,9 @@ pub fn compile_turns(
         memo_bytes(&meta_bytes, &raw),
     );
 
-    // Store only what DESERIALIZED — the same discipline
-    // `tidepool_runtime::compile_haskell` keeps, so a malformed artifact set is
-    // never memoized into a permanently-failing entry. Best-effort: an
-    // unwritable memo costs a recompile, it never fails a compile.
+    // Store only what DESERIALIZED, so a malformed artifact set is never
+    // memoized into a permanently-failing entry. Best-effort: an unwritable
+    // memo costs a recompile, it never fails a compile.
     let turns = assemble(&meta_bytes, &raw, &module, node, round)?;
     if let Some(key) = &key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
@@ -438,8 +407,7 @@ fn assemble(
     );
     // Register varId → name pairs so runtime unresolved-variable errors can name
     // the symbol, and sentinel-slot → external-name pairs so a forced kind-4
-    // poison names the symbol it replaced (mirrors compile_haskell) — once,
-    // over the shared merged table.
+    // poison names the symbol it replaced — once, over the shared merged table.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
@@ -507,7 +475,7 @@ fn parse_asks(bytes: Option<&[u8]>) -> Result<AsksSidecar, CompileError> {
 }
 
 /// Extract the module name from a `module <Name> where` header (GHC derives the
-/// filename from it). Mirrors `tidepool_runtime`'s private helper.
+/// filename from it).
 fn extract_module_name(source: &str) -> Option<String> {
     for line in source.lines() {
         let line = line.trim_start();

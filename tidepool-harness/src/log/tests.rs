@@ -132,9 +132,6 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
     use crate::engine::DrivenTurn;
     use crate::provider::{ReasoningItem, Usage};
 
-    // Mirrors Harness::drive_turn's actual call:
-    //   self.tree.turn_delta_reasoned(node, turn_seq, Role::Assistant,
-    //       driven.reply.clone(), Some(driven.usage), driven.reasoning.clone())
     let to_event = |driven: &DrivenTurn| Event::TurnDelta {
         node: NodeId(1),
         turn: 1,

@@ -125,13 +125,10 @@ pub enum Event {
         node: NodeId,
         reason: String,
     },
-    /// One conversation-turn delta — the transcript is
-    /// reconstructed by FOLDING these in `seq` order. A turn's `content` is
-    /// the whole message (R0 stores messages inline, not as sub-deltas — the
-    /// "delta" framing is the schema seam, kept so a later streaming turn can
-    /// append partial content under the same `node`+`turn` without reshaping
-    /// the enum). `turn` is the per-node monotonic turn index the transcript
-    /// store assigns; a fork references a parent `(node, turn)` via
+    /// One conversation-turn delta — the transcript is reconstructed by
+    /// FOLDING these in `seq` order. A turn's `content` is the whole message.
+    /// `turn` is the per-node monotonic turn index the transcript store
+    /// assigns; a fork references a parent `(node, turn)` via
     /// [`Event::TurnForked`].
     TurnDelta {
         node: NodeId,
@@ -158,21 +155,13 @@ pub enum Event {
         parent: NodeId,
         parent_turn: u64,
     },
-    /// The `turn_spliced` kind: an OPERATOR verb that
-    /// interjects a message into `node`'s OWN transcript (never a different
-    /// node's — the operator addresses the conversation directly, unlike a
-    /// fork's parent-position reference). Kept PARALLEL to [`Event::TurnDelta`]
-    /// (`node`/`turn`/`role`/`content`) rather than reusing it outright: a
-    /// splice is operator-injected, not a turn the model produced or
-    /// consumed, so a distinct kind means an interjection is never mistaken
-    /// for a modeled turn when auditing history. `turn` is the SAME per-node
-    /// monotonic turn-index space `TurnDelta` uses — the splice lands at
-    /// `node`'s CURRENT turn position (whatever its turn-sequence counter is
-    /// when the operator interjects), so transcript reconstruction folds it
-    /// in at exactly that point, ahead of whatever turn the node produces
-    /// next. `role` is always operator-ish (`Role::User` — the model sees it
-    /// exactly like a user-turn nudge); a splice never carries `usage`
-    /// (harness/operator-injected, costs no tokens by construction).
+    /// An OPERATOR verb that interjects a message into `node`'s OWN
+    /// transcript (never a different node's — unlike a fork's parent-position
+    /// reference). `turn` is the SAME per-node monotonic turn-index space
+    /// `TurnDelta` uses, landing at `node`'s CURRENT turn position, so
+    /// transcript reconstruction folds it in exactly there. `role` is always
+    /// `Role::User` (the model sees it like a user-turn nudge); a splice
+    /// never carries `usage` (costs no tokens by construction).
     TurnSpliced {
         node: NodeId,
         turn: u64,

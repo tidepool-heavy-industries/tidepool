@@ -14,8 +14,7 @@
 //!
 //! # Lifecycle transitions are atomic at the dispatch boundary
 //!
-//! Ported from `tidepool-repl`'s `state.rs` discipline (the pattern, not the
-//! code): the transition — inspect the slot, decide, move the owned machine out
+//! The transition — inspect the slot, decide, move the owned machine out
 //! — happens under one short lock; the TURN itself (compile + run, which blocks)
 //! runs with the lock RELEASED (the machine owned on the caller's stack), then a
 //! second short lock restores the machine as `Idle` or `Suspended`. The

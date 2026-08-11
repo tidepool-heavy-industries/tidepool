@@ -572,8 +572,7 @@ impl<M> NodeTree<M> {
         self.inner.lock().nodes.get(&node).and_then(|e| e.session)
     }
 
-    /// Cursor-paged node-id enumeration (widen: replaces the tree pane's old
-    /// probe-for-gaps scan). Node ids are minted monotonically from 0 and
+    /// Cursor-paged node-id enumeration. Node ids are minted monotonically from 0 and
     /// never reused ([`Self::create_node`]), so every id in `0..next_node_id`
     /// is a live node — this is an exact `O(min(limit, n))` slice, not a
     /// probe. Returns up to `limit` ids strictly greater than `cursor`
