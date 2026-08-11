@@ -63,6 +63,7 @@ use tidepool_eval::value::Value;
 use tidepool_repr::{BindingName, CoreExpr, DataConTable, Generation, SessionModule, SessionVarId};
 
 use crate::render::EvalResult;
+use crate::timing;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use super::engine::OutputSink;
@@ -420,14 +421,26 @@ where
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
-        super::record_turn_stage("jit_codegen", jit_codegen_started.elapsed(), 0);
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_JIT_CODEGEN,
+            jit_codegen_started.elapsed(),
+            0,
+        );
 
         let ask_tag = self.core.ask_tag();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
         })?;
-        super::record_turn_stage("run_exec", run_exec_started.elapsed(), 0);
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_RUN_EXEC,
+            run_exec_started.elapsed(),
+            0,
+        );
         Ok(self.classify(outcome))
     }
 
@@ -463,7 +476,13 @@ where
             .core
             .add_fragment_session(name_hint, expr, &env)
             .map_err(ResidentError::AddFunction)?;
-        super::record_turn_stage("jit_codegen", jit_codegen_started.elapsed(), 0);
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_JIT_CODEGEN,
+            jit_codegen_started.elapsed(),
+            0,
+        );
 
         let ask_tag = self.core.ask_tag();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
@@ -475,7 +494,13 @@ where
                 func_id, table, handlers, captured, ask_tag, forced,
             )
         })?;
-        super::record_turn_stage("run_exec", run_exec_started.elapsed(), 0);
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_RUN_EXEC,
+            run_exec_started.elapsed(),
+            0,
+        );
         // A completion (no suspension) tenured the result — bind it now. A
         // suspension defers the bind to `resume_bind`.
         if matches!(outcome, SuspendableOutcome::Completed(_)) {

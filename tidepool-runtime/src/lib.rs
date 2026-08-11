@@ -22,6 +22,7 @@ pub mod failclass;
 pub mod paths;
 mod render;
 pub mod session;
+pub mod timing;
 pub mod toolchain;
 
 pub use failclass::{

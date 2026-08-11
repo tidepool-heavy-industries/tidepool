@@ -28,7 +28,7 @@ use tidepool_extract_cmd::{ExitPolicy, ExitVerdict, ExtractCmd, SpawnError};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
-use crate::{extract_module_name, CompileError};
+use crate::{extract_module_name, timing, CompileError};
 
 use super::render::ExportItem;
 
@@ -391,38 +391,31 @@ fn map_notfound(e: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(e.source))
 }
 
-/// Scan `stderr` for `tidepool-timing phase=<name> ms=<int>` lines and re-emit
-/// each as a `<prefix>.<phase>` stage via [`super::record_turn_stage`]. Mirrors
-/// `tidepool-harness/src/timing.rs`'s `ExtractTiming::parse` +
-/// `record_extract_phases`/`record_classify_phases`-shaped forwarding by hand
-/// (see `record_turn_stage`'s doc for why this crate can't just import them).
+/// Parse `stderr` via [`timing::ExtractTiming::parse`] and re-emit each phase
+/// as a `<prefix>.<phase>` stage via [`timing::record_stage`].
 ///
 /// `prefix` selects which `tidepool-extract` spawn these phases came from —
-/// pass `"classify"` (matching `timing.rs`'s `CLASSIFY_STAGE_PREFIX`) for the
+/// pass `"classify"` (matching [`timing::CLASSIFY_STAGE_PREFIX`]) for the
 /// parse-only [`classify_block`] spawn, `"extract"` (matching
-/// `EXTRACT_STAGE_PREFIX`) for a full-pipeline spawn like [`run_turn`]'s or
-/// `compile_session_turn`'s. Two DIFFERENT subprocess spawns must never share
-/// a prefix — a collector summing by stage name would silently merge their
-/// costs into one row. Malformed lines are skipped (diagnostics only, never a
-/// failure path); absent timing lines forward zero phases.
+/// [`timing::EXTRACT_STAGE_PREFIX`]) for a full-pipeline spawn like
+/// [`run_turn`]'s or `compile_session_turn`'s. Two DIFFERENT subprocess
+/// spawns must never share a prefix — a collector summing by stage name
+/// would silently merge their costs into one row.
 fn forward_extract_timing(stderr: &str, prefix: &str) {
-    for line in stderr.lines() {
-        let Some(rest) = line.trim().strip_prefix("tidepool-timing ") else {
-            continue;
-        };
-        let mut phase = None;
-        let mut ms = None;
-        for field in rest.split_whitespace() {
-            if let Some(v) = field.strip_prefix("phase=") {
-                phase = Some(v.to_string());
-            } else if let Some(v) = field.strip_prefix("ms=") {
-                ms = v.parse::<u64>().ok();
-            }
-        }
-        if let (Some(phase), Some(ms)) = (phase, ms) {
-            let stage = format!("{prefix}.{phase}");
-            super::record_turn_stage(&stage, std::time::Duration::from_millis(ms), 0);
-        }
+    let stage_name = |phase: &str| match prefix {
+        "extract" => timing::extract_stage_name(phase),
+        "classify" => timing::classify_stage_name(phase),
+        other => unreachable!("forward_extract_timing: unknown prefix {other:?}"),
+    };
+    let parsed = timing::ExtractTiming::parse(stderr);
+    for (phase, ms) in &parsed.phases {
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            &stage_name(phase),
+            std::time::Duration::from_millis(*ms),
+            0,
+        );
     }
 }
 
@@ -485,7 +478,13 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
     }
 
     let run = cmd.run().map_err(map_notfound)?;
-    super::record_turn_stage("extract_spawn", run.elapsed, 0);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_EXTRACT_SPAWN,
+        run.elapsed,
+        0,
+    );
     let output = &run.output;
     let stderr = run.stderr_lossy();
     // A failed compile is still a real spawn — attribute its extract phases
@@ -560,12 +559,24 @@ fn read_compiled_turn(
     let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
     let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
-    super::record_turn_stage("cbor_read", cbor_read_start.elapsed(), cbor_read_bytes);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_CBOR_READ,
+        cbor_read_start.elapsed(),
+        cbor_read_bytes,
+    );
 
     let deserialize_start = std::time::Instant::now();
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
-    super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_CBOR_DESERIALIZE,
+        deserialize_start.elapsed(),
+        0,
+    );
     // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
@@ -975,7 +986,13 @@ pub fn compile_session_turn(
     }
 
     let run = cmd.run().map_err(map_notfound)?;
-    super::record_turn_stage("extract_spawn", run.elapsed, 0);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_EXTRACT_SPAWN,
+        run.elapsed,
+        0,
+    );
     let output = &run.output;
     let stderr = run.stderr_lossy();
     if !stderr.is_empty() {
@@ -1007,12 +1024,24 @@ pub fn compile_session_turn(
     let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
     let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
-    super::record_turn_stage("cbor_read", cbor_read_start.elapsed(), cbor_read_bytes);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_CBOR_READ,
+        cbor_read_start.elapsed(),
+        cbor_read_bytes,
+    );
 
     let deserialize_start = std::time::Instant::now();
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
-    super::record_turn_stage("cbor_deserialize", deserialize_start.elapsed(), 0);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_CBOR_DESERIALIZE,
+        deserialize_start.elapsed(),
+        0,
+    );
     // Runtime unresolved-error naming — see lib.rs twin sites.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
@@ -1028,7 +1057,13 @@ pub fn compile_session_turn(
 
     let asks_start = std::time::Instant::now();
     let asks = read_asks_sidecar(&temp.path().join("asks.json"))?;
-    super::record_turn_stage("asks_parse", asks_start.elapsed(), 0);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_ASKS_PARSE,
+        asks_start.elapsed(),
+        0,
+    );
 
     Ok(SessionTurnResult {
         expr,

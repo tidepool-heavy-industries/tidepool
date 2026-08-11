@@ -13,9 +13,7 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-use tidepool_harness::timing::{
-    self, ExtractTiming, NO_NODE, NO_ROUND, STAGE_TEMPLATE,
-};
+use tidepool_harness::timing::{self, ExtractTiming, NO_NODE, NO_ROUND, STAGE_TEMPLATE};
 
 #[derive(Default, Debug, Clone)]
 struct CapturedEvent {
@@ -97,7 +95,13 @@ fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
 #[test]
 fn record_stage_emits_the_pinned_target_message_and_field_shape() {
     let (_, events) = capture(|| {
-        timing::record_stage(NO_NODE, NO_ROUND, STAGE_TEMPLATE, Duration::from_millis(42), 7);
+        timing::record_stage(
+            NO_NODE,
+            NO_ROUND,
+            STAGE_TEMPLATE,
+            Duration::from_millis(42),
+            7,
+        );
     });
 
     assert_eq!(events.len(), 1);
