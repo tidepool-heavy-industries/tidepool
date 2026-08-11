@@ -1,8 +1,5 @@
-//! Shared proptest helpers for property-based testing across crates.
-//!
-//! Consolidates `build_table_for_expr`, `check_jit_vs_eval`, and
-//! `check_pass_preserves_eval` that were previously duplicated across
-//! 4+ test files.
+//! Shared proptest helpers for property-based testing across crates:
+//! `build_table_for_expr`, `check_jit_vs_eval`, and `check_pass_preserves_eval`.
 
 use proptest::prelude::*;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -139,7 +136,7 @@ fn watchdog_this_case(expr: &CoreExpr) -> crate::watchdog::Guard {
 ///   ("Prelude.chr: bad argument") — so a both-fail outcome there is the
 ///   generator producing invalid input, not a bug.
 /// - `InfiniteLoop`: the synthetic generator can build a self-referencing
-///   thunk (e.g. `tidepool-optimize/tests/proptest_shadowing.rs`). Both
+///   thunk (e.g. `tidepool-optimize/tests/optimizer_matrix/shadowing.rs`). Both
 ///   engines correctly detect it — eval as `InfiniteLoop` (a thunk forcing
 ///   itself), the JIT as the same phenomenon under its own name,
 ///   `JitErrorClass::BlackHole`. `BlackHole` is deliberately NOT in this
@@ -149,8 +146,7 @@ fn watchdog_this_case(expr: &CoreExpr) -> crate::watchdog::Guard {
 ///   where eval independently confirms the loop, is tolerated here.
 ///
 /// No other eval class is named: eval failing on this generator is otherwise
-/// always a failure, not a skip — the wildcard arm this shim replaces used
-/// to discard every eval failure silently.
+/// always a failure, not a skip.
 fn legacy_synthetic_policy(label: &'static str) -> crate::differential::DiffConfig {
     use crate::differential::{DiffConfig, EvalErrorClass, JitErrorClass};
     DiffConfig::new(label)
@@ -244,7 +240,7 @@ pub fn check_jit_vs_eval_captured(
 /// matters here: a pass bug that corrupts a value under a lazy constructor
 /// field (e.g. a let-bound `Just x` thunk) is invisible to a WHNF-only
 /// comparison — `check_jit_vs_eval` deep-forces for exactly this reason
-/// (#336); this oracle needs the same treatment (plan 08 F1). If the original
+/// (#336), and this oracle does the same. If the original
 /// evaluation fails, the test case is skipped (passes only preserve behavior
 /// of well-defined programs). Same policy as `cbor_roundtrip_preserves_eval`
 /// (`gen/strategy.rs`): skip when BOTH deep-forces fail (e.g. a non-terminating

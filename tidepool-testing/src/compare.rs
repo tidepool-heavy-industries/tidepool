@@ -9,15 +9,9 @@ use tidepool_repr::{DataConId, Literal};
 /// Compare two interpreter Values for structural equality.
 ///
 /// Assumes both values have been deep-forced (no ThunkRef nodes).
-/// Closures and JoinConts are skipped (any pair compares equal); ConFuns
-/// compare by tag/arity/args; ByteArrays compare by CONTENT (the old
-/// catch-all made eq(ba, ba.clone()) false — proptest_infra_selftest BUG-2).
-///
-/// Returns true if structurally equal, false otherwise.
 ///
 /// Uses an explicit worklist instead of recursion so deeply nested values
-/// (the whole point of lifting the depth-3 generator cap) cannot overflow the
-/// host stack. Semantics are identical to the prior recursive version.
+/// cannot overflow the host stack.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
     while let Some((x, y)) = stack.pop() {
@@ -103,11 +97,10 @@ const MAX_CON_FIELDS: usize = 256;
 
 /// Reconstruct an interpreter `Value` from a JIT heap object pointer.
 ///
-/// Uses an explicit worklist (mirroring `tidepool_eval::eval::deep_force`)
-/// instead of recursion, so deeply nested heap objects cannot overflow the
-/// host stack. Forwarding pointers are followed per-visit, so GC moves that
-/// occur while forcing a thunk in a sibling field are tolerated exactly as in
-/// the prior recursive version.
+/// Uses an explicit worklist instead of recursion, so deeply nested heap
+/// objects cannot overflow the host stack. Forwarding pointers are followed
+/// per-visit, so GC moves that occur while forcing a thunk in a sibling field
+/// are tolerated.
 ///
 /// # Safety
 ///

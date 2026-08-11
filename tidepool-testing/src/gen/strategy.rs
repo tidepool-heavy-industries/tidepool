@@ -104,7 +104,6 @@ fn arb_ground_type() -> impl Strategy<Value = SimpleType> {
         prop_oneof![
             inner.clone().prop_map(|t| SimpleType::Maybe(Box::new(t))),
             (inner.clone(), inner).prop_map(|(a, b)| SimpleType::Pair(Box::new(a), Box::new(b))),
-            // No Fun — ground types only
         ]
     })
 }
@@ -135,7 +134,6 @@ fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
         Just(SimpleType::Char),
     ];
     leaf.prop_recursive(2, 5, 2, |inner| {
-        // reduced recursive parameters
         prop_oneof![
             inner.clone().prop_map(|t| SimpleType::Maybe(Box::new(t))),
             (inner.clone(), inner.clone())
@@ -258,8 +256,6 @@ fn gen_expr(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
         return gen_leaf(ty, ctx);
     }
 
-    // Multiple clones of ty and ctx are needed to satisfy proptest move semantics
-    // in the prop_oneof! macro below.
     let ty2 = ty.clone();
     let ty3 = ty.clone();
     let ty4 = ty.clone();
@@ -305,7 +301,6 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
         strategies.push(var_strat.boxed());
     }
 
-    // LitWord, LitDouble, and LitFloat are now also supported.
     match &ty {
         SimpleType::Int => {
             strategies.push(
@@ -1189,7 +1184,6 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Option 1: Eval never panics.
     /// Every generated expression should either produce Ok(_) or a well-formed
     /// EvalError — never panic or crash.
     #[test]
@@ -1213,7 +1207,6 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Option 6: CBOR roundtrip preserves evaluation semantics.
     /// serialize → deserialize should produce an expression that evaluates
     /// identically to the original.
     #[test]

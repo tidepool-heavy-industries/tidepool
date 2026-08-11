@@ -868,10 +868,8 @@ impl ReachCounter {
 // ---------------------------------------------------------------------------
 // The runner's own gate: every Verdict variant class must be reachable and
 // correctly assigned. This module is what makes the runner a gate rather
-// than a trusted-on-faith black box — see the mutation-check evidence in the
-// commit message for the complementary "does a broken oracle/lying JIT
-// actually go red" proof, which this suite alone cannot demonstrate (it uses
-// synthetic recorded runs, not a mutated production path).
+// than a trusted-on-faith black box; it uses synthetic recorded runs, not a
+// mutated production path.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {

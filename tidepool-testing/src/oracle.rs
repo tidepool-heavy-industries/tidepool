@@ -3,14 +3,12 @@ use std::path::PathBuf;
 use tidepool_eval::{env::Env, error::EvalError, eval::eval, heap::VecHeap, value::Value};
 use tidepool_repr::{CoreFrame, RecursiveTree};
 
-/// Helper function to evaluate a CoreExpr tree.
 pub fn eval_expr(nodes: Vec<CoreFrame<usize>>) -> Result<Value, EvalError> {
     let expr = RecursiveTree { nodes };
     let mut heap = VecHeap::new();
     eval(&expr, &Env::new(), &mut heap)
 }
 
-/// Helper function to evaluate a CBOR file.
 pub fn eval_cbor(path: &str) -> Result<Value, Box<dyn Error>> {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push(path);

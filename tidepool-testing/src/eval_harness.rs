@@ -5,7 +5,7 @@
 //! ~250 test sites across `tidepool-runtime/tests` and `tidepool-repl/tests`
 //! hand-roll the same setup: derive the Prelude include dir, spawn an 8-256 MiB
 //! stack thread (deep [`Value`] spines overflow the default 2 MiB test-thread
-//! stack — see the "Host stack-overflow class" note), call one of
+//! stack), call one of
 //! `compile_and_run` / `compile_and_run_pure` / `compile_haskell`, then unwrap
 //! the [`EvalResult`]. Effectful tests additionally re-declare the base MCP
 //! GADT stack verbatim (~60 lines each) and re-implement mock handlers.
@@ -61,16 +61,14 @@ pub fn repo_root() -> PathBuf {
 
 /// The Haskell stdlib / Prelude include dir (`<root>/haskell/lib`).
 ///
-/// Every effectful or Prelude-using test needs this on the include path; it was
-/// previously re-derived by a local `prelude_path()` in a dozen files.
+/// Every effectful or Prelude-using test needs this on the include path.
 pub fn prelude_path() -> PathBuf {
     repo_root().join("haskell").join("lib")
 }
 
 /// The user verb-library dir (`<root>/.tidepool/lib`).
 ///
-/// Tests that exercise `.tidepool/lib` modules need this on the include path;
-/// it was previously re-derived by a local `user_lib_dir()` in eleven files.
+/// Tests that exercise `.tidepool/lib` modules need this on the include path.
 pub fn user_lib_dir() -> PathBuf {
     repo_root().join(".tidepool").join("lib")
 }
@@ -399,22 +397,23 @@ impl EvalHarness {
 }
 
 /// The base MCP effect stack (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
-/// Ask — matching `tidepool_mcp::base_effects!` + the interposed Ask effect)
-/// as a hand-maintained GADT preamble, plus matching stub handlers and a
+/// Ask, RunLLMTurn, Fork — matching `tidepool_mcp::standard_decls()`) as a
+/// hand-maintained GADT preamble, plus matching stub handlers and a
 /// ready-made [`mock::min_stack`] `frunk` HList.
 ///
 /// The GADT preamble text and stub handlers below are a STATIC mirror of the
 /// real stack, not a derivation — it exists so callers can compile a
 /// self-contained module without wiring `with_effects_module()`/
 /// `Tidepool.Orchestrate`. Because *those* are hand-maintained, they CAN
-/// drift from `tidepool_mcp::base_effects!` (that's exactly what happened
+/// drift from `tidepool_mcp::standard_decls()` (that's exactly what happened
 /// when the SG effect was cut and Lsp/Time were added — see f1a480e6).
 /// [`EFFECT_NAMES`] itself is no longer part of that hand-maintained surface:
 /// it's computed straight from `tidepool_mcp::standard_decls()` (this crate
 /// already depends on `tidepool-mcp` as a normal dependency), so it cannot
-/// independently drift. `mock_stack_matches_production` (this crate's test
-/// suite, `tests/` dir) still pins it against `tidepool_mcp::standard_decls()`
-/// as a regression guard against a future hand-maintained list creeping back in.
+/// independently drift. `mock_stack_matches_production`
+/// (`tidepool-runtime/tests/effect_stack/mock_stack_lockstep.rs`) still pins
+/// it against `tidepool_mcp::standard_decls()` as a regression guard against
+/// a future hand-maintained list creeping back in.
 pub mod mock {
     use std::collections::HashMap;
     use std::sync::LazyLock;
@@ -511,7 +510,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
-    /// standard way to build a source string for the 10-effect stack.
+    /// standard way to build a source string for the 12-effect stack.
     pub fn mcp_module(body: &str) -> String {
         format!("{MCP_PREAMBLE}\n{body}\n")
     }
