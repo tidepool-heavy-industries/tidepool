@@ -285,8 +285,11 @@ pub fn compile_turns(
         0,
     );
     // Register varId → name pairs so runtime unresolved-variable errors can name
-    // the symbol (mirrors compile_haskell) — once, over the shared merged table.
+    // the symbol, and sentinel-slot → external-name pairs so a forced kind-4
+    // poison names the symbol it replaced (mirrors compile_haskell) — once,
+    // over the shared merged table.
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
+    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     let asks_start = Instant::now();
     let mut turns = HashMap::with_capacity(targets.len());
