@@ -87,10 +87,8 @@ unsafe fn build_cons_cells(
 }
 
 /// Eagerly materialize a whole flattened list as a heap cons chain,
-/// iteratively — no recursion over the spine. (A deep spine's recursive
-/// `value_to_heap` or recursive `Value` Drop overflows the host stack; the
-/// fault lands outside signal protection and silently kills the eval
-/// thread.) This is the ONE list-response path — there is no lazy channel.
+/// iteratively — no recursion over the spine (see module doc). This is the
+/// ONE list-response path; there is no lazy channel.
 /// Returns the chain head, or a poison pointer with a runtime error set.
 ///
 /// # Safety

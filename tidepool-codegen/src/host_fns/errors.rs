@@ -218,7 +218,7 @@ pub fn drain_diagnostics() -> Vec<String> {
 }
 
 /// varId → human name, registered from meta.cbor's `var_names` at load time
-/// so runtime unresolved-variable errors can NAME the symbol (friction #12).
+/// so runtime unresolved-variable errors can NAME the symbol.
 /// Process-global and append-only: ids are content-addressed (stableVarId /
 /// disambiguated local hashes), so cross-session collisions mean identical
 /// names anyway.
@@ -310,8 +310,8 @@ mod var_name_tests {
 }
 
 /// Called by JIT code when an unresolved external variable is forced.
-/// Returns null to allow execution to continue (will likely segfault later).
-/// In debug mode (TIDEPOOL_TRACE), logs and returns null.
+/// Records the runtime error and returns the poison pointer so the caller
+/// doesn't crash on a null return.
 pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
@@ -333,9 +333,8 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
 }
 
 /// Called by JIT code for runtime errors (divZeroError, overflowError).
-/// Sets a thread-local error flag and returns a "poison" Lit(Int#, 0) object
-/// instead of null. This prevents JIT code from segfaulting on the return value.
-/// The effect machine checks the error flag after JIT returns and converts
+/// Records the error and returns the poison pointer instead of null. The
+/// effect machine checks for a pending error after JIT returns and converts
 /// to Yield::Error.
 /// kind: 0 = divZeroError, 1 = overflowError, 2 = UserError, 3 = Undefined
 pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
@@ -345,10 +344,6 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
     push_diagnostic(msg);
     let err = rk.into_error();
     set_first_cause(err);
-    // Return a poison object instead of null. This is a valid Lit(Int#, 0)
-    // heap object, so JIT code won't segfault when reading its tag byte.
-    // The effect machine will detect the error flag and return Yield::Error
-    // before this poison value reaches user code.
     error_poison_ptr()
 }
 

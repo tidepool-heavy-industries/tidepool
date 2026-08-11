@@ -1,53 +1,19 @@
 //! Host functions for the JIT runtime — the Rust side of the JIT↔host ABI.
+//! Cranelift-emitted code calls into these symbols, registered via
+//! `host_fn_symbols()` below. Every item is re-exported here so callers
+//! outside this module see one flat surface regardless of the internal
+//! module split ([`cancel`], [`gc`], [`errors`], [`force`], [`primops`],
+//! [`list_materialize`]).
 //!
-//! Cranelift-emitted code calls into these symbols, which are handed to the JIT
-//! module via `host_fn_symbols()` (the registration table near the bottom of the
-//! file). Four concerns live here:
+//! ## Reaching per-machine state
 //!
-//! - **Primop dispatch** — runtime implementations for primops not inlined as
-//!   Cranelift IR (the bignum / `__gmpn_*` / `integer_gmp_*` intercepts, etc.).
-//! - **GC trigger** — allocation slow-path callbacks into the copying collector,
-//!   driven through the `VMContext` + stack-map registry.
-//! - **Error poisoning** — `RuntimeError` raising: case traps, bad pointers,
-//!   division by zero, and forced `error`/`undefined` sentinels.
-//! - **List materialization** — iterative, stack-safe construction of
-//!   list-shaped effect responses as heap cons chains.
-//!
-//! Always-on stderr breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]`) fire
-//! only on genuine compiler bugs and must stay loud.
-//!
-//! This module is split along system boundaries: [`cancel`] (external
-//! cancellation), [`gc`] (roots + the copying collector), [`errors`]
-//! (`RuntimeError` + poison machinery), [`force`] (WHNF/NF forcing + the tail
-//! trampoline), [`primops`] (byte/boxed-array, Double, JSON primops), and
-//! [`list_materialize`] (eager list-response materialization). Every item is
-//! re-exported here so callers outside this module see one flat surface
-//! regardless of the internal module split.
-//!
-//! ## The per-machine-state boundary (multi-machine / parMapM seam)
-//!
-//! Per-machine state lives entirely on [`crate::machine_state::MachineState`],
-//! owned by `JitEffectMachine`: the cancel flag, JSON con ids, stack-map
-//! registry, and call depth (leaf 1); the first-cause runtime error,
-//! and diagnostics (leaf 2); and the GC state plus
-//! the run-scoped/session-scoped GC root registries (leaf 3). Two reach
-//! paths exist, and the GC cluster uses only the first:
-//!
-//! - **vmctx reach** (`(*vmctx).machine_state`) — the GC cluster
-//!   (`gc.rs`: `GcState`, run-scoped roots, persistent roots) is reached this
-//!   way EXCLUSIVELY, never via the per-thread slot below. A write (root
-//!   register) and the read that later traces it (`perform_gc`) must key on
-//!   the identical machine; see the "GC-cluster reach" note on
-//!   `machine_state.rs`.
-//! - **`CURRENT_MACHINE`** (a per-thread slot, `crate::machine_state`) — used
-//!   by the cancel/JSON/stack-map/call-depth/runtime-error/diagnostics
-//!   ambient shims for host fns that receive no `vmctx`.
-//!
-//! Only the signal handler (`EXEC_CONTEXT` / `SIGNAL_SAFE_CTX`, read from
-//! async-signal context) must stay thread-scoped rather than per-machine.
-//! Full host-fn vmctx-reach for the remaining ambient shims
-//! (`runtime_error`/`runtime_error_with_msg`/`unresolved_var_trap`/
-//! `runtime_shape_trap`/`runtime_oom`/the array primops) is #329.
+//! Ambient per-machine state (cancel flag, JSON con ids, stack-map registry,
+//! call depth, first-cause runtime error, diagnostics, GC state and root
+//! registries) lives on [`crate::machine_state::MachineState`]; see that
+//! module's doc for the full reach-path invariant. Host fns without a
+//! `vmctx` use the per-thread `CURRENT_MACHINE` slot; the GC cluster is
+//! reached via `vmctx` only. The signal handler's `EXEC_CONTEXT`/
+//! `SIGNAL_SAFE_CTX` stay thread-scoped rather than per-machine.
 
 mod cancel;
 mod errors;

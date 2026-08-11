@@ -250,25 +250,17 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
 
-    // External cancellation safepoint. Record `RuntimeError::Cancelled`
-    // and skip `perform_gc`: the JIT's slow-path post-GC re-check will
-    // fail (alloc_ptr/alloc_limit are unchanged), routing the next
-    // allocation through `runtime_oom`'s poison path. `runtime_oom`'s
-    // first-write-wins `set_first_cause` preserves the `Cancelled` cause so
-    // the unwind surfaces it via the boundary's `surface_error` resolution,
-    // not as `HeapOverflow`.
+    // External cancellation safepoint. Record `RuntimeError::Cancelled` and
+    // skip `perform_gc`: the JIT's slow-path post-GC re-check will fail
+    // (alloc_ptr/alloc_limit are unchanged), routing the next allocation
+    // through `runtime_oom`'s poison path. `runtime_oom`'s first-write-wins
+    // `set_first_cause` preserves the `Cancelled` cause so the unwind
+    // surfaces it via `surface_error`, not as `HeapOverflow`.
     //
-    // Post-OOM stores into the poison are bounded by `POISON_BUF_SIZE`
-    // (16 KiB, sized for worst-case Con writes — see PR #272).
-    //
-    // The other cancel safepoints — the trampoline loop, the join back-edge
-    // (`runtime_cancel_check`, #325), and the effect-dispatch boundary in
-    // `drive_to_done` — already give prompt unwind for tail-recursive,
+    // The other cancel safepoints (trampoline loop, join back-edge,
+    // effect-dispatch boundary) give prompt unwind for tail-recursive,
     // join-looping, and effect-driven programs; this path closes the gap for
-    // pure non-tail-call allocator loops that never reach any of them (#273).
-    // Same shared check as those safepoints; this one just returns void and
-    // skips perform_gc (the post-GC re-check routes the next allocation
-    // through runtime_oom's poison path, per the comment above).
+    // pure non-tail-call allocator loops that never reach any of them.
     if check_cancel_and_set_error(vmctx) {
         return;
     }
@@ -295,7 +287,6 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     }
 }
 
-/// Shared GC body: walk frames, run Cheney copy, call hooks.
 #[inline(never)]
 /// Heap growth ceiling. Defaults to 1 GiB; override with `TIDEPOOL_MAX_HEAP`
 /// (bytes). Reaching the cap with a full live set ends in a clean
@@ -833,6 +824,7 @@ unsafe fn verify_heap_post_gc(
     }
 }
 
+/// Shared GC body: walk frames, run Cheney copy, call hooks.
 fn perform_gc(fp: usize, vmctx: *mut VMContext) {
     // SAFETY: vmctx is valid; machine_state was installed before entering JIT code.
     let registry_ptr = unsafe { machine_state(vmctx) }.stack_map_registry();

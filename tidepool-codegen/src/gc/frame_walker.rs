@@ -105,15 +105,14 @@ fn query_stack_top() -> Option<usize> {
 /// Walk JIT frames starting from the given frame pointer, collecting all GC roots.
 ///
 /// Uses Cranelift's `frame_size` metadata (the FP-to-SP distance, aka `active_size()`)
-/// to compute SP at each safepoint: `SP = caller_FP - frame_size`. This is the same
-/// approach Wasmtime uses and is correct on both x86_64 and aarch64, regardless of
-/// prologue structure or callee-saved register layout.
+/// to compute SP at each safepoint: `SP = caller_FP - frame_size`. Correct on both
+/// x86_64 and aarch64, regardless of prologue structure or callee-saved register layout.
 ///
 /// # Safety
 /// - `start_fp` must be a valid frame pointer from within a JIT call chain
 ///   (typically gc_trigger's FP, read via inline asm), OR any value at all —
-///   an invalid `start_fp` is now a controlled failure, not UB, PROVIDED
-///   `bounds` correctly excludes it.
+///   an invalid `start_fp` is a controlled failure, not UB, PROVIDED `bounds`
+///   correctly excludes it.
 /// - `stack_maps` must contain entries for all JIT functions in the call chain
 ///   the caller wants fully walked; a stack map missing for a live JIT return
 ///   address silently drops that frame's roots (not this function's contract
@@ -121,7 +120,7 @@ fn query_stack_top() -> Option<usize> {
 /// - `bounds` must be a `StackBounds` the caller can justify contains every
 ///   frame it expects to walk (see [`StackBounds::capture`]).
 ///
-/// # What is now enforced
+/// # What is enforced
 /// Every address this function dereferences — a frame's saved-FP slot, its
 /// return-address slot, and every stack-map-derived root slot — is proven to
 /// lie within `bounds` and to be 8-byte aligned before the read happens, and
@@ -129,8 +128,8 @@ fn query_stack_top() -> Option<usize> {
 /// `sp_at_safepoint + offset`) uses checked arithmetic. A frame chain that
 /// disagrees with the stack-map metadata it is checked against — a corrupt
 /// saved FP, a `frame_size` that walks `sp_at_safepoint` outside `bounds`, or
-/// a stack-map offset landing outside `bounds` — can no longer produce a wild
-/// read or write: it is caught before the dereference, an always-on `[BUG]`
+/// a stack-map offset landing outside `bounds` — cannot produce a wild read
+/// or write: it is caught before the dereference, an always-on `[BUG]`
 /// breadcrumb is printed naming the violated condition, and the walk stops,
 /// returning whatever roots were collected before the bad frame. Under
 /// diagnostic mode (`diagnostic_mode = true`, wired to `TIDEPOOL_HEAP_VERIFY`
@@ -140,9 +139,8 @@ fn query_stack_top() -> Option<usize> {
 /// # What this does NOT guarantee
 /// Stopping early is itself a GC bug either way: any roots that lived past
 /// the bad frame are lost, and the objects they point to may be collected
-/// out from under a still-live reference. This change does not make an
-/// invalid frame chain produce a correct root set — it only guarantees that
-/// discovering one can no longer read or write memory outside `bounds`.
+/// out from under a still-live reference. Bounds-checking makes a bad frame
+/// chain fail safe, not correct.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub unsafe fn walk_frames(
     start_fp: usize,
@@ -192,7 +190,6 @@ pub unsafe fn walk_frames(
         // SAFETY: as above.
         let saved_fp = unsafe { *(fp as *const usize) };
 
-        // Check if this return address is in JIT code
         if !stack_maps.contains_address(return_addr) {
             // Not a JIT frame — skip it and keep walking.
             // This handles both pre-JIT frames (gc_trigger → perform_gc)
@@ -209,8 +206,6 @@ pub unsafe fn walk_frames(
         if let Some(info) = stack_maps.lookup(return_addr) {
             // The caller's FP is saved at [current_FP + 0] (already read above).
             let caller_fp = saved_fp;
-            // SP at the safepoint = caller's FP - caller's active frame size.
-            // Cranelift's frame_size is active_size(): the distance from FP down to SP.
             let Some(sp_at_safepoint) = caller_fp.checked_sub(info.frame_size as usize) else {
                 fail(&format!(
                     "caller_fp {caller_fp:#x} - frame_size {} underflowed",
@@ -257,7 +252,6 @@ pub unsafe fn walk_frames(
             }
         }
 
-        // Walk to next frame: [FP+0] is the saved caller FP (already read above).
         // Sanity checks to prevent infinite loops.
         if saved_fp == 0 || saved_fp == fp || saved_fp <= fp {
             break;

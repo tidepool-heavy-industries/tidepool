@@ -17,7 +17,7 @@ use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 /// Upper bound on consecutive EVALUATED-indirection follows in one
 /// `heap_force` call. A genuine chain needs one distinct (>=48-byte) thunk per
 /// link — 64M links would need >3 GiB of thunks, beyond any heap we run — so
-/// exceeding it can only mean a memoized indirection cycle (#336).
+/// exceeding it can only mean a memoized indirection cycle.
 const INDIRECTION_FOLLOW_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
@@ -112,7 +112,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // A body that returns the very thunk being forced is a
                         // value cycle (`let x = x`): memoizing it would write a
                         // self-indirection and ERASE the blackhole, turning the
-                        // <<loop>> into an infinite EVALUATED-follow spin (#336).
+                        // <<loop>> into an infinite EVALUATED-follow spin.
                         // Memoize the poison instead so re-forces fail fast.
                         if result == current {
                             let poison = runtime_blackhole_trap(vmctx);
@@ -140,7 +140,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                     layout::THUNK_EVALUATED => {
                         // Mutual aliases (`x = y; y = x`) memoize an
                         // EVALUATED indirection CYCLE that contains no
-                        // blackhole state to trap on (#336). A legitimate
+                        // blackhole state to trap on. A legitimate
                         // chain is bounded by how many thunks fit in the heap
                         // (each link is a distinct >=48-byte thunk), so a
                         // follow count past the limit can only be a cycle.
@@ -158,10 +158,6 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
             }
 
             // Non-thunk tags (Closure, Con, Lit, unknown) — already WHNF.
-            // Note: the pre-thunk closure-forcing path was removed because
-            // TAG_THUNK now handles all lazy computations. TAG_CLOSURE objects
-            // are genuine lambdas (with captures/args) and must not be called
-            // with null arguments.
             return current;
         }
     }
