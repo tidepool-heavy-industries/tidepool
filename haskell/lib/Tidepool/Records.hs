@@ -47,8 +47,7 @@ instance ToJSON Hit where
 instance ToJSON FileMeta where
   toJSON m = object ["size" .= m.size, "is_file" .= m.isFile, "is_dir" .= m.isDir]
 
--- | Outcome of @planUpdate@ (the dry-run str-replace). Documents the four
--- shapes the verb used to hand back as an opaque Value:
+-- | Outcome of @planUpdate@ (the dry-run str-replace). The four shapes:
 --
 --   * 'UpdateRejected' — the replace cannot proceed (file missing, empty
 --     @old@, not found, or ambiguous). The 'Maybe' 'Int' carries the match
@@ -68,7 +67,7 @@ instance ToJSON UpdateOutcome where
   toJSON (UpdateDiff d)              = object ["ok" .= True, "changed" .= True, "diff" .= d]
 
 -- | Outcome of @update@ (exact str-replace, exactly-once). Reported as DATA,
--- never thrown (mirrors 'InsertAfterOutcome'):
+-- never thrown:
 --
 --   * 'UpdateOneRejected' — @old@ was empty, the file is missing, @old@ was
 --     not found, or @old@ matched 2+ places. The 'Maybe' 'Int' carries the
@@ -85,7 +84,7 @@ instance ToJSON UpdateOneOutcome where
   toJSON UpdateOneApplied                = object ["ok" .= True]
 
 -- | Outcome of @updateAll@ (replace-EVERY-occurrence str-replace). Reported as
--- DATA, never thrown (mirrors 'UpdateOutcome'):
+-- DATA, never thrown:
 --
 --   * 'UpdateAllRejected' — @old@ was empty, or matched nowhere, or the file
 --     is missing; nothing written.
@@ -100,7 +99,7 @@ instance ToJSON UpdateAllOutcome where
   toJSON (UpdateAllApplied c)  = object ["ok" .= True, "count" .= c]
 
 -- | Outcome of @insertAfter@ (insert a block after the unique anchor line).
--- Reported as DATA, never thrown (mirrors 'UpdateOutcome'):
+-- Reported as DATA, never thrown:
 --
 --   * 'InsertAfterRejected' — the file is missing, or the anchor matched zero
 --     or 2+ lines. The 'Maybe' 'Int' carries the anchor's match count (only
