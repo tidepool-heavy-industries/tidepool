@@ -174,16 +174,20 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
     (console, transcript)
 }
 
-/// Acceptance 1 (the narration test): capture the tracing output of one
-/// replayed cycle and assert the narration elements a person watching the
-/// console needs are present — the compiled source (both the failing AND the
-/// corrected block), the extracted type, the hole's prompt, the untruncated
-/// compile error, and the finalized answer — and that `u64::MAX` never
-/// appears raw.
+/// Acceptance 1+2 (narration + telemetry fold): `run_one_cycle_with_a_retry`
+/// ALREADY returns `(console, transcript)` as a tuple for ONE replayed cycle —
+/// formerly two tests each discarding half of it. One drive, both assertion
+/// blocks: the narration elements a person watching the console needs are
+/// present (the compiled source, both the failing AND the corrected block,
+/// the extracted type, the hole's prompt, the untruncated compile error, the
+/// finalized answer, and that `u64::MAX` never appears raw), AND the tier-0
+/// telemetry fold (first-compile success rate, retries-per-hole) computed
+/// from `transcript.jsonl` alone is correct for a cycle whose single hole
+/// burns exactly one corrective-retry round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn narration_shows_source_types_holes_and_answers_with_no_raw_sentinels() {
+async fn narration_and_transcript_fold_both_hold_for_one_retry_cycle() {
     support::require_extract();
-    let (console, _transcript) = run_one_cycle_with_a_retry().await;
+    let (console, transcript) = run_one_cycle_with_a_retry().await;
 
     // Deliverable 1: the compiled source, verbatim — both the failing round's
     // block and the corrected one.
@@ -230,6 +234,46 @@ async fn narration_shows_source_types_holes_and_answers_with_no_raw_sentinels() 
     assert!(
         !console.contains("18446744073709551615"),
         "u64::MAX must never appear raw in console output, got:\n{console}"
+    );
+
+    // Deliverable 6 (the telemetry fold): compute first-compile success rate
+    // and retries-per-hole from the SAME cycle's `transcript.jsonl` alone —
+    // both metrics non-degenerate (rate < 1.0, at least one retry) because
+    // the single hole burned exactly one corrective-retry round.
+    let by_site = fold_answerer_rounds(&transcript);
+    assert_eq!(
+        by_site.len(),
+        1,
+        "exactly one hole (site 0, the loop's single runLLMTurn) was serviced, got: {by_site:?}"
+    );
+    let rounds = &by_site[&0];
+    assert_eq!(
+        rounds.len(),
+        2,
+        "site 0 must show both the failing and the corrected round, got: {rounds:?}"
+    );
+    assert_eq!(
+        rounds[0],
+        (1, false),
+        "round 1 must be recorded as a compile FAILURE, got: {rounds:?}"
+    );
+    assert_eq!(
+        rounds[1],
+        (2, true),
+        "round 2 must be recorded as a compile SUCCESS, got: {rounds:?}"
+    );
+
+    let rate = first_compile_success_rate(&by_site);
+    assert_eq!(
+        rate, 0.0,
+        "the only hole did NOT succeed on its first attempt, so the rate must be 0.0, got {rate}"
+    );
+
+    let retries = retries_per_hole(&by_site);
+    assert_eq!(
+        retries.get(&0),
+        Some(&1),
+        "site 0 consumed exactly one corrective-retry round, got: {retries:?}"
     );
 }
 
@@ -278,50 +322,4 @@ fn retries_per_hole(by_site: &BTreeMap<u64, Rounds>) -> BTreeMap<u64, usize> {
         .iter()
         .map(|(site, rounds)| (*site, rounds.iter().filter(|(_, ok)| !ok).count()))
         .collect()
-}
-
-/// Acceptance 2 (the telemetry fold test): compute first-compile success
-/// rate and retries-per-hole from `transcript.jsonl` alone, for a cycle whose
-/// single hole burns exactly one corrective-retry round before finalizing —
-/// so both metrics are non-degenerate (rate < 1.0, at least one retry).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn transcript_fold_computes_first_compile_success_rate_and_retries_per_hole() {
-    support::require_extract();
-    let (_console, transcript) = run_one_cycle_with_a_retry().await;
-
-    let by_site = fold_answerer_rounds(&transcript);
-    assert_eq!(
-        by_site.len(),
-        1,
-        "exactly one hole (site 0, the loop's single runLLMTurn) was serviced, got: {by_site:?}"
-    );
-    let rounds = &by_site[&0];
-    assert_eq!(
-        rounds.len(),
-        2,
-        "site 0 must show both the failing and the corrected round, got: {rounds:?}"
-    );
-    assert_eq!(
-        rounds[0],
-        (1, false),
-        "round 1 must be recorded as a compile FAILURE, got: {rounds:?}"
-    );
-    assert_eq!(
-        rounds[1],
-        (2, true),
-        "round 2 must be recorded as a compile SUCCESS, got: {rounds:?}"
-    );
-
-    let rate = first_compile_success_rate(&by_site);
-    assert_eq!(
-        rate, 0.0,
-        "the only hole did NOT succeed on its first attempt, so the rate must be 0.0, got {rate}"
-    );
-
-    let retries = retries_per_hole(&by_site);
-    assert_eq!(
-        retries.get(&0),
-        Some(&1),
-        "site 0 consumed exactly one corrective-retry round, got: {retries:?}"
-    );
 }
