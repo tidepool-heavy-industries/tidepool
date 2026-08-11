@@ -4,8 +4,7 @@
 //! The bug only manifests through `compile_and_run` (effect dispatch loop), not
 //! through `compile_and_run_pure` (direct heap read).
 //!
-//! The 10-effect GADT preamble and the ten mock handlers used to be re-declared
-//! verbatim in every test in this file (~2300 lines). They now live once in
+//! The 10-effect GADT preamble and the ten mock handlers live once in
 //! `tidepool_testing::eval_harness::mock` — `mock::mcp_module(body)` prepends the
 //! canonical preamble and `mock::min_stack()` is the matching handler HList.
 

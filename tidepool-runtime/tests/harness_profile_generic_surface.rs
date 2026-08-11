@@ -1,4 +1,4 @@
-//! generic-surface wave, item 4, PART 2 — the harness compilation profile.
+//! The harness compilation profile.
 //!
 //! Proves, through the REAL `tidepool-extract` binary (not a hand-wired
 //! stand-in), that a harness-shaped module:

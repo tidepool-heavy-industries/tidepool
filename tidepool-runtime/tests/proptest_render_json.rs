@@ -394,9 +394,8 @@ fn prop_truncation_prefix() {
 
 // ---------------------------------------------------------------------------
 // CAP-BOUNDARY COUNTERS — deterministic, each ±1 size explicitly hit.
-// These assert the CORRECT/consistent behavior. Where current behavior is
-// buggy (exactly-cap list), they assert only stability+parseability and point
-// to the `#[ignore]`d repro; a counter proves the size was exercised.
+// These assert the CORRECT/consistent behavior at every boundary size; a
+// counter proves each size was actually exercised.
 // ---------------------------------------------------------------------------
 
 /// LIST cap straddle: 9999 / 10000 / 10001. Counter-asserts each size renders,
