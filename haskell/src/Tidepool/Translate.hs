@@ -144,26 +144,26 @@ data TransState = TransState
   -- else about "what did this program poison" is read back out of the emitted
   -- nodes.
   , tsPoisonSlots :: !(Map.Map Word64 Word64)
-  -- runLLMTurn (#R0 typed-yield pass): varIds of the hidden Sited siblings
-  -- (Nothing when the Ask effect's helper text isn't in the closed program —
-  -- an interception site with no sibling available is an extract-pipeline bug).
-  , tsRunLLMTurnSitedId :: !(Maybe Word64)
-  , tsRunLLMTurnForkSitedId :: !(Maybe Word64)
-  , tsRunLLMTurnFanoutSitedId :: !(Maybe Word64)  -- B1 widen: runLLMTurnFanout's sibling
-  , tsForkMapSitedId :: !(Maybe Word64)      -- combinator-sites widen: forkMap's hidden sibling
-  , tsForkCataSitedId :: !(Maybe Word64)     -- combinator-sites widen: forkCata's hidden sibling
+  -- Typed-yield pass (#R0 and its widenings): the varId of each sited verb's
+  -- hidden @*Sited@ sibling, keyed by the SURFACE verb's occurrence name
+  -- ('vsName'). Seeded once per 'translateModule' run by 'resolveSitedIds',
+  -- which walks 'sitedVerbs' — so this map's key set is exactly the table's,
+  -- minus any verb whose sibling isn't in the closed program.
+  --
+  -- A key is ABSENT when the effect's generated helper text isn't there at
+  -- all; an interception site with no sibling available is an
+  -- extract-pipeline bug (see the head-swap arm's 'Nothing' branch for the
+  -- one benign caller that hits it deliberately).
+  --
+  -- This ONE map replaced a family of per-verb @Maybe Word64@ fields whose
+  -- adjacency here — and correspondingly adjacent positional arguments at
+  -- the sole construction site — made transposing two of them type-check
+  -- silently while head-swapping every call site of one verb to another
+  -- verb's sibling.
+  , tsSitedIds :: !(Map.Map String Word64)
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
   , tsRunLLMTurnSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
-  -- finalize (self-iterating-harness WS-B): varId of finalize's hidden Sited
-  -- sibling, resolved the same way as the runLLMTurn family's (Nothing when
-  -- the Finalize effect's helper text isn't in the closed program).
-  , tsFinalizeSitedId :: !(Maybe Word64)
-  -- Tidepool.Fork's own effect (distinct from RunLLMTurn): varIds of
-  -- fork/forkAll's hidden Sited siblings, resolved the same way (Nothing
-  -- when the Fork effect's helper text isn't in the closed program).
-  , tsForkSitedId :: !(Maybe Word64)
-  , tsForkAllSitedId :: !(Maybe Word64)
   }
 
 type TransM = State TransState
@@ -485,17 +485,10 @@ emptyTransState = TransState
   , tsSynthCounter = 0
   , tsUnresolvedIds = Set.empty
   , tsPoisonSlots = Map.empty
-  , tsRunLLMTurnSitedId = Nothing
-  , tsRunLLMTurnForkSitedId = Nothing
-  , tsRunLLMTurnFanoutSitedId = Nothing
-  , tsForkMapSitedId = Nothing
-  , tsForkCataSitedId = Nothing
+  , tsSitedIds = Map.empty
   , tsSiteCounter = 0
   , tsRunLLMTurnSites = Seq.empty
   , tsCurrentBinder = Nothing
-  , tsFinalizeSitedId = Nothing
-  , tsForkSitedId = Nothing
-  , tsForkAllSitedId = Nothing
   }
 
 translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
@@ -536,28 +529,14 @@ translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
-      -- runLLMTurn (#R0): the hidden Sited siblings are ordinary home-module
-      -- bindings (Tidepool.Effects, spliced via ask_effect_def!'s helper text,
-      -- or Tidepool.Fork's own forkMapSited/forkCataSited), so a name-only
-      -- scan over the FULL (pre-reachability) bind pool finds their real Ids
-      -- — mirroring findTargetId's own name lookup. `translate` can't do an
-      -- HscEnv/environment lookup itself (TransM is pure State, no IO), so
-      -- both varIds are resolved ONCE here and threaded through TransState
-      -- for the interception arm to consult. Each lookup is qualified on the
-      -- sibling's own defining module (auxVerbModules), same discipline as
-      -- 'isIntrinsicVerb' for the call-site predicates: a user binding that
-      -- merely shares one of these names is never picked as a head-swap
-      -- target.
-      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds Map.empty
-                    (findAuxVarId "runLLMTurnSited" allBinds)
-                    (findAuxVarId "runLLMTurnForkSited" allBinds)
-                    (findAuxVarId "runLLMTurnFanoutSited" allBinds)
-                    (findAuxVarId "forkMapSited" allBinds)
-                    (findAuxVarId "forkCataSited" allBinds)
-                    0 Seq.empty Nothing
-                    (findAuxVarId "finalizeSited" allBinds)
-                    (findAuxVarId "forkSited" allBinds)
-                    (findAuxVarId "forkAllSited" allBinds)
+      -- Built with RECORD syntax off 'emptyTransState', never positionally:
+      -- 'TransState' carries several same-typed fields, and a positional
+      -- constructor application over them type-checks with any two
+      -- transposed.
+      initState = emptyTransState
+        { tsUnresolvedIds = unresolvedIds
+        , tsSitedIds = resolveSitedIds allBinds
+        }
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in ( tsNodes finalState, tsUsedDCs finalState, neededBinds
      , tsRunLLMTurnSites finalState, tsPoisonSlots finalState )
@@ -579,51 +558,6 @@ translateModule allBinds targetName unresolvedIds =
         isNameMatch b =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
-
-    -- | (occurrence name, defining module) for every hidden *Sited helper
-    -- 'findAuxVarId' looks up. The only pass between resolveExternals and
-    -- this scan that touches binder identity is 'uniquifyDuplicateBinders':
-    -- its 'goTop' rewrites only each bind's RHS (@NonRec b <$> goE ...@ /
-    -- @Rec ... (b,) <$> goE ...@) and returns the TOP binder @b@ unchanged.
-    -- 'findAuxVarId' scans exactly those top binders, so a *Sited sibling's
-    -- Name — and its defining module — is still whatever it was before that
-    -- pass ran, same as the call-site Vars 'isIntrinsicVerb' relies on.
-    auxVerbModules :: [(String, String)]
-    auxVerbModules =
-      [ ("runLLMTurnSited",       "Tidepool.Effects")
-      , ("runLLMTurnForkSited",   "Tidepool.Effects")
-      , ("runLLMTurnFanoutSited", "Tidepool.Effects")
-      , ("finalizeSited",         "Tidepool.Effects")
-      , ("forkSited",             "Tidepool.Effects")
-      , ("forkAllSited",          "Tidepool.Effects")
-      , ("forkMapSited",          "Tidepool.Fork")
-      , ("forkCataSited",         "Tidepool.Fork")
-      ]
-
-    -- | Lookup for a hidden *Sited helper binding that may or may not be
-    -- present (unlike 'findTargetId', absence is not an error — it just
-    -- means the corresponding head-swap can't fire). Qualified on the
-    -- binder's own defining module ('auxVerbModules'), same discipline as
-    -- 'isIntrinsicVerb': a user binding that merely shares a *Sited
-    -- occurrence name is never picked as a head-swap target.
-    findAuxVarId :: String -> [CoreBind] -> Maybe Word64
-    findAuxVarId name binds =
-      case filter isMatch (concatMap bindersOf binds) of
-        (b:_) -> Just (varId b)
-        []    -> Nothing
-      where
-        -- A name absent from auxVerbModules is a wiring mistake, not a
-        -- non-match: answering Nothing would silently retire the head-swap
-        -- that lookup feeds.
-        expectedModule = case lookup name auxVerbModules of
-          Just m  -> m
-          Nothing -> error $ "findAuxVarId: no defining module registered for '"
-                             ++ name ++ "' — add it to auxVerbModules"
-        isMatch b =
-          occNameString (nameOccName (idName b)) == name
-          && not (isSystemName (idName b))
-          && maybe False ((== expectedModule) . moduleNameString . moduleName)
-                   (nameModule_maybe (idName b))
 
     bindersOf (NonRec b _) = [b]
     bindersOf (Rec pairs)  = map fst pairs
@@ -1813,62 +1747,64 @@ translate expr =
             emitNode $ NCase argIdx 0 altData
           _ -> error $ "tagToEnum# without resolvable type argument"
 
-    -- runLLMTurn @T prompt / runLLMTurnFork @T prompt / runLLMTurnFanout
-    -- @T prompts (riding the RunLLMTurn effect) / fork @T brief / forkAll
-    -- @T prompts (Tidepool.Fork's surface verbs, riding the distinct Fork
-    -- effect): detected the same way as the tagToEnum# arm above (a known
-    -- Var applied to [Type ty] + one value arg — for Fanout/forkAll that one
-    -- value arg is the `[Text]` prompts list, for runLLMTurnFork/fork it's
-    -- the single `Text` prompt/brief, same shape, translated like any other
-    -- Core expression). The ONLY Core synthesis permitted is the head-swap
-    -- to the hidden *Sited sibling (its varId resolved once, name-only, in
-    -- 'translateModule') with a fresh site-id literal prepended — the
-    -- sibling's REAL body (which builds the "typedSite"-tagged payload)
-    -- then runs normally at JIT runtime; we never construct that payload
-    -- ourselves.
-    Var v | isRunLLMTurnVar v || isRunLLMTurnForkVar v || isRunLLMTurnFanoutVar v || isForkAllVar v || isForkVar v
+    -- EVERY sited verb's call site — @runLLMTurn \@T prompt@,
+    -- @runLLMTurnFork@, @runLLMTurnFanout@, @fork@, @forkAll@, @forkMap@,
+    -- @forkCata@, @finalize@ — through ONE arm driven by 'sitedVerbs'.
+    -- Detected the same way as the tagToEnum# arm above: a known Var
+    -- ('lookupSitedVerb' — occurrence name AND defining module) applied to
+    -- the verb's leading @Type@ arguments plus its own trailing value args,
+    -- which are translated like any other Core expression. The ONLY Core
+    -- synthesis permitted is the head-swap to the hidden @*Sited@ sibling
+    -- (its varId resolved once, by name, in 'translateModule') with a fresh
+    -- site-id literal prepended — the sibling's REAL body (which builds the
+    -- "typedSite"-tagged payload) then runs normally at JIT runtime; we
+    -- never construct that payload ourselves.
+    --
+    -- Everything these sites used to differ on — how many type args the
+    -- call carries, how many value args are the verb's own, which answer-type
+    -- rejection applies, whether the sidecar records @T@ or @[T]@ — is a
+    -- FIELD of the verb's row, so this arm carries no per-verb constant.
+    Var v | Just spec <- lookupSitedVerb v
           , let typeArgs = filter (not . isValueArg) allArgs
-          , (Type ty : _) <- typeArgs
-          -- Trailing 1 value arg is the prompt; anything before it is 0+
-          -- leading `Member <Eff> effs` dictionaries (see 'splitTrailingArgs').
-          , Just (dictArgs, [promptArg]) <- splitTrailingArgs 1 args -> do
-        checkRunLLMTurnType ty
-        let sitedField
-              | isRunLLMTurnVar v = tsRunLLMTurnSitedId
-              | isRunLLMTurnForkVar v = tsRunLLMTurnForkSitedId
-              | isForkVar v = tsForkSitedId
-              | isForkAllVar v = tsForkAllSitedId
-              | otherwise = tsRunLLMTurnFanoutSitedId
-        sitedIdM <- gets sitedField
+          -- The answer type is always the FIRST type argument; 'vsTypeArgs'
+          -- says how many the shape requires (any beyond the first are
+          -- discarded — see the rows for which verb discards what and why).
+          , Just (ty : _) <- leadingTypes (vsTypeArgs spec) typeArgs
+          -- The trailing 'vsValueArity' args are the verb's own; anything
+          -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
+          -- 'splitTrailingArgs').
+          , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
+        vsCheckType spec ty
+        sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of
-          -- The sibling's varId is resolved ONCE, name-only, by a scan over
-          -- the FULL closed bind pool ('translateModule's 'findAuxVarId') —
-          -- always populated on the real writeWholeModuleClosed pass (Ask's
-          -- helper text is always present). This branch instead fires when
-          -- OTHER callers re-run 'translate' with a throwaway, unseeded
-          -- TransState purely to harvest 'tsUsedDCs' (e.g.
+          -- The sibling's varId is resolved ONCE, by name, by a scan over
+          -- the FULL closed bind pool ('translateModule's 'resolveSitedIds')
+          -- — always populated on the real writeWholeModuleClosed pass (the
+          -- effect's helper text is always present). This branch instead
+          -- fires when OTHER callers re-run 'translate' with a throwaway,
+          -- unseeded TransState purely to harvest 'tsUsedDCs' (e.g.
           -- 'collectUsedDataCons'/'collectTransitiveDCons' rescanning
           -- 'reachBinds' for the meta.cbor constructor table) — those callers
           -- discard 'tsNodes' entirely, so emitting a poison here (mirroring
-          -- 'emitFfiPoison') is harmless; still translate the prompt (and any
-          -- dictionary args) so their own DataCon usage isn't missed by that
-          -- scan.
+          -- 'emitFfiPoison') is harmless; still translate the value args (and
+          -- any dictionary args) so their own DataCon usage isn't missed by
+          -- that scan.
           Nothing -> do
             mapM_ translate dictArgs
-            _ <- translate promptArg
+            mapM_ translate valueArgs
             emitFfiPoison
           Just sitedVarId -> do
             siteId <- freshSiteId
-            -- runLLMTurnFanout's answer type is `[T]` (a fanout of N
-            -- children each answering T), but `ty` here is the per-child
-            -- element type `T` applied at the call site (`@T`) — record the
-            -- LIST type in the asks.json sidecar so the harness's rendered
-            -- type matches what actually resumes the parent; the harness
-            -- derives the element type back by stripping the outer `[]`.
+            -- A fanout-shaped verb's answer type is `[T]` (N children each
+            -- answering T), but `ty` here is the per-child element type `T`
+            -- applied at the call site (`@T`) — record the LIST type in the
+            -- asks.json sidecar so the harness's rendered type matches what
+            -- actually resumes the parent; the harness derives the element
+            -- type back by stripping the outer `[]`. 'vsListAnswer' is which
+            -- verbs those are.
             let renderedTy = Tidepool.GhcPipeline.renderType ty
-                typeStr = if isRunLLMTurnFanoutVar v || isForkAllVar v
-                            then "[" ++ renderedTy ++ "]"
-                            else renderedTy
+                typeStr | vsListAnswer spec = "[" ++ renderedTy ++ "]"
+                        | otherwise         = renderedTy
             recordRunLLMTurnSite siteId (T.pack typeStr)
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
@@ -1880,115 +1816,29 @@ translate expr =
             withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
             litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
             appLit <- emitNode $ NApp withDicts litIdx
-            promptIdx <- translate promptArg
-            emitNode $ NApp appLit promptIdx
-
-    -- finalize @T x (self-iterating-harness WS-B): detected exactly like the
-    -- runLLMTurn family above (a known Var applied to [Type ty] + one value
-    -- arg), head-swapped to the hidden finalizeSited sibling with a fresh
-    -- site-id literal prepended — same shared-machinery shape, DIFFERENT
-    -- type check: checkFinalizeType skips the function-arrow rejection
-    -- (finalize's value crosses in-heap via run_child, never through JSON, so
-    -- it may carry a closure) but still rejects a polymorphic (non-monomorphic)
-    -- site, same as runLLMTurn.
-    Var v | isFinalizeVar v
-          , let typeArgs = filter (not . isValueArg) allArgs
-          -- finalize :: forall v a. v -> M a — TWO forall'd tyvars (`v`, the
-          -- finalized value's own type; `a`, its independent "never returns"
-          -- placeholder — see effect_defs.rs's finalize_effect_def! for why
-          -- they're kept independent), so a `finalize @T x` call site carries
-          -- TWO explicit Core type arguments, not runLLMTurn's one. `ty` is
-          -- the FIRST (`v`, what `@T` fixes); the second (`a`) is discarded —
-          -- it never crosses the suspend boundary, only `ty` does.
-          , (Type ty : Type _phantomRet : _) <- typeArgs
-          , Just (dictArgs, [valueArg]) <- splitTrailingArgs 1 args -> do
-        checkFinalizeType ty
-        sitedIdM <- gets tsFinalizeSitedId
-        case sitedIdM of
-          -- See the runLLMTurn arm above for why this branch is harmless: it
-          -- fires only for throwaway, unseeded TransState scans that discard
-          -- tsNodes entirely.
-          Nothing -> do
-            mapM_ translate dictArgs
-            _ <- translate valueArg
-            emitFfiPoison
-          Just sitedVarId -> do
-            siteId <- freshSiteId
-            let typeStr = Tidepool.GhcPipeline.renderType ty
-            recordRunLLMTurnSite siteId (T.pack typeStr)
-            sitedRef <- emitNode $ NVar sitedVarId
-            dictIdxs <- mapM translate dictArgs
-            withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
-            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
-            appLit <- emitNode $ NApp withDicts litIdx
-            valueIdx <- translate valueArg
-            emitNode $ NApp appLit valueIdx
-
-    -- forkMap @b f xs / forkCata @b combine tree (combinator-sites widen):
-    -- library-defined recursion-scheme combinators (Tidepool.Fork) over
-    -- runLLMTurnFanout, recognized by name exactly like
-    -- runLLMTurn/runLLMTurnFork/runLLMTurnFanout above. Two
-    -- differences from that arm: the value-arg arity is 2 (not 1), and the
-    -- answer type is the FIRST type argument, not the only one — forkMap/
-    -- forkCata are each quantified `forall b a. ...` so a single explicit
-    -- `forkMap @T` application pins the answer type b (the element/tree
-    -- type a is inferred from the second value argument and is NEVER
-    -- checked here: it never crosses the suspend boundary, only b does).
-    -- Head-swap target is the hidden *Sited sibling (resolved once by name
-    -- in 'translateModule', same as the runLLMTurn siblings); the
-    -- sidecar records the SAME "[b]" shape a bare runLLMTurnFanout site
-    -- records — forkMap/forkCata's *Sited body routes through exactly one
-    -- runLLMTurnFanoutSited dispatch per answer, so every AskWith
-    -- payload this site's id ever tags really does carry a `[b]`-shaped
-    -- fanout (see Tidepool.Fork's haddock).
-    Var v | isForkMapVar v || isForkCataVar v
-          , let typeArgs = filter (not . isValueArg) allArgs
-          , (Type tyAns : Type _tyElem : _) <- typeArgs
-          , Just (dictArgs, [fnArg, xsArg]) <- splitTrailingArgs 2 args -> do
-        checkRunLLMTurnType tyAns
-        let sitedField
-              | isForkMapVar v = tsForkMapSitedId
-              | otherwise = tsForkCataSitedId
-        sitedIdM <- gets sitedField
-        case sitedIdM of
-          Nothing -> do
-            mapM_ translate dictArgs
-            _ <- translate fnArg
-            _ <- translate xsArg
-            emitFfiPoison
-          Just sitedVarId -> do
-            siteId <- freshSiteId
-            let typeStr = "[" ++ Tidepool.GhcPipeline.renderType tyAns ++ "]"
-            recordRunLLMTurnSite siteId (T.pack typeStr)
-            sitedRef <- emitNode $ NVar sitedVarId
-            dictIdxs <- mapM translate dictArgs
-            withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
-            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
-            appLit <- emitNode $ NApp withDicts litIdx
-            fnIdx <- translate fnArg
-            appFn <- emitNode $ NApp appLit fnIdx
-            xsIdx <- translate xsArg
-            emitNode $ NApp appFn xsIdx
+            -- Then the verb's own value args, left to right — one 'NApp' per
+            -- arg, emitted right after that arg's own subtree, exactly as
+            -- the per-arity arms this replaced spelled it out.
+            foldM (\fIdx a -> translate a >>= emitNode . NApp fIdx) appLit valueArgs
 
     -- A mis-shaped occurrence (partial application, a type-argument count
-    -- that doesn't match [answer, element/tree], a mis-arity value-arg
-    -- list) of the REAL Tidepool.Fork forkMap/forkCata: Fork.hs's own
-    -- module haddock is explicit that these combinators have "no runtime
-    -- fallback" — every well-formed call site head-swaps to the *Sited
-    -- sibling, and a call extract genuinely cannot rewrite must fail HERE,
-    -- naming the site, rather than silently falling through to the
-    -- (OPAQUE, dead-at-runtime) stub. isForkMapVar/isForkCataVar already
-    -- gate on the Var's own DEFINING MODULE (not just its occurrence name),
-    -- so this stays disjoint from the fallthrough below: a user's own
-    -- same-named-but-different-module forkMap/forkCata (see
-    -- `user_defined_forkmap_does_not_abort_extract`,
-    -- fork-catchall-fallthrough) never matches either predicate and always
-    -- falls through untouched.
-    Var v | isForkMapVar v || isForkCataVar v -> do
+    -- that doesn't match the row's, a mis-arity value-arg list) of a verb
+    -- whose row sets 'vsMisShapeIsError': Fork.hs's own module haddock is
+    -- explicit that its combinators have "no runtime fallback" — every
+    -- well-formed call site head-swaps to the *Sited sibling, and a call
+    -- extract genuinely cannot rewrite must fail HERE, naming the site,
+    -- rather than silently falling through to the (OPAQUE, dead-at-runtime)
+    -- stub. 'lookupSitedVerb' already gates on the Var's own DEFINING MODULE
+    -- (not just its occurrence name), so this stays disjoint from the
+    -- fallthrough below: a user's own same-named-but-different-module
+    -- forkMap/forkCata (see `user_defined_forkmap_does_not_abort_extract`,
+    -- fork-catchall-fallthrough) never matches the table and always falls
+    -- through untouched.
+    Var v | Just spec <- lookupSitedVerb v
+          , vsMisShapeIsError spec -> do
         binder <- gets tsCurrentBinder
         let siteDesc = maybe "<top level>" T.unpack binder
-            which = if isForkMapVar v then "forkMap" else "forkCata" :: String
-        error $ which ++ " site in " ++ siteDesc
+        error $ vsName spec ++ " site in " ++ siteDesc
               ++ " is not fully applied or its answer type is not a concrete "
               ++ "monomorphic type at this call site — apply it to both of "
               ++ "its arguments and ensure the answer type is instantiated "
@@ -3137,17 +2987,15 @@ isShowDoubleVar v =
 -- intact for these recognizers.
 intrinsicVerbModules :: [(String, String)]
 intrinsicVerbModules =
+  -- Verbs lowered straight to a primop: no *Sited sibling, no call-site
+  -- rewrite, so no row in 'sitedVerbs'.
   [ ("eitherDecodeValue", "Tidepool.Aeson.Value")
   , ("parseISO8601",      "Tidepool.Data.Time")
-  , ("runLLMTurn",        "Tidepool.Effects")
-  , ("runLLMTurnFork",    "Tidepool.Effects")
-  , ("runLLMTurnFanout",  "Tidepool.Effects")
-  , ("finalize",          "Tidepool.Effects")
-  , ("fork",              "Tidepool.Fork")
-  , ("forkAll",           "Tidepool.Fork")
-  , ("forkMap",           "Tidepool.Fork")
-  , ("forkCata",          "Tidepool.Fork")
   ]
+  -- Every SITED verb, read off the one table that also supplies its sibling,
+  -- its shape and its type check — so a new sited verb can never be
+  -- recognized here but unresolvable there, or vice versa.
+  ++ [ (vsName spec, vsModule spec) | spec <- sitedVerbs ]
 
 -- | Is @v@ the intrinsic verb named @name@: its occurrence name matches AND
 -- it is actually DEFINED in 'intrinsicVerbModules's paired module, read
@@ -3190,56 +3038,201 @@ isEitherDecodeValueVar = isIntrinsicVerb "eitherDecodeValue"
 isParseISO8601Var :: Id -> Bool
 isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 
--- | Recognize @runLLMTurn@/@runLLMTurnFork@ (the stdlib OPAQUE surface
--- verbs in ask_effect_def!'s helper text, Tidepool.Effects). OPAQUE keeps
--- their calls un-inlined so the type application at each call site
--- survives to this interception.
-isRunLLMTurnVar :: Id -> Bool
-isRunLLMTurnVar = isIntrinsicVerb "runLLMTurn"
+-- | Everything the extractor knows about ONE sited verb: a surface verb
+-- whose call sites are head-swapped to a hidden @*Sited@ sibling carrying a
+-- fresh site id.
+--
+-- === Adding a sited verb is ONE ROW in 'sitedVerbs'. ===
+--
+-- This table is the single source for all of it: the call-site recognizer
+-- (via 'intrinsicVerbModules', built from 'vsName'\/'vsModule'), the
+-- sibling resolution ('resolveSitedIds', from
+-- 'vsSitedName'\/'vsSitedModule'), the 'TransState' slot the resolved id
+-- lands in ('tsSitedIds', keyed by 'vsName'), and every constant the one
+-- head-swap arm in 'translateHead' needs. There is no second place to
+-- register a verb and no per-verb field, accessor, guard arm or constructor
+-- argument to keep in step — which is the point: the family of same-typed
+-- @Maybe Word64@ fields this replaced was applied POSITIONALLY at its sole
+-- construction site, where transposing two of them type-checked silently
+-- and head-swapped every call site of one verb to another verb's sibling.
+data VerbSpec = VerbSpec
+  { vsName :: String
+    -- ^ The surface verb's occurrence name (@"runLLMTurn"@). Doubles as the
+    -- 'tsSitedIds' key and as the verb's name in the mis-shape error.
+  , vsModule :: String
+    -- ^ Module the surface verb is DEFINED in. 'isIntrinsicVerb' qualifies
+    -- on it, so a user's own same-named function is never head-swapped.
+  , vsSitedName :: String
+    -- ^ The hidden @*Sited@ sibling each well-formed call site is swapped
+    -- to. Sibling names are disjoint from every recognizer in this file, so
+    -- occurrences of a sibling (including a sibling's own body referencing
+    -- another sibling) always fall through to ordinary Var\/App translation
+    -- — that holds by construction of the naming, not by a runtime check.
+  , vsSitedModule :: String
+    -- ^ Module the SIBLING is defined in. Usually 'vsModule', but not
+    -- always: @fork@\/@forkAll@ are Tidepool.Fork's surface verbs while
+    -- their siblings are generated into Tidepool.Effects.
+  , vsTypeArgs :: Int
+    -- ^ How many leading @Type@ arguments a well-formed call site carries.
+    -- The ANSWER type is always the first; see each row for what a second
+    -- one is and why it is discarded.
+  , vsValueArity :: Int
+    -- ^ How many trailing value args belong to the verb's own signature.
+    -- Anything ahead of them is @Member \<Eff\> effs@ dictionaries, which
+    -- ride along and are re-applied verbatim to the sibling
+    -- ('splitTrailingArgs').
+  , vsCheckType :: Type -> TransM ()
+    -- ^ The extract-time rejection applied to the answer type.
+  , vsListAnswer :: Bool
+    -- ^ Record the asks.json sidecar type as @[T]@ rather than @T@ — true
+    -- for the fanout-shaped verbs, whose @\@T@ pins the per-child ELEMENT
+    -- type while the site really answers a list.
+  , vsMisShapeIsError :: Bool
+    -- ^ A recognized occurrence that does NOT match the shape above is a
+    -- hard extract error naming the site, instead of falling through to
+    -- ordinary Var\/App translation (and thence to the verb's OPAQUE,
+    -- dead-at-runtime stub).
+  }
 
-isRunLLMTurnForkVar :: Id -> Bool
-isRunLLMTurnForkVar = isIntrinsicVerb "runLLMTurnFork"
+-- | The sited verbs, one row each. See 'VerbSpec' — this is the whole cost
+-- of adding one.
+--
+-- Every surface verb here carries @{-\# OPAQUE \#-}@ at its definition (see
+-- 'intrinsicVerbModules' for why NOINLINE is not enough), which is what
+-- keeps its calls un-inlined so the type application at each call site
+-- survives to the interception.
+sitedVerbs :: [VerbSpec]
+sitedVerbs =
+  [ -- The RunLLMTurn effect's own surface verbs (ask_effect_def!'s helper
+    -- text, generated into Tidepool.Effects).
+    VerbSpec { vsName = "runLLMTurn", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 1
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = False, vsMisShapeIsError = False }
+  , VerbSpec { vsName = "runLLMTurnFork", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnForkSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 1
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = False, vsMisShapeIsError = False }
+    -- B1 widen. One `[Text]` prompts list in, N children each answering the
+    -- per-child type `@T` — so the SITE answers `[T]` ('vsListAnswer').
+  , VerbSpec { vsName = "runLLMTurnFanout", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnFanoutSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 1
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = True, vsMisShapeIsError = False }
+    -- self-iterating-harness WS-B. `finalize :: forall v a. v -> M a` has
+    -- TWO forall'd tyvars (`v`, the finalized value's type; `a`, its
+    -- independent "never returns" placeholder — see effect_defs.rs's
+    -- finalize_effect_def! for why they stay independent), so a call site
+    -- carries TWO explicit type arguments. Only the first (`v`, what `@T`
+    -- fixes) crosses the suspend boundary; `a` is discarded.
+    --
+    -- DIFFERENT type check from the runLLMTurn family: 'checkFinalizeType'
+    -- skips the function-arrow rejection (finalize's value crosses in-heap
+    -- via run_child, never through JSON, so it may carry a closure) but
+    -- still rejects a polymorphic site.
+  , VerbSpec { vsName = "finalize", vsModule = "Tidepool.Effects"
+             , vsSitedName = "finalizeSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 2, vsValueArity = 1
+             , vsCheckType = checkFinalizeType
+             , vsListAnswer = False, vsMisShapeIsError = False }
+    -- Tidepool.Fork's surface verbs, riding the distinct Fork effect (NOT
+    -- RunLLMTurn) — note the sibling module differs from the verb's own.
+    -- `fork :: forall a. Text -> M a` is structurally identical to
+    -- runLLMTurnFork's shape, and `forkAll :: forall a. [Text] -> M [a]` to
+    -- runLLMTurnFanout's; each still resolves its OWN sibling.
+  , VerbSpec { vsName = "fork", vsModule = "Tidepool.Fork"
+             , vsSitedName = "forkSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 1
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = False, vsMisShapeIsError = False }
+  , VerbSpec { vsName = "forkAll", vsModule = "Tidepool.Fork"
+             , vsSitedName = "forkAllSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 1
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = True, vsMisShapeIsError = False }
+    -- combinator-sites widen: library-defined recursion schemes over
+    -- runLLMTurnFanout. Each is quantified `forall b a. ...`, so a single
+    -- explicit `@T` pins the ANSWER type b; the element/tree type a is
+    -- inferred from the second value argument and NEVER checked here (it
+    -- never crosses the suspend boundary, only b does). Their sidecar entry
+    -- records the SAME "[b]" shape a bare runLLMTurnFanout site records —
+    -- their *Sited bodies route through exactly one forkAllSited dispatch
+    -- per answer, so every payload such a site id tags really does carry a
+    -- `[b]`-shaped fanout (see Tidepool.Fork's haddock).
+    --
+    -- 'vsMisShapeIsError': Fork.hs's module haddock is explicit that these
+    -- have no runtime fallback, so a call extract cannot rewrite must fail
+    -- at extract naming the site.
+  , VerbSpec { vsName = "forkMap", vsModule = "Tidepool.Fork"
+             , vsSitedName = "forkMapSited", vsSitedModule = "Tidepool.Fork"
+             , vsTypeArgs = 2, vsValueArity = 2
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = True, vsMisShapeIsError = True }
+  , VerbSpec { vsName = "forkCata", vsModule = "Tidepool.Fork"
+             , vsSitedName = "forkCataSited", vsSitedModule = "Tidepool.Fork"
+             , vsTypeArgs = 2, vsValueArity = 2
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = True, vsMisShapeIsError = True }
+  ]
 
-isRunLLMTurnFanoutVar :: Id -> Bool
-isRunLLMTurnFanoutVar = isIntrinsicVerb "runLLMTurnFanout"
+-- | The 'VerbSpec' for @v@ when @v@ IS one of the sited verbs — matched on
+-- occurrence name AND defining module (via 'isIntrinsicVerb'), so a user's
+-- own same-named function never matches. 'Nothing' for everything else,
+-- including the @*Sited@ siblings themselves.
+lookupSitedVerb :: Id -> Maybe VerbSpec
+lookupSitedVerb v = Data.List.find (\spec -> isIntrinsicVerb (vsName spec) v) sitedVerbs
 
--- | Recognize @forkAll@ (@Tidepool.Fork@'s @mapConcurrently@-shaped surface
--- verb) — same convention as 'isRunLLMTurnVar' et al. @forkAll@'s shape
--- (@forall a. [Text] -> M [a]@) is structurally identical to
--- @runLLMTurnFanout@'s (one type arg, one @[Text]@ value arg, list-typed
--- answer), so it rides the SAME head-swap arm, but resolves its own
--- @forkAllSited@ sibling (riding the @Fork@ effect, not @RunLLMTurn@).
-isForkAllVar :: Id -> Bool
-isForkAllVar = isIntrinsicVerb "forkAll"
+-- | The first @n@ arguments of an (already 'isValueArg'-filtered) spine as
+-- 'Type's — 'Nothing' when there are fewer than @n@, or when any of them is
+-- a Coercion rather than a Type. This is 'vsTypeArgs' spelled as a match:
+-- @n = 1@ reproduces @(Type ty : _)@, @n = 2@ reproduces
+-- @(Type ty : Type _ : _)@.
+leadingTypes :: Int -> [CoreExpr] -> Maybe [Type]
+leadingTypes n as
+  | length leading == n = mapM asType leading
+  | otherwise           = Nothing
+  where
+    leading = take n as
+    asType (Type t) = Just t
+    asType _        = Nothing
 
--- | Recognize @fork@ (@Tidepool.Fork@'s singleton-answerer surface verb) —
--- same convention as 'isForkAllVar'. @fork@'s shape (@forall a. Text -> M
--- a@) is structurally identical to @runLLMTurnFork@'s (one type arg, one
--- 'Text' value arg, non-list answer), so it rides the SAME head-swap arm,
--- but resolves its own @forkSited@ sibling (riding the @Fork@ effect, not
--- @RunLLMTurn@).
-isForkVar :: Id -> Bool
-isForkVar = isIntrinsicVerb "fork"
-
--- | Recognize @forkMap@\/@forkCata@ (the @Tidepool.Fork@ OPAQUE combinator
--- stubs) — same convention as 'isRunLLMTurnVar' et al. Their hidden
--- @*Sited@ siblings ('forkMapSited'\/'forkCataSited') are matched by
--- NEITHER this predicate NOR any other arm in this file (disjoint names),
--- so occurrences of the Sited siblings — the head-swap target's own real
--- logic, referencing @forkAllSited@, itself a third, also-unmatched name —
--- always fall through to ordinary Var/App translation. No separate
--- "pass-through" arm is needed: it holds by construction of the naming,
--- not by an extra runtime check.
-isForkMapVar :: Id -> Bool
-isForkMapVar = isIntrinsicVerb "forkMap"
-
-isForkCataVar :: Id -> Bool
-isForkCataVar = isIntrinsicVerb "forkCata"
-
--- | Recognize @finalize@ (the @Tidepool.Effects@ OPAQUE surface verb,
--- self-iterating-harness WS-B) — same convention as 'isRunLLMTurnVar' et al.
-isFinalizeVar :: Id -> Bool
-isFinalizeVar = isIntrinsicVerb "finalize"
+-- | Resolve every sited verb's hidden @*Sited@ sibling in ONE scan over the
+-- FULL (pre-reachability) bind pool, producing 'TransState's 'tsSitedIds'
+-- seed. The siblings are ordinary home-module bindings (Tidepool.Effects,
+-- spliced via the effect defs' helper text, or Tidepool.Fork's own
+-- @forkMapSited@\/@forkCataSited@), so a name lookup over the top binders
+-- finds their real Ids — mirroring 'translateModule's own 'findTargetId'.
+-- @translate@ can't do an HscEnv lookup itself (TransM is pure State, no
+-- IO), which is why resolution happens once, here.
+--
+-- A sibling that ISN'T present is simply absent from the map (unlike a
+-- missing target, that is not an error — it just means the corresponding
+-- head-swap can't fire). Each lookup is qualified on the sibling's own
+-- defining module ('vsSitedModule'), the same discipline 'isIntrinsicVerb'
+-- applies to call sites: a user binding that merely shares a @*Sited@
+-- occurrence name is never picked as a head-swap target.
+--
+-- The only pass between 'resolveExternals' and this scan that touches binder
+-- identity is 'uniquifyDuplicateBinders': its @goTop@ rewrites only each
+-- bind's RHS (@NonRec b <$> goE ...@ \/ @Rec ... (b,) <$> goE ...@) and
+-- returns the TOP binder @b@ unchanged. This scans exactly those top
+-- binders, so a sibling's Name — and its defining module — is still whatever
+-- it was before that pass ran, same as the call-site Vars 'isIntrinsicVerb'
+-- relies on.
+resolveSitedIds :: [CoreBind] -> Map.Map String Word64
+resolveSitedIds binds = Map.fromList
+  [ (vsName spec, varId b)
+  | spec <- sitedVerbs
+  , (b:_) <- [filter (isSibling spec) topBinders] ]
+  where
+    topBinders = concatMap bindersOf binds   -- GHC.Core's own
+    isSibling spec b =
+      occNameString (nameOccName (idName b)) == vsSitedName spec
+      && not (isSystemName (idName b))
+      && definedIn (vsSitedModule spec) b
 
 -- | The shared extract-time rejection every typed-yield site (runLLMTurn
 -- family, finalize) applies: a leftover type variable means the site isn't
