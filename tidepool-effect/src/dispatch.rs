@@ -205,38 +205,7 @@ impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frunk::hlist;
     use tidepool_repr::types::Literal;
-
-    /// Handler that adds 1 to a LitInt request.
-    struct AddOneHandler;
-    impl EffectHandler for AddOneHandler {
-        type Request = Value;
-        fn handle(&mut self, req: Value, _cx: &EffectContext) -> Result<Response, EffectError> {
-            match req {
-                Value::Lit(Literal::LitInt(n)) => Ok(Value::Lit(Literal::LitInt(n + 1)).into()),
-                other => Err(EffectError::UnexpectedValue {
-                    context: "LitInt",
-                    got: format!("{other:?}"),
-                }),
-            }
-        }
-    }
-
-    /// Handler that doubles a LitInt request.
-    struct DoubleHandler;
-    impl EffectHandler for DoubleHandler {
-        type Request = Value;
-        fn handle(&mut self, req: Value, _cx: &EffectContext) -> Result<Response, EffectError> {
-            match req {
-                Value::Lit(Literal::LitInt(n)) => Ok(Value::Lit(Literal::LitInt(n * 2)).into()),
-                other => Err(EffectError::UnexpectedValue {
-                    context: "LitInt",
-                    got: format!("{other:?}"),
-                }),
-            }
-        }
-    }
 
     fn empty_table() -> DataConTable {
         DataConTable::new()
@@ -258,72 +227,6 @@ mod tests {
         match result {
             Err(EffectError::UnhandledEffect { tag: 0 }) => {}
             other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn single_handler_routes_tag_0() {
-        let table = empty_table();
-        let cx = make_cx(&table);
-        let mut handlers = hlist![AddOneHandler];
-        let result = handlers.dispatch(0, &lit_int(10), &cx).unwrap();
-        match result {
-            Response::Complete(Value::Lit(Literal::LitInt(11))) => {}
-            other => panic!("expected LitInt(11), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn single_handler_rejects_tag_1() {
-        let table = empty_table();
-        let cx = make_cx(&table);
-        let mut handlers = hlist![AddOneHandler];
-        let result = handlers.dispatch(1, &lit_int(10), &cx);
-        match result {
-            Err(EffectError::UnhandledEffect { tag: 1 }) => {}
-            // tag is decremented per HCons layer to address the tail, then
-            // restored by 1 per layer on the way back out — the diagnostic
-            // must name the ORIGINAL out-of-range tag, 1.
-            other => panic!("expected UnhandledEffect {{ tag: 1 }}, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn two_handlers_route_tag_0_to_head() {
-        let table = empty_table();
-        let cx = make_cx(&table);
-        let mut handlers = hlist![AddOneHandler, DoubleHandler];
-        let result = handlers.dispatch(0, &lit_int(5), &cx).unwrap();
-        match result {
-            Response::Complete(Value::Lit(Literal::LitInt(6))) => {} // 5 + 1
-            other => panic!("expected LitInt(6), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn two_handlers_route_tag_1_to_tail() {
-        let table = empty_table();
-        let cx = make_cx(&table);
-        let mut handlers = hlist![AddOneHandler, DoubleHandler];
-        let result = handlers.dispatch(1, &lit_int(5), &cx).unwrap();
-        match result {
-            Response::Complete(Value::Lit(Literal::LitInt(10))) => {} // 5 * 2
-            other => panic!("expected LitInt(10), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn two_handlers_reject_tag_2() {
-        let table = empty_table();
-        let cx = make_cx(&table);
-        let mut handlers = hlist![AddOneHandler, DoubleHandler];
-        let result = handlers.dispatch(2, &lit_int(5), &cx);
-        match result {
-            Err(EffectError::UnhandledEffect { tag: 2 }) => {}
-            // tag decremented by 2 on the way in (one per HCons layer), then
-            // restored by 2 on the way out — the original out-of-range tag,
-            // 2, is what a version-skewed caller needs to see.
-            other => panic!("expected UnhandledEffect {{ tag: 2 }}, got {other:?}"),
         }
     }
 

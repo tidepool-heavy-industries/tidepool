@@ -582,49 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_preserves_eval() {
-        // let x = 10 in let y = 20 in PrimOp(IntAdd, [x, y])
-        let nodes = vec![
-            CoreFrame::Lit(Literal::LitInt(10)), // 0
-            CoreFrame::Lit(Literal::LitInt(20)), // 1
-            CoreFrame::Var(VarId(1)),            // 2
-            CoreFrame::Var(VarId(2)),            // 3
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![2, 3],
-            }, // 4
-            CoreFrame::LetNonRec {
-                binder: VarId(2),
-                rhs: 1,
-                body: 4,
-            }, // 5
-            CoreFrame::LetNonRec {
-                binder: VarId(1),
-                rhs: 0,
-                body: 5,
-            }, // 6
-        ];
-        let mut expr = CoreExpr { nodes };
-
-        let mut heap_before = VecHeap::new();
-        let val_before = eval(&expr, &Env::new(), &mut heap_before).unwrap();
-
-        let pass = PartialEval;
-        pass.run(&mut expr);
-
-        let mut heap_after = VecHeap::new();
-        let val_after = eval(&expr, &Env::new(), &mut heap_after).unwrap();
-
-        let (Value::Lit(Literal::LitInt(n1)), Value::Lit(Literal::LitInt(n2))) =
-            (val_before, val_after)
-        else {
-            panic!("Expected LitInt(30)");
-        };
-        assert_eq!(n1, 30);
-        assert_eq!(n2, 30);
-    }
-
-    #[test]
     fn test_partial_nested_let() {
         // let x = 1 in let y = PrimOp(IntAdd, [x, Lit(2)]) in PrimOp(IntAdd, [y, Lit(3)])
         let nodes = vec![

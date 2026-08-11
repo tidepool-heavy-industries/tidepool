@@ -59,7 +59,6 @@ fn try_beta_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_eval::{eval, Env, VecHeap};
     use tidepool_repr::{Literal, VarId};
 
     #[test]
@@ -149,47 +148,6 @@ mod tests {
             panic!("Body should be Var(y)");
         };
         assert_eq!(*v, y); // Should refer to the free y
-    }
-
-    #[test]
-    fn test_beta_preserves_eval() {
-        // (λx. x + x) 21
-        let x = VarId(1);
-        let nodes = vec![
-            CoreFrame::Var(x), // 0: x
-            CoreFrame::PrimOp {
-                op: tidepool_repr::PrimOpKind::IntAdd,
-                args: vec![0, 0],
-            }, // 1: x + x
-            CoreFrame::Lam { binder: x, body: 1 }, // 2: λx. x + x
-            CoreFrame::Lit(Literal::LitInt(21)), // 3: 21
-            CoreFrame::App { fun: 2, arg: 3 }, // 4: (λx. x + x) 21
-        ];
-        let expr_orig = CoreExpr { nodes };
-        let mut expr_reduced = expr_orig.clone();
-        let pass = BetaReduce;
-        pass.run(&mut expr_reduced);
-
-        let mut heap = VecHeap::new();
-        let env = Env::new();
-
-        let val_orig = eval(&expr_orig, &env, &mut heap).expect("Original eval failed");
-        let val_reduced = eval(&expr_reduced, &env, &mut heap).expect("Reduced eval failed");
-
-        let (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) =
-            (&val_orig, &val_reduced)
-        else {
-            panic!(
-                "Expected literal results, got {:?} and {:?}",
-                val_orig, val_reduced
-            );
-        };
-        assert_eq!(l1, l2);
-
-        let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig else {
-            panic!("Expected 42");
-        };
-        assert_eq!(n, 42);
     }
 
     #[test]

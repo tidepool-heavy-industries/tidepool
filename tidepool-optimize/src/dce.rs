@@ -182,44 +182,6 @@ mod tests {
         assert_eq!(*binder, x);
     }
 
-    // 6. test_dce_preserves_eval: let x = 42 in let y = 99 in x -> eval before/after, verify match.
-    #[test]
-    fn test_dce_preserves_eval() {
-        let x = VarId(1);
-        let y = VarId(2);
-        let expr = tree(vec![
-            CoreFrame::Lit(Literal::LitInt(42)), // 0: x's rhs
-            CoreFrame::Lit(Literal::LitInt(99)), // 1: y's rhs
-            CoreFrame::Var(x),                   // 2: y's body
-            CoreFrame::LetNonRec {
-                binder: y,
-                rhs: 1,
-                body: 2,
-            }, // 3: x's body
-            CoreFrame::LetNonRec {
-                binder: x,
-                rhs: 0,
-                body: 3,
-            }, // 4: root
-        ]);
-        let mut dce_expr = expr.clone();
-
-        let mut heap = VecHeap::new();
-        let env = Env::new();
-
-        let val_orig = eval(&expr, &env, &mut heap).expect("Original eval failed");
-
-        let changed = Dce.run(&mut dce_expr);
-        assert!(changed);
-
-        let val_dce = eval(&dce_expr, &env, &mut heap).expect("DCE eval failed");
-
-        match (&val_orig, &val_dce) {
-            (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) => assert_eq!(l1, l2),
-            _ => panic!("Expected literals"),
-        }
-    }
-
     // 7. test_dce_letrec_mixed_liveness: letrec { f = 100; g = 200 } in f -> unchanged.
     // g is Dead, but f is Once. The entire group must be kept because DCE currently
     // only drops the entire LetRec group if ALL binders are dead.

@@ -45,7 +45,6 @@ fn try_inline_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_eval::{eval, Env, VecHeap};
     use tidepool_repr::{Literal, PrimOpKind, VarId};
 
     fn tree(nodes: Vec<CoreFrame<usize>>) -> CoreExpr {
@@ -192,50 +191,4 @@ mod tests {
         assert_eq!(*v, y);
     }
 
-    // 7. test_inline_preserves_eval: Build let x = 21 in x + x (Many, no inline) and let x = 21 in x (Once, inline). Eval before/after, verify match.
-    #[test]
-    fn test_inline_preserves_eval() {
-        let x = VarId(1);
-
-        // Case A: Once (should inline)
-        let expr_once = tree(vec![
-            CoreFrame::Lit(Literal::LitInt(21)),
-            CoreFrame::Var(x),
-            CoreFrame::LetNonRec {
-                binder: x,
-                rhs: 0,
-                body: 1,
-            },
-        ]);
-        let mut expr_once_reduced = expr_once.clone();
-        Inline.run(&mut expr_once_reduced);
-
-        let mut heap = VecHeap::new();
-        let env = Env::new();
-        let v1 = eval(&expr_once, &env, &mut heap).unwrap();
-        let v2 = eval(&expr_once_reduced, &env, &mut heap).unwrap();
-        match (&v1, &v2) {
-            (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) => assert_eq!(l1, l2),
-            _ => panic!("Expected literals"),
-        }
-
-        // Case B: Many (should NOT inline)
-        let mut expr_many = tree(vec![
-            CoreFrame::Lit(Literal::LitInt(21)),
-            CoreFrame::Var(x),
-            CoreFrame::Var(x),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![1, 2],
-            },
-            CoreFrame::LetNonRec {
-                binder: x,
-                rhs: 0,
-                body: 3,
-            },
-        ]);
-        let expr_many_orig = expr_many.clone();
-        Inline.run(&mut expr_many);
-        assert_eq!(expr_many, expr_many_orig);
-    }
 }

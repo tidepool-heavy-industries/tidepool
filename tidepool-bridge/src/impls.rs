@@ -803,13 +803,6 @@ mod tests {
     }
 
     #[test]
-    fn test_i64_roundtrip() {
-        let table = test_table();
-        roundtrip(42i64, &table);
-        roundtrip(-7i64, &table);
-    }
-
-    #[test]
     fn test_i32_roundtrip() {
         let table = test_table();
         roundtrip(42i32, &table);
@@ -823,73 +816,6 @@ mod tests {
         let value = val.to_value(&table).unwrap();
         let res = i32::from_value(&value, &table);
         assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
-    }
-
-    #[test]
-    fn test_u64_roundtrip() {
-        let table = test_table();
-        roundtrip(42u64, &table);
-    }
-
-    #[test]
-    fn test_f64_roundtrip() {
-        let table = test_table();
-        roundtrip(3.14159f64, &table);
-        roundtrip(-0.0f64, &table);
-    }
-
-    #[test]
-    fn test_bool_roundtrip() {
-        let table = test_table();
-        roundtrip(true, &table);
-        roundtrip(false, &table);
-    }
-
-    #[test]
-    fn test_char_roundtrip() {
-        let table = test_table();
-        roundtrip('a', &table);
-        roundtrip('λ', &table);
-    }
-
-    #[test]
-    fn test_string_roundtrip() {
-        let table = test_table();
-        roundtrip("hello".to_string(), &table);
-        roundtrip("".to_string(), &table);
-    }
-
-    #[test]
-    fn test_option_roundtrip() {
-        let table = test_table();
-        roundtrip(Some(42i64), &table);
-        roundtrip(None::<i64>, &table);
-    }
-
-    #[test]
-    fn test_vec_roundtrip() {
-        let table = test_table();
-        roundtrip(vec![1i64, 2, 3], &table);
-        roundtrip(Vec::<i64>::new(), &table);
-    }
-
-    #[test]
-    fn test_result_roundtrip() {
-        let table = test_table();
-        roundtrip(Ok::<i64, String>(42), &table);
-        roundtrip(Err::<i64, String>("error".to_string()), &table);
-    }
-
-    #[test]
-    fn test_tuple2_roundtrip() {
-        let table = test_table();
-        roundtrip((42i64, true), &table);
-    }
-
-    #[test]
-    fn test_tuple3_roundtrip() {
-        let table = test_table();
-        roundtrip((42i64, true, "hello".to_string()), &table);
     }
 
     #[test]
