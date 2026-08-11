@@ -16,7 +16,10 @@ pub struct LlmHandler {
     call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
-/// Fresh call counter per clone — see comment in original source for rationale.
+/// Fresh call counter per clone: the handler stack is cloned from the
+/// factory once per MCP eval / repl turn, so `LLM_MAX_CALLS` is a per-turn
+/// budget, not a lifetime one — a shared `Arc` counter here would instead cap
+/// the whole server's total call count across every eval.
 impl Clone for LlmHandler {
     fn clone(&self) -> Self {
         Self {
