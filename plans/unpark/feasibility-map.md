@@ -302,12 +302,29 @@ replacing a channel teardown that no longer exists. So an old gap has slid over
 new code — which is why it is worth recording rather than filing as
 pre-existing and forgetting.
 
-Bounded mitigation attempted: drive the state machine into `Wedged` directly
-(the technique `a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`
-already uses for a stale epoch) and assert the reclaim path — reset reclaims a
-wedged entry; the reaper sweeps one past TTL. **Hard limit: not at the cost of
-production surface that exists only for tests.** A `pub` setter or a
-`cfg(test)` door into the state machine is a worse trade than a documented gap.
+**RESOLVED IN PART — the gap is now narrower than the paragraph above.** The
+bounded mitigation (drive the state machine into `Wedged` directly, the
+technique `a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`
+already uses for a stale epoch) landed, and needed NO production surface: the
+tests live inside `server.rs`/`manager.rs`, so `SessionState`/`SharedState`/
+`state()` are the server's own vocabulary and `ensure_session`/`session_reset`/
+`reap_once` are reachable as private items. The hard limit — never buy coverage
+with a `pub` setter or a `cfg(test)` door — was not approached.
+
+Three tests now pin the RECLAIM paths out of `Wedged`:
+`reaper_removes_a_wedged_entry_only_once_past_its_ttl` (two sweeps; the
+NEGATIVE half is what makes it assert "the TTL is consulted" rather than merely
+"reaping fires"), `reset_reclaims_a_wedged_entry` (reset REPLACES the entry —
+`!Arc::ptr_eq` — rather than nursing it back, keeping reset uniform across
+idle/suspended/wedged), and `drop_entry_on_the_current_epoch_retires_the_entry`
+(the positive half of the transition the ABA test only covered from the stale
+side).
+
+**Residual, and the actual wave-B item:** ENTRY into `Wedged` from a real
+timeout is still uncovered — `drive`'s "abort grace expired, the turn still
+holds the session" branch is reachable only in production. Carried up as: *no
+end-to-end coverage of the timeout → grace-expiry → `Wedged` transition; needs
+a JIT-cancel-resistant runaway or a seam to simulate one.*
 
 The related invariant IS pinned at the transition level:
 `manager.rs::a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`
