@@ -1,5 +1,5 @@
-//! Regression tests for repo-review-2026-07-06/02-haskell-stdlib.md findings
-//! H1, H2, H3, H4 (M5 and M10 are covered separately — see below).
+//! Regression tests for findings H1, H2, H3, H4 (M5 and M10 are covered
+//! separately — see below).
 //!
 //! H1/H2 — non-ASCII `String` literals were silently corrupted: GHC embeds a
 //! String literal's Addr# as raw UTF-8 bytes, but the extractor's static
@@ -216,12 +216,10 @@ fn works_replicate_negative_n_terminates() {
 //
 // `decodeFloat_Int#` DOES NOT, and it is reachable from exported stdlib:
 // `eitherDecode "3.5" :: Either Text Float` routes through aeson's
-// `parseRealFloat` and aborts extraction with the named error below. An
-// earlier version of this comment claimed the fallback had no reachable path
-// from any exported stdlib function; `jit_surface::works_from_json_float`
-// disproves that and is red for exactly this reason. The fix shape is the
-// one the error text names — a dedicated split for `decodeFloat_Int#`
-// alongside the existing ones — not a change here.
+// `parseRealFloat` and aborts extraction with the named error below —
+// `jit_surface::works_from_json_float` is red for exactly this reason. The
+// fix shape is the one the error text names — a dedicated split for
+// `decodeFloat_Int#` alongside the existing ones — not a change here.
 //
 // The fix that landed (a named, loud `error` at extract time instead of
 // silently aliasing both result binders to one primop node) was verified

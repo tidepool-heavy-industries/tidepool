@@ -356,7 +356,7 @@ result = Calc.calc 1 2 3
 // the top-level letrec differently in single- vs split-module compiles — same
 // class of divergence that already justifies runtime-only checks on the
 // typeclass-dispatch/primitive-boxing fixtures below. Verified the runtime
-// values still agree; see plans/repo-review-2026-07-06/08-test-infra.md.
+// values still agree.
 #[test]
 fn pure_nested_value_case_cross_mode_equivalent() {
     let fixture = CrossModeFixture {

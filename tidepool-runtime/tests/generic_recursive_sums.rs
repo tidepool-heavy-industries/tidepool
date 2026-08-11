@@ -1,10 +1,7 @@
 //! Recursive sum types through the GENERIC JSON DEFAULTS on the real JIT:
 //! `deriving (Generic, ToJSON, FromJSON)` on a payload sum whose recursion
-//! flows through a list. Successor to the deleted gate-1(b) spike
-//! (`Tidepool.Agent.CodecSpike`, a positional {tag, fields} experiment):
-//! what that spike proved — lists and recursion survive extract + JIT — is
-//! now proven through the one production path, aeson's TaggedObject shape
-//! with record constructors.
+//! flows through a list — proven through the one production path, aeson's
+//! TaggedObject shape with record constructors.
 //!
 //! Needs `TIDEPOOL_EXTRACT` (run inside `nix develop`).
 

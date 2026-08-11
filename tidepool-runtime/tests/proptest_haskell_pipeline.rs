@@ -1,4 +1,4 @@
-//! W6 — Differential property testing of the full Haskell -> Core -> JIT pipeline.
+//! Differential property testing of the full Haskell -> Core -> JIT pipeline.
 //!
 //! This layer is *unreachable* by the Rust-side IR generators (proptest_jit_vs_eval
 //! et al.) because it exercises `Translate.hs` and GHC's -O2 Core shapes: joinrec,
@@ -1361,7 +1361,7 @@ mod committed {
 }
 
 // ============================================================================
-// Regression: deep programs compile on a production-sized stack (W6 SIGSEGV).
+// Regression: deep programs compile on a production-sized stack.
 //
 // Post-EPS-unpoison, cross-module specialization inlines prelude ops
 // (`toUpper`/`strip`/`tReverse`/`words` ...) into Core deep enough that a single
