@@ -31,7 +31,8 @@
 //! `Vec<u64>` moves its 24-byte header, not its heap data.
 //!
 //! `nested_child_depth` counts children currently running against the parent;
-//! a parent resume is rejected while it is > 0.
+//! a parent resume is rejected while it is > 0, because the heap holds exactly
+//! one computation at a time (sequential-isolated).
 //!
 //! # The parked-continuation registry (realm prototype)
 //!
