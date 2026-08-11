@@ -490,9 +490,11 @@ impl RepoEventHandler {
         Self::with_source(Box::new(MonitorObservations::new(monitor)), config)
     }
 
-    /// Any other observation source (the acceptance harness supplies one that
-    /// reads a real temporary repository directly, because the monitor's
-    /// classifier is lane L3's and is not landed yet).
+    /// Any other observation source. [`MonitorObservations`] is the real
+    /// production adapter; the acceptance harness supplies a second source
+    /// that reads a real temporary repository directly, scoped to that
+    /// harness's single-cycle/process-memory baseline — not because the
+    /// production adapter doesn't exist.
     pub fn with_source(source: Box<dyn ObservationSource>, config: EventConfig) -> Self {
         Self {
             registry: SubscriptionRegistry::new(config.queue_bound),
