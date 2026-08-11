@@ -71,10 +71,10 @@
 //! `uses_qq`, so they get their own bundle rather than forcing that import
 //! on every other check). Eight probes stay standalone — see each one's
 //! comment for why (the sanctioned red, two deliberate-failure assertions,
-//! one crash-class regression, and the four `Patch.*` checks, which hit a
-//! real cross-check corruption bug when bundled — see the CROSS-CHECK
-//! CORRUPTION note above `works_patch_tab_timestamp_not_treated_as_rename`)
-//! — and the commit message carries the full value-vs-crash sort.
+//! one crash-class regression, and the four `Patch.*` checks, which are
+//! merely un-bundled rather than unbundlable: see the SAFE TO BUNDLE note
+//! above `works_patch_tab_timestamp_not_treated_as_rename`) — and the
+//! commit message carries the full value-vs-crash sort.
 
 use std::path::Path;
 use tidepool_runtime::compile_and_run;
@@ -227,30 +227,27 @@ fn works_numeric_json_and_parsing_family() {
 
 // =========================================================================
 // M3 (diff -u timestamp headers) + M4 (no-newline markers, both
-// directions). NOT bundled — see the CROSS-CHECK CORRUPTION note below.
+// directions). Still one-compile-per-test — but now only because nobody has
+// bundled them yet, NOT because bundling is unsafe. See below.
 // =========================================================================
 
-// CROSS-CHECK CORRUPTION — these four stay STANDALONE, unlike every other
-// VALUE-class group in this file. A first bundling attempt combined them
-// into one `works_patch_family` probe via the check-list idiom (unique
-// binder names per check, exactly like the other bundles below) and hit a
-// real, reproducible bug: with `patch_devnull_create_with_tab_timestamp`'s
-// check listed BEFORE `patch_apply_marker_new_side_loses_trailing_newline`'s
-// in the same `concat`, the earlier check's `Patch.fpCreate` result comes
-// back `False` (wrong — it's `True` standalone); reordering the same two
-// checks (loses-trailing-newline first, devnull-create second) makes both
-// pass. Renaming every pattern-bound variable to be unique across checks
-// (`fp1`/`fp2`/`fp3`/`fp4`, `out3`/`out4`) did NOT fix it — this is not a
-// binder-collision bug, it's order-dependent cross-check state corruption
-// somewhere in `Patch.parsePatch`/`Patch.fpCreate`/`Patch.applyFilePatch`'s
-// compiled interaction, reproduced directly against `compile_and_run` (not
-// a caching artifact of the interactive MCP eval server). That's a real JIT
-// or `Tidepool.Patch` correctness bug, but chasing its root cause is well
-// outside this task's scope (bundling test suites) and boundary (`Patch.hs`
-// isn't a named file here) — flagged to the parent instead. Per rule 4
-// ("group by COMPILE COMPATIBILITY, not just theme"), multiple `Patch.*`
-// probes sharing one eval is UNSAFE until that's understood, so these keep
-// their original one-compile-per-test shape.
+// SAFE TO BUNDLE. These four were held standalone because bundling them hit
+// a reproducible wrong answer that depended on the ORDER of the checks in
+// the `concat`. That bug is root-caused and fixed: it was never about
+// `Patch.hs` or about co-residence. `Tidepool/Translate.hs` passed GHC's
+// `dataToTag#` straight through to a `DataToTag` primop whose backends
+// answer with the runtime constructor tag — a stableVarId hash of the
+// constructor's NAME — where GHC's contract is the constructor's 0-based
+// index within its own data type, so `fpCreate fp == True` compared a hash
+// against `1#` and lost. Order only decided whether GHC emitted the primop
+// at all (it does so when the comparison feeds a shared `Int#` join point,
+// which the SECOND check is what creates).
+//
+// `tidepool-runtime/tests/patch_crosscheck_differential.rs` carries the
+// mechanism, the both-engines pin, and a structural guard that no
+// `DataToTag` primop survives translation. Bundling these four into one
+// `works_patch_family` is now an ordinary compile-cost win, and the
+// oracle-vs-JIT matrix over exactly these checks is already green.
 
 #[test]
 fn works_patch_tab_timestamp_not_treated_as_rename() {
