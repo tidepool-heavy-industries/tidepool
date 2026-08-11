@@ -17,14 +17,15 @@ server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 Every effect has ONE definition: a `<eff>_effect_def!` macro in
 `src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
 Rust bridge types), helper-verb text, and the handler/method wiring. Two
-projections consume it: `effect_decl_projection!` (in `effect_decls.rs`)
-generates the `*_decl()` builder, and `effect_rust_projection!`
-(`tidepool-handlers/src/effect_glue.rs`) generates the `*Req` enum +
-`DescribeEffect` + dispatch. Adding a constructor = one `verbs` row in the
-definition + one hand-written inherent method on the handler struct (using
-`cx.respond`/`respond_list`, or an errors-tagged method
+projections consume it: `effect_decl_projection!` (defined in `effect_defs.rs`,
+invoked per-effect from `effect_decls.rs`) generates the `*_decl()` builder,
+and `effect_rust_projection!` (`tidepool-handlers/src/effect_glue.rs`)
+generates the `*Req` enum + `DescribeEffect` + dispatch. Adding a constructor =
+one `verbs` row in the definition + one hand-written inherent method on the
+handler struct (using `cx.respond`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
+
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
@@ -157,12 +158,31 @@ Notes for anyone working on the server process itself (`tidepool/src/main.rs`, `
 
 **Eval thread signal handling**: A best-effort SIGILL/SIGSEGV handler is installed via `sigaltstack`+`sigaction`. `panic!` from a signal handler is UB and does not reliably unwind. The real safety net is returning `Ok(None)` → `CallToolResult::error` (not `McpError`) from the JIT boundary — this surfaces the failure to the MCP client without killing the server process or the connection. Do not try to make the signal handler do more than set a flag.
 
-**Preamble imports**: Every eval sees:
+**Preamble imports**: the canonical list (`preamble::eval_import_lines`) every eval sees:
 ```haskell
 import Tidepool.Prelude hiding (error)
+import Tidepool.Effects
+import qualified Tidepool.Data.Text as T
+import qualified Data.Map.Strict as Map
+import qualified Data.Map.Merge.Strict as MM
+import qualified Data.Set as Set
+import qualified Tidepool.Aeson as Aeson
+import qualified Tidepool.Aeson.KeyMap as KM
+import qualified Data.List as L
+import qualified Tidepool.TextFormat as TF
+import qualified Tidepool.Table as Tab
+import qualified Tidepool.Patch as Patch
 import Control.Monad.Freer hiding (run)
 import qualified Prelude as P
 ```
-Our `error :: Text -> a` shadows Prelude's `String` version. Our `run :: Text -> M (Either ExecError Proc)` shadows Freer's `run :: Eff '[] a -> a`. These hiding clauses are load-bearing — removing them breaks eval code that uses `error` with Text or `run` for shell commands.
+(`import Library` is inserted before the final `Prelude as P` line when a
+project library is present; each present effect's own `extra_imports` — e.g.
+`Exec` → `Tidepool.Shell`/`Tidepool.Cargo`, `Git` → `Tidepool.Git`, `AskUser` →
+`Tidepool.Form` — folds in on top of this base list, see `extra_imports_for!`
+above.) The two `hiding` clauses are the load-bearing ones: our
+`error :: Text -> a` shadows Prelude's `String` version, and our
+`run :: Text -> M (Either ExecError Proc)` shadows Freer's
+`run :: Eff '[] a -> a`. Removing either breaks eval code that uses `error`
+with Text or `run` for shell commands.
 
 **Eval timeout**: The default is 600 seconds, per-request raisable to 1800 (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Long shell commands (builds, test suites) run comfortably inside it; at the window an eval at an effect boundary parks as a continuation, a pure runaway is detached. The timeout returns a clean `CallToolResult::error`, not a crash.
