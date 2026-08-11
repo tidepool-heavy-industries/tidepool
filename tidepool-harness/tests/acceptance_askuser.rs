@@ -34,10 +34,11 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::selfharness::observer::FormSource;
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, OperatorGate, SelfHarnessDriver,
+    answerer_decls, load_harness_source, Event, Harness, Observer, OperatorGate, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -189,6 +190,48 @@ impl OperatorGate for ScriptedGate {
     fn await_continue(&self) {}
 }
 
+/// A driver-emitted form event, reduced to what this test needs to compare:
+/// which side raised the form ([`FormSource::Answerer`] vs
+/// [`FormSource::OuterLoop`], collapsed to a bool since this cycle only
+/// exercises the nested answerer) and the shape/submission payload. Proves
+/// the servicing loop still emits `FormPresented`/`FormSubmitted` in the same
+/// order and pairing as before the `service_askuser_hole`/
+/// `service_outer_askuser_hole` dedupe — the durable transcript jsonl
+/// (dogfood-observability) is a straight fold over this exact event stream.
+#[derive(Debug, Clone, PartialEq)]
+enum CapturedForm {
+    Presented {
+        answerer: bool,
+        shape: FormShape,
+    },
+    Submitted {
+        answerer: bool,
+        submission: serde_json::Value,
+    },
+}
+
+#[derive(Default)]
+struct CaptureObserver {
+    forms: Mutex<Vec<CapturedForm>>,
+}
+
+impl Observer for CaptureObserver {
+    fn on_event(&self, event: &Event) {
+        let captured = match event {
+            Event::FormPresented { source, shape } => CapturedForm::Presented {
+                answerer: matches!(source, FormSource::Answerer { .. }),
+                shape: shape.clone(),
+            },
+            Event::FormSubmitted { source, submission } => CapturedForm::Submitted {
+                answerer: matches!(source, FormSource::Answerer { .. }),
+                submission: submission.clone(),
+            },
+            _ => return,
+        };
+        self.forms.lock().unwrap().push(captured);
+    }
+}
+
 /// The ONE recorded answerer reply: a fenced Haskell `do`-block that asks the
 /// operator for a whole `Decision` with `askUser @Decision`, then picks among
 /// two RUNTIME values with `chooseMany`, then `finalize`s. Both suspensions
@@ -239,7 +282,8 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
-    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    let observer = Arc::new(CaptureObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer.clone());
     let gate = Arc::new(ScriptedGate::new());
     driver.set_gate(gate.clone());
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
@@ -293,6 +337,58 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
             ],
         }),
         "chooseMany must offer one control per runtime label, got: {seen:?}"
+    );
+
+    // The driver's own emitted event stream — not just what the gate saw —
+    // is the same PRESENTED/SUBMITTED pairing in the same order: the
+    // malformed submission, the corrected `Decision`, then `chooseMany`'s
+    // choice. All three forms are the nested answerer's own
+    // (`FormSource::Answerer`), never `OuterLoop`.
+    let forms = observer.forms.lock().unwrap().clone();
+    assert_eq!(
+        forms,
+        vec![
+            CapturedForm::Presented {
+                answerer: true,
+                shape: expected_decision_shape(),
+            },
+            CapturedForm::Submitted {
+                answerer: true,
+                submission: serde_json::json!({}),
+            },
+            CapturedForm::Presented {
+                answerer: true,
+                shape: expected_decision_shape(),
+            },
+            CapturedForm::Submitted {
+                answerer: true,
+                submission: decision_answer(),
+            },
+            CapturedForm::Presented {
+                answerer: true,
+                shape: FormShape::Product {
+                    type_key: "Choices".to_string(),
+                    constructor: "Choices".to_string(),
+                    fields: vec![
+                        FieldShape {
+                            key: "keep".to_string(),
+                            shape: FormShape::Bool,
+                        },
+                        FieldShape {
+                            key: "drop".to_string(),
+                            shape: FormShape::Bool,
+                        },
+                    ],
+                },
+            },
+            CapturedForm::Submitted {
+                answerer: true,
+                submission: serde_json::json!({"keep": true, "drop": false}),
+            },
+        ],
+        "the driver must emit one FormPresented/FormSubmitted pair per \
+         present_form call, in order — the servicing loop's observability \
+         contract is unchanged by the answerer/outer dedupe"
     );
 
     // The typed round-trip: the operator's structural submission decoded into a

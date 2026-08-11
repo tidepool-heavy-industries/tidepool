@@ -1096,11 +1096,9 @@ impl SelfHarnessDriver {
                         // outcome that ISN'T another operator form — a `runLLMTurn`
                         // suspension the main loop then services, or a completion.
                         HoleRouting::AskUser { shape } => {
-                            outcome = self.service_outer_askuser_hole(
-                                hole.clone(),
-                                shape.clone(),
-                                &compiled,
-                            )?;
+                            outcome = self
+                                .service_outer_askuser_hole(hole.clone(), shape.clone(), &compiled)
+                                .await?;
                         }
                         other => {
                             return Err(DriverError::Session(format!(
@@ -1430,31 +1428,9 @@ impl SelfHarnessDriver {
         let mut shape = shape.clone();
         let mut reprompts: u32 = 0;
         loop {
-            if reprompts >= ASKUSER_MAX_REPROMPTS {
-                return Err(DriverError::Session(format!(
-                    "operator form re-presented {reprompts} times without a decodable \
-                     submission (a non-interactive gate at EOF, or a form whose \
-                     submission never decodes) — hard-failing the hole"
-                )));
-            }
-            reprompts += 1;
-
-            let form_source = FormSource::Answerer { node };
-            self.emit(Event::FormPresented {
-                source: form_source.clone(),
-                shape: shape.clone(),
-            });
-            // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
-            // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
-            // under `block_in_place` so that blocking wait yields the tokio
-            // worker rather than stalling it.
-            let gate = Arc::clone(&self.gate);
-            let form = shape.clone();
-            let submission = tokio::task::block_in_place(move || gate.present_form(&form));
-            self.emit(Event::FormSubmitted {
-                source: form_source,
-                submission: submission.clone(),
-            });
+            let submission = self
+                .present_askuser_form(&mut reprompts, FormSource::Answerer { node }, &shape)
+                .await?;
             self.agent.answer_dialog(node, submission).await?;
 
             let Some((hole, classified, _table)) = self.agent.pending_hole_full(node) else {
@@ -1504,7 +1480,7 @@ impl SelfHarnessDriver {
     /// re-prompt into a hot loop no model-round cap catches (a form resume is
     /// not a model round). The between-loops human gate bounds loop ITERATIONS,
     /// not re-prompts WITHIN one loop's `askUser` — this counter does.
-    fn service_outer_askuser_hole(
+    async fn service_outer_askuser_hole(
         &mut self,
         hole: String,
         shape: FormShape,
@@ -1514,28 +1490,9 @@ impl SelfHarnessDriver {
         let mut shape = shape;
         let mut reprompts: u32 = 0;
         loop {
-            if reprompts >= ASKUSER_MAX_REPROMPTS {
-                return Err(DriverError::Session(format!(
-                    "outer-loop operator form re-presented {reprompts} times without a \
-                     decodable submission (a non-interactive gate at EOF, or a form \
-                     whose submission never decodes) — hard-failing the loop"
-                )));
-            }
-            reprompts += 1;
-
-            self.emit(Event::FormPresented {
-                source: FormSource::OuterLoop,
-                shape: shape.clone(),
-            });
-            // Sync-blocking gate under `block_in_place` (see the frozen contract):
-            // a web gate parks a channel here; yield the worker while it waits.
-            let gate = Arc::clone(&self.gate);
-            let form = shape.clone();
-            let submission = tokio::task::block_in_place(move || gate.present_form(&form));
-            self.emit(Event::FormSubmitted {
-                source: FormSource::OuterLoop,
-                submission: submission.clone(),
-            });
+            let submission = self
+                .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
+                .await?;
             let answer =
                 engine::json_answer_to_value(&submission, &compiled.table).map_err(|e| {
                     DriverError::Session(format!("outer askUser submission decode: {e}"))
@@ -1569,6 +1526,47 @@ impl SelfHarnessDriver {
                 ResidentOutcome::Completed { .. } => return Ok(outcome),
             }
         }
+    }
+
+    /// Present `shape` via the operator gate and return the operator's raw
+    /// submission — the servicing step shared by [`Self::service_askuser_hole`]
+    /// (a nested answerer's own form) and [`Self::service_outer_askuser_hole`]
+    /// (the authored OUTER loop's own form): check + increment the shared
+    /// reprompt cap, emit [`Event::FormPresented`], block on the operator gate,
+    /// then emit [`Event::FormSubmitted`]. `source` is the only observable
+    /// difference between the two callers — a genuine tag distinguishing which
+    /// side raised the form in the transcript, not a hidden behavior fork.
+    async fn present_askuser_form(
+        &self,
+        reprompts: &mut u32,
+        source: FormSource,
+        shape: &FormShape,
+    ) -> Result<Json, DriverError> {
+        if *reprompts >= ASKUSER_MAX_REPROMPTS {
+            return Err(DriverError::Session(format!(
+                "operator form re-presented {reprompts} times without a decodable \
+                 submission (a non-interactive gate at EOF, or a form whose \
+                 submission never decodes)"
+            )));
+        }
+        *reprompts += 1;
+
+        self.emit(Event::FormPresented {
+            source: source.clone(),
+            shape: shape.clone(),
+        });
+        // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
+        // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
+        // under `block_in_place` so that blocking wait yields the tokio
+        // worker rather than stalling it.
+        let gate = Arc::clone(&self.gate);
+        let form = shape.clone();
+        let submission = tokio::task::block_in_place(move || gate.present_form(&form));
+        self.emit(Event::FormSubmitted {
+            source,
+            submission: submission.clone(),
+        });
+        Ok(submission)
     }
 
     /// Drain a `HoleRouting::Fork` suspension on the per-loop answerer

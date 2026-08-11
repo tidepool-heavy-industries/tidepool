@@ -285,12 +285,28 @@ enum CapDecision {
     Abort { reason: String },
 }
 
-/// A fork/fanout child's inherited context, staged between
-/// `register_fork_child` and `force`: the cloned parent transcript prefix
-/// (through the fork checkpoint) plus the hole card, and the parent's framing
-/// (its system message), so the child's request prefix is byte-identical to
-/// the parent's through the checkpoint.
-type ForkedContext = (Vec<Message>, Option<String>);
+/// A just-created node's staged opening context, held between node creation
+/// (`create_root_framed`/`register_fork_child`) and `force` (a thunk node has
+/// no live [`NodeConvo`] to hold it yet) — the two node-creation paths differ
+/// only in WHAT seeds the transcript, so they share one staging slot per node
+/// rather than two maps a reader has to know are mutually exclusive by
+/// construction.
+enum NodeSeed {
+    /// A plain root's opening prompt, from `create_root_framed`.
+    Root {
+        prompt: String,
+        framing: Option<String>,
+    },
+    /// A fork/fanout child's inherited context, from `register_fork_child`:
+    /// the cloned parent transcript prefix (through the fork checkpoint) plus
+    /// the hole card, and the parent's framing (its system message), so the
+    /// child's request prefix is byte-identical to the parent's through the
+    /// checkpoint.
+    Forked {
+        transcript: Vec<Message>,
+        framing: Option<String>,
+    },
+}
 
 /// A fork child's compile row: the parent row minus the fork-spawning effects
 /// (`Fork`/`RunLLMTurn`). A child keeps everything else it needs to compute its
@@ -473,28 +489,23 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// A just-created root's opening prompt PLUS its optional per-node framing
-    /// (the system message override — [`NodeConvo::framing`]), staged between
-    /// `create_root`/`create_root_framed` and `force` (a thunk node has no
-    /// live `NodeConvo` to hold either yet). Removed once consumed at force
-    /// time.
-    seeds: Mutex<HashMap<NodeId, (String, Option<String>)>>,
-    /// A just-registered fork/fanout child's inherited [`ForkedContext`],
-    /// staged between `register_fork_child` and `force` (same lifetime as
-    /// `seeds`). Removed once consumed at force time.
-    forked_transcripts: Mutex<HashMap<NodeId, ForkedContext>>,
+    /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
+    /// a fork child's inherited transcript, either way paired with its
+    /// framing — between node creation and `force` (a thunk node has no live
+    /// `NodeConvo` to hold it yet). Removed once consumed at force time.
+    pending: Mutex<HashMap<NodeId, NodeSeed>>,
     /// Rung-2 escalation state (operator popup), keyed by the answerer node
-    /// that is parked awaiting a decision. Set by
-    /// [`Self::escalate_to_operator`] just before the await, read by the web
-    /// layer to render the stuck-node popup, removed once resolved.
-    escalations: Mutex<HashMap<NodeId, Escalation>>,
-    /// The oneshot sender half for each PENDING rung-2 escalation, keyed the
-    /// same way as `escalations`. [`Self::resolve_escalation`] (driven by the
-    /// web resolve endpoint, or fired directly in a test) removes and fires
-    /// the sender; the matching receiver lives on `escalate_to_operator`'s
-    /// async stack, in-process only (see that method's doc for the
-    /// durability caveat).
-    operator_decisions: Mutex<HashMap<NodeId, oneshot::Sender<OperatorDecision>>>,
+    /// that is parked awaiting a decision: the [`Escalation`] the web layer
+    /// renders the stuck-node popup from, paired with the oneshot sender half
+    /// that delivers the operator's decision back to
+    /// [`Self::escalate_to_operator`]'s awaiting receiver (which lives on its
+    /// own async stack, in-process only — see that method's doc for the
+    /// durability caveat). Set by [`Self::escalate_to_operator`] just before
+    /// the await; [`Self::resolve_escalation`] (driven by the web resolve
+    /// endpoint, or fired directly in a test) removes the whole entry to take
+    /// the sender and fires it — the pair is inserted together and removed
+    /// together, never independently.
+    escalations: Mutex<HashMap<NodeId, (Escalation, oneshot::Sender<OperatorDecision>)>>,
 }
 
 impl Harness {
@@ -526,10 +537,8 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            seeds: Mutex::new(HashMap::new()),
-            forked_transcripts: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
-            operator_decisions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -705,9 +714,13 @@ impl Harness {
         // Seed the (not-yet-live) transcript with the operator's opening prompt
         // and the node's framing. The convo entry is created lazily at force
         // time; stash both in the pending seed map until then.
-        self.seeds
-            .lock()
-            .insert(node, (prompt.to_string(), framing));
+        self.pending.lock().insert(
+            node,
+            NodeSeed::Root {
+                prompt: prompt.to_string(),
+                framing,
+            },
+        );
         Ok(node)
     }
 
@@ -743,42 +756,54 @@ impl Harness {
         self.tree.force(node, actor, session)?;
 
         // Seed the transcript: a fork/fanout answerer inherits its parent's
-        // transcript (set by `register_fork_child`); a plain root gets its
-        // opening prompt.
+        // transcript (staged by `register_fork_child`); a plain root gets its
+        // opening prompt (staged by `create_root_framed`). Mutually exclusive
+        // by construction — a node id is seeded exactly once, by whichever
+        // path created it.
         let mut convos = self.convos.lock();
-        let inherited = self.forked_transcripts.lock().remove(&node);
-        let (transcript, framing) = match inherited {
+        let seed = self.pending.lock().remove(&node);
+        let (transcript, framing) = match seed {
             // A fork/fanout answerer inherits its parent's transcript (turns
             // already in the log — nothing to re-log) AND the parent's framing,
             // so the child's request prefix is byte-identical to the parent's
             // through the fork checkpoint (exact-context fork).
-            Some((t, framing)) => (t, framing),
+            Some(NodeSeed::Forked {
+                transcript,
+                framing,
+            }) => (transcript, framing),
             // A plain root: log its opening prompt as a User turn so the
             // transcript shows what was asked, not just the model's reply
             // (symmetric with the assistant `turn_delta` in `drive_turn`).
-            None => {
-                let (seed, framing) = self
-                    .seeds
-                    .lock()
-                    .remove(&node)
-                    .unwrap_or_else(|| ("Begin.".to_string(), None));
+            Some(NodeSeed::Root { prompt, framing }) => {
                 // An empty seed (the self-iterating harness's framing-only
                 // answerer, `create_root_framed(_, "", _)`) has no opening
                 // user turn to log or carry — its context comes from
                 // `framing` alone. Logging/transcribing an empty turn would
                 // be a false record.
-                let transcript = if seed.is_empty() {
+                let transcript = if prompt.is_empty() {
                     Vec::new()
                 } else {
                     self.tree
-                        .turn_delta(node, 0, Role::User, seed.clone(), None)?;
+                        .turn_delta(node, 0, Role::User, prompt.clone(), None)?;
                     vec![Message {
                         role: Role::User,
-                        content: seed,
+                        content: prompt,
                         reasoning_items: Vec::new(),
                     }]
                 };
                 (transcript, framing)
+            }
+            None => {
+                self.tree
+                    .turn_delta(node, 0, Role::User, "Begin.".to_string(), None)?;
+                (
+                    vec![Message {
+                        role: Role::User,
+                        content: "Begin.".to_string(),
+                        reasoning_items: Vec::new(),
+                    }],
+                    None,
+                )
             }
         };
         convos.insert(
@@ -1831,7 +1856,7 @@ impl Harness {
     /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
     /// an operator decision — what the stuck-node popup renders.
     pub fn escalation_of(&self, node: NodeId) -> Option<Escalation> {
-        self.escalations.lock().get(&node).cloned()
+        self.escalations.lock().get(&node).map(|(e, _)| e.clone())
     }
 
     /// The first node currently parked on a rung-2 escalation, if any — what
@@ -1852,8 +1877,8 @@ impl Harness {
         node: NodeId,
         decision: OperatorDecision,
     ) -> Result<(), HarnessError> {
-        let tx = self
-            .operator_decisions
+        let (_, tx) = self
+            .escalations
             .lock()
             .remove(&node)
             .ok_or(HarnessError::NoPendingEscalation(node))?;
@@ -2489,16 +2514,20 @@ impl Harness {
             reason: format!("cap-exhausted after {attempts} attempts"),
             transcript_preview: self.transcript_tail(answerer, 6),
         };
-        self.escalations.lock().insert(answerer, escalation);
-        self.operator_decisions.lock().insert(answerer, tx);
+        self.escalations.lock().insert(answerer, (escalation, tx));
 
+        // On success, `resolve_escalation` already removed this entry (it
+        // takes the sender by removing the whole pair) — nothing left to
+        // clean up here. On error (the sender dropped without a decision —
+        // e.g. a second escalation on the same node overwrote this entry
+        // before it resolved), `resolve_escalation` never ran, so the entry
+        // needs cleaning up here instead.
         let decision = rx.await.map_err(|_| {
             self.escalations.lock().remove(&answerer);
             HarnessError::Resident(format!(
                 "node {answerer:?}: operator escalation channel dropped without a decision"
             ))
         })?;
-        self.escalations.lock().remove(&answerer);
 
         match decision {
             OperatorDecision::AllocateMore { turns, steer } => {
@@ -2707,9 +2736,13 @@ impl Harness {
             content: engine::hole_card(prompt, ty, table.as_ref()),
             reasoning_items: Vec::new(),
         });
-        self.forked_transcripts
-            .lock()
-            .insert(child, (transcript, parent_framing));
+        self.pending.lock().insert(
+            child,
+            NodeSeed::Forked {
+                transcript,
+                framing: parent_framing,
+            },
+        );
         Ok(child)
     }
 
@@ -3215,10 +3248,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            seeds: Mutex::new(HashMap::new()),
-            forked_transcripts: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
-            operator_decisions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3249,10 +3280,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            seeds: Mutex::new(HashMap::new()),
-            forked_transcripts: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
-            operator_decisions: Mutex::new(HashMap::new()),
         };
         (harness, path, dir)
     }
