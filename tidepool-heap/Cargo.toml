@@ -9,11 +9,3 @@ rust-version.workspace = true
 description = "Memory management and heap layout for Tidepool Core"
 readme = "../README.md"
 
-[dependencies]
-tidepool-repr.workspace = true
-tidepool-eval.workspace = true
-bumpalo = "3"
-thiserror.workspace = true
-
-[dev-dependencies]
-proptest.workspace = true
