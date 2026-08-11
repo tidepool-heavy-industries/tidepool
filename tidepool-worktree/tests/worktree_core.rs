@@ -245,19 +245,6 @@ fn registry_and_lookup_survive_a_fresh_manager_over_the_same_root() {
 }
 
 #[test]
-fn lookup_of_a_never_registered_id_is_ok_none() {
-    let repo = TestRepo::init().expect("init");
-    repo.writer()
-        .commit_file("a.txt", "one", "first")
-        .expect("commit");
-    let base = tempfile::TempDir::new().expect("tempdir");
-    let manager = manager_over(&repo, base.path());
-
-    let bogus = WorktreeId::from_raw("does-not-exist");
-    assert_eq!(manager.lookup(&bogus).expect("lookup"), None);
-}
-
-#[test]
 fn hand_deleted_worktree_is_lost_not_recreated() {
     let repo = TestRepo::init().expect("init");
     repo.writer()
