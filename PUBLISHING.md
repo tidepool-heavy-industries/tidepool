@@ -16,14 +16,16 @@ Crates must be published in dependency order. Wait for each crate to appear on c
 9.  tidepool-bridge-effects
 10. tidepool-runtime
 11. tidepool-mcp
-12. tidepool-handlers
-13. tidepool-harness
-14. tidepool-macro
-15. tidepool-optimize
-16. tidepool (binary)
-17. tidepool-lsp (binary)
-18. tidepool-repl (binary)
-19. tidepool-web (binary)
+12. tidepool-worktree
+13. tidepool-agent
+14. tidepool-handlers
+15. tidepool-harness
+16. tidepool-macro
+17. tidepool-optimize
+18. tidepool (binary)
+19. tidepool-lsp (binary)
+20. tidepool-repl (binary)
+21. tidepool-web (binary)
 ```
 
 This order is derived from the workspace dependency graph (`cargo metadata`,
