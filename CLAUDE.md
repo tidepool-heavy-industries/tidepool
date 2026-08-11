@@ -32,14 +32,15 @@ The Key Decisions Reference section below is the source of truth for all archite
 > (`~/.exo/roles/devswarm/context/root.md`), loaded each session. This file is
 > codebase truth; that file is process truth.
 
-### Decision Archive
+### Doc history
 
-Doc-history asides (why a note exists, superseded wording) that used to live
-inline in a `CLAUDE.md` file now live in `plans/decision-archive/`, one file
-per source doc, with a one-line pointer left at each extraction site. This
-does NOT apply to the Key Decisions Reference below — those stay here,
-verbatim, as the authoritative contracts layer; nothing load-bearing moves
-to the archive.
+Inline doc-history ("an earlier version…", "this used to…", superseded
+rationale, wave/lane narration) is DELETED, not archived — git is the store.
+`plans/decision-archive/` is reserved for the narrow case where losing the
+backstory invites re-tripping a hazard (a fix silently re-derived because
+nobody wrote down that it was already made); those get a one-line pointer at
+the site, never inline prose. Never applies to the Key Decisions Reference
+below — it stays here verbatim.
 
 ---
 
@@ -130,15 +131,11 @@ cargo install --path tidepool            # Install the MCP server binary (`tidep
 **Test runner is `cargo-nextest`** (`cargo install cargo-nextest --locked` if not
 already on PATH), not plain `cargo test`. nextest runs every test in its own OS
 process — never two tests sharing one — which structurally de-races the JIT's
-process-global-ish state (signal handlers, GC, fork-safety harnesses) that the
-old blanket `-- --test-threads=1` discipline used to serialize against by
-brute force. See `.config/nextest.toml` for the hazard-audit note (which
-historical hazards existed, why process-per-test resolves them, and why the
-only `test-group` override needed is the GHC fan-out cap) and
-`scripts/battery.sh` for the
+process-global-ish state (signal handlers, GC, fork-safety harnesses); that is
+why the only `test-group` override needed is the GHC fan-out cap. See
+`.config/nextest.toml` for the hazard audit and `scripts/battery.sh` for the
 canonical full-suite invocation. Plain `cargo test --workspace -- --test-threads=1`
-still works as a fallback (e.g. no `cargo-nextest` available) but is
-noticeably slower — see the branch history for a measured comparison.
+still works as a fallback (no `cargo-nextest` available) but is noticeably slower.
 
 **Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
 `tidepool-extract-bin`, or tests fail loud with `Metadata entry must be an
