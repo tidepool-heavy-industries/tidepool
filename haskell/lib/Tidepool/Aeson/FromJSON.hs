@@ -39,12 +39,12 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Tidepool.Aeson.Value
   ( Value(..), Object, Array, fromText, toText, eitherDecodeValue
-  , GAllFieldsNamed
+  , GAllFieldsNamed, IsNullarySum
   )
 import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific, floatingOrInteger)
-import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 
@@ -147,19 +147,10 @@ instance GFromRecord U1 where
 instance GFromJSONSum (IsNullarySum (a :+: b)) (a :+: b) => GFromJSON (a :+: b) where
   gParseJSON = gParseJSONSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
 
--- | Does every constructor reachable through this sum skeleton carry zero
--- fields (@M1 C c U1@)? Computed structurally over the '(:+:)' tree so it
--- works for any number of constructors, not just two. (Mirrors
--- 'Tidepool.Aeson.Value.IsNullarySum' — duplicated rather than shared, same
--- as the rest of this module's generic machinery vs. 'ToJSON'\'s.)
-type family IsNullarySum (f :: Type -> Type) :: Bool where
-  IsNullarySum (a :+: b) = IsNullarySumAnd (IsNullarySum a) (IsNullarySum b)
-  IsNullarySum (M1 C c U1) = 'True
-  IsNullarySum (M1 C c f) = 'False
-
-type family IsNullarySumAnd (a :: Bool) (b :: Bool) :: Bool where
-  IsNullarySumAnd 'True 'True = 'True
-  IsNullarySumAnd a b = 'False
+-- 'IsNullarySum' (does every constructor reachable through this sum skeleton
+-- carry zero fields?) is shared with "Tidepool.Aeson.Value" — a
+-- direction-free closed type family, imported rather than duplicated, since
+-- 'ToJSON' and 'FromJSON' must always agree on which branch a sum takes.
 
 -- | Dispatch on whether a sum is all-nullary: 'True' routes to the
 -- constructor-name decoder, 'False' to a compile-time rejection.
@@ -311,6 +302,16 @@ instance FromJSON Char where
     | otherwise        = Error "expected a string of length 1"
   parseJSON v = mismatch "string" v
 
+-- | The bare constructor-name string, matching the 'Tidepool.Aeson.Value.ToJSON'
+-- instance's @"LT"@\/@"EQ"@\/@"GT"@ output exactly.
+instance FromJSON Ordering where
+  parseJSON (String s)
+    | s == T.pack "LT" = Success LT
+    | s == T.pack "EQ" = Success EQ
+    | s == T.pack "GT" = Success GT
+    | otherwise = Error ("expected one of \"LT\", \"EQ\", \"GT\", got " ++ show (T.unpack s))
+  parseJSON v = mismatch "string" v
+
 -- | Unbounded: an exact integral 'Scientific' of any magnitude succeeds; a
 -- fractional value is an 'Error', via the same 'floatingOrInteger' split
 -- aeson's @parseIntegralFromScientific@ uses (aeson `FromJSON Integer`
@@ -363,6 +364,12 @@ instance FromJSON a => FromJSON (Map.Map Text a) where
   parseJSON (Object o) = Map.foldrWithKey step (Success Map.empty) o
     where step k v acc = Map.insert (toText k) <$> parseJSON v <*> acc
   parseJSON v          = mismatch "object" v
+
+-- | A JSON array of elements, matching the 'Tidepool.Aeson.Value.ToJSON'
+-- instance's @Array . map toJSON . Set.toList@ output.
+instance (Ord a, FromJSON a) => FromJSON (Set.Set a) where
+  parseJSON (Array xs) = Set.fromList <$> traverse parseJSON xs
+  parseJSON v          = mismatch "array" v
 
 -- | JSON @null@, matching this package's 'ToJSON ()' instance and the unit
 -- schema exposed to agents. Keeping one spelling matters here: @askUser @()@

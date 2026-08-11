@@ -214,3 +214,38 @@ fn eval_jit_parity_on_generic_core() {
         other => panic!("eval/JIT disagreed on generic-deriving decode Core: {other:?}"),
     }
 }
+
+/// A record field of type `Ordering` round-trips through the generic
+/// defaults — the vendored `ToJSON Ordering` instance emits the bare
+/// constructor-name string ("LT"/"EQ"/"GT"), and `FromJSON Ordering` now
+/// exists to decode it back, closing what was previously an encode-only type.
+#[test]
+fn ordering_field_round_trips() {
+    let src = format!(
+        "{HEADER}\n\
+         data Rec = Rec {{ rord :: Ordering, rx :: Int }} deriving (Generic, ToJSON, FromJSON, Eq)\n\n\
+         roundTrip :: Rec -> Bool\n\
+         roundTrip r = case fromJSON (toJSON r) of {{ Success v -> v == r; Error _ -> False }}\n\n\
+         result :: Bool\n\
+         result = roundTrip (Rec LT 3) && roundTrip (Rec EQ 4) && roundTrip (Rec GT 5)\n"
+    );
+    assert_eq!(run(&src, "result"), json!(true));
+}
+
+/// A record field of type `Set Int` round-trips through the generic
+/// defaults — the vendored `ToJSON (Set a)` instance emits a JSON array of
+/// elements, and `FromJSON (Set a)` now exists to decode it back, closing
+/// what was previously an encode-only type.
+#[test]
+fn set_field_round_trips() {
+    let src = format!(
+        "{HEADER}\
+         import qualified Data.Set as Set\n\n\
+         data Rec = Rec {{ rset :: Set Int, rx :: Int }} deriving (Generic, ToJSON, FromJSON, Eq)\n\n\
+         roundTrip :: Rec -> Bool\n\
+         roundTrip r = case fromJSON (toJSON r) of {{ Success v -> v == r; Error _ -> False }}\n\n\
+         result :: Bool\n\
+         result = roundTrip (Rec (Set.fromList [3, 1, 2]) 7) && roundTrip (Rec Set.empty 0)\n"
+    );
+    assert_eq!(run(&src, "result"), json!(true));
+}
