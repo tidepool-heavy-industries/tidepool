@@ -1401,3 +1401,52 @@ mod tests {
         assert!(formatted.contains("bad = ok + True"));
     }
 }
+
+/// Pin test: byte-exact output of the three `template_haskell*` wrapper
+/// paths, captured BEFORE the `TurnTemplate` options-struct refactor (see
+/// `plans/README.md` / the template-struct spec). Same discipline as
+/// `preamble.rs`'s `import_gating_pin`: hardcoded literal expected text, not
+/// a call back into any production string-builder, so a refactor of the
+/// templating internals cannot keep this green while silently changing the
+/// emitted bytes. `template_haskell_impl`'s output is a compile-cache input
+/// (it feeds `compile_haskell`'s source, salted independently of
+/// `ensure_effects_module_at`'s own cache — see that fn's doc), so drift here
+/// is a real regression, not cosmetic.
+#[cfg(test)]
+mod template_haskell_pin {
+    use super::*;
+
+    const PRE: &str = "module Expr where\ndefault (Int)\n";
+    const STACK: &str = "'[Console]";
+    const CODE: &str = "pure 1";
+
+    #[test]
+    fn plain_wrapper_pin() {
+        let src = template_haskell(PRE, STACK, CODE, "", "", None, None);
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
+            "template_haskell output changed — this is a compile-cache input, see template_haskell_impl"
+        );
+    }
+
+    #[test]
+    fn anchored_wrapper_pin() {
+        let src = template_haskell_anchored(PRE, STACK, CODE, "", "", None, None);
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON (__anchor _r))\n",
+            "template_haskell_anchored output changed — this is a compile-cache input, see template_haskell_impl"
+        );
+    }
+
+    #[test]
+    fn show_default_wrapper_pin() {
+        let src = template_haskell_show_default(PRE, STACK, CODE, "", "", None, None);
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire _r)\n",
+            "template_haskell_show_default output changed — this is a compile-cache input, see template_haskell_impl"
+        );
+    }
+}
