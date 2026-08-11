@@ -249,3 +249,30 @@ boundary so it does not read as an oversight.
 
 Generalization worth carrying: when a fixed-shape return type forces a variant
 to invent data, the type is wrong — not the variant.
+
+### 6.2 The Bind/Render asymmetry is scheduled, not permanent (sequenced)
+
+6.1 leaves Bind's slot on the `last_bound_root` stash while Render's rides
+inline. Routed up; root's call: take the symmetry, but SEQUENCE it rather than
+couple it into the cutover.
+
+1. Land the cutover as planned — stash kept, with a comment naming it a
+   compatibility boundary held open for sequencing and slated for removal.
+   Coupled set complete, suite green.
+2. THEN, as a separate commit: widen `SuspendableOutcome` (or its successor) so
+   Bind's slot rides inline like Render's, delete `last_bound_root` entirely,
+   and update the harness-side matches. **The `tidepool-harness/src` edit is
+   authorized for this step** — a boundary widening, not an engine rework: the
+   harness matches are mechanical arms, and `golden_path` is the oracle for
+   them.
+3. If the widening ripples BEYOND mechanical match-arm updates, drop step 2,
+   keep the comment, and report what it ripples into. That is a finding for the
+   wave-B queue, not a blocker for the fold.
+
+Standing principle this serves, restated by root: **prefer deleting a pathway
+over commenting it.** The stash is the one place that instinct is held back,
+and only for sequencing.
+
+Fold receipts therefore owe: repl 203/203, harness `golden_path`, clippy zero,
+the removed-line count MEASURED not estimated, and one line stating whether
+step 2 landed or was dropped with the ripple named.
