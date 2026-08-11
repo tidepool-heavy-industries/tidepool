@@ -10,8 +10,7 @@ module Tidepool.Prelude
   , String, Ordering(..), Maybe(..), Either(..)
   , Generic
     -- Render(render) (Tidepool.Render, the [fmt|] hole-coercion class) is
-    -- intentionally NOT re-exported here (approved surface decision,
-    -- generic-surface wave item 4, 2026-08-08): it collides with any
+    -- intentionally NOT re-exported here: it collides with any
     -- author-defined `render` (the harness contract's
     -- `render :: State -> Maybe Text -> Text`), and bare `render` was never
     -- an advertised verb — the canonical coercion instinct is `show`, which
@@ -395,18 +394,14 @@ isSuffixOf = T.isSuffixOf
 isInfixOf :: Text -> Text -> Bool
 isInfixOf = T.isInfixOf
 
--- Delegates to T.words. HISTORY (2026-06-11): was a "pure reimplementation"
--- round-tripping through [Char]; probe-verified T.words compiles and runs
--- cleanly under today's JIT in both saturated AND higher-order position, so the
--- String detour only cost performance. Same retirement as splitOn (3fb10e5).
--- (Contrast takeWhileT/dropWhileT below: the analogous delegation to Data.Text
--- was MEASURED BROKEN, so their String detour stays load-bearing.)
+-- Delegates to T.words: probe-verified to compile and run cleanly under the
+-- JIT in both saturated AND higher-order position.
 words :: Text -> [Text]
 words = T.words
 {-# INLINE words #-}
 
--- Delegates to T.lines. Same retirement as words above; edge semantics
--- verified equivalent (trailing newline, empty input, bare "\n").
+-- Delegates to T.lines; edge semantics verified equivalent (trailing
+-- newline, empty input, bare "\n").
 lines :: Text -> [Text]
 lines = T.lines
 {-# INLINE lines #-}
@@ -551,24 +546,15 @@ tReverse = T.reverse
 
 -- | Text takeWhile: take the longest prefix of characters satisfying a predicate.
 -- Thin alias for the vendored @T.takeWhile@ (@Tidepool.Data.Text@), kept for
--- source compatibility.
---
--- RETIRED (2026-06-20): the old @T.pack . go . T.unpack@ String-detour body was a
--- LOAD-BEARING workaround for the cross-module-wrapper + operator-section
--- corruption of EXTERNAL @Data.Text.takeWhile@ (gotcha-audit #14). With @T@ now
--- repointed to the vendored home-module @Tidepool.Data.Text@, @T.takeWhile@ is a
--- HOME body — proven correct under exactly this wrapped-section path (the probe
--- in text-vendor-mechanism-proven; guard @repro_takewhilet_alias_pap.rs@). So the
--- delegation that was MEASURED BROKEN against external text is now correct, and
--- the String detour (slow, allocating) is gone.
+-- source compatibility. MUST stay a home-module delegation (see the import
+-- above) — the equivalent wrapper over external @Data.Text.takeWhile@
+-- corrupts under the JIT.
 takeWhileT :: (Char -> Bool) -> Text -> Text
 takeWhileT = T.takeWhile
 {-# INLINE takeWhileT #-}
 
 -- | Text dropWhile: drop the longest prefix of characters satisfying a predicate.
--- Thin alias for the vendored @T.dropWhile@; see @takeWhileT@ above. RETIRED
--- (2026-06-20) from the String-detour shadow now that @T@ is the vendored
--- home-module Data.Text.
+-- Thin alias for the vendored @T.dropWhile@; see @takeWhileT@ above.
 dropWhileT :: (Char -> Bool) -> Text -> Text
 dropWhileT = T.dropWhile
 {-# INLINE dropWhileT #-}
@@ -669,18 +655,6 @@ foldl1 = unsatisfiable
 
 fromJust :: Unsatisfiable ('Text "fromJust is partial — use fromMaybe def, maybe, or a Just pattern." ':$$: 'Text "Deliberate partial use: Data.Maybe.fromJust.") => Maybe a -> a
 fromJust = unsatisfiable
-
--- #155: Monomorphic even/odd shadows removed — GHC specialization
--- (re-enabled) eliminates Integral dictionary passing at compile time.
--- Likewise `round` (was `Double -> Int`): it now comes polymorphically from
--- base, matching its already-polymorphic siblings `truncate`/`floor`/`ceiling`,
--- so `round`/`truncate`/`floor`/`ceiling` work on any `RealFrac` — including
--- `Scientific`, exactly (Integer math, no `Double` round-trip). The Double case
--- still lowers to the round primop (as `QQ.Fmt.Runtime` already relies on).
--- The same cleanup was finished for the last four `Int`-only shadows
--- (`abs'`/`signum'`/`min'`/`max'`): removed in favour of the polymorphic base
--- `abs`/`signum` (via `Num(..)`) and `max`/`min` (via `Ord(..)`), already
--- re-exported above.
 
 -- | Zip three lists with a function.
 zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
@@ -951,7 +925,7 @@ toUpperChar c
 {-# INLINE toUpperChar #-}
 
 -- ---------------------------------------------------------------------------
--- Kleisli profunctor squad (probe-verified under the JIT 2026-06-11):
+-- Kleisli profunctor squad, probe-verified under the JIT:
 -- Arrow-style plumbing for monadic pipelines, monomorphic in shape but
 -- polymorphic over the monad (single-constraint Monad dictionaries are
 -- JIT-safe — same class as mapM/foldM). Fixities match Control.Arrow.
