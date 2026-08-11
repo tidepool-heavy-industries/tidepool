@@ -13,6 +13,7 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHp
 import GHC.Driver.Make (load')
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Types.SafeHaskell (SafeHaskellMode(Sf_None))
+import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage)
 import GHC.Types.SrcLoc (unLoc)
 import GHC.Utils.Logger (LogAction)
@@ -190,7 +191,17 @@ runNormalPipeline path includes = do
     -- 'ghc_session' used to bracket, they do not nest inside it.
     liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     modGraph <- getModuleGraph
-    let summaries = mgModSummaries modGraph
+    -- hs-boot summaries are EXCLUDED from extraction (item 20, 2026-08-10):
+    -- a boot node shares its ModuleName with the real module, so its
+    -- near-empty desugared guts would CLOBBER the real module's entry in
+    -- the name-keyed 'gutsByMod' below — hiding every Core edge out of that
+    -- module from 'reachableModuleClosure' and silently tiering its
+    -- dependencies out of PASS 2 (observed live: the Even.hs-boot/Odd cycle
+    -- baked a TypeMetadata sentinel for Odd.odd'). Boot files exist for
+    -- 'load''s loop-breaking only; any error in one already surfaced there,
+    -- and their guts carry no bindings extraction could use.
+    let summaries =
+          [ ms | ms <- mgModSummaries modGraph, ms_hsc_src ms == HsSrcFile ]
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
     -- E6 (tiered -O2): process every module's parse/typecheck/desugar (PASS
@@ -563,7 +574,11 @@ runSessionPipeline scope path includes = do
     -- the umbrella 'GHC' module already imported here) give a real
     -- deps-before-dependents order.
     let summaries =
-          [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
+          [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
+               -- Same hs-boot exclusion as 'runNormalPipeline' (item 20):
+               -- boot guts carry no bindings and must not be desugared or
+               -- merged as if they were the real module.
+               , ms_hsc_src ms == HsSrcFile ]
     when (null summaries) $
       liftIO $ ioError (userError "runSessionPipeline: empty module graph")
     tcMsRef   <- liftIO (newIORef (0 :: Integer))

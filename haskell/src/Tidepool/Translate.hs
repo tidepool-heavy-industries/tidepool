@@ -133,6 +133,13 @@ data TransState = TransState
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
+  -- Item 20 defect (b): the ORIGINAL ids of unresolved externals that were
+  -- actually POISONED during this run. The emitted node is the shared
+  -- 0x45…04 sentinel, which erases WHICH external it replaced — and the
+  -- referenced-ids masking filter ('trulyUnresolved') can therefore never
+  -- see them. This set is the only place that information survives; the
+  -- caller turns it into a loud extract-time diagnostic.
+  , tsPoisonedHits :: !(Set.Set Word64)
   -- runLLMTurn (#R0 typed-yield pass): varIds of the hidden Sited siblings
   -- (Nothing when the Ask effect's helper text isn't in the closed program —
   -- an interception site with no sibling available is an extract-pipeline bug).
@@ -429,7 +436,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -437,7 +444,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -456,7 +463,7 @@ translateBinds binds = concatMap translateBind binds
 -- the DataConTable meta walks so those harvest only constructors the program
 -- can run, never the full closed graph (quoter-internal / TH machinery binds
 -- that merely sit on the include path).
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text))
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text), Set.Set Word64)
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
@@ -472,7 +479,7 @@ translateModule allBinds targetName unresolvedIds =
       -- 'isIntrinsicVerb' for the call-site predicates: a user binding that
       -- merely shares one of these names is never picked as a head-swap
       -- target.
-      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds
+      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds Set.empty
                     (findAuxVarId "runLLMTurnSited" allBinds)
                     (findAuxVarId "runLLMTurnForkSited" allBinds)
                     (findAuxVarId "runLLMTurnFanoutSited" allBinds)
@@ -483,7 +490,8 @@ translateModule allBinds targetName unresolvedIds =
                     (findAuxVarId "forkSited" allBinds)
                     (findAuxVarId "forkAllSited" allBinds)
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
-  in (tsNodes finalState, tsUsedDCs finalState, neededBinds, tsRunLLMTurnSites finalState)
+  in ( tsNodes finalState, tsUsedDCs finalState, neededBinds
+     , tsRunLLMTurnSites finalState, tsPoisonedHits finalState )
   where
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
@@ -774,7 +782,24 @@ translateModuleClosed hscEnv allBinds targetName = do
         _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds, runLLMTurnSites) = translateModule closedBinds targetName unresolvedIds
+      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonedHits) =
+        translateModule closedBinds targetName unresolvedIds
+  -- Item 20 defect (b): a poisoned external is LAZY (the 0x45 kind=4 node
+  -- traps only if forced at runtime), so it is deliberately NOT an
+  -- extract-time error — dead-branch poisons are legitimate. But it must
+  -- never be SILENT: the poison node erases which symbol it replaced, and
+  -- 'trulyUnresolved' below (keyed on the original id, which the poison
+  -- replaced in the emitted nodes) structurally cannot report these. Name
+  -- them here, loudly, at extract time.
+  do let poisonedNamed =
+           [ uvModule uv ++ "." ++ uvName uv
+           | uv <- unresolved, uvKey uv `Set.member` poisonedHits ]
+     case poisonedNamed of
+       [] -> pure ()
+       names -> hPutStrLn stderr $
+         "  [extract] POISONED " ++ show (length names)
+         ++ " unresolved external(s) (lazy: traps as TypeMetadata kind=4 only if forced): "
+         ++ unwords names
   let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
@@ -1046,11 +1071,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
         in tsUsedDCs s
       ) pairs
 
@@ -1944,7 +1969,11 @@ translateHead = \case
     | otherwise -> do
         unresolved <- gets (Set.member (varId v) . tsUnresolvedIds)
         if unresolved
-          then emitNode $ NVar 0x4500000000000004
+          then do
+            -- Record the ORIGINAL id before it is erased by the shared
+            -- poison node — see 'tsPoisonedHits'.
+            modify' (\s -> s { tsPoisonedHits = Set.insert (varId v) (tsPoisonedHits s) })
+            emitNode $ NVar 0x4500000000000004
           else emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body

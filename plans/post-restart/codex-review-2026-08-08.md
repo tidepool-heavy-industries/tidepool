@@ -519,6 +519,43 @@ silent-negative family as everything else this weekend). Repro:
 extractor. Owner: a focused extract dev (morning); on the sanctioned
 list until then.
 
+### Item 20 — FIXED (root, 2026-08-10), off the sanctioned list
+
+Both defects, mechanism-level:
+
+(a) **Boot-summary clobber.** `runNormalPipeline`'s PASS 1 iterated
+`mgModSummaries` INCLUDING the `Even.hs-boot` node, whose near-empty
+desugared guts share real Even's `ModuleName` and clobbered its entry
+in the name-keyed `gutsByMod` — hiding the Even→Odd Core edge from
+`reachableModuleClosure`, so Odd was tiered out of PASS 2
+(`validation_only`, observed via the `e6-tier` line), left the
+fat-iface fallback with no `Odd.hi` (this pipeline writes no
+interfaces), and baked the sentinel. Fix: both pipelines
+(`runNormalPipeline` + `runSessionPipeline` PHASE 3, which had the
+same latent hazard) filter summaries to `ms_hsc_src == HsSrcFile` —
+boot files exist for `load'`'s loop-breaking only and their guts carry
+nothing extraction can use. After the fix the same repro shows
+`reachable_names=["Even","Odd","Test"]`.
+
+(b) **The silent bake.** `trulyUnresolved` filters the unresolved list
+on the ORIGINAL var id appearing in emitted nodes — but the poison
+branch emits the shared `0x45…04` node instead, so a poisoned external
+STRUCTURALLY never appears there and `cmUnresolved` stays empty (the
+masking `runSessionPipeline`'s PHASE 3 comment predicted). A hard
+error would be wrong (poisons are LAZY by design; dead-branch poisons
+are legitimate), so the fix records the original ids in a new
+`tsPoisonedHits` set and `translateModuleClosed` names every poisoned
+external LOUDLY on stderr (`[extract] POISONED …`), unconditionally.
+
+Receipts: `dimension_d1_mutual_recursion` red→green on the same
+binaries (tip extract rebuilt); `cross_mode_targeted` 10/10;
+`extract-fidelity-test` PASS; new pin
+`tidepool-runtime/tests/extract_poison_diagnostic.rs` (2/2) drives the
+`TIDEPOOL_TEST_FORCE_VALIDATION_ONLY` fault injection — its first
+in-tree consumer — asserting the diagnostic names `Dep.helper`, and
+that a healthy extraction stays quiet (no diagnostic spam on ordinary
+evals).
+
 ### Item 14 — DECISION EXECUTED (structural-cleanup step 3a, 2026-08-10)
 
 Symmetric lossless sums landed in the vendored generic defaults: ToJSON
