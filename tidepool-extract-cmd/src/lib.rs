@@ -1,15 +1,5 @@
 //! The ONE place a `tidepool-extract` process is built and spawned.
 //!
-//! Before this crate existed, seven call sites across `tidepool-runtime`,
-//! `tidepool-harness` and `tidepool-macro` each open-coded their own
-//! `Command::new(<extract bin>)` — with their own binary-resolution policy,
-//! their own argument spelling, and (fatally) their own visibility to the
-//! process-global spawn counter that the extract-wave plan uses as its
-//! done-criterion. The counter lived in `tidepool-harness::compile` and saw
-//! only that one site, so "the boot compile count dropped" was a measurement
-//! of one lane rather than of the process. See
-//! `plans/post-restart/extract-manifest.md` decisions D-A and D-B.
-//!
 //! What lives here:
 //!
 //! - [`resolve_bin`] — binary resolution, with `tidepool-macro`'s STRICT
@@ -56,8 +46,8 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_BIN: &str = "tidepool-extract";
 
 // ---------------------------------------------------------------------------
-// Process-global spawn counter (moved here from `tidepool-harness/src/compile.rs`,
-// which re-exports these three items so its public surface is unchanged).
+// Process-global spawn counter (`tidepool-harness/src/compile.rs` re-exports
+// these three items so its public surface is unchanged).
 // ---------------------------------------------------------------------------
 
 /// Process-global count of `tidepool-extract` spawns paid through
@@ -65,12 +55,7 @@ pub const DEFAULT_BIN: &str = "tidepool-extract";
 /// live receipt that the self-iterating harness's pre-model-call compile
 /// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
 /// and since every spawn site in the workspace funnels through this crate,
-/// the count covers the PROCESS rather than one lane. It previously lived in
-/// `tidepool-harness::compile` and saw only that crate's `compile_turn`,
-/// which made the measurement wrong by construction: the harness also reaches
-/// `tidepool_runtime::session::turn`'s `run_turn`/`classify_block`/
-/// `compile_session_turn`, and those spawns were invisible to it
-/// (`plans/post-restart/extract-manifest.md`, D-B).
+/// the count covers the PROCESS rather than one lane.
 /// PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
 /// on it must run as its own test binary so no other test's compiles land on
 /// the same count (nextest already gives one process per test binary).
@@ -192,8 +177,7 @@ pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
 /// --` fallback for the case where the bare name isn't on `PATH` — a property
 /// of THAT call site, not of the arguments. Expressing it as a second
 /// launcher over the SAME [`ExtractCmd`] means the argument construction is
-/// shared even though the fallback is not (it used to be written out twice in
-/// that one function).
+/// shared even though the fallback is not.
 #[derive(Clone, Debug)]
 pub enum Launcher {
     /// Spawn the extract binary directly.
