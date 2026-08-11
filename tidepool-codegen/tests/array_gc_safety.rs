@@ -298,4 +298,3 @@ fn small_array_element_survives_gc_under_tiny_nursery() {
          the verifier never ran, so this test guarded nothing"
     );
 }
-
