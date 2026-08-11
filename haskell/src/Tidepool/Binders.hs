@@ -49,10 +49,9 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
-import Data.Char (ord)
-import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
+import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 
 -- | A binder a declaration introduces.
@@ -153,22 +152,6 @@ renderItem (EType n cons) =
 renderItem (EClass n methods) =
   "{\"kind\":\"class\",\"name\":" ++ jsonString n
     ++ ",\"methods\":[" ++ intercalate "," (map jsonString methods) ++ "]}"
-
--- | JSON string escaping for arbitrary text — every caller in this module,
--- including rendered types that wrap across lines and whole wrapped module
--- sources, goes through this one escaper.
-jsonString :: String -> String
-jsonString s = '"' : concatMap esc s ++ "\""
-  where
-    esc '"'  = "\\\""
-    esc '\\' = "\\\\"
-    esc '\n' = "\\n"
-    esc '\r' = "\\r"
-    esc '\t' = "\\t"
-    esc c
-      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
-      | otherwise  = [c]
-    pad4 s' = replicate (4 - length s') '0' ++ s'
 
 getLibdir :: IO FilePath
 getLibdir = do

@@ -18,6 +18,7 @@ library tidepool-extract-internal
     Tidepool.DiagJson
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.Json
     Tidepool.Resolve
     Tidepool.Session
     Tidepool.Timing

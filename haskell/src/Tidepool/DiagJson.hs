@@ -10,10 +10,8 @@ module Tidepool.DiagJson
   ) where
 
 import Control.Exception (SomeException)
-import Data.Char (ord)
 import Data.Foldable (toList)
 import Data.List (intercalate)
-import Numeric (showHex)
 
 import GHC (SrcSpan(..), srcSpanFile, srcSpanStartLine, srcSpanStartCol, srcSpanEndLine, srcSpanEndCol)
 import GHC.Types.Error (MsgEnvelope(..), Severity(..), diagnosticMessage, getMessages, NoDiagnosticOpts(..))
@@ -24,6 +22,7 @@ import GHC.Iface.Errors.Types (IfaceMessageOpts(..), BuildingCabalPackage(..))
 import GHC.Utils.Error (formatBulleted)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(..), mkErrStyle)
 import GHC.Data.FastString (unpackFS)
+import Tidepool.Json (jsonString)
 
 -- | One diagnostic: an optional source span, a severity ("error"/"warning"),
 -- and the rendered message text.
@@ -106,27 +105,14 @@ renderDiagsJson diags =
 renderDiag :: Diag -> String
 renderDiag (Diag mspan sev msg) =
   "{\"span\":" ++ renderSpan mspan
-    ++ ",\"severity\":" ++ jstr sev
-    ++ ",\"message\":" ++ jstr msg ++ "}"
+    ++ ",\"severity\":" ++ jsonString sev
+    ++ ",\"message\":" ++ jsonString msg ++ "}"
 
 renderSpan :: Maybe (String, Int, Int, Int, Int) -> String
 renderSpan Nothing = "null"
 renderSpan (Just (file, sl, sc, el, ec)) =
-  "{\"file\":" ++ jstr file
+  "{\"file\":" ++ jsonString file
     ++ ",\"startLine\":" ++ show sl
     ++ ",\"startCol\":" ++ show sc
     ++ ",\"endLine\":" ++ show el
     ++ ",\"endCol\":" ++ show ec ++ "}"
-
-jstr :: String -> String
-jstr s = '"' : concatMap esc s ++ "\""
-  where
-    esc '"'  = "\\\""
-    esc '\\' = "\\\\"
-    esc '\n' = "\\n"
-    esc '\r' = "\\r"
-    esc '\t' = "\\t"
-    esc c
-      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
-      | otherwise  = [c]
-    pad4 s' = replicate (4 - length s') '0' ++ s'
