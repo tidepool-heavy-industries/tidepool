@@ -1,14 +1,9 @@
-# tidepool-harness — typed-yield session harness (R0 build)
+# tidepool-harness — typed-yield session harness
 
-A new frontend over the eval substrate — NOT a retrofit of tidepool-repl.
-The two are separate frontends that now share ONE suspension engine: the
-threadless stow-as-data mechanism in
-`tidepool_runtime::session::PersistentSession`. The repl's parked-thread
-mechanism is gone (`plans/unpark/`), so nothing here is contrasting against
-it. Plan + segment specs:
-`plans/harness-r0/`; cross-segment contracts:
-`plans/harness-r0/00-scaffold/contracts.md`; frozen shapes:
-`plans/harness-r0/FREEZES.md`.
+A frontend over the eval substrate, peer to `tidepool-repl`. Both share ONE
+suspension engine: the threadless stow-as-data mechanism in
+`tidepool_runtime::session::PersistentSession`. There is no parked-thread
+mechanism anywhere in this crate.
 
 Module map:
 - `tree`/`forcing` — `NodeId`/`NodeState`/`HoleId`/`SiteId`, forcing badges,
@@ -17,7 +12,7 @@ Module map:
   backed internally by a `SessionRegistry<M>` (see Machine lifecycle below).
 - `registry` — `SessionRegistry<M>`: the `Idle | Running | RunningChild |
   Suspended` slot machine + atomic checkout/restore, including nested-child
-  checkout (segment 40, landed — `checkout_child`/`RunningChild`).
+  checkout (`checkout_child`/`RunningChild`).
 - `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
   `SessionRegistry<Session>` is the one place a resident session lives (see
   Machine lifecycle below); a separate `convos` map holds everything ELSE
@@ -47,12 +42,10 @@ Module map:
 
 ## Compile memo — one content-addressed cache, no cache-free path
 
-`compile.rs` used to be deliberately cache-free ("turns are one-shot, no cache
-needed"). That decision is REVERSED (approved 2026-08-11) and the cache-free
-path is DELETED — there is no bypass flag and no second mechanism. The full
-keying spec, the correctness hazards it answers, and the safety argument for
-sharing one memo across test processes are in `plans/compile-memo.md`; what a
-reader here needs:
+`compile.rs` memoizes every turn compile. There is no cache-free path, no
+bypass flag, and no second mechanism. The full keying spec, the correctness
+hazards it answers, and the safety argument for sharing one memo across test
+processes are in `plans/compile-memo.md`; what a reader here needs:
 
 - **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
   `invocation_key` keys the COMPLETE invocation — source CONTENT, the built
@@ -149,31 +142,29 @@ Two independent pieces, both in `replay.rs`:
   `tail -f log.jsonl`. It is NOT the startup recovery path: that is the
   generation-tagged `persistence::Checkpoint` the driver restores from at
   boot (`SelfHarnessDriver::restore`) — a second recovery source folding the
-  log at startup would be dual lifecycle machinery, the thing this lane
-  exists to remove. `golden_path`'s crash-replay assertion (a killed
+  log at startup would be dual lifecycle machinery.
+  `golden_path`'s crash-replay assertion (a killed
   process's log folds back to the terminal tree) is what pins this contract.
 
-**`Event::Effect` IS written by the live turn loop; effect-response
-SUBSTITUTION on replay is what remains out of scope.** The writer
-(`NodeTree::effect` ← `Harness::flush_effects`, which drains the node's
-`effect_trace` after each `run_block`/`answer_*`) is wired
-into the live path: every turn that dispatches a HANDLED (non-suspending)
-effect produces one `Event::Effect{req,resp}` per effect. A SUSPENDING effect
-(`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never reaches a handler, so it logs
-as `HolePublished`/`HoleConsumed`, not `Effect`. **Scoped-stack caveat:** the
+**Effects are RECORDED live; they are never SUBSTITUTED on replay.**
+`Harness::flush_effects` drains a node's `effect_trace` after each
+`run_block`/`answer_*` into `NodeTree::effect`, so every turn that dispatches
+a HANDLED (non-suspending) effect writes one `Event::Effect{req,resp}` per
+effect. A SUSPENDING effect (`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never
+reaches a handler, so it logs as `HolePublished`/`HoleConsumed`, not
+`Effect`. **Scoped-stack caveat:** the
 self-iterating harness's answerer (`[AskUser, Finalize]`) and outer loop
 (`[RunLLMTurn, AskUser]`) declare ONLY suspending effects — no base
 `Console`/`Fs`/`Http`/… — so `flush_effects` runs but drains an empty trace:
 those nodes produce NO `Event::Effect` BY CONSTRUCTION (that absence IS the
 capability boundary — the answerer structurally cannot run a shell/file/net
-effect). A general Agent node (full base-effect row) does produce them. What
-is still OUT OF R0 SCOPE is a READER that substitutes recorded effect
-responses back into a resumed session on restart — a node that suspended
-after running handled effects, then restarted and resumed, would RE-EXECUTE
-them live rather than replay recorded responses. The record side is live; the
-replay side is reserved.
+effect). A general Agent node (full base-effect row) does produce them.
 
-## Rules inherited from the plan
+**The reserved gap:** nothing READS those records back. Recorded responses are
+never substituted into a resumed session, so a node that suspended after
+running handled effects, then restarted and resumed, RE-EXECUTES them live.
+
+## Invariants
 
 Forcing events are the only work-begins mechanism (consent integrity audits
 to literal zero — `NodeTree::force` is the only transition out of `Thunk`,
@@ -236,32 +227,26 @@ is reused across holes whose types differ), and its turns compile with:
   Core, so `FinalizeWith` keeps its arity and `Finalize` its positional union
   tag.
 
-  `a` being free does NOT mean the shared template's `toJSON _r`/`toWire _r`
-  "defaults it" — GHC's defaulting (even under `ExtendedDefaultRules`, even
-  with the explicit `default (Int, Double, Text)` already in the eval
-  preamble) only fires when the ambiguous variable's constraint set carries
-  at least one class from GHC's own fixed "standard" set (the GHC User's
-  Guide's `ExtendedDefaultRules` section states rule 3 as relaxed to "at
-  least one of the classes Ci is numeric, or is Show, Eq, or Ord" — a
-  relaxation of the anchor requirement, never its removal). `ToJSON`/`ToWire`
-  are ordinary library classes with no superclass, so a solitary `ToJSON a0`
-  never qualifies — `_r <- __user; … (toJSON _r)` is ambiguous by construction
-  whenever a turn's block terminates in `finalize`, confirmed empirically (a
-  minimal `IO` repro and a real `freer-simple` `Eff`-row repro with an
-  identical custom class fail IDENTICALLY under identical pragmas — not an
-  `Eff`-row/`MonoLocalBinds`/implication effect). `template_turn_for`
-  (`engine.rs`) supplies the missing anchor instead: a turn compiled against a
-  real (non-`NoAnswer`) `Finalize T` row routes through
-  `tidepool_mcp::template_haskell_anchored`, which routes `_r` through a
+  **`a` being free makes the shared template's `toJSON _r`/`toWire _r`
+  ambiguous, and GHC defaulting does NOT rescue it.** Even under
+  `ExtendedDefaultRules`, with the preamble's explicit `default (Int, Double,
+  Text)`, defaulting fires only when the ambiguous variable's constraint set
+  carries at least one class from GHC's own standard set (numeric, `Show`,
+  `Eq`, `Ord`). `ToJSON`/`ToWire` are ordinary superclass-less library
+  classes, so a solitary `ToJSON a0` never qualifies: `_r <- __user; …
+  (toJSON _r)` is ambiguous by construction whenever a turn's block
+  terminates in `finalize`. (Not an `Eff`-row, `MonoLocalBinds`, or
+  implication artifact — a plain `IO` repro fails identically.)
+  `template_turn_for` (`engine.rs`) supplies the missing anchor: a turn
+  compiled against a real (non-`NoAnswer`) `Finalize T` row routes through
+  `tidepool_mcp::template_haskell_anchored`, which passes `_r` through a
   generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
-  rendering it — additive (`id` never forces `_r`'s type), so an
+  rendering. It is ADDITIVE — `id` never forces `_r`'s type — so an
   already-concretely-typed result (an ordinary eval, or an answerer turn that
   suspends on `askUser` without finalizing) is unaffected, and only
-  `finalize`'s genuinely-ambiguous `_r` newly resolves (picking the first
-  candidate in the existing `default (Int, Double, Text)` list with both
-  `Show` and `ToJSON`/`ToWire` instances — observed to be `Int`, not `()`).
-  Every other caller of the shared template (`tidepool_mcp::template_haskell`)
-  is untouched.
+  `finalize`'s genuinely-ambiguous `_r` newly resolves (to `Int`: the first
+  `default` candidate carrying both `Show` and `ToJSON`/`ToWire`). Every
+  other caller of `tidepool_mcp::template_haskell` is untouched.
 
   `EngineConfig::turn_target` resolves one turn's compile target, returning a
   `TurnTarget { include, stack }` derived from a SINGLE `tidepool_mcp::RowArgs`
@@ -277,10 +262,9 @@ is reused across holes whose types differ), and its turns compile with:
   A turn with no contract compiles at `Finalize NoAnswer` — an uninhabited type
   declared by `Finalize` itself. Such a turn is not answering a typed hole and
   therefore has no finalize capability at all, which is the true statement, and
-  GHC says it by name. There is no "unpinned finalize" any more: the row admits
-  exactly one answer type, so the old failure mode (any `v` compiles, then
-  crosses in-heap into a `T`-typed continuation and case-traps past every
-  check) is not expressible.
+  GHC says it by name. Because the row admits exactly one answer type, a
+  wrong-typed answer cannot compile — it can never cross in-heap into a
+  `T`-typed continuation and case-trap past every check.
 - **The author modules that define the type** — `HarnessSource::answerer_imports`,
   derived structurally as the sibling modules the harness file itself imports.
   Not a naming convention: a module the harness does not import is never pulled
@@ -344,9 +328,9 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
 `selfharness::persistence`):
 
 - **`transcript.jsonl`** (`default_transcript_path`, written by `JsonlObserver`
-  over the `Observer` seam) — the LOOP-level story, and (dogfood-observability,
-  wave 1.5) the whole input to the tier-0 telemetry fold (first-compile success
-  rate, retries-per-hole — `tests/dogfood_observability.rs`):
+  over the `Observer` seam) — the LOOP-level story, and the whole input to the
+  telemetry fold (first-compile success rate, retries-per-hole —
+  `tests/dogfood_observability.rs`):
   `LoopBoundary`; `RunLLMTurnHole{site,ty,prompt}` (the hole's human-facing
   ask, not just its site/type); `TurnStart`/`TurnEnd` (node ids only);
   `AnswererRound{node,site,round,error}` — one line per answerer round while
@@ -366,7 +350,7 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
   `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell, so
   `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
   the exact blocks the answerer ran — also surfaced at console INFO, not just
-  the durable line, as of dogfood-observability), `TurnExtracted{asks,bound}`
+  the durable line), `TurnExtracted{asks,bound}`
   (what extract said this turn's holes/binds ARE — the `asks.json` site → type
   table and a value-plane bind's bound name/type, when either is non-empty),
   `TurnDelta` (the full model reply), `HolePublished`/`HoleConsumed` (each
