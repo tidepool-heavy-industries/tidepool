@@ -185,6 +185,17 @@ capped without an edit there.
 Never run bare `scripts/battery.sh` (tier 0, unbounded) expecting it to
 complete here — use tier 2 or 3.
 
+**Suite wall time is a standing constraint — a new test must not pay its own
+extract compile when a family bundle exists.** The idiom is one substrate,
+many assertions: a new stdlib/JIT probe joins its family bundle's named-check
+list (`jit_surface.rs`, the `stdlib_regressions` bundles, the handlers
+per-effect families) instead of adding a `#[test]` that forks another
+~5-8s compile; per-variant one-liners join exhaustive tables. Standalone
+stays correct for: crash-class tests (a bundled crash destroys sibling
+diagnosis), compile-fail assertions, sanctioned reds, property tests, and
+distinct-fixture suites. Reviews should flag new per-test compiles in
+bundleable territory as regressions of this constraint.
+
 **Compile compiles are memoized, and test processes SHARE the memo.**
 `$TIDEPOOL_COMPILE_CACHE_DIR` (default: the cache dir) locates the
 content-addressed compiled-artifact memo, and the harness suite points it at
