@@ -3,10 +3,10 @@
 //! every JSONL frame captured for fixture recording.
 //!
 //! Built on [`codex_codes::RawAsyncClient`] rather than
-//! [`codex_codes::AsyncClient`]: phase 3 needs the exact bytes on the wire
-//! for the committed fixture, and the raw client is the only layer that
-//! exposes them. The typed request/response structs from `codex_codes`
-//! still do the encoding/decoding — only the framing is manual.
+//! [`codex_codes::AsyncClient`]: fixture recording needs the exact bytes on
+//! the wire, and the raw client is the only layer that exposes them. The
+//! typed request/response structs from `codex_codes` still do the
+//! encoding/decoding — only the framing is manual.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::backend::codex::transport::Transport;
 
 /// How long a single request is allowed to wait for its matching response.
-/// Phase 3 traffic is metadata-only (no model tokens, no user-facing latency
+/// Metadata-only traffic here (no model tokens, no user-facing latency
 /// budget to respect) — this bounds a hung or misbehaving process, not normal
 /// round-trip time.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,7 +108,7 @@ pub struct Session<T = RawAsyncClient> {
     next_id: i64,
     frames: Vec<RecordedFrame>,
     pid: Option<u32>,
-    /// State of the turn currently being pumped, which now spans several calls.
+    /// State of the turn currently being pumped.
     turn: TurnState,
 }
 
@@ -180,8 +180,8 @@ impl<T: Transport> Session<T> {
     ///
     /// Any other traffic that arrives first (notifications, unrelated server
     /// requests) is still recorded into [`Session::frames`] but otherwise
-    /// discarded — phase 3 only exercises metadata requests with no
-    /// concurrent thread/turn activity to interleave with.
+    /// discarded — this path is for metadata requests with no concurrent
+    /// thread/turn activity to interleave with.
     pub async fn request<P: Serialize, R: DeserializeOwned>(
         &mut self,
         method: &str,
@@ -329,10 +329,8 @@ pub enum TurnStop {
     Completed(codex_codes::Turn),
 }
 
-/// State the pump carries across one turn's stops.
-///
-/// A turn spans several `pump` calls now, so what used to be locals in a single
-/// loop have to live somewhere that survives between them.
+/// State the pump carries across one turn's stops, since a turn spans
+/// several `pump` calls.
 #[derive(Default)]
 pub(crate) struct TurnState {
     /// The `turn/start` request id, until its response arrives.
@@ -416,9 +414,7 @@ impl<T: Transport> Session<T> {
                 parked: parked_call,
             });
         }
-        // Measured, never manufactured: the park interval is however long the
-        // parent actually took, which is now an unbounded Haskell computation
-        // rather than a synchronous Rust closure.
+        // Measured, never manufactured: however long the parent actually took.
         if let Some(observed) = self
             .turn
             .tool_calls
@@ -440,10 +436,10 @@ impl<T: Transport> Session<T> {
 
     /// Read frames until the turn parks or completes.
     ///
-    /// The `timeout` bounds THIS segment only. That is the right scope now that
-    /// a turn spans several segments: a parent thinking for ten minutes between
-    /// two pumps is not a hung backend, and charging its time against a backend
-    /// liveness budget would kill healthy turns.
+    /// The `timeout` bounds THIS segment only, not the whole turn: a parent
+    /// thinking for ten minutes between two pumps is not a hung backend, and
+    /// charging its time against a backend liveness budget would kill
+    /// healthy turns.
     async fn pump(&mut self, timeout: Duration) -> Result<TurnStop, SessionError> {
         tokio::time::timeout(timeout, self.pump_inner())
             .await
@@ -529,9 +525,9 @@ impl<T: Transport> Session<T> {
                 JsonRpcMessage::Notification(notif)
                     if notif.method == "thread/tokenUsage/updated" =>
                 {
-                    // Recorded rather than discarded: a lane that spends a real
-                    // budget has to be able to say what it spent, and this is
-                    // the only place the backend says so.
+                    // Recorded rather than discarded: a caller that spends a
+                    // real budget has to be able to say what it spent, and
+                    // this is the only place the backend reports it.
                     if let Some(params) = notif.params {
                         let updated: codex_codes::ThreadTokenUsageUpdatedNotification =
                             serde_json::from_value(params).map_err(|source| {
@@ -562,7 +558,7 @@ impl<T: Transport> Session<T> {
                     return Ok(TurnStop::Completed(completed.turn));
                 }
                 // Everything else (item/started, item/updated, deltas, ...) is
-                // already recorded above; not needed to drive this vertical.
+                // already recorded above; not needed here.
                 _ => continue,
             }
         }
@@ -679,8 +675,7 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-    /// Phase 3 (`plans/post-restart/agent-lanes/dev-adapter-bringup.md`):
-    /// spawn the real app-server against the operator's real `~/.codex`,
+    /// Spawn the real app-server against the operator's real `~/.codex`,
     /// complete the handshake, make one metadata request that spends no
     /// model tokens, shut down cleanly, and prove config isolation held
     /// across the whole run.
@@ -761,11 +756,9 @@ mod tests {
         })
     }
 
-    /// Free to retry (PRD 18 phase 4, condition 3): no `turn/start`, so no
-    /// model tokens spent. Confirms the hand-rolled `dynamicTools` field and
-    /// the `experimentalApi` opt-in are actually accepted by the real
-    /// 0.146.0 server — the part of the plan safe to nail down before the
-    /// one live turn.
+    /// Free to retry: no `turn/start`, so no model tokens spent. Confirms
+    /// the hand-rolled `dynamicTools` field and the `experimentalApi`
+    /// opt-in are actually accepted by the real 0.146.0 server.
     #[tokio::test]
     #[ignore = "spawns a real app-server process against the operator's live ~/.codex; run explicitly"]
     async fn thread_start_with_dynamic_tools_is_accepted() {
@@ -796,11 +789,10 @@ mod tests {
         .expect("dry-run exceeded its bounded timeout");
     }
 
-    /// Phase 4 (GATED — go received from agent-wave 2026-08-08, pin
-    /// `gpt-5.6-terra`, four conditions): the one live turn that spends the
-    /// operator's ChatGPT tokens. ONE attempt once `turn/start` is actually
-    /// sent — do not loop this on failure; capture the frame log and report
-    /// back instead (condition 3).
+    /// The one live turn that spends the operator's ChatGPT tokens, pinned
+    /// to `gpt-5.6-terra`. ONE attempt once `turn/start` is actually sent —
+    /// do not loop this on failure; capture the frame log and report back
+    /// instead.
     ///
     /// Ignored by default; run explicitly exactly once:
     ///
@@ -905,7 +897,7 @@ mod tests {
             .await;
 
         // Persist frames and shut down BEFORE any assertion that could
-        // panic — a failed turn still needs its evidence (condition 3).
+        // panic — a failed turn still needs its evidence.
         let frames = session.frames().to_vec();
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/app-server-0.146.0/phase4-live-turn.jsonl");

@@ -3,18 +3,17 @@
 //!
 //! # Why a recording rather than a simulator
 //!
-//! Mock policy (root/human, 2026-08-11,
-//! `plans/post-restart/agent-lanes/codex-live-frozen-contract.md`): `MockBackend`
-//! stays a dumb seam implementation with zero protocol semantics, so anything
-//! that is genuinely PROTOCOL behavior — frame ordering, the parked correlation
-//! triple, the `success:false` reply shape, `turn/completed` projection,
+//! Protocol behavior — frame ordering, the parked correlation triple, the
+//! `success:false` reply shape, `turn/completed` projection,
 //! `thread/tokenUsage/updated` capture — has to be proven by the real adapter
-//! against real bytes. A recording is evidence. A hand-written imitation is
-//! drift waiting to happen: it can only ever encode what its author believed
-//! the server does. `tidepool-harness`'s `ReplayProvider` is the named
-//! precedent for this shape.
+//! against real bytes, not encoded by hand in
+//! [`crate::backend::mock::MockBackend`]: a hand-written imitation can only
+//! ever encode what its author believed the server does. Mock policy:
+//! `plans/post-restart/agent-lanes/codex-live-frozen-contract.md`.
+//! `tidepool-harness`'s `ReplayProvider` is the named precedent for this
+//! shape.
 //!
-//! The frames replayed here were produced by the one live phase-4 turn
+//! The frames replayed here were produced by one recorded live turn
 //! (`fixtures/app-server-0.146.0/phase4-live-turn.jsonl`, 35 frames). That run
 //! happened to be on `gpt-5.6-terra`; that is a fact about the bytes and
 //! nothing else. Nothing in this module reads, resolves, or selects a model —
@@ -58,7 +57,7 @@
 //! are facts about the recording rather than preferences:
 //!
 //! 1. `CodexAgentBackend::start_turn` resolves a model first, which issues a
-//!    `model/list` request. **The phase-4 recording contains no `model/list`
+//!    `model/list` request. **The recording contains no `model/list`
 //!    exchange** — it was recorded from a session that had already resolved.
 //!    Replaying the backend would therefore mean writing a `model/list`
 //!    response by hand, which is exactly the invented frame the record/replay
@@ -340,7 +339,7 @@ fn describe(frame: &Value) -> String {
 #[cfg(test)]
 mod tests {
     //! Protocol gates: the REAL adapter's turn pump, driven over the REAL
-    //! recorded transcript of the one live phase-4 turn.
+    //! recorded transcript of one live turn.
     //!
     //! Every test here runs the production
     //! [`Session::start_turn`]/[`Session::reply_and_pump`] code — the same
@@ -354,8 +353,7 @@ mod tests {
     //! appear ONLY under this module — and a gate about protocol frames cannot
     //! be written without them.
     //!
-    //! Each test is named for the ONE failure mode it catches, per the receipt
-    //! rule in `plans/post-restart/agent-lanes/README.md`.
+    //! Each test is named for the ONE failure mode it catches.
 
     use std::path::PathBuf;
     use std::time::Duration;
@@ -692,7 +690,7 @@ mod tests {
     }
 
     /// GATE: a read past the end of the recording is a clean `Closed`, not a
-    /// hang — the property step 3 of this lane's brief names directly.
+    /// hang.
     #[tokio::test]
     async fn a_read_past_the_end_of_the_recording_is_a_clean_closed() {
         let mut transport = TranscriptTransport::from_path(transcript())
