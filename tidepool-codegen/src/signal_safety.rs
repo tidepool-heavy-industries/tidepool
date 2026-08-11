@@ -201,11 +201,6 @@ mod inner {
     impl std::fmt::Display for SignalError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let name = match self.0 {
-                // The JIT emits no bare `trap`s: case misses, div-by-zero, and
-                // bad `chr` all route through host calls that yield clean
-                // RuntimeErrors. So a SIGILL/SIGFPE reaching here is a genuine
-                // fault (heap corruption, a bad pointer, an unguarded op), not a
-                // routine language-level error.
                 libc::SIGILL => "SIGILL (illegal instruction — likely heap corruption or a bad code pointer)",
                 libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
                 libc::SIGBUS => "SIGBUS (bus error)",
@@ -305,7 +300,6 @@ mod inner {
         // SAFETY: SigJmpBuf is repr(C) POD — zeroed is a valid initial state for sigsetjmp.
         let mut buf: SigJmpBuf = std::mem::zeroed();
 
-        // Store the jump buffer so the signal handler can find it.
         JMP_BUF.with(|cell| cell.set(&mut buf as *mut SigJmpBuf));
         FAULTING_ADDR.with(|c| c.set(0));
 
@@ -322,8 +316,8 @@ mod inner {
     }
 
     extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
-        // Synchronous signals (SIGILL, SIGSEGV, SIGBUS) are delivered to the
-        // faulting thread, so the thread-local read returns this thread's buf.
+        // Per-thread JMP_BUF read is correct here: see its doc for why
+        // (synchronous signals are delivered to the faulting thread).
         // SAFETY: _info is provided by the kernel signal delivery and is valid when non-null.
         let si_addr = if !_info.is_null() {
             unsafe { (*_info).si_addr() as usize }
@@ -399,7 +393,6 @@ mod inner {
                         CRASH_DIR_PATH_LEN
                             .store(cwd_bytes.len() + dir_suffix.len() - 1, Ordering::Relaxed);
 
-                        // Ensure .tidepool/ directory exists (safe, non-signal context).
                         libc::mkdir(addr_of!(CRASH_DIR_PATH) as *const libc::c_char, 0o755);
                     }
                 }

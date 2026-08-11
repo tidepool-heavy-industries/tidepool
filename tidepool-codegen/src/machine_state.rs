@@ -5,8 +5,8 @@
 //! Homes all per-machine ambient state in one place, owned inline by each
 //! `JitEffectMachine`: the external-cancellation flag, the JSON decode
 //! constructor ids, the stack-map registry pointer, and the call-depth
-//! counter (leaf 1); the first-cause runtime error, diagnostics, and
-//! parked-stream registry (leaf 2); and the GC state + GC root registries
+//! counter (leaf 1); the first-cause runtime error and diagnostics (leaf 2);
+//! and the GC state + GC root registries
 //! (leaf 3: `GC_STATE`, `RUST_ROOTS`, `PERSISTENT_ROOTS`).
 //! `install_registries` points the run's `VMContext.machine_state` at it and
 //! installs it as this thread's [`CURRENT_MACHINE`].
@@ -54,9 +54,9 @@ use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
 use crate::stack_map::StackMapRegistry;
 
-/// Per-machine ambient state. Every cell keeps the exact wrapper type
-/// (`RefCell`/`Cell`) its thread-local predecessor used, preserving
-/// try_borrow/borrow-panic/take semantics byte-for-byte.
+/// Per-machine ambient state. Each cell's wrapper type (`RefCell`/`Cell`) is
+/// chosen to match the try_borrow/borrow-panic/take semantics its callers
+/// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
     json_con_ids: Cell<Option<tidepool_eval::json::JsonConIds>>,
@@ -239,9 +239,8 @@ impl MachineState {
         }
     }
 
-    /// Unconditionally overwrite the pending cause. Mirrors writers (e.g.
-    /// `unresolved_var_trap`) that replace any earlier cause rather than
-    /// preserving it.
+    /// Unconditionally overwrite the pending cause, rather than preserving
+    /// an earlier one (unlike [`Self::set_first_cause`]'s first-write-wins).
     ///
     /// Same `try_borrow_mut` defense as [`Self::set_first_cause`] — this
     /// writer has the identical stuck-RefCell hazard as its sibling.
@@ -306,10 +305,8 @@ impl MachineState {
     // `set_gc_state`/`clear_gc_state` are `pub`: bare-VMContext test
     // harnesses (e.g. proptest_parked_registry.rs) own a MachineState, wire
     // `vmctx.machine_state` at it, and drive GC state directly — same
-    // pattern leaf 1 used for `set_stack_map_registry`. The rest are
-    // `pub(crate)`: their only callers (`install_registries`,
-    // `RegistryGuard::drop`, `JitEffectMachine::drop`, `make_session_vmctx`)
-    // are all in this crate and hold `self.machine_state`/a guard pointer.
+    // pattern leaf 1 used for `set_stack_map_registry`. The rest stay
+    // `pub(crate)`.
 
     /// Set the active GC region for this machine.
     pub fn set_gc_state(&self, start: *mut u8, size: usize) {
@@ -424,8 +421,7 @@ impl MachineState {
     }
 
     /// Append this machine's run-scoped rust roots to `out` — used by
-    /// `perform_gc` to build its root slot list (byte-identical logic to the
-    /// old `RUST_ROOTS.with(|r| root_slots.extend(r.borrow().iter().copied()))`).
+    /// `perform_gc` to build its root slot list.
     pub(crate) fn extend_rust_roots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.rust_roots.borrow().iter().copied());
     }
@@ -624,18 +620,9 @@ thread_local! {
     ///
     /// State itself still lives on [`MachineState`], owned per-machine; this
     /// cell is only the reach path for code that has no `vmctx` to follow.
-    ///
-    /// Elimination path: leaf 3 threads `vmctx` into every GC-cluster
-    /// register/read site instead of routing them through this cell (see the
-    /// module-level "GC-cluster reach" note — a per-thread slot can diverge
-    /// from the `vmctx` a write/read actually belongs to, which the GC
-    /// cluster cannot tolerate), shrinking this cell's remaining internal
-    /// callers to the two external shims (`set_first_cause`/
-    /// `drain_diagnostics`, anchored to #340), which keep using it until that
-    /// sibling-crate cutover captures a machine handle at suspension time
-    /// instead. Full host-fn vmctx-reach (`runtime_error`/
-    /// `runtime_error_with_msg`/`unresolved_var_trap`/`runtime_shape_trap`/
-    /// `runtime_oom`/the array primops) is #329.
+    /// Never used for the GC cluster (leaf 3) — see the module-level
+    /// "GC-cluster reach" note for why a per-thread slot can't stand in for
+    /// `vmctx` there.
     static CURRENT_MACHINE: Cell<*mut MachineState> = const { Cell::new(std::ptr::null_mut()) };
 }
 

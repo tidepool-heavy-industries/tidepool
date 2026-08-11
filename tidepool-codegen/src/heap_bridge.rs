@@ -417,14 +417,12 @@ unsafe fn heap_to_value_inner(
             let state = unsafe { *ptr.add(layout::THUNK_STATE_OFFSET as usize) };
             match state {
                 layout::THUNK_EVALUATED => {
-                    // Follow indirection pointer to the WHNF result
                     let target = unsafe {
                         *(ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8)
                     };
                     heap_to_value_inner(target, depth + 1, vmctx, closures)
                 }
                 _ if !vmctx.is_null() => {
-                    // Force the thunk via heap_force when vmctx is available
                     let forced = crate::host_fns::heap_force(vmctx, ptr as *mut u8);
                     if !forced.is_null() && !std::ptr::eq(forced, ptr) {
                         heap_to_value_inner(forced as *const u8, depth + 1, vmctx, closures)

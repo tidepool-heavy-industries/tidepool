@@ -20,12 +20,6 @@ use tidepool_heap::layout as heap_layout;
 /// Rust scoping already guarantees this for plain `let` locals) — the
 /// underlying root stack is LIFO, mirroring `register_rust_root`'s own
 /// scoping contract.
-///
-/// `pub(crate)`: also used by `host_fns::force::deep_force` as a per-work-item
-/// root — a stack that continuously pushes/pops (unlike this module's
-/// fixed-for-its-lifetime continuation stack) needs registration scoped to
-/// EACH item's own lifetime rather than [`RootedStack`]'s whole-vec-at-once
-/// model.
 pub(crate) struct RootedLocal {
     cell: Box<*mut u8>,
     vmctx: *mut VMContext,
@@ -50,7 +44,6 @@ impl RootedLocal {
         RootedLocal { cell, vmctx, mark }
     }
 
-    /// The current (GC-updated) pointer value.
     pub(crate) fn get(&self) -> *mut u8 {
         *self.cell
     }
@@ -188,18 +181,9 @@ impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
     type Error = EffContKind;
 
     fn try_from(table: &tidepool_repr::DataConTable) -> Result<Self, Self::Error> {
-        // Resolve each freer continuation constructor. Prefer the module-qualified
-        // name: it is unambiguous even when a user import collides on the
-        // unqualified name (e.g. `Data.Tree.Node` vs the FTCQueue continuation
-        // `Data.FTCQueue.Node`, both arity 2 — `get_by_name` returns `None` for
-        // such collisions, and arity does not disambiguate). Fall back to the
-        // unqualified lookup only when the qualified name is absent, preserving
-        // the no-collision behaviour for any producer that omits qualified names.
-        //
-        // The (qualified, bare) pairs are the SAME toolchain-pinned names the
-        // oracle resolves against (`tidepool_effect::machine::EffectMachine::new`)
-        // — hoisted as shared `pub` consts in `tidepool_effect::freer_names` so
-        // the two resolution schemes cannot drift apart (#F5).
+        // Prefer the qualified name (see `EffContKind::qualified_name` for why
+        // that disambiguates); fall back to unqualified only when the
+        // qualified name is absent.
         let resolve =
             |kind: EffContKind, qualified: &str, bare: &str| -> Result<u64, EffContKind> {
                 tidepool_effect::freer_names::resolve(table, qualified, bare)
@@ -307,7 +291,6 @@ impl CompiledEffectMachine {
         &mut self.vmctx
     }
 
-    /// Execute the compiled function and parse the result.
     pub fn step(&mut self) -> Yield {
         // SAFETY: func_ptr is a finalized JIT function pointer. vmctx is valid and
         // owned by this machine. The function returns a heap pointer to an Eff value.
@@ -332,7 +315,6 @@ impl CompiledEffectMachine {
         self.parse_result(result)
     }
 
-    /// Parse a heap-allocated Eff result into a Yield.
     fn parse_result(&mut self, result: *mut u8) -> Yield {
         // Check for runtime error FIRST (before null check), because runtime_error
         // now returns a "poison" non-null Lit object to prevent segfaults in JIT code.
@@ -367,7 +349,6 @@ impl CompiledEffectMachine {
         let con_tag = unsafe { Self::read_con_tag(result) };
 
         if con_tag == self.tags.val {
-            // Val(value) — extract value from fields[0]
             let num_fields = unsafe { Self::read_con_num_fields(result) };
             if num_fields < 1 {
                 return Yield::Error(YieldError::BadValFields(num_fields));
@@ -383,7 +364,6 @@ impl CompiledEffectMachine {
             }
             Yield::Done(value)
         } else if con_tag == self.tags.e {
-            // E(union, continuation) — extract Union and k
             let num_fields = unsafe { Self::read_con_num_fields(result) };
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
@@ -397,7 +377,6 @@ impl CompiledEffectMachine {
             let mut union_ptr = unsafe { RootedLocal::new(vmctx, union_field) };
             let mut continuation = unsafe { RootedLocal::new(vmctx, cont_field) };
 
-            // Force all field pointers — they may be thunks from lazy Con fields
             union_ptr.set(self.force_ptr(union_ptr.get()));
             if union_ptr.get().is_null() {
                 return Yield::Error(YieldError::NullPointer);
@@ -427,10 +406,8 @@ impl CompiledEffectMachine {
             // position index (Word#). After Core normalization (Rule 2),
             // this is ideally an unboxed Lit(Word, N). However, we maintain
             // a fallback for boxed W# to handle cross-module variables that
-            // normalization cannot safely unbox.
+            // normalization cannot safely unbox. (core-shapes.md §7)
             let tag_ptr_tag = unsafe { *tag_ptr.get() };
-            // core-shapes.md §7: effect tag should be unboxed Lit after normalization,
-            // but we must handle boxed W# for cross-module variables Rule 2 can't see.
             if tag_ptr_tag != layout::TAG_LIT && tag_ptr_tag != layout::TAG_CON {
                 return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
             }
@@ -546,9 +523,7 @@ impl CompiledEffectMachine {
         // `k`/`arg` are reassigned across loop iterations (Node descent,
         // Val/k2 resumption) but never need re-registration: `RootedLocal`'s
         // cell is a stable heap slot, so `.set()` on reassignment keeps the
-        // SAME root live for the whole call — rooted unconditionally in
-        // every branch below rather than per-site as the manual discipline
-        // this replaces required.
+        // SAME root live for the whole call.
         let mut k = unsafe { RootedLocal::new(vmctx, k) };
         let mut arg = unsafe { RootedLocal::new(vmctx, arg) };
 
