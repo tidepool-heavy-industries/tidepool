@@ -2138,12 +2138,14 @@ impl Harness {
         Ok(())
     }
 
-    /// Answer an operator `dialogAsk` (or plain `ask`) hole with a form
-    /// submission `{values, prose}`. `dialogAsk :: Ui -> M Value` returns the
-    /// submission DIRECTLY as its value — the program that called `dialogAsk`
-    /// decides what it means — so the submission JSON always becomes the resume
-    /// Value with zero model turns. (Typed structure is the caller's job, via
-    /// `Tidepool.Form` / `dialogForm`, not a harness-side interpretation step.)
+    /// Answer an operator hole — `askUser` ([`HoleRouting::AskUser`]) or a
+    /// plain `ask` ([`HoleRouting::Ask`]) — with the operator's submission.
+    /// Both effects return the submitted value DIRECTLY, so the submission
+    /// JSON always becomes the resume `Value` with zero model turns; the
+    /// program that suspended decides what it means. Typed structure is the
+    /// caller's job, via `Tidepool.Form`'s `askUser @T` (which derives its
+    /// form from `T`'s own metadata and decodes the reply with `T`'s own
+    /// `FromJSON`), never a harness-side interpretation step.
     pub async fn answer_dialog(&self, node: NodeId, submission: Json) -> Result<(), HarnessError> {
         // `resume_parent` below is this method's whole job — one lease for
         // the call.
@@ -2166,8 +2168,9 @@ impl Harness {
         }
 
         // The suspend table is the constructor set the hole suspended with; the
-        // submission Value bridges against it. `dialogAsk` returns a Value, so
-        // the submission JSON IS the resume answer — always, no interpretation.
+        // submission Value bridges against it. Both `askUser` and `ask` return
+        // a Value, so the submission JSON IS the resume answer — always, no
+        // interpretation.
         let table = self
             .convos
             .lock()
@@ -2364,7 +2367,7 @@ impl Harness {
                 }
                 Err(ResidentError::NotSuspended) => return Err(HarnessError::NotSuspended(target)),
                 // v1 limitation: a forked CHILD that itself suspends (nested
-                // `fork`/`forkAll`, or `dialogAsk`/`dialogForm`) is unsupported.
+                // `fork`/`forkAll`, or an `askUser`/`ask` hole) is unsupported.
                 // The GUI/self-harness driver monitors ONE session (the
                 // parent's), so there is no operator to answer a hole opened
                 // two levels deep — and `run_child` itself only ever holds ONE
