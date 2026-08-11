@@ -10,10 +10,9 @@ map.
 
 ## Daemon architecture
 
-One `rust-analyzer` per running daemon (not per workspace root — nothing
-prevents pointing a second daemon at the same root today, though
-`registry.rs`'s `server_for` shape leaves room for a real multi-server future
-later). Started manually: `tidepool-lsp-daemon [--root DIR] [--socket PATH]`.
+One `rust-analyzer` per running daemon, NOT per workspace root — nothing stops
+two daemons pointing at the same root. Started manually:
+`tidepool-lsp-daemon [--root DIR] [--socket PATH]`.
 Socket resolution: `--socket` flag → `$TIDEPOOL_LSP_SOCK` →
 `<root>/.tidepool/lsp.sock`. `LspHandler::new` on the client side resolves the
 same way (env var, else `<cwd>/.tidepool/lsp.sock`, no `--socket` equivalent

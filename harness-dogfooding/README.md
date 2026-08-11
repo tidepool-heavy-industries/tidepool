@@ -21,10 +21,10 @@ Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
 **Minimal effect surfaces, on purpose:** the wizard's answerer has only
-`askUser` (typed forms) + `finalize`, plus `fork` as it lands. The development
-tree instead gives headless workers their native coding tools while Haskell
-owns typed orchestration. Frictions hit while authoring/running these *are the
-roadmap* for the next harness helpers.
+`askUser` (typed forms) + `finalize`. The development tree instead gives
+headless workers their native coding tools while Haskell owns typed
+orchestration. Frictions hit while authoring/running these *are the roadmap*
+for the next harness helpers.
 
 ## Harnesses
 
@@ -37,5 +37,5 @@ roadmap* for the next harness helpers.
   retained worktrees, and lexical event handlers**. It unfolds an ordinary
   recursive `DevPlan` into coding agents, pokes descendants when parent HEADs
   move, then asks fresh integration agents to merge completed branches
-  bottom-up. It is intentionally tagged against PRD 18 and
-  `19-managed-worktrees-events-prd.md` and will compile as those surfaces land.
+  bottom-up. It is written directly against the PRD 18 (typed subagents) and
+  PRD 19 (managed worktrees + events) surfaces.
