@@ -349,7 +349,8 @@ mod tests {
     //! transport is a file.
     //!
     //! They live inside `backend::codex` rather than in `tests/` because this
-    //! crate's containment rule (`lib.rs`, rule 1) is that `codex-codes` types
+    //! crate's containment rule (`lib.rs`, rule 1;
+    //! `plans/post-restart/agent-lanes/README.md`) is that `codex-codes` types
     //! appear ONLY under this module — and a gate about protocol frames cannot
     //! be written without them.
     //!
