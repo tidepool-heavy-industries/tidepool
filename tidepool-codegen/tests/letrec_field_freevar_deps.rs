@@ -1,5 +1,5 @@
-//! M1 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
-//! LetRec Phase-3b dependency detection matched only direct `Var` Con
+//! M1 (see the same label in `emit/expr.rs`'s Phase 3b comment): LetRec
+//! Phase-3b dependency detection matched only direct `Var` Con
 //! fields against the deferred-simple-binder set. A non-Var field (e.g.
 //! `App g k` where `k` is a Phase-3c "simple" binder — anything in the Rec
 //! group that isn't a Lam/Con) was wrongly classified as immediately

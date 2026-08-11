@@ -13,9 +13,6 @@
 //! against the hand-computed arithmetic answer, via the classified
 //! `tidepool_testing::differential` runner (nurseries [64KiB, 4KiB], nothing
 //! tolerated — this generator is total/ground by construction).
-//!
-//! Construction style mirrors `proptest_ghc_idioms.rs`: hand-built
-//! `RecursiveTree<CoreFrame<usize>>` IR, total and ground by construction.
 
 use tidepool_repr::types::{Alt, AltCon, JoinId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
@@ -197,8 +194,7 @@ fn joinrec_with_type_arg_leads_eval_equals_jit() {
 #[test]
 fn joinrec_through_differential_oracle() {
     // Run the now-un-blinded class through the classified differential
-    // runner. Pre-fix, eval errored and these cases were silently skipped via
-    // the (now-retired) shim's catch-all arm.
+    // runner. Pre-fix, eval errored and these cases were silently skipped.
     let reach = ReachCounter::new("joinrec/through_differential_oracle");
     for limit in [0i64, 1, 5, 100, 200] {
         let expr = build_sum_joinrec(limit, 1, 3);

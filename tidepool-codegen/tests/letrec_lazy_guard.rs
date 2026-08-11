@@ -1,16 +1,16 @@
-//! Fixture-INDEPENDENT guards for the LetRec lazy-default spine (Stage 1).
+//! Fixture-INDEPENDENT guards for the LetRec lazy-default spine.
 //!
-//! emit_letrec_phases now binds every simple (non-Lam/non-Con) LetRec binding
+//! `emit_letrec_phases` binds every simple (non-Lam/non-Con) LetRec binding
 //! under the lazy-default rule: thunkify unless trivially resolvable now, in
-//! topological order. These hand-built IR cases pin the behaviour that the
-//! 5-phase knot-tie must preserve, so it survives the later consolidation:
-//!   1. a Var alias to a still-pending sibling resolves (the old Gap A, now
-//!      subsumed by the rule);
+//! topological order. These hand-built IR cases pin the behaviour the phased
+//! knot-tie must preserve:
+//!   1. a Var alias to a still-pending sibling resolves under the rule;
 //!   2. a self-referential Con knot (`xs = 1 : xs`) works;
 //!   3. a mutually-referential Con knot (`xs = 1:ys; ys = 2:xs`) works;
 //!   4. a SIMPLE binding that calls a closure which pattern-matches a sibling
-//!      Con — the documented Phase-3c SIGSEGV — is safe under lazy-default
-//!      (the binding is a thunk forced after all Con fields are filled).
+//!      Con — reading an unfilled Con field if the binding were bound eagerly
+//!      — is safe under lazy-default (the binding is a thunk forced after all
+//!      Con fields are filled).
 use tidepool_eval::value::Value;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
 use tidepool_testing::proptest::{

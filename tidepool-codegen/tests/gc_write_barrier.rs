@@ -7,37 +7,10 @@
 //! later minor collection, so a fresh nursery value written there had no path
 //! back to a GC root once the array itself was off-nursery.
 //!
-//! `tenured_array_write_survives_gc_g1` drives this through the most public
-//! path available: `compile_session` -> `run_pure_and_bind` tenures a boxed
-//! `SmallArray#`, a LATER fragment resolves that tenured binding via
-//! `ExternalEnv` and `writeSmallArray#`s a freshly allocated nursery `Con`
-//! into it, a filler fragment forces minor + doubling GC under a tiny
-//! nursery, and a final fragment deep-reads the element back (forces it and
-//! case-matches its payload, not just a non-null pointer check).
-//! `tenured_array_write_visible_without_intervening_gc` is the negative
-//! control isolating the write/read mechanism from the GC-rescan question.
-//! `tenured_thunk_indirection_uses_write_barrier_and_survives_gc` is the
-//! unification check: the pre-existing thunk-indirection tenure path (which
-//! this fix re-routes onto the same `write_barrier` API as array writes)
-//! still works. `tenured_array_write_g1_reproduces_without_barrier` is the
-//! mutation check: with the barrier disabled, G1 must reproduce the SAME
-//! corruption signature.
-//!
-//! Two tests here make DIFFERENT claims about what is load-bearing, and their
-//! diagnostic settings differ accordingly:
-//!
-//! - `tenured_array_write_g1_reproduces_without_barrier` proves the BARRIER
-//!   is load-bearing — barrier off, heap-verify OFF, so the stranded element
-//!   is observed as poison at the dereference (the Phase 1 spike signature).
-//! - `heap_verify_catches_unrecorded_store_at_the_stranding_collection`
-//!   proves the VERIFIER is load-bearing and independent of the barrier —
-//!   barrier off, heap-verify ON, so `verify_tenured_graph` finds the
-//!   unrecorded store at the collection that strands it. It runs in a
-//!   subprocess because that detection aborts rather than unwinds.
-//!
-//! Every other test runs with `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on
-//! so a dangling read is deterministic (poison tag 0xDD) rather than
-//! sometimes-works.
+//! Every test runs with `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on so a
+//! dangling read is deterministic (poison tag 0xDD) rather than
+//! sometimes-works, except the two tests whose own doc comments explain why
+//! they turn one of those off.
 
 use serial_test::serial;
 use tidepool_codegen::emit::ExternalEnv;
@@ -63,7 +36,6 @@ use session_scaffold_expect::expect_int;
 use session_scaffold_gc_forcing::build_gc_forcing_fragment;
 use session_scaffold_value::build_value_fragment;
 
-/// `I# :: Int -> T`, the payload constructor fragments build and case-match.
 const I_HASH: DataConId = DataConId(7);
 
 /// The stable external id `write_new`/`read_back` resolve the tenured array
@@ -90,9 +62,9 @@ fn reset_ctr() {
     VAR_CTR.with(|c| c.set(2000));
 }
 
-/// Mirrors `array_gc_safety.rs`/`bind_error_then_allocate.rs`'s helper: ensure
-/// `root` is the tree's last node (the emitter's root convention) by wrapping
-/// it in a trivial `let` if some later push left it stranded mid-tree.
+/// Ensure `root` is the tree's last node (the emitter's root convention) by
+/// wrapping it in a trivial `let` if some later push left it stranded
+/// mid-tree.
 fn fixup_root(tree: &mut CoreExpr, root: usize) -> CoreExpr {
     if root == tree.nodes.len() - 1 {
         return tree.clone();
@@ -378,8 +350,8 @@ fn tenured_array_write_visible_without_intervening_gc() {
         .unwrap();
 }
 
-/// PHASE 1 — reachability spike (see `codex-core-review-response.md.tmp`,
-/// "Unsafe soundness" finding 1, and pattern 1 under "Established patterns").
+/// Reachability spike: `tenured_array_write_survives_gc_g1` drives the bug
+/// through the most public path available.
 ///
 /// G1: tenure a boxed `SmallArray#`, have a LATER fragment `writeSmallArray#`
 /// a fresh nursery `Con` into it, force minor + doubling GC under a tiny
@@ -599,11 +571,11 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
         .unwrap();
 }
 
-/// MUTATION CHECK (the merge gate — STEP 10). With the write barrier
-/// force-disabled via `set_write_barrier_disabled_for_test`, re-run the exact
-/// G1 scenario. This MUST go red with the same predicted dangling-element
-/// corruption (`CaseTrap`, gc-poison tag 0xDD/221) captured in the Phase 1
-/// spike — if it stayed green, the test would prove nothing.
+/// MUTATION CHECK. With the write barrier force-disabled via
+/// `set_write_barrier_disabled_for_test`, re-run the exact G1 scenario. This
+/// MUST go red with the same predicted dangling-element corruption
+/// (`CaseTrap`, gc-poison tag 0xDD/221) the reachability spike above
+/// predicts — if it stayed green, the test would prove nothing.
 ///
 /// Heap-verify is deliberately OFF here, unlike every other test in this
 /// file. This test's claim is that the BARRIER is load-bearing: remove it and

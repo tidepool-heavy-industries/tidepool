@@ -7,9 +7,9 @@
 //! non-trivial LetNonRec RHS; keep the trivial (WHNF / strict-primop) fast-path
 //! eager.
 //!
-//! These hand-built IR cases pin both halves so the behaviour survives the later
-//! eager-eval-class consolidation refactor (they don't go through the Haskell
-//! extractor, so no fixture drift).
+//! These hand-built IR cases pin both halves independent of the Haskell
+//! extractor's fixtures, so extractor/fixture churn cannot silently erode
+//! this coverage.
 use tidepool_eval::value::Value;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
 use tidepool_testing::proptest::{

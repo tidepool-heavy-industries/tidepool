@@ -1,10 +1,8 @@
 //! Default-tier lane: makes the post-GC heap invariant verifier
 //! (`verify_heap_post_gc`, `tidepool-codegen/src/host_fns/gc.rs`) actually run.
 //!
-//! Before this lane, nothing in the repo ever set `TIDEPOOL_HEAP_VERIFY=1` —
-//! `grep -rn TIDEPOOL_HEAP_VERIFY` found only comments — so the verifier never
-//! guarded a single regression. This lane force-enables it via
-//! `host_fns::set_heap_verify` (a process-global atomic override; `env::set_var`
+//! This lane force-enables it via `host_fns::set_heap_verify` (a
+//! process-global atomic override; `env::set_var`
 //! would race the `OnceLock`-cached env read `heap_verify_enabled` uses, and is
 //! unsafe on edition 2024) and, via `host_fns::heap_verify_run_count`, asserts
 //! the verifier actually fired rather than silently no-op'ing.
@@ -413,9 +411,6 @@ fn run_verified(expr: CoreExpr, nursery_size: usize, expected: i64, label: &str)
     );
 }
 
-/// Byte-for-byte the same `run_verified` assertions as the former four
-/// separate `heap_verify_fires_on_*` tests, looped over their
-/// (expr, nursery, expected, label) tuples.
 #[test]
 fn heap_verify_fires_on_gc_forcing_shapes() {
     let cons_spine_sum = build_cons_spine_sum(300);

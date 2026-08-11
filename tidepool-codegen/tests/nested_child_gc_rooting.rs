@@ -1,5 +1,5 @@
-//! Segment 40 — THE ADVERSARIAL SUITE: a parent suspended at a typed yield
-//! (`Ask`) hosts nested CHILD fragment runs on the SAME machine while its stowed
+//! THE ADVERSARIAL SUITE: a parent suspended at a typed yield (`Ask`) hosts
+//! nested CHILD fragment runs on the SAME machine while its stowed
 //! continuation is a REGISTERED GC ROOT, and resumes correctly afterward.
 //!
 //! This is the memory-safety deliverable. Each test forces the exact exposure
@@ -8,7 +8,7 @@
 //! (`TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY`) turn a missed-root into a
 //! deterministic failure rather than a timing-dependent SIGSEGV.
 //!
-//! Coverage (spec step 5):
+//! Coverage:
 //!   (a) child allocates until GC fires with a live suspended parent, then the
 //!       parent resumes and the continuation's captured value deep-verifies;
 //!   (b) child triggers heap DOUBLING mid-run, parent resumes;
@@ -556,8 +556,8 @@ fn plain_run_entry_while_suspended_still_panics() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Value-plane tenure across a suspension (segment-20-deferred): parent binds a
-// value → suspends → child forces GC → parent resumes and reads the binding.
+// Value-plane tenure across a suspension: parent binds a value → suspends →
+// child forces GC → parent resumes and reads the binding.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]

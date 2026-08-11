@@ -299,7 +299,7 @@ fn bignat_decimal(v: &Value) -> String {
     tidepool_eval::shapes::bignat_bytes_to_decimal(&bytes)
 }
 
-/// `coeff × 10^exp` → canonical decimal string (mirrors render.rs::compose_decimal).
+/// `coeff × 10^exp` → canonical decimal string.
 fn compose_decimal(coeff: &str, exp: i64) -> String {
     let (neg, rest) = match coeff.strip_prefix('-') {
         Some(r) => (true, r),

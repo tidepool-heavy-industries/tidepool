@@ -99,8 +99,6 @@ fn test_heap_force_thunk_evaluation() {
 
     let mut result: JitRun = compile_and_run(&tree, 65536);
     unsafe {
-        // The result of LetNonRec might be a thunk if rhs was thunked.
-        // But here body is just Var(x), so result_ptr should be the thunk or the value of x.
         let forced = result.force(result.result_ptr);
         assert_eq!(layout::read_tag(forced), layout::TAG_LIT);
         assert_eq!(read_lit_int(forced), 3);

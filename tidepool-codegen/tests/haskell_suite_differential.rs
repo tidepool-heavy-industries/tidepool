@@ -1,4 +1,4 @@
-//! Option 7: Haskell fixture differential testing (Interpreter vs JIT).
+//! Haskell fixture differential testing (Interpreter vs JIT).
 //!
 //! For each CBOR fixture in haskell/test/suite_cbor/, evaluate with both the
 //! interpreter and JIT, and verify they produce the same result.
@@ -79,10 +79,10 @@ const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
 ];
 
 /// A nontrivial floor on how many fixtures must reach a clean comparison.
-/// Observed 312 on the 2026-08-08 baseline run (tested=349, closure_skip=34,
-/// mismatch=0, both_error=0, jit_only_error=0, eval_jit_diverge=3, skipped=1)
-/// — set a little below that so ordinary fixture churn doesn't flap the gate,
-/// while a real collapse in comparison reach still fails it.
+/// Observed 312 on a baseline run (tested=349, closure_skip=34, mismatch=0,
+/// both_error=0, jit_only_error=0, eval_jit_diverge=3, skipped=1) — set a
+/// little below that so ordinary fixture churn doesn't flap the gate, while a
+/// real collapse in comparison reach still fails it.
 const COMPARED_FLOOR: usize = 300;
 
 #[test]
