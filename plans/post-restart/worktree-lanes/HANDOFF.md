@@ -6,8 +6,10 @@ the reasoning behind decisions whose failure modes are silent.
 
 Design authority remains
 `plans/self-iterating-harness/19-managed-worktrees-events-prd.md` (root's
-rewrite). Per-lane detail is in `L1`–`L8` receipts here; the by-name gate record
-is `GATES.md`; operational rules are in `README.md`.
+rewrite). Per-lane detail is in the `L2`, `L3`, `L4`, `L5`, `L6` receipts here
+(`L1`, `L7`, `L8` folded cleanly with no open items and were swept to git
+history); the by-name gate record is `GATES.md`; operational rules are in
+`README.md`.
 
 ## What exists, and where the seam is
 
