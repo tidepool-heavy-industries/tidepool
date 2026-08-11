@@ -1,8 +1,7 @@
-//! REPRO (2026-06-20): `send (Print …)` resolves to an unresolved variable at
-//! runtime in some contexts, even though it type-checks and `run`/other effects
-//! work. These tests MAP the minimal
-//! trigger in a controlled (single-Console-handler) effect stack so the bug can
-//! be bisected against pre-wave commits.
+//! REPRO: `send (Print …)` resolves to an unresolved variable at runtime in
+//! some contexts, even though it type-checks and `run`/other effects work.
+//! These tests MAP the minimal trigger in a controlled (single-Console-handler)
+//! effect stack.
 //!
 //! Each test runs one snippet through the real GHC→JIT pipeline and reports the
 //! exact outcome (Ok value / which RuntimeError). They assert the EXPECTED-good

@@ -1,9 +1,3 @@
-//! generic-surface wave, item 4 — the canonical extension-set reconciliation
-//! the external review asked for after the pragma-vs-flags redesign: "ONE
-//! canonical extension-set definition with tested per-surface DELTAS... plus
-//! a set-equality test between the Harness.Prelude re-export module and the
-//! profile."
-//!
 //! Four extension-set surfaces exist across the workspace and legitimately
 //! differ in scope — that's fine, as long as every delta is DECLARED and
 //! TESTED rather than incidental:
@@ -20,9 +14,9 @@
 //!     `NoImplicitPrelude` (the standalone lens-free surface relies on the
 //!     implicit Prelude import instead of `Tidepool.Prelude`).
 //!   - The Haskell-side harness compilation profile
-//!     (`haskell/app/Main.hs`'s `harnessProfilePragmaLine`, generic-surface
-//!     wave item 4 PART 2) — a Haskell string literal can't import a Rust
-//!     constant across the language boundary, so it's checked here by
+//!     (`haskell/app/Main.hs`'s `harnessProfilePragmaLine`) — a Haskell string
+//!     literal can't import a Rust constant across the language boundary, so
+//!     it's checked here by
 //!     reading the source file and parsing its extension set directly. It is
 //!     designed to carry EXACTLY EVAL_PRAGMAS's set (an author using
 //!     `Tidepool.Harness.Prelude` gets the identical dialect an eval author
@@ -125,10 +119,9 @@ fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
 /// `ModuleEnv::standalone_default()`'s pragma set must equal `decl_pragmas()`'s
 /// set with EXACTLY ONE documented delta: `NoImplicitPrelude` removed (the
 /// standalone lens-free surface relies on the implicit Prelude import
-/// instead of `Tidepool.Prelude`). This is the exact drift the external
-/// review's redesign-ordered follow-up caught live: `DeriveGeneric`/
-/// `DeriveAnyClass` had silently fallen out of sync (generic-surface wave,
-/// 2026-08-08) before this test existed.
+/// instead of `Tidepool.Prelude`). HAZARD: `DeriveGeneric`/`DeriveAnyClass`
+/// have silently fallen out of sync between these two surfaces before —
+/// this test is the guard.
 #[test]
 fn standalone_default_tracks_decl_pragmas_modulo_no_implicit_prelude() {
     let decl_pragmas_text = decl_pragmas();

@@ -2,18 +2,11 @@
 //! ("yield error: null pointer in effect result") on multi-line / composite-return
 //! inputs through the JIT effect-dispatch path.
 //!
-//! These mirror the failing patterns from the original bug report (filed by
-//! `pattern` agent runtime). They all pass on tidepool main as of this commit;
-//! `pattern` was likely on a tidepool pinned before #309 (Data.Text.empty
-//! intercept) or other post-#272 normalization fixes.
-//!
 //! Sister suite in `tidepool-runtime/tests/text_breakon_replace_pure.rs` covers
 //! the pure JIT path.
 //!
-//! BUNDLED (test-diet, coverage-overlap census): the 11 individual cases below
-//! used to be 11 separate `#[test]` fns, each paying its own `tidepool-extract`
-//! compile. Bundled into 2 tests using the repo's named-check-list idiom (see
-//! `tidepool-runtime/tests/generic_form_roundtrip.rs`'s `check` pattern): ONE
+//! BUNDLED: named-check-list idiom (see
+//! `tidepool-runtime/tests/generic_form_roundtrip.rs`'s `check` pattern) — ONE
 //! Haskell compile per test, returning the list of FAILED check names, asserted
 //! empty — same 11 behaviors, individually named in the failure output. Split
 //! in two only because the long-body cases share one `T.pack`-compiled corpus

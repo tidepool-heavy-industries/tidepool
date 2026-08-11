@@ -1,7 +1,5 @@
 //! Success-path GHC warnings must survive a clean compile and appear in the
-//! rendered eval result instead of being silently dropped (previously
-//! `compile_and_run` only checked `warnings.has_io` and discarded the rest —
-//! see `plans/diagnostics-flow-recon.md` patch point (a)).
+//! rendered eval result instead of being silently dropped.
 //!
 //! Mirrors the harness in `text_breakon_replace_mcp.rs` (real `compile_and_run`
 //! with the standard MCP preamble/effect stack + `.tidepool/lib`/stdlib include
