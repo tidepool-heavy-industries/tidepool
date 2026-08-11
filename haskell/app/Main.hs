@@ -36,7 +36,7 @@ import Tidepool.Binders
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), BoundBinder(..)
-  , renderTurnOutJson, renderBoundBinderJson, renderAskJson, renderVerdictsJson )
+  , renderBoundBinderJson, renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
   , stripMonadHead, isClosureType, renderType, splitTupleType )
@@ -73,7 +73,7 @@ main = do
             else pure parsedArgs
   case argFiles args of
     [] -> do
-      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--json-output <out.json>] [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
+      hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] <file.hs> ..."
       putStrLn (renderDiagsJson [])
     (file : _)
       -- Block classify lane: every positional file is one item, classified
@@ -219,7 +219,6 @@ data Args = Args
   , argTurn :: Bool
   , argTurnTemplates :: [String]
   , argTurnOut :: Maybe FilePath
-  , argJsonOutput :: Maybe FilePath
   , argTurnVerdict :: Maybe String
   -- --classify mode (block classify lane, plans/one-spawn-turn-protocol-phase-b.md):
   , argClassify :: Bool
@@ -238,7 +237,7 @@ data Args = Args
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing [] False False False [] []
                      False [] Nothing Nothing [] Nothing
-                     False [] Nothing Nothing Nothing
+                     False [] Nothing Nothing
                      False Nothing
                      False)
   where
@@ -257,7 +256,6 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a ("--turn" : rest) = go a { argTurn = True } rest
     go a ("--turn-template" : kv : rest) = go a { argTurnTemplates = argTurnTemplates a ++ [kv] } rest
     go a ("--turn-out" : out : rest) = go a { argTurnOut = Just out } rest
-    go a ("--json-output" : out : rest) = go a { argJsonOutput = Just out } rest
     go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
     go a ("--classify" : rest) = go a { argClassify = True } rest
     go a ("--classify-out" : out : rest) = go a { argClassifyOut = Just out } rest
@@ -826,8 +824,7 @@ processSessionFile args path = do
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
 -- matching template, compile through the EXISTING session-compile path
 -- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
--- 'TurnOut' result — CBOR always (@--turn-out@), JSON rendering too when
--- @--json-output@ is given. A @decl@ verdict never compiles: its
+-- 'TurnOut' result as CBOR (@--turn-out@). A @decl@ verdict never compiles: its
 -- 'toDeclItems' come from a whole-module parse over the turn's OWN spliced
 -- scratch module ('extractBindersNamed', exact-name match — see
 -- @--turn-template decl=<file>@ below), never from the single-statement
@@ -928,11 +925,6 @@ runTurnMode args path = do
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
-    case argJsonOutput args of
-      Just jout -> do
-        writeFile jout (renderTurnOutJson turnOut)
-        hPutStrLn stderr $ "  Wrote: " ++ jout
-      Nothing -> return ()
   reportDiags res
 
 -- | Block classify lane (@--classify@, plans/one-spawn-turn-protocol-phase-b.md):

@@ -25,7 +25,6 @@ module Tidepool.Binders
     -- * Turn-mode rich result (--turn)
   , TurnOut(..)
   , BoundBinder(..)
-  , renderTurnOutJson
   , renderBoundBinderJson
   , renderAskJson
   ) where
@@ -149,16 +148,6 @@ conDeclNames = \case
 
 occStr :: RdrName -> String
 occStr = occNameString . rdrNameOcc
-
-renderItem :: ExportItem -> String
-renderItem (EValue n) =
-  "{\"kind\":\"value\",\"name\":" ++ jsonString n ++ "}"
-renderItem (EType n cons) =
-  "{\"kind\":\"type\",\"name\":" ++ jsonString n
-    ++ ",\"cons\":[" ++ intercalate "," (map jsonString cons) ++ "]}"
-renderItem (EClass n methods) =
-  "{\"kind\":\"class\",\"name\":" ++ jsonString n
-    ++ ",\"methods\":[" ++ intercalate "," (map jsonString methods) ++ "]}"
 
 getLibdir :: IO FilePath
 getLibdir = do
@@ -438,16 +427,16 @@ data BoundBinder = BoundBinder
 -- declarations joined into one module) has no single statement to parse.
 -- 'TBind'/'TExpr'
 -- carry what the selected template variant actually compiled to. The
--- wire-visible tag ('renderTurnOutJson' \/ the CBOR encoder) is
--- @"Decl"@\/@"Bind"@\/@"Expr"@ regardless of these constructor names.
+-- wire-visible tag (the CBOR encoder) is @"Decl"@\/@"Bind"@\/@"Expr"@
+-- regardless of these constructor names.
 --
 -- 'TDecl's @toBinders@ is UNRELIABLE as a verbatim echo of the supplied
 -- verdict: a decl-batch verdict (@--turn-verdict decl@, no @:name,name…@
 -- suffix) carries an empty binder list, so 'runTurnMode' DERIVES
 -- @toBinders@ from 'toDeclItems'' head names ('exportItemName') whenever the
 -- verdict itself supplies none. @toBinders@ is therefore never a bare echo
--- of the verdict on the decl path — a @--json-output@ consumer should read
--- it as "the binders this turn introduces", not as "what the verdict said".
+-- of the verdict on the decl path — a 'TurnOut' consumer should read it as
+-- "the binders this turn introduces", not as "what the verdict said".
 data TurnOut
   = TDecl
       { toBinders   :: [Text]
@@ -466,24 +455,6 @@ data TurnOut
       , toWrappedSource :: Text
       }
   deriving (Eq, Show)
-
-renderTurnOutJson :: TurnOut -> String
-renderTurnOutJson (TDecl bs items) =
-  "{\"kind\":\"Decl\",\"binders\":[" ++ jsonStringList bs
-    ++ "],\"declItems\":[" ++ intercalate "," (map renderItem items) ++ "]}"
-renderTurnOutJson (TBind bs var bbs aks wrapped) =
-  "{\"kind\":\"Bind\",\"binders\":[" ++ jsonStringList bs
-    ++ "],\"variant\":" ++ show var
-    ++ ",\"boundBinders\":[" ++ intercalate "," (map renderBoundBinderJson bbs)
-    ++ "],\"asks\":[" ++ intercalate "," (map renderAskJson aks)
-    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
-renderTurnOutJson (TExpr var aks wrapped) =
-  "{\"kind\":\"Expr\",\"variant\":" ++ show var
-    ++ ",\"asks\":[" ++ intercalate "," (map renderAskJson aks)
-    ++ "],\"wrappedSource\":" ++ jsonString (T.unpack wrapped) ++ "}"
-
-jsonStringList :: [Text] -> String
-jsonStringList = intercalate "," . map (jsonString . T.unpack)
 
 -- | One 'BoundBinder' as JSON. @varId@ is a DECIMAL STRING of the u64 (an f64
 -- would lose precision) — same shape the legacy @--emit-bound-binders@

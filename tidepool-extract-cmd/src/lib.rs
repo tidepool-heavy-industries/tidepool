@@ -508,12 +508,6 @@ impl ExtractCmd {
         self.flag("--classify-out", path)
     }
 
-    /// `--json-output <path>`. No in-tree caller drives this today; it is
-    /// here so that when one appears it does not open-code a spawn to get it.
-    pub fn json_output(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--json-output", path)
-    }
-
     /// `--session-root <dir>` — where `Tidepool.Session.Val.G<g>` ifaces are
     /// written and where `--inject-val` ifaces are looked up.
     pub fn session_root(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
