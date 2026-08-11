@@ -154,16 +154,18 @@ export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
 
 This environment hard-kills background processes at ~380s, and a full-workspace
 GHC battery is HOURS (every GHC-heavy test forks a real `tidepool-extract`
-compile, capped at 3 concurrent, and a handful of suites alone run ~900s).
+compile, capped at 1 concurrent per run, and a handful of suites alone run
+for multiple hundreds of seconds).
 Bare `scripts/battery.sh` WILL get killed mid-run. Four tiers, from fastest to
 most exhaustive:
 
 Both battery scripts take a host GHC slot for you (`scripts/ghc-slots.sh run`,
-3 slots shared box-wide) and re-exec themselves under it — you do not wrap
+6 slots shared box-wide) and re-exec themselves under it — you do not wrap
 them, and an outer wrapper is respected rather than double-acquired. Inside a
 run, `.config/nextest.toml`'s `ghc-heavy` test group caps concurrent extract
-compiles at 3; membership is default-deny, so a new crate or test binary is
-capped without an edit there.
+compiles at 1; membership is default-deny, so a new crate or test binary is
+capped without an edit there. The box-wide ceiling is the product of the two
+(slots × per-run cap).
 
 1. **Fast default** — `cargo nextest run`. Pure-Rust crates only
    (`.config/nextest.toml`'s `default-filter` skips every GHC-extract-heavy

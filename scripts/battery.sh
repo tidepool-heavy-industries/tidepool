@@ -8,8 +8,9 @@
 # the hazard-audit note and repo-root CLAUDE.md's Build & Test section.
 #
 # WARNING: this runs the ENTIRE workspace in one process and is HOURS long
-# here (every GHC-heavy crate's test forks a real GHC extract, capped at 4
-# concurrent) — this environment hard-kills background processes at ~380s,
+# here (every GHC-heavy crate's test forks a real GHC extract, capped at 1
+# concurrent per run via .config/nextest.toml's ghc-heavy test group) — this
+# environment hard-kills background processes at ~380s,
 # well short of that. Do not invoke this bare and walk away expecting it to
 # finish. Prefer:
 #   - a single crate/test slice: `scripts/battery.sh -p <crate> -E 'test(<name>)'`
