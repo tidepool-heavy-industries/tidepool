@@ -301,6 +301,43 @@ couple it into the cutover.
    keep the comment, and report what it ripples into. That is a finding for the
    wave-B queue, not a blocker for the fold.
 
+**OUTCOME: step 2 DROPPED — condition 3 fired, and the premise behind steps 1–2
+was wrong.** Built in full before reverting, so this is a finding, not a guess.
+
+`RootSlot` is a bare `*mut *mut u8` newtype with **no `Send` impl anywhere** —
+deliberately, unlike every one of its containers (`JitEffectMachine`,
+`OldSpace`, `CompiledEffectMachine`, `MachineState`, `BindingTable`), which each
+carry an `unsafe impl Send` under the stowed-XOR-running argument. `Bind` is the
+one policy `ResidentSession` drives, and it drives it through `on_eval_thread`,
+which moves the machine onto a scoped eval thread and returns the outcome back
+across the join — so the completion must be `Send`. `Suspendable<(Value,
+RootSlot)>` fails `E0277` at `resident.rs` `run_bind` and `resume_bind`.
+
+So `last_bound_root` was never a shape workaround for
+`SuspendableOutcome::Completed(Value)`, which is what §6.1, §6.2 and the three
+comments all asserted. **It launders a `!Send` slot across a thread boundary by
+riding inside the machine, which is already blessed `Send`** —
+`suspended_finalized_root` does exactly this for W4. `Project`/`Render` escape
+it only because nothing drives them across a thread: their sole caller is the
+repl's single-threaded `PersistentSession`. A future caller wiring either
+through `on_eval_thread` meets the same `E0277` — a compile error, not a silent
+trap, but the reason to expect one.
+
+Corroborating evidence beyond the type error: the attempt measured 204/-203
+across 6 files, driven by `resident.rs` needing `on_eval_thread`/`reenter` split
+into `Send` and non-`Send` variants. Not a match-arm update.
+
+The three "scheduled removal" comments were therefore FALSE and have been
+rewritten to state the real mechanism. That correction is the durable value
+here — the code now explains why the asymmetry exists instead of apologising
+for one that was misdiagnosed.
+
+Wave-B options, root's call, no longer urgent:
+(a) add `unsafe impl Send for RootSlot` with a safety argument mirroring the
+    container impls — a standalone soundness claim on a raw pointer, a real
+    judgment call and not a refactor; or
+(b) leave it, now that the carrier is named for what it does.
+
 Implementation note from the cutover (which built the projection machinery):
 step 2 folds `Bind` into `CompletedProduct`'s inline slot and deletes
 `ParkedRaw::into_suspendable`'s `Bind` arm. The per-entry projection is already

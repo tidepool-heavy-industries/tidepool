@@ -657,11 +657,19 @@ impl PersistentSession {
     /// [`Self::resume_bind`]) stashed on the machine. `None` when no bind
     /// completed — the caller treats that as the infra error it is.
     ///
-    /// Only the single-bind policy needs this: its outcome type
-    /// ([`SuspendableOutcome`]) predates the generic one and is fixed at
-    /// `Completed(Value)`, so the root cannot ride out inline. The projected and
-    /// render policies return their roots in the completion itself, and bind is
-    /// slated to follow once that outcome type is widened.
+    /// Only the single-bind policy needs this, and NOT because of its outcome
+    /// type's shape. `RootSlot` is `!Send`; bind is the one policy
+    /// [`super::ResidentSession`] drives, and it does so through
+    /// `on_eval_thread`, which returns the completion across a scoped-thread
+    /// join. A slot riding out inline does not compile there — stashing it
+    /// inside the (`Send`-blessed) machine is what carries it across. The
+    /// projected and render policies return their roots inline only because
+    /// nothing drives them across a thread; their sole caller is this
+    /// single-threaded repl path.
+    ///
+    /// Removing this was attempted and reverted: it requires
+    /// `unsafe impl Send for RootSlot`, a standalone soundness claim on a raw
+    /// pointer rather than a refactor (`plans/unpark/` §6.2).
     pub fn take_bound_root(&mut self) -> Option<RootSlot> {
         self.machine.as_mut().and_then(|m| m.take_last_bound_root())
     }

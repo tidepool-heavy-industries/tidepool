@@ -84,16 +84,37 @@
 //! `Project`/`Render` spelling, since those are single-session repl paths with
 //! no realm counterpart.
 //!
-//! The two completion types are a TEMPORARY split. [`SuspendableOutcome`] is
-//! fixed as `Completed(Value)` and `tidepool-harness` matches on it, so `Bind`
-//! still stashes its root on the machine for `take_last_bound_root`. The
-//! `Project`/`Render` pair is newer and free of that, so each simply RETURNS
-//! what it produces: [`Suspendable`] is generic over the completion product,
-//! which is what lets `Project` stop fabricating a fields-elided constructor
-//! just to fill a `Value`-shaped hole it never had a value for. Widening
-//! [`SuspendableOutcome`] the same way — and deleting the stash — is a
-//! follow-up; the split exists to bound one cutover's blast radius, not because
-//! two shapes are wanted.
+//! The two completion types differ for a LOAD-BEARING reason, established by
+//! trying to remove it (`plans/unpark/`, §6.2).
+//!
+//! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
+//! inline — [`Suspendable`] is generic over the completion product, which is
+//! what lets `Project` stop fabricating a fields-elided constructor just to
+//! fill a `Value`-shaped hole it never had a value for. `Bind` CANNOT do the
+//! same, and the obstacle is not [`SuspendableOutcome`]'s fixed
+//! `Completed(Value)` shape:
+//!
+//! **`RootSlot` is `!Send`** — a bare `*mut *mut u8` newtype which, unlike its
+//! containers ([`JitEffectMachine`], `OldSpace`, `CompiledEffectMachine`,
+//! `BindingTable`, all `unsafe impl Send` under the stowed-XOR-running
+//! argument), is deliberately not blessed anywhere. `Bind` is the one policy
+//! `tidepool_runtime::session::ResidentSession` drives, and it does so through
+//! `on_eval_thread`, which moves the machine onto a scoped eval thread and
+//! returns the outcome back across the join — requiring the completion to be
+//! `Send`. A slot riding out inline fails `E0277` there.
+//!
+//! So `last_bound_root` is not a shape workaround: it LAUNDERS a `!Send` slot
+//! across that thread boundary by riding inside the machine, which is already
+//! blessed `Send`. `suspended_finalized_root` does the same thing for the same
+//! reason. `Project`/`Render` escape it only because nothing drives them across
+//! a thread — their sole caller is the repl's single-threaded
+//! `PersistentSession` path. A future caller wiring either through
+//! `on_eval_thread` will meet the same `E0277`; that is a compile error, not a
+//! silent trap, but it is the reason to expect one.
+//!
+//! Removing the stash therefore requires `unsafe impl Send for RootSlot` — a
+//! new standalone soundness claim on a raw pointer, which is a real judgment
+//! call and not a refactor. Left open deliberately.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2371,18 +2392,24 @@ impl JitEffectMachine {
                         Ok(ParkedRaw::Completed(CompletedProduct::Value(value)))
                     }
                     Materialized::Bind(slot) => {
-                        // SCHEDULED FOR REMOVAL, not a standing asymmetry.
-                        // `Bind` completes as a `SuspendableOutcome`, whose
-                        // `Completed` is fixed at a bare `Value`, so its root
-                        // cannot ride out inline and is stashed here for
-                        // `take_last_bound_root`. `Project`/`Render` complete as
-                        // `Suspendable<T>` and return their roots directly — no
-                        // stash, nothing to take, nothing to forget to take. The
-                        // stash is held open only to keep the repl-unpark
-                        // cutover's blast radius off `tidepool-harness`;
-                        // widening `SuspendableOutcome` the same way and deleting
-                        // `last_bound_root` is a follow-up commit once that
-                        // cutover is green.
+                        // This stash LAUNDERS a `!Send` value across a thread
+                        // boundary — it is not a shape workaround, and removing
+                        // it was tried and reverted (`plans/unpark/` §6.2).
+                        //
+                        // `RootSlot` is a bare `*mut *mut u8` with no `Send`
+                        // impl. `Bind` is the policy `ResidentSession` drives,
+                        // via `on_eval_thread`, which returns the completion
+                        // back across a scoped-thread join and so requires it to
+                        // be `Send`. Riding the slot out inline fails `E0277`
+                        // there; riding it INSIDE the machine works because the
+                        // machine is blessed `Send` (stowed-XOR-running).
+                        // `suspended_finalized_root` launders W4's root the same
+                        // way. `Project`/`Render` return theirs inline only
+                        // because nothing drives them across a thread.
+                        //
+                        // Deleting this needs `unsafe impl Send for RootSlot` —
+                        // a standalone soundness claim on a raw pointer, not a
+                        // refactor. See the module docstring.
                         if let ParkTarget::Slot = park {
                             self.last_bound_root = Some(slot);
                         }
