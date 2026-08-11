@@ -1,0 +1,748 @@
+//! The ONE toolchain locator — where the GHC→Core extract binary and the
+//! Haskell stdlib source tree live — plus the startup **handshake** that
+//! refuses to serve an extract/stdlib pair that was not deployed together.
+//!
+//! Before this module the answer to "where is the toolchain" was spread across
+//! five independent policies (`TIDEPOOL_EXTRACT` + PATH fallback, the
+//! `derive_stdlib_include` `dist-newstyle` walk, `TIDEPOOL_PRELUDE_DIR`, the
+//! `tidepool` binary's cwd-then-bundle search, and `tidepool-repl`'s
+//! build-time `CARGO_MANIFEST_DIR` path). They disagreed, and the disagreement
+//! surfaced as a *wrong answer at eval time* ("not in scope", "Metadata entry
+//! must be an array of exactly 7") rather than as a configuration error. Both
+//! precedence orders now live here, once, and both are documented below.
+//!
+//! # Precedence: the extract binary
+//!
+//! | # | Source | Notes |
+//! |---|--------|-------|
+//! | 1 | `$TIDEPOOL_EXTRACT` | Explicit override. Honored verbatim — a bare name is still PATH-resolved, an absolute path is used as-is. |
+//! | 2 | `tidepool-extract` on `$PATH` | Normally `~/.nix-profile/bin/tidepool-extract`, a wrapper that prepends the with-packages GHC and `exec`s the store binary. |
+//!
+//! [`extract_command_name`] returns what to spawn (steps 1–2 as a name);
+//! [`locate_extract`] additionally resolves it to a real file and fails typed
+//! when nothing is there.
+//!
+//! # Precedence: the Haskell stdlib source root
+//!
+//! The stdlib root is the GHC include dir under which `Tidepool/Prelude.hs`
+//! lives. Every step is checked with [`is_stdlib_root`]; a step that names a
+//! directory without `Tidepool/Prelude.hs` does not count as a hit.
+//!
+//! | # | Source | Rationale |
+//! |---|--------|-----------|
+//! | 1 | `$TIDEPOOL_PRELUDE_DIR` | Operator override. **Set-but-not-a-stdlib-root is a hard error**, never a silent fall-through — a typo'd override that quietly served a different stdlib is exactly the failure this module exists to kill. |
+//! | 2 | `./haskell/lib`, then `./lib` (from CWD) | In-repo development: the working tree you are editing wins over anything installed. Preserves the `tidepool` binary's historical behavior. |
+//! | 3 | Sibling of the extract's `dist-newstyle` | Absorbs the old `derive_stdlib_include`: walk `$TIDEPOOL_EXTRACT` up to a `dist-newstyle` component and take its sibling `lib/`. Pairs a worktree-built extract with that worktree's stdlib. |
+//! | 4 | [`StdlibFallbacks::bundle`] | Installed mode: the stdlib embedded in the server binary, materialized to a content-addressed cache dir. Immutable and guaranteed to match the binary. |
+//! | 5 | [`StdlibFallbacks::build_tree`] | Last resort: the source tree this binary was *built* from (`env!("CARGO_MANIFEST_DIR")`-derived). Keeps a repo-installed `tidepool-repl` working when launched outside the repo. |
+//! | — | otherwise | [`ToolchainError::StdlibNotFound`], listing every path tried. |
+//!
+//! # The handshake
+//!
+//! Deploy coupling — extract, both servers, and the stdlib must move together
+//! (`scripts/redeploy.sh`) — used to be enforced by script discipline alone.
+//! It is now checked at startup:
+//!
+//! - `scripts/redeploy.sh` finishes by running `tidepool --write-toolchain-stamp`,
+//!   which records the **content** fingerprints of the extract binary and the
+//!   stdlib tree it just deployed into [`stamp_path`].
+//! - Each server calls [`enforce_handshake`] once at startup. It fingerprints
+//!   the extract and stdlib it just resolved and compares them to the stamp.
+//!   A mismatch means one side moved without the other → loud, actionable
+//!   failure naming `scripts/redeploy.sh`.
+//!
+//! Fingerprints are **content-only, never paths**: the stamp is written from
+//! the repo (stdlib = `haskell/lib`) but checked from a server whose stdlib is
+//! the materialized bundle at a completely different path. Identical content
+//! must compare equal.
+//!
+//! Cost: one memoized binary content hash (shared with the compile-cache key,
+//! so a running server pays it at most once per extract version per machine)
+//! plus one walk of ~40 small `.hs` files. Never per-eval.
+
+use std::path::{Path, PathBuf};
+
+/// Env var naming the extract binary (step 1 of the extract precedence).
+pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
+/// Env var naming the stdlib root (step 1 of the stdlib precedence).
+pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
+/// Env var overriding [`stamp_path`].
+pub const ENV_STAMP: &str = "TIDEPOOL_TOOLCHAIN_STAMP";
+/// Env var selecting the handshake severity: `error` (default) / `warn` / `off`.
+pub const ENV_HANDSHAKE: &str = "TIDEPOOL_TOOLCHAIN_HANDSHAKE";
+
+/// Default spelling of the extract binary when `$TIDEPOOL_EXTRACT` is unset.
+pub const DEFAULT_EXTRACT: &str = "tidepool-extract";
+
+/// The deploy command every skew message points at.
+const REDEPLOY: &str = "scripts/redeploy.sh";
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// A toolchain *configuration* failure: the extract or the stdlib could not be
+/// located, or the located pair is skewed. Distinct from a compile failure —
+/// nothing the user's Haskell can cause.
+#[derive(thiserror::Error, Debug)]
+pub enum ToolchainError {
+    /// Neither `$TIDEPOOL_EXTRACT` nor `$PATH` yields a runnable extract.
+    #[error(
+        "tidepool-extract not found (tried {tried}). Set {ENV_EXTRACT} to a built \
+         tidepool-extract-bin, or install the harness with `nix profile install .#tidepool-extract`."
+    )]
+    ExtractNotFound {
+        /// What was searched for — the env value, or `tidepool-extract` on PATH.
+        tried: String,
+    },
+
+    /// `$TIDEPOOL_PRELUDE_DIR` is set but does not name a stdlib root.
+    #[error(
+        "{ENV_PRELUDE_DIR}={} is not a Tidepool stdlib root (no Tidepool/Prelude.hs under it). \
+         Point it at a directory containing Tidepool/Prelude.hs, or unset it to use the \
+         bundled stdlib.",
+        .dir.display()
+    )]
+    PreludeDirInvalid {
+        /// The offending override.
+        dir: PathBuf,
+    },
+
+    /// No step of the stdlib precedence found a root.
+    #[error(
+        "Tidepool stdlib not found — no Tidepool/Prelude.hs under any of: {}. \
+         Set {ENV_PRELUDE_DIR}, run from a Tidepool checkout, or reinstall the server \
+         (`{REDEPLOY}`).",
+        render_tried(.tried)
+    )]
+    StdlibNotFound {
+        /// Every (precedence step, path) pair that was checked, in order.
+        tried: Vec<(&'static str, PathBuf)>,
+    },
+
+    /// The located extract and stdlib were not deployed together.
+    #[error("{0}")]
+    Skew(SkewReport),
+
+    /// Reading or writing the deploy stamp failed.
+    #[error("toolchain stamp {}: {source}", .path.display())]
+    Stamp {
+        /// The stamp path involved.
+        path: PathBuf,
+        /// Underlying I/O or JSON failure.
+        source: std::io::Error,
+    },
+}
+
+fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
+    tried
+        .iter()
+        .map(|(what, p)| format!("{what} ({})", p.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+// ---------------------------------------------------------------------------
+// Extract location
+// ---------------------------------------------------------------------------
+
+/// What to pass to `Command::new` for the extract: `$TIDEPOOL_EXTRACT` when
+/// set and non-empty, else the bare `tidepool-extract` (PATH-resolved by the
+/// OS at spawn time).
+///
+/// This is the **only** place that spelling is decided. Call sites that spawn
+/// the extract own the arguments; they must not re-derive the program name.
+#[must_use]
+pub fn extract_command_name() -> String {
+    match std::env::var(ENV_EXTRACT) {
+        Ok(v) if !v.is_empty() => v,
+        _ => DEFAULT_EXTRACT.to_string(),
+    }
+}
+
+/// Which precedence step produced an extract path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractSource {
+    /// `$TIDEPOOL_EXTRACT`.
+    Env,
+    /// `tidepool-extract` on `$PATH`.
+    Path,
+}
+
+/// A resolved extract binary.
+#[derive(Debug, Clone)]
+pub struct ExtractLocation {
+    /// Absolute path to the binary (or wrapper script).
+    pub path: PathBuf,
+    /// Which precedence step found it.
+    pub source: ExtractSource,
+}
+
+/// Resolve [`extract_command_name`] to a real file, typed-failing when nothing
+/// is there. Uses the same `which` resolution the compile-cache fingerprint
+/// uses, so both see the same binary.
+///
+/// # Errors
+/// [`ToolchainError::ExtractNotFound`] when neither the override nor `$PATH`
+/// resolves to an existing file.
+pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
+    let name = extract_command_name();
+    let source = if name == DEFAULT_EXTRACT {
+        ExtractSource::Path
+    } else {
+        ExtractSource::Env
+    };
+    // `which` handles both spellings: an absolute/relative path is checked for
+    // existence + executability, a bare name is searched on PATH.
+    which::which(&name)
+        .map(|path| ExtractLocation { path, source })
+        .map_err(|_| ToolchainError::ExtractNotFound {
+            tried: match source {
+                ExtractSource::Env => format!("${ENV_EXTRACT}={name}"),
+                ExtractSource::Path => format!("{DEFAULT_EXTRACT} on $PATH"),
+            },
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Stdlib location
+// ---------------------------------------------------------------------------
+
+/// A directory is a stdlib root iff `Tidepool/Prelude.hs` sits under it — the
+/// same probe every historical policy used, now stated once.
+#[must_use]
+pub fn is_stdlib_root(dir: &Path) -> bool {
+    dir.join("Tidepool").join("Prelude.hs").is_file()
+}
+
+/// Which precedence step produced a stdlib root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdlibSource {
+    /// `$TIDEPOOL_PRELUDE_DIR`.
+    EnvOverride,
+    /// `./haskell/lib` or `./lib`, relative to the process CWD.
+    RepoTree,
+    /// The `lib/` sibling of the extract's `dist-newstyle` tree.
+    ExtractSibling,
+    /// The stdlib bundled into the server binary, materialized to the cache.
+    Bundle,
+    /// The source tree this binary was built from.
+    BuildTree,
+}
+
+/// A resolved stdlib root.
+#[derive(Debug, Clone)]
+pub struct StdlibLocation {
+    /// The include dir to hand GHC (`Tidepool/Prelude.hs` lives under it).
+    pub dir: PathBuf,
+    /// Which precedence step found it.
+    pub source: StdlibSource,
+}
+
+/// Binary-supplied tail steps of the stdlib precedence (steps 4 and 5). A
+/// library caller with neither — e.g. session-decl validation inside
+/// `tidepool-runtime` — passes [`StdlibFallbacks::default`] and gets steps 1–3.
+#[derive(Debug, Default, Clone)]
+pub struct StdlibFallbacks {
+    /// Step 4: a materialized copy of the stdlib embedded in this binary.
+    /// Materialize eagerly (it is sentinel-guarded and idempotent) and pass the
+    /// directory; `None` for a binary that embeds no stdlib.
+    pub bundle: Option<PathBuf>,
+    /// Step 5: the source tree this binary was built from, typically
+    /// `Path::new(env!("CARGO_MANIFEST_DIR")).parent()/haskell/lib`.
+    pub build_tree: Option<PathBuf>,
+}
+
+/// Resolve the Haskell stdlib root by the precedence table in the module docs.
+///
+/// # Errors
+/// - [`ToolchainError::PreludeDirInvalid`] when `$TIDEPOOL_PRELUDE_DIR` is set
+///   but is not a stdlib root (a bad override never falls through silently).
+/// - [`ToolchainError::StdlibNotFound`] when no step found one; the error names
+///   every path tried.
+pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, ToolchainError> {
+    let mut tried: Vec<(&'static str, PathBuf)> = Vec::new();
+
+    // 1. Operator override — authoritative, and loud when wrong.
+    if let Some(dir) = std::env::var_os(ENV_PRELUDE_DIR) {
+        let dir = PathBuf::from(dir);
+        if is_stdlib_root(&dir) {
+            return Ok(StdlibLocation {
+                dir,
+                source: StdlibSource::EnvOverride,
+            });
+        }
+        return Err(ToolchainError::PreludeDirInvalid { dir });
+    }
+
+    // 2. In-repo development: walk up from CWD, git-style. Walking (rather than
+    //    probing CWD alone) is what makes this independent of which directory
+    //    cargo/nextest/the MCP client happened to launch from — a test running
+    //    with CWD=<repo>/tidepool-runtime finds the same stdlib as a server
+    //    launched from the repo root.
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut cur = Some(cwd.as_path());
+        while let Some(dir) = cur {
+            for candidate in [dir.join("haskell").join("lib"), dir.join("lib")] {
+                if is_stdlib_root(&candidate) {
+                    return Ok(StdlibLocation {
+                        dir: candidate,
+                        source: StdlibSource::RepoTree,
+                    });
+                }
+            }
+            cur = dir.parent();
+        }
+        tried.push(("repo tree above cwd", cwd.join("haskell").join("lib")));
+    }
+
+    // 3. The `lib/` sibling of the extract's `dist-newstyle` (absorbs the old
+    //    `derive_stdlib_include`).
+    if let Some(candidate) = extract_sibling_lib() {
+        if is_stdlib_root(&candidate) {
+            return Ok(StdlibLocation {
+                dir: candidate,
+                source: StdlibSource::ExtractSibling,
+            });
+        }
+        tried.push(("extract dist-newstyle sibling", candidate));
+    }
+
+    // 4/5. Binary-supplied fallbacks.
+    for (what, source, candidate) in [
+        ("bundled stdlib", StdlibSource::Bundle, &fallbacks.bundle),
+        ("build tree", StdlibSource::BuildTree, &fallbacks.build_tree),
+    ] {
+        let Some(candidate) = candidate else { continue };
+        if is_stdlib_root(candidate) {
+            return Ok(StdlibLocation {
+                dir: candidate.clone(),
+                source,
+            });
+        }
+        tried.push((what, candidate.clone()));
+    }
+
+    Err(ToolchainError::StdlibNotFound { tried })
+}
+
+/// Walk `$TIDEPOOL_EXTRACT` upward to a `dist-newstyle` component and return
+/// its sibling `lib/`. `None` when the override is unset or the binary does not
+/// live inside a cabal build tree (the installed/nix case).
+fn extract_sibling_lib() -> Option<PathBuf> {
+    let extract = std::env::var_os(ENV_EXTRACT)?;
+    let mut path = PathBuf::from(extract);
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    loop {
+        if path.file_name().and_then(|n| n.to_str()) == Some("dist-newstyle") {
+            return path.parent().map(|parent| parent.join("lib"));
+        }
+        if !path.pop() {
+            return None;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprints
+// ---------------------------------------------------------------------------
+
+/// Content fingerprint of the extract binary at `path`, following a one-line
+/// wrapper script to its target (the nix-profile wrapper `exec`s the store
+/// binary; fingerprinting only the wrapper would miss every upgrade).
+///
+/// Shares the memoized content hasher with the compile-cache key
+/// ([`crate::cache`]), so the ~100ms read of a GHC-linked binary is paid at
+/// most once per version per machine.
+#[must_use]
+pub fn extract_fingerprint(path: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&crate::cache::binary_content_hash(path));
+    for target in crate::cache::wrapper_targets(path) {
+        hasher.update(&crate::cache::binary_content_hash(&target));
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Content fingerprint of a stdlib tree rooted at `dir`.
+///
+/// Hashes `(path relative to `dir`, blake3(contents))` for every `.hs` file,
+/// in sorted order, so the same content at two different absolute paths — the
+/// repo `haskell/lib` the stamp is written from and the materialized bundle a
+/// deployed server resolves — fingerprints identically.
+///
+/// **The filter mirrors `tidepool/build.rs`'s embed filter exactly**: `.hs`
+/// only, skipping the `Internal/` probe and the `Prelude_cbor/` build
+/// artifacts. If that filter changes, this must change with it, or a deployed
+/// server will report skew against its own bundle.
+#[must_use]
+pub fn stdlib_fingerprint(dir: &Path) -> String {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_stdlib_files(dir, dir, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(files.len() as u64).to_le_bytes());
+    for (rel, abs) in &files {
+        hasher.update(&(rel.len() as u64).to_le_bytes());
+        hasher.update(rel.as_bytes());
+        match std::fs::read(abs) {
+            Ok(bytes) => hasher.update(blake3::hash(&bytes).as_bytes()),
+            Err(_) => hasher.update(b"<unreadable>"),
+        };
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Excluded directory names — kept in lockstep with `tidepool/build.rs`.
+const STDLIB_SKIP_DIRS: [&str; 2] = ["Internal", "Prelude_cbor"];
+
+fn collect_stdlib_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if STDLIB_SKIP_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            collect_stdlib_files(root, &path, out);
+        } else if path.extension().is_some_and(|e| e == "hs") {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push((rel.to_string_lossy().replace('\\', "/"), path.clone()));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The deploy stamp + handshake
+// ---------------------------------------------------------------------------
+
+/// Wire-format version of the stamp. Bump when the compared fields change; a
+/// stamp with a different schema is treated as absent (warn, don't fail — an
+/// old stamp must not brick a newer server).
+pub const STAMP_SCHEMA: u32 = 1;
+
+/// The (extract, stdlib) pair that was last deployed together.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolchainStamp {
+    /// [`STAMP_SCHEMA`] at write time.
+    pub schema: u32,
+    /// [`extract_fingerprint`] of the deployed extract.
+    pub extract: String,
+    /// [`stdlib_fingerprint`] of the deployed stdlib tree.
+    pub stdlib: String,
+    /// Informational: where the extract was when the stamp was written.
+    pub extract_path: String,
+    /// Informational: where the stdlib was when the stamp was written.
+    pub stdlib_path: String,
+    /// Informational: what wrote it (binary name + version).
+    pub written_by: String,
+}
+
+/// Where the deploy stamp lives: `$TIDEPOOL_TOOLCHAIN_STAMP`, else
+/// `<cache_dir>/toolchain-stamp.json`.
+///
+/// It sits in the cache root deliberately: `scripts/redeploy.sh` clears that
+/// root and then rewrites the stamp, so a hand-cleared cache degrades to
+/// "no stamp" (a warning) rather than to a stale stamp (a false alarm).
+#[must_use]
+pub fn stamp_path() -> PathBuf {
+    if let Some(p) = std::env::var_os(ENV_STAMP) {
+        return PathBuf::from(p);
+    }
+    crate::paths::cache_dir().join("toolchain-stamp.json")
+}
+
+/// Read the stamp. `Ok(None)` when there is none, or when it is unreadable /
+/// written by a different [`STAMP_SCHEMA`] — both mean "nothing to compare
+/// against", never "fail".
+///
+/// # Errors
+/// Never returns `Err` today; the signature is `Result` so a future strict
+/// mode can distinguish "absent" from "corrupt" without a breaking change.
+pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<ToolchainStamp>(&text) {
+        Ok(s) if s.schema == STAMP_SCHEMA => Ok(Some(s)),
+        _ => Ok(None),
+    }
+}
+
+/// Fingerprint `extract` + `stdlib` and write the stamp to [`stamp_path`].
+/// Called by `scripts/redeploy.sh` via `tidepool --write-toolchain-stamp`, so
+/// the writer and the checker share one implementation and cannot drift.
+///
+/// # Errors
+/// [`ToolchainError::Stamp`] if the stamp cannot be created or written.
+pub fn write_stamp(extract: &Path, stdlib: &Path) -> Result<ToolchainStamp, ToolchainError> {
+    let stamp = ToolchainStamp {
+        schema: STAMP_SCHEMA,
+        extract: extract_fingerprint(extract),
+        stdlib: stdlib_fingerprint(stdlib),
+        extract_path: extract.display().to_string(),
+        stdlib_path: stdlib.display().to_string(),
+        written_by: format!("tidepool {}", env!("CARGO_PKG_VERSION")),
+    };
+    let path = stamp_path();
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&stamp)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, json)
+    };
+    write().map_err(|source| ToolchainError::Stamp {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(stamp)
+}
+
+/// Which side of the pair moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkewSide {
+    /// The extract binary differs from the deployed one.
+    Extract,
+    /// The stdlib tree differs from the deployed one.
+    Stdlib,
+}
+
+/// A detected extract/stdlib skew, rendered as the operator-facing message.
+#[derive(Debug, Clone)]
+pub struct SkewReport {
+    /// Which side(s) moved.
+    pub sides: Vec<SkewSide>,
+    /// The extract path in use now.
+    pub extract_path: PathBuf,
+    /// The stdlib path in use now.
+    pub stdlib_path: PathBuf,
+    /// The stamp that was compared against.
+    pub stamp: ToolchainStamp,
+    /// Fingerprint of the extract in use now.
+    pub extract_now: String,
+    /// Fingerprint of the stdlib in use now.
+    pub stdlib_now: String,
+}
+
+impl std::fmt::Display for SkewReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "toolchain skew: the extract binary and the Haskell stdlib in use were not deployed together."
+        )?;
+        for side in &self.sides {
+            match side {
+                SkewSide::Extract => writeln!(
+                    f,
+                    "  extract CHANGED: {} (now {}, deployed {})",
+                    self.extract_path.display(),
+                    short(&self.extract_now),
+                    short(&self.stamp.extract),
+                )?,
+                SkewSide::Stdlib => writeln!(
+                    f,
+                    "  stdlib  CHANGED: {} (now {}, deployed {})",
+                    self.stdlib_path.display(),
+                    short(&self.stdlib_now),
+                    short(&self.stamp.stdlib),
+                )?,
+            }
+        }
+        write!(
+            f,
+            "Running this pair produces wrong answers at eval time (unresolved imports, \
+             malformed extract metadata) rather than a clean error. Fix it with `{REDEPLOY}`, \
+             which moves the extract, both servers, and the stdlib together and rewrites the \
+             stamp. To run a deliberately mixed pair (e.g. testing a worktree extract), set \
+             {ENV_HANDSHAKE}=warn."
+        )
+    }
+}
+
+fn short(hex: &str) -> &str {
+    &hex[..hex.len().min(12)]
+}
+
+/// What [`check_handshake`] found.
+#[derive(Debug, Clone)]
+pub enum HandshakeOutcome {
+    /// Fingerprints match the stamp.
+    Match,
+    /// No usable stamp — nothing was ever deployed through `scripts/redeploy.sh`
+    /// on this machine (or the cache was cleared since). Informational only.
+    NoStamp {
+        /// Where the stamp was looked for.
+        path: PathBuf,
+    },
+    /// The pair in use is not the pair that was deployed.
+    Skew(Box<SkewReport>),
+}
+
+/// Compare the located toolchain against the deploy stamp. Pure detection —
+/// [`enforce_handshake`] applies the severity policy.
+///
+/// # Errors
+/// [`ToolchainError::Stamp`] only if the stamp becomes unreadable in a way
+/// [`read_stamp`] cannot degrade past (currently unreachable).
+pub fn check_handshake(
+    extract: &Path,
+    stdlib: &Path,
+) -> Result<HandshakeOutcome, ToolchainError> {
+    let path = stamp_path();
+    let Some(stamp) = read_stamp(&path)? else {
+        return Ok(HandshakeOutcome::NoStamp { path });
+    };
+
+    let extract_now = extract_fingerprint(extract);
+    let stdlib_now = stdlib_fingerprint(stdlib);
+    let mut sides = Vec::new();
+    if extract_now != stamp.extract {
+        sides.push(SkewSide::Extract);
+    }
+    if stdlib_now != stamp.stdlib {
+        sides.push(SkewSide::Stdlib);
+    }
+    if sides.is_empty() {
+        return Ok(HandshakeOutcome::Match);
+    }
+    Ok(HandshakeOutcome::Skew(Box::new(SkewReport {
+        sides,
+        extract_path: extract.to_path_buf(),
+        stdlib_path: stdlib.to_path_buf(),
+        stamp,
+        extract_now,
+        stdlib_now,
+    })))
+}
+
+/// Handshake severity, from `$TIDEPOOL_TOOLCHAIN_HANDSHAKE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeSeverity {
+    /// Default: a skew aborts startup.
+    Error,
+    /// Log the skew and continue — the escape hatch for deliberately testing a
+    /// worktree extract against an installed server.
+    Warn,
+    /// Skip the check entirely (also skips the fingerprint work).
+    Off,
+}
+
+impl HandshakeSeverity {
+    /// Read `$TIDEPOOL_TOOLCHAIN_HANDSHAKE`. An unrecognized value is `Error`:
+    /// a typo must not silently disable the check.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var(ENV_HANDSHAKE).unwrap_or_default().as_str() {
+            "warn" => Self::Warn,
+            "off" => Self::Off,
+            _ => Self::Error,
+        }
+    }
+}
+
+/// Run the startup handshake and apply the severity policy. Call once, at
+/// server startup, after the toolchain is located — never per-eval.
+///
+/// Returns the outcome so the caller can log the non-fatal cases with its own
+/// subscriber (this crate stays quiet by default).
+///
+/// # Errors
+/// [`ToolchainError::Skew`] when a skew is detected and severity is
+/// [`HandshakeSeverity::Error`].
+pub fn enforce_handshake(
+    extract: &Path,
+    stdlib: &Path,
+) -> Result<HandshakeOutcome, ToolchainError> {
+    let severity = HandshakeSeverity::from_env();
+    if severity == HandshakeSeverity::Off {
+        return Ok(HandshakeOutcome::NoStamp {
+            path: stamp_path(),
+        });
+    }
+    let outcome = check_handshake(extract, stdlib)?;
+    match (&outcome, severity) {
+        (HandshakeOutcome::Skew(report), HandshakeSeverity::Error) => {
+            Err(ToolchainError::Skew((**report).clone()))
+        }
+        _ => Ok(outcome),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_stdlib(root: &Path, prelude_body: &str) {
+        let tp = root.join("Tidepool");
+        std::fs::create_dir_all(tp.join("Internal")).unwrap();
+        std::fs::write(tp.join("Prelude.hs"), prelude_body).unwrap();
+        std::fs::write(tp.join("Table.hs"), "module Tidepool.Table where\n").unwrap();
+        // Excluded by the filter — must not move the fingerprint.
+        std::fs::write(tp.join("Internal").join("Probe.hs"), "probe\n").unwrap();
+        std::fs::write(tp.join("notes.txt"), "not haskell\n").unwrap();
+    }
+
+    /// The fingerprint is content-addressed, not path-addressed: the same tree
+    /// materialized at two paths (repo vs bundle) must compare equal, or every
+    /// deployed server would report skew against its own bundle.
+    #[test]
+    fn stdlib_fingerprint_is_path_independent() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        write_stdlib(a.path(), "module Tidepool.Prelude where\n");
+        write_stdlib(b.path(), "module Tidepool.Prelude where\n");
+        assert_eq!(
+            stdlib_fingerprint(a.path()),
+            stdlib_fingerprint(b.path()),
+            "same content at different paths must fingerprint identically"
+        );
+    }
+
+    /// A content edit to any shipped `.hs` moves the fingerprint; an edit to a
+    /// filtered-out file does not (it is not part of what ships).
+    #[test]
+    fn stdlib_fingerprint_tracks_shipped_content_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_stdlib(dir.path(), "module Tidepool.Prelude where\n");
+        let base = stdlib_fingerprint(dir.path());
+
+        std::fs::write(
+            dir.path().join("Tidepool").join("Internal").join("Probe.hs"),
+            "different probe\n",
+        )
+        .unwrap();
+        assert_eq!(
+            base,
+            stdlib_fingerprint(dir.path()),
+            "Internal/ is excluded from the embed, so it must not move the fingerprint"
+        );
+
+        std::fs::write(
+            dir.path().join("Tidepool").join("Prelude.hs"),
+            "module Tidepool.Prelude where\nnewThing = ()\n",
+        )
+        .unwrap();
+        assert_ne!(
+            base,
+            stdlib_fingerprint(dir.path()),
+            "a shipped stdlib edit must move the fingerprint"
+        );
+    }
+
+    #[test]
+    fn is_stdlib_root_probes_prelude() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(!is_stdlib_root(dir.path()));
+        write_stdlib(dir.path(), "module Tidepool.Prelude where\n");
+        assert!(is_stdlib_root(dir.path()));
+    }
+}

@@ -82,39 +82,68 @@ fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 /// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
 /// If the resolved path is a shell wrapper script (e.g. ~/.cargo/bin/tidepool-extract),
 /// also fingerprints the target binary it delegates to (e.g. ~/.local/bin/tidepool-extract-bin).
+///
+/// The binary is located by [`crate::toolchain::extract_command_name`] — the one
+/// locator — so the cache key, the spawn, and the startup handshake all
+/// fingerprint the SAME file.
 fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
-    let bin_name =
-        std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
+    let bin_name = crate::toolchain::extract_command_name();
 
     if let Ok(path) = which::which(&bin_name) {
         fingerprint_single_binary(hasher, &path);
-
-        // If this looks like a shell wrapper script, also fingerprint the target binary.
-        if let Ok(contents) = fs::read_to_string(&path) {
-            if contents.len() < 4096 && (contents.starts_with("#!") || contents.contains("exec ")) {
-                for line in contents.lines() {
-                    if let Some(target) = extract_exec_target(line.trim()) {
-                        let target_path = PathBuf::from(target);
-                        if target_path.exists() {
-                            if let Ok(resolved) = fs::canonicalize(&target_path) {
-                                fingerprint_single_binary(hasher, &resolved);
-                            }
-                        }
-                    }
-                }
-            }
+        for target in wrapper_targets(&path) {
+            fingerprint_single_binary(hasher, &target);
         }
     }
 }
 
-/// Fingerprints a single binary by path and CONTENT hash.
+/// If `path` is a short shell wrapper script, the absolute binaries it `exec`s.
+/// Empty for a real binary. An unfollowed wrapper target means delegate binary
+/// upgrades silently serve stale Core — see [`extract_exec_target`] for the
+/// known gap in what a text scanner can resolve.
+pub(crate) fn wrapper_targets(path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(contents) = fs::read_to_string(path) else {
+        return out;
+    };
+    if contents.len() >= 4096 || !(contents.starts_with("#!") || contents.contains("exec ")) {
+        return out;
+    }
+    for line in contents.lines() {
+        if let Some(target) = extract_exec_target(line.trim()) {
+            let target_path = PathBuf::from(target);
+            if target_path.exists() {
+                if let Ok(resolved) = fs::canonicalize(&target_path) {
+                    out.push(resolved);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fingerprints a single binary by path and CONTENT hash: the path is framed
+/// into `hasher` (so the same content at two paths is two cache keys), then the
+/// memoized [`binary_content_hash`].
+fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
+    frame(hasher, path.as_os_str().as_encoded_bytes());
+    hasher.update(&binary_content_hash(path));
+}
+
+/// Memoized blake3 of a binary's CONTENT — no path mixed in, so callers that
+/// must compare the same binary across install locations (the toolchain
+/// handshake) get a stable value.
 ///
 /// (size, mtime) alone is blind to same-size content swaps, and the nix store
 /// normalizes ALL mtimes to epoch+1, so for nix-deployed toolchains only
 /// content distinguishes versions. Content is blake3-hashed, memoized per
-/// (path, size, mtime) so each binary is read once per change per process
-/// (~100ms for a GHC-sized binary, amortized to zero).
-fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
+/// (path, size, dev, ino, ctime) so each binary is read once per change per
+/// process (~100ms for a GHC-sized binary, amortized to zero), and once per
+/// change per MACHINE via the sidecar below.
+///
+/// An unreadable path hashes to all-zeroes: a missing binary is a distinct,
+/// stable value rather than a panic or a silently-skipped input.
+pub(crate) fn binary_content_hash(path: &Path) -> [u8; 32] {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -127,9 +156,8 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
     type MemoKey = (PathBuf, u64, u64, u64, i64, i64);
     static MEMO: OnceLock<Mutex<HashMap<MemoKey, [u8; 32]>>> = OnceLock::new();
 
-    frame(hasher, path.as_os_str().as_encoded_bytes());
     let Ok(meta) = fs::metadata(path) else {
-        return;
+        return [0u8; 32];
     };
     let key: MemoKey = {
         use std::os::unix::fs::MetadataExt;
@@ -225,7 +253,7 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
             h
         }
     };
-    hasher.update(&content_hash);
+    content_hash
 }
 
 /// Extracts an absolute path from a shell exec line.

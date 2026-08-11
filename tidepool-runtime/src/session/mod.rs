@@ -46,31 +46,30 @@ pub use render::{
     subtract_import_list_names, DeclLog, DeclTurn, ExportItem, ModuleEnv, RenderedModule,
 };
 
-/// Derive the `lib/` directory that holds Tidepool stdlib source files
-/// (e.g. `Tidepool.Data.Text`) by walking the `TIDEPOOL_EXTRACT` path up to the
-/// `dist-newstyle` directory and returning its sibling `lib/`. Returns an empty
-/// vec when the extract is not set or not inside a `dist-newstyle` tree.
-fn derive_stdlib_include() -> Vec<std::path::PathBuf> {
-    let extract = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_default();
-    if extract.is_empty() {
-        return vec![];
+/// The stdlib include dir a candidate gen module needs at validation time, or
+/// `None` when the caller's include path already carries one.
+///
+/// The candidate module imports stdlib sources (`Tidepool.Data.Text`, …), so a
+/// stdlib root must be on the GHC search path or validation fails with a bare
+/// "Could not find module" that reads like the user's declaration is wrong.
+/// Production callers pass the server's stdlib dir through
+/// [`SessionLib::with_validation_include`]; when they haven't, fall back to the
+/// one locator ([`crate::toolchain::locate_stdlib`]).
+///
+/// This replaced a silent `Vec::new()` on failure: a missing stdlib is a
+/// CONFIGURATION error and now says so, instead of surfacing as a downstream
+/// GHC scope error.
+fn stdlib_include_for_validation(
+    include: &[PathBuf],
+) -> Result<Option<PathBuf>, crate::toolchain::ToolchainError> {
+    if include
+        .iter()
+        .any(|d| crate::toolchain::is_stdlib_root(d))
+    {
+        return Ok(None);
     }
-    let mut path = std::path::PathBuf::from(extract);
-    loop {
-        if path.file_name().and_then(|n| n.to_str()) == Some("dist-newstyle") {
-            if let Some(parent) = path.parent() {
-                let lib = parent.join("lib");
-                if lib.is_dir() {
-                    return vec![lib];
-                }
-            }
-            break;
-        }
-        if !path.pop() {
-            break;
-        }
-    }
-    vec![]
+    crate::toolchain::locate_stdlib(&crate::toolchain::StdlibFallbacks::default())
+        .map(|loc| Some(loc.dir))
 }
 
 /// Mirrors `tidepool-harness/src/timing.rs`'s `record_stage` event shape
@@ -124,6 +123,10 @@ pub enum SessionError {
     /// `FailureClass::VersionSkew`).
     #[error("malformed extract diagnostics: {0}")]
     MalformedDiagnostics(String),
+    /// The toolchain itself is misconfigured — no extract, no stdlib, or a
+    /// skewed extract/stdlib pair. Never caused by the user's declaration.
+    #[error("toolchain: {0}")]
+    Toolchain(#[from] crate::toolchain::ToolchainError),
 }
 
 /// [`crate::CompileError`] → [`SessionError`]: an environment problem stays
@@ -532,6 +535,11 @@ impl SessionLib {
         let wrapper_path = temp.path().join("TidepoolValidate.hs");
         std::fs::write(&wrapper_path, &wrapper_src)?;
 
+        // The candidate imports stdlib sources; resolve the include BEFORE
+        // spawning so a misconfigured toolchain is a typed configuration error
+        // rather than a GHC "Could not find module" blamed on the declaration.
+        let stdlib_include = stdlib_include_for_validation(&self.extra_include)?;
+
         // A misconfigured $TIDEPOOL_EXTRACT is the same environment problem a
         // spawn failure is (`Io` → Infra), never the user's declaration.
         let mut cmd = ExtractCmd::new().map_err(|e| SessionError::Io(e.into()))?;
@@ -545,11 +553,7 @@ impl SessionLib {
         // decl importing `Tidepool.Effects` resolves at validation time.
         cmd.includes(&self.extra_include);
 
-        // The candidate module imports stdlib sources (e.g. Tidepool.Data.Text)
-        // that live next to `dist-newstyle` in the project tree. Auto-discover
-        // that sibling `lib/` from TIDEPOOL_EXTRACT's path so validation finds
-        // them without any extra configuration.
-        cmd.includes(derive_stdlib_include());
+        cmd.includes(stdlib_include);
 
         if !inject_modules.is_empty() {
             // `--inject-val` ifaces are looked up under `--session-root`
