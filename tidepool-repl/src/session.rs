@@ -4182,50 +4182,44 @@ mod turn_template_byte_identity_tests {
         }
     }
 
+    /// Four turn-text shapes: a plain single bind, a single bind whose text
+    /// begins with `let ` (Part 2's named case — `push_braced_stmt`'s
+    /// layout-safe `let { … }` rewrite before splicing into the `do` block,
+    /// which a verbatim `{{TURN}}` splice cannot reproduce; `{{TURN_STMT}}`
+    /// applies the identical normalization), and the same two shapes for a
+    /// multi-bind pattern (`wrap_multi_bind_source` also routes through
+    /// `push_braced_stmt`).
     #[test]
-    fn single_bind_matches_wrap_bind_source() {
-        let turn_text = "x <- pure 1";
-        let expected = wrap_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, "x", None);
-        let template = single_bind_template();
-        let actual = render_template(&template.source, turn_text, &["x".to_string()]);
-        assert_eq!(actual, expected);
-    }
+    fn turn_text_matches_wrap_source() {
+        let cases: Vec<(&str, &str, Vec<String>)> = vec![
+            ("x <- pure 1", "single", vec!["x".to_string()]),
+            ("let y = 2", "single", vec!["y".to_string()]),
+            (
+                "(a, b) <- pure (1, 2)",
+                "multi",
+                vec!["a".to_string(), "b".to_string()],
+            ),
+            (
+                "let (a, b) = (1, 2)",
+                "multi",
+                vec!["a".to_string(), "b".to_string()],
+            ),
+        ];
 
-    /// The case Part 2 calls out by name: a bind turn whose text begins with
-    /// `let ` goes through `push_braced_stmt`'s layout-safe `let { … }`
-    /// rewrite before being spliced into the `do` block — a verbatim
-    /// `{{TURN}}` splice cannot reproduce that (a `let` at column 1 would
-    /// break the block's layout). `{{TURN_STMT}}` applies the identical
-    /// normalization, so this matches.
-    #[test]
-    fn single_bind_let_at_column_1_matches_wrap_bind_source() {
-        let turn_text = "let y = 2";
-        let expected = wrap_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, "y", None);
-        let template = single_bind_template();
-        let actual = render_template(&template.source, turn_text, &["y".to_string()]);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn multi_bind_matches_wrap_multi_bind_source() {
-        let turn_text = "(a, b) <- pure (1, 2)";
-        let names = vec!["a".to_string(), "b".to_string()];
-        let expected = wrap_multi_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, &names, None);
-        let template = multi_bind_template();
-        let actual = render_template(&template.source, turn_text, &names);
-        assert_eq!(actual, expected);
-    }
-
-    /// `wrap_multi_bind_source` also routes through `push_braced_stmt` — the
-    /// `let`-at-column-1 layout fix applies to a multi-binder `let` pattern
-    /// bind too.
-    #[test]
-    fn multi_bind_let_at_column_1_matches_wrap_multi_bind_source() {
-        let turn_text = "let (a, b) = (1, 2)";
-        let names = vec!["a".to_string(), "b".to_string()];
-        let expected = wrap_multi_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, &names, None);
-        let template = multi_bind_template();
-        let actual = render_template(&template.source, turn_text, &names);
-        assert_eq!(actual, expected);
+        for (turn_text, kind, names) in cases {
+            let (template, expected) = if kind == "single" {
+                (
+                    single_bind_template(),
+                    wrap_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, &names[0], None),
+                )
+            } else {
+                (
+                    multi_bind_template(),
+                    wrap_multi_bind_source(PREAMBLE, EFFECT_STACK, "", turn_text, &names, None),
+                )
+            };
+            let actual = render_template(&template.source, turn_text, &names);
+            assert_eq!(actual, expected, "turn_text: {turn_text:?}");
+        }
     }
 }
