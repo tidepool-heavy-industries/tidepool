@@ -165,20 +165,28 @@ covers. S8 is a shell caller and stays one.
 - **Writer:** `encodeTurnOut` (`CborEncode.hs:164-182`) — a tagged 2-element
   list, `"Decl"`/`"Bind"`/`"Expr"`, deliberately *outside* the TPLR format
   (`CborEncode.hs:156-161`: "no TPLR header, no version coupling"). Written at
-  `Main.hs:912-914`. The optional JSON rendering is `renderTurnOutJson`
-  (`Binders.hs:427-441`), written at `Main.hs:917`.
+  `Main.hs:912-914`. (As of this branch's tip the optional JSON rendering,
+  `renderTurnOutJson`, is gone — see the FINDING below.)
 - **Consumer of `turn.cbor`:** S3 only — `decode_turn_out` (`turn.rs:511`,
   decoders at `turn.rs:733-782`).
-- **FINDING — `--json-output` has NO CONSUMER.** No Rust call site passes the
-  flag (grep over the workspace: the only hits are `Main.hs:241`, `:915-919`,
-  `Binders.hs:406`, and `plans/one-spawn-turn-protocol.md`). It is a
-  hand-maintained second serializer of a wire type, kept in sync by hand, that
-  nothing reads. `plans/one-spawn-turn-protocol.md:679` already says as much:
-  *"`--json-output` proves nothing."*
+- **FINDING — `--json-output` has NO CONSUMER.** No Rust call site passed the
+  flag (grep over the workspace at the time of this finding: the only hits
+  were `Main.hs:241`, `:915-919`, `Binders.hs:406`, and
+  `plans/one-spawn-turn-protocol.md`). It was a hand-maintained second
+  serializer of a wire type, kept in sync by hand, that nothing read.
+  `plans/one-spawn-turn-protocol.md:679` already said as much: *"`--json-output`
+  proves nothing."* **DELETED** (`deadchannels` lane, 2026-08-10) — see §7.0's
+  fate table. `argJsonOutput`, its parse arm, its usage-banner mention, the
+  `runTurnMode` write site, `renderTurnOutJson`, and the two helpers that
+  turned out to serve nothing else (`renderItem`, `jsonStringList`) are gone;
+  `renderBoundBinderJson` and `renderAskJson` stayed — channels 5 and 4 still
+  read them. `turn.cbor`/`encodeTurnOut`/`decode_turn_out` are untouched and
+  stay live until M3 absorbs them into `manifest.turn`.
 - **RELATED FINDING — `--harness-profile` has NO Rust consumer** either
   (`Main.hs:246`, `:69-71`, `:130-139`); nothing in the workspace passes it.
-  Out of this doc's scope to remove — noted so a future sweep does not mistake
-  it for live surface.
+  Not one of the nine channels (it is an input flag that changes what gets
+  compiled, not an output the manifest would describe), but §7.0's fate table
+  gives it a named wave anyway so it does not linger as an unresolved finding.
 
 ### Channel 8 — timing lines on stderr
 
@@ -775,6 +783,94 @@ and `sentinels` have folded** — M2 in particular edits the write paths
 `writepaths` owns, and every Rust-side change lands through
 `tidepool-extract-cmd` (D-A) rather than at open-coded spawn sites.
 
+### 7.0 The nine-channel fate table — no survival without a consumer
+
+**Invariant, stated explicitly:** every one of the nine channels inventoried
+in §1 has exactly one fate — ABSORBED into the manifest in a named wave, or
+DELETED in a named wave. A channel may not survive past the final wave (M7)
+without a named production consumer; a channel whose disposition is still
+open blocks M7's closure rather than being left as a standing "no consumer"
+finding for the next sweep to rediscover.
+
+| # | Channel | Fate | Wave |
+|---|---|---|---|
+| 1 | Diagnostics JSON on stdout | **ABSORBED** — this channel does not move; it *is* the manifest's carrier. `manifest` is added beside the unchanged `diagnostics` key (§0, §3.1). | M1 |
+| 2 | Per-binding CBOR trees, percent-encoded filenames | **ABSORBED** — tree bytes stay files forever (§5.1: size, cache, byte-pin arguments). Their name/byte-count/node-count/target/asks are named as `artifacts[]` entries (`role: "tree"`), deleting every Rust-side filename reconstruction. | M2 |
+| 3 | Merged `meta.cbor` | **ABSORBED** (listing only) — the `DataConTable`/warnings-map bytes stay a file forever, by the deliberate control-plane/program-plane split (§5.2); the manifest never mirrors that content. Its existence/path/byte-count is named as an `artifacts[]` entry (`role: "metadata"`). | M2 |
+| 4 | `asks.json` / `<target>.asks.json` | **ABSORBED** into `artifacts[].asks`, per-tree — ends both the write-but-never-read duplication on the `--turn` path and the parallel `targets.len() > 1` shape inference duplicated in both languages. | M2 |
+| 5 | `bound_binders.json` (`--emit-bound-binders`) | **ABSORBED** into `session.bound`. | M2 |
+| 6 | `classify.json` (`--classify-out`) | **ABSORBED** into `classify.verdicts`; the count-mismatch hard-fail is preserved verbatim (§3.4). | M2 |
+| 7 | `turn.cbor` (`--turn-out`) + `--json-output` | **SPLIT fate.** `--json-output`: **DELETED** — done (`deadchannels` lane, this commit; see the amended Channel 7 finding in §1). `turn.cbor`/`encodeTurnOut`/`decode_turn_out`: **ABSORBED** into `manifest.turn.verdict`/`.template`/`.out`, then the CBOR encoder/decoder pair is deleted outright (M3's acceptance criterion). | done / M3 |
+| 8 | Timing lines on stderr | **ABSORBED** into `phases[]`; both hand-rolled forwarders (`forward_extract_timing`, `ExtractTiming::parse`) are deleted. The stderr lines themselves are not deleted (§5.4) — they stay as the debug aid for a hung or killed extract that never emits a manifest. | M5 |
+| 9 | Loud human stderr that is also machine-read (POISONED, SKIPPED ×2, D1 CHECK B, `Wrote:`, `Processing:`, `Top-level bindings:`) | **ABSORBED** into `notes[]` (`poisoned-external` / `skipped-binder` / `meta-coverage-gap` / `unresolved-external`). Every stderr line stays (§5.4); the manifest adds a structured companion, it does not silence the terminal. | M6 |
+
+Three items root named explicitly, so their disposition is recorded here
+rather than left to be re-derived:
+
+- **`--json-output`** — channel 7's JSON half. DELETED, done, this lane
+  (piece 1 of this commit set). Not scheduled — already landed. The CBOR half
+  of channel 7 is untouched and stays live until M3.
+- **`--harness-profile`, the `--all-closed` SKIPPED lines, and the `Wrote:`
+  lines** — root's instruction was explicit: no piecemeal deletion now, each
+  gets a named wave instead of standing as an open finding.
+  - The two SKIPPED lines (`Main.hs:322`, `:340`) are channel 9 rows —
+    **ABSORBED** as `notes[kind="skipped-binder"]`, wave **M6**, same as every
+    other channel-9 line.
+  - The `Wrote:` lines are channel 2/4's rows — their informational content
+    (path/bytes/nodes) is **ABSORBED** into `artifacts[]`, wave **M2** (§3.2's
+    heading already says this: *"artifacts\[\] — absorbs channels 2, 4 (and
+    the `Wrote:` stderr lines)"*). The stderr text itself is unaffected.
+  - **`--harness-profile`** is not one of the nine channels — it is an input
+    flag that changes what source gets compiled, not an output the manifest
+    describes — but it carries the same "no consumer" finding, so it gets a
+    disposition rather than staying an open note. M7's old text punted this
+    ("a different lane's call"); that punt is replaced below: **DELETED,
+    folded into M7**, the wave that already retires every other flag this
+    finding turned up dead.
+
+**D1 CHECK B — a silent-negative bug, not merely a dead channel.** Per root's
+framing, this is "a REAL FINDING to escalate" with no assertable field today
+— the same family as codex items 16 and 20. Its field is
+`notes[kind="meta-coverage-gap"]`, landing in **M6** (§3.7). M6 is wave 6 of
+7 — far out enough that root's rule applies: *"an interim machine-readable
+line is acceptable — but the doc must SAY WHICH it is choosing."* **Choosing
+the interim:** the existing stderr line already carries a stable, greppable
+prefix — `"D1 CHECK B (independent reachable-Core subset) DIAGNOSTIC for
+binder <name>: …"` (`Main.hs:730`, unchanged by this lane) — and that prefix
+is the sanctioned interim signal, grep-anchored on the literal string
+`"D1 CHECK B"`, until `notes[kind="meta-coverage-gap"]` lands in M6. This is a
+stated choice, not an implied one: no new code ships to make it more
+machine-readable before M6; the existing prefix is judged sufficient as a
+bridge.
+
+**`[extract] POISONED` — KEEPS, and gains a field in the same wave as the
+rest of channel 9.** Operator-facing and test-pinned
+(`extract_poison_diagnostic.rs:69, 134`), so the stderr line is never a
+deletion candidate. It gains `notes[kind="poisoned-external"]` in **M6**,
+the same wave every other channel-9 line absorbs into — `slots` carries
+D-C's per-target slot ids so a note and `meta.cbor`'s `poisoned` map join on
+the same key (§3.7's table already specifies this).
+
+**BOUND follow-up, not yet assigned a wave number: hash-derived poison
+slots.** D-E (`plans/post-restart/extract-manifest.md`) found that poison
+slots are per-target counters while `--targets` shares one merged
+`meta.cbor`, so two targets can legitimately assign the SAME slot to
+DIFFERENT externals; `Main.mergePoisonedTables` drops a non-unanimous slot
+rather than guessing. Deriving the slot from a hash of the qualified name
+instead of a counter fixes this at the source (same symbol ⇒ same slot
+across every target) and deletes `mergePoisonedTables` entirely. This costs
+a wire re-bump (D-D's minor-bump discipline), so it is BOUND, explicitly, to
+ride in the SAME fixture-regen cycle as whichever wave next changes
+`meta.cbor`'s wire bytes. No wave in M1-M7 above touches `meta.cbor`'s
+content (§5.2 keeps it deliberately untouched throughout this manifest
+project), so this follow-up has no wave number yet — it is a standing BOUND
+constraint on the next lane that does open `meta.cbor`'s wire format for any
+reason: that lane must land the hash-slot fix in the same commit/fixture-regen
+cycle, not as a trailing follow-up PR. Fixture regeneration is a
+root-sequenced action (D-D's STOP CONDITION), never a lane's own call to
+make — the lane that eventually does this still stops and asks root to
+sequence the regen, same as every other fixture-touching change.
+
 ### M1 — manifest skeleton + version handshake
 
 Emit `manifest` with `major/minor/mode/status/output_dir` and an empty
@@ -850,18 +946,22 @@ Populate `notes[]` for `poisoned-external`, `skipped-binder`,
 
 ### M7 — retire the absorbed channels
 
-Delete `--json-output` (no consumer, §1 channel 7), `--classify-out`,
-`--emit-bound-binders`, `--turn-out`, `renderTurnOutJson`,
-`renderBoundBindersJson`, `renderVerdictsJson`, `renderAsksJson`, and the
-`asks.json` / `<target>.asks.json` writes. Update the usage banner
+`--json-output` is already gone (§7.0; done in the `deadchannels` lane ahead
+of this wave). This wave deletes what M2-M6 leave dual-written: `--classify-out`,
+`--emit-bound-binders`, `--turn-out`, `renderBoundBindersJson`,
+`renderVerdictsJson`, `renderAsksJson`, and the `asks.json` /
+`<target>.asks.json` writes. It also deletes **`--harness-profile`**
+(§7.0 — folded in here rather than left an open finding: nothing in the
+workspace passes it, same "no consumer" shape as every other flag this wave
+retires) and `spliceHarnessProfilePragma`. Update the usage banner
 (`Main.hs:74`). Extend `redeploy.sh`'s post-upgrade probe per §6.4.
 
 > **Acceptance:** the property, not the count — no file is written by the
 > extractor that no consumer reads, asserted as a test that runs each mode into
 > a temp dir and checks every produced file against the manifest's
-> `artifacts[].path` set. `--harness-profile`'s absent consumer (§1) is
-> *reported*, not removed: it is a compilation-profile flag, not a channel, and
-> deleting it is a different lane's call.
+> `artifacts[].path` set. `--harness-profile` is removed outright this wave —
+> confirm zero references remain (flag parse, usage banner, the splice
+> function) the same way `--json-output`'s removal was confirmed (§7.0).
 
 ---
 
