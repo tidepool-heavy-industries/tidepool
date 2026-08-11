@@ -48,7 +48,7 @@
 # So neither command is unconditionally GHC-free, and neither takes a
 # ghc-slots slot. What bounds it is the macro's own content-addressed cache
 # (`<crate>/target/tidepool-cbor/<basename>-<key>`, keyed on source bytes +
-# target binding + transitive .hs deps): 14 macro invocations across the four
+# target binding + transitive .hs deps): 11 macro invocations across the four
 # expanding targets (tidepool-macro/tests/{basic,hs_eval}.rs,
 # examples/{guess,tide}) collapse to 5 distinct keys — measured, 3 + 1 + 1
 # cache dirs. That cache is gitignored and lives under each CRATE's own
