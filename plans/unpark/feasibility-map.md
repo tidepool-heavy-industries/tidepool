@@ -280,5 +280,39 @@ over commenting it.** The stash is the one place that instinct is held back,
 and only for sequencing.
 
 Fold receipts therefore owe: repl 203/203, harness `golden_path`, clippy zero,
-the removed-line count MEASURED not estimated, and one line stating whether
-step 2 landed or was dropped with the ripple named.
+the removed-line count MEASURED not estimated (moved lines excluded — the
+`worker.rs` → `manager.rs` rename is not a deletion), and one line stating
+whether step 2 landed or was dropped with the ripple named.
+
+### 6.3 Finding: the wedge arm is an old coverage gap over NEW code
+
+Carried up as a wave-B queue item, not a fold blocker.
+
+Nothing drives a session into a genuine `SessionState::Wedged` and then resets
+or reaps it. `timed_out_runaway_self_heals_to_idle` covers only the timeout
+whose abort lands INSIDE the grace window (→ `Idle`, session restored);
+`common/mod.rs` wires `wedged_ttl` but no test reaches the arm. Producing a
+real wedge needs a pure runaway that ignores the JIT cancel through the full
+grace — not reliably or cheaply constructible, and a flaky test there would be
+worse than none.
+
+The gap predates this lane. What is new is the code beneath it: `drive`'s two
+`drop_entry(epoch)` calls and the reaper's `RemoveWedged` are this lane's work,
+replacing a channel teardown that no longer exists. So an old gap has slid over
+new code — which is why it is worth recording rather than filing as
+pre-existing and forgetting.
+
+Bounded mitigation attempted: drive the state machine into `Wedged` directly
+(the technique `a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`
+already uses for a stale epoch) and assert the reclaim path — reset reclaims a
+wedged entry; the reaper sweeps one past TTL. **Hard limit: not at the cost of
+production surface that exists only for tests.** A `pub` setter or a
+`cfg(test)` door into the state machine is a worse trade than a documented gap.
+
+The related invariant IS pinned at the transition level:
+`manager.rs::a_stale_turn_cannot_clobber_a_session_installed_after_a_reset`
+drives the ABA three ways (`drop_entry`, `restore_idle`, `restore_suspended`
+with a stale epoch). Its load-bearing case is `restore_idle`: epoch, entry
+presence and slot state are IDENTICAL whether or not the stale session
+clobbered the fresh one, so session identity is the only observable that
+distinguishes them — every other assertion would pass against a broken guard.
