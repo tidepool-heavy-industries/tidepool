@@ -78,16 +78,19 @@ set -euo pipefail
 #
 # 6-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
 # cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
-# concurrent extracts with every lane compliant at 3x3. Per-run cap is 1
-# (fc3363dc, fleet-verified), so slots = box-wide extract ceiling. 6x1=6,
-# still under the old effective 9. Six rather than four because cap-1's
-# second-order cost is HOLD TIME: an --ignore-default-filter crate run
-# serialises internally and holds one slot for its whole duration (observed
-# 1h43m) while extracting only part of the time — so at equal ceiling, more
-# slots means less head-of-line blocking behind long holds, not more load
-# (a held slot is not a running extract; observed 3-6 extracts across 4
-# held). Keep the product <= ~6 on this box; chase per-worktree cap
-# stragglers rather than lowering this.
+# concurrent extracts with every lane compliant at 3x3. Per-run cap is 2
+# (620b2a63: warm-matched A/B measured -48% shard wall at zero cpu/mem PSI;
+# the ceiling math and receipts live in nextest.toml's comment), so the
+# accepted box-wide ceiling is 6x2=12 — a worst case that needs all six
+# slots simultaneously held by fanning runs, with the MemAvailable gate
+# below as the backstop against a burst tipping into swap-thrash. Six slots
+# rather than four because the second-order cost of fewer slots is HOLD
+# TIME: an --ignore-default-filter crate run serialises internally and holds
+# one slot for its whole duration (observed 1h43m) while extracting only
+# part of the time — so at equal ceiling, more slots means less head-of-line
+# blocking behind long holds, not more load (a held slot is not a running
+# extract; observed 3-6 extracts across 4 held). Raise either factor only
+# with a fresh measurement — the product is the budget.
 SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4 /tmp/tidepool-ghc.slot5)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
