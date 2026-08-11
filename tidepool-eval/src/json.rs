@@ -304,6 +304,169 @@ pub fn json_con_ids() -> Option<JsonConIds> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_repr::DataCon;
+
+    /// Build a DataConTable with all constructors needed for JSON values.
+    fn json_test_table() -> DataConTable {
+        let mut t = DataConTable::new();
+        let cons = [
+            // Value constructors
+            ("Object", 0, 1),
+            ("Array", 1, 1),
+            ("String", 2, 1),
+            ("Number", 3, 1),
+            ("Bool", 4, 1),
+            ("Null", 5, 0),
+            // Map constructors
+            ("Bin", 6, 5),
+            ("Tip", 7, 0),
+            // Bool values
+            ("True", 8, 0),
+            ("False", 9, 0),
+            // List
+            ("[]", 10, 0),
+            (":", 11, 2),
+            // Number carrier: Scientific coefficient×10^exponent (exact)
+            ("Scientific", 1, 2),
+            // Integer constructors for the Scientific coefficient
+            ("IS", 1, 1),
+            ("IP", 2, 1),
+            ("IN", 3, 1),
+            // Text
+            ("Text", 12, 3),
+            // Int boxing
+            ("I#", 13, 1),
+        ];
+
+        for (i, (name, tag, arity)) in cons.iter().enumerate() {
+            t.insert(DataCon {
+                id: DataConId(i as u64),
+                name: (*name).into(),
+                tag: *tag,
+                rep_arity: *arity,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: String::new(),
+            });
+        }
+        t
+    }
+
+    /// `Data.Map` and `Data.Set` both register a bare-name `Tip`; `from_table`
+    /// must still resolve via `get_companion` — the `Tip` that is actually a
+    /// sibling of the resolved `Bin` — not just the first bare-name match.
+    #[test]
+    fn json_con_ids_resolves_tip_companion_over_bare_name_collision() {
+        let mut table = json_test_table();
+        // Add a second "Tip" with a far-away id (simulating Data.Set.Tip).
+        table.insert(DataCon {
+            id: DataConId(500),
+            name: "Tip".into(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: String::new(),
+        });
+        let ids = JsonConIds::from_table(&table).expect("table has all JSON constructors");
+        let json = serde_json::json!({"key": "value"});
+        let val = json_to_value(&json, &ids);
+        match &val {
+            Value::Con(id, _) => assert_eq!(*id, ids.object),
+            other => panic!("expected Con(Object), got {other:?}"),
+        }
+    }
+
+    /// When `Bin`/`Tip` from `Data.Map` AND `Data.Set` are both present with
+    /// qualified names, `from_table` must resolve via the qualified path and
+    /// pick the `Data.Map` pair, not whichever bare name comes first.
+    #[test]
+    fn json_con_ids_resolves_ambiguous_map_constructors_via_qualified_name() {
+        let mut t = DataConTable::new();
+        let cons: &[(&str, u32, u32)] = &[
+            ("Object", 0, 1),
+            ("Array", 1, 1),
+            ("String", 2, 1),
+            ("Number", 3, 1),
+            ("Bool", 4, 1),
+            ("Null", 5, 0),
+            ("True", 8, 0),
+            ("False", 9, 0),
+            ("[]", 10, 0),
+            (":", 11, 2),
+            // Number carrier: Scientific coefficient×10^exponent (exact, BUG-8)
+            ("Scientific", 1, 2),
+            ("IS", 1, 1),
+            ("IP", 2, 1),
+            ("IN", 3, 1),
+            ("Text", 12, 3),
+            ("I#", 13, 1),
+        ];
+        for (i, (name, tag, arity)) in cons.iter().enumerate() {
+            t.insert(DataCon {
+                id: DataConId(i as u64),
+                name: (*name).into(),
+                tag: *tag,
+                rep_arity: *arity,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: String::new(),
+            });
+        }
+        // Data.Map constructors with qualified names
+        t.insert(DataCon {
+            id: DataConId(100),
+            name: "Bin".into(),
+            tag: 1,
+            rep_arity: 5,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Map.Bin".into()),
+            type_name: String::new(),
+        });
+        t.insert(DataCon {
+            id: DataConId(101),
+            name: "Tip".into(),
+            tag: 2,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Map.Tip".into()),
+            type_name: String::new(),
+        });
+        // Data.Set constructors with SAME unqualified names
+        t.insert(DataCon {
+            id: DataConId(200),
+            name: "Bin".into(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Set.Bin".into()),
+            type_name: String::new(),
+        });
+        t.insert(DataCon {
+            id: DataConId(201),
+            name: "Tip".into(),
+            tag: 2,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Set.Tip".into()),
+            type_name: String::new(),
+        });
+
+        let ids = JsonConIds::from_table(&t).expect("table has all JSON constructors");
+        let json = serde_json::json!({"a": 1, "b": 2});
+        let val = json_to_value(&json, &ids);
+        match &val {
+            Value::Con(id, fields) => {
+                assert_eq!(*id, ids.object);
+                // Inner map should use Data.Map.Bin (id=100), not Data.Set.Bin
+                match &fields[0] {
+                    Value::Con(bin_id, _) => assert_eq!(*bin_id, DataConId(100)),
+                    other => panic!("expected Con(Bin), got {other:?}"),
+                }
+            }
+            other => panic!("expected Con(Object), got {other:?}"),
+        }
+    }
 
     /// Naive serde node count (what an approximate guard would use).
     fn serde_nodes(j: &serde_json::Value) -> usize {
