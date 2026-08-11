@@ -17,8 +17,10 @@ use codex_codes::{
     RequestId,
 };
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::backend::codex::transport::Transport;
 
 /// How long a single request is allowed to wait for its matching response.
 /// Phase 3 traffic is metadata-only (no model tokens, no user-facing latency
@@ -31,7 +33,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Which side of the wire produced a [`RecordedFrame`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameDirection {
     ClientToServer,
@@ -41,7 +43,12 @@ pub enum FrameDirection {
 /// One JSONL line observed on the wire, tagged with direction. Stored as a
 /// parsed [`Value`] (not the raw string) so a fixture serializes
 /// deterministically regardless of the sender's key order.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` as well as `Serialize`: recording and REPLAY read the same
+/// type, so a recorded fixture and the replay transport that feeds it back
+/// cannot drift apart in shape
+/// (`crate::backend::codex::replay::TranscriptTransport`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedFrame {
     pub direction: FrameDirection,
     pub frame: Value,
@@ -91,8 +98,13 @@ pub enum SessionError {
 ///
 /// Every frame exchanged over its lifetime is available via
 /// [`Session::frames`], in wire order, for fixture recording.
-pub struct Session {
-    client: RawAsyncClient,
+///
+/// Generic over its [`Transport`], defaulting to the live one — see
+/// [`crate::backend::codex::transport`] for why a default type parameter
+/// rather than a boxed trait object. `Session` with no argument is the live
+/// session, exactly as before.
+pub struct Session<T = RawAsyncClient> {
+    client: T,
     next_id: i64,
     frames: Vec<RecordedFrame>,
     pid: Option<u32>,
@@ -100,7 +112,31 @@ pub struct Session {
     turn: TurnState,
 }
 
-impl Session {
+impl<T: Transport> Session<T> {
+    /// A session over an ALREADY-connected transport, performing no handshake.
+    ///
+    /// [`Session::connect`] is the live path and does the handshake itself;
+    /// this is the seam a replay transcript enters through, positioned wherever
+    /// in a recorded conversation the caller wants the pump to pick up.
+    pub fn over(client: T) -> Self {
+        let pid = client.pid();
+        Self {
+            client,
+            next_id: 1,
+            frames: Vec::new(),
+            pid,
+            turn: TurnState::default(),
+        }
+    }
+
+    /// The transport underneath, for a caller that needs to inspect it — a
+    /// replay test asserting on what the pump actually wrote, in practice.
+    pub fn transport(&self) -> &T {
+        &self.client
+    }
+}
+
+impl Session<RawAsyncClient> {
     /// Spawn `codex app-server` and complete the `initialize` handshake.
     ///
     /// Inherits the parent process's environment (in particular `HOME`, and
@@ -111,14 +147,7 @@ impl Session {
         let raw = RawAsyncClient::start_with(AppServerBuilder::new())
             .await
             .map_err(SessionError::Spawn)?;
-        let pid = raw.pid();
-        let mut session = Self {
-            client: raw,
-            next_id: 1,
-            frames: Vec::new(),
-            pid,
-            turn: TurnState::default(),
-        };
+        let mut session = Self::over(raw);
 
         let init_params = InitializeParams {
             client_info: ClientInfo {
@@ -134,7 +163,9 @@ impl Session {
         session.notify(codex_codes::methods::INITIALIZED).await?;
         Ok(session)
     }
+}
 
+impl<T: Transport> Session<T> {
     /// Every frame exchanged so far, in wire order.
     pub fn frames(&self) -> &[RecordedFrame] {
         &self.frames
@@ -217,7 +248,10 @@ impl Session {
     }
 
     /// Send a JSON-RPC notification (no response expected).
-    async fn notify(&mut self, method: &str) -> Result<(), SessionError> {
+    ///
+    /// `pub(crate)` so the replay gates can drive the recorded handshake
+    /// through the same code the live path uses, rather than around it.
+    pub(crate) async fn notify(&mut self, method: &str) -> Result<(), SessionError> {
         let notif = JsonRpcNotification {
             method: method.to_string(),
             params: None,
@@ -225,7 +259,7 @@ impl Session {
         self.send(&notif, method).await
     }
 
-    async fn send<T: Serialize>(&mut self, message: &T, method: &str) -> Result<(), SessionError> {
+    async fn send<M: Serialize>(&mut self, message: &M, method: &str) -> Result<(), SessionError> {
         let value = serde_json::to_value(message).map_err(|source| SessionError::Encode {
             method: method.to_string(),
             source,
@@ -289,6 +323,7 @@ pub struct LiveTurnOutcome {
 /// as long as it needs — including running a whole Haskell handler with its own
 /// effects. That is what makes the driving loop expressible in Haskell rather
 /// than in a Rust callback.
+#[derive(Debug)]
 pub enum TurnStop {
     ToolCall(codex_codes::DynamicToolCallParams),
     Completed(codex_codes::Turn),
@@ -311,7 +346,7 @@ pub(crate) struct TurnState {
     usage: Option<codex_codes::ThreadTokenUsage>,
 }
 
-impl Session {
+impl<T: Transport> Session<T> {
     /// The tool calls observed on the current turn, in order.
     pub fn observed_tool_calls(&self) -> &[ObservedToolCall] {
         &self.turn.tool_calls

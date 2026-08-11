@@ -39,10 +39,14 @@ pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;
 pub mod process;
+pub mod replay;
+pub mod transport;
 
 pub use driver::{
     CodexAgentBackend, CHEAPEST_GPT56_PREFERENCE, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT,
 };
+pub use replay::{ReplayError, TranscriptTransport};
+pub use transport::Transport;
 
 /// The Codex CLI version this adapter is pinned to and its fixtures were
 /// recorded against.

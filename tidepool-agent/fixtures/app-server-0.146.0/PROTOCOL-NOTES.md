@@ -237,3 +237,108 @@ that requires hand-rolling four small types now and staying alert to it on
 every future CLI bump, since it will not self-heal with a crate version bump.
 Whether that trade is worth vendoring instead is root's call; this crate has
 not needed anything from `codex-codes` beyond what's listed above.
+
+---
+
+# Recording and replaying transcripts
+
+The `.jsonl` files beside this document are RECORDINGS of real app-server
+conversations, and they are the evidence behind every protocol claim
+`tidepool-agent` makes in a test. `MockBackend` is deliberately dumb (mock
+policy, root/human 2026-08-11), so protocol behavior — frame ordering, the
+parked correlation triple, the `success:false` reply shape, `turn/completed`
+projection, `thread/tokenUsage/updated` capture — is proven by driving the
+REAL adapter over these bytes, never by an imitation.
+
+## The format
+
+One JSON object per line, in wire order:
+
+```json
+{"direction": "client_to_server" | "server_to_client", "frame": { …JSON-RPC… }}
+```
+
+That is `backend::codex::process::RecordedFrame`, which is both `Serialize`
+(recording) and `Deserialize` (replay), so the two sides cannot drift apart in
+shape.
+
+| file | frames | what it is |
+|---|---|---|
+| `phase3-handshake.jsonl` | 6 | `initialize` + `model/list`, no turn, no tokens spent |
+| `phase4-live-turn.jsonl` | 35 | one full live turn: `thread/start` with `dynamicTools`, `turn/start`, one real `item/tool/call` for `ask_parent` and its reply, two `thread/tokenUsage/updated` frames, `turn/completed` |
+
+`phase4-live-turn.jsonl` was recorded on `gpt-5.6-terra`. **That is protocol
+truth, not a model choice** — nothing in the replay path reads, resolves, or
+selects a model; the allowlist in `driver.rs` decides that, and it cannot
+reach `gpt-5.6-terra` by construction.
+
+## Recording a new transcript
+
+`Session` captures every frame it exchanges, in wire order, whatever transport
+it is on — `Session::frames()`. So recording is: drive a real session, then
+write `frames()` out.
+
+1. Write a live driver as an `#[ignore]`d `#[tokio::test]` (or an example).
+   The two committed ones in `backend::codex::process::tests` are the
+   templates — `handshake_and_model_list_leave_config_untouched` for a
+   token-free recording, `phase4_live_vertical_ask_parent_round_trip` for one
+   that spends tokens.
+2. Capture `session.frames().to_vec()` **before any assertion that can panic**,
+   and write it out with `write_frames_jsonl` (test-only, in the same module).
+   A failed run still needs its evidence.
+3. Persist to `fixtures/app-server-<cli-version>/<name>.jsonl` and shut the
+   session down.
+4. A token-spending run gets ONE attempt after `turn/start`. On failure:
+   commit the frame log, report, stop — never loop.
+
+## How replay matches request ids
+
+`backend::codex::replay::TranscriptTransport` serves a recording to the
+production pump. The pump mints its own JSON-RPC ids from its own counter, so
+the recorded integers cannot be assumed to line up — a test that drives only
+the turn mints `turn/start` as id 1 where the recording has id 3, because the
+recorded run sent `initialize` and `thread/start` first.
+
+The transport therefore **learns** the mapping rather than assuming it:
+
+- Each client→server frame the pump writes is paired with the next recorded
+  client→server frame **by METHOD**, and the recorded id is remembered as an
+  alias for the id the pump actually used.
+- Recorded server→client **responses** (an `id`, a `result` or `error`, and no
+  `method`) are rewritten through that alias map on the way out.
+- Ids the **server** minted — the `item/tool/call` request id — are never
+  rewritten. The pump echoes them back verbatim, so they are already correct,
+  and rewriting one would corrupt the exact correlation the tests check.
+
+Method matching rather than ordinal matching is deliberate: ordinal matching
+mispairs the moment a test drives only part of a recorded session (the normal
+case), and the mispair would surface as an unrelated decode failure several
+frames later. Method matching either pairs correctly or fails immediately,
+naming both frames.
+
+Params are **not** compared. A replay test supplies its own tool answer, and
+demanding byte-equality would make a fixture a straitjacket rather than a
+record of protocol shape. What IS enforced: direction, order (one cursor walks
+the transcript, so a read that lands on an unwritten client frame is a
+mismatch, not a skip), method for requests and notifications, and id for
+responses.
+
+## Starting mid-conversation
+
+`TranscriptTransport::from_path(p).resuming_at("turn/start")` drops every frame
+before the recorded client→server request for that method. A test that drives
+only `Session::start_turn` never performs the handshake, so those recorded
+frames have no live counterpart to pair with.
+
+When the frames run out, `next_line` returns `None` and the pump reports
+`SessionError::Closed` — a clean, named failure rather than a hang.
+
+## What is NOT replayable from `phase4-live-turn.jsonl`
+
+`CodexAgentBackend` itself. Its `start_turn` resolves a model first, which
+issues `model/list`, and **this recording contains no `model/list` exchange**.
+Replaying the backend would mean hand-writing that response — the invented
+frame this whole approach exists to avoid. A future recording taken through
+the backend closes that gap; until then the pump is where the protocol
+behavior lives and where it is proven
+(`backend::codex::replay::tests`, 11 gates, fast tier, no process).
