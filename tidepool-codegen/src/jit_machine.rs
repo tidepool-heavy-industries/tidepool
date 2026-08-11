@@ -1,73 +1,56 @@
 //! The high-level JIT effect machine ([`JitEffectMachine`]) and the effect-drive
 //! loop at the JIT↔Rust boundary.
 //!
-//! # Nested child runs on a suspended machine (segment 40)
+//! # Nested child runs on a suspended machine
 //!
 //! A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host an
 //! arbitrary number of SEQUENTIAL child fragment runs — including ones that
-//! force GC and heap doubling — and resume correctly afterward. Two invariants
-//! make this memory-safe:
+//! force GC and heap doubling — and resume correctly afterward.
 //!
-//! 1. **Registered-root replaces the temporal argument.** The stowed continuation
-//!    used to be safe because "no GC runs on a suspended machine" (enforced by
-//!    the L7 `suspended_continuation.is_none()` asserts on every run entry).
-//!    While a child runs, that is no longer true — the child allocates and
-//!    collects. [`JitEffectMachine::enter_nested_child`] MOVES the continuation
-//!    pointer out of `suspended_continuation` into a heap-stable `Box` cell and
-//!    registers that cell's address in the machine's `stowed_roots` set, which
-//!    `perform_gc` folds into its root assembly. A child collection therefore
-//!    evacuates the parent's continuation tree and rewrites the cell in place; on
-//!    child teardown the (GC-current) pointer is read back out. The L7 asserts
-//!    stay UNCHANGED and still fire for the illegal case — a plain run entry
-//!    (`run`/`run_pure`/`run_fragment`/`*_and_bind`) started while a continuation
-//!    is stowed and UNREGISTERED. The child entries
-//!    ([`JitEffectMachine::run_child_fragment`] and its pure sibling) are the
-//!    only sanctioned way to run while suspended: they register the root, and by
-//!    moving the pointer into the cell they leave `suspended_continuation` reading
-//!    `None` for the child's duration, so the child fragment drives through the
-//!    plain entries whose asserts then pass naturally.
+//! INVARIANT: while a child runs, the parent's stowed continuation must be a
+//! registered GC root, because the child allocates and collects.
+//! [`JitEffectMachine::enter_nested_child`] moves the continuation pointer out
+//! of `suspended_continuation` into a heap-stable `Box` cell and registers
+//! that cell's address in `stowed_roots`, which `perform_gc` folds into its
+//! root assembly; a child collection evacuates the parent's continuation tree
+//! and rewrites the cell in place, and teardown reads the GC-current pointer
+//! back out. The L7 `suspended_continuation.is_none()` asserts on every plain
+//! run entry (`run`/`run_pure`/`run_fragment`/`*_and_bind`) stay UNCHANGED and
+//! still fire if a plain entry runs while a continuation is stowed and
+//! UNREGISTERED — [`JitEffectMachine::run_child_fragment`] and its pure
+//! sibling are the only sanctioned way to run while suspended, since they
+//! empty `suspended_continuation` for the child's duration so the L7 asserts
+//! pass naturally.
 //!
-//! 2. **Reclaim/cursor nesting.** A child turn's [`RegistryGuard::drop`] reclaims
-//!    the session heap buffer + high-water cursor into `self.session` (buffer may
-//!    have been swapped/doubled by a child GC). The `NestedChildGuard` drops
-//!    AFTER the child's `RegistryGuard` (the child guard lives inside
-//!    `run_with_entry`; the nested guard is the outer local in
-//!    `run_child_fragment`), so it reads the continuation pointer back out of the
-//!    stowed cell AFTER the reclaim — observing the POST-child heap. The pointer
-//!    stays valid across the reclaim because moving a `Vec<u64>` moves its 24-byte
-//!    header, not its heap data (the address the pointer targets is stable). When
-//!    the parent later resumes, `install_registries` re-installs that same buffer
-//!    and the continuation pointer resolves correctly.
+//! ORDERING INVARIANT: a child turn's [`RegistryGuard::drop`] reclaims the
+//! session heap buffer + high-water cursor into `self.session` (the buffer
+//! may have been swapped/doubled by a child GC). `NestedChildGuard` must drop
+//! AFTER the child's `RegistryGuard`, so it reads the continuation pointer
+//! back out of the stowed cell AFTER the reclaim — observing the POST-child
+//! heap. The pointer stays valid across the reclaim because moving a
+//! `Vec<u64>` moves its 24-byte header, not its heap data.
 //!
-//! `nested_child_depth` counts children currently running against the parent; a
-//! parent resume is rejected while it is > 0 (sequential-isolated: exactly one
-//! computation on the heap at a time). Module accretion (a child's
-//! `add_function`) is inert for the parent — it mints a fresh `FuncId` and does
-//! not touch the stowed continuation.
+//! `nested_child_depth` counts children currently running against the parent;
+//! a parent resume is rejected while it is > 0.
 //!
 //! # The parked-continuation registry (realm prototype)
 //!
 //! [`JitEffectMachine::run_suspendable_parked`] and [`JitEffectMachine::resume_parked`]
-//! are an ADDITIVE second suspension path that generalizes the single
-//! `suspended_continuation` slot to a map of many. A parked continuation is
-//! never protected by the temporal argument: it is a registered `stowed_roots`
-//! entry from the moment it parks until the moment it resumes, so a collection
-//! triggered by ANY later computation on the machine — a sibling park, a plain
-//! fragment, another realm's resume — evacuates it and rewrites its cell.
+//! generalize the single `suspended_continuation` slot to a map of many. A
+//! parked continuation is a registered `stowed_roots` entry from the moment it
+//! parks until it resumes, so a collection triggered by ANY later computation
+//! on the machine evacuates it and rewrites its cell.
 //!
 //! The parked path deliberately leaves `suspended_continuation` as `None`, so
-//! the L7 asserts on every plain run entry keep passing and keep protecting the
-//! single-slot path. The two paths do not interact: a machine using the parked
-//! registry never stows into the slot, and a machine using the slot never
-//! populates the registry.
+//! the L7 asserts on every plain run entry keep passing. The two paths never
+//! interact: a machine using the parked registry never stows into the slot,
+//! and a machine using the slot never populates the registry.
 //!
 //! # Completion policies on the suspend/park family
 //!
 //! A suspendable turn completes under one of the SAME four
-//! [`ResultMaterialization`] policies the plain routes use — there is one
-//! implementation ([`JitEffectMachine::materialize`]), reached by both
-//! families, so a turn behaves identically whether it completed in its first
-//! run or after any number of ask suspensions:
+//! [`ResultMaterialization`] policies the plain routes use, through one shared
+//! implementation ([`JitEffectMachine::materialize`]):
 //!
 //! | policy | run entry | resume entry | completion type | products |
 //! |---|---|---|---|---|
@@ -76,45 +59,22 @@
 //! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | `Suspendable<Vec<RootSlot>>` | the N tenured roots, IN the completion |
 //! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | `Suspendable<(RootSlot, Value)>` | field 0's tenured root + field 1's render, IN the completion |
 //!
-//! All eight are thin wrappers over the one shared suspend body
-//! (`run_suspendable_shared` / `resume_applied` → `finish_suspendable`); the
-//! only thing that varies is which policy is handed to `materialize` and which
-//! completion type the entry projects onto. The PARKED (registry) path
-//! deliberately covers only the first two — [`ParkKind`] has no
+//! The PARKED (registry) path covers only the first two — [`ParkKind`] has no
 //! `Project`/`Render` spelling, since those are single-session repl paths with
 //! no realm counterpart.
 //!
-//! The two completion types differ for a LOAD-BEARING reason, established by
-//! trying to remove it (`plans/unpark/`, §6.2).
-//!
+//! CONTRACT (see `plans/unpark/`, §6.2, for why this split is load-bearing):
 //! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
-//! inline — [`Suspendable`] is generic over the completion product, which is
-//! what lets `Project` stop fabricating a fields-elided constructor just to
-//! fill a `Value`-shaped hole it never had a value for. `Bind` CANNOT do the
-//! same, and the obstacle is not [`SuspendableOutcome`]'s fixed
-//! `Completed(Value)` shape:
-//!
-//! **`RootSlot` is `!Send`** — a bare `*mut *mut u8` newtype which, unlike its
-//! containers ([`JitEffectMachine`], `OldSpace`, `CompiledEffectMachine`,
-//! `BindingTable`, all `unsafe impl Send` under the stowed-XOR-running
-//! argument), is deliberately not blessed anywhere. `Bind` is the one policy
-//! `tidepool_runtime::session::ResidentSession` drives, and it does so through
-//! `on_eval_thread`, which moves the machine onto a scoped eval thread and
-//! returns the outcome back across the join — requiring the completion to be
-//! `Send`. A slot riding out inline fails `E0277` there.
-//!
-//! So `last_bound_root` is not a shape workaround: it LAUNDERS a `!Send` slot
-//! across that thread boundary by riding inside the machine, which is already
-//! blessed `Send`. `suspended_finalized_root` does the same thing for the same
-//! reason. `Project`/`Render` escape it only because nothing drives them across
-//! a thread — their sole caller is the repl's single-threaded
-//! `PersistentSession` path. A future caller wiring either through
-//! `on_eval_thread` will meet the same `E0277`; that is a compile error, not a
-//! silent trap, but it is the reason to expect one.
-//!
-//! Removing the stash therefore requires `unsafe impl Send for RootSlot` — a
-//! new standalone soundness claim on a raw pointer, which is a real judgment
-//! call and not a refactor. Left open deliberately.
+//! inline in the completion; `Bind` cannot, because `RootSlot` is a bare
+//! `*mut *mut u8` newtype that is deliberately NOT `unsafe impl Send` (unlike
+//! its containers, which are blessed under the stowed-XOR-running argument).
+//! `Bind` is the one policy `tidepool_runtime::session::ResidentSession`
+//! drives across `on_eval_thread`'s scoped-thread join, which requires the
+//! completion to be `Send` — a slot riding out inline fails `E0277` there. So
+//! `last_bound_root` (and `suspended_finalized_root`, same reason) LAUNDERS a
+//! `!Send` slot across that boundary by riding inside the machine, which is
+//! already blessed `Send`. Removing the stash would require `unsafe impl Send
+//! for RootSlot` — a new standalone soundness claim, left open deliberately.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -173,7 +133,7 @@ pub enum JitError {
     HeapBridge(#[from] crate::heap_bridge::BridgeError),
     // Transparent: this variant wraps signals from EVERY protected JIT call
     // site (step/resume/apply/bridge), so a site-specific prefix here would
-    // lie about the phase (it used to say "during heap bridge" everywhere).
+    // lie about the phase.
     #[error(transparent)]
     Signal(#[from] crate::signal_safety::SignalError),
     #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
@@ -288,8 +248,8 @@ pub struct ContinuationFrame {
     suspend_tag: u64,
     /// Plain park vs value-plane binding park.
     kind: ParkKind,
-    /// The persistent root of a closure-valued `finalize`'s finalized value
-    /// (W4), tenured at park time. `Some` only for a frame parked while
+    /// The persistent root of a closure-valued `finalize`'s finalized value,
+    /// tenured at park time. `Some` only for a frame parked while
     /// suspended on a closure-valued finalize; taken via
     /// [`JitEffectMachine::take_parked_finalized_root`], which leaves the
     /// frame itself parked and rooted.
@@ -320,14 +280,14 @@ pub enum ParkedOutcome {
     Completed {
         /// The bridged result.
         value: tidepool_eval::value::Value,
-        /// A1: the tenured root of a value-plane BIND's result, returned
+        /// The tenured root of a value-plane BIND's result, returned
         /// INLINE in the same call that observed completion — `Some` exactly
         /// when the park kind was [`ParkKind::Binding`], `None` for
         /// [`ParkKind::Plain`]. A completed park leaves no frame in the
         /// registry (a frame exists only while parked), so there is nowhere
-        /// for a machine-level stash to live between write and read; this is
-        /// what closes realm-checklist Item 3 — no window for a second
-        /// realm's completion to overwrite it before the caller reads it.
+        /// for a machine-level stash to live between write and read — no
+        /// window for a second realm's completion to overwrite it before the
+        /// caller reads it.
         bound_root: Option<crate::old_space::RootSlot>,
     },
     /// The turn suspended and its continuation was PARKED in the registry as a
@@ -513,45 +473,40 @@ impl ParkedRaw {
     }
 }
 
-/// ROUTE-DIFFERENCE TABLE (external review, runner-unification lane) — every
-/// public run variant's setup/epilogue shape, tabled before folding any of
-/// them behind [`JitEffectMachine::with_active_run`].
+/// Every public run variant's drive/session/materialization shape, all folded
+/// as thin wrappers over [`JitEffectMachine::with_active_run`]:
 ///
-/// | route | drive | session | materialization | pre-refactor reclaim arm |
-/// |---|---|---|---|---|
-/// | [`JitEffectMachine::run`] / [`JitEffectMachine::run_fragment`] | effectful (`drive_to_done`) | optional | `Value` | early, before drive |
-/// | [`JitEffectMachine::run_pure`] / [`JitEffectMachine::run_fragment_pure`] | pure (raw call, no `Yield` decoding) | optional | `Value` | early, before drive |
-/// | [`JitEffectMachine::run_pure_and_bind`] | pure | REQUIRED | `Bind { forced: true }` (unconditional) | last, after tenure |
-/// | [`JitEffectMachine::run_fragment_and_bind`] | effectful | REQUIRED | `Bind { forced: <caller> }` | last, after tenure |
-/// | [`JitEffectMachine::run_fragment_and_bind_projected`] | effectful | REQUIRED | `Project { n_fields }` | last, after tenure |
-/// | [`JitEffectMachine::run_fragment_and_bind_render`] | effectful | REQUIRED | `Render { field0_forced }` | last, after tenure (+ extra field0 `RootScope` across the field1 bridge) |
-/// | [`JitEffectMachine::run_child_fragment`] / `_pure` | → `run_with_entry` / `run_pure_with_entry`, wrapped in [`JitEffectMachine::enter_nested_child`] | requires a suspended parent | `Value` | unaffected — rides the entry it wraps |
+/// | route | drive | session | materialization |
+/// |---|---|---|---|
+/// | [`JitEffectMachine::run`] / [`JitEffectMachine::run_fragment`] | effectful (`drive_to_done`) | optional | `Value` |
+/// | [`JitEffectMachine::run_pure`] / [`JitEffectMachine::run_fragment_pure`] | pure (raw call, no `Yield` decoding) | optional | `Value` |
+/// | [`JitEffectMachine::run_pure_and_bind`] | pure | REQUIRED | `Bind { forced: true }` (unconditional) |
+/// | [`JitEffectMachine::run_fragment_and_bind`] | effectful | REQUIRED | `Bind { forced: <caller> }` |
+/// | [`JitEffectMachine::run_fragment_and_bind_projected`] | effectful | REQUIRED | `Project { n_fields }` |
+/// | [`JitEffectMachine::run_fragment_and_bind_render`] | effectful | REQUIRED | `Render { field0_forced }` |
+/// | [`JitEffectMachine::run_child_fragment`] / `_pure` | → `run_with_entry` / `run_pure_with_entry`, wrapped in [`JitEffectMachine::enter_nested_child`] | requires a suspended parent | `Value` |
 ///
 /// The suspend/park family (`run_suspendable*`, `resume_suspended*`,
 /// `run_suspendable_parked`, `run_fragment_suspendable_parked`,
 /// `resume_parked`) is NOT in this table: it funnels through its own shared
 /// setup body ([`JitEffectMachine::run_suspendable_shared`] /
 /// [`JitEffectMachine::resume_applied`]) and one shared epilogue
-/// ([`JitEffectMachine::finish_suspendable`]) with reclaim armed
-/// unconditionally last, exactly the shape this table's six routes are
-/// folded into below. It DOES share the materialization: `finish_suspendable`
-/// used to hand-roll a copy of the `Bind` arm below (and so covered only two
-/// of the four policies); it now calls [`JitEffectMachine::materialize`], which
-/// is what gives the suspendable path `Project` and `Render` — see the
-/// completion-policy table in the module docs.
+/// ([`JitEffectMachine::finish_suspendable`]), which also calls
+/// [`JitEffectMachine::materialize`] — see the completion-policy table in the
+/// module docs.
 ///
-/// The fold: every routed listed above becomes a thin wrapper over
-/// [`JitEffectMachine::with_active_run`], which owns registry install/reclaim
-/// and `VMContext`/`CompiledEffectMachine` lifecycle once, drives through
+/// `with_active_run` owns registry install/reclaim and
+/// `VMContext`/`CompiledEffectMachine` lifecycle once, drives through
 /// [`JitEffectMachine::drive_active`], and hands the `Done` pointer to
 /// [`JitEffectMachine::materialize`] — an explicit [`ResultMaterialization`]
 /// enum so the four semantic policies (`Value`/`Bind`/`Project`/`Render`)
 /// stay visible as named variants rather than folding into one opaque
-/// callback. Reclaim is armed exactly ONCE, in `with_active_run`, always
-/// AFTER `materialize` returns (Ok or Err) — structurally the "arm last"
-/// ordering every bind route previously had to get right by hand (see each
-/// route's old "arm reclaim LAST" comment, and `run_pure_and_bind`'s Finding
-/// 4 about what an early arm on an error path used to cost).
+/// callback.
+///
+/// ORDERING INVARIANT: reclaim is armed exactly ONCE, in `with_active_run`,
+/// always AFTER `materialize` returns (Ok or Err) — arming it before a
+/// fallible materialize step can reclaim a heap state materialize is still
+/// reading.
 enum ResultMaterialization {
     /// Bridge `Done` to an owned [`Value`] — the plain (non-bind) routes.
     Value,
@@ -583,11 +538,10 @@ enum Materialized {
 }
 
 /// Which driver [`JitEffectMachine::with_active_run`] uses, and — for the
-/// effectful case — the handler triple every pre-refactor effectful entry
-/// threaded through by hand. Pure programs skip the freer-simple effect loop
-/// entirely (the compiled function returns a raw value directly — no `Yield`
-/// decoding); effectful programs step through [`drive_to_done`], dispatching
-/// each request through `handlers`.
+/// effectful case — the handler triple it dispatches through. Pure programs
+/// skip the freer-simple effect loop entirely (the compiled function returns
+/// a raw value directly — no `Yield` decoding); effectful programs step
+/// through [`drive_to_done`], dispatching each request through `handlers`.
 enum RunTarget<'a, U, H: DispatchEffect<U>> {
     Pure,
     Effectful {
@@ -674,33 +628,31 @@ pub struct JitEffectMachine {
     /// GC safepoint observes the flag and aborts execution with
     /// `YieldError::Cancelled` if it has been set. See [`Self::cancel_handle`].
     cancel_flag: Arc<AtomicBool>,
-    /// Session state for GHCi-style persistent machines (Wave 1.A).
+    /// Session state for GHCi-style persistent machines.
     /// `None` for one-shot machines created by [`Self::compile`].
     session: Option<SessionState>,
     /// Per-machine ambient state (cancel flag, JSON con ids, stack-map
     /// registry, call depth, diagnostics). Reached at run time via
     /// `(*vmctx).machine_state`, pointed at this field by
-    /// `install_registries`/the run entries. Leaves 2 and 3 add more fields.
+    /// `install_registries`/the run entries.
     machine_state: MachineState,
-    /// E2 threadless suspension: the freer-simple continuation heap pointer of a
-    /// turn that suspended at the ask boundary (`run_suspendable` →
-    /// `SuspendableOutcome::Suspended`), waiting for `resume_suspended`. `None`
-    /// for a running or completed machine. The pointer is into this machine's
-    /// retained session heap.
+    /// The freer-simple continuation heap pointer of a turn that suspended at
+    /// the ask boundary (`run_suspendable` → `SuspendableOutcome::Suspended`),
+    /// waiting for `resume_suspended`. `None` for a running or completed
+    /// machine. The pointer is into this machine's retained session heap.
     ///
-    /// SEGMENT 40 — the safety argument for this pointer changed. It used to be
-    /// safe because "no GC runs on a suspended machine" (a temporal argument the
-    /// L7 asserts enforced). It is now safe because, while nested CHILD runs
-    /// execute against the suspended parent, the continuation is a REGISTERED GC
-    /// ROOT: [`Self::enter_nested_child`] copies this pointer into
-    /// `stowed_root_cell` and registers that heap-stable cell in the machine's
-    /// `stowed_roots` set, so any child collection evacuates the continuation
-    /// tree and rewrites the cell in place; on child teardown the (GC-current)
-    /// pointer is read back out. `resume_suspended` still re-roots via
-    /// `materialize_response_and_resume` for its own answer materialization.
+    /// INVARIANT: while nested CHILD runs execute against the suspended
+    /// parent, this pointer is a REGISTERED GC ROOT, not just protected by
+    /// "no GC runs on a suspended machine" — [`Self::enter_nested_child`]
+    /// copies it into `stowed_root_cell` and registers that heap-stable cell
+    /// in the machine's `stowed_roots` set, so any child collection evacuates
+    /// the continuation tree and rewrites the cell in place; on child
+    /// teardown the (GC-current) pointer is read back out. `resume_suspended`
+    /// still re-roots via `materialize_response_and_resume` for its own
+    /// answer materialization.
     suspended_continuation: Option<*mut u8>,
-    /// Heap-stable cell holding the stowed continuation pointer WHILE a nested
-    /// child is running (segment 40). A `Box` (not the `suspended_continuation`
+    /// Heap-stable cell holding the stowed continuation pointer WHILE a
+    /// nested child is running. A `Box` (not the `suspended_continuation`
     /// field directly) because the machine itself moves between threads under
     /// the stow-XOR-run discipline: the `Box`'s POINTEE address is a stable heap
     /// allocation that does NOT move with the struct, so the `stowed_roots`
@@ -708,40 +660,38 @@ pub struct JitEffectMachine {
     /// the `OldSpace` slots pattern. `None` unless a child is mid-run.
     stowed_root_cell: Option<Box<*mut u8>>,
     /// Number of nested child runs currently executing against this suspended
-    /// parent (segment 40). Zero when idle, suspended-but-no-child, or running
-    /// its own turn. A parent resume is rejected while this is > 0 (exactly one
+    /// parent. Zero when idle, suspended-but-no-child, or running its own
+    /// turn. A parent resume is rejected while this is > 0 (exactly one
     /// computation on the heap at a time — sequential-isolated). Incremented by
     /// [`Self::enter_nested_child`], decremented on guard drop; the stowed root
     /// is registered on 0→1 and deregistered on 1→0.
     nested_child_depth: usize,
-    /// W1b-redux: a value-plane bind whose fragment ran through the SUSPENDABLE
+    /// A value-plane bind whose fragment ran through the SUSPENDABLE
     /// path (`run_fragment_suspendable_binding`/`resume_suspended_binding`) tenures
     /// its `Done` result into old-space and stashes the persistent [`RootSlot`]
     /// here, for the caller to read out AFTER the machine moves back off the eval
-    /// thread. Unlike the repl's `run_fragment_and_bind` (which returns the slot
-    /// directly on its pinned thread), the harness runs a bind on a scoped eval
-    /// thread and a `RootSlot` (`*mut *mut u8`) is `!Send`, so it cannot cross the
-    /// scope boundary as a bare value — it rides home INSIDE the machine (already
-    /// `Send` under stowed-XOR-running, same as `suspended_continuation`). `None`
-    /// except in the window between a bind fragment completing and the caller
-    /// taking it via [`Self::take_last_bound_root`]. A fork bind lands here on the
-    /// eventual `resume`, not the initial (suspending) run.
+    /// thread. A `RootSlot` (`*mut *mut u8`) is `!Send`, so it cannot cross the
+    /// eval-thread scope boundary as a bare value — it rides home INSIDE the
+    /// machine (already `Send` under stowed-XOR-running, same as
+    /// `suspended_continuation`; see the module docs for the full contract).
+    /// `None` except in the window between a bind fragment completing and the
+    /// caller taking it via [`Self::take_last_bound_root`]. A fork bind lands
+    /// here on the eventual `resume`, not the initial (suspending) run.
     ///
-    /// SLOT PATH ONLY (A1): the parked path never writes this field — its
+    /// SLOT PATH ONLY: the parked path never writes this field — its
     /// `ParkedOutcome::Completed::bound_root` returns the tenured root inline
     /// instead, so a second realm's completion cannot overwrite a first
-    /// realm's still-unread root (realm-checklist Item 3).
+    /// realm's still-unread root.
     last_bound_root: Option<crate::old_space::RootSlot>,
-    /// W4 finalize-by-reference: the persistent root slot of a suspended
+    /// Finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
     /// tenured at suspend time by [`Self::tenure_finalized_payload`]. `Some`
     /// only while suspended on a closure-valued finalize; read out by
     /// [`Self::take_finalized_root`] when the harness applies the closure by
-    /// reference. Rides inside the machine (already `Send` under stow-XOR-run),
-    /// like `last_bound_root`, because a `RootSlot` (`*mut *mut u8`) is `!Send`
-    /// and cannot cross the eval-thread scope boundary as a bare value.
+    /// reference. Rides inside the machine for the same `!Send` reason as
+    /// `last_bound_root`.
     ///
-    /// SLOT PATH ONLY (A2): the parked path stashes this on the
+    /// SLOT PATH ONLY: the parked path stashes this on the
     /// [`ContinuationFrame`] instead (`ContinuationFrame::finalized_root`,
     /// taken via [`Self::take_parked_finalized_root`]) — a frame exists for
     /// the whole parked lifetime, so there is nowhere for a race to land.
@@ -774,7 +724,7 @@ pub struct JitEffectMachine {
     /// clean "unknown continuation" error rather than a silent aliasing of some
     /// later park.
     next_continuation_id: u64,
-    /// A3: per-realm cancel flags, lazily minted on first park-path run/resume
+    /// Per-realm cancel flags, lazily minted on first park-path run/resume
     /// entry for a realm ([`Self::realm_cancel_flag`]). The parked entries
     /// install a realm's own flag into [`MachineState`] instead of
     /// `cancel_flag`, so cancelling one realm cannot abort a sibling realm's
@@ -848,22 +798,24 @@ impl CancelHandle {
     }
 }
 
-/// Session-level heap + cursor retained across runs (Wave 1.A).
+/// Session-level heap + cursor retained across runs.
 ///
 /// `heap` is `None` until the first GC fires and migrates the live set off
-/// the machine's `Nursery` into a `Vec<u64>` owned here — `Vec<u64>`, not
-/// `Vec<u8>` (L8, repo-review-2026-07-06/01-gc-memory-safety.md): heap
-/// objects are read/written assuming 8-byte alignment, which `Vec<u64>`
-/// guarantees structurally (unlike `Vec<u8>`, whose element alignment is 1
-/// — any alignment it happens to have is an allocator implementation
-/// detail). `cursor` is the bump high-water mark (bytes from the start of
-/// `heap`, or from `nursery.start()` when `heap` is None) at the end of the
-/// last run — the next run resumes allocation from there.
+/// the machine's `Nursery` into a `Vec<u64>` owned here.
+///
+/// INVARIANT: `Vec<u64>`, not `Vec<u8>` — heap objects are read/written
+/// assuming 8-byte alignment, which `Vec<u64>` guarantees structurally
+/// (unlike `Vec<u8>`, whose element alignment is 1 — any alignment it
+/// happens to have is an allocator implementation detail).
+///
+/// `cursor` is the bump high-water mark (bytes from the start of `heap`, or
+/// from `nursery.start()` when `heap` is None) at the end of the last run —
+/// the next run resumes allocation from there.
 struct SessionState {
     heap: Option<Vec<u64>>,
     cursor: usize,
-    // Wave 1.A (Worker-Tenure): populated at bind time; read by the four
-    // *_and_bind* run entries to tenure NF values into stable old-space slots.
+    /// Populated at bind time; read by the four `*_and_bind*` run entries to
+    /// tenure NF values into stable old-space slots.
     old_space: crate::old_space::OldSpace,
 }
 
@@ -1118,7 +1070,7 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
-    /// A3: obtain a clone-able cancellation handle scoped to ONE realm,
+    /// Obtain a clone-able cancellation handle scoped to ONE realm,
     /// lazily minting that realm's flag on first request. Cancelling this
     /// handle aborts only runs/resumes parked-path-entered under `realm` —
     /// a sibling realm's run on the same machine is unaffected, because the
@@ -1135,7 +1087,7 @@ impl JitEffectMachine {
         CancelHandle(self.realm_cancel_flag(realm))
     }
 
-    /// A3: this realm's cancel flag, lazily minted on first park-path
+    /// This realm's cancel flag, lazily minted on first park-path
     /// run/resume entry for `realm`. Never removed once minted, so the same
     /// `Arc` identity is returned for the machine's whole life — a
     /// [`ContinuationFrame`] cloning it at park time and a later
@@ -1169,7 +1121,7 @@ impl JitEffectMachine {
     /// Shared body of [`Self::install_registries`]: install per-run
     /// thread-local registries using the given `cancel_flag` rather than
     /// unconditionally `self.cancel_flag` — the parked run/resume entries
-    /// (A3) pass the ACTIVE realm's flag here instead, via
+    /// pass the ACTIVE realm's flag here instead, via
     /// [`Self::realm_cancel_flag`], so cancelling one realm cannot abort a
     /// sibling realm's run on the same machine.
     fn install_registries_with_cancel_flag(
@@ -1210,7 +1162,7 @@ impl JitEffectMachine {
     }
 
     /// Build a `VMContext` for a session run, re-pointing alloc_ptr at the
-    /// persistent cursor (component F).
+    /// persistent cursor.
     ///
     /// Reads the active GC region from `GC_STATE` (installed by
     /// `install_registries` immediately before this call) and sets
@@ -1240,14 +1192,13 @@ impl JitEffectMachine {
     }
 
     /// The shared executor every plain (non-suspending) run route is a thin
-    /// wrapper over — see the ROUTE-DIFFERENCE TABLE above
-    /// [`ResultMaterialization`] for what used to be six near-duplicate
-    /// bodies. Owns, exactly once: the L7/session asserts, signal-handler
-    /// install, registry install (+ its drop-guard), `VMContext`/
-    /// `CompiledEffectMachine` construction, and — structurally, not by
-    /// convention — reclaim arming LAST, after [`Self::materialize`] (the
-    /// only place a `Bind`/`Project`/`Render` epilogue touches `self.session`
-    /// via `tenure`), unconditionally on every exit path.
+    /// wrapper over — see the route table above and [`ResultMaterialization`].
+    /// Owns, exactly once: the L7/session asserts, signal-handler install,
+    /// registry install (+ its drop-guard), `VMContext`/`CompiledEffectMachine`
+    /// construction, and — structurally, not by convention — reclaim arming
+    /// LAST, after [`Self::materialize`] (the only place a
+    /// `Bind`/`Project`/`Render` epilogue touches `self.session` via
+    /// `tenure`), unconditionally on every exit path.
     #[allow(clippy::too_many_arguments)]
     fn with_active_run<U, H: DispatchEffect<U>>(
         &mut self,
@@ -1258,10 +1209,9 @@ impl JitEffectMachine {
         exec_start: &str,
         resume_suffix: &str,
     ) -> Result<Materialized, JitError> {
-        // L7 (repo-review-2026-07-06/01-gc-memory-safety.md): shared by every
-        // plain entry — starting a new turn while a prior one is still parked
-        // at resume_suspended isn't a GC-rooted invariant anything else
-        // enforces.
+        // L7: shared by every plain entry — starting a new turn while a prior
+        // one is still parked at resume_suspended isn't a GC-rooted invariant
+        // anything else enforces.
         assert!(self.suspended_continuation.is_none(), "{l7_msg}");
         let tags = match &mode {
             RunTarget::Pure => None,
@@ -1379,8 +1329,7 @@ impl JitEffectMachine {
     }
 
     /// The shared epilogue for EVERY completion, plain or suspendable —
-    /// [`ResultMaterialization`]'s four policies, each ported verbatim from
-    /// the route body it used to live in.
+    /// [`ResultMaterialization`]'s four policies.
     ///
     /// The parameter is a bare `&mut VMContext` rather than the
     /// [`ActiveContext`] the plain routes own, because that is the context
@@ -1669,8 +1618,7 @@ impl JitEffectMachine {
     ///
     /// [`Self::run`] passes the machine's original entry; [`Self::run_fragment`]
     /// passes an [`Self::add_function`]-minted fragment id. The lifecycle is
-    /// identical either way (session vmctx, reclaim arming, effect loop), so the
-    /// one-shot path is byte-identical to the pre-refactor `run`.
+    /// identical either way (session vmctx, reclaim arming, effect loop).
     fn run_with_entry<U, H: DispatchEffect<U>>(
         &mut self,
         func_id: FuncId,
@@ -1697,7 +1645,7 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // E2 — threadless suspension at the ask boundary.
+    // Threadless suspension at the ask boundary.
     // ----------------------------------------------------------------------
 
     /// Drive an effectful turn until it COMPLETES or SUSPENDS at `suspend_tag`
@@ -1880,8 +1828,7 @@ impl JitEffectMachine {
     /// [`Self::run_suspendable`] passes the machine's original entry;
     /// [`Self::run_fragment_suspendable`] passes an [`Self::add_function`]-minted
     /// fragment id. The lifecycle is identical either way (session vmctx, reclaim
-    /// arming, suspend-capable effect loop), so the entry path stays
-    /// byte-identical to the pre-refactor `run_suspendable`.
+    /// arming, suspend-capable effect loop).
     fn run_suspendable_with_entry<U, H: DispatchEffect<U>>(
         &mut self,
         func_id: FuncId,
@@ -1928,17 +1875,19 @@ impl JitEffectMachine {
             "run_suspendable called while a continuation is already suspended — \
              resume_suspended it first"
         );
-        // Interim guard (codex-review-2026-08-08.md item 11): the slot-vs-
-        // registry exclusion — no machine holds both a slot continuation and
-        // parked ones — used to be convention, not machine-enforced. The
-        // sibling direction (a parked-path entry while the SLOT is occupied)
-        // was already caught by the `suspended_continuation.is_none()` assert
+        // Guard (plans/post-restart/codex-review-2026-08-08.md item 11): the
+        // slot-vs-registry exclusion — no machine holds both a slot
+        // continuation and parked ones — is enforced here. The sibling
+        // direction (a parked-path entry while the SLOT is occupied) is
+        // already caught by the `suspended_continuation.is_none()` assert
         // above, since every parked-path entry funnels through this same
-        // method too. This was the missing direction: a caller could park a
-        // realm, then call a legacy slot-path entry, reaching the mixed
-        // state — and only find out later, when `resume_parked` panics
-        // rather than run a collection with the slot-held continuation
-        // unrooted. Reject it HERE instead, before anything is driven.
+        // method too.
+        //
+        // HAZARD: without this check, parking a realm and then calling a
+        // legacy slot-path entry reaches a mixed state that isn't caught
+        // until `resume_parked` panics later, after running with the
+        // slot-held continuation unrooted in the meantime. Reject it HERE
+        // instead, before anything is driven.
         //
         // A clean `Err`, deliberately NOT a panic/assert: parking a realm and
         // then calling a legacy entry is ordinary caller misuse (a plausible
@@ -1962,10 +1911,9 @@ impl JitEffectMachine {
         }
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
-        // A3: the parked path installs THAT realm's cancel flag (lazily
-        // minted) instead of the machine-level one; the slot path installs
-        // `self.cancel_flag`, byte-identical to before this method took a
-        // `park` argument.
+        // The parked path installs THAT realm's cancel flag (lazily minted)
+        // instead of the machine-level one; the slot path installs
+        // `self.cancel_flag`.
         let park_cancel_flag: Arc<AtomicBool> = match park {
             ParkTarget::Slot => self.cancel_flag.clone(),
             ParkTarget::Registry { realm, .. } => self.realm_cancel_flag(realm),
@@ -2027,7 +1975,7 @@ impl JitEffectMachine {
     /// session heap. It must NOT reset the nursery — the session heap-retention
     /// path (heap `Some` → `install_session_buffer`, or `None` → nursery at the
     /// preserved cursor) preserves the mid-ask heap; a nursery reset would
-    /// silently discard it. That is edit site (a).
+    /// silently discard it.
     ///
     /// Errors if the machine is not currently suspended.
     pub fn resume_suspended<U, H: DispatchEffect<U>>(
@@ -2150,10 +2098,9 @@ impl JitEffectMachine {
         materialization: ResultMaterialization,
     ) -> Result<ParkedRaw, JitError> {
         // PEEK the continuation — do NOT consume it yet. The A5 NF-force
-        // (segment 40) rejects a bottom-bearing answer WITHOUT consuming the
-        // continuation, so the caller can retry with a corrected answer; only
-        // after the answer is verified NF do we `.take()` (below). A `None`
-        // here (not suspended) is the same clean error as before.
+        // rejects a bottom-bearing answer WITHOUT consuming the continuation,
+        // so the caller can retry with a corrected answer; only after the
+        // answer is verified NF do we `.take()` (below).
         if self.suspended_continuation.is_none() {
             return Err(JitError::Effect(EffectError::Handler(
                 "resume_suspended called on a machine that is not suspended".into(),
@@ -2178,8 +2125,8 @@ impl JitEffectMachine {
         // thunk — an `undefined`/`⊥` the child-answer bridge would have raised,
         // caught here as defense-in-depth) fails the answer as a retryable
         // error and leaves `suspended_continuation` intact. Function-bearing
-        // answer types were rejected at extract (segment 10), so every field of
-        // a data-kinded answer is walkable by construction; the walk terminates
+        // answer types are rejected at extract, so every field of a
+        // data-kinded answer is walkable by construction; the walk terminates
         // on a visited-set (cyclic data).
         if let ResumeInput::Answer(val) = &input {
             answer_force_nf(val).map_err(|reason| {
@@ -2254,20 +2201,17 @@ impl JitEffectMachine {
         let answer = match input {
             ResumeInput::Answer(val) => val,
             ResumeInput::Abort(reason) => {
-                // Edit site (b): a stowed machine has no thread. We do NOT run
-                // the continuation — the ask itself fails, byte-identically to
-                // pre-E2's answer-channel abort, which returned
+                // A stowed machine has no thread. We do NOT run the
+                // continuation — the ask itself fails, returning
                 // `EffectError::Handler("ask aborted by caller: …")` from the
-                // dispatcher (no `Cancelled` first cause — that was only the
-                // gate/timeout abort). The engine maps this to its terminal
-                // error outcome exactly as before. `install_registries` above
-                // already installed this machine as `CURRENT_MACHINE`, so any
+                // dispatcher (no `Cancelled` first cause — that is only the
+                // gate/timeout abort). `install_registries` above already
+                // installed this machine as `CURRENT_MACHINE`, so any
                 // machine-scoped state stays reachable, but this early return
                 // surfaces the error directly without touching the first-cause
                 // cell.
                 // Abort does not run the continuation, so it never reaches the
-                // tail arm; arm+drop the guard here to restore the session buffer
-                // exactly as the pre-W1b path did (which armed before this branch).
+                // tail arm; arm+drop the guard here to restore the session buffer.
                 unsafe {
                     _guard
                         .arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
@@ -2335,15 +2279,14 @@ impl JitEffectMachine {
     /// this order:
     ///
     /// 1. the machine-level stash — on the SLOT path a `Bind`'s tenured root
-    ///    goes to `self.last_bound_root`, byte-identically to before, because
+    ///    goes to `self.last_bound_root`, because
     ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
     ///    cannot carry it; on the REGISTRY path it is returned INLINE via
-    ///    `ParkedOutcome::Completed::bound_root` instead — A1, closing
-    ///    realm-checklist Item 3 (two realms' binds completing before either is
-    ///    drained would otherwise overwrite one machine-level slot).
-    ///    `Project`/`Render` never stash: they complete as `Suspendable<T>` and
-    ///    return their roots in the outcome. `Bind` is slated to join them once
-    ///    `SuspendableOutcome` is widened;
+    ///    `ParkedOutcome::Completed::bound_root` instead, so that two realms'
+    ///    binds completing before either is drained cannot overwrite one
+    ///    machine-level slot. `Project`/`Render` never stash: they complete
+    ///    as `Suspendable<T>` and return their roots in the outcome. `Bind`
+    ///    is slated to join them once `SuspendableOutcome` is widened;
     /// 2. the bridge that turns a tenured root into the `Value` a
     ///    [`SuspendableOutcome::Completed`] must carry — for `Bind`, that is
     ///    the bridge of `slot.current()` (the TENURED, rooted pointer, not
@@ -2392,24 +2335,11 @@ impl JitEffectMachine {
                         Ok(ParkedRaw::Completed(CompletedProduct::Value(value)))
                     }
                     Materialized::Bind(slot) => {
-                        // This stash LAUNDERS a `!Send` value across a thread
-                        // boundary — it is not a shape workaround, and removing
-                        // it was tried and reverted (`plans/unpark/` §6.2).
-                        //
-                        // `RootSlot` is a bare `*mut *mut u8` with no `Send`
-                        // impl. `Bind` is the policy `ResidentSession` drives,
-                        // via `on_eval_thread`, which returns the completion
-                        // back across a scoped-thread join and so requires it to
-                        // be `Send`. Riding the slot out inline fails `E0277`
-                        // there; riding it INSIDE the machine works because the
-                        // machine is blessed `Send` (stowed-XOR-running).
-                        // `suspended_finalized_root` launders W4's root the same
-                        // way. `Project`/`Render` return theirs inline only
-                        // because nothing drives them across a thread.
-                        //
-                        // Deleting this needs `unsafe impl Send for RootSlot` —
-                        // a standalone soundness claim on a raw pointer, not a
-                        // refactor. See the module docstring.
+                        // Laundering a `!Send` `RootSlot` across the eval-thread
+                        // boundary — see the module docstring's `RootSlot: !Send`
+                        // contract for why. Only the SLOT path stashes here; the
+                        // registry path returns its root inline in
+                        // `ParkedOutcome::Completed::bound_root` instead.
                         if let ParkTarget::Slot = park {
                             self.last_bound_root = Some(slot);
                         }
@@ -2465,7 +2395,7 @@ impl JitEffectMachine {
                 request_ptr,
                 continuation,
             } => {
-                // W4 finalize-by-reference: when the bridged request carries a
+                // Finalize-by-reference: when the bridged request carries a
                 // CLOSURE_SENTINEL placeholder, its value field (field 1 of the
                 // request Con) is a live closure with no data representation.
                 // Tenure it into old-space NOW — while we still hold the run's
@@ -2473,13 +2403,13 @@ impl JitEffectMachine {
                 // child GC as a persistent root, and hand the slot up so the
                 // harness can apply it by reference via `run_child`.
                 let has_finalized_closure = request_carries_closure_sentinel(&request);
-                // A2: on the slot path the tenured slot goes to
-                // `self.suspended_finalized_root` exactly as before (only
-                // written when `has_finalized_closure`, so an unrelated
-                // suspension never clobbers a stale value there); on the
-                // registry path it rides to `park_continuation` instead and
-                // lands on the frame — never on a machine-level field a
-                // second realm could overwrite.
+                // On the slot path the tenured slot goes to
+                // `self.suspended_finalized_root` (only written when
+                // `has_finalized_closure`, so an unrelated suspension never
+                // clobbers a stale value there); on the registry path it
+                // rides to `park_continuation` instead and lands on the
+                // frame — never on a machine-level field a second realm
+                // could overwrite.
                 let mut parked_finalized_root = None;
                 if has_finalized_closure {
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
@@ -2518,7 +2448,7 @@ impl JitEffectMachine {
     }
 
     /// Tenure the finalized VALUE (field 1) out of a suspended `finalize @T x`
-    /// request Con into old-space, returning its persistent GC root slot (W4).
+    /// request Con into old-space, returning its persistent GC root slot.
     /// The finalized value stays LIVE in the session heap (never deep-forced to
     /// data) and is applied later by reference. Runs during the suspending turn,
     /// so `gc_active_range`/`vmctx` are valid.
@@ -2577,7 +2507,7 @@ impl JitEffectMachine {
     }
 
     /// Take the persistent root slot of a suspended `finalize @T closure`'s
-    /// finalized VALUE (W4 finalize-by-reference), tenured at suspend time. The
+    /// finalized VALUE (finalize-by-reference), tenured at suspend time. The
     /// slot stays a registered persistent root for the machine's life (taking
     /// it here only removes the machine's own handle, not the registration), so
     /// a subsequent `run_child` that references it by slot address is GC-safe.
@@ -2615,12 +2545,11 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // GHCi-style session re-entry (Wave 1 — components C, K).
+    // GHCi-style session re-entry.
     //
     // These freeze the codegen contracts the tidepool-repl session manager
-    // (Wave 2) builds on. Implemented in Wave 1.B atop the 1.A lifecycle seam
-    // (buffer retention, persistent roots, tenuring); see
-    // plans/ghci-implementation-plan.md §4 (1.B).
+    // builds on, atop the session lifecycle seam (buffer retention,
+    // persistent roots, tenuring).
     // ----------------------------------------------------------------------
 
     /// Compile an additional `CoreExpr` fragment into this machine's *live*
@@ -2628,7 +2557,7 @@ impl JitEffectMachine {
     /// code or heap. The new fragment may reference session bindings via
     /// `external_env` (Var-miss resolution to seeded heap pointers).
     ///
-    /// Component C1: declare + define the fragment and re-run
+    /// Declare + define the fragment and re-run
     /// `finalize_definitions` (multi-round-safe in cranelift 0.129.1 — a new
     /// `FuncId` post-finalize carves a fresh arena segment, leaving round-1 code
     /// stable). `table` shapes the fragment exactly like the one-shot entry
@@ -2740,13 +2669,12 @@ impl JitEffectMachine {
         }
         // Refresh `tags` too — re-resolve ConTags against THIS fragment's table
         // rather than leaving it frozen at whatever `compile_inner` saw at
-        // bootstrap (plans/self-iterating-harness/12-contags-staleness-findings.md,
-        // finding 1/1b). The asymmetry is deliberate, not an oversight:
+        // bootstrap. The asymmetry is deliberate, not an oversight:
         //   Err -> Ok: install. Mirrors json_con_ids/time_con_ids' accumulate-
         //     never-clobber intent — a later turn's table may supply a freer
         //     constructor (Val/E/Union/Leaf/Node) that bootstrap's table lacked,
         //     and without this a session stays permanently `MissingConTags`
-        //     even once the table can classify (finding 1b, deterministic).
+        //     even once the table can classify.
         //   Ok -> Ok (re-resolved): install. An accumulated session table is a
         //     superset of the bootstrap one, so this is a no-op in practice,
         //     but re-resolving against the turn's own table rather than
@@ -2821,9 +2749,9 @@ impl JitEffectMachine {
     /// this machine's live, machine-owned heap, dispatching effects through the
     /// handler HList exactly as [`Self::run`] does for the one-shot entry.
     ///
-    /// Component C2: like `run`, but targets `func_id` instead of the machine's
-    /// original entry, reusing the persistent heap via the 1.A buffer-retention
-    /// contract (`install_registries` re-points GC state at the retained buffer).
+    /// Like `run`, but targets `func_id` instead of the machine's original
+    /// entry, reusing the persistent heap (`install_registries` re-points GC
+    /// state at the retained buffer).
     pub fn run_fragment<U, H: DispatchEffect<U>>(
         &mut self,
         func_id: FuncId,
@@ -2844,14 +2772,13 @@ impl JitEffectMachine {
     }
 
     /// The value-plane **bind primitive**: run a pure entry, deep-force its
-    /// result to normal form (component K), tenure the NF value into the session
-    /// old-space (component E), register its persistent GC root (component D),
-    /// and return the stable [`RootSlot`](crate::old_space::RootSlot) a later
-    /// fragment resolves through its `ExternalEnv`.
+    /// result to normal form, tenure the NF value into the session old-space,
+    /// register its persistent GC root, and return the stable
+    /// [`RootSlot`](crate::old_space::RootSlot) a later fragment resolves
+    /// through its `ExternalEnv`.
     ///
-    /// This assembles 1.A's tenure/persistent-root machinery with 1.B's
-    /// `deep_force`. The tenure happens while GC state is still installed and the
-    /// result pointer is live (before the per-run `RegistryGuard` reclaims the
+    /// The tenure happens while GC state is still installed and the result
+    /// pointer is live (before the per-run `RegistryGuard` reclaims the
     /// nursery buffer), so the tenured copy and its slot outlive the run.
     ///
     /// # Panics
@@ -2980,9 +2907,7 @@ impl JitEffectMachine {
     /// effect step loop, and at `Yield::Done(tuple_ptr)` — the result of the
     /// wrapped `pure (it, toWire it)` — bridge field 1 (the render) into an
     /// OWNED [`Value`] first, then tenure field 0 (`it` itself) alone,
-    /// returning both. Replaces the old two-compile `run_bare_expr` (one
-    /// compile to bind `it` via [`Self::run_fragment_and_bind`], a second,
-    /// separate compile to render `toWire it`).
+    /// returning both.
     ///
     /// **Why field1-before-field0-tenure is load-bearing:** when `toWire` is
     /// the identity (`toWire :: Aeson.Value -> Aeson.Value`, e.g. a bare
@@ -3037,10 +2962,10 @@ impl JitEffectMachine {
     /// Register a session-scoped GC root slot that survives across runs (i.e.
     /// across `RegistryGuard` drops), unlike the per-run rust roots.
     ///
-    /// Wave 1.A (component D): fill this machine's persistent-roots registry
-    /// so a tenured binding's root is appended to `perform_gc`'s root set and
-    /// is NOT cleared by the per-run `clear_run_scratch`. Takes a slot
-    /// pointer (`*mut *mut u8`) like `host_fns::register_rust_root`.
+    /// Fills this machine's persistent-roots registry so a tenured binding's
+    /// root is appended to `perform_gc`'s root set and is NOT cleared by the
+    /// per-run `clear_run_scratch`. Takes a slot pointer (`*mut *mut u8`)
+    /// like `host_fns::register_rust_root`.
     ///
     /// # Safety
     /// The caller guarantees that `slot` is non-null, points to a valid
@@ -3067,26 +2992,20 @@ impl JitEffectMachine {
     }
 
     /// Number of write-barrier remembered slots currently registered on this
-    /// machine (test/diagnostic accessor) — the barrier's sibling of
-    /// `persistent_roots_count`. Reads `self.machine_state` directly, same
-    /// rationale as `persistent_roots_count`.
+    /// machine (test/diagnostic accessor).
     pub fn remembered_slots_count(&self) -> usize {
         self.machine_state.remembered_slots_count()
     }
 
     /// Session-lifetime count of Cranelift functions successfully compiled
-    /// into this machine's `JITModule` (test/diagnostic accessor — realm-
-    /// lifetime spike, COST B). Delegates to [`CodegenPipeline::functions_defined`],
-    /// which has no other reach from `JitEffectMachine` today.
+    /// into this machine's `JITModule` (test/diagnostic accessor).
     pub fn functions_defined(&self) -> u64 {
         self.pipeline.functions_defined()
     }
 
     /// Total bytes currently tenured in this session's old-space (test/
-    /// diagnostic accessor — realm-lifetime spike, COST A). 0 for a one-shot
-    /// machine (no session, no old-space). Delegates to
-    /// [`crate::old_space::OldSpace::bytes_used`], which has no other reach
-    /// from `JitEffectMachine` today.
+    /// diagnostic accessor). 0 for a one-shot machine (no session, no
+    /// old-space).
     pub fn old_space_bytes_used(&self) -> usize {
         self.session
             .as_ref()
@@ -3102,7 +3021,7 @@ impl JitEffectMachine {
 
     /// Number of stowed GC roots currently registered (test/diagnostic
     /// accessor — 1 while a nested child is running against a suspended parent,
-    /// 0 otherwise). Segment 40.
+    /// 0 otherwise).
     pub fn stowed_roots_count(&self) -> usize {
         self.machine_state.stowed_roots_count()
     }
@@ -3123,7 +3042,7 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // Segment 40 — nested child runs on a suspended machine.
+    // Nested child runs on a suspended machine.
     //
     // While a parent turn is suspended at a typed yield (`runLLMTurn`/`Ask`,
     // `suspended_continuation` is `Some`), CHILD fragment runs can execute
@@ -3346,7 +3265,7 @@ impl JitEffectMachine {
         Ok(())
     }
 
-    /// The rooting receipt (SEAM.md §1): every parked continuation must be a
+    /// The rooting receipt: every parked continuation must be a
     /// registered GC root for its whole parked lifetime, so
     /// `stowed_roots_count() == parked_count()` at every quiescent point the
     /// registry passes through. `debug_assert_eq!` rather than a hard
@@ -3636,7 +3555,7 @@ impl JitEffectMachine {
     }
 
     /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry
-    /// path (A2): take the persistent root of a PARKED frame's closure-valued
+    /// path: take the persistent root of a PARKED frame's closure-valued
     /// `finalize` payload, tenured at park time. The frame stays parked and
     /// rooted — only the frame's own handle to the slot is cleared, not its
     /// persistent-root registration, which lives for the machine's life
@@ -3674,8 +3593,8 @@ impl JitEffectMachine {
     }
 }
 
-/// RAII proof that a nested child is running against a suspended parent
-/// (segment 40). On drop it reads the (GC-current) continuation pointer back
+/// RAII proof that a nested child is running against a suspended parent.
+/// On drop it reads the (GC-current) continuation pointer back
 /// out of the heap-stable stowed cell and restores it into the machine's
 /// `suspended_continuation`, deregisters the stowed root, drops the cell, and
 /// decrements the nested-child depth — leaving the machine exactly as suspended
@@ -3800,7 +3719,7 @@ enum ResponsePlan {
 
 /// Outcome of the shared effect step loop ([`drive_effect_loop`]): the turn
 /// completed with a Done heap pointer, or it SUSPENDED at the caller's
-/// `suspend_tag` (threadless suspension — E2). `Suspended` carries the bridged
+/// `suspend_tag` (threadless suspension). `Suspended` carries the bridged
 /// request `Value` (the caller extracts prompt/meta) and the raw continuation
 /// heap pointer (the caller stows it; the machine's session heap is retained
 /// across the suspension). The non-suspend callers pass `suspend_tag = None`
@@ -3809,8 +3728,8 @@ enum DriveOutcome {
     Done(*mut u8),
     Suspended {
         request: tidepool_eval::value::Value,
-        /// The raw heap pointer to the request `Con` (rooted for the arm). W4:
-        /// a `finalize`'s value field crosses by reference, so `finish_suspendable`
+        /// The raw heap pointer to the request `Con` (rooted for the arm). A
+        /// `finalize`'s value field crosses by reference, so `finish_suspendable`
         /// reaches back into this Con to tenure the finalized value when the
         /// bridged `request` carries a [`heap_bridge::CLOSURE_SENTINEL`] placeholder.
         request_ptr: *mut u8,
@@ -3820,7 +3739,7 @@ enum DriveOutcome {
 
 /// Whether a bridged suspend request carries a [`heap_bridge::CLOSURE_SENTINEL`]
 /// placeholder among its top-level Con fields — the tolerant bridge's marker
-/// that a field was a live closure it declined to materialize (W4). Only the
+/// that a field was a live closure it declined to materialize. Only the
 /// direct fields of the request Con are checked: a `finalize`'s value is field
 /// 1 of `FinalizeWith`, and no other suspend request (`Ask`/`RunLLMTurn`) can
 /// legally contain a closure, so a nested sentinel would itself be a bug.
@@ -3847,7 +3766,7 @@ pub enum SuspendableOutcome {
     /// request; the machine holds the continuation internally.
     Suspended {
         request: tidepool_eval::value::Value,
-        /// W4 finalize-by-reference: `true` when the suspend request was a
+        /// Finalize-by-reference: `true` when the suspend request was a
         /// `finalize @T closure` — the finalized VALUE (field 1 of the request
         /// Con) has been tenured into old-space and its persistent root slot
         /// stashed on the machine ([`JitEffectMachine::take_finalized_root`]).
@@ -3918,9 +3837,8 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
 ) -> Result<*mut u8, JitError> {
     let yield_result = initial_step(machine, exec_start);
     // suspend_tag = None: the ask-suspend branch is never taken, so this drives
-    // exactly as the pre-E2 inline loop did — byte-identical non-suspend path.
-    // Threadless suspension is opt-in via `JitEffectMachine::run_suspendable`,
-    // which passes `Some(ask_tag)`.
+    // the plain non-suspend path. Threadless suspension is opt-in via
+    // `JitEffectMachine::run_suspendable`, which passes `Some(ask_tag)`.
     match drive_effect_loop(
         machine,
         cancel_flag,
@@ -3963,10 +3881,10 @@ fn initial_step(machine: &mut CompiledEffectMachine, exec_start: &str) -> Yield 
 /// continuation is still valid), instead of dispatching to a handler. `t` is
 /// the first INTERPOSED (unhandled) tag — every tag from there on is
 /// unhandled by construction, so this threshold test is what lets
-/// `Ask`/`RunLLMTurn`/`Finalize` (self-iterating-harness WS-B) share this one
-/// suspend arm without each needing its own comparison.
-/// `suspend_tag = None`: every effect dispatches exactly as the pre-E2 inline
-/// loop did — the non-suspend path is byte-identical.
+/// `Ask`/`RunLLMTurn`/`Finalize` share this one suspend arm without each
+/// needing its own comparison.
+/// `suspend_tag = None`: every effect dispatches through the plain,
+/// non-suspend path.
 ///
 /// `yield_result` is the entry Yield: a fresh [`initial_step`] for a new turn,
 /// or a `machine.resume(..)` of the stowed continuation for a re-entry.
@@ -4011,8 +3929,8 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                     );
                 }
                 // Root the raw request pointer too, alongside the continuation:
-                // a suspended `finalize @T closure` (self-iterating-harness W4)
-                // passes the finalized value by REFERENCE, so the harness reaches
+                // a suspended `finalize @T closure` passes the finalized value
+                // by REFERENCE, so the harness reaches
                 // BACK into this request Con's value field live after the suspend.
                 // The bridge below may itself GC (thunk forcing); registering the
                 // request slot keeps field(1)'s subtree evacuated + GC-updated.
@@ -4043,18 +3961,17 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 let req_val =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
                 log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
-                // E2 threadless suspension: `suspend_tag` is the FIRST interposed
+                // Threadless suspension: `suspend_tag` is the FIRST interposed
                 // (unhandled) tag — the position right after the last effect with
                 // a real handler. Every tag at or beyond it is unhandled by
-                // construction (Ask, and — self-iterating-harness WS-B —
-                // RunLLMTurn/Finalize, always appended consecutively after the
-                // handled stack), so the threshold test `tag >= suspend_tag`
-                // catches ALL of them through this one arm: no per-effect
-                // duplication, `Ask`/`RunLLMTurn`/`Finalize` share this exact
-                // suspend path. A stack with only one interposed effect (the
-                // pre-WS-B norm, and today's ordinary eval/repl stacks) has
-                // `suspend_tag` as the only tag >= it, so this is behavior-
-                // preserving there. Unwind carrying the bridged request + the
+                // construction (Ask, and RunLLMTurn/Finalize, always appended
+                // consecutively after the handled stack), so the threshold test
+                // `tag >= suspend_tag` catches ALL of them through this one arm:
+                // no per-effect duplication, `Ask`/`RunLLMTurn`/`Finalize` share
+                // this exact suspend path. A stack with only one interposed
+                // effect (today's ordinary eval/repl stacks) has `suspend_tag`
+                // as the only tag >= it, so this is behavior-preserving there.
+                // Unwind carrying the bridged request + the
                 // continuation instead of dispatching. `continuation` here is the
                 // post-request-bridge value (the arm's `register_rust_root`
                 // updated it in place through any GC during forcing). The arm's
@@ -4116,11 +4033,10 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
 /// Materialize a handler [`tidepool_effect::Response`] into a heap pointer and
 /// resume the machine's `continuation` with it, returning the next [`Yield`].
 ///
-/// Factored verbatim out of the effect loop so [`JitEffectMachine::resume_suspended`]
-/// re-enters a stowed turn through the EXACT same materialization path (lazy
-/// `Stream` park, long-spine re-park, eager `value_to_heap`) — one body, no
-/// drift-prone second copy. The non-suspend loop calls this once per effect
-/// exactly as before, so its behavior is unchanged.
+/// Shared so [`JitEffectMachine::resume_suspended`] re-enters a stowed turn
+/// through the EXACT same materialization path (lazy `Stream` park,
+/// long-spine re-park, eager `value_to_heap`) — one body, no drift-prone
+/// second copy.
 ///
 /// `continuation` is GC-rooted here for the duration: response materialization
 /// (`value_to_heap` / `materialize_cons_list`) can
@@ -4356,7 +4272,7 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
     Yield::Error(runtime_error_or_signal(e.0))
 }
 
-/// A5 (segment 40) — the deepseq-style NF check on a data-kinded resume answer.
+/// A5 — the deepseq-style NF check on a data-kinded resume answer.
 ///
 /// A bridged answer `Value` is produced by `heap_to_value_forcing`, which forces
 /// each node to WHNF as it walks — so a genuine bottom (`undefined`/`⊥`, a lazy
@@ -4370,7 +4286,7 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
 /// address-keyed visited set on `Con` payloads so shared/cyclic data terminates.
 /// `Con`/`Lit`/`ByteArray` are normal-form data; `ThunkRef` is a bottom-reject;
 /// `Closure`/`JoinCont`/`ConFun` cannot occur in a data-kinded answer
-/// (function-bearing types were rejected at extract, segment 10) but are treated
+/// (function-bearing types are rejected at extract) but are treated
 /// as a reject too, since they are not first-order NF data.
 fn answer_force_nf(root: &tidepool_eval::value::Value) -> Result<(), String> {
     use tidepool_eval::value::Value;
@@ -4492,15 +4408,12 @@ mod tests {
         );
     }
 
-    /// L7 (repo-review-2026-07-06/01-gc-memory-safety.md, Low findings):
-    /// `suspended_continuation` is not a GC root and, before this fix, no
-    /// run entry asserted it was `None` — safety rested entirely on
-    /// tidepool-repl's external discipline never calling a fresh run entry
-    /// on a machine parked at `resume_suspended`. Rather than drive a real
-    /// `Ask`-boundary suspension (heavy effect-machine setup), this directly
-    /// sets the private field to simulate "already suspended" and confirms
-    /// each entry's new `assert!` fires — a clean panic, not silent
-    /// corruption of a live continuation.
+    /// `suspended_continuation` is not a GC root, so every plain run entry
+    /// must assert it is `None` (the L7 assert) rather than rely on external
+    /// discipline. Rather than drive a real `Ask`-boundary suspension (heavy
+    /// effect-machine setup), this directly sets the private field to
+    /// simulate "already suspended" and confirms each entry's assert fires —
+    /// a clean panic, not silent corruption of a live continuation.
     #[test]
     fn run_entries_assert_when_a_continuation_is_already_suspended() {
         use tidepool_repr::tree::RecursiveTree;
@@ -4540,12 +4453,10 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Wave 1.A seam tests
+    // Session seam tests
     // ---------------------------------------------------------------------------
 
     /// Build a Con-chain expr + DataConTable that forces >=1 GC under a small nursery.
-    /// Mirrors the gc_frame_walker.rs `build_con_chain` + `make_table_with_con` helpers,
-    /// and the Con-chain shape of `tidepool_testing::gen::make_gc_forcing_setup`.
     ///
     /// INVARIANT: cfg(test) code in this crate must NOT reference tidepool-testing.
     /// tidepool-testing links its own (non-test) copy of tidepool-codegen, so if this
@@ -4637,14 +4548,13 @@ mod tests {
         (expr, table)
     }
 
-    /// Test (c): persistent roots survive a RegistryGuard drop; per-run rust
+    /// Persistent roots survive a RegistryGuard drop; per-run rust
     /// roots and GC state are cleared.
     ///
-    /// Bare-VMContext harness (leaf 3's GC cluster reaches exclusively via
+    /// Bare-VMContext harness (the GC cluster reaches exclusively via
     /// `vmctx.machine_state`, never `CURRENT_MACHINE`): owns a `MachineState`,
     /// wires it onto a hand-built `VMContext`, and drives the vmctx-gated
-    /// free fns through it — same pattern leaf 1 used for
-    /// `set_stack_map_registry`.
+    /// free fns through it.
     #[test]
     #[serial]
     fn test_persistent_root_survives_guard_drop() {
@@ -4702,7 +4612,7 @@ mod tests {
         machine_state.clear_persistent_roots();
     }
 
-    /// Test (d): THE SEAM TEST — compile_session, run, verify heap retention,
+    /// THE SEAM TEST — compile_session, run, verify heap retention,
     /// verify install re-points, verify persistent root survives second run.
     #[test]
     #[serial]
@@ -4789,12 +4699,11 @@ mod tests {
                 );
 
                 // Drop the machine: free_session_heap clears persistent roots.
-                // Per-machine ownership means this is now structural — the
+                // Per-machine ownership means this is structural — the
                 // MachineState (and its persistent_roots Vec) is deallocated
-                // with `machine`, so there is nothing left to query; the
-                // assertion this replaces (`persistent_roots_count() == 0`
-                // read through a since-freed handle) is no longer expressible
-                // and would be UB, not a check.
+                // with `machine`, so there is nothing left to query;
+                // `persistent_roots_count()` on a freed handle would be UB,
+                // not a check.
                 drop(machine);
             })
             .unwrap()
