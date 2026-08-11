@@ -26,11 +26,11 @@ dyn-clone = "1.0"
 frunk.workspace = true
 schemars.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
-tidepool-bridge.workspace = true
 
 [dev-dependencies]
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
+tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest.workspace = true
