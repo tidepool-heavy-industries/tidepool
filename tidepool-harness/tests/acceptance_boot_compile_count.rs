@@ -81,6 +81,11 @@ use tidepool_harness::{
 /// constant and nothing else in this test — the test itself, and the
 /// spawn-counting instrumentation it asserts against, stay unchanged.
 ///
+/// Harness turn compiles are memoized as of `plans/compile-memo.md`, so
+/// "clean cache" is now enforced by the test (`support::isolate_compile_memo`)
+/// rather than assumed of the ambient environment — a warm memo pays 0 spawns,
+/// which would be a receipt about cache state, not about the boot path.
+///
 /// MEASURED 2026-08-09 on the centralized tip (this suite, clean cache):
 /// **2** — both boot seeds are gone (item 0 steps 1-3, boot-lazy), leaving
 /// exactly the two `compile_outer` invocations (render framing + loop body)
@@ -158,6 +163,13 @@ impl ModelProvider for SnapshotOnFirstCall {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     support::require_extract();
+
+    // This receipt is about the BOOT PATH, not about cache state. Harness turn
+    // compiles are memoized (`plans/compile-memo.md`), so against the shared
+    // test memo this counts 0 spawns on a warm run and
+    // `PRE_MODEL_EXTRACT_COMPILES` on a cold one. The constant's own doc says
+    // "clean cache"; this enforces it instead of assuming it.
+    let _memo_guard = support::isolate_compile_memo();
 
     // Own process (nextest gives every test binary its own), but reset
     // anyway: this test binary has exactly one test function, so this only

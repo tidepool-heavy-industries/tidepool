@@ -181,6 +181,16 @@ capped without an edit there.
 Never run bare `scripts/battery.sh` (tier 0, unbounded) expecting it to
 complete here — use tier 2 or 3.
 
+**Compile compiles are memoized, and test processes SHARE the memo.**
+`$TIDEPOOL_COMPILE_CACHE_DIR` (default: the cache dir) locates the
+content-addressed compiled-artifact memo, and the harness suite points it at
+the ambient cache dir while keeping each test's mutable state in its own
+tempdir — so a second run of a GHC-heavy leg is much cheaper than the first
+(measured on three harness binaries: 99s cold, 47s warm). Two consequences:
+a COLD number needs the memo removed (`rm -rf $XDG_CACHE_HOME/tidepool`), and
+a test that measures compile COST must pin its own memo dir rather than
+inherit the shared one. See `plans/compile-memo.md`.
+
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
 `scripts/redeploy.sh` — deploy extract + both servers + cache clear + deploy stamp; see `haskell/CLAUDE.md` for what each step does, including the toolchain locator precedence tables and the deploy handshake

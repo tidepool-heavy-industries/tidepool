@@ -1,13 +1,16 @@
 //! Filesystem caching for compiled artifacts.
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Returns the cache directory for Tidepool's compiled-artifact memos.
-/// Delegates to the canonical resolver ([`crate::paths::cache_dir`]); wrapped in
-/// `Some` since every call site uses `?`/`Option` combinators.
+/// Delegates to the canonical resolver ([`crate::paths::compile_cache_dir`]),
+/// which is [`crate::paths::cache_dir`] unless `$TIDEPOOL_COMPILE_CACHE_DIR`
+/// redirects the memo (and the `binfp-*` sidecars) somewhere shared; wrapped
+/// in `Some` since every call site uses `?`/`Option` combinators.
 fn cache_dir() -> Option<PathBuf> {
-    Some(crate::paths::cache_dir())
+    Some(crate::paths::compile_cache_dir())
 }
 
 /// A content-addressed cache key: the blake3 hex digest of a compilation
@@ -433,6 +436,357 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
     let _ = fs::write(&sentinel, checksum);
 }
 
+// ---------------------------------------------------------------------------
+// Invocation-keyed artifact sets
+//
+// The second consumer of this module. `compile_haskell` above memoizes ONE
+// eval compile as a fixed (expr, meta) pair keyed by (source, target,
+// includes-by-path, binary). `tidepool_harness::compile` needs a memo for a
+// whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
+// (per-target Core, one shared meta, an asks sidecar whose very FILENAME
+// depends on the target count), and a key that survives the same content
+// appearing under a different absolute path. Rather than fork the fingerprint/
+// staleness discipline solved above, that shape is expressed here, over the
+// same primitives. See `plans/compile-memo.md`.
+// ---------------------------------------------------------------------------
+
+/// Leads an [`InvocationKey`]'s hash, so an invocation key can never collide
+/// with an eval [`CacheKey`] — the two name DIFFERENT artifact sets under the
+/// same `<key>.*` filenames, and a collision would serve one caller the
+/// other's bytes. The eval key's own bytes are untouched by this module: no
+/// mass invalidation of anyone's `~/.cache/tidepool`.
+const INVOCATION_NAMESPACE: &[u8] = b"tidepool-invocation-artifacts-v1";
+
+/// A content-addressed key for a COMPLETE `tidepool-extract` invocation.
+/// A newtype for the same reason [`CacheKey`] is one — it also names the
+/// on-disk artifact files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvocationKey(String);
+
+impl std::fmt::Display for InvocationKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Everything about a `tidepool-extract` invocation that can reach its output
+/// bytes. Built by the caller from the very `ExtractCmd` it is about to run,
+/// so the key describes the invocation that actually happens.
+pub struct Invocation<'a> {
+    /// The module source, by CONTENT. Never the path — the on-disk
+    /// `<Module>.hs` lives in a per-invocation tempdir.
+    pub source: &'a str,
+    /// The built argv, exactly as `ExtractCmd::argv()` returns it. Walked
+    /// against an allowlist (see [`invocation_key`]).
+    pub argv: &'a [OsString],
+    /// The positional input path in `argv`, so the walk can recognize (and
+    /// drop) it rather than treating it as an unknown argument.
+    pub input_path: &'a Path,
+    /// `--include` roots in ORIGINAL order. Fingerprinted by CONTENT, with
+    /// paths RELATIVE to each root — the absolute location is deliberately not
+    /// keyed.
+    pub include: &'a [PathBuf],
+    /// The binary this invocation will spawn. Fingerprinted by content
+    /// (following wrapper `exec` targets); resolved through `$PATH` first if
+    /// it is a bare name.
+    pub bin: &'a Path,
+}
+
+/// Compute the key for an invocation, or `None` when the invocation is
+/// **uncacheable** and must be compiled cold.
+///
+/// The argv walk is an ALLOWLIST, and that is the point: it makes "the key
+/// covers every input that affects the output" a structural property instead
+/// of a standing obligation to remember. Recognized elements are
+///
+/// - `--output-dir <dir>` — dropped. Per-invocation; where the bytes are
+///   written cannot change what they are.
+/// - `--include <dir>` — dropped HERE and content-fingerprinted below.
+/// - `--target <name>` / `--targets <a,b>` — keyed verbatim, in order. The
+///   target list decides what is compiled, and (via `targets.len() > 1`)
+///   which asks-sidecar shape the extract writes.
+/// - the positional input, iff it equals `input_path` — dropped (its CONTENT
+///   is keyed as `source`).
+///
+/// **Anything else makes the invocation uncacheable.** A flag added to
+/// `ExtractCmd` tomorrow and threaded into a calling site does not ride along
+/// unkeyed; it goes cold until someone classifies it. The failure direction is
+/// a miss, never a false hit. This is also how session-scope compiles
+/// (`--session-bind`/`--inject-val`/`--session-root`, which read per-session
+/// MUTABLE directories nothing here fingerprints) are excluded: not by a
+/// comment, but because those flags are not on the list.
+///
+/// An unresolvable binary is likewise uncacheable rather than keyed with an
+/// empty fingerprint — a key that cannot see the compiler would survive an
+/// extract rebuild and serve stale Core.
+pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
+    // Walk first, so an uncacheable invocation costs no hashing.
+    let mut fields: Vec<&OsStr> = Vec::new();
+    let mut args = inv.argv.iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--output-dir" | "--include") => {
+                args.next()?;
+            }
+            Some(flag @ ("--target" | "--targets")) => {
+                let value = args.next()?;
+                fields.push(OsStr::new(flag));
+                fields.push(value);
+            }
+            _ if arg.as_os_str() == inv.input_path.as_os_str() => {}
+            _ => return None,
+        }
+    }
+
+    let bin = resolve_for_fingerprint(inv.bin)?;
+
+    let mut hasher = blake3::Hasher::new();
+    frame(&mut hasher, INVOCATION_NAMESPACE);
+    frame(&mut hasher, inv.source.as_bytes());
+
+    frame(&mut hasher, &(fields.len() as u64).to_le_bytes());
+    for field in fields {
+        frame(&mut hasher, field.as_encoded_bytes());
+    }
+
+    // ORIGINAL order: GHC receives `--include` in argument order and
+    // search-path order decides module shadowing, so [A,B] and [B,A] are
+    // different compilations and must not share a key.
+    frame(&mut hasher, &(inv.include.len() as u64).to_le_bytes());
+    for root in inv.include {
+        fingerprint_dir_relative(root, &mut hasher);
+    }
+
+    fingerprint_binary_content(&bin, &mut hasher);
+
+    Some(InvocationKey(hasher.finalize().to_hex().to_string()))
+}
+
+/// The binary that will actually be spawned, as an absolute readable file.
+/// A bare name (`$TIDEPOOL_EXTRACT` unset, so `ExtractCmd` spawns through
+/// `PATH`) is resolved the same way the OS will resolve it, so the key
+/// fingerprints the binary the spawn reaches. `None` when nothing resolves.
+fn resolve_for_fingerprint(bin: &Path) -> Option<PathBuf> {
+    if bin.is_file() {
+        return Some(bin.to_path_buf());
+    }
+    which::which(bin).ok()
+}
+
+/// Fingerprint the compiler by CONTENT only — no path, deliberately. The same
+/// binary bytes at two install locations IS the same compiler, and pinning the
+/// path would defeat sharing one memo across processes that resolved the
+/// extract differently. Wrapper `exec` targets are followed, so a delegate-only
+/// upgrade still forces a miss ([`wrapper_targets`]).
+fn fingerprint_binary_content(bin: &Path, hasher: &mut blake3::Hasher) {
+    frame(hasher, &binary_content_hash(bin));
+    let targets = wrapper_targets(bin);
+    frame(hasher, &(targets.len() as u64).to_le_bytes());
+    for target in &targets {
+        frame(hasher, &binary_content_hash(target));
+    }
+}
+
+/// Fingerprints an include root by CONTENT, keyed by each file's path
+/// RELATIVE to that root.
+///
+/// The relative keying is the deliberate divergence from [`fingerprint_dir`],
+/// which frames absolute paths. It is what makes one memo shareable across
+/// processes that materialized identical trees at different locations (the
+/// generated effects module and test fixtures both live under a per-process
+/// tempdir), and it is sound because the absolute location of an include dir
+/// does not reach the output bytes: Cast/Tick/Type erasure happens in the
+/// Haskell serializer, so Core carries no source spans. Module identity comes
+/// from the path relative to the search root — which IS keyed.
+///
+/// Files are collected then sorted globally, so the digest does not depend on
+/// directory traversal order. The canonicalized-`visited` set is the same
+/// cycle guard [`fingerprint_dir_inner`] carries: `path.is_dir()` follows
+/// symlinks, so a directory symlink pointing back at an ancestor would
+/// otherwise recurse forever.
+fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_relative(root, root, &mut files, &mut visited);
+    files.sort();
+
+    frame(hasher, &(files.len() as u64).to_le_bytes());
+    for (rel, digest) in &files {
+        frame(hasher, rel.as_bytes());
+        frame(hasher, digest);
+    }
+}
+
+fn collect_relative(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    if let Ok(canon) = fs::canonicalize(dir) {
+        if !visited.insert(canon) {
+            return;
+        }
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_relative(root, &path, out, visited);
+            continue;
+        }
+        let Some(ext) = path.extension() else {
+            continue;
+        };
+        if ext != "hs" && ext != "hs-boot" {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        // A leading tag byte keeps "unreadable" a distinct value from any
+        // content digest instead of aliasing onto one. `fs::read` follows
+        // symlinks and hashes what GHC will actually compile.
+        let digest = match fs::read(&path) {
+            Ok(bytes) => {
+                let mut d = vec![1u8];
+                d.extend_from_slice(blake3::hash(&bytes).as_bytes());
+                d
+            }
+            Err(_) => vec![0u8],
+        };
+        out.push((rel, digest));
+    }
+}
+
+/// Manifest tag, so a truncated or foreign file cannot be read as a manifest.
+const ARTIFACT_MANIFEST_TAG: &[u8] = b"artifact-set-v1";
+
+/// Load a cached invocation's FULL artifact set, in the order `names` requests
+/// it. `Some(v)` only when the stored manifest names exactly `names`, in
+/// order, and every present artifact's bytes still hash to what the manifest
+/// recorded — a crash mid-store, a slot-set mismatch, or a bit-flip that would
+/// still decode as plausible CBOR all read as a MISS.
+///
+/// An entry is `None` when the extract did not write that artifact at all.
+/// That is distinct from empty bytes and must stay so: an extract predating
+/// the asks pass writes no `asks.json`, and the caller's "no file" branch
+/// yields an empty sidecar rather than parsing `[]`.
+pub fn artifacts_load(key: &InvocationKey, names: &[&str]) -> Option<Vec<Option<Vec<u8>>>> {
+    let dir = cache_dir()?;
+    let manifest = fs::read(dir.join(format!("{key}.ok"))).ok()?;
+    let entries = parse_manifest(&manifest)?;
+    if entries.len() != names.len() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(names.len());
+    for (i, (expected, (name, digest))) in names.iter().zip(entries.iter()).enumerate() {
+        if name.as_str() != *expected {
+            return None;
+        }
+        let Some(digest) = digest else {
+            out.push(None);
+            continue;
+        };
+        let bytes = fs::read(dir.join(format!("{key}.a{i}"))).ok()?;
+        if blake3::hash(&bytes).as_bytes() != digest {
+            return None;
+        }
+        out.push(Some(bytes));
+    }
+    Some(out)
+}
+
+/// Store an invocation's full artifact set. Each present artifact is replaced
+/// atomically via rename; the `{key}.ok` manifest is REMOVED first (marking
+/// the entry incomplete) and rewritten LAST, so [`artifacts_load`] never reads
+/// a half-written set. Best-effort throughout — a cache that cannot be written
+/// degrades to recompiling, never to failing the compile.
+pub fn artifacts_store(key: &InvocationKey, artifacts: &[(&str, Option<&[u8]>)]) {
+    let Some(dir) = cache_dir() else { return };
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let sentinel = dir.join(format!("{key}.ok"));
+    let _ = fs::remove_file(&sentinel);
+
+    let mut manifest = Vec::new();
+    frame_bytes(&mut manifest, ARTIFACT_MANIFEST_TAG);
+    frame_bytes(&mut manifest, &(artifacts.len() as u64).to_le_bytes());
+    for (i, (name, bytes)) in artifacts.iter().enumerate() {
+        frame_bytes(&mut manifest, name.as_bytes());
+        match bytes {
+            Some(bytes) => {
+                use std::io::Write;
+                let Ok(mut tmp) = tempfile::NamedTempFile::new_in(&dir) else {
+                    return;
+                };
+                if tmp.write_all(bytes).is_err() {
+                    return;
+                }
+                if tmp.persist(dir.join(format!("{key}.a{i}"))).is_err() {
+                    return;
+                }
+                manifest.push(1u8);
+                frame_bytes(&mut manifest, blake3::hash(bytes).as_bytes());
+            }
+            None => manifest.push(0u8),
+        }
+    }
+    let _ = fs::write(&sentinel, &manifest);
+}
+
+/// Length-prefixed field into a byte buffer — the [`frame`] discipline, for
+/// the manifest rather than a hasher.
+fn frame_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// Parse a manifest into `(name, Some(digest) | None)` entries. Any
+/// malformation — wrong tag, truncation, trailing bytes — is `None`, i.e. a
+/// miss.
+fn parse_manifest(bytes: &[u8]) -> Option<Vec<(String, Option<[u8; 32]>)>> {
+    let mut cur = 0usize;
+    if take_framed(bytes, &mut cur)? != ARTIFACT_MANIFEST_TAG {
+        return None;
+    }
+    let count = u64::from_le_bytes(take_framed(bytes, &mut cur)?.try_into().ok()?);
+    let count = usize::try_from(count).ok()?;
+    let mut out = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let name = String::from_utf8(take_framed(bytes, &mut cur)?.to_vec()).ok()?;
+        let digest = match take(bytes, &mut cur, 1)?[0] {
+            0 => None,
+            1 => Some(<[u8; 32]>::try_from(take_framed(bytes, &mut cur)?).ok()?),
+            _ => return None,
+        };
+        out.push((name, digest));
+    }
+    // Trailing bytes mean this is not the manifest we wrote.
+    if cur != bytes.len() {
+        return None;
+    }
+    Some(out)
+}
+
+fn take<'a>(bytes: &'a [u8], cur: &mut usize, n: usize) -> Option<&'a [u8]> {
+    let end = cur.checked_add(n)?;
+    let slice = bytes.get(*cur..end)?;
+    *cur = end;
+    Some(slice)
+}
+
+fn take_framed<'a>(bytes: &'a [u8], cur: &mut usize) -> Option<&'a [u8]> {
+    let len = u64::from_le_bytes(take(bytes, cur, 8)?.try_into().ok()?);
+    take(bytes, cur, usize::try_from(len).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +1038,331 @@ mod tests {
         assert_eq!(extract_exec_target("FOO=bar"), None);
         assert_eq!(extract_exec_target(""), None);
         assert_eq!(extract_exec_target("relative-path arg"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Invocation keying — adversarial.
+    //
+    // A keying bug here poisons every downstream consumer SILENTLY: a false
+    // hit serves one compilation's Core for another and nothing fails loudly.
+    // So the discipline is one test per DIMENSION, each varying exactly one
+    // thing and asserting a MISS, plus the one dimension that must NOT change
+    // the key (absolute include path — the property that makes the memo
+    // shareable across processes).
+    // -----------------------------------------------------------------------
+
+    /// A dummy extract binary, so the key's compiler fingerprint resolves.
+    #[cfg(unix)]
+    fn fake_bin(dir: &Path, contents: &[u8]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-extract");
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// The argv `tidepool_harness::compile::compile_turns` builds.
+    fn turn_argv(input: &Path, out: &Path, targets: &str, includes: &[&Path]) -> Vec<OsString> {
+        let mut argv = vec![
+            input.as_os_str().to_os_string(),
+            OsString::from("--output-dir"),
+            out.as_os_str().to_os_string(),
+            OsString::from("--targets"),
+            OsString::from(targets),
+        ];
+        for inc in includes {
+            argv.push(OsString::from("--include"));
+            argv.push(inc.as_os_str().to_os_string());
+        }
+        argv
+    }
+
+    /// Writes `Lib.hs` with the given body under a fresh subdir of `root`.
+    fn include_dir(root: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = root.join(name);
+        fs::create_dir_all(dir.join("Nested")).unwrap();
+        fs::write(dir.join("Lib.hs"), body).unwrap();
+        fs::write(
+            dir.join("Nested").join("Deep.hs"),
+            "module Nested.Deep where",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_misses_on_every_input_dimension() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+        let out = tmp.path().join("out");
+        let inc_a = include_dir(tmp.path(), "a", "module Lib where\nx = 1");
+        let inc_b = include_dir(tmp.path(), "b", "module Other where\ny = 2");
+
+        let key = |source: &str, targets: &str, includes: &[&Path]| {
+            let argv = turn_argv(&input, &out, targets, includes);
+            let include: Vec<PathBuf> = includes.iter().map(|p| p.to_path_buf()).collect();
+            invocation_key(&Invocation {
+                source,
+                argv: &argv,
+                input_path: &input,
+                include: &include,
+                bin: &bin,
+            })
+            .expect("this invocation is cacheable")
+        };
+
+        let base = key("main = pure ()", "result", &[&inc_a, &inc_b]);
+        assert_eq!(
+            base,
+            key("main = pure ()", "result", &[&inc_a, &inc_b]),
+            "the key must be deterministic"
+        );
+
+        // Source content.
+        assert_ne!(base, key("main = pure 1", "result", &[&inc_a, &inc_b]));
+        // A target NAME (an argv field).
+        assert_ne!(base, key("main = pure ()", "other", &[&inc_a, &inc_b]));
+        // Target ORDER: `--targets a,b` and `--targets b,a` are different
+        // invocations (and for >1 they select the per-target asks shape).
+        assert_ne!(
+            key("main = pure ()", "a,b", &[&inc_a]),
+            key("main = pure ()", "b,a", &[&inc_a])
+        );
+        // Include ORDER: search-path order decides module shadowing.
+        assert_ne!(base, key("main = pure ()", "result", &[&inc_b, &inc_a]));
+        // Include SET.
+        assert_ne!(base, key("main = pure ()", "result", &[&inc_a]));
+
+        // Include CONTENT — one byte in one file under one include root.
+        fs::write(inc_a.join("Lib.hs"), "module Lib where\nx = 2").unwrap();
+        let after_edit = key("main = pure ()", "result", &[&inc_a, &inc_b]);
+        assert_ne!(base, after_edit, "an include-content edit must miss");
+
+        // A NEW file under an include root (a module that was not there).
+        fs::write(inc_a.join("Extra.hs"), "module Extra where").unwrap();
+        assert_ne!(
+            after_edit,
+            key("main = pure ()", "result", &[&inc_a, &inc_b])
+        );
+    }
+
+    /// The compiler itself is keyed by CONTENT: an extract rebuild must miss
+    /// even when the path, size and mtime are unchanged.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_misses_on_extract_binary_content() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+        let key = || {
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: &[],
+                bin: &bin,
+            })
+            .unwrap()
+        };
+
+        let before = key();
+        // Sleep first: ctime granularity is a kernel tick, and the content-hash
+        // memo is keyed on (dev, ino, ctime). A real rebuild is never sub-tick.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let past = filetime::FileTime::from_unix_time(100, 0);
+        filetime::set_file_mtime(&bin, past).unwrap();
+        fs::write(&bin, b"#!/bin/sh\nexit 1\n").unwrap(); // same size
+        filetime::set_file_mtime(&bin, past).unwrap();
+        assert_ne!(before, key(), "an extract rebuild must invalidate");
+    }
+
+    /// The property the shared test memo rests on: identical CONTENT at
+    /// different absolute paths is the same compilation and keys identically.
+    /// If this ever flips, every harness test process misses and the suite
+    /// silently returns to its cold cost.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_is_independent_of_absolute_paths() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let body = "module Lib where\nx = 1";
+
+        let key_at = |root: &Path| {
+            let input = root.join("Expr.hs");
+            fs::write(&input, "module Expr where").unwrap();
+            let inc = include_dir(root, "inc", body);
+            let argv = turn_argv(&input, &root.join("out"), "result", &[&inc]);
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: std::slice::from_ref(&inc),
+                bin: &bin,
+            })
+            .unwrap()
+        };
+
+        let one = TempDir::new().unwrap();
+        let two = TempDir::new().unwrap();
+        assert_eq!(
+            key_at(one.path()),
+            key_at(two.path()),
+            "identical content at different absolute paths must share a key"
+        );
+    }
+
+    /// Default-deny: an argv element the allowlist does not classify makes the
+    /// invocation UNCACHEABLE rather than silently unkeyed. This is how
+    /// session-scope compiles (which read per-session MUTABLE dirs nothing
+    /// here fingerprints) stay out, and how a flag added tomorrow goes cold
+    /// instead of wrong.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_refuses_unclassified_and_session_scoped_flags() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+
+        let key = |extra: &[&str]| {
+            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+            argv.extend(extra.iter().map(OsString::from));
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: &[],
+                bin: &bin,
+            })
+        };
+
+        assert!(key(&[]).is_some(), "the plain turn invocation is cacheable");
+        for flags in [
+            &["--session-bind"][..],
+            &["--session-root", "/tmp/sessions"][..],
+            &["--inject-val", "Tidepool.Session.Val.G1"][..],
+            &["--bind-gen", "2"][..],
+            &["--turn"][..],
+            &["--classify"][..],
+            &["--some-future-flag", "v"][..],
+        ] {
+            assert!(
+                key(flags).is_none(),
+                "{flags:?} must make the invocation uncacheable"
+            );
+        }
+        // A dangling flag (no value) is likewise uncacheable, not a panic.
+        assert!(key(&["--target"]).is_none());
+        // An unresolvable binary is uncacheable — a key blind to the compiler
+        // would survive an extract rebuild.
+        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+        assert!(invocation_key(&Invocation {
+            source: "main = pure ()",
+            argv: &argv,
+            input_path: &input,
+            include: &[],
+            bin: &tmp.path().join("no-such-extract"),
+        })
+        .is_none());
+    }
+
+    /// An invocation key can never name the same on-disk entry as an eval
+    /// key — the two store DIFFERENT artifact sets under `<key>.*`.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_is_namespaced_away_from_eval_keys() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin);
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+        let inv = invocation_key(&Invocation {
+            source: "main = pure ()",
+            argv: &argv,
+            input_path: &input,
+            include: &[],
+            bin: &bin,
+        })
+        .unwrap();
+        assert_ne!(
+            inv.to_string(),
+            cache_key("main = pure ()", "result", &[]).to_string()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn artifacts_roundtrip_present_and_absent() {
+        let tmp = TempDir::new().unwrap();
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", tmp.path());
+        let key = InvocationKey("artifacts-roundtrip".to_string());
+        let names = ["meta.cbor", "result.cbor", "asks.json"];
+
+        assert!(artifacts_load(&key, &names).is_none(), "empty cache misses");
+
+        // The asks sidecar is ABSENT — an extract predating that pass writes
+        // no file at all, and `None` must survive as `None`.
+        artifacts_store(
+            &key,
+            &[
+                ("meta.cbor", Some(b"meta".as_slice())),
+                ("result.cbor", Some(b"expr".as_slice())),
+                ("asks.json", None),
+            ],
+        );
+
+        let loaded = artifacts_load(&key, &names).expect("stored set must load");
+        assert_eq!(loaded[0].as_deref(), Some(b"meta".as_slice()));
+        assert_eq!(loaded[1].as_deref(), Some(b"expr".as_slice()));
+        assert_eq!(loaded[2], None, "absent must not become empty");
+
+        // A DIFFERENT expected name set is a miss, not a silent mismatch.
+        assert!(artifacts_load(&key, &["meta.cbor", "other.cbor", "asks.json"]).is_none());
+        assert!(artifacts_load(&key, &["meta.cbor", "result.cbor"]).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn artifacts_load_misses_on_missing_sentinel_or_corrupt_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", tmp.path());
+        let dir = tmp.path().join("tidepool");
+        let key = InvocationKey("artifacts-corrupt".to_string());
+        let names = ["meta.cbor", "result.cbor"];
+        artifacts_store(
+            &key,
+            &[
+                ("meta.cbor", Some(b"meta".as_slice())),
+                ("result.cbor", Some(b"expr".as_slice())),
+            ],
+        );
+        assert!(artifacts_load(&key, &names).is_some());
+
+        // A bit-flip that would still decode as plausible CBOR: the manifest's
+        // recorded digest no longer matches, so the entry reads as a MISS.
+        fs::write(dir.join(format!("{key}.a1")), b"EXPR").unwrap();
+        assert!(artifacts_load(&key, &names).is_none());
+
+        // A crash mid-store leaves artifacts with no sentinel.
+        fs::write(dir.join(format!("{key}.a1")), b"expr").unwrap();
+        assert!(artifacts_load(&key, &names).is_some());
+        fs::remove_file(dir.join(format!("{key}.ok"))).unwrap();
+        assert!(artifacts_load(&key, &names).is_none());
+
+        // A truncated/foreign manifest is a miss, never a panic.
+        fs::write(dir.join(format!("{key}.ok")), b"not-a-manifest").unwrap();
+        assert!(artifacts_load(&key, &names).is_none());
     }
 
     #[cfg(unix)]

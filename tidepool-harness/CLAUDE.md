@@ -29,8 +29,8 @@ Module map:
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
   name.
 - `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
-  + `asks.json` sidecar) via `tidepool-extract`, independent of
-  `tidepool-runtime`'s caching compile (turns are one-shot, no cache needed).
+  + `asks.json` sidecar) via `tidepool-extract`, MEMOIZED through
+  `tidepool_runtime::cache` (see Compile memo below).
 - `log` — event-log wire schema (header pins prelude+extract fingerprints).
   `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
   a "model" tag; `Event::Effect{req,resp}` is written by the live
@@ -44,6 +44,45 @@ Module map:
 - `synopsis` — the names-only `type_synopsis` a hole card's shape line reads,
   derived from a compiled `DataConTable` (constructor/selector NAMES only —
   the table has no field TYPES, so this is honestly shallow, never a form).
+
+## Compile memo — one content-addressed cache, no cache-free path
+
+`compile.rs` used to be deliberately cache-free ("turns are one-shot, no cache
+needed"). That decision is REVERSED (approved 2026-08-11) and the cache-free
+path is DELETED — there is no bypass flag and no second mechanism. The full
+keying spec, the correctness hazards it answers, and the safety argument for
+sharing one memo across test processes are in `plans/compile-memo.md`; what a
+reader here needs:
+
+- **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
+  `invocation_key` keys the COMPLETE invocation — source CONTENT, the built
+  `ExtractCmd::argv()` walked against an ALLOWLIST, the include roots by
+  CONTENT with paths RELATIVE to each root, and the extract binary by content.
+  An argv element the allowlist does not classify makes the invocation
+  UNCACHEABLE (compile cold), never silently unkeyed — that is also how
+  session-scope compiles (`--session-bind`/`--inject-val`/`--session-root`,
+  which read per-session MUTABLE dirs) stay out of v1. The session lane
+  (`tidepool_runtime::session::turn`) is untouched.
+- **A hit stores and restores the FULL artifact set** this module reads —
+  `meta.cbor`, every `<target>.cbor`, and the asks sidecar in whichever shape
+  the target count selects, with ABSENT distinct from empty. Hit and miss
+  rejoin at `compile::assemble`, so observational identity is a property of
+  the code shape. The one deliberate difference: a hit records no
+  `extract_spawn` timing stage and no `extract.*` phases, because nothing was
+  spawned.
+- **Tests share the memo, not their state.** `tests/support::isolate_cache`
+  still isolates `XDG_CACHE_HOME` per test (checkpoints, transcripts,
+  `log.jsonl`, KV, the generated effects module) but points
+  `TIDEPOOL_COMPILE_CACHE_DIR` at the AMBIENT cache dir so every test process
+  shares one memo. Sharing is safe by construction: content-addressed entries
+  are only reached by identical compilations. Measured on
+  `golden_path + acceptance_askuser + selfharness_spine`: 119s before, 99s
+  cold, **47s warm**.
+- **A test that MEASURES compile cost must opt out** via
+  `support::isolate_compile_memo()` (a fresh memo dir), or its receipt becomes
+  a receipt about cache state. `acceptance_boot_compile_count` is the one such
+  test — its `PRE_MODEL_EXTRACT_COMPILES` counts spawns, which a warm memo
+  drives to 0.
 
 ## Machine lifecycle — the registry is the one session-lifecycle truth
 

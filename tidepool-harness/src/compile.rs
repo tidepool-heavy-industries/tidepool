@@ -10,10 +10,26 @@
 //! builder, the same one `compile_haskell` drives) and reads all three
 //! outputs — `<target>.cbor`, `meta.cbor`, `asks.json` — from it.
 //!
-//! This is deliberately NOT a fork of the runtime's caching compile: turns are
-//! one-shot `M a` expressions, the sidecar is small, and the extract call is
-//! the ~2s floor either way. Keeping it here means the harness owns the
-//! sidecar contract end-to-end.
+//! **These compiles are MEMOIZED.** This module used to be deliberately
+//! cache-free ("turns are one-shot, the extract call is the ~2s floor either
+//! way"), which was right about one turn and wrong about the suite: the
+//! fixed-source compiles here — the boot seeds, the answerer's turns, the
+//! outer `render`/`loop` fragments — are the same bytes, the same includes and
+//! the same extract binary, recompiled once per test PROCESS across ~200 of
+//! them. That path is gone; there is no cache-free variant and no bypass flag.
+//! What survives is the sidecar contract, still owned end-to-end here: the memo
+//! stores the FULL artifact set this module reads (`meta.cbor`, every
+//! `<target>.cbor`, and the asks sidecar in whichever shape the target count
+//! selects — with ABSENT distinct from empty), and hit and miss rejoin at
+//! [`assemble`], so a hit is observationally identical by code shape rather
+//! than by two branches kept in sync. Keying, and why sharing one memo across
+//! test processes is safe, are specified in `plans/compile-memo.md`; the
+//! mechanism is `tidepool_runtime::cache`, not a fork of it.
+//!
+//! The one deliberate difference on a hit: no `extract_spawn` stage and no
+//! `extract.*` phases are recorded, because no process was spawned. That is
+//! the measurement working. The `cbor_read`/`cbor_deserialize`/`asks_parse`
+//! stages are still recorded, over the memo's bytes.
 //!
 //! [`compile_turns`] is the multi-target entry point (extract's `--targets`
 //! mode, `haskell/app/Main.hs`'s `runMultiTargetClosed` — see
@@ -31,6 +47,7 @@ use serde::Deserialize;
 use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_runtime::cache;
 
 use crate::timing;
 
@@ -196,6 +213,10 @@ pub fn compile_turns(
     let input_path = temp_dir.path().join(format!("{module}.hs"));
     std::fs::write(&input_path, source)?;
 
+    // A single requested target reads the plain `asks.json`; more than one
+    // reads `<target>.asks.json` per target — see this fn's doc comment.
+    let multi = targets.len() > 1;
+
     // The caller resolved the binary once at construction, so this site takes
     // it as given (`with_bin`) rather than re-reading the env per turn.
     let mut cmd = ExtractCmd::with_bin(extract_bin);
@@ -203,6 +224,37 @@ pub fn compile_turns(
         .output_dir(temp_dir.path())
         .targets(targets)
         .includes(include);
+
+    // Keyed on the invocation that is about to run — the built argv itself, so
+    // a flag this site grows cannot ride along unkeyed (the allowlist walk in
+    // `invocation_key` makes an unclassified flag uncacheable rather than
+    // silently unkeyed). `None` means "compile cold", never "compile wrong".
+    let argv = cmd.argv();
+    let key = cache::invocation_key(&cache::Invocation {
+        source,
+        argv: &argv,
+        input_path: &input_path,
+        include,
+        bin: Path::new(extract_bin),
+    });
+    let names = artifact_names(targets, multi);
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    if let Some(key) = &key {
+        let load_start = Instant::now();
+        if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, targets) {
+            let bytes = memo_bytes(&meta_bytes, &raw);
+            timing::record_stage(
+                node,
+                round,
+                timing::STAGE_CBOR_READ,
+                load_start.elapsed(),
+                bytes,
+            );
+            return assemble(&meta_bytes, raw, &module, node, round);
+        }
+    }
+
     // The spawn counter lives inside `run()` now, so it counts every spawn in
     // the process, not just this site's — see this module's re-export above.
     let run = cmd.run().map_err(|e| CompileError::Spawn {
@@ -232,10 +284,6 @@ pub fn compile_turns(
         return Err(CompileError::MissingOutput(meta_path));
     }
 
-    // A single requested target reads the plain `asks.json`; more than one
-    // reads `<target>.asks.json` per target — see this fn's doc comment.
-    let multi = targets.len() > 1;
-
     let cbor_read_start = Instant::now();
     let meta_bytes = std::fs::read(&meta_path)?;
     let mut raw: Vec<RawTargetOutput> = Vec::with_capacity(targets.len());
@@ -257,22 +305,126 @@ pub fn compile_turns(
             asks_bytes,
         });
     }
-    let cbor_read_bytes = meta_bytes.len()
-        + raw
-            .iter()
-            .map(|r| r.expr_bytes.len() + r.asks_bytes.as_ref().map_or(0, Vec::len))
-            .sum::<usize>();
     timing::record_stage(
         node,
         round,
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        cbor_read_bytes as u64,
+        memo_bytes(&meta_bytes, &raw),
     );
 
+    // Store only a SUCCESSFUL compile's artifacts — every failure path above
+    // returned already. Best-effort: an unwritable memo costs a recompile, it
+    // never fails a compile.
+    if let Some(key) = &key {
+        store_memo(key, &name_refs, &meta_bytes, &raw);
+    }
+
+    assemble(&meta_bytes, raw, &module, node, round)
+}
+
+/// The logical artifact names of one invocation's output set — exactly the
+/// filenames [`compile_turns`] reads out of the extract's output dir, in a
+/// fixed order: the shared `meta.cbor`, then per target its `<target>.cbor`
+/// and its asks sidecar. `multi` picks the sidecar SHAPE on the same
+/// `targets.len() > 1` test the Haskell side uses to decide which shape to
+/// write, so the memo's names track the extract's own contract.
+fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
+    let mut names = Vec::with_capacity(1 + targets.len() * 2);
+    names.push("meta.cbor".to_string());
+    for target in targets {
+        names.push(format!("{target}.cbor"));
+        names.push(if multi {
+            format!("{target}.asks.json")
+        } else {
+            "asks.json".to_string()
+        });
+    }
+    names
+}
+
+/// Total bytes read for this compile, for the `cbor_read` timing stage —
+/// identical on the memo path and the spawn path, since both count the same
+/// artifacts.
+fn memo_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput]) -> u64 {
+    let total = meta_bytes.len()
+        + raw
+            .iter()
+            .map(|r| r.expr_bytes.len() + r.asks_bytes.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
+    total as u64
+}
+
+/// Reassemble a memoized artifact set into the same `(meta, raw)` pair the
+/// spawn path produces. `None` — any absent-but-required artifact, or a set
+/// the memo declines — falls through to a cold compile.
+fn load_memo(
+    key: &cache::InvocationKey,
+    names: &[&str],
+    targets: &[&str],
+) -> Option<(Vec<u8>, Vec<RawTargetOutput>)> {
+    let loaded = cache::artifacts_load(key, names)?;
+    let mut it = loaded.into_iter();
+    // `meta.cbor` and every `<target>.cbor` are required (the spawn path errors
+    // with `MissingOutput` without them); the asks sidecar is legitimately
+    // absent for an extract predating that pass, and `None` must survive as
+    // `None` so `parse_asks` yields an empty sidecar rather than parsing `[]`.
+    let meta_bytes = it.next()??;
+    let mut raw = Vec::with_capacity(targets.len());
+    for target in targets {
+        let expr_bytes = it.next()??;
+        let asks_bytes = it.next()?;
+        raw.push(RawTargetOutput {
+            target: (*target).to_string(),
+            expr_bytes,
+            asks_bytes,
+        });
+    }
+    Some((meta_bytes, raw))
+}
+
+/// Store this invocation's full artifact set under `names`, in the order
+/// [`artifact_names`] fixed.
+fn store_memo(
+    key: &cache::InvocationKey,
+    names: &[&str],
+    meta_bytes: &[u8],
+    raw: &[RawTargetOutput],
+) {
+    let mut artifacts: Vec<(&str, Option<&[u8]>)> = Vec::with_capacity(names.len());
+    let mut names = names.iter();
+    if let Some(name) = names.next() {
+        artifacts.push((name, Some(meta_bytes)));
+    }
+    for r in raw {
+        let (Some(expr_name), Some(asks_name)) = (names.next(), names.next()) else {
+            return;
+        };
+        artifacts.push((expr_name, Some(r.expr_bytes.as_slice())));
+        artifacts.push((asks_name, r.asks_bytes.as_deref()));
+    }
+    cache::artifacts_store(key, &artifacts);
+}
+
+/// The shared post-bytes tail: deserialize, register the metadata's var names
+/// and poisoned externals, parse each target's asks sidecar, log, and build the
+/// per-target [`CompiledTurn`] map.
+///
+/// BOTH the memo path and the spawn path land here with the same
+/// `(meta_bytes, raw)` pair, which is what makes a cache hit observationally
+/// identical to a cold compile — a property of the code shape rather than of
+/// two branches kept in sync by hand.
+fn assemble(
+    meta_bytes: &[u8],
+    raw: Vec<RawTargetOutput>,
+    module: &str,
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let targets_len = raw.len();
     let deserialize_start = Instant::now();
     let (table, warnings) =
-        read_metadata(&meta_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
+        read_metadata(meta_bytes).map_err(|e| CompileError::Deserialize(e.to_string()))?;
     let exprs: Vec<CoreExpr> = raw
         .iter()
         .map(|r| read_cbor(&r.expr_bytes).map_err(|e| CompileError::Deserialize(e.to_string())))
@@ -292,7 +444,7 @@ pub fn compile_turns(
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     let asks_start = Instant::now();
-    let mut turns = HashMap::with_capacity(targets.len());
+    let mut turns = HashMap::with_capacity(targets_len);
     for (r, expr) in raw.into_iter().zip(exprs.into_iter()) {
         let RawTargetOutput {
             target,

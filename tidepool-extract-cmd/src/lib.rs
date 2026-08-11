@@ -33,6 +33,17 @@
 //! [`std::process::Output`] plus the classification verdict, and each caller
 //! maps that onto its own error type (`CompileError`, `SessionError`,
 //! `String`).
+//!
+//! Nor does the **compile memo**, for the same reason. Keying a whole
+//! invocation is the natural job for the crate that BUILDS the invocation, and
+//! `tidepool_runtime::cache::invocation_key` is written to accept exactly what
+//! [`ExtractCmd::argv`] returns so the builder could move down here later. It
+//! has not, because a content-addressed memo needs blake3 and atomic
+//! tempfile-rename, and D-A's whole point is that this crate's dependency list
+//! is paid by every crate that transitively expands `haskell_eval!`. So the
+//! memo lives one layer up, over this crate's argv, and the callers that want
+//! it (`tidepool_runtime::compile_haskell`, `tidepool_harness::compile`)
+//! consult it before calling [`ExtractCmd::run`]. See `plans/compile-memo.md`.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

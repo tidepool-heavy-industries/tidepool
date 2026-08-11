@@ -32,6 +32,27 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("tidepool")
 }
 
+/// Where the content-addressed compiled-artifact memo (and the `binfp-*`
+/// binary-fingerprint sidecars) live: `$TIDEPOOL_COMPILE_CACHE_DIR` if set,
+/// else [`cache_dir`]. **The default layout is unchanged** — nobody's existing
+/// cache moves.
+///
+/// The override exists so a process can isolate its MUTABLE state
+/// (`XDG_CACHE_HOME` → a private tempdir: checkpoints, transcripts, logs, the
+/// generated effects module, the materialized stdlib) while still SHARING the
+/// memo. That split is only sound because the memo is content-addressed: two
+/// writers reach the same entry only when every input that can reach the
+/// output bytes is identical, in which case they are the same compilation and
+/// are entitled to the same bytes. `tidepool-harness/tests/support`'s
+/// `isolate_cache` is the caller that wants exactly this — see
+/// `plans/compile-memo.md`.
+pub fn compile_cache_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    cache_dir()
+}
+
 /// User-global config root: `$TIDEPOOL_CONFIG_DIR` → `$XDG_CONFIG_HOME/tidepool`
 /// → `~/.config/tidepool` → `$TMPDIR/tidepool-config` (last resort). Holds the
 /// global verb `lib/`, `secrets/`, and `config.toml`.

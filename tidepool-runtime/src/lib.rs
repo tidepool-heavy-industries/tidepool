@@ -16,7 +16,14 @@ use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
-mod cache;
+/// The compiled-artifact memo. Public for its second consumer,
+/// `tidepool_harness::compile`, which memoizes whole `tidepool-extract`
+/// invocations through [`cache::invocation_key`] /
+/// [`cache::artifacts_load`] / [`cache::artifacts_store`] rather than
+/// forking this module's fingerprint and staleness discipline
+/// (`plans/compile-memo.md`). The eval pair
+/// ([`cache::cache_key_salted`] and friends) stays crate-private.
+pub mod cache;
 pub mod diag;
 pub mod failclass;
 pub mod paths;
