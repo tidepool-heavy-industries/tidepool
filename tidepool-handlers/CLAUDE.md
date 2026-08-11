@@ -21,10 +21,17 @@ One module per effect under `src/handlers/`:
   wire types + `json_str`/`json_line`
 - `src/handlers/llm.rs` — `LlmReq`/`LlmHandler` + `strictify`, `DEFAULT_OPENAI_MODEL`,
   `LLM_MAX_CALLS`
-- `src/handlers/git.rs` — `GitReq`/`GitHandler` + the bridged records
-  (`GitCommit`/`GitStatusEntry`/`GitFileDelta`) + `bridged_records_module`
+- `src/handlers/git.rs` — `GitReq`/`GitHandler`, using the bridged records
+  (`GitCommit`/`GitStatusEntry`/`GitFileDelta`) and `bridged_records_module`,
+  both defined in `tidepool-bridge-effects` and re-exported here
 - `src/handlers/time.rs` — `TimeReq`/`TimeHandler`
 - `src/handlers/meta.rs` — `MetaReq`/`MetaHandler` (debug path only)
+- `src/handlers/event.rs` — repository-event subscribe/drain/unsubscribe over
+  `tidepool_worktree::EventJournal` (PRD 19 lane L4); not in the `base_effects!`
+  default row
+- `src/handlers/worktree.rs` — `WorktreeReq`/`WorktreeHandler` over
+  `tidepool_worktree::create`/`registry`/`git` (PRD 19); also not in the
+  `base_effects!` default row — see `tidepool-worktree/CLAUDE.md`
 
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
 `build_base_stack`, `build_minimal_stack`, `base_decls_with_ask`) and
