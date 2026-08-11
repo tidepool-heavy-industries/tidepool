@@ -68,7 +68,7 @@ tidepool/
 ├── tidepool-repl/         ← GHCi-style resident-session MCP server  [CLAUDE.md]
 ├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
 ├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events (PRD 19)  [CLAUDE.md]
-├── tidepool-web/          ← Web operator GUI: AskUser form rendering + observatory shell  [CLAUDE.md]
+├── tidepool-web/          ← Web operator GUI: AskUser form rendering + the operator gate  [CLAUDE.md]
 ├── tidepool-lsp/          ← LSP client + workspace daemon (call graph, hover, refs)  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
