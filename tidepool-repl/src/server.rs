@@ -55,6 +55,65 @@ const TURN_TIMEOUT_SECS: u64 = 600;
 /// as genuinely uninterruptible, and its session is gone with it.
 const ABORT_GRACE_SECS: u64 = 3;
 
+/// What a caller loses when a turn wedges, stated at the one moment it is true.
+///
+/// A wedged turn holds the only copy of its `Session` (it was MOVED into the
+/// blocking closure), so the manager entry is dropped and the session's
+/// declarations and value bindings go with it. The next `session_run` auto-opens
+/// a fresh session exactly as it does from cold.
+///
+/// This rides the timeout/crash error the caller is already being handed — it is
+/// NOT a breadcrumb stored for a later turn to report. Nothing new is recorded;
+/// the notice is emitted at the instant the loss happens, and never again.
+///
+/// Why it is load-bearing rather than politeness: the repl's whole contract is
+/// that the session IS the caller's working memory across turns. Losing it after
+/// a runaway may be unavoidable; losing it SILENTLY is a trap — a later turn
+/// would fail with "Variable not in scope: <name>" and read as a Haskell error
+/// rather than as the reclaim that actually caused it. The pre-cutover model
+/// stated the loss (a wedged entry persisted and rejected follow-up ops); this
+/// keeps that virtue while keeping the zombie entry deleted.
+///
+/// It also supersedes the old "session_reset to recover" instruction, which is
+/// now FALSE: the entry is already gone, so there is nothing left to reset.
+const RECLAIMED_NOTICE: &str = "The session was reclaimed: its declarations and \
+     bindings are GONE. The next session_run opens a fresh, empty session — no \
+     session_reset needed.";
+
+/// Build the error text for a turn that wedged (timed out and did not abort
+/// within the grace period). Split out as a pure function so every wedge path
+/// carries [`RECLAIMED_NOTICE`] by construction rather than by three separate
+/// authors remembering to append it — and so the message is unit-testable
+/// WITHOUT driving a real runaway, which is the one wedge transition that has no
+/// reliable test seam (see `plans/unpark/feasibility-map.md` §6.3).
+///
+/// `effect_in_flight` distinguishes a turn blocked inside an effect handler (an
+/// external call still running, the JIT idle so the JIT cancel cannot bite) from
+/// a pure-compute runaway that outran the cancel.
+fn wedged_message(op: &str, to_secs: u64, effect_in_flight: bool) -> String {
+    if effect_in_flight {
+        // Blocked inside an effect handler (e.g. Exec/Http/Lsp) when the
+        // timeout fired. The handler runs on until its external call returns,
+        // and any spawned child process is NOT killed.
+        format!(
+            "{op} timed out after {to_secs}s while an effect was in flight (an \
+             external call — e.g. a spawned process or network request — was \
+             still running). Raise timeout_secs or check the external command \
+             duration. Any spawned child process was NOT killed. \
+             {RECLAIMED_NOTICE}"
+        )
+    } else {
+        // Pure JIT computation with no effect dispatch in progress — likely an
+        // infinite loop or unbounded recursion. The JIT cancel was signalled
+        // but the turn did not abort within the grace period.
+        format!(
+            "{op} timed out after {to_secs}s on pure JIT computation (no effect \
+             boundary reached; likely an infinite loop or unbounded recursion). \
+             {RECLAIMED_NOTICE}"
+        )
+    }
+}
+
 /// The manager-side handles for the session whose turn [`TidepoolReplServer::drive`]
 /// awaits: its lifecycle [`SharedState`] and the [`CancelSlot`] read on timeout to
 /// abort a runaway at a JIT safepoint. Bundled so `drive` stays within the
@@ -940,34 +999,11 @@ impl TidepoolReplServer {
                     since: Instant::now(),
                 };
                 self.inner.manager.drop_entry(epoch);
-                let wedged_msg = if effect_in_flight {
-                    // The turn was blocked inside an effect handler (e.g. an
-                    // Exec/Http/Lsp call) when the timeout fired. The JIT is
-                    // not running so the JIT cancel has no effect; the effect
-                    // handler will continue until its external call completes.
-                    // Any spawned child process is NOT killed — it runs to
-                    // completion on its own.
-                    format!(
-                        "{op} timed out after {to_secs}s while an effect was in \
-                         flight (an external call — e.g. a spawned process or \
-                         network request — was still running). Raise timeout_secs \
-                         or check the external command duration. Any spawned child \
-                         process was NOT killed. The session is wedged; session_reset \
-                         to recover."
-                    )
-                } else {
-                    // Pure JIT computation with no effect dispatch in progress
-                    // — likely an infinite loop or unbounded recursion. The JIT
-                    // cancel was signalled but the turn did not abort within
-                    // the grace period.
-                    format!(
-                        "{op} timed out after {to_secs}s on pure JIT computation \
-                         (no effect boundary reached; likely an infinite loop or \
-                         unbounded recursion). The session is wedged; session_reset \
-                         to recover."
-                    )
-                };
-                return CallToolResult::error(vec![Content::text(wedged_msg)]);
+                return CallToolResult::error(vec![Content::text(wedged_message(
+                    op,
+                    to_secs,
+                    effect_in_flight,
+                ))]);
             }
         };
         let run = match joined {
@@ -983,7 +1019,7 @@ impl TidepoolReplServer {
                 self.inner.manager.drop_entry(epoch);
                 return CallToolResult::error(vec![Content::text(format!(
                     "{op}: session turn thread crashed (likely a JIT signal — exhausted case \
-                     branch or invalid memory access)"
+                     branch or invalid memory access). {RECLAIMED_NOTICE}"
                 ))]);
             }
         };
@@ -1412,6 +1448,47 @@ mod tests {
             turn_timeout: None,
         };
         TidepoolReplServer::new(frunk::HNil, cfg)
+    }
+
+    /// Every wedge path must TELL the caller their session is gone.
+    ///
+    /// A wedged turn's session is unrecoverable (the turn holds the only copy),
+    /// so the entry is dropped and the next `session_run` auto-opens an empty
+    /// one. That is the right mechanism, but it makes the loss inferable rather
+    /// than stated — and the repl's contract is that the session IS the caller's
+    /// working memory across turns. A silent reclaim surfaces later as
+    /// "Variable not in scope: <name>", which reads as a Haskell error rather
+    /// than as the reclaim that actually caused it.
+    ///
+    /// The notice rides the timeout error the caller is already being handed, so
+    /// this asserts on the message rather than on stored state — there IS no
+    /// stored state, deliberately (no breadcrumb, no second pathway).
+    ///
+    /// Both branches are checked because they are separately authored strings;
+    /// routing them through `wedged_message` is what makes the notice structural,
+    /// and this is what keeps it that way. Testing the function directly also
+    /// sidesteps the one wedge transition with no reliable seam — ENTRY via a
+    /// real runaway (`plans/unpark/feasibility-map.md` §6.3).
+    #[test]
+    fn every_wedge_message_states_the_session_was_reclaimed() {
+        for effect_in_flight in [true, false] {
+            let msg = wedged_message("session_run", 30, effect_in_flight);
+            assert!(
+                msg.contains("bindings are GONE"),
+                "a wedge must state the binding loss outright (effect_in_flight={effect_in_flight}): {msg}"
+            );
+            assert!(
+                msg.contains("fresh, empty session"),
+                "a wedge must say what the NEXT turn gets (effect_in_flight={effect_in_flight}): {msg}"
+            );
+            // The pre-cutover instruction is now false: the entry is already
+            // gone, so there is nothing left to reset. Telling a caller to run a
+            // recovery step that no longer exists is its own trap.
+            assert!(
+                !msg.contains("session_reset to recover"),
+                "the stale 'session_reset to recover' instruction must not survive (effect_in_flight={effect_in_flight}): {msg}"
+            );
+        }
     }
 
     /// `Wedged` is this lane's new reclaim path: the pre-cutover model tore a

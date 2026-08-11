@@ -5,9 +5,10 @@
 //! `run_to_hole_or_done`) to a `finalize` and `run_child`-ing the result
 //! back in-heap to resume `loop`.
 //!
-//! Deliberately does not reuse `tidepool-repl`'s parked-thread mechanism —
-//! the outer session is `Threadless`, the same mechanism `Harness`'s own
-//! nodes use — and does not reimplement the turn loop:
+//! The outer session is an ordinary resident session on the one threadless
+//! (stow-as-data) suspension engine, the same mechanism `Harness`'s own nodes
+//! use — there is no second mechanism to opt out of any more (`plans/unpark/`
+//! deleted the repl's parked-thread one). It does not reimplement the turn loop:
 //! [`SelfHarnessDriver::service_runllm_hole`] reshapes
 //! `Harness::run_to_hole_or_done`, it does not duplicate it. Heaps are never
 //! copied — the nested Agent's `finalize` value crosses via
@@ -553,7 +554,7 @@ impl SelfHarnessDriver {
         self.iteration
     }
 
-    /// Register the outer `PersistentSession<Threadless>` (via
+    /// Register the outer `PersistentSession` (via
     /// [`crate::harness::Session`]) and splice `source`'s whole module body
     /// ([`HarnessSource`]) as a plain `--include`d module (NOT the session
     /// decl plane — see [`HarnessSource`]'s module doc for why: a static
