@@ -57,9 +57,8 @@ pub use render::{
 /// [`SessionLib::with_validation_include`]; when they haven't, fall back to the
 /// one locator ([`crate::toolchain::locate_stdlib`]).
 ///
-/// This replaced a silent `Vec::new()` on failure: a missing stdlib is a
-/// CONFIGURATION error and now says so, instead of surfacing as a downstream
-/// GHC scope error.
+/// A missing stdlib is a CONFIGURATION error and says so, instead of
+/// surfacing as a downstream GHC scope error.
 fn stdlib_include_for_validation(
     include: &[PathBuf],
 ) -> Result<Option<PathBuf>, crate::toolchain::ToolchainError> {

@@ -203,19 +203,16 @@ where
     /// fragments. Mirrors the repl's bootstrap (`session.rs`: compile_session on
     /// the first turn's table).
     ///
-    /// No production caller left as of the extract-wave `boot` lane's lazy-boot
-    /// item (`tidepool-harness`'s `Harness::force`/`SelfHarnessDriver::bootstrap`
-    /// both moved to [`Self::unbootstrapped`], which pays no compile until the
-    /// first REAL turn). Kept as a public constructor because this crate's own
-    /// GHC-heavy test suite (`tidepool-runtime/tests/resident_session.rs`,
-    /// `realm_varid_pinning.rs`) still calls it directly for one-shot setup
-    /// convenience — a caller that already has an `expr`/`table` in hand and
-    /// wants a live machine immediately, which is a legitimate shape distinct
-    /// from the harness's since-deleted per-node fake-seed anti-pattern (that
-    /// compiled a THROWAWAY program solely to fit this constructor's slot; these
-    /// tests compile a real one and then drive real turns against the SAME
-    /// machine [`Self::unbootstrapped`] would also have booted from their first
-    /// `run`).
+    /// No production caller: `tidepool-harness`'s `Harness::force`/
+    /// `SelfHarnessDriver::bootstrap` both use [`Self::unbootstrapped`], which
+    /// pays no compile until the first REAL turn. Kept as a public constructor
+    /// because this crate's own GHC-heavy test suite
+    /// (`tidepool-runtime/tests/resident_session.rs`, `realm_varid_pinning.rs`)
+    /// still calls it directly for one-shot setup convenience — a caller that
+    /// already has an `expr`/`table` in hand and wants a live machine
+    /// immediately, compiling a real program and then driving real turns
+    /// against the SAME machine [`Self::unbootstrapped`] would also have
+    /// booted from their first `run`.
     // The arg list mirrors the engine's `StartTurn` field carrier (source,
     // handlers, ask_tag, effect_names, captured, include, nursery) — bundling
     // them into a struct would just move the arity, not remove it.

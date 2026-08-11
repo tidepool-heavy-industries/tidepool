@@ -195,9 +195,7 @@ pub struct TurnTemplate {
 }
 
 /// The decl template source `run_turn`'s `Decl` verdict selects — the parse
-/// wrapper the deleted `binders.rs`'s `wrap_decls` used to build per-call, now
-/// authored once and spliced via `{{TURN}}`. The pragma block is
-/// byte-identical to `wrap_decls`'s (moved verbatim, not retyped).
+/// wrapper, authored once and spliced via `{{TURN}}`.
 ///
 /// The pragma block is deliberately a SUBSET of the canonical eval dialect
 /// (`tidepool_mcp::preamble::EVAL_PRAGMAS`): this pass PARSES but never
@@ -1516,12 +1514,11 @@ mod tests {
         assert_eq!(cs[0].binders, vec!["sq".to_string()]);
     }
 
-    /// Old behavior (pre-fix): an unrecognized `kind` silently defaulted to
-    /// `TurnKind::Expr` — a corrupted "bind" verdict would then run as a bare
-    /// expression instead of surfacing the corruption. New behavior: any
-    /// `kind` other than `decl`/`bind`/`expr` is a loud infrastructure error,
-    /// in the same `MalformedDiagnostics` (→ VersionSkew) family as the
-    /// non-zero-exit path above — this lane has no user-error mode.
+    /// Any `kind` other than `decl`/`bind`/`expr` is a loud infrastructure
+    /// error, in the same `MalformedDiagnostics` (→ VersionSkew) family as
+    /// the non-zero-exit path above — this lane has no user-error mode. A
+    /// silent default to `TurnKind::Expr` would let a corrupted "bind"
+    /// verdict run as a bare expression instead of surfacing the corruption.
     #[test]
     fn unknown_kind_is_malformed_diagnostics_not_silent_expr() {
         let err =
@@ -1532,9 +1529,8 @@ mod tests {
         );
     }
 
-    /// Old behavior: a missing `kind` field silently defaulted to
-    /// `TurnKind::Expr` via `unwrap_or("expr")`. New behavior: missing
-    /// `kind` is a loud infrastructure error, not a silent expr verdict.
+    /// A missing `kind` field is a loud infrastructure error, not a silent
+    /// `TurnKind::Expr` default.
     #[test]
     fn missing_kind_is_malformed_diagnostics_not_silent_expr() {
         let err = parse_classify_json(r#"{"verdicts":[{"binders":["x"]}]}"#, 1).unwrap_err();
@@ -1544,10 +1540,9 @@ mod tests {
         );
     }
 
-    /// Old behavior: `filter_map` silently dropped any non-string binder
-    /// entry, so `["x", 5]` decoded as `["x"]` — a corrupted binder list
-    /// would compile a bind with the wrong binder set instead of failing.
-    /// New behavior: any non-string element rejects the whole verdict.
+    /// Any non-string element in `binders` rejects the whole verdict — a
+    /// silently dropped entry (`["x", 5]` decoding as `["x"]`) would compile
+    /// a bind against the wrong binder set instead of failing.
     #[test]
     fn non_string_binder_is_malformed_diagnostics_not_silently_dropped() {
         let err = parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x",5]}]}"#, 1)
@@ -1558,10 +1553,9 @@ mod tests {
         );
     }
 
-    /// Old behavior: a `binders` field that is not an array (or is absent)
-    /// defaulted to `vec![]` via `unwrap_or_default` — a corrupted "bind"
-    /// verdict would silently become a discard bind. New behavior: a
-    /// malformed or missing `binders` field is a loud infrastructure error.
+    /// A malformed or missing `binders` field is a loud infrastructure
+    /// error — a silent `vec![]` default would turn a corrupted "bind"
+    /// verdict into a discard bind.
     #[test]
     fn malformed_binder_list_is_malformed_diagnostics_not_silent_empty() {
         let non_array =

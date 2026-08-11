@@ -1200,10 +1200,8 @@ fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureCla
 /// park while paused, error out on abort.
 ///
 /// Shared, not per-server: `tidepool-repl` wraps every resident turn's handler
-/// stack in this same dispatcher. It used to carry a near-identical copy that
-/// ALSO intercepted the ask tag to park its worker thread; with the repl on the
-/// threadless suspend path there is exactly one non-ask-intercepting gate
-/// wrapper, here.
+/// stack in this same dispatcher — there is exactly one non-ask-intercepting
+/// gate wrapper, here.
 pub struct GateDispatcher<H> {
     inner: H,
     gate: Arc<PauseGate>,

@@ -13,8 +13,7 @@
 //! stowed-XOR-running), the eval thread exits, and a fresh thread re-enters via
 //! `resume_suspended`. No OS thread is parked per suspended session — neither in
 //! the harness (a TREE of many simultaneously-suspended nodes cannot pin N+1
-//! threads) nor in the repl (which used to park its resident worker on an answer
-//! channel and no longer does; see `plans/unpark/feasibility-map.md`).
+//! threads) nor in the repl (see `plans/unpark/feasibility-map.md`).
 //!
 //! Every run entry here therefore reports either a completion or a suspension,
 //! and every one has a `resume_*` sibling that re-enters the stowed continuation

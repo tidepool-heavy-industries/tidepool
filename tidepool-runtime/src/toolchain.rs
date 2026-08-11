@@ -2,14 +2,13 @@
 //! Haskell stdlib source tree live — plus the startup **handshake** that
 //! refuses to serve an extract/stdlib pair that was not deployed together.
 //!
-//! Before this module the answer to "where is the toolchain" was spread across
-//! five independent policies (`TIDEPOOL_EXTRACT` + PATH fallback, the
-//! `derive_stdlib_include` `dist-newstyle` walk, `TIDEPOOL_PRELUDE_DIR`, the
-//! `tidepool` binary's cwd-then-bundle search, and `tidepool-repl`'s
-//! build-time `CARGO_MANIFEST_DIR` path). They disagreed, and the disagreement
-//! surfaced as a *wrong answer at eval time* ("not in scope", "Metadata entry
-//! must be an array of exactly 8") rather than as a configuration error. Both
-//! precedence orders now live here, once, and both are documented below.
+//! The extract precedence (`$TIDEPOOL_EXTRACT` + `$PATH` fallback) and the
+//! stdlib precedence (`$TIDEPOOL_PRELUDE_DIR`, the `dist-newstyle` sibling
+//! walk, the cwd/bundle search) are consolidated into one place so they
+//! cannot disagree. A disagreement between separate policies surfaces as a
+//! *wrong answer at eval time* ("not in scope", "Metadata entry must be an
+//! array of exactly 8") rather than as a configuration error. Both
+//! precedence orders live here, once, and both are documented below.
 //!
 //! # Precedence: the extract binary
 //!
@@ -44,8 +43,7 @@
 //! # The handshake
 //!
 //! Deploy coupling — extract, both servers, and the stdlib must move together
-//! (`scripts/redeploy.sh`) — used to be enforced by script discipline alone.
-//! It is now checked at startup:
+//! (`scripts/redeploy.sh`) — is checked at startup:
 //!
 //! - `scripts/redeploy.sh` finishes by running `tidepool --write-toolchain-stamp`,
 //!   which records the **content** fingerprints of the extract binary and the
