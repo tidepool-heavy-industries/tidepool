@@ -174,8 +174,9 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
 -- Turn-mode rich result (--turn) — independent of the frozen tree format
 -- above: no TPLR header, no version coupling. A 2-element list, a string tag
 -- ("Decl"/"Bind"/"Expr") plus the variant's payload, mirroring 'encodeNode's
--- tagged-list convention. The JSON rendering ('Tidepool.Binders.renderTurnOutJson')
--- uses the same tag strings and payload shape.
+-- tagged-list convention. This is the ONLY serialization of a 'TurnOut': the
+-- parallel JSON rendering (@--json-output@ / @renderTurnOutJson@) was a second
+-- hand-maintained serializer with no reader and was deleted.
 --------------------------------------------------------------------------------
 
 encodeTurnOut :: TurnOut -> ByteString
