@@ -66,11 +66,6 @@ pub struct SnapshotReceipt {
 
 /// Write the synthetic snapshot commit. Does not create a worktree; returns the
 /// base a managed branch is then rooted at.
-///
-/// Depends on [`inspect::dirty_summary`] (LANE L1) for `pre_status` and for the
-/// set of tracked-modified / untracked paths to capture. Until that lands this
-/// panics via its `todo!("L1")` on any source that is not clean — see the L2
-/// receipt for what is proven independently of it in the meantime.
 pub fn snapshot_source(
     git: &GitCli,
     source: &Path,

@@ -1,7 +1,7 @@
 //! Opaque identities. Every one of these is a newtype rather than a bare
 //! `String`/`u64` so a git OID can never be passed where a worktree id is
 //! wanted, and so `EventId` (runtime identity) stays visibly distinct from
-//! `GitOid` (domain data) — PRD 19 states that split explicitly.
+//! `GitOid` (domain data).
 
 use serde::{Deserialize, Serialize};
 
@@ -53,10 +53,9 @@ impl std::fmt::Display for WorktreeId {
 /// "these are two things", so the id is minted once per reconciliation pass,
 /// not once per emitted observation.
 ///
-/// The multi-commit case follows from that and is worth stating so it is not
-/// re-litigated: when a pass coalesces several commits into one `Advanced`, the
-/// pass emits one `headChanged` and one `commit` per gained commit, and ALL of
-/// them carry the pass's single id. So the id means "these facts were reconciled
+/// When a pass coalesces several commits into one `Advanced`, the pass emits
+/// one `headChanged` and one `commit` per gained commit, and ALL of them carry
+/// the pass's single id. So the id means "these facts were reconciled
 /// together", which is exactly what a consumer can act on — it does NOT mean
 /// "these describe one commit", and nothing should read it that way. Each gained
 /// commit is independently and honestly inferable, so dropping all but one would

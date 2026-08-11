@@ -10,7 +10,7 @@
 //! ## Why the writer may rebase when the runtime may not
 //!
 //! [`ScriptedWriter`] has `rebase_onto`, `amend`, and `reset_hard`. Those are
-//! not a crack in PRD 19's boundary — the boundary says the RUNTIME exposes no
+//! not a crack in the boundary — the boundary says the RUNTIME exposes no
 //! git workflow verbs, because that work belongs to coding agents. The scripted
 //! writer *is* the stand-in coding agent. It exists to produce the repository
 //! states the monitor must classify honestly (`Amended`, `Rewritten`,

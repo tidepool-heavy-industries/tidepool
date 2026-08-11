@@ -1,5 +1,5 @@
 //! LANE L7 acceptance tests — `WorktreeManager::worktree_head`, the fresh-read
-//! HEAD lookup PRD 19's rewrite added to the public surface.
+//! HEAD lookup on the public surface.
 //!
 //! Every test drives a REAL temporary git repository via
 //! [`tidepool_worktree::testing::TestRepo`] and [`ScriptedWriter`]. There is

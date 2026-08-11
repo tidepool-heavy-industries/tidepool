@@ -2,9 +2,9 @@
 //! classification, the no-replay journal) — all against real temporary git
 //! repositories via [`TestRepo`] + [`ScriptedWriter`], never a mock of git.
 //!
-//! L1 (`WorktreeRegistry`/`WorktreeManager`) has not landed yet, so these tests
-//! do not go through it. `WorktreeMonitor::register` only needs a
-//! [`WorktreeId`] and a path; most tests supply both directly, pointing at a
+//! These tests do not go through `WorktreeRegistry`/`WorktreeManager`:
+//! `WorktreeMonitor::register` only needs a [`WorktreeId`] and a path; most
+//! tests supply both directly, pointing at a
 //! [`TestRepo`]'s own working tree (the monitor treats any git working
 //! directory uniformly — nothing here depends on it being a *linked*
 //! worktree). One test (`real_git_worktree_add_is_monitored_directly`) uses an
@@ -620,7 +620,7 @@ fn reconcile_of_a_worktree_removed_from_disk_returns_worktree_lost() {
 /// returns on each [`Observed`] must be the SAME id the journal recorded for
 /// that pass — not a fresh id minted independently at the return path, which
 /// would make every other test in this file pass while correlation to the
-/// journal (PRD 19's stated reason the journal exists) stayed impossible.
+/// journal stayed impossible.
 ///
 /// Wrong-reason guard: an implementation that mints a disconnected id would
 /// still pass a naive "some id came back" check, and one that always returns

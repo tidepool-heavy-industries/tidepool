@@ -29,22 +29,13 @@
 //! Those two are complementary evidence; conflating them would let a worker's
 //! prose become proof of a commit.
 //!
-//! Per the PRD's "commit and headChanged serve different jobs" section, a
-//! `commit` observation is emitted for `Advanced` (once per commit gained —
+//! A `commit` observation is emitted for `Advanced` (once per commit gained —
 //! each is independently, honestly inferable even when several are coalesced
 //! into one `HeadChanged`) and for `Amended` (the replacement tip is a real
 //! commit object). `Rewound`, `Switched`, `Rewritten`, and `UnknownChange`
 //! never carry a co-emitted `Commit`: a reset or checkout creates no new
 //! commit, and a rebase's synthetic commits are not "a commit the user made in
 //! this worktree" in the sense the PRD's review/test/receipt consumers expect.
-//!
-//! ## One event, one id
-//!
-//! A normal commit produces a `Commit` observation and a `HeadChanged`
-//! observation sharing one [`EventId`], because they are two views of one
-//! underlying change. The id is minted once per reconciliation pass, and every
-//! observation emitted by that pass — including multiple `Commit`s for a
-//! coalesced `Advanced` — carries it.
 //!
 //! ## First observation of a worktree
 //!
@@ -69,47 +60,11 @@ use crate::journal::{now_ms, EventJournal};
 ///
 /// Not enforced by this crate: [`WorktreeMonitor::reconcile`] is a single
 /// pass, driven externally. The timer loop that calls it on a schedule
-/// belongs to whichever realm/driver owns process scheduling (out of scope
-/// here — see the crate docs on what this crate deliberately does not have).
-/// This constant is that loop's recommended DEFAULT, named and exported so a
-/// caller can override it rather than the number being buried as a magic
-/// literal wherever the loop eventually lives — its *value* is tunable, that
-/// it exists is not.
-///
-/// ## Reasoning (root ruling 2026-08-08: pick this independently of
-/// Exomonad's 15s inbox backstop — repository observation and inbox delivery
-/// have different urgency profiles, so 15s is context, not precedent)
-///
-/// - **Tolerable propagation latency.** The consumer of a `headChanged` poke
-///   is a child agent deciding whether to rebase onto its parent's latest
-///   HEAD, not a human waiting on a spinner. Agent work (write, test, commit)
-///   operates on a cadence of tens of seconds to minutes, so a few seconds of
-///   staleness before that poke fires is imperceptible against it.
-/// - **Poll cost.** A no-op reconcile is two constant-time git invocations
-///   per worktree (`rev-parse HEAD`, `symbolic-ref --short HEAD`) — a few
-///   milliseconds of process-spawn overhead each, independent of repository
-///   size. This number does not need to be conservative for cost reasons.
-/// - **Fleet behavior.** Cost scales linearly with the number of watched
-///   worktrees, not with how tight the interval is. MEASURED, instrument
-///   named: a `rev-parse HEAD` + `symbolic-ref --short HEAD` pair against a
-///   real temporary repository, timed over 200 iterations with `date +%s%N`
-///   deltas around the loop, on this box at load ~35-55, cost 6.85 ms per
-///   pair. At that figure a 5 s round is 1.6% of one core at 12 worktrees,
-///   3.3% at 24, and 6.6% at 48.
-///
-///   An earlier revision of this comment claimed "well under a percent of a
-///   core at dozens of worktrees". That was an unmeasured estimate stated as
-///   a measurement, and it is wrong by roughly 3x at 24 worktrees. The
-///   CONCLUSION is unchanged — single-digit percent of one core is still
-///   cheap, and cost is not a reason to widen the interval — but the claim
-///   was overstated and is corrected rather than quietly dropped. Note the
-///   figure is process-spawn dominated, so it reflects a loaded box; an idle
-///   one is faster. It is a measurement of this machine, not a property of
-///   the operation.
-///
-/// 5 seconds reads as "near-immediate" against agent work cadence, and fleet
-/// size is not a reason to widen it. Revisit against real dev-tree telemetry
-/// if that changes — this is a default, not a promise.
+/// belongs to whichever realm/driver owns process scheduling. This constant
+/// is that loop's recommended DEFAULT, named and exported so a caller can
+/// override it rather than the number being buried as a magic literal
+/// wherever the loop eventually lives — its *value* is tunable, that it
+/// exists is not.
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
 
 /// An observation, carrying the runtime identity that ties co-emitted views of
@@ -120,7 +75,7 @@ pub struct Observed<T> {
     pub value: T,
 }
 
-/// How `HEAD` moved. PRD 19 fixes this set.
+/// How `HEAD` moved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeadChangeKind {
     /// Fast-forward: the old head is an ancestor of the new one. Carries the
@@ -278,10 +233,9 @@ impl WorktreeMonitor {
     /// since worktree ids reach this call from author-supplied values at the
     /// effect surface. `Err(WorktreeError::WorktreeLost)` when `worktree` WAS
     /// registered but its path is gone from disk (a human removed it,
-    /// retain-first's "never silently recreated" case) — the same typed
-    /// failure [`crate::create::WorktreeManager::worktree_head`] and
-    /// `lookup` already use for this condition, rather than letting the
-    /// subsequent `git` invocation fail opaquely against a missing directory.
+    /// retain-first's "never silently recreated" case), rather than letting
+    /// the subsequent `git` invocation fail opaquely against a missing
+    /// directory.
     pub fn reconcile(
         &mut self,
         worktree: &WorktreeId,
@@ -435,9 +389,9 @@ fn read_branch(git: &GitCli, cwd: &Path) -> Option<BranchName> {
 /// "no" from "cannot tell". `merge-base --is-ancestor` exits 1 for a genuine
 /// "not an ancestor" and something else (commonly 128, "not a valid object")
 /// when an endpoint is not resolvable at all — e.g. after the old head was
-/// garbage-collected. Collapsing those two into the same answer is exactly the
-/// trap the PRD warns about: a `No` there would let classification carry on to
-/// wrongly conclude `Rewound`/`Rewritten` from an unresolvable object.
+/// garbage-collected. Collapsing those two into the same answer would let
+/// classification carry on to wrongly conclude `Rewound`/`Rewritten` from an
+/// unresolvable object.
 enum Ancestry {
     Yes,
     No,

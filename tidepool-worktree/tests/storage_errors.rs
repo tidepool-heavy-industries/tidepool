@@ -342,20 +342,15 @@ fn create_reports_typed_failure_when_a_file_blocks_the_worktree_root() {
     assert!(manager.list().expect("list").is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// Pre-fold defects found by external plan review (2026-08-09). Both are
-// loud-failure violations: state that disagrees with itself, silently.
-// ---------------------------------------------------------------------------
-
 /// A malformed row in the MIDDLE of the journal is a corrupted receipt, not a
 /// torn write, and must fail loudly.
 ///
 /// The recovery contract tolerates exactly one shape: a crash mid-`writeln!`
 /// leaving an incomplete FINAL line. A bad row with valid rows after it cannot
 /// have been produced that way. Silently skipping it would delete precisely the
-/// evidence the journal exists to preserve — and `EventJournal` is the
-/// traceability substrate PRD 19 points post-mortems at, so a quietly shorter
-/// journal is worse than an unopenable one.
+/// evidence the journal exists to preserve — `EventJournal` is the
+/// traceability substrate post-mortems rely on, so a quietly shorter journal
+/// is worse than an unopenable one.
 #[test]
 fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
     let base = tempfile::TempDir::new().expect("tempdir");

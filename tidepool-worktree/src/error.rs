@@ -7,20 +7,10 @@ use std::path::PathBuf;
 
 use crate::id::WorktreeId;
 
-/// PRD 19's `WorktreeError`, plus two variants the PRD's prose requires but its
-/// illustrative ADT did not spell out.
-///
-/// EXTENSIONS OVER THE PRD SNIPPET, and why each is not a scope creep:
-///
-/// - [`WorktreeError::SourceOperationInProgress`] — the PRD's dirty-snapshot
-///   section says a source with `MERGE_HEAD`/`REBASE_HEAD` present must "fail
-///   loudly", because a synthetic commit of a half-merged tree is a
-///   reproducible base for the WRONG program. Folding that into `SourceDirty`
-///   would tell an author to commit their changes, which is exactly the wrong
-///   advice mid-rebase.
-/// - [`WorktreeError::WorktreeBusy`] — the coupling revision requires that
-///   binding a second agent to a bound worktree "fails explicitly". An explicit
-///   failure needs a variant to be explicit *as*.
+/// Folding [`WorktreeError::SourceOperationInProgress`] into `SourceDirty`
+/// would tell an author to commit their changes, which is exactly the wrong
+/// advice mid-rebase — a synthetic commit of a half-merged tree is a
+/// reproducible base for the WRONG program.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum WorktreeError {
     /// The source working tree has uncommitted state and the spec did not opt
@@ -162,11 +152,8 @@ impl std::fmt::Display for DirtySummary {
     }
 }
 
-/// A failed git invocation, recorded verbatim.
-///
-/// Per the VERIFY discipline this wave runs under, downstream receipts count
-/// per-binary outcomes and never treat an exit code as a summary — so this
-/// keeps stdout AND stderr, not just the status.
+/// A failed git invocation, recorded verbatim: an exit code alone doesn't
+/// explain a failure, so this keeps stdout AND stderr, not just the status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFailureReceipt {
     pub args: Vec<String>,

@@ -1,24 +1,12 @@
 //! One worktree, one agent — LANE L1.
 //!
-//! The coupling revision (Inanna, 2026-08-08) made agent creation and worktree
-//! allocation a single act: every agent gets its own managed worktree, all
-//! agents are isolated, and a managed worktree is the only workspace an agent
-//! can receive.
-//!
-//! That decision dissolves the writer-lease problem STRUCTURALLY rather than
-//! mechanically. There is no lease to acquire, no read-only mode to police, and
-//! no shared-directory coexistence to reason about, because at most one agent
-//! is ever bound to a worktree at a time. A reviewer of a child's work is
-//! isolated like everyone else: it gets its own worktree created from the
-//! child's branch. This module is the small amount of bookkeeping that remains.
-//!
-//! ## Scope right now
-//!
-//! The binding STATE MACHINE and its enforcement are in scope and testable
-//! today against the scripted writer, with [`AgentRef`] standing in for a real
-//! agent identity. Wiring it to actual spawns waits on the coupled-spawn seam,
-//! which is designed jointly with the agent lane — so this module must not
-//! reach for anything agent-shaped beyond an opaque identity.
+//! Every agent gets its own managed worktree, all agents are isolated, and a
+//! managed worktree is the only workspace an agent can receive: at most one
+//! agent is ever bound to a worktree at a time, so there is no lease to
+//! acquire, no read-only mode to police, and no shared-directory coexistence
+//! to reason about. A reviewer of a child's work is isolated like everyone
+//! else: it gets its own worktree created from the child's branch. This
+//! module is the small amount of bookkeeping that remains.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -39,8 +27,8 @@ fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError
 }
 
 /// An opaque agent identity. Deliberately a string newtype and not a typed
-/// agent handle: the coupled-spawn seam is on hold, and coupling this module to
-/// a handle type that has not been designed yet would have to be undone.
+/// agent handle: this module must not reach for anything agent-shaped beyond
+/// an opaque identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AgentRef(String);
 

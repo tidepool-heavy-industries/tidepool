@@ -15,12 +15,6 @@
 //!
 //! ## What this crate deliberately does NOT have
 //!
-//! No `rebase`, `merge`, `cherry_pick`, conflict resolution, or branch
-//! promotion. PRD 19's boundary is creation, lookup, inspection, and events;
-//! choreography is authored code and the git work itself belongs to coding
-//! agents using their native tools. Adding a workflow verb here is a design
-//! regression, not a convenience.
-//!
 //! No deletion, GC, or retention policy. Retain-first is a locked decision:
 //! every worktree, branch, snapshot ref, and receipt survives indefinitely in
 //! v1. A worktree a human removed by hand becomes

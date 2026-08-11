@@ -5,13 +5,7 @@
 //! there is no mock of git.
 //!
 //! `snapshot_source` calls `git::inspect::dirty_summary` (LANE L1's `pre_status`
-//! source) after its refuse-first checks. As of this writing that function is
-//! still `todo!("L1")` in this worktree, so every test below that reaches a
-//! SUCCESSFUL snapshot — everything except the three `refuses_*` tests — will
-//! panic with `not yet implemented: L1` rather than assert-fail. That is a
-//! blocked dependency, not a logic error in this lane; see
-//! `plans/post-restart/worktree-lanes/L2-receipt.md`. The three refusal tests
-//! return before `dirty_summary` is ever called and pass today.
+//! source) after its refuse-first checks.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

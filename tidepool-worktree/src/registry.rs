@@ -1,8 +1,7 @@
 //! The durable record of every managed worktree.
 //!
 //! LANE L1 owns the implementation. The types here are frozen scaffold: change
-//! them only by agreement with the other lanes, since the monitor keys on
-//! [`WorktreeId`] and the snapshot lane fills `snapshot_ref`.
+//! them only by agreement with the other lanes.
 //!
 //! ## Invariants this module exists to hold
 //!
@@ -109,7 +108,7 @@ pub enum WorktreeRecordStatus {
     Finalized,
 }
 
-/// PRD 19's durable registry row.
+/// The durable registry row for one managed worktree.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeReceipt {
     pub worktree_id: WorktreeId,
@@ -148,10 +147,9 @@ pub struct WorktreeSummary {
 
 /// Durable, restart-surviving storage of [`WorktreeReceipt`]s.
 ///
-/// Storage layout is L1's call, but it must be crash-safe per record (write to
-/// a temporary file in the same directory, fsync, rename) — a torn registry
-/// file that loses every OTHER worktree is a worse failure than the one being
-/// written.
+/// Crash-safe per record (write to a temporary file in the same directory,
+/// fsync, rename) — a torn registry file that loses every OTHER worktree is
+/// a worse failure than the one being written.
 #[derive(Clone, Debug)]
 pub struct WorktreeRegistry {
     root: PathBuf,
