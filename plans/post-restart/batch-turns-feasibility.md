@@ -480,27 +480,50 @@ slower, without it.
 3. Then steps 2-4 of §6, with the `ModIfaceCache` thread (§7.1) included from
    the start.
 
-### 7.5 An adjacent finding worth more than the lane, for one item shape
+### 7.5 The bare-expression retry: not a competing win — a worked example of this lane
 
-The baseline's census turned up a bare expression costing 3 spawns, one of
-which is a ~3.8s doomed compile — roughly a third of a ~11.3s turn, on the
-most common repl item shape there is.
+Settled: `plans/post-restart/bare-expr-retry-finding.md`.
 
-The baseline attributed it to `query_inner_type`. **That attribution looks
-wrong.** `run_bare_expr` compiles `wrap_bare_it_monadic` first
-(`session.rs:2124`) and on *any* compile error at all — `Err(_monadic_err)`,
-the error discarded unexamined (`session.rs:2143`) — falls back to
-`wrap_bare_it_pure`. So every *pure* bare expression pays a full doomed
-monadic compile before its real one.
+The mechanism correction held. It is `run_bare_expr`'s monadic-first cascade
+(`session.rs:2124`, error discarded unexamined at `:2143`), not
+`query_inner_type` — proven two ways: the wasted spawn's own GHC diagnostic
+reproduces `wrap_bare_it_monadic`'s literal generated source (`__user`,
+semicolon-braced do-block) rather than `wrap_probe_source`'s different shape,
+and `query_inner_type`'s single call site sits on `run_plain_eval`, reachable
+only when the block's batch classify itself failed — never on a steady-state
+turn. Measured: pure bare expr 3 spawns / ~11.6s, monadic 2 spawns / ~5.75s.
 
-The order is not gratuitous, and this is the trap: `wrap_bare_it_pure` binds
-`let it = <expr>`, which for a monadic `expr :: M a` still **compiles** — it
-binds the unexecuted action instead of running it. Monadic-first is what makes
-the ambiguity fail safe. **Swapping the order would look green in tests while
-silently not running users' effects.** Any fix must decide from the inferred
-TYPE (or from one wrapper that serves both), never from ordering.
+**My own framing in the previous revision — that this was "worth more than
+the lane" — was wrong, and the finding's structural argument is the reason.**
+A compile *failure* short-circuits in typecheck and pays fixed cost only
+(`startup` 26ms + `ghc_setup` 38ms + `ghc_load` 2035ms, **no** `typecheck` /
+`core` line at all). A compile *success* pays the full pipeline, and `core` —
+almost entirely `core2core` — is the largest phase in every successful compile
+in the census (2566-5079ms). So:
 
-Being chased separately (`bare-expr-waste`), deliberately scoped out of the
-batch design. Note that it also strengthens the batch case: in a batched
-world both wraps compile in one session at marginal cost, so the retry stops
-mattering by construction.
+- today's monadic-first ordering is close to **cost-optimal** for a
+  one-process-per-attempt world: zero waste when the guess is right, and the
+  *cheapest available* failure when it is wrong;
+- reordering to pure-first does not create a cheap probe, because
+  `let it = <expr>` always typechecks — it just moves the expensive miss onto
+  the monadic shape (~2.5× regression there), needing an implausible ~80%
+  pure-dominant mix merely to break even. Correctly rejected.
+- the one-wrapper-serves-both option (overlapping instances) was rejected as
+  **unproven rather than unsafe**, with the failure mode named (ambiguous
+  instance resolution on open principal types, not wrong-branch selection).
+
+The decisive part for this lane: **the wasted spawn is ~100% fixed cost —
+precisely the term batching amortizes.** This is not an adjacent inefficiency
+competing with the batch design; it is a worked example of what the batch
+design is for, and it needs no separate fix. Left unfixed deliberately.
+
+**One structural fact from that census that re-aims §7.3.** The eval preamble
+is *imports*, not inlined source (`patched_preamble` rewrites import lines;
+`begin_user_module` = preamble + imports + the user's text). So the
+2900+ bindings the baseline attributed to "the preamble" live in DEPENDENCY
+modules — `Tidepool.Effects`, `Prelude`, `Library`, `Orchestrate` — while the
+target module stays small. That is the memo hypothesis's exact target: the
+dominant `core2core` cost sits in modules that are *identical across items of
+a block*. It also sharpens the known condition — the stdlib closure is stable
+within a block, but `Lib.G<g>` changes whenever a decl item lands, so the memo
+must be per-module and invalidated for the modules that actually changed.
