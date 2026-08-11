@@ -1889,19 +1889,6 @@ impl Harness {
         })
     }
 
-    /// The first node currently suspended on an Ask (operator) hole, if any —
-    /// what the inspector focuses by default.
-    pub fn first_operator_hole(&self) -> Option<NodeId> {
-        let convos = self.convos.lock();
-        convos.iter().find_map(|(n, c)| {
-            matches!(
-                c.pending.as_ref().map(|p| &p.classified.routing),
-                Some(HoleRouting::Ask { .. })
-            )
-            .then_some(*n)
-        })
-    }
-
     /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
     /// path leaves it `Running` with a live resident session: every fallible
     /// step after forcing the child (a provider/join/log fault inside
