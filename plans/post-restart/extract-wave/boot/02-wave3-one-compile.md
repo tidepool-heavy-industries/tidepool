@@ -1,7 +1,7 @@
 # Wave 3 — `boot-onecompile`: item 0 steps 4–5
 
 **Status: EXECUTED 2026-08-11** (lane `spawn-latency`, dev `wave3-fusion`,
-commit `838862ba`). Both holds cleared before it ran: wave 2 folded and
+commit `032fbbfc`). Both holds cleared before it ran: wave 2 folded and
 `--targets` landed on both sides.
 
 **Measured:** pre-model extract spawns **2 → 1**; pre-model boot path median
@@ -32,10 +32,6 @@ have re-created the hand-maintained-copy mechanism this wave's ledger keeps
 catching.
 
 ---
-
-<details>
-<summary>Original spec as written (HELD status, stale sections retained for
-history)</summary>
 
 **Status: HELD** on TWO things now — wave 2's fold (it rewrites the same three
 functions) and the `--targets` prerequisite (`03-targets-prereq.md`).
@@ -156,5 +152,3 @@ re-check that specifically.
 splits. Per the realm-spike conflict experiment these are deliberately NOT
 pre-partitioned. Write a minimal localized diff, do not reorganize surrounding
 code, and log anything non-mechanical in `LEDGER.md` at fold.
-
-</details>

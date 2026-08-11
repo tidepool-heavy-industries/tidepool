@@ -39,7 +39,7 @@ patch — the "before" was taken on a tree whose only commit past the wave base
 is a plans-only doc commit, so the baseline sha IS the unmodified code. N=3 per
 side, every run reported individually.
 
-## BEFORE — `1cdbc013` (plans-only commit on top of `fc94ac3b`; no code delta)
+## BEFORE — `9ef54deb` (plans-only commit on top of `fc94ac3b`; no code delta)
 
 `PRE_MODEL_EXTRACT_COMPILES = 2` (two `compile_outer` invocations: the pre-loop
 render framing, and the loop body).
@@ -75,18 +75,18 @@ slower than the before median), and the conditions were not matched.
 The fix was to re-take the baseline under MATCHED warm conditions on the same
 box in the same session, by reverse-applying the change as a patch:
 
-    git diff 344febbe HEAD -- tidepool-harness/src tidepool-harness/tests \
+    git diff 47b811e2 HEAD -- tidepool-harness/src tidepool-harness/tests \
         tidepool-mcp/src > wave3.patch
     git apply -R wave3.patch     # tree is baseline CODE, plans intact
     <5 runs>
     git apply wave3.patch        # restored; `git status` clean
 
 No `git stash` at any point. The restore was confirmed with `git status --short`
-(empty) and `git log` (HEAD unmoved at `838862ba`).
+(empty) and `git log` (HEAD unmoved at `032fbbfc`).
 
 ## BEFORE — cold, first pass, SUPERSEDED (kept because it is what nearly shipped)
 
-`1cdbc013`, `PRE_MODEL_EXTRACT_COMPILES = 2`:
+`9ef54deb`, `PRE_MODEL_EXTRACT_COMPILES = 2`:
 21.613 / 27.740 / 25.660 s, median 25.660s. Discarded as unmatched, per above.
 
 ## BEFORE — warm, matched conditions (reverse-applied patch)
@@ -104,7 +104,7 @@ framing, loop body).
 
 **median 22.449s**, range 20.450–24.765s (4.3s spread).
 
-## AFTER — `838862ba`, warm, matched conditions
+## AFTER — `032fbbfc`, warm, matched conditions
 
 `PRE_MODEL_EXTRACT_COMPILES = 1` — one fused `compile_turns` spawn emitting
 both entries.
@@ -173,21 +173,47 @@ cold compile memo. It is not "half the turn latency". Specifically:
   The measurement isolates the memo deliberately (`isolate_compile_memo`) so it
   reports the boot path rather than cache state.
 
-## Verify legs at the merged tip (`838862ba`)
+## Rebase note — the measurement predates a rebase, and it was re-verified
+
+Every number above was taken before this branch was rebased onto its parent
+(`harness-interaction-surface`). The shas quoted are the post-rebase ones; the
+code content is identical (the rebase applied cleanly with no conflicts).
+
+That is not on its own sufficient, because the parent's `e50b96c1`
+(`fix(mcp): uses_qq drops the deleted [form| token`) touches
+**`tidepool-mcp/src/eval_prep.rs` — the same file this change edits.** A clean
+rebase means git found no textual conflict, not that the two changes are
+semantically compatible. So the legs below were re-run at the rebased tip
+rather than inherited from the pre-rebase run, and the spawn-count receipt was
+re-taken there too.
+
+**The measurement replicates there.** `acceptance_boot_compile_count` re-run
+×3 at the rebased tip: **11.449 / 11.118 / 12.353 s**, median 11.449s — within
+the pre-rebase after-set's band (median 11.664s) and still comfortably clear of
+the 20.450s baseline floor. Every run PASSed, so the spawn count is still 1.
+
+## Verify legs at the rebased tip (`f9d60a92`)
 
     cargo check --workspace --all-targets            rc=0
     cargo clippy --workspace --all-targets           rc=0, no warnings emitted
     cargo fmt --all -- --check                       rc=0
     cargo nextest run                                1742 passed, 0 failed, 12 skipped
+      (covers this change's eval_prep golden tests AND the parent's uses_qq
+       proptest, which is the pair the shared-file rebase put at risk)
     scripts/battery.sh -p tidepool-harness \
       -E 'binary(golden_path) + binary(acceptance_askuser)'
                                                      4 passed, 0 skipped
-      · acceptance_askuser::askuser_operator_form_round_trip_and_ws4_log   PASS 34.418s
-      · acceptance_askuser::prd_example_adts_compile_with_the_bare_derive_contract PASS 4.322s
-      · golden_path::fork_only_resumes_to_completion                       PASS 14.730s
-      · golden_path::golden_path_record_replay                             PASS 15.329s
+      · acceptance_askuser::askuser_operator_form_round_trip_and_ws4_log   PASS 32.843s
+      · acceptance_askuser::prd_example_adts_compile_with_the_bare_derive_contract PASS 4.283s
+      · golden_path::fork_only_resumes_to_completion                       PASS 14.945s
+      · golden_path::golden_path_record_replay                             PASS 14.664s
     scripts/battery.sh -p tidepool-harness \
-      -E 'binary(acceptance_boot_compile_count)'     1 passed, 0 skipped (×9 runs, all PASS)
+      -E 'binary(acceptance_boot_compile_count)'     1 passed, 0 skipped
+                                                     (×12 runs total across the
+                                                      lane, all PASS)
+
+Pre-rebase, the same two harness legs read 34.418 / 4.322 / 14.730 / 15.329s,
+4 passed — i.e. unchanged by the rebase within run-to-run variance.
 
 Extract-side legs (`extract-fidelity-test`, `cross_mode_targeted`) were **not**
 run and are **not** required: this change touches no Haskell and no extract
