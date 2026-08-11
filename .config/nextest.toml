@@ -137,26 +137,33 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # GHC group prevents the thrash while the pure-Rust crates (codegen/eval/repr/
 # effect/bridge — zero extract calls) keep running at full parallelism, so the
 # codegen ~2.15x win is untouched. This is a PROCESS-LOCAL cap sitting UNDER
-# the host semaphore (scripts/ghc-slots.sh, 3 slots shared across every
+# the host semaphore (scripts/ghc-slots.sh, slots shared across every
 # worktree on the box) — it bounds nextest's own concurrency within a single
 # run, it is not itself the host guarantee, and taking a slot is still
 # required before launching GHC-heavy work (scripts/battery.sh and
 # scripts/battery-shard.sh now take one for you).
 #
-# 1 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
+# 2 is the per-RUN cap and is NOT the host slot count (ghc-slots.sh's SLOTS
 # moves with box capacity; do not copy whatever it says today into here).
 # The two numbers answer different questions: slots bound how many GHC-heavy
 # RUNS proceed at once, this bounds how many extract compiles ONE run fans
 # out to. THE BOX-WIDE CEILING IS THEIR PRODUCT. The 2026-08-08 load-92
 # incident reached 7+ concurrent extracts with every lane compliant, because
 # 3 slots x per-run 3 = 9 — the "3-slot cap" bounded slot holders, not
-# compiles. At 1, the slot count means what everyone already believes it
-# means: N slots = at most N concurrent extracts box-wide, and lane-level
-# parallelism comes from MORE SLOTS (cheap to grant once the product is
-# honest) rather than intra-run fan-out. Raise this only with a measurement
-# AND a matching slot-count decision — the product is the budget.
+# compiles.
+#
+# 2 is a MEASURED setting (2026-08-11, quiet box, warm-matched A/B on the
+# tidepool-harness shard, memo prewarmed, load/PSI sampled every 5s during
+# both legs): cap=1 595s vs cap=2 311s (-48%), 199/199 green both legs,
+# cpu/memory PSI avg10 peaked at 0.00 in BOTH legs, 1-min load peaked 1.4
+# (cap1) vs 2.2 (cap2). The matching slot-count decision: slots stay as they
+# are — the product (slots x 2) is the accepted worst-case extract count
+# box-wide, roughly half the 22-extract load-159 incident level, and the
+# default-deny membership below is what keeps the fan-out bounded to exactly
+# this number. Raise this again only with a fresh measurement AND a matching
+# slot-count decision — the product is the budget.
 [test-groups.ghc-heavy]
-max-threads = 1
+max-threads = 2
 
 # The cap is DEFAULT-DENY: everything is GHC-heavy unless it appears in the
 # exemption list below. That direction is the whole point. The 2026-08-09
@@ -166,7 +173,8 @@ max-threads = 1
 # were named one by one, the list lagged 16 of 24 as binaries were added, and
 # the unnamed ones ran uncapped at full core count. An allowlist fails OPEN:
 # whatever it forgets thrashes the box. Default-deny fails CLOSED: whatever
-# this exemption list forgets merely runs at 3-way parallelism instead of 16.
+# this exemption list forgets merely runs at the capped parallelism instead
+# of full core count.
 #
 # So: add a crate, add a test binary, rename a package — it lands in the
 # capped group with no edit here. An entry is only removed from the cap after
