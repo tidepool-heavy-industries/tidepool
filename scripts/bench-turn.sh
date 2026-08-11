@@ -108,8 +108,11 @@ for i in 1 2 3; do
   TIDEPOOL_COMPILE_CACHE_DIR="$cold_dir" "$ONESHOT_BIN" >"$out" 2>"$err"
   {
     grep -E '^wall_ms=[0-9]+$' "$out" | sed 's/^/oneshot_cold./'
+    # No-match is legal (an older extract emits no timing lines) — don't let
+    # pipefail turn an empty stderr into a silent whole-script abort.
     grep -oE 'tidepool-timing phase=[A-Za-z0-9_]+ ms=[0-9]+' "$err" \
-      | sed -E 's/tidepool-timing phase=([A-Za-z0-9_]+) ms=([0-9]+)/oneshot_cold.extract.\1_ms=\2/'
+      | sed -E 's/tidepool-timing phase=([A-Za-z0-9_]+) ms=([0-9]+)/oneshot_cold.extract.\1_ms=\2/' \
+      || true
   } > "$KV_DIR/oneshot_cold.$i.kv"
   rm -rf "$cold_dir"
 done
@@ -128,8 +131,12 @@ for i in 1 2 3; do
   TIDEPOOL_COMPILE_CACHE_DIR="$warm_dir" "$ONESHOT_BIN" >"$out" 2>"$err"
   {
     grep -E '^wall_ms=[0-9]+$' "$out" | sed 's/^/oneshot_warm./'
+    # A warm run spawns NO extract, so an empty timing grep is the EXPECTED
+    # case here, not an error — without || true, pipefail + set -e silently
+    # kills the whole script at the first warm repeat.
     grep -oE 'tidepool-timing phase=[A-Za-z0-9_]+ ms=[0-9]+' "$err" \
-      | sed -E 's/tidepool-timing phase=([A-Za-z0-9_]+) ms=([0-9]+)/oneshot_warm.extract.\1_ms=\2/'
+      | sed -E 's/tidepool-timing phase=([A-Za-z0-9_]+) ms=([0-9]+)/oneshot_warm.extract.\1_ms=\2/' \
+      || true
   } > "$KV_DIR/oneshot_warm.$i.kv"
 done
 rm -rf "$warm_dir"
