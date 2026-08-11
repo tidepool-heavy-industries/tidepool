@@ -73,6 +73,59 @@ fn poisoned_external_is_named_on_stderr_at_extract_time() {
         stderr.contains("Dep.helper"),
         "the diagnostic must NAME the poisoned symbol (Dep.helper); got:\n{stderr}"
     );
+
+    // A poison is LAZY: the extraction still succeeds and still emits a
+    // program. That contract is what makes the self-describing sentinel
+    // meaningful — a poisoned program is one that runs until the poison is
+    // forced, not one that fails to build.
+    assert!(
+        output.status.success(),
+        "a lazy poison must not fail the extraction; stderr:\n{stderr}"
+    );
+
+    // The program itself says which external it replaced: the emitted node is
+    // `0x45 << 56 | slot << 8 | 4`, and meta.cbor's `poisoned` table maps that
+    // slot back to the qualified name. Neither half is a side channel — this
+    // is the end-to-end proof of item 20(b)'s fix.
+    let expr_bytes = std::fs::read(out.join("main.cbor")).expect("read main.cbor");
+    let expr = tidepool_repr::serial::read_cbor(&expr_bytes).expect("decode main.cbor");
+    let slots: Vec<u64> = expr
+        .nodes
+        .iter()
+        .filter_map(|frame| match frame {
+            tidepool_repr::frame::CoreFrame::Var(v) => v.sentinel(),
+            _ => None,
+        })
+        .filter(|s| s.kind == 4)
+        .map(|s| s.slot)
+        .collect();
+    assert!(
+        !slots.is_empty(),
+        "the poisoned program must carry a kind=4 sentinel; nodes: {:?}",
+        expr.nodes
+    );
+    assert!(
+        slots.iter().all(|s| *s != 0),
+        "a poison sentinel must carry a NON-ZERO identity slot (got {slots:?}) — \
+         slot 0 is the anonymous, pre-fix encoding"
+    );
+
+    let meta_bytes = std::fs::read(out.join("meta.cbor")).expect("read meta.cbor");
+    let (_, warnings) =
+        tidepool_repr::serial::read_metadata(&meta_bytes).expect("decode meta.cbor");
+    for slot in &slots {
+        let name = warnings
+            .poisoned
+            .iter()
+            .find(|(s, _)| s == slot)
+            .map(|(_, n)| n.as_str());
+        assert_eq!(
+            name,
+            Some("Dep.helper"),
+            "meta.cbor's `poisoned` table must name slot {slot}; table: {:?}",
+            warnings.poisoned
+        );
+    }
 }
 
 /// The same fixture WITHOUT fault injection extracts clean — the diagnostic

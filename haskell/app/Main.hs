@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 import Numeric (showHex)
 import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isDigit, isAlphaNum, isSpace)
-import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
+import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
 import System.Exit (exitFailure)
@@ -379,7 +379,7 @@ processFile timing args path = do
                         [ wiredInMeta, tyconMeta, Map.elems allMetaMap
                         , scanMeta, transitiveMeta ]
             hasIO = any (targetBindingHasIO binds) uniqueNames
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts []
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -416,7 +416,7 @@ processFile timing args path = do
             -- loader rejects them loudly instead of one silently winning.
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-        let metaCbor = encodeMetadata allMeta False mCapturedTy [] warnTexts
+        let metaCbor = encodeMetadata allMeta False mCapturedTy [] warnTexts []
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -487,7 +487,21 @@ data TargetWrite = TargetWrite
   , twVarNames    :: [(Word64, Text)]
   , twHasIO       :: Bool
   , twAskSites    :: [(Word64, Text)]
+  , twPoisoned    :: [(Word64, Text)]
   }
+
+-- | Merge the per-target @poisoned@ tables (sentinel identity slot ->
+-- qualified name) into the ONE merged meta.cbor. Slots are per-target
+-- counters, so two targets can legitimately assign the SAME slot to
+-- DIFFERENT externals; a slot whose name is not unanimous is DROPPED rather
+-- than guessed, leaving the JIT to report an anonymous kind=4 for it — a
+-- missing name is honest, a wrong one is not. Single-target (every
+-- pre-existing caller) keeps its table verbatim, in ascending-slot order.
+mergePoisonedTables :: [[(Word64, Text)]] -> [(Word64, Text)]
+mergePoisonedTables tables =
+  [ (slot, name) | (slot, [name]) <- Map.toList grouped ]
+  where
+    grouped = Map.map nub (Map.fromListWith (++) [ (s, [n]) | (s, n) <- concat tables ])
 
 -- | Write step, shared by the single-target write path (a singleton input
 -- list — see 'writeWholeModuleClosed') and the multi-target '--targets' mode
@@ -510,7 +524,9 @@ data TargetWrite = TargetWrite
 -- list every existing caller passes) both reduce to exactly that one
 -- target's own value, with NO reordering — @or [x] == x@ and
 -- @concatMap f [x] == f x@ — so meta.cbor stays byte-for-byte unchanged for
--- every pre-existing caller. DataCon entries merge through
+-- every pre-existing caller. The @poisoned@ table merges through
+-- 'mergePoisonedTables' (slots are per-target, so an ambiguous slot is
+-- dropped rather than guessed). DataCon entries merge through
 -- 'mergeMetaPreserving', which keeps a genuine (varId, qualified-name)
 -- COLLISION as two distinct entries so the loader rejects it loudly rather
 -- than one target's copy silently winning over another's — this function
@@ -539,6 +555,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
   (writes, encodeMsTotal) <- foldM (\(acc, msAcc) (targetName, outFileBase, closed) -> do
       let ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmReachBinds = reachBinds
                         , cmVarNames = varNames, cmRunLLMTurnSites = runLLMTurnSites
+                        , cmPoisoned = poisoned
                         } = closed
       (cbor, ms) <- timeSection (evaluate (encodeTree nodes))
       let w = TargetWrite
@@ -550,6 +567,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
             , twVarNames    = varNames
             , twHasIO       = targetBindingHasIO binds targetName
             , twAskSites    = runLLMTurnSites
+            , twPoisoned    = poisoned
             }
       return (acc ++ [w], msAcc + ms)
     ) ([], 0) targets
@@ -587,6 +605,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
                   [ wiredInMeta, tyconMeta, concatMap twUsedMeta writes, transitiveMeta ]
       hasIO       = or (map twHasIO writes)
       allVarNames = concatMap twVarNames writes
+      allPoisoned = mergePoisonedTables (map twPoisoned writes)
 
   -- D1 defense, re-wired at the extract-wave fold (2026-08-09): the merge of
   -- boot's '--targets' split with spawn-latency's D1-A left
@@ -608,7 +627,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
   forM_ targets $ \(tn, _, closed) ->
     assertMetaCoversEmitted tn (cmNodes closed) (cmReachBinds closed) allMeta
 
-  (metaCbor, metaMs) <- timeSection (evaluate (encodeMetadata allMeta hasIO mCapturedTy allVarNames warnTexts))
+  (metaCbor, metaMs) <- timeSection (evaluate (encodeMetadata allMeta hasIO mCapturedTy allVarNames warnTexts allPoisoned))
   emitPhase timing "cbor_encode" (encodeMsTotal + metaMs)
 
   -- Write step: one <outFileBase>.cbor per target, ONE merged meta.cbor, and

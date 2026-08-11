@@ -118,6 +118,17 @@ families:
   a safe operand so execution continues to a placeholder value the pending error
   preempts.
 
+  An **unresolved-external poison** (the `0x45` kind-4 sentinel the extract
+  bakes when it cannot resolve a symbol) is in this family and NAMES the
+  symbol: the emitted node carries a 48-bit identity slot
+  (`VarId::sentinel()`), `meta.cbor`'s `poisoned` table maps slot -> qualified
+  name, `register_poisoned_externals` loads it at metadata read time, and
+  `emit/expr.rs` resolves the slot when it emits the lazy poison — so forcing
+  one raises `RuntimeError::UnresolvedExternal("Dep.helper")` instead of an
+  anonymous kind-4 `TypeMetadata`. An UNNAMED kind-4 now means one of: a
+  pre-2.1 payload, a genuine `$tc*`/`$trModule*` type-metadata sentinel, or a
+  slot the multi-target metadata merge dropped as ambiguous.
+
 Almost all PrimOpKind variants are implemented; a clean runtime error is
 surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
 SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine

@@ -317,7 +317,12 @@ fn classify_runtime(e: &RuntimeError) -> JitErrorClass {
         RuntimeError::Undefined => JitErrorClass::Undefined,
         RuntimeError::CaseTrap => JitErrorClass::CaseTrap,
         RuntimeError::BadPointer => JitErrorClass::BadPointer,
-        RuntimeError::TypeMetadata => JitErrorClass::TypeMetadata,
+        // A named kind-4 poison is the same fault as the anonymous one (the
+        // extract resolved its identity slot), so it classifies identically —
+        // naming the symbol must not move a differential comparison.
+        RuntimeError::TypeMetadata | RuntimeError::UnresolvedExternal(_) => {
+            JitErrorClass::TypeMetadata
+        }
         RuntimeError::UnresolvedVar(..) => JitErrorClass::UnresolvedVar,
         RuntimeError::NullFunPtr => JitErrorClass::NullFunPtr,
         RuntimeError::BadFunPtrTag(_) => JitErrorClass::BadFunPtrTag,

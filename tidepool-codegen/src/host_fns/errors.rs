@@ -31,6 +31,13 @@ pub enum RuntimeError {
     BadPointer,
     #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
+    /// A `0x45` kind-4 poison whose identity slot resolved through
+    /// `meta.cbor`'s `poisoned` table: the extract could not resolve this
+    /// external and baked a sentinel in its place. Distinguished from the
+    /// anonymous [`RuntimeError::TypeMetadata`] purely by having a name — the
+    /// same fault, said out loud.
+    #[error("unresolved external {0} — the extract replaced it with a poison sentinel (the `[extract] POISONED` line names it at extract time); a missing/mis-tiered dependency or an extract-pipeline bug, not a user error")]
+    UnresolvedExternal(String),
     #[error("unresolved variable VarId({0:#x}){name} — a compiler bug, not a user error; report it (TIDEPOOL_VARID_AUDIT={0:x} on the extract names it too)", name = .1.as_deref().map(|n| format!(" = {n}")).unwrap_or_default())]
     UnresolvedVar(u64, Option<String>),
     #[error("application of null function pointer")]
@@ -240,6 +247,49 @@ fn lookup_var_name(id: u64) -> Option<String> {
     r.get(&id).cloned()
 }
 
+/// Sentinel identity slot → qualified name of the unresolved external the
+/// extract replaced with a `0x45` kind-4 poison node, registered from
+/// meta.cbor's `poisoned` table (wire 2.1) at load time. Same lifetime and
+/// append-only discipline as [`VAR_NAMES`], but keyed on the SLOT the emitted
+/// node carries, not on a varId — the poison node no longer carries the
+/// original id, it carries this slot.
+///
+/// Slots are per-module counters, so two extractions can legitimately disagree
+/// about what slot 1 means; the last registration wins, and codegen resolves a
+/// slot immediately after registering that module's table, so a program is
+/// always compiled against its own names.
+static POISONED_EXTERNALS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<u64, String>>,
+> = std::sync::OnceLock::new();
+
+/// Register sentinel-slot → external-name pairs (from `MetaWarnings::poisoned`).
+pub fn register_poisoned_externals(pairs: &[(u64, String)]) {
+    if pairs.is_empty() {
+        return;
+    }
+    let map = POISONED_EXTERNALS.get_or_init(Default::default);
+    let mut w = map
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (slot, name) in pairs {
+        w.insert(*slot, name.clone());
+    }
+}
+
+/// The qualified name registered for a sentinel identity slot, if any. Slot 0
+/// means "no identity recorded" (every non-poison sentinel kind, and poisons
+/// from a pre-2.1 extract) and never resolves.
+pub fn poisoned_external_name(slot: u64) -> Option<String> {
+    if slot == 0 {
+        return None;
+    }
+    let map = POISONED_EXTERNALS.get()?;
+    let r = map
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    r.get(&slot).cloned()
+}
+
 #[cfg(test)]
 mod var_name_tests {
     use super::*;
@@ -324,6 +374,11 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
     push_diagnostic(diag);
     let err = match rk {
         RuntimeErrorKind::UserError if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
+        // A kind-4 poison only ever carries a message when codegen resolved
+        // its identity slot against meta.cbor's `poisoned` table
+        // (`error_poison_ptr_lazy_named`), and that message IS the qualified
+        // name of the external it replaced.
+        RuntimeErrorKind::TypeMetadata if !msg.is_empty() => RuntimeError::UnresolvedExternal(msg),
         other => other.into_error(),
     };
     set_first_cause(err);
@@ -774,6 +829,32 @@ unsafe extern "C" fn poison_trampoline_lazy(
     }
 
     runtime_error(kind)
+}
+
+/// A lazy poison closure that NAMES the symbol it stands for: forcing it
+/// raises [`RuntimeError::UnresolvedExternal`] with `name` instead of an
+/// anonymous kind-4 `TypeMetadata`. Used for `0x45` kind-4 sentinels whose
+/// identity slot resolved through [`poisoned_external_name`].
+///
+/// Memoized per (kind, name): the same external is typically referenced from
+/// many sites in one program and recompiled every turn of a resident session,
+/// and each underlying allocation is deliberately leaked (it must outlive the
+/// JIT code that holds its address as an `iconst`).
+pub fn error_poison_ptr_lazy_named(kind: u64, name: &str) -> *mut u8 {
+    static NAMED_POISONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(u64, String), usize>>,
+    > = std::sync::OnceLock::new();
+    let cache = NAMED_POISONS.get_or_init(Default::default);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (kind, name.to_string());
+    if let Some(addr) = guard.get(&key) {
+        return *addr as *mut u8;
+    }
+    let ptr = error_poison_ptr_lazy_msg(kind, name.as_bytes());
+    guard.insert(key, ptr as usize);
+    ptr
 }
 
 /// Create a pre-allocated "lazy poison" Closure for a given error kind and message.

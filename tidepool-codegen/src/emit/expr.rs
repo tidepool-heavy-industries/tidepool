@@ -429,15 +429,24 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     return Ok(SsaVal::from_external_slot(args.builder, slot));
                 }
 
-                let tag = (vid.0 >> 56) as u8;
-                if tag == tidepool_repr::ERROR_SENTINEL_TAG {
+                if let Some(sentinel) = vid.sentinel() {
                     // Lazy poison: emit a constant pointer to a pre-allocated
                     // poison closure. The error flag is NOT set now \u2014 only when
                     // the closure is actually called (forced). This is critical
                     // for typeclass dictionaries that contain error methods for
                     // impossible branches (e.g., $fFloatingDouble).
-                    let kind = vid.0 & 0xFF;
-                    let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                    //
+                    // An unresolved-external poison (kind 4) carries the slot of
+                    // the symbol it replaced; resolving it against meta.cbor's
+                    // `poisoned` table here is what lets the trap say
+                    // "unresolved external Dep.helper" instead of a bare kind=4.
+                    let kind = u64::from(sentinel.kind);
+                    let poison_addr = match crate::host_fns::poisoned_external_name(sentinel.slot) {
+                        Some(name) => {
+                            crate::host_fns::error_poison_ptr_lazy_named(kind, &name) as i64
+                        }
+                        None => crate::host_fns::error_poison_ptr_lazy(kind) as i64,
+                    };
                     let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
                     return Ok(SsaVal::HeapPtr(poison_val));
                 }

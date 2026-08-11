@@ -103,6 +103,14 @@ pub struct MetaWarnings {
     /// `GhcPipeline.warnCollectorHook`). Empty on a clean compile or from an
     /// older extractor that didn't emit the key.
     pub warnings: Vec<String>,
+    /// Sentinel slot → qualified name of the unresolved external that
+    /// `Translate.hs` replaced with a `0x45`-kind-4 poison node
+    /// (`VarId::sentinel().slot`). This is how the emitted program stays
+    /// SELF-DESCRIBING: the node carries the slot, this table carries the
+    /// identity, and the JIT names the symbol in its trap instead of
+    /// reporting a bare kind=4. Empty from a 2.0 payload (the key is
+    /// optional) and from any extraction that poisoned nothing.
+    pub poisoned: Vec<(u64, String)>,
 }
 
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
@@ -252,11 +260,62 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     Ok((table, warnings))
 }
 
+/// Decode an `[[id, name], …]` warnings-map value — the shape shared by the
+/// `var_names` and `poisoned` keys. `field` names the key in any error.
+fn parse_id_name_pairs(field: &'static str, val: &Value) -> Result<Vec<(u64, String)>, ReadError> {
+    let items = match val {
+        Value::Array(items) => items,
+        _ => {
+            return Err(ReadError::MalformedMetadataField {
+                field,
+                detail: "expected an array".to_string(),
+            })
+        }
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let kv = match item {
+            Value::Array(kv) if kv.len() == 2 => kv,
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field,
+                    detail: "each item must be a 2-element [id, name] array".to_string(),
+                })
+            }
+        };
+        let id = match &kv[0] {
+            Value::Integer(id) => {
+                u64::try_from(*id).map_err(|_| ReadError::MalformedMetadataField {
+                    field,
+                    detail: "id does not fit in u64".to_string(),
+                })?
+            }
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field,
+                    detail: "id must be an integer".to_string(),
+                })
+            }
+        };
+        let name = match &kv[1] {
+            Value::Text(nm) => nm.clone(),
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field,
+                    detail: "name must be text".to_string(),
+                })
+            }
+        };
+        out.push((id, name));
+    }
+    Ok(out)
+}
+
 /// Parses the metadata warnings map. Every key a conforming writer emits
-/// (`has_io`, `captured_type`, `var_names`, `warnings`) must carry a value of
-/// the exact shape that key's field expects; a non-text map key, a duplicate
-/// key, or a key this reader does not recognize are each a decode error, not
-/// a silent skip.
+/// (`has_io`, `captured_type`, `var_names`, `warnings`, `poisoned`) must carry
+/// a value of the exact shape that key's field expects; a non-text map key, a
+/// duplicate key, or a key this reader does not recognize are each a decode
+/// error, not a silent skip.
 fn parse_warnings(val: &Value) -> Result<MetaWarnings, ReadError> {
     let mut warnings = MetaWarnings::default();
     let pairs = match val {
@@ -303,53 +362,8 @@ fn parse_warnings(val: &Value) -> Result<MetaWarnings, ReadError> {
                     })
                 }
             },
-            "var_names" => {
-                let items = match v {
-                    Value::Array(items) => items,
-                    _ => {
-                        return Err(ReadError::MalformedMetadataField {
-                            field: "var_names",
-                            detail: "expected an array".to_string(),
-                        })
-                    }
-                };
-                for item in items {
-                    let kv = match item {
-                        Value::Array(kv) if kv.len() == 2 => kv,
-                        _ => {
-                            return Err(ReadError::MalformedMetadataField {
-                                field: "var_names",
-                                detail: "each item must be a 2-element [id, name] array"
-                                    .to_string(),
-                            })
-                        }
-                    };
-                    let id = match &kv[0] {
-                        Value::Integer(id) => {
-                            u64::try_from(*id).map_err(|_| ReadError::MalformedMetadataField {
-                                field: "var_names",
-                                detail: "id does not fit in u64".to_string(),
-                            })?
-                        }
-                        _ => {
-                            return Err(ReadError::MalformedMetadataField {
-                                field: "var_names",
-                                detail: "id must be an integer".to_string(),
-                            })
-                        }
-                    };
-                    let name = match &kv[1] {
-                        Value::Text(nm) => nm.clone(),
-                        _ => {
-                            return Err(ReadError::MalformedMetadataField {
-                                field: "var_names",
-                                detail: "name must be text".to_string(),
-                            })
-                        }
-                    };
-                    warnings.var_names.push((id, name));
-                }
-            }
+            "var_names" => warnings.var_names = parse_id_name_pairs("var_names", v)?,
+            "poisoned" => warnings.poisoned = parse_id_name_pairs("poisoned", v)?,
             "warnings" => {
                 let items = match v {
                     Value::Array(items) => items,
@@ -968,6 +982,69 @@ mod tests {
         let old = meta_bytes(vec![]);
         let (_, w2) = read_metadata(&old).expect("old meta loads");
         assert!(w2.var_names.is_empty());
+    }
+
+    /// The optional `poisoned` warnings key (wire 2.1) decodes into
+    /// `MetaWarnings::poisoned`: sentinel slot → the qualified name of the
+    /// unresolved external that slot's `0x45`-kind-4 node replaced.
+    #[test]
+    fn read_metadata_parses_poisoned_table() {
+        use ciborium::value::Value as Cbor;
+        let root = Cbor::Array(vec![
+            Cbor::Array(vec![]),
+            Cbor::Map(vec![
+                (Cbor::Text("has_io".into()), Cbor::Bool(false)),
+                (
+                    Cbor::Text("poisoned".into()),
+                    Cbor::Array(vec![Cbor::Array(vec![
+                        Cbor::Integer(1u64.into()),
+                        Cbor::Text("Dep.helper".into()),
+                    ])]),
+                ),
+            ]),
+        ]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
+        let (_, warnings) = read_metadata(&bytes).expect("poisoned meta loads");
+        assert_eq!(warnings.poisoned, vec![(1u64, "Dep.helper".to_string())]);
+    }
+
+    /// D-D's backward-compatibility claim, pinned: a metadata payload stamped
+    /// with the PREVIOUS minor (2.0) and carrying no `poisoned` key still
+    /// reads clean, and the table decodes to empty. This is why the committed
+    /// 2.0 fixture corpora need no regeneration for the 2.1 bump.
+    #[test]
+    fn read_metadata_accepts_previous_minor_without_poisoned_key() {
+        use ciborium::value::Value as Cbor;
+        const { assert!(super::super::VERSION_MINOR >= 1) } // pins the 2.0 → 2.1 bump
+        let root = Cbor::Array(vec![
+            Cbor::Array(vec![]),
+            Cbor::Map(vec![
+                (Cbor::Text("has_io".into()), Cbor::Bool(true)),
+                (
+                    Cbor::Text("var_names".into()),
+                    Cbor::Array(vec![Cbor::Array(vec![
+                        Cbor::Integer(0xfe00_0000_0000_0001_u64.into()),
+                        Cbor::Text("Dep.helper".into()),
+                    ])]),
+                ),
+            ]),
+        ]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&(super::super::VERSION_MINOR - 1).to_be_bytes());
+        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
+        let (_, warnings) = read_metadata(&bytes).expect("a 2.0 metadata payload must still read");
+        assert!(warnings.has_io);
+        assert_eq!(warnings.var_names.len(), 1);
+        assert!(
+            warnings.poisoned.is_empty(),
+            "an older-minor payload carries no poisoned table"
+        );
     }
 
     // ---- type capture: the warnings map carries the eval's captured type ----

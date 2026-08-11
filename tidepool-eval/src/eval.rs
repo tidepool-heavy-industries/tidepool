@@ -583,11 +583,13 @@ fn eval_step(
 ) -> Result<Mode, EvalError> {
     match &expr.nodes[idx] {
         CoreFrame::Var(v) => {
-            let tag = (v.0 >> 56) as u8;
-            if tag == tidepool_repr::ERROR_SENTINEL_TAG {
-                // 'E' = error tag: synthetic error VarIds from Translate.hs
+            if let Some(sentinel) = v.sentinel() {
+                // 'E' = error tag: synthetic error VarIds from Translate.hs.
+                // The kind is the LOW byte; the middle bits carry the poisoned
+                // external's identity slot, which the oracle ignores (it has no
+                // meta.cbor table to resolve it against — the JIT names it).
                 use crate::error::SentinelKind;
-                return Err(match SentinelKind::from_u8((v.0 & 0xFF) as u8) {
+                return Err(match SentinelKind::from_u8(sentinel.kind) {
                     SentinelKind::DivByZero => EvalError::TypeMismatch {
                         expected: "non-zero divisor",
                         got: crate::error::ValueKind::Other("division by zero".into()),

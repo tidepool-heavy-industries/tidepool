@@ -79,7 +79,12 @@ pub const VERSION_MAJOR: u16 = 2;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.
-pub const VERSION_MINOR: u16 = 0;
+///
+/// `2.1` added the OPTIONAL `poisoned` warnings key (slot → qualified name of
+/// the external each `0x45`-kind-4 sentinel replaced). A `2.0` payload simply
+/// omits it, which decodes to an empty table — so the committed 2.0 fixture
+/// corpora stay readable and are NOT regenerated.
+pub const VERSION_MINOR: u16 = 1;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 

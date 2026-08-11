@@ -11,6 +11,23 @@ pub const EXTERNAL_TAG: u8 = 0xFE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarId(pub u64);
 
+/// The decoded payload of a `0x45` error-sentinel [`VarId`].
+///
+/// Layout (`Translate.errorSentinelVar`): `0x45 << 56 | slot << 8 | kind`.
+/// The kind stays in the LOW byte, so sentinels that carry no slot are
+/// byte-identical to the pre-slot encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentinelPayload {
+    /// Which sentinel this is: 0 = div-by-zero, 1 = overflow, 2 = error,
+    /// 3 = undefined, 4 = type metadata / unresolved-external poison.
+    pub kind: u8,
+    /// Per-module identity slot of the symbol this sentinel REPLACED, or `0`
+    /// when the sentinel records no identity (every kind but the
+    /// unresolved-external poison, plus payloads from pre-2.1 extractors).
+    /// Resolved to a qualified name through `meta.cbor`'s `poisoned` table.
+    pub slot: u64,
+}
+
 /// Decoded high-byte tag of a [`VarId`] (domain model §3). Replaces bare byte
 /// comparisons (`v >> 56 == 0x..`) at resolution sites with an exhaustive match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +55,21 @@ impl VarId {
             ERROR_SENTINEL_TAG => VarKind::ErrorSentinel,
             _ => VarKind::Local,
         }
+    }
+
+    /// Decode an error sentinel's kind byte and identity slot; `None` for any
+    /// id that isn't `0x45`-tagged. The ONE place the sentinel bit layout is
+    /// decoded — every consumer (the eval oracle, the JIT's poison emission)
+    /// goes through here rather than open-coding the shifts.
+    #[must_use]
+    pub fn sentinel(self) -> Option<SentinelPayload> {
+        if self.tag() != ERROR_SENTINEL_TAG {
+            return None;
+        }
+        Some(SentinelPayload {
+            kind: (self.0 & 0xFF) as u8,
+            slot: (self.0 >> 8) & 0xFFFF_FFFF_FFFF,
+        })
     }
 }
 
@@ -520,6 +552,27 @@ mod tests {
     #[test]
     fn test_var_id_display() {
         assert_eq!(VarId(42).to_string(), "v_42");
+    }
+
+    /// The sentinel layout (`0x45<<56 | slot<<8 | kind`): the kind stays in the
+    /// LOW byte, so a slotless sentinel decodes exactly as the pre-slot
+    /// encoding did, and a slot-carrying poison decodes both halves.
+    #[test]
+    fn sentinel_decodes_kind_and_slot() {
+        for kind in 0u8..=4 {
+            let slotless = VarId(0x4500_0000_0000_0000 | u64::from(kind));
+            let p = slotless.sentinel().expect("0x45-tagged");
+            assert_eq!((p.kind, p.slot), (kind, 0));
+        }
+        let poisoned = VarId(0x4500_0000_0000_0000 | (7u64 << 8) | 4);
+        let p = poisoned.sentinel().expect("0x45-tagged");
+        assert_eq!((p.kind, p.slot), (4, 7));
+        // The maximum representable slot uses all 48 middle bits.
+        let wide = VarId(0x4500_0000_0000_0000 | (0xFFFF_FFFF_FFFF << 8) | 4);
+        assert_eq!(wide.sentinel().map(|p| p.slot), Some(0xFFFF_FFFF_FFFF));
+        // Non-sentinel tags decode to None, not to a bogus kind/slot.
+        assert!(VarId(0xFE00_0000_0000_0004).sentinel().is_none());
+        assert!(VarId(42).sentinel().is_none());
     }
 
     #[test]

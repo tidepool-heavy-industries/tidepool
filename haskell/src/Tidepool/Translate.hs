@@ -21,6 +21,8 @@ module Tidepool.Translate
   , FlatAltCon(..)
   , LitEnc(..)
   , UnresolvedVar(..)
+  , errorSentinelVar
+  , poisonSentinelSlot
   , varId
   , stableVarId
   , fieldParentDisamb
@@ -133,13 +135,15 @@ data TransState = TransState
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
-  -- Item 20 defect (b): the ORIGINAL ids of unresolved externals that were
-  -- actually POISONED during this run. The emitted node is the shared
-  -- 0x45…04 sentinel, which erases WHICH external it replaced — and the
-  -- referenced-ids masking filter ('trulyUnresolved') can therefore never
-  -- see them. This set is the only place that information survives; the
-  -- caller turns it into a loud extract-time diagnostic.
-  , tsPoisonedHits :: !(Set.Set Word64)
+  -- Item 20 defect (b): the identity SLOT assigned to each distinct unresolved
+  -- external that this run poisoned (original varId -> slot, slots monotonic
+  -- from 1). The slot is what the emitted node CARRIES
+  -- ('errorSentinelVar' / D-C's @0x45<<56 | slot<<8 | kind@), so this map is
+  -- the encoding table, not a side channel: the caller pairs it with the
+  -- unresolved-var names to build meta.cbor's @poisoned@ key, and everything
+  -- else about "what did this program poison" is read back out of the emitted
+  -- nodes.
+  , tsPoisonSlots :: !(Map.Map Word64 Word64)
   -- runLLMTurn (#R0 typed-yield pass): varIds of the hidden Sited siblings
   -- (Nothing when the Ask effect's helper text isn't in the closed program —
   -- an interception site with no sibling available is an extract-pipeline bug).
@@ -170,6 +174,28 @@ emitNode n = do
   let idx = Seq.length (tsNodes s)
   put s { tsNodes = tsNodes s |> n }
   return idx
+
+-- | Encode an error-sentinel VarId (decision D-C,
+-- @plans/post-restart/extract-manifest.md@): tag @0x45@ ('E') in the high
+-- byte, a 48-bit identity @slot@ in the middle bits, the sentinel @kind@ in
+-- the LOW byte. Slotless sentinels (@slot = 0@ — every kind but the
+-- unresolved-external poison) are byte-identical to the pre-slot encoding, so
+-- readers that compare the whole word keep matching. The Rust decoder is
+-- @VarId::sentinel@ (@tidepool-repr/src/types.rs@).
+errorSentinelVar :: Word64 -> Word64 -> Word64
+errorSentinelVar slot kind = 0x4500000000000000 .|. (slot `shiftL` 8) .|. kind
+
+-- | Inverse of 'errorSentinelVar' for the unresolved-external poison
+-- (kind 4): the identity slot a poison node carries, or 'Nothing' for any
+-- other VarId. Slot 0 means "no identity recorded".
+poisonSentinelSlot :: Word64 -> Maybe Word64
+poisonSentinelSlot v
+  | v `shiftR` 56 == 0x45
+  , v .&. 0xFF == 4
+  , let slot = (v `shiftR` 8) .&. 0xFFFFFFFFFFFF
+  , slot /= 0
+  = Just slot
+  | otherwise = Nothing
 
 -- | Generate a fresh synthetic VarId with tag 'T' (Tidepool-generated).
 freshSynthVarId :: TransM Word64
@@ -206,6 +232,21 @@ freshSiteId = do
   let c = tsSiteCounter s
   put s { tsSiteCounter = c + 1 }
   return c
+
+-- | The identity slot for one poisoned unresolved external, assigned on first
+-- reference and reused for every later reference to the same original id.
+-- Slots are per-'translateModule'-run and monotonic from 1 (0 is reserved for
+-- "no identity recorded"), the same shape 'freshSiteId' uses for runLLMTurn
+-- call sites.
+poisonSlotFor :: Word64 -> TransM Word64
+poisonSlotFor vid = do
+  slots <- gets tsPoisonSlots
+  case Map.lookup vid slots of
+    Just slot -> return slot
+    Nothing -> do
+      let slot = fromIntegral (Map.size slots) + 1
+      modify' $ \s -> s { tsPoisonSlots = Map.insert vid slot (tsPoisonSlots s) }
+      return slot
 
 -- | Record one runLLMTurn/runLLMTurnFork site for the asks.json sidecar.
 recordRunLLMTurnSite :: Word64 -> Text -> TransM ()
@@ -432,11 +473,36 @@ emitShowDoubleSpecBody binder = do
     lam2       <- emitNode $ NLam precId lam3
     emitNode $ NLam fmtId lam2
 
+-- | A 'TransState' with every accumulator empty and no aux-verb sibling ids
+-- resolved — the starting state for a single-binding translation
+-- ('translateBinds'). 'translateModule' builds its own, seeding
+-- 'tsUnresolvedIds' and the sibling ids.
+emptyTransState :: TransState
+emptyTransState = TransState
+  { tsNodes = Seq.empty
+  , tsUsedDCs = Map.empty
+  , tsRecJoinIds = Set.empty
+  , tsSynthCounter = 0
+  , tsUnresolvedIds = Set.empty
+  , tsPoisonSlots = Map.empty
+  , tsRunLLMTurnSitedId = Nothing
+  , tsRunLLMTurnForkSitedId = Nothing
+  , tsRunLLMTurnFanoutSitedId = Nothing
+  , tsForkMapSitedId = Nothing
+  , tsForkCataSitedId = Nothing
+  , tsSiteCounter = 0
+  , tsRunLLMTurnSites = Seq.empty
+  , tsCurrentBinder = Nothing
+  , tsFinalizeSitedId = Nothing
+  , tsForkSitedId = Nothing
+  , tsForkAllSitedId = Nothing
+  }
+
 translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+      let (idx, s) = runState (translate rhs) emptyTransState
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -444,7 +510,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+        let (idx, s) = runState (translate rhs) emptyTransState
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -463,7 +529,10 @@ translateBinds binds = concatMap translateBind binds
 -- the DataConTable meta walks so those harvest only constructors the program
 -- can run, never the full closed graph (quoter-internal / TH machinery binds
 -- that merely sit on the include path).
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text), Set.Set Word64)
+-- The fifth component is the poison-slot table (original varId -> identity
+-- slot) for the unresolved externals this run replaced with sentinels; see
+-- 'tsPoisonSlots'.
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text), Map.Map Word64 Word64)
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
@@ -479,7 +548,7 @@ translateModule allBinds targetName unresolvedIds =
       -- 'isIntrinsicVerb' for the call-site predicates: a user binding that
       -- merely shares one of these names is never picked as a head-swap
       -- target.
-      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds Set.empty
+      initState = TransState Seq.empty Map.empty Set.empty 0 unresolvedIds Map.empty
                     (findAuxVarId "runLLMTurnSited" allBinds)
                     (findAuxVarId "runLLMTurnForkSited" allBinds)
                     (findAuxVarId "runLLMTurnFanoutSited" allBinds)
@@ -491,7 +560,7 @@ translateModule allBinds targetName unresolvedIds =
                     (findAuxVarId "forkAllSited" allBinds)
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in ( tsNodes finalState, tsUsedDCs finalState, neededBinds
-     , tsRunLLMTurnSites finalState, tsPoisonedHits finalState )
+     , tsRunLLMTurnSites finalState, tsPoisonSlots finalState )
   where
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
@@ -711,6 +780,11 @@ data ClosedModule = ClosedModule
   , cmRunLLMTurnSites :: [(Word64, Text)]
     -- ^ runLLMTurn/runLLMTurnFork {site, type} pairs (#R0), for the
     -- asks.json sidecar 'writeWholeModuleClosed' writes next to meta.cbor.
+  , cmPoisoned   :: [(Word64, Text)]
+    -- ^ Sentinel identity slot → qualified name, for every unresolved external
+    -- the emitted program replaced with a @0x45@ kind-4 poison node. Shipped
+    -- as meta.cbor's optional @poisoned@ key (wire 2.1) so the JIT can NAME
+    -- the symbol when one is forced, instead of reporting a bare kind=4.
   }
 
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
@@ -782,27 +856,44 @@ translateModuleClosed hscEnv allBinds targetName = do
         _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonedHits) =
+      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonSlots) =
         translateModule closedBinds targetName unresolvedIds
-  -- Item 20 defect (b): a poisoned external is LAZY (the 0x45 kind=4 node
-  -- traps only if forced at runtime), so it is deliberately NOT an
-  -- extract-time error — dead-branch poisons are legitimate. But it must
-  -- never be SILENT: the poison node erases which symbol it replaced, and
-  -- 'trulyUnresolved' below (keyed on the original id, which the poison
-  -- replaced in the emitted nodes) structurally cannot report these. Name
-  -- them here, loudly, at extract time.
-  do let poisonedNamed =
-           [ uvModule uv ++ "." ++ uvName uv
-           | uv <- unresolved, uvKey uv `Set.member` poisonedHits ]
-     case poisonedNamed of
-       [] -> pure ()
-       names -> hPutStrLn stderr $
-         "  [extract] POISONED " ++ show (length names)
-         ++ " unresolved external(s) (lazy: traps as TypeMetadata kind=4 only if forced): "
-         ++ unwords names
-  let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
+      referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
+      -- Item 20 defect (b): READ THE PROGRAM. Every poison node carries the
+      -- identity slot of the external it replaced, so "what did this
+      -- extraction poison" is a scan of the emitted nodes for kind-4
+      -- sentinels — no side set threaded through the translation, and no
+      -- masking filter keyed on the ORIGINAL id (the one the poison node
+      -- REPLACES, so such a filter structurally never matches a poison).
+      emittedPoisonSlots =
+        Set.fromList (Data.Maybe.mapMaybe poisonSentinelSlot (Set.toList referencedIds))
+      -- slot -> qualified name: the meta.cbor @poisoned@ table, which is what
+      -- lets the JIT NAME a forced sentinel instead of reporting kind=4.
+      poisonedTable =
+        [ (slot, T.pack (uvModule uv ++ "." ++ uvName uv))
+        | uv <- unresolved
+        , Just slot <- [Map.lookup (uvKey uv) poisonSlots]
+        , slot `Set.member` emittedPoisonSlots ]
+      -- 'cmUnresolved' is the FATAL channel (Main.translateTargetClosed errors
+      -- on it), and it deliberately does NOT include the poisoned externals
+      -- above: a poison is LAZY — the kind-4 node traps only if forced at
+      -- runtime — and dead-branch poisons are legitimate, which is the whole
+      -- reason the slot/table/named-trap machinery exists (a program that
+      -- poisoned something must still be emitted and run). What IS fatal is an
+      -- unresolved external the program references RAW, with no poison
+      -- covering it: nothing binds that id, so forcing it is an
+      -- unresolved-variable trap with no deferred-error semantics at all. Both
+      -- lists are now reads of the emitted nodes ('referencedIds'), which is
+      -- why they can be stated apart in the first place.
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
-      -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
+  -- A poison must never be SILENT, even though it is not fatal.
+  case map snd poisonedTable of
+    [] -> pure ()
+    names -> hPutStrLn stderr $
+      "  [extract] POISONED " ++ show (length names)
+      ++ " unresolved external(s) (lazy: traps as TypeMetadata kind=4 only if forced): "
+      ++ unwords (map T.unpack names)
+  let -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
       danglingIds = Set.filter (\v -> not (Set.member v boundIds) && (v `shiftR` 56) /= 0x45) referencedIds
   -- Dangling NVar check — ids the emitted program references but nothing
@@ -874,6 +965,7 @@ translateModuleClosed hscEnv allBinds targetName = do
     , cmReachBinds = reachBinds
     , cmVarNames   = varNames
     , cmRunLLMTurnSites = Data.Foldable.toList runLLMTurnSites
+    , cmPoisoned   = poisonedTable
     }
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
@@ -1071,11 +1163,11 @@ collectUsedDataCons binds =
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+      let (_, s) = runState (translate rhs) emptyTransState
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty Set.empty Nothing Nothing Nothing Nothing Nothing 0 Seq.empty Nothing Nothing Nothing Nothing)
+        let (_, s) = runState (translate rhs) emptyTransState
         in tsUsedDCs s
       ) pairs
 
@@ -1436,7 +1528,7 @@ translate expr =
 
     -- Intercept error calls to preserve message string
     Var v | isErrorVar v -> do
-      hIdx <- emitNode $ NVar 0x4500000000000002
+      hIdx <- emitNode $ NVar (errorSentinelVar 0 2)
       let findMsg [] = Nothing
           findMsg (a:as) = case extractErrorMessage a of
                              Just bs -> Just bs
@@ -1953,13 +2045,13 @@ translateHead = \case
   Var v
     | isRuntimeErrorVar v -> do
         let kind = if occNameString (nameOccName (idName v)) == "divZeroError" then 0 else 1
-        emitNode $ NVar (0x4500000000000000 .|. kind)  -- tag 'E' for error
-    | isErrorVar v -> emitNode $ NVar 0x4500000000000002  -- tag 'E', kind 2 (error)
-    | isUndefinedVar v -> emitNode $ NVar 0x4500000000000003  -- tag 'E', kind 3 (undefined)
+        emitNode $ NVar (errorSentinelVar 0 kind)  -- tag 'E' for error
+    | isErrorVar v -> emitNode $ NVar (errorSentinelVar 0 2)  -- tag 'E', kind 2 (error)
+    | isUndefinedVar v -> emitNode $ NVar (errorSentinelVar 0 3)  -- tag 'E', kind 3 (undefined)
     | isRealWorldVar v ->
         emitNode $ NLit (LEInt 0)  -- realWorld# state token → dummy literal
     | isTypeMetadataVar v ->
-        emitNode $ NVar 0x4500000000000004  -- tag 'E', kind 4 (type metadata)
+        emitNode $ NVar (errorSentinelVar 0 4)  -- tag 'E', kind 4 (type metadata)
     | isNospecVar v -> do
         -- GHC.Magic.nospec is the identity; bare / zero-value-arg occurrence
         -- (the applied form is desugared in the App handler). Emit `\x -> x`.
@@ -1970,10 +2062,12 @@ translateHead = \case
         unresolved <- gets (Set.member (varId v) . tsUnresolvedIds)
         if unresolved
           then do
-            -- Record the ORIGINAL id before it is erased by the shared
-            -- poison node — see 'tsPoisonedHits'.
-            modify' (\s -> s { tsPoisonedHits = Set.insert (varId v) (tsPoisonedHits s) })
-            emitNode $ NVar 0x4500000000000004
+            -- The poison node CARRIES the replaced symbol's identity: an
+            -- identity slot in the middle bits, resolved back to a qualified
+            -- name through meta.cbor's @poisoned@ table. Kind stays 4, so
+            -- every existing kind-4 reader still matches.
+            slot <- poisonSlotFor (varId v)
+            emitNode $ NVar (errorSentinelVar slot 4)
           else emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
@@ -2943,7 +3037,7 @@ mapFfiCall pprName
 -- tag-'E' UserError Var. The JIT lowers it to a poison closure that only raises
 -- when forced/applied, so it is harmless in dead branches.
 emitFfiPoison :: TransM Int
-emitFfiPoison = emitNode $ NVar 0x4500000000000002
+emitFfiPoison = emitNode $ NVar (errorSentinelVar 0 2)
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =

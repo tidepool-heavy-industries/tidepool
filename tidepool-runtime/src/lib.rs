@@ -161,6 +161,7 @@ pub fn compile_haskell_salted(
             (read_cbor(&expr_bytes), read_metadata(&meta_bytes))
         {
             tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
+            tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
             return Ok(CompileResult {
                 expr,
                 table,
@@ -224,9 +225,11 @@ pub fn compile_haskell_salted(
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     // Register varId → name pairs so runtime unresolved-variable errors can
-    // name the symbol; same on the cache-hit path above and the session-turn
-    // reader (session/turn.rs).
+    // name the symbol, and sentinel-slot → external-name pairs so a forced
+    // kind-4 poison names the symbol it replaced; same on the cache-hit path
+    // above and the session-turn reader (session/turn.rs).
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
+    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     // Only store in cache if deserialization succeeded
     cache::cache_store(&key, &expr_bytes, &meta_bytes);

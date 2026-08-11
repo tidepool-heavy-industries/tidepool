@@ -72,8 +72,9 @@ pub use gc::{
 use errors::unresolved_var_trap;
 pub use errors::{
     debug_app_check, debug_app_return, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
-    error_poison_ptr_lazy_msg, get_exec_context, has_runtime_error, is_lazy_poison,
-    push_diagnostic, raise_lazy_poison, register_var_names, runtime_bad_thunk_state_trap,
+    error_poison_ptr_lazy_msg, error_poison_ptr_lazy_named, get_exec_context, has_runtime_error,
+    is_lazy_poison, poisoned_external_name, push_diagnostic, raise_lazy_poison,
+    register_poisoned_externals, register_var_names, runtime_bad_thunk_state_trap,
     runtime_blackhole_trap, runtime_error, runtime_error_dynamic, runtime_error_with_msg,
     runtime_oom, runtime_shape_trap, set_exec_context, set_first_cause, surface_error,
     take_runtime_error, RuntimeError, RuntimeErrorKind, ShapeTrapKind,

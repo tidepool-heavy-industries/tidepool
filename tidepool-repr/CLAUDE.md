@@ -74,7 +74,7 @@ cross-language hashing algorithm to keep in sync, by construction.
 ## CBOR wire format (`serial/mod.rs`) — ONE current format, no tolerance
 
 8-byte header: 4-byte magic `TPLR` + `VERSION_MAJOR`/`VERSION_MINOR` (currently
-`2.0`) as two big-endian `u16`s. **The header is MANDATORY** — a payload
+`2.1`) as two big-endian `u16`s. **The header is MANDATORY** — a payload
 without it is rejected loudly (`ReadError::MissingHeader`); stale fixtures or
 caches get regenerated, never tolerated. Version rejection is also loud
 (`ReadError::UnsupportedVersion`): a `major` mismatch, or a `minor` newer than
@@ -90,3 +90,15 @@ regenerate the fixture corpora (`haskell/regen-corpus.sh` + the extract
 invocations in `haskell/CLAUDE.md`) — the Haskell and Rust sides are one
 format with two implementations, and the regenerated corpus diff is the
 review artifact.
+
+**A purely ADDITIVE optional warnings key is a MINOR bump, and must not need
+fixture regeneration.** `2.1` (the `poisoned` key: sentinel slot → the
+qualified name of the unresolved external each `0x45`-kind-4 node replaced) is
+the worked example. The rules that make it safe: the reader accepts an older
+minor within the same major, an absent optional key decodes to empty, and the
+writer omits it when empty — so every committed `2.0` payload still reads,
+re-encodes byte-identically (`golden_wire_contract` compares payloads, not
+headers), and is NOT regenerated. Bump both sides in one commit, and pin the
+older-minor read (`read_metadata_accepts_previous_minor_without_poisoned_key`).
+A key that is not optional, or any change to an existing key's shape, is a
+MAJOR bump with the full regeneration dance above.

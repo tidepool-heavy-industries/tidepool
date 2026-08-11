@@ -41,6 +41,19 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     Ok(bytes)
 }
 
+/// Encode an `[(id, name)]` table as the `[[id, name], …]` CBOR array shared
+/// by the `var_names` and `poisoned` warnings keys.
+fn id_name_pairs_value(pairs: &[(u64, String)]) -> Value {
+    Value::Array(
+        pairs
+            .iter()
+            .map(|(id, nm)| {
+                Value::Array(vec![Value::Integer((*id).into()), Value::Text(nm.clone())])
+            })
+            .collect(),
+    )
+}
+
 /// Encode a slice of record field labels as a CBOR array of text.
 fn field_labels_value(labels: &[String]) -> Value {
     Value::Array(labels.iter().map(|l| Value::Text(l.clone())).collect())
@@ -100,7 +113,7 @@ pub fn write_metadata(
     // Warnings map mirrors `encodeMetadata`'s emission exactly (key order and
     // presence rules) so a read→re-encode of Haskell-produced meta is
     // byte-identical: `has_io` always; `captured_type` only when present;
-    // `var_names`/`warnings` only when non-empty.
+    // `var_names`/`warnings`/`poisoned` only when non-empty.
     let mut warnings_pairs = vec![(
         Value::Text("has_io".to_string()),
         Value::Bool(warnings.has_io),
@@ -114,15 +127,7 @@ pub fn write_metadata(
     if !warnings.var_names.is_empty() {
         warnings_pairs.push((
             Value::Text("var_names".to_string()),
-            Value::Array(
-                warnings
-                    .var_names
-                    .iter()
-                    .map(|(id, nm)| {
-                        Value::Array(vec![Value::Integer((*id).into()), Value::Text(nm.clone())])
-                    })
-                    .collect(),
-            ),
+            id_name_pairs_value(&warnings.var_names),
         ));
     }
     if !warnings.warnings.is_empty() {
@@ -135,6 +140,13 @@ pub fn write_metadata(
                     .map(|w| Value::Text(w.clone()))
                     .collect(),
             ),
+        ));
+    }
+    // `poisoned` is emitted LAST, matching `encodeMetadata`'s key order (2.1).
+    if !warnings.poisoned.is_empty() {
+        warnings_pairs.push((
+            Value::Text("poisoned".to_string()),
+            id_name_pairs_value(&warnings.poisoned),
         ));
     }
     let root = Value::Array(vec![Value::Array(entries), Value::Map(warnings_pairs)]);

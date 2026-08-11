@@ -311,6 +311,7 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
         var_names: vec![(0xfe00_0000_0000_0001_u64, "foo".to_string())],
         captured_type: Some("[Int]".to_string()),
         warnings: vec!["Wincomplete-patterns".to_string()],
+        poisoned: vec![(1u64, "Dep.helper".to_string())],
     };
 
     let bytes = write_metadata(&table, &warnings).expect("write_metadata failed");
@@ -322,4 +323,5 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     assert_eq!(recovered_warnings.var_names, warnings.var_names);
     assert_eq!(recovered_warnings.captured_type, warnings.captured_type);
     assert_eq!(recovered_warnings.warnings, warnings.warnings);
+    assert_eq!(recovered_warnings.poisoned, warnings.poisoned);
 }

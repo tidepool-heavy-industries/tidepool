@@ -539,6 +539,7 @@ fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
         | RuntimeError::Undefined
         | RuntimeError::BadPointer
         | RuntimeError::TypeMetadata
+        | RuntimeError::UnresolvedExternal(_)
         | RuntimeError::UnresolvedVar(..)
         | RuntimeError::NullFunPtr
         | RuntimeError::BadFunPtrTag(_)

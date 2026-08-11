@@ -12,11 +12,15 @@ import qualified Data.Sequence as Seq
 import Tidepool.Translate (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..), DCMeta(..))
 import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
 
--- | 8-byte version header: magic 'TPLR' + version 2.0 (bumped from 1.1 for
--- the breaking metadata-entry shape change: 7 -> 8 elements, parent-type-name
--- channel).
+-- | 8-byte version header: magic 'TPLR' + version 2.1.
+--
+-- 2.0 (from 1.1) was the breaking metadata-entry shape change: 7 -> 8
+-- elements, parent-type-name channel. 2.1 is a MINOR bump: the OPTIONAL
+-- @poisoned@ warnings key (sentinel slot -> qualified name). The Rust reader
+-- accepts an older minor within the same major, so committed 2.0 payloads
+-- stay readable — they simply omit @poisoned@, which decodes to empty.
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x02, 0x00, 0x00]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x02, 0x00, 0x01]
 
 -- | Encodes the flattened node tree into a CBOR payload prepended with the TPLR version header.
 encodeTree :: Seq FlatNode -> ByteString
@@ -99,11 +103,16 @@ encodeFlatAltCon = \case
 -- (the eval's @__user@ binding type — see GhcPipeline.capturedUserType) it also
 -- carries @captured_type@. The Rust reader (serial/read.rs parse_warnings)
 -- tolerates either map shape, so omitting the key on Nothing is backward-safe.
--- The trailing @[Text]@ is the GHC diagnostic warnings for the target module
+-- The @[Text]@ is the GHC diagnostic warnings for the target module
 -- (see GhcPipeline.prWarnings) — an empty list omits the @warnings@ key
 -- entirely, keeping a clean compile's meta.cbor byte-identical to before.
-encodeMetadata :: [DCMeta] -> Bool -> Maybe Text -> [(Word64, Text)] -> [Text] -> ByteString
-encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toStrictByteString (
+-- The trailing @[(Word64, Text)]@ is the @poisoned@ table (wire 2.1): the
+-- identity slot each emitted @0x45@ kind-4 sentinel carries, paired with the
+-- qualified name of the unresolved external it replaced (Translate.cmPoisoned).
+-- Same omit-when-empty rule, so an extraction that poisoned nothing is
+-- byte-identical to a 2.0 payload apart from the header's minor.
+encodeMetadata :: [DCMeta] -> Bool -> Maybe Text -> [(Word64, Text)] -> [Text] -> [(Word64, Text)] -> ByteString
+encodeMetadata entries hasIO mCapturedType varNames warnings poisoned = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
   <> warningsMap)
@@ -114,17 +123,25 @@ encodeMetadata entries hasIO mCapturedType varNames warnings = tplrHeader <> toS
     warningsMap =
       encodeMapLen (1 + maybe 0 (const 1) mCapturedType
                       + (if null varNames then 0 else 1)
-                      + (if null warnings then 0 else 1))
+                      + (if null warnings then 0 else 1)
+                      + (if null poisoned then 0 else 1))
       <> encodeString "has_io" <> encodeBool hasIO
       <> maybe mempty (\ty -> encodeString "captured_type" <> encodeString ty) mCapturedType
       <> (if null varNames then mempty else
-            encodeString "var_names"
-            <> encodeListLen (fromIntegral (length varNames))
-            <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) varNames)
+            encodeString "var_names" <> encodeIdNamePairs varNames)
       <> (if null warnings then mempty else
             encodeString "warnings"
             <> encodeListLen (fromIntegral (length warnings))
             <> foldMap encodeString warnings)
+      <> (if null poisoned then mempty else
+            encodeString "poisoned" <> encodeIdNamePairs poisoned)
+
+-- | The @[[id, name], …]@ value shape shared by the @var_names@ and
+-- @poisoned@ warnings keys (Rust: @serial::read::parse_id_name_pairs@).
+encodeIdNamePairs :: [(Word64, Text)] -> Encoding
+encodeIdNamePairs pairs =
+  encodeListLen (fromIntegral (length pairs))
+  <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) pairs
 
 encodeMetaEntry :: DCMeta -> Encoding
 encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName} =
