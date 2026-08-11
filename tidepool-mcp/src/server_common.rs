@@ -172,6 +172,56 @@ pub fn load_secrets_logged() {
     }
 }
 
+/// Run the startup toolchain handshake against the stdlib dir this server just
+/// resolved, logging the non-fatal outcomes. Shared by BOTH server binaries so
+/// they agree on when a skew is fatal and on what the operator is told.
+///
+/// This is the ONE place the deploy-coupling invariant (extract + servers +
+/// stdlib move together via `scripts/redeploy.sh`) is checked at runtime rather
+/// than by script discipline. Cost is one memoized binary content hash plus a
+/// walk of ~40 small `.hs` files, paid once at startup — never per eval.
+///
+/// A missing extract is NOT fatal here: the server starts and the first eval
+/// reports it through the normal `FailureClass::Infra` path, which is where
+/// that error is already actionable. Only a *skewed pair* aborts startup, and
+/// only under the default `TIDEPOOL_TOOLCHAIN_HANDSHAKE=error`.
+///
+/// # Errors
+/// [`ToolchainError::Skew`](tidepool_runtime::toolchain::ToolchainError::Skew)
+/// when the located extract and stdlib were not deployed together.
+pub fn handshake_logged(stdlib: &Path) -> Result<(), tidepool_runtime::toolchain::ToolchainError> {
+    use tidepool_runtime::toolchain::{self, HandshakeOutcome};
+
+    let extract = match toolchain::locate_extract() {
+        Ok(loc) => loc,
+        Err(e) => {
+            tracing::warn!("toolchain handshake skipped: {e}");
+            return Ok(());
+        }
+    };
+    match toolchain::enforce_handshake(&extract.path, stdlib)? {
+        HandshakeOutcome::Match => {
+            tracing::info!(
+                extract = %extract.path.display(),
+                stdlib = %stdlib.display(),
+                "toolchain handshake ok"
+            );
+        }
+        HandshakeOutcome::NoStamp { path } => {
+            tracing::info!(
+                stamp = %path.display(),
+                "no toolchain deploy stamp — skew undetectable until `scripts/redeploy.sh` writes one"
+            );
+        }
+        HandshakeOutcome::Skew(report) => {
+            // Reached only under TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn; the `error`
+            // default returned above.
+            tracing::warn!("{report}");
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the layered verb-library dirs for the GHC include path: the
 /// nearest project `.tidepool/lib` (if any), followed by the user-global
 /// dirs — GHC first-match-wins order, so a project `Library`/module shadows

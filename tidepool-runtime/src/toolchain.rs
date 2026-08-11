@@ -745,4 +745,145 @@ mod tests {
         write_stdlib(dir.path(), "module Tidepool.Prelude where\n");
         assert!(is_stdlib_root(dir.path()));
     }
+
+    /// A set-but-wrong `$TIDEPOOL_PRELUDE_DIR` must be a hard error, never a
+    /// silent fall-through to some other stdlib — a typo'd override that
+    /// quietly served a different tree is the exact failure this module exists
+    /// to kill.
+    #[test]
+    fn prelude_dir_override_that_is_not_a_stdlib_root_is_fatal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var(ENV_PRELUDE_DIR, dir.path());
+        let err = locate_stdlib(&StdlibFallbacks::default()).unwrap_err();
+        std::env::remove_var(ENV_PRELUDE_DIR);
+        assert!(
+            matches!(err, ToolchainError::PreludeDirInvalid { .. }),
+            "expected PreludeDirInvalid, got {err:?}"
+        );
+        assert!(err.to_string().contains("Tidepool/Prelude.hs"));
+    }
+
+    /// Isolate the machine-wide fingerprint sidecar + stamp so a test never
+    /// reads or writes the developer's real cache.
+    fn isolate_cache(tmp: &Path) {
+        std::env::set_var("XDG_CACHE_HOME", tmp.join("cache"));
+        std::env::set_var(ENV_STAMP, tmp.join("stamp.json"));
+    }
+
+    /// The handshake's whole job: a stamp recorded at deploy time, then ONE
+    /// side of the pair moves, and startup says so loudly instead of serving a
+    /// mixed toolchain that fails at eval time.
+    #[test]
+    fn handshake_detects_a_skewed_extract_and_names_the_redeploy_script() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let stdlib = tmp.path().join("lib");
+        write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
+        let extract = tmp.path().join("tidepool-extract");
+        std::fs::write(&extract, b"deployed extract v1").unwrap();
+
+        // Deploy: both sides blessed together.
+        write_stamp(&extract, &stdlib).unwrap();
+        assert!(
+            matches!(
+                check_handshake(&extract, &stdlib).unwrap(),
+                HandshakeOutcome::Match
+            ),
+            "the pair that was just stamped must match"
+        );
+
+        // A `nix profile upgrade tidepool-extract` without a full redeploy.
+        std::fs::write(&extract, b"upgraded extract v2 -- larger").unwrap();
+
+        let outcome = check_handshake(&extract, &stdlib).unwrap();
+        let HandshakeOutcome::Skew(report) = outcome else {
+            panic!("expected skew, got {outcome:?}");
+        };
+        assert_eq!(report.sides, vec![SkewSide::Extract]);
+
+        // Default severity aborts startup, and the message is actionable.
+        std::env::remove_var(ENV_HANDSHAKE);
+        let err = enforce_handshake(&extract, &stdlib).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ToolchainError::Skew(_)), "got {err:?}");
+        assert!(msg.contains(REDEPLOY), "message must name the fix: {msg}");
+        assert!(
+            msg.contains(ENV_HANDSHAKE),
+            "message must name the escape hatch: {msg}"
+        );
+
+        // `warn` is the documented escape hatch for a deliberately mixed pair.
+        std::env::set_var(ENV_HANDSHAKE, "warn");
+        assert!(
+            matches!(
+                enforce_handshake(&extract, &stdlib).unwrap(),
+                HandshakeOutcome::Skew(_)
+            ),
+            "warn severity reports the skew but does not fail"
+        );
+        std::env::remove_var(ENV_HANDSHAKE);
+    }
+
+    /// A stdlib edit with an unchanged extract is the other half of the pair,
+    /// and must be caught the same way — this is the "edited haskell/lib, never
+    /// redeployed" case.
+    #[test]
+    fn handshake_detects_a_skewed_stdlib() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let stdlib = tmp.path().join("lib");
+        write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
+        let extract = tmp.path().join("tidepool-extract");
+        std::fs::write(&extract, b"deployed extract v1").unwrap();
+        write_stamp(&extract, &stdlib).unwrap();
+
+        std::fs::write(
+            stdlib.join("Tidepool").join("Prelude.hs"),
+            "module Tidepool.Prelude where\nadded = ()\n",
+        )
+        .unwrap();
+
+        let HandshakeOutcome::Skew(report) = check_handshake(&extract, &stdlib).unwrap() else {
+            panic!("a stdlib edit must skew");
+        };
+        assert_eq!(report.sides, vec![SkewSide::Stdlib]);
+    }
+
+    /// No stamp means nobody has deployed through `scripts/redeploy.sh` on this
+    /// machine (or the cache was hand-cleared). That is informational — a fresh
+    /// checkout must not be unable to start.
+    #[test]
+    fn handshake_without_a_stamp_is_informational() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let stdlib = tmp.path().join("lib");
+        write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
+        let extract = tmp.path().join("tidepool-extract");
+        std::fs::write(&extract, b"extract").unwrap();
+        std::env::remove_var(ENV_HANDSHAKE);
+
+        assert!(matches!(
+            enforce_handshake(&extract, &stdlib).unwrap(),
+            HandshakeOutcome::NoStamp { .. }
+        ));
+    }
+
+    /// A stamp from a future (or ancient) schema is treated as absent, not as a
+    /// skew: an old stamp must never brick a newer server.
+    #[test]
+    fn stamp_with_a_foreign_schema_reads_as_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("stamp.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema": STAMP_SCHEMA + 1,
+                "extract": "aa", "stdlib": "bb",
+                "extract_path": "/x", "stdlib_path": "/y", "written_by": "future",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read_stamp(&path).unwrap().is_none());
+    }
 }

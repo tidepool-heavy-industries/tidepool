@@ -44,6 +44,15 @@ struct Args {
     /// (Unset → falls back to `config.toml` `llm_model`, then the built-in default.)
     #[arg(long, env = "TIDEPOOL_LLM_MODEL")]
     llm: Option<String>,
+
+    /// Record the deploy stamp — the content fingerprints of the extract
+    /// binary and the stdlib tree this binary resolves — then exit. Run by
+    /// `scripts/redeploy.sh` as its final step, so that every later server
+    /// startup can detect an extract/stdlib pair that did NOT move together.
+    /// Writer and checker share one implementation
+    /// (`tidepool_runtime::toolchain`), so they cannot drift.
+    #[arg(long)]
+    write_toolchain_stamp: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +83,24 @@ fn install_panic_hook() {
     }));
 }
 
+/// Body of `--write-toolchain-stamp`. Prints the recorded fingerprints so the
+/// deploy log carries which pair was blessed — the same detail the skew message
+/// prints later, making a stamp/skew pair diffable by eye.
+fn write_toolchain_stamp(prelude_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use tidepool_runtime::toolchain;
+    let extract = toolchain::locate_extract()?;
+    let stamp = toolchain::write_stamp(&extract.path, prelude_dir)?;
+    println!(
+        "toolchain stamp written to {}\n  extract {} ({})\n  stdlib  {} ({})",
+        toolchain::stamp_path().display(),
+        &stamp.extract[..12],
+        stamp.extract_path,
+        &stamp.stdlib[..12],
+        stamp.stdlib_path,
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_hook();
@@ -91,6 +118,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server_common::load_secrets_logged();
 
     let prelude_dir = prelude::ensure_prelude()?;
+
+    // `--write-toolchain-stamp`: record the pair and exit, before any server
+    // machinery starts. Deliberately runs AFTER `ensure_prelude` so the stamp
+    // records exactly the stdlib a real startup would resolve.
+    if args.write_toolchain_stamp {
+        return write_toolchain_stamp(&prelude_dir);
+    }
+
+    // Startup handshake: refuse to serve an extract/stdlib pair that was not
+    // deployed together. Placed before the degraded-setup fallback so a skew is
+    // reported as a skew, not masked as "extract unavailable".
+    server_common::handshake_logged(&prelude_dir)?;
 
     // If tidepool-extract is not available, serve the degraded setup server.
     if setup::maybe_serve_degraded(http_addr).await? {

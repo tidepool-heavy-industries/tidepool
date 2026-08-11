@@ -750,17 +750,20 @@ where
         self
     }
 
-    /// Add the bundled Tidepool prelude to the include paths.
+    /// Add the Tidepool stdlib at `prelude_dir` to the include paths.
     ///
-    /// Looks for the prelude in this order:
-    /// 1. `TIDEPOOL_PRELUDE_DIR` environment variable
-    /// 2. The provided fallback path
+    /// Takes the dir VERBATIM — location policy is not decided here. The caller
+    /// resolves it once through the one locator
+    /// ([`tidepool_runtime::toolchain::locate_stdlib`], whose module docs carry
+    /// the precedence table) and passes the result. This used to re-read
+    /// `TIDEPOOL_PRELUDE_DIR` itself, so the binary and the server disagreed
+    /// about which stdlib was in play whenever the override was set — and the
+    /// startup handshake would then fingerprint a dir the server never used.
     ///
-    /// The prelude provides source definitions for common Prelude functions
+    /// The stdlib provides source definitions for common Prelude functions
     /// (reverse, splitAt, sort, etc.) whose GHC base library workers lack
     /// unfoldings in .hi files.
-    pub fn with_prelude(mut self, fallback: PathBuf) -> Self {
-        let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR").map_or(fallback, PathBuf::from);
+    pub fn with_prelude(mut self, prelude_dir: PathBuf) -> Self {
         // The prelude dir holds the vendored `Tidepool/*.hs` stdlib — back the
         // `tidepool://stdlib/{module}` resources with it.
         self.inner.stdlib_dir = Some(prelude_dir.clone());

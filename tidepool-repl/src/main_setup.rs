@@ -10,20 +10,31 @@ use tidepool_handlers::{
 };
 use tidepool_repl::ReplServerConfig;
 
-/// Resolve the bundled Haskell prelude/stdlib dir (`Tidepool.*` modules).
-/// Honors `TIDEPOOL_PRELUDE_DIR`; falls back to the in-repo `haskell/lib`.
-pub(crate) fn resolve_prelude_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") {
-        return PathBuf::from(dir);
-    }
-    let repo_lib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("haskell").join("lib"))
-        .unwrap_or_default();
-    if repo_lib.is_dir() {
-        return repo_lib;
-    }
-    repo_lib
+/// Resolve the Haskell stdlib dir (`Tidepool.*` modules) via the ONE locator —
+/// [`tidepool_runtime::toolchain::locate_stdlib`], whose module docs carry the
+/// precedence table.
+///
+/// This binary embeds no stdlib of its own, so it contributes only step 5: the
+/// source tree it was BUILT from. That keeps a `cargo install --path
+/// tidepool-repl` working when the server is launched from an unrelated project
+/// directory. Previously that build-time path was returned unconditionally,
+/// even when it no longer existed — a nonexistent include dir that surfaced as
+/// a GHC scope error at the first turn. It is now the last candidate, and
+/// exhausting the table is a typed error.
+///
+/// # Errors
+/// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table
+/// finds a stdlib root, or when `TIDEPOOL_PRELUDE_DIR` names a directory that
+/// is not one.
+pub(crate) fn resolve_prelude_dir(
+) -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError> {
+    let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
+        bundle: None,
+        build_tree: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("haskell").join("lib")),
+    };
+    Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
 /// Bundle of values `main()` needs after startup config assembly: the
@@ -70,7 +81,12 @@ pub fn build(
 
     // The generated Tidepool.Effects module must be on the include path.
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)?;
-    let prelude_dir = resolve_prelude_dir();
+    let prelude_dir = resolve_prelude_dir()?;
+    // Startup handshake: refuse to serve an extract/stdlib pair that was not
+    // deployed together (see `tidepool_runtime::toolchain`). One subprocess-free
+    // check — a memoized binary content hash plus a walk of the stdlib tree —
+    // paid once here, never per turn.
+    tidepool_mcp::server_common::handshake_logged(&prelude_dir)?;
     let mut base_include = vec![effects_dir, prelude_dir];
 
     // Verb libraries (parity with the eval server): project `.tidepool/lib`

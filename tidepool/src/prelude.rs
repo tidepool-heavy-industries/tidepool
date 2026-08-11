@@ -22,33 +22,18 @@ fn stdlib_content_hash() -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Resolve the directory holding the Tidepool stdlib (an include root for GHC).
-/// Precedence: `TIDEPOOL_PRELUDE_DIR` → in-repo `haskell/lib` → materialized
-/// bundle in the content-addressed cache dir. The bundle is the COMPLETE tree
-/// and is keyed on content, so it can't go stale across binary versions (the
-/// old `.version` stamp froze it) and can't drift from a hand-maintained subset.
-pub(crate) fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-
-    // In-repo development: use haskell/lib/ directly if present
-    if let Ok(cwd) = std::env::current_dir() {
-        let from_root = cwd.join("haskell").join("lib");
-        if from_root.join("Tidepool").join("Prelude.hs").exists() {
-            return Ok(from_root);
-        }
-        let from_haskell = cwd.join("lib");
-        if from_haskell.join("Tidepool").join("Prelude.hs").exists() {
-            return Ok(from_haskell);
-        }
-    }
-
-    // Installed mode: materialize the bundled stdlib to a content-addressed dir.
+/// Materialize the bundled stdlib into its content-addressed cache dir and
+/// return it. Idempotent: a `.complete` sentinel marks a finished write, so
+/// repeat startups do one `exists()` check. The sentinel also guards against
+/// serving a half-written dir (a crash mid-materialization) and against the
+/// macOS cache reaper.
+///
+/// The bundle is the COMPLETE tree and is keyed on content, so it can't go
+/// stale across binary versions (the old `.version` stamp froze it) and can't
+/// drift from a hand-maintained subset.
+fn materialize_bundle() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = stdlib_content_hash();
     let base = tidepool_runtime::paths::stdlib_dir(&hash);
-    // Sentinel marks a COMPLETE write — guards against serving a half-written dir
-    // (e.g. a crash mid-materialization) and against the macOS cache reaper.
     let sentinel = base.join(".complete");
     if !sentinel.exists() {
         for (rel, content) in EMBEDDED_STDLIB {
@@ -61,4 +46,18 @@ pub(crate) fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
         std::fs::write(&sentinel, hash.as_bytes())?;
     }
     Ok(base)
+}
+
+/// Resolve the directory holding the Tidepool stdlib (an include root for GHC).
+///
+/// Precedence lives in ONE place — [`tidepool_runtime::toolchain::locate_stdlib`],
+/// whose module docs carry the table. This binary contributes step 4 (the
+/// stdlib embedded at build time, materialized above); it needs no step 5,
+/// since the bundle always ships with it.
+pub(crate) fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
+        bundle: Some(materialize_bundle()?),
+        build_tree: None,
+    };
+    Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
