@@ -29,6 +29,18 @@ the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
 
+If an effect's helpers need a companion Haskell import beyond the fixed eval
+surface (`preamble::eval_import_lines` — Prelude, the qualified `T.`/`Map.`/…
+namespaces, `Tidepool.Effects`), add ONE arm to `extra_imports_for!` in
+`effect_defs.rs`, matched on the effect's own identifier (see the `Exec`/
+`Git`/`AskUser` arms — e.g. `Exec`'s helpers build on `runArgv`, so it pulls
+in `Tidepool.Shell`/`Tidepool.Cargo`). That one edit is picked up by both the
+stmt/eval plane (`preamble::pragmas_and_imports`) and the decl plane
+(`preamble::session_decl_module_env`) automatically — both fold over
+`EffectDecl::extra_imports` the same way, so there is no second gate to keep
+in sync by hand (the two used to be hand-mirrored `type_name == "..."`
+checks that drifted — friction #23).
+
 ## On-disk paths & config (`tidepool_runtime::paths`)
 
 The installed server is self-sufficient from any directory. All locations resolve

@@ -99,11 +99,13 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// standalone REPL/tests; this requires the `with-packages` GHC (it imports
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 ///
-/// `effects`: the session's actual effect stack — gates the Git/Shell/Cargo
-/// imports exactly like the eval preamble's `pragmas_and_imports` does
-/// (Shell/Cargo need Exec's `runArgv`, Git needs the Git verbs; those helpers
-/// don't exist in a generated `Tidepool.Effects` built from a smaller stack).
-/// Passing the wrong (e.g.
+/// `effects`: the session's actual effect stack. Each effect's own
+/// [`EffectDecl::extra_imports`] (Exec → `Tidepool.Shell`/`Tidepool.Cargo`,
+/// Git → `Tidepool.Git`, …) is folded in, in list order — the SAME fold
+/// [`pragmas_and_imports`] runs, so the decl and stmt/eval planes structurally
+/// cannot diverge on this surface (previously two hand-mirrored `type_name ==
+/// "..."` gates that had to be kept in sync by hand; friction #23 is the bug
+/// that produced when they drifted). Passing the wrong (e.g.
 /// empty/minimal) effect set here used to be masked by callers reaching for
 /// the lens-free `ModuleEnv::standalone_default` instead — but that surface
 /// also drops Prelude/Aeson, so a decl-plane pure bind (`v = object [...]`,
@@ -112,7 +114,7 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// `toJSON` under a minimal stack even though production always has them.
 /// This fn is now safe to call for ANY stack: it always carries
 /// Prelude/Aeson/qualified-namespaces (via `eval_import_lines`), and adds
-/// Shell/Git/Cargo only when the stack actually supports them.
+/// each effect's companion imports only when that effect is actually present.
 ///
 /// `user_library`: whether a project/global `Library` facade is on the
 /// include path (mirrors the `stmt`-path flag in `has_user_library`, passed
@@ -133,25 +135,8 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
         .into_iter()
         .map(String::from)
         .collect();
-    // Shell/Cargo depend on the Exec (`runArgv`) helper and Git on the Git
-    // verbs in the generated Tidepool.Effects — import each only when its
-    // effect is present, mirroring `pragmas_and_imports` exactly so the decl
-    // and stmt/eval planes never diverge on this gate.
-    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
-    let has_git = effects.iter().any(|e| e.type_name == "Git");
-    if has_exec {
-        imports.push("import qualified Tidepool.Shell as Shell".into());
-        imports.push("import Tidepool.Shell (sh)".into());
-        imports.push("import qualified Tidepool.Cargo as Cargo".into());
-    }
-    if has_git {
-        imports.push("import qualified Tidepool.Git as Git".into());
-    }
-    // Typed forms — gated on AskUser (see `pragmas_and_imports`); keeps the decl
-    // and eval/stmt planes from diverging on the import surface. `Tidepool.Form`
-    // builds on `askUserRaw`, which only exists when the AskUser effect is present.
-    if effects.iter().any(|e| e.type_name == "AskUser") {
-        imports.push("import Tidepool.Form".into());
+    for decl in effects {
+        imports.extend(decl.extra_imports.iter().map(|s| (*s).to_string()));
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
@@ -192,26 +177,18 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
         out.push_str(imp);
         out.push('\n');
     }
-    // Shell/Cargo depend on the Exec (`runArgv`) helper and Git on the Git
-    // verbs in the generated Tidepool.Effects — import each only when its
-    // effect is present, else they fail to load (e.g. on a minimal
-    // Console-only stack).
-    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
-    let has_git = effects.iter().any(|e| e.type_name == "Git");
-    if has_exec {
-        out.push_str("import qualified Tidepool.Shell as Shell\n");
-        out.push_str("import Tidepool.Shell (sh)\n");
-        out.push_str("import qualified Tidepool.Cargo as Cargo\n");
-    }
-    if has_git {
-        out.push_str("import qualified Tidepool.Git as Git\n");
-    }
-    // Typed forms (`askUser` + field constructors) — auto-imported so a form
-    // is one expression, no import tax. Gated on `AskUser`: `Tidepool.Form` builds
-    // on `askUserRaw`, which only exists when the AskUser effect is in the stack
-    // (mirrors the Shell/Git gates above; a minimal Console-only stack omits it).
-    if effects.iter().any(|e| e.type_name == "AskUser") {
-        out.push_str("import Tidepool.Form\n");
+    // Each effect's own companion imports (Exec → Tidepool.Shell/Cargo, Git →
+    // Tidepool.Git, AskUser → Tidepool.Form, …) — emitted only when that
+    // effect is present, else e.g. Shell/Cargo fail to load (they depend on
+    // Exec's `runArgv`, absent from a generated Tidepool.Effects built from a
+    // smaller stack). One fold over `EffectDecl::extra_imports`, in list
+    // order, shared with `session_decl_module_env` — see that fn's doc
+    // comment for why this used to be two hand-mirrored gates (friction #23).
+    for decl in effects {
+        for imp in decl.extra_imports {
+            out.push_str(imp);
+            out.push('\n');
+        }
     }
     // The pagination / orchestration helper DEFINITIONS live in the generated
     // Tidepool.Orchestrate module (always written by `ensure_effects_module`,
@@ -242,6 +219,12 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
 /// capture a helper body's bare `glob` (Orchestrate's internal `glob` resolves
 /// in ITS own scope), and the expr module hides colliding names on the import.
 pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
+    // Built once; every presence question below (`has_exec`, `has_ask`, …) is
+    // a `.contains()` lookup instead of a fresh `effects.iter().any(...)`
+    // rescan of the same slice — the genuinely conditional helper BODIES
+    // (e.g. the `has_console && has_kv` `putStrLn` variant below) still stay
+    // conditional, only the presence CHECK is shared.
+    let names: std::collections::HashSet<&str> = effects.iter().map(|e| e.type_name).collect();
     let mut out = String::new();
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
@@ -258,8 +241,8 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
     out.push_str("import qualified Data.List as L\n");
-    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
-    let has_http = effects.iter().any(|e| e.type_name == "Http");
+    let has_exec = names.contains("Exec");
+    let has_http = names.contains("Http");
     if has_exec && has_http {
         out.push_str("import qualified Tidepool.Shell as Shell\n");
         out.push_str("import Tidepool.Shell (sh)\n");
@@ -331,10 +314,10 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "\n",
     ));
 
-    let has_ask = effects.iter().any(|e| e.type_name == "Ask");
-    let has_console = effects.iter().any(|e| e.type_name == "Console");
-    let has_kv = effects.iter().any(|e| e.type_name == "KV");
-    let has_fs = effects.iter().any(|e| e.type_name == "Fs");
+    let has_ask = names.contains("Ask");
+    let has_console = names.contains("Console");
+    let has_kv = names.contains("KV");
+    let has_fs = names.contains("Fs");
 
     out.push_str("-- Pagination\n");
     out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
@@ -766,8 +749,9 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         // the repl session_run description all render from the SAME derivation.
         desc.push_str(&crate::describe_effects_index(effects));
 
-        let has_llm = effects.iter().any(|e| e.type_name == "Llm");
-        let has_ask = effects.iter().any(|e| e.type_name == "Ask");
+        let names: std::collections::HashSet<&str> = effects.iter().map(|e| e.type_name).collect();
+        let has_llm = names.contains("Llm");
+        let has_ask = names.contains("Ask");
         if has_llm && has_ask {
             desc.push_str(concat!(
                 "\nStructured LLM / Ask (one Schema vocabulary; full detail in tidepool://schema):\n",
