@@ -1138,3 +1138,127 @@ import Lsp
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Pin test: the generated eval-module text (both the stmt/eval plane's
+/// [`build_preamble`] and the decl plane's [`session_decl_module_env`]) is a
+/// content-addressed compile-cache key (`ensure_effects_module_at`, see the
+/// module doc comment above) — a single changed byte invalidates every cached
+/// compile for every user. These snapshots are hardcoded literal text
+/// (independent of `EVAL_PRAGMAS`/`eval_import_lines`/the gating logic under
+/// test) so a refactor of the import-gating machinery cannot accidentally
+/// keep the test green while silently changing the emitted bytes.
+///
+/// Covers the four combinations the import-gating refactor
+/// (companion imports living on `EffectDecl::extra_imports`, see
+/// `effect_decls.rs`) must reproduce byte-for-byte: the standard row (all
+/// base effects, exercises the Exec+Git companion imports), the answerer row
+/// `[AskUser, Finalize]` (exercises the AskUser companion import alone), the
+/// outer row `[RunLLMTurn, AskUser]` (AskUser again, different row shape),
+/// and the empty row (no companion imports, no `paginateResult` alias).
+#[cfg(test)]
+mod import_gating_pin {
+    use crate::EffectDecl;
+
+    const PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}";
+
+    const DECL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}";
+
+    /// The 15 fixed import lines every row carries, regardless of effect set
+    /// (mirrors [`super::eval_import_lines`] with `user_library: false`).
+    const FIXED_IMPORTS: &str = "\
+import Tidepool.Prelude hiding (error)
+import Tidepool.Effects
+import qualified Tidepool.Data.Text as T
+import qualified Data.Map.Strict as Map
+import qualified Data.Map.Merge.Strict as MM
+import qualified Data.Set as Set
+import qualified Tidepool.Aeson as Aeson
+import qualified Tidepool.Aeson.KeyMap as KM
+import qualified Data.List as L
+import qualified Tidepool.TextFormat as TF
+import qualified Tidepool.Table as Tab
+import qualified Tidepool.Patch as Patch
+import Control.Monad.Freer hiding (run)
+import qualified Prelude as P";
+
+    const EXEC_GIT_IMPORTS: &str = "\
+import qualified Tidepool.Shell as Shell
+import Tidepool.Shell (sh)
+import qualified Tidepool.Cargo as Cargo
+import qualified Tidepool.Git as Git";
+
+    const ASKUSER_IMPORT: &str = "import Tidepool.Form";
+
+    fn expected_preamble(extra_imports: &str, paginate_target: Option<&str>) -> String {
+        let extra = if extra_imports.is_empty() {
+            String::new()
+        } else {
+            format!("{extra_imports}\n")
+        };
+        // `default (Int, Double, Text)\n` (the decl) is followed by a blank
+        // line (`pragmas_and_imports`'s own `out.push('\n')`); a non-empty
+        // effect set then gets the `paginateResult` alias plus its own
+        // trailing blank line (`paginate_alias`'s `out.push('\n')`).
+        let tail = match paginate_target {
+            Some(target) => {
+                format!("paginateResult :: Int -> Value -> M Value\npaginateResult = {target}\n\n")
+            }
+            None => String::new(),
+        };
+        format!(
+            "{PRAGMAS}\nmodule Expr where\n{FIXED_IMPORTS}\n{extra}import Tidepool.Orchestrate\ndefault (Int, Double, Text)\n\n{tail}"
+        )
+    }
+
+    fn expected_decl_env(extra_imports: &str) -> String {
+        let extra = if extra_imports.is_empty() {
+            String::new()
+        } else {
+            format!("{extra_imports}\n")
+        };
+        format!("{DECL_PRAGMAS}\n{FIXED_IMPORTS}\n{extra}import Tidepool.Orchestrate")
+    }
+
+    fn env_text(env: &tidepool_runtime::session::ModuleEnv) -> String {
+        format!("{}\n{}", env.pragmas, env.imports.join("\n"))
+    }
+
+    fn check(effects: &[EffectDecl], extra_imports: &str, paginate_target: Option<&str>) {
+        assert_eq!(
+            super::build_preamble(effects, false),
+            expected_preamble(extra_imports, paginate_target),
+            "build_preamble output changed — this is a compile-cache key, see ensure_effects_module_at"
+        );
+        assert_eq!(
+            env_text(&super::session_decl_module_env(effects, false)),
+            expected_decl_env(extra_imports),
+            "session_decl_module_env output changed — decl and stmt/eval planes must stay identical on imports"
+        );
+    }
+
+    #[test]
+    fn standard_row_pins_exec_and_git_imports() {
+        check(
+            &crate::standard_decls(),
+            EXEC_GIT_IMPORTS,
+            Some("paginateInteractive"),
+        );
+    }
+
+    #[test]
+    fn answerer_row_pins_askuser_import() {
+        let effects = vec![crate::askuser_decl(), crate::finalize_decl()];
+        check(&effects, ASKUSER_IMPORT, Some("paginateTrunc"));
+    }
+
+    #[test]
+    fn outer_row_pins_askuser_import() {
+        let effects = vec![crate::runllmturn_decl(), crate::askuser_decl()];
+        check(&effects, ASKUSER_IMPORT, Some("paginateTrunc"));
+    }
+
+    #[test]
+    fn no_effects_row_pins_no_extra_imports_and_no_paginate_alias() {
+        check(&[], "", None);
+    }
+}
