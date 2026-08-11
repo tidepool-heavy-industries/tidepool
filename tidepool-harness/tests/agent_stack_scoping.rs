@@ -137,9 +137,7 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
 /// against the answerer stack — the import alone proves `RunLLMTurn` has a
 /// real GADT in the answerer's generated `Tidepool.Effects`, independent of
 /// whether the eval code actually calls a `RunLLMTurn` verb (this one calls
-/// `askUserRaw`, an ordinary in-row verb). Before item 0b this import failed
-/// outright: the answerer's generated module never declared `RunLLMTurn` at
-/// all, so naming it — even just to import it — was itself "not in scope".
+/// `askUserRaw`, an ordinary in-row verb).
 #[test]
 fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
     support::require_extract();
@@ -283,7 +281,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 
 /// The capability boundary proper: a BASE effect verb (`httpGet`, the `Http`
 /// effect — representative of the nine base effects the answerer row drops:
-/// `Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Meta`) does NOT
+/// `Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Llm`) does NOT
 /// typecheck against `Eff '[AskUser, Fork, Finalize]`. This is the whole
 /// point of the scoped stack — the answerer structurally cannot hit the
 /// network, run a shell command, or read files, because those verbs are

@@ -5,12 +5,11 @@
 //! NEXT prompt assembly carries it — "splice lands at the child's current
 //! turn position, visible in its next prompt assembly."
 //!
-//! The script mirrors `golden_path.rs`'s fork-answerer shape (root
-//! forks for an Int, the answerer's first attempt is deliberately ill-typed,
-//! the second is valid) so the GHC-facing behavior is known-good; the only
-//! addition is a `Harness::splice` call injected as a side effect of the
-//! scripted provider's FIRST reply to the child, timed so it lands after
-//! that reply's own (already-sent) prompt but before the child's next one.
+//! The root forks for an Int; the answerer's first attempt is deliberately
+//! ill-typed and the second is valid. The only addition is a
+//! `Harness::splice` call injected as a side effect of the scripted
+//! provider's FIRST reply to the child, timed so it lands after that reply's
+//! own (already-sent) prompt but before the child's next one.
 
 mod support;
 

@@ -210,9 +210,9 @@ async fn a_failed_turn_releases_its_lease() {
 /// on that node must fail BUSY (`HarnessError::TurnInFlight`, the
 /// `CheckoutError::Running -> HarnessError::TurnInFlight` mapping) — never
 /// `NoSession`, and never a permanent wedge. Once the held checkout is
-/// dropped without an explicit restore (the panic-safety net, step 5's
-/// `Drop` impl), a following call on the SAME node must succeed — recovered,
-/// not wedged `Running` forever.
+/// dropped without an explicit restore (the panic-safety net's `Drop` impl),
+/// a following call on the SAME node must succeed — recovered, not wedged
+/// `Running` forever.
 ///
 /// Mutation: remove `impl Drop for Checkout` — the node must go RED (the
 /// second `drive_turn` after dropping the manual checkout keeps returning

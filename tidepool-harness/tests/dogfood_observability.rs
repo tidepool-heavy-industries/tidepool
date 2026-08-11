@@ -47,10 +47,9 @@ fn header() -> LogHeader {
     }
 }
 
-/// Fans every driver [`Event`] out to several observers — mirrors the
-/// production binary's `FanoutObserver` (`tidepool-selfharness.rs`), so this
-/// test exercises the SAME console (`LogObserver`) + durable-transcript
-/// (`JsonlObserver`) wiring a live dogfood run uses.
+/// Fans every driver [`Event`] out to several observers — exercises the SAME
+/// console (`LogObserver`) + durable-transcript (`JsonlObserver`) wiring a
+/// live dogfood run uses.
 struct FanoutObserver {
     observers: Vec<Arc<dyn Observer>>,
 }
@@ -174,10 +173,9 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
     (console, transcript)
 }
 
-/// Acceptance 1+2 (narration + telemetry fold): `run_one_cycle_with_a_retry`
-/// ALREADY returns `(console, transcript)` as a tuple for ONE replayed cycle —
-/// formerly two tests each discarding half of it. One drive, both assertion
-/// blocks: the narration elements a person watching the console needs are
+/// `run_one_cycle_with_a_retry` returns `(console, transcript)` as a tuple
+/// for ONE replayed cycle. One drive, both assertion blocks: the narration
+/// elements a person watching the console needs are
 /// present (the compiled source, both the failing AND the corrected block,
 /// the extracted type, the hole's prompt, the untruncated compile error, the
 /// finalized answer, and that `u64::MAX` never appears raw), AND the tier-0

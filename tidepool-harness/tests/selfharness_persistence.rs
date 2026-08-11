@@ -1,16 +1,14 @@
-//! Targeted coverage for the ONE generation-tagged checkpoint that replaces
-//! the old split `state.json` + `compaction.txt` persistence: a completed
+//! Targeted coverage for the ONE generation-tagged checkpoint: a completed
 //! cycle commits its own state and its own compaction summary together, at
 //! the end of `SelfHarnessDriver::run_one_cycle`'s success path, so a
 //! restart always reads a state and a summary from the SAME generation.
 //!
 //! Drives cycles through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`, mirroring `acceptance_selfharness.rs`'s
-//! direct-cycle-driving style — the frozen sync contract's acceptance path),
-//! then constructs a FRESH `SelfHarnessDriver` over a FRESH `Harness` —
-//! simulating a killed and restarted process — and confirms what it
-//! restores. Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH —
-//! run inside `nix develop` (see `haskell/CLAUDE.md`).
+//! (`SelfHarnessDriver::run_one_cycle`), then constructs a FRESH
+//! `SelfHarnessDriver` over a FRESH `Harness` — simulating a killed and
+//! restarted process — and confirms what it restores. Needs
+//! `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside `nix
+//! develop` (see `haskell/CLAUDE.md`).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -558,14 +556,11 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
     );
     driver.set_checkpoint_path(checkpoint_path.clone());
 
-    // Override the fingerprint on a clone rather than trust the reference
-    // harness's real content-hash to differ from the fixture's stale one —
     // `restore` only ever compares `HarnessSource::fingerprint` against the
-    // checkpoint's `harness_source`, nothing else about the source, so this
-    // is a safe substitution and it pins the mismatch by construction
-    // instead of gambling on file-content divergence (the reference
-    // harness's fingerprint is content-derived and can coincide with any
-    // other file's, including this fixture's, with no warning).
+    // checkpoint's `harness_source`, nothing else about the source — so
+    // overriding the fingerprint on a clone pins the mismatch by
+    // construction, rather than trusting the reference harness's real
+    // content-hash to differ from the fixture's stale one.
     let mut current_source = source();
     current_source.fingerprint = "00000000deadbeef".to_string();
     assert_ne!(current_source.fingerprint, "fcbd20d2594c4426");

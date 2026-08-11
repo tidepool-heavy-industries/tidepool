@@ -6,11 +6,11 @@
 //! cycle re-bootstraps cleanly rather than running against stale state.
 //!
 //! Drives the real `SelfHarnessDriver` + `Harness` against the reference
-//! harness module (mirrors `tests/selfharness_spine.rs`), with a scripted
-//! `ModelProvider` that fails on demand instead of a hand-wired
-//! mini-harness — the failure is induced through the real turn loop, not
-//! injected past it. Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on
-//! PATH — run inside `nix develop` (see `haskell/CLAUDE.md`).
+//! harness module, with a scripted `ModelProvider` that fails on demand
+//! instead of a hand-wired mini-harness — the failure is induced through the
+//! real turn loop, not injected past it. Needs `TIDEPOOL_EXTRACT` and the
+//! with-packages GHC on PATH — run inside `nix develop` (see
+//! `haskell/CLAUDE.md`).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -118,12 +118,12 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 }
 
 /// A cycle whose answerer turn fails (the real turn loop, not a bypassed
-/// one) leaves `lifecycle()` as `Failed`, not the old cosmetic `Idle` — and
-/// the FOLLOWING cycle on the SAME driver succeeds. The failed cycle's outer
-/// session (parked mid-fragment on the `runLLMTurn` hole) must have been
-/// discarded and re-bootstrapped rather than reused: if it had not been
-/// discarded, the second `run_one_cycle` would hit the resident session's
-/// own "already suspended" guard instead of completing.
+/// one) leaves `lifecycle()` as `Failed`, and the FOLLOWING cycle on the SAME
+/// driver succeeds. The failed cycle's outer session (parked mid-fragment on
+/// the `runLLMTurn` hole) must have been discarded and re-bootstrapped rather
+/// than reused: if it had not been discarded, the second `run_one_cycle`
+/// would hit the resident session's own "already suspended" guard instead of
+/// completing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     support::require_extract();
@@ -289,23 +289,19 @@ async fn poisoned_driver_refuses_entry_points() {
     ));
 }
 
-/// F1's ghost-node repro: `retire_answerer` (called at the end of every
-/// `run_loop_fragment`, regardless of whether the cycle succeeds or fails —
-/// see the `result = ...; self.retire_answerer(); result` shape) must
-/// TERMINALIZE the per-loop answerer node it retires, not just drop the
+/// Ghost-node hazard: `retire_answerer` (called at the end of every
+/// `run_loop_fragment`, regardless of whether the cycle succeeds or fails)
+/// must TERMINALIZE the per-loop answerer node it retires, not just drop the
 /// harness's convenience `NodeConvo`/session — a forever-loop retires one
 /// answerer per cycle, so a `terminate_node` that silently no-ops (or a bare
 /// session drop with no tree transition) would leave one ghost
 /// `Running`/`Suspended` node behind PER CYCLE, growing without bound.
 ///
-/// Drives TWO cycles on one driver — the same fail-then-recover shape as
-/// `errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers` above
-/// (cheap: cycle 1's scripted provider failure still forces + retires an
-/// answerer node before the failing model call, with no GHC compile for its
-/// own turn; only cycle 2 runs a real compile+finalize) — and asserts every
-/// node either cycle created is terminal (`Done` or `Cancelled`) once its
-/// cycle completes. decision_block's scripted reply never forks, so each
-/// cycle creates exactly one node (the loop's answerer).
+/// Drives TWO cycles on one driver (cycle 1 fails via the scripted provider,
+/// cycle 2 runs a real compile+finalize) and asserts every node either cycle
+/// created is terminal (`Done` or `Cancelled`) once its cycle completes.
+/// decision_block's scripted reply never forks, so each cycle creates
+/// exactly one node (the loop's answerer).
 ///
 /// Mutation: revert `SelfHarnessDriver::retire_answerer`'s body to
 /// `self.agent.drop_session(node)`-equivalent (no tree terminalization) —
@@ -366,8 +362,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     retired_nodes.extend(new_in_cycle1);
     seen_before = after_cycle1;
 
-    // Cycle 2: the model call now succeeds — a real GHC-compiled turn +
-    // finalize, same as `errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers`.
+    // Cycle 2: the model call now succeeds — a real GHC-compiled turn + finalize.
     driver
         .run_one_cycle(&harness_source, None)
         .await

@@ -1,10 +1,9 @@
 //! Pins the timing module's emitted event shape: tracing target, message,
-//! and field set/order — the wire contract that
-//! `tidepool-runtime/src/session/{mod.rs,turn.rs}` used to hand-mirror
-//! across the crate boundary because a back-dependency on `tidepool-harness`
-//! would cycle. This test must stay green, UNCHANGED, whether `timing.rs`
-//! lives in `tidepool-harness` or is re-exported from `tidepool-runtime` —
-//! it exercises only `tidepool_harness::timing`'s public surface.
+//! and field set/order — the wire contract collectors depend on regardless
+//! of which crate hosts `timing.rs` (`tidepool-runtime` cannot depend on
+//! `tidepool-harness`, so the module lives on the `tidepool-runtime` side and
+//! `tidepool-harness` re-exports it). This test exercises only
+//! `tidepool_harness::timing`'s public surface, so it stays valid either way.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -64,8 +63,7 @@ struct CaptureLayer {
 impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         // The declared field set/order, minus the implicit `message` field
-        // the macro's trailing string-literal arm adds — the contract table
-        // in `timing.rs`'s module doc names exactly these five, in order.
+        // the macro's trailing string-literal arm adds.
         let field_names: Vec<String> = event
             .metadata()
             .fields()
