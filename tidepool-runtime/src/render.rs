@@ -554,13 +554,6 @@ mod tests {
         t
     }
 
-    #[test]
-    fn test_render_lit_int() {
-        let table = test_table();
-        let val = Value::Lit(Literal::LitInt(42));
-        assert_eq!(value_to_json(&val, &table, 0), json!(42));
-    }
-
     /// A clean compile (no warnings) renders byte-identical to the
     /// pre-warnings shape — no `## Warnings` noise on the happy path.
     #[test]
@@ -610,139 +603,137 @@ mod tests {
         assert_eq!(result.warnings(), &["w1".to_string()]);
     }
 
+    /// Per-shape `value_to_json` cases: one literal `Value` construction per
+    /// row, each asserted against its exact expected JSON.
     #[test]
-    fn test_render_lit_string() {
-        let table = test_table();
-        let val = Value::Lit(Literal::LitString(b"hello".to_vec()));
-        assert_eq!(value_to_json(&val, &table, 0), json!("hello"));
-    }
-
-    #[test]
-    fn test_render_bool() {
-        let table = test_table();
-        let true_val = Value::Con(table.get_by_name("True").unwrap(), vec![]);
-        let false_val = Value::Con(table.get_by_name("False").unwrap(), vec![]);
-        assert_eq!(value_to_json(&true_val, &table, 0), json!(true));
-        assert_eq!(value_to_json(&false_val, &table, 0), json!(false));
-    }
-
-    #[test]
-    fn test_render_option() {
-        let table = test_table();
-        let nothing = Value::Con(table.get_by_name("Nothing").unwrap(), vec![]);
-        let just = Value::Con(
-            table.get_by_name("Just").unwrap(),
-            vec![Value::Lit(Literal::LitInt(42))],
-        );
-        assert_eq!(value_to_json(&nothing, &table, 0), json!(null));
-        assert_eq!(value_to_json(&just, &table, 0), json!(42));
-    }
-
-    #[test]
-    fn test_render_unit() {
-        let table = test_table();
-        let unit = Value::Con(table.get_by_name("()").unwrap(), vec![]);
-        assert_eq!(value_to_json(&unit, &table, 0), json!(null));
-    }
-
-    #[test]
-    fn test_render_list_int() {
+    fn test_render_value_shapes() {
         let table = test_table();
         let nil_id = table.get_by_name("[]").unwrap();
         let cons_id = table.get_by_name(":").unwrap();
-
-        // [1, 2]
-        let list = Value::Con(
-            cons_id,
-            vec![
-                Value::Lit(Literal::LitInt(1)),
-                Value::Con(
-                    cons_id,
-                    vec![Value::Lit(Literal::LitInt(2)), Value::Con(nil_id, vec![])],
-                ),
-            ],
-        );
-        assert_eq!(value_to_json(&list, &table, 0), json!([1, 2]));
-    }
-
-    #[test]
-    fn test_render_text() {
-        let table = test_table();
         let text_id = table.get_by_name("Text").unwrap();
-        let ba = Value::ByteArray(Arc::new(Mutex::new(b"hello".to_vec())));
-        let val = Value::Con(
-            text_id,
-            vec![
-                ba,
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(5)),
-            ],
-        );
-        assert_eq!(value_to_json(&val, &table, 0), json!("hello"));
-    }
-
-    #[test]
-    fn test_render_text_litstring() {
-        let table = test_table();
-        let text_id = table.get_by_name("Text").unwrap();
-        let val = Value::Con(
-            text_id,
-            vec![
-                Value::Lit(Literal::LitString(b"hello litstring".to_vec())),
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(15)),
-            ],
-        );
-        assert_eq!(value_to_json(&val, &table, 0), json!("hello litstring"));
-    }
-
-    #[test]
-    fn test_render_list_string() {
-        let table = test_table();
-        let nil_id = table.get_by_name("[]").unwrap();
-        let cons_id = table.get_by_name(":").unwrap();
-
-        // ["a", "b"]
-        let list = Value::Con(
-            cons_id,
-            vec![
-                Value::Lit(Literal::LitString(b"a".to_vec())),
-                Value::Con(
-                    cons_id,
-                    vec![
-                        Value::Lit(Literal::LitString(b"b".to_vec())),
-                        Value::Con(nil_id, vec![]),
-                    ],
-                ),
-            ],
-        );
-        assert_eq!(value_to_json(&list, &table, 0), json!(["a", "b"]));
-    }
-
-    #[test]
-    fn test_render_tuple() {
-        let table = test_table();
         let pair_id = table.get_by_name("(,)").unwrap();
         let triple_id = table.get_by_name("(,,)").unwrap();
 
-        let pair = Value::Con(
-            pair_id,
-            vec![
-                Value::Lit(Literal::LitInt(1)),
-                Value::Lit(Literal::LitInt(2)),
-            ],
-        );
-        let triple = Value::Con(
-            triple_id,
-            vec![
-                Value::Lit(Literal::LitInt(1)),
-                Value::Lit(Literal::LitInt(2)),
-                Value::Lit(Literal::LitInt(3)),
-            ],
-        );
+        let cases: Vec<(&str, Value, serde_json::Value)> = vec![
+            ("lit_int", Value::Lit(Literal::LitInt(42)), json!(42)),
+            (
+                "lit_string",
+                Value::Lit(Literal::LitString(b"hello".to_vec())),
+                json!("hello"),
+            ),
+            (
+                "bool_true",
+                Value::Con(table.get_by_name("True").unwrap(), vec![]),
+                json!(true),
+            ),
+            (
+                "bool_false",
+                Value::Con(table.get_by_name("False").unwrap(), vec![]),
+                json!(false),
+            ),
+            (
+                "option_nothing",
+                Value::Con(table.get_by_name("Nothing").unwrap(), vec![]),
+                json!(null),
+            ),
+            (
+                "option_just",
+                Value::Con(
+                    table.get_by_name("Just").unwrap(),
+                    vec![Value::Lit(Literal::LitInt(42))],
+                ),
+                json!(42),
+            ),
+            (
+                "unit",
+                Value::Con(table.get_by_name("()").unwrap(), vec![]),
+                json!(null),
+            ),
+            (
+                // [1, 2]
+                "list_int",
+                Value::Con(
+                    cons_id,
+                    vec![
+                        Value::Lit(Literal::LitInt(1)),
+                        Value::Con(
+                            cons_id,
+                            vec![Value::Lit(Literal::LitInt(2)), Value::Con(nil_id, vec![])],
+                        ),
+                    ],
+                ),
+                json!([1, 2]),
+            ),
+            (
+                "text_bytearray",
+                Value::Con(
+                    text_id,
+                    vec![
+                        Value::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
+                        Value::Lit(Literal::LitInt(0)),
+                        Value::Lit(Literal::LitInt(5)),
+                    ],
+                ),
+                json!("hello"),
+            ),
+            (
+                "text_litstring",
+                Value::Con(
+                    text_id,
+                    vec![
+                        Value::Lit(Literal::LitString(b"hello litstring".to_vec())),
+                        Value::Lit(Literal::LitInt(0)),
+                        Value::Lit(Literal::LitInt(15)),
+                    ],
+                ),
+                json!("hello litstring"),
+            ),
+            (
+                // ["a", "b"]
+                "list_string",
+                Value::Con(
+                    cons_id,
+                    vec![
+                        Value::Lit(Literal::LitString(b"a".to_vec())),
+                        Value::Con(
+                            cons_id,
+                            vec![
+                                Value::Lit(Literal::LitString(b"b".to_vec())),
+                                Value::Con(nil_id, vec![]),
+                            ],
+                        ),
+                    ],
+                ),
+                json!(["a", "b"]),
+            ),
+            (
+                "tuple_pair",
+                Value::Con(
+                    pair_id,
+                    vec![
+                        Value::Lit(Literal::LitInt(1)),
+                        Value::Lit(Literal::LitInt(2)),
+                    ],
+                ),
+                json!([1, 2]),
+            ),
+            (
+                "tuple_triple",
+                Value::Con(
+                    triple_id,
+                    vec![
+                        Value::Lit(Literal::LitInt(1)),
+                        Value::Lit(Literal::LitInt(2)),
+                        Value::Lit(Literal::LitInt(3)),
+                    ],
+                ),
+                json!([1, 2, 3]),
+            ),
+        ];
 
-        assert_eq!(value_to_json(&pair, &table, 0), json!([1, 2]));
-        assert_eq!(value_to_json(&triple, &table, 0), json!([1, 2, 3]));
+        for (label, val, expected) in cases {
+            assert_eq!(value_to_json(&val, &table, 0), expected, "case: {label}");
+        }
     }
 
     #[test]
