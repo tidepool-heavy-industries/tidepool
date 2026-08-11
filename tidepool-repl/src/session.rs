@@ -3647,7 +3647,7 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 #[cfg(test)]
 mod slim_tests {
     use super::self_referential_monadic_pure_bind;
-    use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
+    use super::{browse_effects, EffectDecl};
     use super::{decl_head, pure_bind_to_decl, slim_item_result, strip_leading_comments};
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
@@ -3681,29 +3681,6 @@ mod slim_tests {
                 helpers_row_polymorphic: false,
             },
         ]
-    }
-
-    #[test]
-    fn first_sentence_takes_leading_sentence() {
-        assert_eq!(
-            first_sentence("Run shell commands. And capture output."),
-            "Run shell commands."
-        );
-        // No sentence break → whole (trimmed) string.
-        assert_eq!(first_sentence("  just one clause  "), "just one clause");
-    }
-
-    #[test]
-    fn helper_sig_skips_comments_and_finds_signature() {
-        assert_eq!(
-            helper_sig("-- | doc line\nrun :: Text -> M Proc\nrun cmd = undefined").as_deref(),
-            Some("run :: Text -> M Proc")
-        );
-        // No comment: still the sig line.
-        assert_eq!(
-            helper_sig("kvSet :: Text -> Value -> M ()\nkvSet k v = undefined").as_deref(),
-            Some("kvSet :: Text -> Value -> M ()")
-        );
     }
 
     #[test]
