@@ -162,7 +162,7 @@ Env-gated, OFF by default. For the JIT-runtime / effect-machine / cache knobs se
 | `TIDEPOOL_JOINREC_DEBUG=1` | joinrec-translation forensics (`[313-joinrec]` spew) | Join-point conversion bugs (jumps compiled as calls, wrong continuation) |
 | `TIDEPOOL_IFACE_DEBUG=1` | `[fat-iface]` interface-loading trace | Missing unfoldings / "unresolved external" mysteries |
 | `TIDEPOOL_TEST_DROP_DC=<module-qualified-name>` | D1 mutation-test fault injection: `recordDC` silently skips recording exactly the one constructor whose qualified name matches | Proving the D1 hard-fail metadata-subset defense (`Main.assertMetaCoversEmitted`) actually fires — never set outside `extract-fidelity-test` |
-| `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY=<module-name>` | E6 mis-tiering fault injection: `runNormalPipeline` forcibly denies `core2core` (the -O2/exposed-unfoldings pass) to the one named home module, regardless of what the real Core-reachability closure (`GhcPipeline.reachableModuleClosure`) found | Proving E6's tier detects a module the target actually needs being wrongly denied optimized Core — never set outside a deliberate detection-power test |
+| `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY=<module-name>` | E6 mis-tiering fault injection: the `OptimizeCoreReachable` tier (`normalVariant`) forcibly denies `core2core` (the -O2/exposed-unfoldings pass) to the one named home module, regardless of what the real Core-reachability closure (`GhcPipeline.reachableModuleClosure`) found | Proving E6's tier detects a module the target actually needs being wrongly denied optimized Core — never set outside a deliberate detection-power test |
 
 ## Eval stdlib (`lib/Tidepool/`)
 

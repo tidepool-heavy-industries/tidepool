@@ -7,8 +7,9 @@
 -- hand since they live in separate languages/crates.
 --
 -- __Phases are FLAT, never nested (do not sum a phase into another).__ On
--- both @GhcPipeline.hs@ extraction paths (@runNormalPipeline@ and
--- @runSessionPipeline@), @ghc_setup@ (session DynFlags setup +
+-- both @GhcPipeline.hs@ extraction variants (@normalVariant@ and
+-- @sessionVariant@, which share the one @runCompile@ skeleton),
+-- @ghc_setup@ (session DynFlags setup +
 -- guessTarget\/setTargets + @depanal@) and @ghc_load@ (the @load'@ call
 -- alone) are two SEPARATE, NON-OVERLAPPING spans that PARTITION what an
 -- older @ghc_session@ bracket used to cover on the compile lane — see the
@@ -17,7 +18,8 @@
 -- (a flat-sum collector already does this for free); neither row is emitted
 -- twice, so there is nothing to avoid double-counting. On the session path,
 -- @inject@ (PHASE 2's Val-iface splice) is a third flat row alongside them,
--- with no normal-path counterpart. @load'@ itself gets NO internal
+-- with no normal-path counterpart (it is emitted by @sessionVariant@'s
+-- @cpAfterLoad@ hook). @load'@ itself gets NO internal
 -- decomposition: it already redoes the SAME parse\/typecheck\/core2core work
 -- the per-module loop below it redoes a second time, so one row around the
 -- whole call answers what matters. Do not redefine an existing phase's

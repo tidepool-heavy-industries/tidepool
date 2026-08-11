@@ -57,8 +57,9 @@
 //!
 //! # Flat phase partition (compile lane)
 //!
-//! On BOTH extract pipeline paths (`runNormalPipeline` and
-//! `runSessionPipeline` in `haskell/src/Tidepool/GhcPipeline.hs`),
+//! On BOTH extract pipeline variants (`normalVariant` and `sessionVariant`
+//! in `haskell/src/Tidepool/GhcPipeline.hs`, which share the one
+//! `runCompile` skeleton that emits these phases),
 //! [`PHASE_GHC_SETUP`] (session `DynFlags` setup plus
 //! `guessTarget`/`setTargets`/`depanal`) and [`PHASE_GHC_LOAD`] (the `load'`
 //! call alone) are two
@@ -156,9 +157,9 @@ pub const PHASE_GHC_SETUP: &str = "ghc_setup";
 /// decomposition — see the module doc's flat-phase-partition section for why
 /// one row around the whole call is what answers C1.
 pub const PHASE_GHC_LOAD: &str = "ghc_load";
-/// FLAT, SESSION-PATH ONLY (absent on `runNormalPipeline`, which never
-/// injects session Vals): `injectSessionScope` splicing the live `Val.G<g>`
-/// ifaces into the HPT.
+/// FLAT, SESSION-PATH ONLY (absent on `normalVariant`, which never injects
+/// session Vals): `injectSessionScope` splicing the live `Val.G<g>` ifaces
+/// into the HPT, emitted from `sessionVariant`'s `cpAfterLoad` hook.
 pub const PHASE_INJECT: &str = "inject";
 /// The `--turn` mode's in-process classify substep (GHC-sourced verdict,
 /// inside the booted session, before any compile work) — absent when a
