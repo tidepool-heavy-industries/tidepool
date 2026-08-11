@@ -62,10 +62,7 @@ pub use render::{
 fn stdlib_include_for_validation(
     include: &[PathBuf],
 ) -> Result<Option<PathBuf>, crate::toolchain::ToolchainError> {
-    if include
-        .iter()
-        .any(|d| crate::toolchain::is_stdlib_root(d))
-    {
+    if include.iter().any(|d| crate::toolchain::is_stdlib_root(d)) {
         return Ok(None);
     }
     crate::toolchain::locate_stdlib(&crate::toolchain::StdlibFallbacks::default())

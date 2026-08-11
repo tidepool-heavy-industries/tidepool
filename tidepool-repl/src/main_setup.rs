@@ -26,8 +26,8 @@ use tidepool_repl::ReplServerConfig;
 /// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table
 /// finds a stdlib root, or when `TIDEPOOL_PRELUDE_DIR` names a directory that
 /// is not one.
-pub(crate) fn resolve_prelude_dir(
-) -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError> {
+pub(crate) fn resolve_prelude_dir() -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError>
+{
     let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
         bundle: None,
         build_tree: PathBuf::from(env!("CARGO_MANIFEST_DIR"))

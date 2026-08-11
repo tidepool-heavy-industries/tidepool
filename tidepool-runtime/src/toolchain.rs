@@ -120,9 +120,12 @@ pub enum ToolchainError {
         tried: Vec<(&'static str, PathBuf)>,
     },
 
-    /// The located extract and stdlib were not deployed together.
+    /// The located extract and stdlib were not deployed together. Boxed: the
+    /// report carries both fingerprints plus the whole stamp, and this error
+    /// rides in `Result`s on hot session paths where an unboxed 200+ byte
+    /// variant would widen every `Ok` too (clippy's `result_large_err`).
     #[error("{0}")]
-    Skew(SkewReport),
+    Skew(Box<SkewReport>),
 
     /// Reading or writing the deploy stamp failed.
     #[error("toolchain stamp {}: {source}", .path.display())]
@@ -379,8 +382,13 @@ pub fn extract_fingerprint(path: &Path) -> String {
 /// server will report skew against its own bundle.
 #[must_use]
 pub fn stdlib_fingerprint(dir: &Path) -> String {
+    // Root the walk at `Tidepool/`, not at `dir`, because that is exactly what
+    // `tidepool/build.rs` embeds. Walking `dir` itself would count a stray
+    // `haskell/lib/Scratch.hs` that never ships, and every deployed server
+    // would then report skew against its own bundle.
+    let root = dir.join("Tidepool");
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_stdlib_files(dir, dir, &mut files);
+    collect_stdlib_files(&root, &root, &mut files);
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
@@ -593,10 +601,7 @@ pub enum HandshakeOutcome {
 /// # Errors
 /// [`ToolchainError::Stamp`] only if the stamp becomes unreadable in a way
 /// [`read_stamp`] cannot degrade past (currently unreachable).
-pub fn check_handshake(
-    extract: &Path,
-    stdlib: &Path,
-) -> Result<HandshakeOutcome, ToolchainError> {
+pub fn check_handshake(extract: &Path, stdlib: &Path) -> Result<HandshakeOutcome, ToolchainError> {
     let path = stamp_path();
     let Some(stamp) = read_stamp(&path)? else {
         return Ok(HandshakeOutcome::NoStamp { path });
@@ -664,14 +669,12 @@ pub fn enforce_handshake(
 ) -> Result<HandshakeOutcome, ToolchainError> {
     let severity = HandshakeSeverity::from_env();
     if severity == HandshakeSeverity::Off {
-        return Ok(HandshakeOutcome::NoStamp {
-            path: stamp_path(),
-        });
+        return Ok(HandshakeOutcome::NoStamp { path: stamp_path() });
     }
     let outcome = check_handshake(extract, stdlib)?;
     match (&outcome, severity) {
         (HandshakeOutcome::Skew(report), HandshakeSeverity::Error) => {
-            Err(ToolchainError::Skew((**report).clone()))
+            Err(ToolchainError::Skew(report.clone()))
         }
         _ => Ok(outcome),
     }
@@ -716,7 +719,10 @@ mod tests {
         let base = stdlib_fingerprint(dir.path());
 
         std::fs::write(
-            dir.path().join("Tidepool").join("Internal").join("Probe.hs"),
+            dir.path()
+                .join("Tidepool")
+                .join("Internal")
+                .join("Probe.hs"),
             "different probe\n",
         )
         .unwrap();
