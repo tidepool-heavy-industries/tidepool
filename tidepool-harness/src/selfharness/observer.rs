@@ -85,11 +85,18 @@ pub enum Event {
         source: FormSource,
         submission: serde_json::Value,
     },
-    /// The driver compiled one of the OUTER session's own fragments —
-    /// `render(state, lastCompaction)` or `loop __selfHarnessState` — the
-    /// compiles `crate::log::Event::TurnStart` never covers (the outer
-    /// session is not a tree node). `source` is the full templated module
-    /// text actually compiled, verbatim — never truncated, even when large.
+    /// The driver compiled one or more of the OUTER session's own fragments —
+    /// the compiles `crate::log::Event::TurnStart` never covers (the outer
+    /// session is not a tree node). `label` is `"render+loop"` for the
+    /// PRE-loop fused compile (`SelfHarnessDriver::compile_cycle_entry`: the
+    /// pre-loop `render(state, lastCompaction)` and this cycle's
+    /// `loop __selfHarnessState`, ONE `tidepool-extract` spawn compiling BOTH
+    /// as distinct top-level entries of one module) or `"render"` for the
+    /// POST-loop render (`SelfHarnessDriver::render_framing`'s own
+    /// `compile_outer` call, which cannot fuse — it compiles against the NEW
+    /// state the fused pre-loop compile does not have yet). `source` is the
+    /// full templated module text actually compiled, verbatim — never
+    /// truncated, even when large.
     OuterCompile { label: String, source: String },
     /// The runtime-owned ~80% emergency compaction fired on `node` (the
     /// per-loop answerer). Carries WHAT compaction produced — so the jsonl

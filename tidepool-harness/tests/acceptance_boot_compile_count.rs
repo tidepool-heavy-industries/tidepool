@@ -7,18 +7,18 @@
 //! PROCESS-GLOBAL (nextest already gives one process per test binary, so
 //! this test's count is never polluted by another test's compiles).
 //!
-//! # Traced call chain (every extract-spawn site the self-harness launch
+//! # Traced call chain (the ONE extract-spawn site the self-harness launch
 //! path reaches before the first model call — see this crate's `compile.rs`
 //! module doc and the counter's doc comment in `tidepool-extract-cmd` for the
 //! full site survey)
 //!
-//! The counter now sees EVERY `tidepool-extract` spawn in the process, not
-//! just this crate's: it lives in `tidepool_extract_cmd`, which owns the one
+//! The counter sees EVERY `tidepool-extract` spawn in the process, not just
+//! this crate's: it lives in `tidepool_extract_cmd`, which owns the one
 //! builder every site goes through (`plans/post-restart/extract-manifest.md`,
 //! D-B — before that, spawns through `tidepool_runtime` were invisible here).
 //! The constant below is unaffected, because the other sites are not on the
-//! pre-model path: all FOUR pre-model compiles below funnel through the ONE
-//! spawn function [`tidepool_harness::compile::compile_turn`]
+//! pre-model path: the ONE pre-model compile below funnels through
+//! [`tidepool_harness::compile::compile_turns`]
 //! (`tidepool-harness/src/compile.rs`, at its single `cmd.run()` call) — the
 //! harness's turn-compile path is deliberately independent of
 //! `tidepool_runtime::compile_haskell`/`cache.rs` (the MCP eval path, never
@@ -26,31 +26,30 @@
 //! `tidepool_runtime::session::turn.rs`'s `run_turn`/`classify_block`/
 //! `compile_session_turn` (reached only via `Harness::run_block`, i.e. only
 //! AFTER a model turn produces a Haskell block to run — never before the
-//! first model call):
+//! first model call). The two eager boot seeds (`Harness::new`'s and
+//! `SelfHarnessDriver::bootstrap`'s trivial ConTags-seeding compiles) are
+//! ALREADY GONE (lazy boot, extract-wave item 0 steps 1-3); wave-3's
+//! render+loop fusion removes the remaining split:
 //!
-//! 1. `Harness::new` (`tidepool-harness/src/harness.rs` ~430) — the answerer
-//!    `Harness`'s own boot seed, `pure (toJSON (0 :: Int))` compiled to seed
-//!    the answerer stack's ConTags, paid before `Harness::new` even returns
-//!    (i.e. before this test constructs its `agent`).
-//! 2. `SelfHarnessDriver::bootstrap` (`tidepool-harness/src/selfharness/driver.rs`
-//!    ~570) — the SAME trivial compile, seeding the outer `Eff
-//!    '[RunLLMTurn, AskUser]` session's ConTags.
-//! 3. `SelfHarnessDriver::render_framing` → `compile_outer` (driver.rs
-//!    ~1507) — the pre-loop `render` framing.
-//! 4. `SelfHarnessDriver::run_loop_fragment_inner` → `compile_outer`
-//!    (driver.rs ~929) — `Loaded.loop __selfHarnessState`. Only once THIS
-//!    compile succeeds and the loop suspends on its first `runLLMTurn` hole
-//!    does the driver ever call a model — `service_runllm_hole` →
-//!    `drive_answerer_to_finalize` → `Harness::drive_turn` →
-//!    `engine::drive_model_turn` (the first live [`ModelProvider::complete`]
-//!    call, which [`SnapshotOnFirstCall`] below intercepts).
+//! 1. `SelfHarnessDriver::run_one_cycle` →
+//!    `SelfHarnessDriver::compile_cycle_entry` (driver.rs) — ONE
+//!    `tidepool-extract` spawn (`compile::compile_turns`, two `--targets`
+//!    over one shared merged `meta.cbor`) compiling the pre-loop
+//!    `render(state, lastCompaction)` and this cycle's
+//!    `loop __selfHarnessState` TOGETHER, as distinct top-level entries of
+//!    ONE module. Only once this compile succeeds and the loop suspends on
+//!    its first `runLLMTurn` hole does the driver ever call a model —
+//!    `service_runllm_hole` → `drive_answerer_to_finalize` →
+//!    `Harness::drive_turn` → `engine::drive_model_turn` (the first live
+//!    [`ModelProvider::complete`] call, which [`SnapshotOnFirstCall`] below
+//!    intercepts).
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
-//! `nix develop` (see `haskell/CLAUDE.md`). Pays 4 real GHC extract compiles
-//! (~15-30s each, ~96s total per the D7 measurement below) — sized to fit
-//! inside this environment's ~380s shard budget as its own binary:
-//! `export XDG_CACHE_HOME="$PWD/.cache" && scripts/battery-shard.sh
-//! tidepool-harness -E 'binary(acceptance_boot_compile_count)'`.
+//! `nix develop` (see `haskell/CLAUDE.md`). Pays 1 real GHC extract compile
+//! — sized to fit comfortably inside this environment's ~380s shard budget
+//! as its own binary: `export XDG_CACHE_HOME="$PWD/.cache" &&
+//! scripts/battery-shard.sh tidepool-harness -E
+//! 'binary(acceptance_boot_compile_count)'`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -69,30 +68,33 @@ use tidepool_harness::{
 
 /// The D7 live-dogfood measurement (2026-08-08, clean cache,
 /// `plans/post-restart/extract-wave.md`): a clean-cache self-harness launch
-/// pays FOUR `tidepool-extract` compiles before the first model call — two
-/// trivial boot seeds (the outer session's, `driver.rs::bootstrap`, and the
-/// answerer `Harness`'s own, `harness.rs::Harness::new`) purely to seed
-/// ConTags, plus `compile_outer` of the render framing and `compile_outer`
-/// of the loop body.
+/// originally paid FOUR `tidepool-extract` compiles before the first model
+/// call — two trivial boot seeds (the outer session's, `driver.rs::bootstrap`,
+/// and the answerer `Harness`'s own, `harness.rs::Harness::new`) purely to
+/// seed ConTags, plus `compile_outer` of the render framing and
+/// `compile_outer` of the loop body.
 ///
 /// Item 0's target end-state (`plans/post-restart/extract-wave/boot/00-spec.md`)
 /// is exactly **1**: delete both boot seeds, and fuse render+loop emission
-/// into one extract invocation. A later dev lands the fix by changing THIS
-/// constant and nothing else in this test — the test itself, and the
-/// spawn-counting instrumentation it asserts against, stay unchanged.
+/// into one extract invocation. Both steps have now landed.
 ///
 /// Harness turn compiles are memoized as of `plans/compile-memo.md`, so
 /// "clean cache" is now enforced by the test (`support::isolate_compile_memo`)
 /// rather than assumed of the ambient environment — a warm memo pays 0 spawns,
 /// which would be a receipt about cache state, not about the boot path.
 ///
-/// MEASURED 2026-08-09 on the centralized tip (this suite, clean cache):
-/// **2** — both boot seeds are gone (item 0 steps 1-3, boot-lazy), leaving
-/// exactly the two `compile_outer` invocations (render framing + loop body)
-/// that wave 3's render+loop fusion targets. 4 -> 2 is now a measurement,
-/// not an expectation; the remaining 2 -> 1 belongs to the routed
-/// `boot-onecompile` spec.
-pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 2;
+/// MEASURED 2026-08-09 on the centralized tip (this suite, clean cache): 2 —
+/// both boot seeds gone (item 0 steps 1-3, boot-lazy), leaving exactly the
+/// two `compile_outer` invocations (render framing + loop body) that wave 3's
+/// render+loop fusion targeted.
+///
+/// MEASURED 2026-08-11 on this branch (this suite, clean cache): **1** —
+/// `SelfHarnessDriver::compile_cycle_entry` (driver.rs) now compiles the
+/// pre-loop render and this cycle's loop body as two entries of ONE module in
+/// ONE `tidepool-extract` spawn (wave-3 render+loop fusion,
+/// `plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md`
+/// §2). Item 0's target end-state is reached.
+pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 1;
 
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

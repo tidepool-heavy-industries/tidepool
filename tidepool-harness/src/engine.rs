@@ -937,6 +937,40 @@ pub fn template_turn_for(
     }
 }
 
+/// Like [`template_turn_for`], but additionally renders `extra_entries` into
+/// the SAME module as `result` — each `(name, code)` pair becomes its own
+/// top-level `Eff <stack> Value` entry, rendered through the identical shared
+/// path `result` itself uses
+/// ([`tidepool_mcp::TurnTemplate::extra_entries`]), so a caller compiling
+/// `result` and an extra entry as two `--targets` of ONE `tidepool-extract`
+/// spawn (`crate::compile::compile_turns`) gets entries that are identical by
+/// construction rather than a hand-copied second `result`-shaped binder — the
+/// self-iterating harness driver's render+loop fusion is the first caller
+/// (`SelfHarnessDriver::compile_cycle_entry`). Routes through the SAME
+/// anchor/preamble decision [`template_turn_for`] makes; `extra_entries`
+/// empty renders byte-identical to it.
+pub fn template_turn_for_fused(
+    decls: &[tidepool_mcp::EffectDecl],
+    stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    extra_entries: &[(&str, &str)],
+) -> String {
+    let preamble = tidepool_mcp::build_preamble(decls, false);
+    tidepool_mcp::TurnTemplate {
+        preamble: &preamble,
+        effect_stack: stack,
+        code,
+        imports,
+        helpers,
+        anchor_result: finalize_pin_active(stack),
+        extra_entries,
+        ..Default::default()
+    }
+    .render()
+}
+
 /// Whether `stack` (the promoted row string a turn compiles against, e.g.
 /// `'[AskUser, Finalize Decision]`) pins `Finalize` to a REAL author type —
 /// `false` for the uninhabited default `Finalize NoAnswer` (a turn not

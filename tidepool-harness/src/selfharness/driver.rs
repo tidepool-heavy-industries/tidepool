@@ -663,6 +663,89 @@ impl SelfHarnessDriver {
         .map_err(|e| DriverError::Session(format!("outer compile failed: {e}")))
     }
 
+    /// The `--targets` name of the fused module's extra entry — the loop
+    /// body, compiled alongside `result` (the render entry) by
+    /// [`Self::compile_cycle_entry`] in ONE `tidepool-extract` spawn. Named in
+    /// the `__selfHarness*` family like every other runtime-generated splice
+    /// in this driver.
+    const LOOP_ENTRY_TARGET: &'static str = "__selfHarnessLoopEntry";
+
+    /// Compile the PRE-loop `render` and this cycle's `loop` fragment as TWO
+    /// entries of ONE module, in a SINGLE `tidepool-extract` spawn
+    /// ([`compile::compile_turns`]) — the pre-model boot-path fusion this
+    /// driver exists to land (`plans/post-restart/extract-wave/spawn-latency/
+    /// 04-turn-latency-plan.md` §2). Both entries splice
+    /// `state_cross::state_in(prior_state)` with the SAME `prior_state`, so
+    /// their helper text is byte-identical by construction — one splice, not
+    /// two — and [`tidepool_mcp::TurnTemplate::extra_entries`] renders the
+    /// loop entry through the exact code path `result` (the render entry)
+    /// uses, so the two are identical by construction rather than a
+    /// hand-copied second shape.
+    ///
+    /// The merged table this spawn returns is a FEATURE, not an artifact: both
+    /// targets share ONE `meta.cbor` (`compile::compile_turns`'s whole point),
+    /// so the render entry's [`CompiledTurn::table`] already carries the loop
+    /// entry's constructors — including the `RunLLMTurn` ConTags the machine
+    /// needs once `loop` starts suspending on holes.
+    ///
+    /// Returns `(render_turn, loop_turn)`. Does NOT run either — that stays
+    /// [`Self::render_framing`]/[`Self::run_loop_fragment_inner`]'s job, so a
+    /// caller can compile once and run each entry through its own existing
+    /// path.
+    fn compile_cycle_entry(
+        &mut self,
+        prior_state: Option<&Json>,
+    ) -> Result<(CompiledTurn, CompiledTurn), DriverError> {
+        let outer = self.outer.as_ref().ok_or_else(not_bootstrapped)?;
+        let imports = format!(
+            "qualified {} as {}",
+            outer.module_name,
+            state_cross::LOADED_QUALIFIER
+        );
+        let stack = outer
+            .cfg
+            .turn_target(None)
+            .map_err(|e| DriverError::Session(format!("outer engine target: {e}")))?
+            .stack;
+        let extract_bin = outer.cfg.extract_bin.clone();
+        let include = outer.cfg.include.clone();
+
+        let helpers = state_cross::state_in(prior_state);
+        let render_code = format!(
+            "pure ({q}.render __selfHarnessState)",
+            q = state_cross::LOADED_QUALIFIER
+        );
+        let loop_code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
+        let src = engine::template_turn_for_fused(
+            &outer_decls(),
+            &stack,
+            &render_code,
+            &imports,
+            &helpers,
+            &[(Self::LOOP_ENTRY_TARGET, &loop_code)],
+        );
+        self.emit(Event::OuterCompile {
+            label: "render+loop".to_string(),
+            source: src.clone(),
+        });
+        let mut turns = compile::compile_turns(
+            &extract_bin,
+            &src,
+            &["result", Self::LOOP_ENTRY_TARGET],
+            &include,
+            timing::NO_NODE,
+            timing::NO_ROUND,
+        )
+        .map_err(|e| DriverError::Session(format!("fused outer compile failed: {e}")))?;
+        let render_turn = turns.remove("result").ok_or_else(|| {
+            DriverError::Session("fused outer compile: missing render entry".into())
+        })?;
+        let loop_turn = turns.remove(Self::LOOP_ENTRY_TARGET).ok_or_else(|| {
+            DriverError::Session("fused outer compile: missing loop entry".into())
+        })?;
+        Ok((render_turn, loop_turn))
+    }
+
     /// Run ONE `render` → `loop` → (service each `runLLMTurn` hole) →
     /// `render` cycle: bootstrap the outer session if needed, render the
     /// pre-loop prompt ([`Self::render_framing`] — the author's `render`
@@ -717,21 +800,44 @@ impl SelfHarnessDriver {
         }
         self.emit(Event::LoopBoundary);
 
-        // Render the pre-loop prompt directly against `prior_state` — `None`
-        // (the very first cycle) splices `Loaded.initialState` in the `render`
-        // helpers (`state_cross::state_in(None)`), so no redundant
-        // `pure initialState` compile + round-trip through JSON is needed.
+        // Compile the pre-loop `render` and this cycle's `loop` fragment
+        // TOGETHER, in ONE spawn (`Self::compile_cycle_entry`), then run the
+        // render entry directly against `prior_state` — `None` (the very
+        // first cycle) splices `Loaded.initialState` in the shared helpers
+        // (`state_cross::state_in(None)`), so no redundant `pure initialState`
+        // compile + round-trip through JSON is needed.
         //
         // Since lazy boot, THIS compile — not `bootstrap` — is where "can we
         // build a usable outer session at all" is actually answered (the
         // eager boot seed that used to answer it is gone), so its failure
-        // takes the same Failed-vs-Poisoned classification as a bootstrap
-        // failure. A bare `?` here once returned early PAST the lifecycle
-        // update, leaving a failed driver reporting the cosmetic `Idle`, and
-        // a failed recovery reporting `Failed` forever instead of escalating.
+        // (compile OR the render entry's run) takes the same
+        // Failed-vs-Poisoned classification as a bootstrap failure. A bare
+        // `?` here once returned early PAST the lifecycle update, leaving a
+        // failed driver reporting the cosmetic `Idle`, and a failed recovery
+        // reporting `Failed` forever instead of escalating. The fused compile
+        // now inherits this role for BOTH entries: a loop-entry compile
+        // failure surfaces here too, since it fails the same spawn the render
+        // entry's compile is part of.
         let prior_compaction = self.last_compaction.clone();
-        let prompt_before = match self.render_framing(prior_state, prior_compaction.as_deref()) {
-            Ok(p) => p,
+        let (prompt_before, loop_turn) = match self.compile_cycle_entry(prior_state) {
+            Ok((render_turn, loop_turn)) => {
+                match self.render_framing_with(&render_turn, prior_compaction.as_deref()) {
+                    Ok(prompt) => (prompt, loop_turn),
+                    Err(e) => {
+                        self.discard_resident_state();
+                        self.lifecycle = if recovering_from_failure {
+                            SelfHarnessState::Poisoned {
+                                reason: e.to_string(),
+                            }
+                        } else {
+                            SelfHarnessState::Failed {
+                                reason: e.to_string(),
+                            }
+                        };
+                        return Err(e);
+                    }
+                }
+            }
             Err(e) => {
                 self.discard_resident_state();
                 self.lifecycle = if recovering_from_failure {
@@ -761,7 +867,7 @@ impl SelfHarnessDriver {
         // (after discarding that resident state) on error — never `Idle` on
         // a path that didn't actually finish.
         let result: Result<CycleOutcome, DriverError> = async {
-            let (value, table) = self.run_loop_fragment(prior_state).await?;
+            let (value, table) = self.run_loop_fragment(prior_state, Some(loop_turn)).await?;
             let state_json = state_cross::state_out(&value, &table);
 
             // This cycle's `loop` completed — advance the runtime's OWN
@@ -986,6 +1092,13 @@ impl SelfHarnessDriver {
     /// against — `resume` never recompiles, mirroring
     /// `Harness::resume_parent`'s snapshot-the-table discipline).
     ///
+    /// `precompiled`, when `Some`, is this cycle's loop entry from
+    /// [`Self::compile_cycle_entry`] — used AS-IS instead of compiling one
+    /// here, which is how [`Self::run_one_cycle`] pays only ONE fused spawn
+    /// for both `render` and `loop`. `None` compiles it here via
+    /// [`Self::compile_outer`], exactly as before fusion — a direct caller
+    /// (a test driving this fragment in isolation) keeps working unfused.
+    ///
     /// Emergency compaction does NOT happen here at loop end — it fires
     /// MID-LOOP via [`Self::maybe_compact_answerer`] (checked between the
     /// answerer's holes/rounds against its real accumulated context), setting
@@ -994,6 +1107,7 @@ impl SelfHarnessDriver {
     async fn run_loop_fragment(
         &mut self,
         prior_state: Option<&Json>,
+        precompiled: Option<CompiledTurn>,
     ) -> Result<(Value, DataConTable), DriverError> {
         self.loop_inference_calls = 0;
         self.cycle_compaction = None;
@@ -1008,7 +1122,7 @@ impl SelfHarnessDriver {
         self.agent.force(answerer, Actor::Operator)?;
         self.answerer = Some(answerer);
 
-        let result = self.run_loop_fragment_inner(prior_state).await;
+        let result = self.run_loop_fragment_inner(prior_state, precompiled).await;
         self.retire_answerer();
         result
     }
@@ -1033,13 +1147,22 @@ impl SelfHarnessDriver {
     /// checks the answerer's real accumulated context against the threshold and,
     /// if past it, summarizes + replaces the answerer's context IN PLACE so the
     /// loop's REMAINING holes continue under a smaller window (no abort).
+    ///
+    /// `precompiled`, when `Some`, is used as-is instead of calling
+    /// [`Self::compile_outer`] — see [`Self::run_loop_fragment`]'s doc.
     async fn run_loop_fragment_inner(
         &mut self,
         prior_state: Option<&Json>,
+        precompiled: Option<CompiledTurn>,
     ) -> Result<(Value, DataConTable), DriverError> {
-        let helpers = state_cross::state_in(prior_state);
-        let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
-        let compiled = self.compile_outer(&code, &helpers, "loop")?;
+        let compiled = match precompiled {
+            Some(compiled) => compiled,
+            None => {
+                let helpers = state_cross::state_in(prior_state);
+                let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
+                self.compile_outer(&code, &helpers, "loop")?
+            }
+        };
 
         let mut outcome = {
             let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
@@ -1673,6 +1796,20 @@ impl SelfHarnessDriver {
             q = state_cross::LOADED_QUALIFIER
         );
         let compiled = self.compile_outer(&code, &state_decl, "render")?;
+        self.render_framing_with(&compiled, last_compaction)
+    }
+
+    /// The shared run-and-compose tail of [`Self::render_framing`]: run an
+    /// ALREADY-COMPILED `render` entry against the outer session, then
+    /// compose the prior compaction summary and the loop-iteration count onto
+    /// its `Text` result. Split out so [`Self::compile_cycle_entry`]'s fused
+    /// render entry runs through the exact same compose logic
+    /// [`Self::render_framing`] uses standalone, rather than a second copy.
+    fn render_framing_with(
+        &mut self,
+        compiled: &CompiledTurn,
+        last_compaction: Option<&str>,
+    ) -> Result<String, DriverError> {
         let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
         let outcome = outer
             .session

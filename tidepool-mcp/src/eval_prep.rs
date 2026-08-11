@@ -431,6 +431,22 @@ pub struct TurnTemplate<'a> {
     pub budget: Option<u32>,
     pub render: Render,
     pub anchor_result: bool,
+    /// Additional top-level entries beyond the primary `result`, as `(name,
+    /// code)` pairs — `name` becomes the entry's own top-level binder (an
+    /// extract `--targets` name a caller can compile alongside `result` in
+    /// the SAME module), rendered through the identical shared path
+    /// [`Self::render_entry_wrapper`]/[`Self::render_entry_body`] `result`
+    /// itself uses, so the two are identical by construction rather than a
+    /// hand-copied second shape that can drift from the template it imitates
+    /// (`tidepool-harness`'s render+loop fusion is the first caller). Empty
+    /// by default (`..Default::default()`), so every pre-existing caller's
+    /// output is byte-identical to before this field existed — see
+    /// `template_haskell_pin` in this module's tests. Only the PRIMARY entry
+    /// (`result`, from `code`) ever emits the `-- [user-lines] S:E` marker
+    /// (`tidepool-runtime/src/diag.rs` maps a GHC error back to the user's
+    /// block by its FIRST occurrence, and there is only ever one user block)
+    /// — an extra entry's code is never treated as user-authored input.
+    pub extra_entries: &'a [(&'a str, &'a str)],
 }
 
 impl TurnTemplate<'_> {
@@ -473,64 +489,112 @@ impl TurnTemplate<'_> {
         // Inject input binding if provided
         out.push_str(&input_binding_source(self.input));
 
-        // User code is a real binding (single EXPRESSION; explicit `do` for
-        // sequencing; trailing `where` legal) embedded VERBATIM — no indentation
-        // transform. Explicit `let { }` brackets suspend the layout algorithm
-        // (Report rule L, explicit context), so unindented user lines are legal
-        // and quasiquote payloads keep byte-exact fidelity (indenting them was
-        // the "+2 corrupts multi-line QQ" bug class). `__b` is local to this RHS.
-        out.push_str("__user = let {\n __b =\n");
-        // 1-based inclusive line range of the user's own `code` text within this
-        // module: `start` is the line right after this bracket (where `code`'s
-        // first line lands); `end` follows from `code`'s own newline count. Riding
-        // this on the closing-bracket line (rather than a standalone comment line)
-        // keeps every downstream line number byte-identical to before this range
-        // was computed — no line is inserted, only appended text on an existing one.
+        // The primary entry: `__user`/`result`, from `self.code` — the ONLY
+        // entry that emits the `-- [user-lines]` marker.
+        self.render_entry_wrapper(&mut out, "__user", self.code, true);
+
+        // The defaulting anchor (see this struct's doc): `id` under a `Show`
+        // constraint, so it never forces `_r`'s type — only adds the standard-
+        // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
+        // when `anchor_result` is set (a real `Finalize T` row); every other
+        // caller's `_r` is rendered exactly as before. Declared ONCE, ahead of
+        // every entry body (including any extra entries), since it is a single
+        // top-level binding shared module-wide, not a per-entry one.
+        if self.anchor_result {
+            out.push_str("__anchor :: P.Show a => a -> a\n__anchor = P.id\n\n");
+        }
+        self.render_entry_body(&mut out, "__user", "result");
+
+        // Each extra entry gets its OWN wrapper binder (derived from its name,
+        // so it cannot collide with `__user` or a sibling extra entry) and is
+        // rendered through the SAME two helpers `result` used above — the
+        // `_r <- <binder>` bind, budget conditionals, `__anchor`,
+        // `paginateResult`, `toJSON`/`toWire` are therefore shared code, never
+        // a hand-maintained copy. One blank line separates consecutive entries;
+        // none trails the last, so output is byte-identical to before this
+        // field existed whenever `extra_entries` is empty.
+        for (i, (name, code)) in self.extra_entries.iter().enumerate() {
+            if i == 0 {
+                out.push('\n');
+            }
+            let binder = format!("{name}Impl");
+            self.render_entry_wrapper(&mut out, &binder, code, false);
+            self.render_entry_body(&mut out, &binder, name);
+            if i + 1 < self.extra_entries.len() {
+                out.push('\n');
+            }
+        }
+
+        out
+    }
+
+    /// Emit one entry's wrapper binding: `<binder> = let { __b = <code> } in
+    /// __b`, embedding `code` VERBATIM (no indentation transform — see
+    /// `render`'s doc on why) followed by exactly one blank line. `__b` is
+    /// local to this binding's own `let`, so it never collides across
+    /// entries even though every entry uses the same local name. When
+    /// `emit_user_lines` is set, the closing bracket line also carries the
+    /// `-- [user-lines] S:E` 1-based line range of `code` within the module
+    /// built so far (`tidepool-runtime/src/diag.rs` reads the FIRST such
+    /// marker) — reserved for the PRIMARY entry only; an extra entry's code
+    /// is runtime-generated, not user-authored, so it never carries one.
+    fn render_entry_wrapper(
+        &self,
+        out: &mut String,
+        binder: &str,
+        code: &str,
+        emit_user_lines: bool,
+    ) {
+        out.push_str(&format!("{binder} = let {{\n __b =\n"));
+        // 1-based inclusive line range of `code` within this module: `start` is
+        // the line right after this bracket (where `code`'s first line lands);
+        // `end` follows from `code`'s own newline count.
         let start_line = out.matches('\n').count() + 1;
-        out.push_str(self.code);
-        if !self.code.ends_with('\n') {
+        out.push_str(code);
+        if !code.ends_with('\n') {
             out.push('\n');
         }
-        let content_lines = if self.code.is_empty() {
+        let content_lines = if code.is_empty() {
             1
-        } else if self.code.ends_with('\n') {
-            self.code.matches('\n').count()
+        } else if code.ends_with('\n') {
+            code.matches('\n').count()
         } else {
-            self.code.matches('\n').count() + 1
+            code.matches('\n').count() + 1
         };
         let end_line = start_line + content_lines - 1;
-        out.push_str(&format!(
-            " }} in __b  -- [user-lines] {start_line}:{end_line}\n"
-        ));
+        if emit_user_lines {
+            out.push_str(&format!(
+                " }} in __b  -- [user-lines] {start_line}:{end_line}\n"
+            ));
+        } else {
+            out.push_str(" } in __b\n");
+        }
         out.push('\n');
+    }
 
+    /// Emit one entry's top-level function: `<name> :: Eff <stack>
+    /// Value; <name> = do { _r <- <binder>; …; paginateResult … (<render_call>
+    /// <rendered>) }` — the budget/anchor conditionals and the `toJSON`/`toWire`
+    /// render call are identical for every entry, sourced from `self` alone.
+    fn render_entry_body(&self, out: &mut String, binder: &str, name: &str) {
         // render_call: toWire in REPL (Show-default), toJSON in stateless server.
         let render_call = if self.render == Render::ToWire {
             "toWire"
         } else {
             "toJSON"
         };
-
-        // The defaulting anchor (see this struct's doc): `id` under a `Show`
-        // constraint, so it never forces `_r`'s type — only adds the standard-
-        // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
-        // when `anchor_result` is set (a real `Finalize T` row); every other
-        // caller's `_r` is rendered exactly as before.
-        if self.anchor_result {
-            out.push_str("__anchor :: P.Show a => a -> a\n__anchor = P.id\n\n");
-        }
         let rendered = if self.anchor_result {
             "(__anchor _r)"
         } else {
             "_r"
         };
 
-        out.push_str(&format!("result :: Eff {} Value\n", self.effect_stack));
-        out.push_str("result = do\n");
+        out.push_str(&format!("{name} :: Eff {} Value\n", self.effect_stack));
+        out.push_str(&format!("{name} = do\n"));
         if self.budget.is_some() {
             out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
         }
-        out.push_str("  _r <- __user\n");
+        out.push_str(&format!("  _r <- {binder}\n"));
         if let Some(b) = self.budget {
             out.push_str("  _scV <- kvGet \"__sayChars\"\n");
             out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
@@ -543,8 +607,6 @@ impl TurnTemplate<'_> {
                 "  paginateResult 4096 ({render_call} {rendered})\n"
             ));
         }
-
-        out
     }
 }
 
@@ -1489,6 +1551,53 @@ mod template_haskell_pin {
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire (__anchor _r))\n",
             "the newly-expressible show_default+anchor_result combination changed"
+        );
+    }
+
+    /// An explicit empty `extra_entries` renders BYTE-IDENTICAL to the field
+    /// not being set at all (the `..Default::default()` path every
+    /// pre-existing caller takes) — same literal as `plain_wrapper_pin`,
+    /// pinning the additive-field claim directly rather than only by
+    /// implication.
+    #[test]
+    fn empty_extra_entries_is_byte_identical_to_default() {
+        let src = TurnTemplate {
+            preamble: PRE,
+            effect_stack: STACK,
+            code: CODE,
+            extra_entries: &[],
+            ..Default::default()
+        }
+        .render();
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
+        );
+    }
+
+    /// Two entries (the render+loop fusion shape): the primary `result` and
+    /// ONE extra entry, sharing one module. Exactly one `-- [user-lines]`
+    /// marker (only `result`'s), the extra entry's own wrapper/body rendered
+    /// through the same shared helpers, and a blank line separating the two
+    /// entries.
+    #[test]
+    fn one_extra_entry_shares_module_with_one_marker() {
+        let src = TurnTemplate {
+            preamble: PRE,
+            effect_stack: STACK,
+            code: CODE,
+            extra_entries: &[("__loopEntry", "Loaded.loop __selfHarnessState")],
+            ..Default::default()
+        }
+        .render();
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n\n__loopEntryImpl = let {\n __b =\nLoaded.loop __selfHarnessState\n } in __b\n\n__loopEntry :: Eff '[Console] Value\n__loopEntry = do\n  _r <- __loopEntryImpl\n  paginateResult 4096 (toJSON _r)\n",
+        );
+        assert_eq!(
+            src.matches("[user-lines]").count(),
+            1,
+            "exactly one user-lines marker per module, regardless of entry count"
         );
     }
 }
