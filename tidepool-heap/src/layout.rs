@@ -176,7 +176,6 @@ impl std::fmt::Display for LitTag {
 }
 
 // ── Payload field offsets ─────────────────────────────────────
-// These match the HeapObject memory layout from decisions.md.
 // All offsets are in bytes from the start of the HeapObject.
 
 /// Offset of the tag byte (u8).
