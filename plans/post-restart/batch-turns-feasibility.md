@@ -389,10 +389,48 @@ The extractor already emits this partition: `TIDEPOOL_TIMING=1` gives one
 `tidepool-timing phase=<name> ms=<int>` line per phase
 (`haskell/src/Tidepool/Timing.hs:87`), and `startup` / `ghc_setup` / `ghc_load`
 are exactly the amortizable terms while `typecheck` / `core` are the per-item
-ones. Measuring a real turn's phase table is outstanding (`batch-baseline`) and
-is what turns the win from an argument into a number. **No batch-mode code
-should be written against the ~5-20% figure or against a hoped-for larger one
-until that table exists.**
+ones.
+
+**MEASURED** (`plans/post-restart/batch-turns-baseline.md`):
+
+| Shape | fixed (startup+ghc_setup+ghc_load) | total | fixed % |
+|---|---|---|---|
+| effectful bind | 4634 ms | 8995 ms | **51.5%** |
+| bare expression | 3025 ms | 11336 ms | **26.7%** |
+| small decl / probe compiles (avg) | — | — | **83.2%** |
+
+Floor on the batch win at N=5 (fixed% × (N-1)/N): **~66.6% for decl-shaped
+blocks, ~25% for effectful-bind / bare-expression blocks.** Both above the
+spike's 5-20% line, confirming §7.2's objection: that line's denominator
+excluded process boot entirely.
+
+**The single most important number is a ratio the spike could not see.**
+Cold-process `ghc_load` measures 2.7-7.5s here against the spike's
+*within-session* `ghc_load` of 145-566ms — an order of magnitude. So the
+dominant win is **never paying a cold process boot for items 2..N**, not
+shrinking `load'` on an already-warm session. The `ModIfaceCache` fix (§7.1)
+is necessary but is the smaller half.
+
+Two side findings from the same measurement:
+
+- **`TIDEPOOL_GHC_LIBDIR` is unset in the live repl server's launcher env**
+  (`~/.claude.json` `mcpServers.tidepool-repl.env == {}`), so every spawn's
+  `startup` phase forks a real `ghc --print-libdir` subprocess
+  (`GhcPipeline.hs:986-992`). Under 1% of a full-stack turn, but pure
+  amortizable waste and an orthogonal one-line fix.
+- **The measured spawn census runs consistently +1 over §1's predicted table
+  on all three decl-route shapes** (single decl 4 vs 3, three decls 6 vs 5,
+  pure bind 4 vs 3; effectful bind matches at 2). Unexplained. Trace it before
+  the batch planner's spawn budget is trusted — §1's table is a code-reading
+  prediction and is now known to be wrong somewhere.
+
+**Shard baseline** (`scripts/battery-shard.sh tidepool-repl`): cold
+**2919s / 48m40s**, warm **3313s / 55m14s**, 195/195 passing both times. Warm
+is *slower*, +13.5% — the compile memo barely fires on this suite because each
+test compiles distinct per-test Haskell rather than a byte-identical repeat,
+unlike the harness-binary case the root `CLAUDE.md` cites. Anyone quoting
+that doc's 99s-cold/47s-warm figure for the repl shard would be quoting the
+wrong workload.
 
 ### 7.3 The compile loop is probably not irreducible either — and that is the next probe
 
@@ -432,10 +470,37 @@ slower, without it.
 
 ### 7.4 Revised gate order
 
-1. **Measure the real phase table** (`batch-baseline`) — settles §7.2 and sizes
-   everything downstream. No code before this.
-2. **Probe the dep-guts memo** (§7.3) against the differential oracle. Green →
-   the batch's per-item cost is the turn module alone. Red → the batch still
-   wins §7.2's fixed costs, and the memo is a written finding.
+1. ~~**Measure the real phase table.**~~ **DONE — §7.2.** The lane is worth
+   building: floor of ~25% on the worst-measured shape, ~66% on decl-shaped
+   blocks, before the memo.
+2. **Probe the dep-guts memo** (§7.3). Green → the per-item cost is the turn
+   module alone and the win is much larger than the floor. Red → the batch
+   still wins §7.2's fixed costs, and the memo is a written finding.
+   *(in flight: `batch-gutsmemo`)*
 3. Then steps 2-4 of §6, with the `ModIfaceCache` thread (§7.1) included from
    the start.
+
+### 7.5 An adjacent finding worth more than the lane, for one item shape
+
+The baseline's census turned up a bare expression costing 3 spawns, one of
+which is a ~3.8s doomed compile — roughly a third of a ~11.3s turn, on the
+most common repl item shape there is.
+
+The baseline attributed it to `query_inner_type`. **That attribution looks
+wrong.** `run_bare_expr` compiles `wrap_bare_it_monadic` first
+(`session.rs:2124`) and on *any* compile error at all — `Err(_monadic_err)`,
+the error discarded unexamined (`session.rs:2143`) — falls back to
+`wrap_bare_it_pure`. So every *pure* bare expression pays a full doomed
+monadic compile before its real one.
+
+The order is not gratuitous, and this is the trap: `wrap_bare_it_pure` binds
+`let it = <expr>`, which for a monadic `expr :: M a` still **compiles** — it
+binds the unexecuted action instead of running it. Monadic-first is what makes
+the ambiguity fail safe. **Swapping the order would look green in tests while
+silently not running users' effects.** Any fix must decide from the inferred
+TYPE (or from one wrapper that serves both), never from ordering.
+
+Being chased separately (`bare-expr-waste`), deliberately scoped out of the
+batch design. Note that it also strengthens the batch case: in a batched
+world both wraps compile in one session at marginal cost, so the retry stops
+mattering by construction.
