@@ -1779,9 +1779,10 @@ macro_rules! event_effect_def {
 ///
 /// **Typed-result decoding is Haskell-side.** The verb returns the terminal
 /// payload as a `CyclePayload`; decoding `PayloadStructured` against the
-/// caller's result type is `Tidepool.Agent.ModelCodec`'s job (named-field
-/// polarity — NOT the positional gate-1(b) shape), and a decode failure is a
-/// typed error, never a success.
+/// caller's result type is `Tidepool.Agent.Spawn`'s job — ordinary
+/// `FromJSON`, whose named-field shape the derived `outputSchema`
+/// (`Tidepool.Aeson.Schema`) describes — and a decode failure is a typed
+/// error, never a success.
 // See `http_effect_def!` on why `crate::` (not `$crate`) is correct here:
 // `crate::handlers::worktree::WorktreeError` / `crate::effect_glue::JsonArg`
 // resolve at the EXPANSION site (tidepool-handlers), the only consumer of the
@@ -1849,8 +1850,9 @@ macro_rules! subagent_effect_def {
                 { raw ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
                        "-- backend cycle, atomically; `schema` is the JSON Schema the terminal",
                        "-- result must conform to. Prefer the typed wrapper in",
-                       "-- `Tidepool.Agent.ModelCodec` (schema derived from your result type,",
-                       "-- payload decoded for you); this is its substrate.",
+                       "-- `Tidepool.Agent.Spawn` (schema derived from your result type's",
+                       "-- Generic representation, payload decoded by its FromJSON instance);",
+                       "-- this is its substrate.",
                        "spawnAgentRaw :: SpawnSpec -> Value -> M (Either SpawnError SpawnOutcome)",
                        "spawnAgentRaw spec schema = send (SubagentSpawn spec schema)"] },
                 { raw ["-- | Spawn in a NEW managed worktree: worktree spec, agent label, task.",

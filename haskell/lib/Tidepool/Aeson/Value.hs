@@ -44,6 +44,7 @@ module Tidepool.Aeson.Value
   , ToJSON(..)
   , GToJSON(..)
   , GAllFieldsNamed
+  , IsNullarySum
   , genericToJSON
   ) where
 

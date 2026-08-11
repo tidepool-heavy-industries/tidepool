@@ -139,7 +139,11 @@ surface here — it drifts. Module map:
   surface). `Table` (`Tab.`) — CSV/TSV parse + render.
 - `FilePath` — System.FilePath over Text (`FilePath = Text`); the file-IO interface.
 - `Data/Time` — `UTCTime` newtype (epoch-millisecond, opaque); `formatISO8601` (ISO-8601, pure civil_from_days); `diffUTCTime`/`addUTCTime` (seconds); `epochMillis` escape hatch. `getCurrentTime :: M UTCTime` lives in the generated `Tidepool.Effects` (via `time_decl()` helpers).
-- `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
+- `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens, and
+  `Schema` (`JsonSchema` — the JSON Schema OF the generic `ToJSON`/`FromJSON`
+  encoding, derived from the same `Generic` metadata and sharing their
+  `GAllFieldsNamed` compile-time rejection; this is what agent tool
+  `input_schema` and subagent `outputSchema` publish).
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters.
 - `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
   (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
@@ -170,13 +174,17 @@ surface here — it drifts. Module map:
   prior wording: `plans/decision-archive/haskell.md`.)
 
 - `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (mode-
-  interpreted endpoint records compiled to declarations and dispatch), `ModelCodec` (the MODEL-boundary
-  codec: one Generic traversal → named-field JSON Schema + decoder + encoder;
-  use THIS for anything a model reads or writes), `Spawn` (typed `spawnAgent`
-  over the generated `spawnAgentRaw`; compiles only in rows containing
-  Subagent + Worktree, same row-gating as Form). Recursive payload sums also
-  round-trip through the ordinary `Tidepool.Aeson` generic defaults
-  (TaggedObject wire; `tidepool-runtime/tests/generic_recursive_sums.rs`).
+  interpreted endpoint records compiled to declarations and dispatch),
+  `Spawn` (typed `spawnAgent` over the generated `spawnAgentRaw`; compiles
+  only in rows containing Subagent + Worktree, same row-gating as Form).
+  **There is no model codec.** A model reads and writes ordinary JSON through
+  the vendored `ToJSON`/`FromJSON` generic defaults (TaggedObject wire for
+  payload sums, bare constructor-name strings for enums, `Maybe` fields
+  absent-or-null; `tidepool-runtime/tests/generic_recursive_sums.rs`), so a
+  result type needs only `deriving (Generic, FromJSON, JsonSchema)`. Decode
+  errors are the plain vendored ones (`key "caveats" not present`) — the
+  deleted `Agent.ModelCodec`'s snake_case normalization and JSONPath-carrying
+  errors are not coming back (settled 2026-08-10).
 
 ### Structured LLM / Ask — one `Schema` vocabulary
 

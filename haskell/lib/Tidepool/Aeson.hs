@@ -1,6 +1,12 @@
 -- | Vendored aeson — re-exports construction types and lens accessors.
 --
 -- Drop-in replacement for Data.Aeson + Data.Aeson.Lens.
+--
+-- "Tidepool.Aeson.Schema" is deliberately NOT re-exported here: upstream
+-- aeson has no schema class, and this umbrella is in every eval's compile
+-- closure (via "Tidepool.Prelude") while @JsonSchema@ is consumed only by the
+-- agent surfaces. Import it directly, or get it from
+-- "Tidepool.Agent.Contract", which re-exports it.
 module Tidepool.Aeson
   ( -- * Core types (from Tidepool.Aeson.Value)
     Value(..)

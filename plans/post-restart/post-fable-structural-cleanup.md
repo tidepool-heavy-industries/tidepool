@@ -9,9 +9,8 @@ Scope: architecture and subtraction, not the current bug hunt
 > verified per its stop condition — step 2 (lazy streams deleted, eager
 > iterative lists; −5.9k lines), step 3a (symmetric generic sums +
 > Maybe-tolerant decode + CodecSpike deleted + honest tool-schema
-> `required`; the options-record/ModelCodec collapse is the documented 3b
-> remainder — the open design point is ModelCodec's JSONPath-quality decode
-> errors vs the vendored `Result`), step 4 core (FormAnswer deleted BOTH
+> `required`; ModelCodec's deletion is step 3b, stamped
+> separately below), step 4 core (FormAnswer deleted BOTH
 > sides; answers are plain JSON through the one generic decode; author
 > contract is now `deriving (Generic, FromJSON)` — the PRD-14
 > "Generic-only" headline was retired deliberately, since a Generic-only
@@ -24,6 +23,39 @@ Scope: architecture and subtraction, not the current bug hunt
 > Usage/Other deleted). Human steering on 2026-08-10 explicitly preserves the
 > Call/Notify mode interpretation seam: it is unfinished, not dead. Steps 6-11
 > untouched, per the interference warning and decision gates.
+>
+> **Step 3b execution stamp (2026-08-10):** `Tidepool.Agent.ModelCodec` is
+> DELETED. The design point step 3a left open is settled by the human: *"the
+> whole point is not having a codec, just using JSON is better."* There is no
+> options record and no ported error machinery — the model boundary uses the
+> vendored generic `ToJSON`/`FromJSON` defaults directly, wire keys are
+> selector names VERBATIM (the snake_case normalization is gone; breaking the
+> wire was explicitly fine), and decode failures are the plain vendored
+> messages (`key "caveats" not present`). ModelCodec's JSONPath-carrying
+> errors were NOT ported and are not a future item.
+>
+> The schema derivation was the one part of ModelCodec that was not a codec,
+> so it survives as `Tidepool.Aeson.Schema` (`JsonSchema`), a peer of
+> `Aeson/Value.hs` and `Aeson/FromJSON.hs` rather than an agent module —
+> because what it describes is the vendored JSON encoding, not anything
+> agent-specific. It reads the same `Generic` metadata those two read and
+> imports their `GAllFieldsNamed` witness rather than restating it, so
+> "if it has a schema, it encodes and decodes" is a type-level fact. It
+> ABSORBED `Tidepool.Agent.Contract`'s `AgentSchema` (deleted; `Contract`
+> re-exports `JsonSchema` and its tool `input_schema` is now the same
+> derivation): the two had the same field-name and `Maybe`-optionality rules
+> and differed only in that `AgentSchema` rejected every sum, which was drift
+> — `FromJSON` has always decoded sums, so a tool input can now BE one.
+>
+> ModelCodec's runtime collision validation died with the normalization it
+> existed for. Duplicate normalized field names are unconstructible (no
+> normalization; two selectors of one constructor cannot share a source
+> name), and the tag-vs-payload collision is a compile-time `TypeError` from
+> `GAllFieldsNamed`, pinned on the agent surface by
+> `agent_mode_encoding.rs::compile_fail_payload_field_named_tag`. Proof types
+> `WorkerResult`/`ReviewNote` left the stdlib: the surviving one is declared
+> in `subagent_one_cycle.rs`'s own fixture, where a caller's result type
+> belongs.
 >
 > **Rebaseline stamp (Fable, 2026-08-09, run complete):** the run ended at
 > `8441b352`. The two commits after the live recheck are immaterial to this
