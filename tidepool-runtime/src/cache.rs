@@ -83,13 +83,14 @@ fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 /// If the resolved path is a shell wrapper script (e.g. ~/.cargo/bin/tidepool-extract),
 /// also fingerprints the target binary it delegates to (e.g. ~/.local/bin/tidepool-extract-bin).
 ///
-/// The binary is located by [`crate::toolchain::extract_command_name`] — the one
-/// locator — so the cache key, the spawn, and the startup handshake all
-/// fingerprint the SAME file.
+/// The binary is located by [`crate::toolchain::locate_extract`] — which
+/// delegates to `tidepool-extract-cmd`, the crate that also SPAWNS it — so the
+/// cache key, the spawn, and the startup handshake all fingerprint the SAME
+/// file. A misconfigured toolchain contributes nothing here and fails loudly at
+/// spawn/startup instead.
 fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
-    let bin_name = crate::toolchain::extract_command_name();
-
-    if let Ok(path) = which::which(&bin_name) {
+    if let Ok(loc) = crate::toolchain::locate_extract() {
+        let path = loc.path;
         fingerprint_single_binary(hasher, &path);
         for target in wrapper_targets(&path) {
             fingerprint_single_binary(hasher, &target);

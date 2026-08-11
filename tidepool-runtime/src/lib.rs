@@ -22,6 +22,7 @@ pub mod failclass;
 pub mod paths;
 mod render;
 pub mod session;
+pub mod toolchain;
 
 pub use failclass::{
     classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,

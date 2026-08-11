@@ -13,14 +13,18 @@
 //!
 //! # Precedence: the extract binary
 //!
+//! Owned by `tidepool-extract-cmd` (`resolve_bin`), the crate that also builds
+//! the extract COMMAND — location and invocation of the same binary belong
+//! together. Reproduced here because the stdlib table below depends on it.
+//!
 //! | # | Source | Notes |
 //! |---|--------|-------|
-//! | 1 | `$TIDEPOOL_EXTRACT` | Explicit override. Honored verbatim — a bare name is still PATH-resolved, an absolute path is used as-is. |
+//! | 1 | `$TIDEPOOL_EXTRACT` | Explicit override, and STRICT: set-but-unreadable is a hard error, never a silent fall-through to `$PATH` — falling through would run a different binary than the caller believes it is running. |
 //! | 2 | `tidepool-extract` on `$PATH` | Normally `~/.nix-profile/bin/tidepool-extract`, a wrapper that prepends the with-packages GHC and `exec`s the store binary. |
 //!
-//! [`extract_command_name`] returns what to spawn (steps 1–2 as a name);
-//! [`locate_extract`] additionally resolves it to a real file and fails typed
-//! when nothing is there.
+//! [`extract_command_name`] returns what to spawn; [`locate_extract`] resolves
+//! it to an ABSOLUTE path (the handshake must fingerprint a real file) and
+//! fails typed when there is none.
 //!
 //! # Precedence: the Haskell stdlib source root
 //!
@@ -63,6 +67,8 @@
 use std::path::{Path, PathBuf};
 
 /// Env var naming the extract binary (step 1 of the extract precedence).
+/// Read here only for the stdlib table's step 3; the extract binary itself is
+/// resolved by [`tidepool_extract_cmd::resolve_bin`].
 pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
@@ -70,9 +76,6 @@ pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 pub const ENV_STAMP: &str = "TIDEPOOL_TOOLCHAIN_STAMP";
 /// Env var selecting the handshake severity: `error` (default) / `warn` / `off`.
 pub const ENV_HANDSHAKE: &str = "TIDEPOOL_TOOLCHAIN_HANDSHAKE";
-
-/// Default spelling of the extract binary when `$TIDEPOOL_EXTRACT` is unset.
-pub const DEFAULT_EXTRACT: &str = "tidepool-extract";
 
 /// The deploy command every skew message points at.
 const REDEPLOY: &str = "scripts/redeploy.sh";
@@ -86,13 +89,14 @@ const REDEPLOY: &str = "scripts/redeploy.sh";
 /// nothing the user's Haskell can cause.
 #[derive(thiserror::Error)]
 pub enum ToolchainError {
-    /// Neither `$TIDEPOOL_EXTRACT` nor `$PATH` yields a runnable extract.
+    /// No runnable extract: `$TIDEPOOL_EXTRACT` named an unreadable file, or
+    /// the bare name is not on `$PATH`.
     #[error(
-        "tidepool-extract not found (tried {tried}). Set {ENV_EXTRACT} to a built \
+        "tidepool-extract not found ({tried}). Set {ENV_EXTRACT} to a built \
          tidepool-extract-bin, or install the harness with `nix profile install .#tidepool-extract`."
     )]
     ExtractNotFound {
-        /// What was searched for — the env value, or `tidepool-extract` on PATH.
+        /// What was searched for, as the locator crate reported it.
         tried: String,
     },
 
@@ -167,64 +171,64 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Extract location
+// Extract location — delegated
 // ---------------------------------------------------------------------------
 
-/// What to pass to `Command::new` for the extract: `$TIDEPOOL_EXTRACT` when
-/// set and non-empty, else the bare `tidepool-extract` (PATH-resolved by the
-/// OS at spawn time).
+/// What to pass to `Command::new` for the extract.
 ///
-/// This is the **only** place that spelling is decided. Call sites that spawn
-/// the extract own the arguments; they must not re-derive the program name.
+/// Thin delegation to [`tidepool_extract_cmd::resolve_bin`], which owns the
+/// extract-binary precedence (see the table in this module's docs). Kept as a
+/// named entry point so a caller that only needs the SPELLING — the compile
+/// cache, the harness's `EngineConfig` — does not have to reach into the
+/// invocation crate.
+///
+/// A set-but-unreadable `$TIDEPOOL_EXTRACT` degrades to the bare name here
+/// rather than erroring, because both callers already fail loudly downstream
+/// (the cache simply gets no fingerprint; `ExtractCmd::new` rejects it at
+/// spawn time with the strict message). Callers that want that error up front
+/// use [`locate_extract`].
 #[must_use]
 pub fn extract_command_name() -> String {
-    match std::env::var(ENV_EXTRACT) {
-        Ok(v) if !v.is_empty() => v,
-        _ => DEFAULT_EXTRACT.to_string(),
-    }
+    tidepool_extract_cmd::resolve_bin()
+        .map(|b| b.path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| tidepool_extract_cmd::DEFAULT_BIN.to_string())
 }
 
-/// Which precedence step produced an extract path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtractSource {
-    /// `$TIDEPOOL_EXTRACT`.
-    Env,
-    /// `tidepool-extract` on `$PATH`.
-    Path,
-}
-
-/// A resolved extract binary.
+/// A resolved extract binary: an ABSOLUTE path plus where it came from.
 #[derive(Debug, Clone)]
 pub struct ExtractLocation {
-    /// Absolute path to the binary (or wrapper script).
+    /// Absolute path to the binary (or wrapper script) — resolved through
+    /// `PATH` when `$TIDEPOOL_EXTRACT` is unset, so it is always a real file
+    /// that can be fingerprinted.
     pub path: PathBuf,
-    /// Which precedence step found it.
-    pub source: ExtractSource,
+    /// Which precedence step found it, straight from the locator crate.
+    pub source: tidepool_extract_cmd::BinSource,
 }
 
-/// Resolve [`extract_command_name`] to a real file, typed-failing when nothing
-/// is there. Uses the same `which` resolution the compile-cache fingerprint
-/// uses, so both see the same binary.
+/// Resolve the extract to a real file on disk, typed-failing when there is
+/// none.
+///
+/// [`tidepool_extract_cmd::resolve_bin`] decides WHICH binary; this adds the
+/// `PATH` lookup its `PathLookup` case defers to the OS, because the handshake
+/// and the degraded-setup probe need an absolute path, not a name to spawn.
 ///
 /// # Errors
-/// [`ToolchainError::ExtractNotFound`] when neither the override nor `$PATH`
-/// resolves to an existing file.
+/// [`ToolchainError::ExtractNotFound`] when `$TIDEPOOL_EXTRACT` names an
+/// unreadable file, or when the bare name is not on `$PATH`.
 pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
-    let name = extract_command_name();
-    let source = if name == DEFAULT_EXTRACT {
-        ExtractSource::Path
-    } else {
-        ExtractSource::Env
-    };
-    // `which` handles both spellings: an absolute/relative path is checked for
-    // existence + executability, a bare name is searched on PATH.
-    which::which(&name)
-        .map(|path| ExtractLocation { path, source })
+    let resolved =
+        tidepool_extract_cmd::resolve_bin().map_err(|e| ToolchainError::ExtractNotFound {
+            tried: e.to_string(),
+        })?;
+    // An Env-sourced path is already known-readable; a PathLookup one is the
+    // bare name and still needs the OS search.
+    which::which(&resolved.path)
+        .map(|path| ExtractLocation {
+            path,
+            source: resolved.source,
+        })
         .map_err(|_| ToolchainError::ExtractNotFound {
-            tried: match source {
-                ExtractSource::Env => format!("${ENV_EXTRACT}={name}"),
-                ExtractSource::Path => format!("{DEFAULT_EXTRACT} on $PATH"),
-            },
+            tried: format!("{} on $PATH", resolved.path.display()),
         })
 }
 
