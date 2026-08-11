@@ -8,7 +8,6 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::{compile_and_run, read_lit_int};
 
-/// 1 MiB nursery for deep trees.
 const NURSERY: usize = 1 << 20;
 
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
@@ -28,7 +27,6 @@ const NIL_TAG: DataConId = DataConId(0);
 const CONS_TAG: DataConId = DataConId(1);
 
 /// Build a Haskell-style list: Cons(x, Cons(y, ... Nil))
-/// Returns the tree. Root is the last node.
 fn build_list(values: &[i64]) -> CoreExpr {
     let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
 
@@ -54,8 +52,7 @@ fn build_list(values: &[i64]) -> CoreExpr {
     RecursiveTree { nodes }
 }
 
-/// Build a deep chain of PrimOp(IntAdd, [prev, 1]):
-/// ((((0 + 1) + 1) + 1) + ... + 1) with `depth` additions.
+/// Build a deep chain of PrimOp(IntAdd, [prev, 1]) with `depth` additions.
 fn build_deep_add_chain(depth: usize) -> CoreExpr {
     let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
 
@@ -78,11 +75,8 @@ fn build_deep_add_chain(depth: usize) -> CoreExpr {
     RecursiveTree { nodes }
 }
 
-/// Build a deep chain of App(App(App(..., arg), arg), arg).
-/// f(x)(x)(x)... where f = λa.λb.λc....a (returns first arg).
-/// We'll use a simpler approach: nested identity applications.
+/// Build nested identity-function applications:
 /// (λx.x) ((λx.x) ((λx.x) (... 42)))
-/// Each application wraps an identity function around the previous result.
 fn build_deep_app_chain(depth: usize) -> CoreExpr {
     let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
 
@@ -115,12 +109,10 @@ fn build_deep_app_chain(depth: usize) -> CoreExpr {
 /// Build a deeply case-nested expression:
 /// `case 0 of { _ -> case 0 of { _ -> ... Lit(42) } }`, `depth` cases deep.
 ///
-/// Unlike value-position subtrees (handled by the heap-based `emit_subtree`
-/// hylomorphism), case-ALT bodies are emitted by re-entering `emit_node`
-/// natively (emit_node → emit_subtree → collapse_frame → emit_case → emit_node),
-/// growing the call stack ~one frame per case level. This is the case-nesting
-/// cliff from plans/stack-safety.md that `stacker::maybe_grow` at `emit_node`
-/// guards. The shared `Lit(0)` scrutinee keeps the IR small so Cranelift's own
+/// A tail Case's alt body re-enters `emit_node` natively (emit_node →
+/// emit_case → emit_node), growing the call stack ~one frame per case
+/// level — the cliff `stacker::maybe_grow` at `emit_node` guards. The shared
+/// `Lit(0)` scrutinee keeps the IR small so Cranelift's own
 /// (IR-size-proportional) passes stay well within the test stack — isolating
 /// the emit-recursion depth.
 fn build_deep_case_chain(depth: usize) -> CoreExpr {
@@ -146,7 +138,6 @@ fn build_deep_case_chain(depth: usize) -> CoreExpr {
 }
 
 /// Build a deep chain of Con nodes: Con(tag, [Con(tag, [... Lit(42)])])
-/// Nested unary constructors.
 fn build_deep_con_chain(depth: usize) -> CoreExpr {
     let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
 
@@ -171,8 +162,6 @@ fn build_deep_con_chain(depth: usize) -> CoreExpr {
 // ---------------------------------------------------------------------------
 
 /// 200-element list: produces ~400 Con nodes (Cons + Lit pairs).
-/// Would overflow a ~2MB stack with recursive emit_node (~20 bytes/frame × 400 = 8KB,
-/// but the actual per-frame cost is higher due to Cranelift builder state).
 #[test]
 fn test_deep_list_200() {
     let values: Vec<i64> = (1..=200).collect();
@@ -194,7 +183,6 @@ fn test_deep_list_200() {
     }
 }
 
-/// 500-element list: 1000+ nodes.
 #[test]
 fn test_deep_list_500() {
     let values: Vec<i64> = (1..=500).collect();
@@ -208,8 +196,6 @@ fn test_deep_list_500() {
     }
 }
 
-/// 500 nested additions: 0 + 1 + 1 + ... + 1 = 500.
-/// Creates a 1001-node tree (500 PrimOp + 501 Lit).
 #[test]
 fn test_deep_add_chain_500() {
     let tree = build_deep_add_chain(500);
@@ -221,7 +207,6 @@ fn test_deep_add_chain_500() {
     }
 }
 
-/// 1000 nested additions.
 #[test]
 fn test_deep_add_chain_1000() {
     let tree = build_deep_add_chain(1000);
@@ -233,8 +218,6 @@ fn test_deep_add_chain_1000() {
     }
 }
 
-/// 200 nested identity applications: (λx.x) ((λx.x) (... 42)) = 42.
-/// Each application adds 3 nodes (Var, Lam, App), so 600+ nodes.
 #[test]
 fn test_deep_app_chain_200() {
     let tree = build_deep_app_chain(200);
@@ -246,7 +229,6 @@ fn test_deep_app_chain_200() {
     }
 }
 
-/// 200 nested unary constructors wrapping a Lit(42).
 #[test]
 fn test_deep_con_chain_200() {
     let tree = build_deep_con_chain(200);
@@ -269,7 +251,6 @@ fn test_deep_con_chain_200() {
 
 /// Mixed: deep list inside a let-chain.
 /// let x0 = Lit(0) in let x1 = Lit(1) in ... let xN = Lit(N) in [x0, x1, ..., xN]
-/// Tests interaction between iterative let-loop and hylomorphism.
 #[test]
 fn test_let_chain_then_deep_list() {
     let n = 100;
@@ -334,8 +315,8 @@ fn test_let_chain_then_deep_list() {
 fn test_deep_add_small_stack() {
     let tree = build_deep_add_chain(2000);
 
-    // 2MB: proves our tree-walking is stack-safe (was overflowing before hylomorphism),
-    // while giving Cranelift enough room for its internal passes on ~4000 IR instructions.
+    // 2MB: the hylomorphism keeps tree-walking off the host stack, while still
+    // giving Cranelift room for its internal passes on ~4000 IR instructions.
     let result = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(move || {
@@ -349,7 +330,6 @@ fn test_deep_add_small_stack() {
     assert_eq!(result, 2000);
 }
 
-/// Stress test: 500-element list on a 512KB stack.
 #[test]
 fn test_deep_list_small_stack() {
     let values: Vec<i64> = (1..=500).collect();
@@ -398,7 +378,6 @@ fn test_deep_case_nesting_small_stack() {
     assert_eq!(result, 42);
 }
 
-/// Stress test: 200 nested App on a 512KB stack.
 #[test]
 fn test_deep_app_small_stack() {
     let tree = build_deep_app_chain(200);

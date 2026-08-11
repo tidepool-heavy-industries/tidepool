@@ -1,6 +1,7 @@
-//! Shared GC-pressure test scaffolding between `heap_verify_lane.rs` and
-//! `proptest_gc_recursion.rs`: standard DataCon tags, the fresh-VarId supply,
-//! root fixup, and the cons-spine / balanced Pair-tree `CoreExpr` builders.
+//! Shared GC-pressure test scaffolding between `gc_fault_recovery.rs`,
+//! `heap_verify_lane.rs`, and `proptest_gc_recursion.rs`: standard DataCon
+//! tags, the fresh-VarId supply, root fixup, and the cons-spine / balanced
+//! Pair-tree `CoreExpr` builders.
 //! `tests/*.rs` files are separate crates, so this is included via `#[path]`
 //! rather than shared as an ordinary library module.
 

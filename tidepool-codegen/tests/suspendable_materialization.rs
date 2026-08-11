@@ -17,11 +17,6 @@
 //! non-suspending route, so this test asserts the property the shared code is
 //! supposed to guarantee: an aliased `(x, x)` result is intact after a
 //! suspension, a resume, and a later collection.
-//!
-//! Fixture style is copied from `realm_per_realm_fields.rs` /
-//! `realm_multi_continuation.rs` — same synthetic freer-simple table, same
-//! hand-built `CoreExpr`s, same `TIDEPOOL_GC_POISON` + `TIDEPOOL_HEAP_VERIFY`
-//! arming, same big-stack test thread.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
@@ -46,8 +41,7 @@ mod session_scaffold_expect;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 
-// ─── freer-simple constructor ids — the same synthetic stack the realm tests
-// use. ──────────────────────────────────────────────────────────────────────
+// ─── freer-simple constructor ids ──────────────────────────────────────────
 const VAL_ID: DataConId = DataConId(10);
 const E_ID: DataConId = DataConId(11);
 const UNION_ID: DataConId = DataConId(12);

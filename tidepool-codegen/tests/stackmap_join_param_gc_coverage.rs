@@ -1,34 +1,21 @@
-//! Closes a PRE-EXISTING GC-coverage gap found while verifying cluster F
-//! (D6, jit-chain-2): the GC gate (`gc_frame_walker`, `frame_walker_hardening`,
-//! `continuation_gc_root`, `gc_fault_recovery`, `nested_child_gc_rooting`,
-//! `gc_audit`, `gc_write_barrier`, `array_gc_safety`, `con_midfill_gc_safety`,
-//! `nested_child_response_materialization_gc`, `heap_verify_lane`) had ZERO
-//! tests that actually EXECUTE a `Join`/`Jump` under a forced collection.
+//! No test in the GC-coverage family (`gc_frame_walker`,
+//! `frame_walker_hardening`, `continuation_gc_root`, `gc_fault_recovery`,
+//! `nested_child_gc_rooting`, `gc_audit`, `gc_write_barrier`,
+//! `array_gc_safety`, `con_midfill_gc_safety`,
+//! `nested_child_response_materialization_gc`, `heap_verify_lane`) actually
+//! EXECUTEs a `Join`/`Jump` under a forced collection.
 //! `gc_audit::test_stack_map_join_safepoints` compiles a Join and asserts
 //! `!pipeline.stack_maps.is_empty()` but never runs the program — a purely
 //! structural check, not a runtime one.
 //!
-//! This is NOT a regression guard for the `declare_env` removal
-//! (`emit/join.rs:154`/`199`, see that commit): `join.rs:163`'s
-//! `declare_value_needs_stack_map(val) // CRITICAL` mark on the join block
-//! param is untouched by that change — `declare_env` never uniquely covered
-//! it, and the removal is safe by the function-wide-liveness contract
-//! established from the pinned `cranelift-frontend` 0.129.1 source
-//! (`declare_value_needs_stack_map` marks a Value once into a per-Function
-//! set; Cranelift's own whole-function backward-liveness dataflow, not
-//! `declare_env`, decides where it's live). This test exists because the
-//! gap itself — no runtime proof that a join-point block param survives a
-//! real collection — predates and is independent of that change, and a hole
-//! this lane found should leave a test behind, not a paragraph.
-//!
 //! Program: `join j(p) = case Con(NOISE_TAG, [0..100)) of NOISE_TAG -> p in
 //! jump j(42)`. `p` is bound to the join block's own Cranelift block param
-//! (marked at `join.rs:163`, the value under test) when `jump j(42)` lands.
-//! `rhs` immediately builds a 100-field noisy `Con` as its `Case` scrutinee
-//! (forced eagerly by the hylomorphism, no thunk/DCE indirection to route
-//! around), allocating enough to force a real GC while `p` is live only via
-//! its join-block-param mark, then the matching `DataAlt` returns `p`
-//! untouched. Swept nursery sizes, same rationale as
+//! (marked `// CRITICAL` at `join.rs:156`, the value under test) when
+//! `jump j(42)` lands. `rhs` immediately builds a 100-field noisy `Con` as
+//! its `Case` scrutinee (forced eagerly by the hylomorphism, no thunk/DCE
+//! indirection to route around), allocating enough to force a real GC while
+//! `p` is live only via its join-block-param mark, then the matching
+//! `DataAlt` returns `p` untouched. Swept nursery sizes, same rationale as
 //! `apply_acceptance.rs`'s `apply_gc_during_application_relocates_forced_callee`.
 
 use tidepool_codegen::host_fns;
@@ -91,7 +78,7 @@ fn build_tree(n_noise_fields: i64) -> CoreExpr {
     RecursiveTree { nodes }
 }
 
-/// The proof: `p` (the join block param, marked only at `join.rs:163`)
+/// The proof: `p` (the join block param, marked only at `join.rs:156`)
 /// survives a real GC forced inside `rhs`'s scrutinee construction, under
 /// both `TIDEPOOL_GC_POISON` and `TIDEPOOL_HEAP_VERIFY`.
 #[test]
