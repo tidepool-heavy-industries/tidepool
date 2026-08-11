@@ -43,12 +43,19 @@ else:
 
 Everything else is per-item, and several item shapes cost more than one spawn:
 
+> ⚠️ **THIS TABLE IS WRONG IN TWO WAYS — see §7.2 and §9.1 before using it.**
+> Its spawn counts are code-reading predictions that measurement contradicted
+> (§7.2: every decl route is +1), and its *rail* attribution is wrong — no repl
+> item path calls `turn::run_turn` at all; they all call
+> `compile_session_turn` (§9.1). Left here unedited because §8's rail choice
+> was made from it, and the error is part of the record.
+
 | Item shape | Spawns | Sites |
 |---|---|---|
 | decl run (M items) | 1 validate + 1 type probe *per value decl* | `session/mod.rs:509`; "one extra extract compile per value decl" (`tidepool-repl/CLAUDE.md`) |
 | pure bind (`let x = e`, `x <- pure e`) | 1 `define_scoped` + 1 `probe_pure_type`, or 1 + 1 failed + 1 `run_bind` | `session.rs:1305`, `session.rs:1377-1383`, `session.rs:1540` |
-| effectful bind `x <- e` | 1 `--turn` | `session.rs:1711` → `turn.rs:435` |
-| bare expression | 1 `--turn`, plus `query_inner_type` when it fires | `session.rs:2096`, `session.rs:2277` |
+| effectful bind `x <- e` | 1 `--turn` ❌ *(actually `compile_session_turn`, `session.rs:1736`)* | ~~`session.rs:1711` → `turn.rs:435`~~ |
+| bare expression | 1 `--turn` ❌ *(actually `compile_session_turn`, `session.rs:2129`/`:2153`; the extra spawn is the monadic-first retry, not `query_inner_type` — §7.5)* | ~~`session.rs:2096`, `session.rs:2277`~~ |
 
 A five-item block of mixed shapes is routinely 8-12 spawns. At the measured
 ~5-8s spawn+boot floor that is the dominant cost of the repl test suite and of
