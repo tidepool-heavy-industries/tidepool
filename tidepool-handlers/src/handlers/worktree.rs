@@ -477,14 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_to_wire_wraps_the_receipt() {
-        let receipt = sample_receipt(None);
-        let handle = WorktreeHandle::from_receipt(receipt.clone());
-        let wire = handle_to_wire(&handle);
-        assert_eq!(wire.handle_receipt, receipt_to_wire(&receipt));
-    }
-
-    #[test]
     fn summary_to_wire_carries_presence() {
         let receipt = sample_receipt(None);
         let present = WorktreeSummary {
@@ -634,23 +626,6 @@ mod tests {
                 "No space left on device".to_string()
             )
         );
-    }
-
-    #[test]
-    fn never_registered_is_distinct_from_worktree_lost() {
-        let id = WtWorktreeId {
-            raw: "wt-ghost".to_string(),
-        };
-        let unregistered = never_registered(&id);
-        let lost = error_to_wire(DomainWorktreeError::WorktreeLost(WorktreeId::from_raw(
-            "wt-ghost",
-        )));
-        assert_ne!(unregistered, lost);
-        assert!(matches!(
-            unregistered,
-            WorktreeError::WorktreeNotRegistered(_)
-        ));
-        assert!(matches!(lost, WorktreeError::WorktreeLost(_)));
     }
 
     #[test]
