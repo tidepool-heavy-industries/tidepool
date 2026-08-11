@@ -1,21 +1,33 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Forward dogfood: recursive coding agents in retained Git worktrees.
 --
--- This is deliberately a sketch of the intended authored surface.  It will
--- compile after PRD 18 (typed headless subagents) and PRD 19 (managed
--- worktrees/events) land.  TODO(PRD 18 / PRD 19): keep this file as the
--- executable acceptance target while those APIs are implemented.
+-- Every name this file calls exists today: managed worktrees and typed
+-- repository events (PRD 19, "Tidepool.Worktree"\/"Tidepool.Event") and the
+-- typed one-cycle spawn (PRD 18 lane 1, "Tidepool.Agent.Spawn").
+--
+-- __Assumed row.__ @Harness@ is an alias for @M@, so this file needs a compile
+-- whose row carries @RunLLMTurn@ (the harness monad) plus @Console@,
+-- @Worktree@, @RepoEvent@, and @Subagent@.  The self-iterating driver's v1
+-- outer session is @RunLLMTurn@-only, so pointing the driver at this file does
+-- not run it yet; that is a row-composition gap, not a missing API.
+--
+-- __Why there is no rebase propagation.__ @spawnAgent \@r spec@ runs ONE cycle
+-- to completion, so a child worktree created AFTER its parent's worker
+-- returned is seeded from the parent's FINAL HEAD.  There is no window in
+-- which a parent HEAD moves under a live child, and therefore nothing for a
+-- rebase poke to do: depth-first ordering answers the whole problem.  See
+-- 'runNode'.
 module Harness
   ( State (..)
   , Phase (..)
   , DevPlan (..)
-  , DevMessage (..)
   , WorkerResult (..)
   , RunSummary (..)
   , initialState
@@ -25,34 +37,20 @@ module Harness
 
 import qualified Data.Text as T
 import HarnessTypes
-import Tidepool.Agent
+import Tidepool.Agent.Spawn (spawnAgent)
+-- `SpawnError`/`spawnSpecIn`/`renderSpawnError` and the Console `say` are
+-- generated into `Tidepool.Effects`; `Tidepool.Agent.Spawn` re-exports only the
+-- spawn verbs themselves.
+import Tidepool.Effects (SpawnError, renderSpawnError, say, spawnSpecIn)
 import Tidepool.Event
 import Tidepool.Harness (Harness)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import Tidepool.Worktree
 
--- Runtime-only values.  These never enter checkpointed 'State'.
-data PreparedNode = PreparedNode
-  { preparedPlan     :: DevPlan
-  , preparedTree     :: WorktreeHandle
-  , preparedChildren :: [PreparedNode]
-  }
-
-data LiveNode = LiveNode
-  { livePlan     :: DevPlan
-  , liveTree     :: WorktreeHandle
-  , liveAgent    :: AgentHandle DevMessage WorkerResult
-  , liveChildren :: [LiveNode]
-  }
-
-data FinishedNode = FinishedNode
-  { finishedPlan     :: DevPlan
-  , finishedTree     :: WorktreeHandle
-  , workerResult     :: WorkerResult
-  , finishedChildren :: [FinishedNode]
-  }
-
+-- | A fully processed node: its own worker's result, its integrated children,
+-- and the integration worker's result when there was anything to merge.
+-- Runtime-only — never enters checkpointed 'State'.
 data IntegratedNode = IntegratedNode
   { integratedPlan     :: DevPlan
   , integratedTree     :: WorktreeHandle
@@ -61,45 +59,53 @@ data IntegratedNode = IntegratedNode
   , integratedChildren :: [IntegratedNode]
   }
 
--- | One resident cycle unfolds a development tree into isolated agents, keeps
--- parent->child rebase pokes live while they work, then folds completed child
--- branches upward through fresh integration agents.  Haskell never runs
--- @git rebase@ or @git merge@: coding agents do so with their native tools.
+-- | Why a node stopped.  Both halves of the saga fail with a typed, renderable
+-- value — no exceptions cross this boundary.
+data NodeError
+  = NodeWorktreeFailed Text WorktreeError
+  | NodeSpawnFailed Text SpawnError
+
+renderNodeError :: NodeError -> Text
+renderNodeError = \case
+  NodeWorktreeFailed n e -> n <> " (worktree): " <> renderWorktreeError e
+  NodeSpawnFailed n e -> n <> " (agent): " <> renderSpawnError e
+
+-- | One resident cycle unfolds a development tree into isolated agents and
+-- folds their branches back upward.  Haskell never runs @git rebase@ or
+-- @git merge@: coding agents do so with their native tools.
 loop :: State -> Harness State
 loop st
   | phase st /= Ready = pure st
-  | otherwise = do
-      created <- createWorktree (rootWorktreeSpec st)
-      case created of
+  | otherwise =
+      createWorktree (rootWorktreeSpec st) >>= \case
+        -- Matching the SPECIFIC Left is what earns a better message than the
+        -- generic one: name the files the operator has to deal with, and point
+        -- at the flag that skips the requirement.
         Left (SourceDirty summary) ->
-          pure st
-            { phase = Blocked [fmt|Source repository is dirty: {summary}|]
-            , cycleCount = cycleCount st + 1
-            }
-
+          let dirtyFiles =
+                length summary.staged + length summary.unstaged + length summary.untracked
+           in pure
+                ( blocked
+                    st
+                    [fmt|Source repository is dirty ({dirtyFiles} uncommitted paths). Commit them, or set snapshotDirtySource to run against a hidden snapshot.|]
+                )
         Left err ->
-          pure st
-            { phase = Blocked [fmt|Could not create root worktree: {renderWorktreeError err}|]
-            , cycleCount = cycleCount st + 1
-            }
-
-        Right rootTree -> do
-          prepared <- prepareNode rootTree (plan st)
-          case prepared of
+          pure (blocked st [fmt|Could not create root worktree: {renderWorktreeError err}|])
+        Right rootTree ->
+          runNode rootTree (plan st) >>= \case
             Left err ->
-              pure st
-                { phase = Blocked [fmt|Could not prepare development tree: {renderWorktreeError err}|]
-                , cycleCount = cycleCount st + 1
-                }
+              pure (blocked st [fmt|Development tree stopped at {renderNodeError err}|])
+            Right integrated ->
+              pure
+                st
+                  { phase = Completed
+                  , cycleCount = cycleCount st + 1
+                  , lastRun = Just (summarize integrated)
+                  }
 
-            Right tree -> do
-              finished <- runTree tree
-              integrated <- integrateTree finished
-              pure st
-                { phase = Completed
-                , cycleCount = cycleCount st + 1
-                , lastRun = Just (summarize integrated)
-                }
+blocked :: State -> Text -> State
+blocked st reason =
+  st {phase = Blocked {blockedReason = reason}, cycleCount = cycleCount st + 1}
 
 -- TODO(Worktree PRD): 'fromCurrentRepository' defaults to RequireClean.
 -- 'allowDirtySnapshot' creates a hidden synthetic commit without touching the
@@ -111,198 +117,136 @@ rootWorktreeSpec st
   where
     base = fromCurrentRepository "dev-tree/integration"
 
--- | Allocate the entire tree before starting workers.  A child is seeded from
--- its parent's current HEAD, but no persistent parent/child graph is built into
--- the runtime; the recursive relationship belongs to this resident program.
-prepareNode
-  :: WorktreeHandle
-  -> DevPlan
-  -> Harness (Either WorktreeError PreparedNode)
-prepareNode tree p =
-  prepareChildren tree (childPlans p) >>= \case
-    Left err -> pure (Left err)
-    Right children -> pure (Right (PreparedNode
-      { preparedPlan = p
-      , preparedTree = tree
-      , preparedChildren = children
-      }))
+-- | Run one node to completion, then its children, then integrate.
+--
+-- DEPTH-FIRST, PARENT FIRST, and that ordering is the whole design.  The node's
+-- own implementation worker runs to completion before any child worktree is
+-- created, so each child is seeded from a parent HEAD that is already final.
+--
+-- The 'withHandler' scope is observation, not control: a HEAD move recorded
+-- from the repository is authoritative evidence that the worker committed,
+-- where the worker's own 'workSummary' is only a claim.  The subscription
+-- begins at registration and unregisters when the body ends, so it covers
+-- exactly this node's worker.
+runNode :: WorktreeHandle -> DevPlan -> Harness (Either NodeError IntegratedNode)
+runNode tree p =
+  withHandler (headChanged tree) (noteHeadMove p) (spawnWorker tree p) >>= \case
+    Left err -> pure (Left (NodeSpawnFailed (nodeName p) err))
+    Right implResult ->
+      runChildren tree (childPlans p) >>= \case
+        Left err -> pure (Left err)
+        Right children -> integrateNode tree p implResult children
 
-prepareChildren
-  :: WorktreeHandle
-  -> [DevPlan]
-  -> Harness (Either WorktreeError [PreparedNode])
-prepareChildren _ [] = pure (Right [])
-prepareChildren parentTree (p : ps) = do
-  -- TODO(Worktree PRD): this snapshots the parent's committed HEAD only.  The
-  -- parent worker has not started yet, so the seed is stable and clean.
+-- | The typed spawn: @\@WorkerResult@ is what fixes the schema the worker is
+-- held to AND the type its terminal payload decodes into.  A payload that does
+-- not fit comes back as @Left (SpawnResultMalformed …)@, never as a success
+-- with a defaulted field.  The worktree already exists, so the spec names it by
+-- id ('spawnSpecIn') rather than asking for a new one.
+spawnWorker :: WorktreeHandle -> DevPlan -> Harness (Either SpawnError WorkerResult)
+spawnWorker tree p =
+  spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) (nodeName p) (workerPrompt p))
+    <&> fmap snd
+
+-- | Repository events are authoritative; agent summaries are not.
+noteHeadMove :: DevPlan -> Observed HeadChangeReceipt -> Harness ()
+noteHeadMove p change =
+  say (nodeName p <> " HEAD -> " <> renderGitOid receipt.newHead)
+  where
+    receipt = value change
+
+-- | Allocate and run each child in turn, stopping at the first failure.  Each
+-- child worktree is created from the parent's CURRENT state, which by the
+-- ordering in 'runNode' is the parent worker's final commit.
+runChildren :: WorktreeHandle -> [DevPlan] -> Harness (Either NodeError [IntegratedNode])
+runChildren _ [] = pure (Right [])
+runChildren parentTree (p : ps) =
   createWorktree (fromWorktree parentTree (nodeName p)) >>= \case
-    Left err -> pure (Left err)
+    Left err -> pure (Left (NodeWorktreeFailed (nodeName p) err))
     Right childTree ->
-      prepareNode childTree p >>= \case
+      runNode childTree p >>= \case
         Left err -> pure (Left err)
         Right child ->
-          prepareChildren parentTree ps >>= \case
+          runChildren parentTree ps >>= \case
             Left err -> pure (Left err)
             Right rest -> pure (Right (child : rest))
 
--- | CPS keeps every lexical handler scope alive until the root continuation
--- finishes.  Descendants start first; each node's HEAD handler is registered
--- before that node's worker can make its first commit.
-withLiveNode
-  :: PreparedNode
-  -> (LiveNode -> Harness a)
-  -> Harness a
-withLiveNode PreparedNode {..} k =
-  withLiveForest preparedChildren $ \children ->
-    withHandler (headChanged preparedTree) (pokeChildren preparedPlan children) $ do
-      worker <- spawnAgent
-        (workerSpec preparedTree preparedPlan)
-        (workerPrompt preparedPlan)
-      k (LiveNode
-        { livePlan = preparedPlan
-        , liveTree = preparedTree
-        , liveAgent = worker
-        , liveChildren = children
-        })
-
-withLiveForest
-  :: [PreparedNode]
-  -> ([LiveNode] -> Harness a)
-  -> Harness a
-withLiveForest [] k = k []
-withLiveForest (p : ps) k =
-  withLiveNode p $ \node ->
-    withLiveForest ps $ \nodes ->
-      k (node : nodes)
-
--- | A real HEAD transition is a poke, not a magic rebase effect.  Each child
--- decides where to stop, whether to make a WIP commit, how to rebase, and how
--- to resolve conflicts.  Its subsequent Worktree events are the evidence.
-pokeChildren
-  :: DevPlan
-  -> [LiveNode]
-  -> Observed HeadChangeReceipt
-  -> Harness ()
-pokeChildren parentPlan children observed =
-  for_ children $ \child ->
-    pokeAgent (liveAgent child) (whenSafe (RebaseWhenSafe
-      { upstreamNode = nodeName parentPlan
-      , upstreamHead = renderGitOid (newHead (payload observed))
-      }))
-
--- TODO(PRD 18): 'whenSafe' is the cooperative tag. Escalation code may instead
--- use 'interrupting' with a typed FinishAndCommit message; there is no separate
--- authored interrupt operation.
-
-runTree :: PreparedNode -> Harness FinishedNode
-runTree tree = withLiveNode tree finishTree
-
--- All agents were spawned asynchronously by 'withLiveNode', so these waits may
--- be traversed sequentially without serializing the workers themselves.
-finishTree :: LiveNode -> Harness FinishedNode
-finishTree LiveNode {..} = do
-  result <- waitForResult liveAgent
-  children <- traverse finishTree liveChildren
-  pure FinishedNode
-    { finishedPlan = livePlan
-    , finishedTree = liveTree
-    , workerResult = result
-    , finishedChildren = children
-    }
-
--- | Fold bottom-up.  Once all implementation workers are terminal there is
--- only one writer per worktree.  A fresh integration agent in each interior
--- node merges its already-integrated child branches and resolves conflicts.
-integrateTree :: FinishedNode -> Harness IntegratedNode
-integrateTree FinishedNode {..} = do
-  children <- traverse integrateTree finishedChildren
-  merged <- case children of
-    [] -> pure Nothing
-    _ -> do
-      refs <- traverse (worktreeBranch . integratedTree) children
-      integrator <- spawnAgent
-        (integrationSpec finishedTree finishedPlan)
-        (integrationPrompt finishedPlan children refs)
-      Just <$> waitForResult integrator
-  pure IntegratedNode
-    { integratedPlan = finishedPlan
-    , integratedTree = finishedTree
-    , implementation = workerResult
-    , integration = merged
-    , integratedChildren = children
-    }
-
--- TODO(PRD 18): 'noTools' is the empty generated-tool contract.  Workers keep
--- Codex's native edit/search/shell/test tools; this example does not need a
--- child-to-parent MCP tool beyond typed steering from the resident.
-workerSpec tree p = agent
-  { instructions = [fmt|
-      You are the implementation worker for node {nodeName p}.
-      Work only in the assigned worktree. Use native edit, shell, test, and Git
-      tools. Commit coherent progress. If you receive RebaseWhenSafe, finish a
-      safe unit of work (making a WIP commit if useful), rebase onto the given
-      parent HEAD, resolve conflicts, re-run relevant checks, and continue.
-      Do not merely claim Git work: perform it and report the resulting evidence.
-    |]
-  , tools = noTools
-  , model = Capable
-  , workspace = workspaceOf tree
-  , retention = Durable
-  }
+-- | Fold the children back in.  Every child is already integrated and its
+-- worker terminal, so there is exactly one writer per worktree here.  A fresh
+-- integration agent merges the child branches and resolves conflicts with its
+-- own native Git tools.
+integrateNode
+  :: WorktreeHandle
+  -> DevPlan
+  -> WorkerResult
+  -> [IntegratedNode]
+  -> Harness (Either NodeError IntegratedNode)
+integrateNode tree p implResult children = case children of
+  [] -> pure (Right (node Nothing))
+  _ -> do
+    refs <- traverse (worktreeBranch . integratedTree) children
+    spawnAgent @WorkerResult
+      (spawnSpecIn (worktreeId tree) (nodeName p <> "-integration") (integrationPrompt p children refs))
+      >>= \case
+        Left err -> pure (Left (NodeSpawnFailed (nodeName p <> "-integration") err))
+        Right (_, merged) -> pure (Right (node (Just merged)))
+  where
+    node merged =
+      IntegratedNode
+        { integratedPlan = p
+        , integratedTree = tree
+        , implementation = implResult
+        , integration = merged
+        , integratedChildren = children
+        }
 
 workerPrompt :: DevPlan -> Text
 workerPrompt p = [fmt|
-  Goal for this development tree: implement your assigned node independently.
-  Node: {nodeName p}
+  You are the implementation worker for node {nodeName p}.
+  Work only in the assigned worktree, using your native edit, shell, test, and
+  Git tools.
+
   Task: {nodeTask p}
 
-  Inspect the repository before editing. Keep your branch buildable, commit
-  coherent progress, and finish with a typed WorkerResult.
+  Inspect the repository before editing. Keep your branch buildable and commit
+  coherent progress — the commits are what your parent integrates, and the
+  repository events they raise are the authoritative record of your work.
+  Do not merely claim Git work: perform it, and cite the evidence.
+
+  Finish your turn with a WorkerResult: a one-paragraph workSummary, an
+  evidence list (commands run, checks passed, commits made), and
+  readyForIntegration.
 |]
 
-integrationSpec tree p = agent
-  { instructions = [fmt|
-      You are the integration worker for node {nodeName p}.
-      Work only in the assigned worktree. Merge the supplied child branches
-      using native Git, resolve conflicts by understanding both implementations,
-      run the relevant checks, and commit the integrated result. Never discard a
-      child's work merely to make the merge easy.
-    |]
-  , tools = noTools
-  , model = Capable
-  , workspace = workspaceOf tree
-  , retention = Ephemeral
-  }
-
-integrationPrompt
-  :: DevPlan
-  -> [IntegratedNode]
-  -> [BranchName]
-  -> Text
+integrationPrompt :: DevPlan -> [IntegratedNode] -> [BranchName] -> Text
 integrationPrompt p children refs = [fmt|
-  Integrate the completed child branches into node {nodeName p}:
+  You are the integration worker for node {nodeName p}. Merge the completed
+  child branches into this worktree:
 {branchLines}
 
-  Inspect every child diff and its test evidence, merge them one at a time,
-  resolve conflicts semantically, run the combined checks, commit the result,
-  and finish with a typed WorkerResult.
+  Inspect every child diff and its test evidence, merge them one at a time with
+  your native Git tools, resolve conflicts by understanding both
+  implementations, run the combined checks, and commit the integrated result.
+  Never discard a child's work merely to make the merge easy.
+
+  Finish your turn with a WorkerResult describing what you merged and what you
+  ran.
 |]
   where
     branchLines = T.intercalate "\n" (zipWith renderChild children refs)
     renderChild child ref =
-      "- " <> nodeName (integratedPlan child) <> ": " <> renderBranchName ref
+      "  - " <> nodeName (integratedPlan child) <> ": " <> renderBranchName ref
 
 summarize :: IntegratedNode -> RunSummary
-summarize root = RunSummary
-  { implementationSummaries = map (workSummary . implementation) nodes
-  , integrationSummaries =
-      [ workSummary result
-      | node <- nodes
-      , Just result <- [integration node]
-      ]
-  , retainedWorktrees =
-      map (renderWorktreeId . worktreeId . integratedTree) nodes
-  }
+summarize root =
+  RunSummary
+    { implementationSummaries = map (workSummary . implementation) nodes
+    , integrationSummaries =
+        [ workSummary result
+        | node <- nodes
+        , Just result <- [integration node]
+        ]
+    , retainedWorktrees = map (renderWorktreeId . worktreeId . integratedTree) nodes
+    }
   where
     nodes = flatten root
 

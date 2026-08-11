@@ -20,11 +20,12 @@ two-file layout:
 Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
-**Minimal effect surfaces, on purpose:** the wizard's answerer has only
-`askUser` (typed forms) + `finalize`. The development tree instead gives
-headless workers their native coding tools while Haskell owns typed
-orchestration. Frictions hit while authoring/running these *are the roadmap*
-for the next harness helpers.
+**Minimal effect surfaces, on purpose:** the wizard's answerer row is exactly
+`Eff '[AskUser, Fork, Finalize]` (spelled out in `Tidepool.Agent`) — typed
+forms, depth-one parallel sub-answerers, and the typed yield. The development
+tree instead gives headless workers their native coding tools while Haskell
+owns typed orchestration. Frictions hit while authoring/running these *are the
+roadmap* for the next harness helpers.
 
 ## Harnesses
 
@@ -35,7 +36,14 @@ for the next harness helpers.
   requests. Deliberately rough — the roughness is iteration fuel.
 - [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for typed subagents,
   retained worktrees, and lexical event handlers**. It unfolds an ordinary
-  recursive `DevPlan` into coding agents, pokes descendants when parent HEADs
-  move, then asks fresh integration agents to merge completed branches
-  bottom-up. It is written directly against the PRD 18 (typed subagents) and
-  PRD 19 (managed worktrees + events) surfaces.
+  recursive `DevPlan` depth-first into coding agents — parent worker first, so
+  each child worktree is seeded from a parent HEAD that is already final, which
+  is why no rebase propagation is needed — then asks fresh integration agents
+  to merge completed branches bottom-up. It is written against PRD 18's typed
+  `spawnAgent @r` (lane 1: synchronous, one cycle) and PRD 19's managed
+  worktrees + events, both of which have landed. What it waits on is ROW
+  COMPOSITION, not API: `Harness` is an alias for `M`, and the driver's v1
+  outer session is `RunLLMTurn`-only, so this file needs
+  `Console`/`Worktree`/`RepoEvent`/`Subagent` appended to that row before the
+  driver can run it. `tidepool-harness/tests/dogfood_harness_typecheck.rs`
+  compiles it against that row.

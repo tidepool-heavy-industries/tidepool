@@ -13,7 +13,6 @@ module HarnessTypes
   ( State (..)
   , Phase (..)
   , DevPlan (..)
-  , DevMessage (..)
   , WorkerResult (..)
   , RunSummary (..)
   , initialState
@@ -23,6 +22,7 @@ module HarnessTypes
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
+import Tidepool.Aeson.Schema (JsonSchema)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
@@ -36,10 +36,14 @@ data State = State
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
+-- | A payload constructor in a SUM must use record syntax: generic JSON has no
+-- key to put a positional field under, and 'State' is checkpointed through
+-- 'ToJSON'\/'FromJSON'.  A positional @Blocked Text@ typechecks as a plain ADT
+-- and fails only when the derive is demanded.
 data Phase
   = Ready
   | Completed
-  | Blocked Text
+  | Blocked { blockedReason :: Text }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The tree is authored data, not a runtime workflow graph.  'Harness.loop'
@@ -51,24 +55,25 @@ data DevPlan = DevPlan
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
--- | Typed steering understood by every implementation worker in this dogfood.
--- The worker still uses its native shell/edit/git tools to do the work.
-data DevMessage
-  = RebaseWhenSafe
-      { upstreamNode :: Text
-      , upstreamHead :: Text
-      }
-  | FinishAndCommit
-      { finishReason :: Text
-      }
-  deriving (Generic, ToJSON, FromJSON, Show, Eq)
-
+-- | What every worker in this dogfood must finish its turn with.
+--
+-- This type IS the worker's @outputSchema@: @spawnAgent \@WorkerResult@ derives
+-- the schema the backend holds the worker to from this declaration's own
+-- 'Generic' metadata, and decodes the terminal payload back through the same
+-- 'FromJSON'.  There is no second description of the result shape to drift
+-- from the one the caller pattern-matches on, which is why 'JsonSchema' is in
+-- the derive set and not optional.
+--
+-- SINGLE-CONSTRUCTOR RECORD, deliberately: a sum renders @oneOf@ at the schema
+-- root and the backend refuses the turn whole at request validation.  An
+-- alternative is modelled as a field ('readyForIntegration'), never as a
+-- constructor.
 data WorkerResult = WorkerResult
   { workSummary         :: Text
   , evidence            :: [Text]
   , readyForIntegration :: Bool
   }
-  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
 -- | Model reports are useful summaries; Agent and Worktree receipts remain the
 -- authoritative account of commands, changed files, commits, and HEAD moves.
@@ -130,11 +135,22 @@ initialPlan =
         ]
     }
 
-render :: State -> Maybe Text -> Text
-render st lastCompaction =
+-- | @render :: State -> Text@ — the LOCKED signature (see
+-- @examples\/harness\/HarnessTypes.hs@).  Domain policy only: the driver
+-- composes this output with the loop-iteration count, the prior compaction
+-- summary, and capability\/finalization instructions.  This function does not
+-- take the compaction summary as an argument, because that is a runtime fact
+-- and the runtime's to supply.
+-- `[fmt|{hole}|]` renders a hole through `Tidepool.Render.Render`, which has
+-- instances for Text/String/Int/Double/Bool/Char and nothing else — an
+-- author-defined type has no rendering the quoter could guess. So 'Phase' and
+-- 'RunSummary' get explicit ones here, which is also where they belong: how a
+-- phase reads to the model is domain policy, not a `Show` accident.
+render :: State -> Text
+render st =
   [fmt|You are operating a typed recursive software-development tree.
 Goal: {goal st}
-Phase: {phase st}
+Phase: {phaseLine}
 Resident cycle: {cycleCount st}
 
 Plan:
@@ -142,18 +158,23 @@ Plan:
 
 Dirty source snapshot allowed: {snapshotDirtySource st}
 {lastRunBlock}
-{compactionBlock}
 
 The Haskell resident owns orchestration. Headless coding agents retain their
 native edit, shell, test, and Git tools. Repository events are authoritative;
 agent summaries are not.|]
   where
+    phaseLine = case phase st of
+      Ready -> "ready" :: Text
+      Completed -> "completed"
+      Blocked {blockedReason = reason} -> "blocked — " <> reason
     lastRunBlock = case lastRun st of
       Nothing -> "No development-tree run has completed yet." :: Text
-      Just summary -> [fmt|Last run: {summary}|]
-    compactionBlock = case lastCompaction of
-      Nothing -> ""
-      Just summary -> "\nPrior-window summary:\n" <> summary
+      Just summary ->
+        T.intercalate "\n" $
+          ["Last run:"]
+            <> map ("  implementation: " <>) (implementationSummaries summary)
+            <> map ("  integration: " <>) (integrationSummaries summary)
+            <> map ("  retained worktree: " <>) (retainedWorktrees summary)
 
 renderPlan :: Int -> DevPlan -> Text
 renderPlan depth p =
