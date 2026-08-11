@@ -1,5 +1,40 @@
 # D2 — `RuntimeTypeClosure` — SPECIFIED, UN-STARTED, ROUTED FORWARD
 
+**Status 2026-08-11 (lane `spawn-latency`): STILL UN-STARTED — BLOCKED ON A
+SIBLING LANE, not on doubt.** Every claim below has been re-validated against
+HEAD (`fc94ac3b`) and the adjustments live in
+`plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md` §1 and
+§1a. **Read that alongside this file; where they disagree, §1 is newer.**
+
+Why blocked: D2's entire edit is the `allMeta` assembly in
+`haskell/app/Main.hs` (`:406-416` in `processFile`, `:580-605` in
+`writeClosedTargets`), and the in-flight `batch-turns` lane owns that file.
+There is no version of D2 that does not touch it. It picks up when that lane
+folds.
+
+What §1/§1a add on top of this document:
+- The premise HOLDS at HEAD (unfiltered `mg_tcs`, CHECK A live, the traced
+  binder-type route intact, `wiredInDataCons` still lacking the five).
+- **This file's headline requirement is unimplementable as literally written.**
+  "DERIVE the five from `tidepool_repr::freer_names`, never hand-list" — but
+  `freer_names` is a RUST module and the narrowing happens in Haskell, which
+  cannot import it, and no Haskell-side mirror of those names exists. §1a
+  reframes it into the constraint that actually delivers the intent: *do not
+  replace or bypass the binder-type closure* (it supplies all five with no
+  list on either side of the boundary).
+- Four more things moved under this doc: `--targets` created a SECOND
+  metadata-assembly site (`processFile`'s, with no CHECK A); `meta.cbor` is now
+  merged ACROSS targets, a per-target-vs-union closure hazard that did not
+  exist at hand-off; `isTypeMetadataVar`'s prefix-only match is still unfixed
+  here so §4's `kind=4` ambiguity is live; the compile memo means any
+  extract-cost measurement must pin its own memo dir.
+- §5's receipt requirement is re-sized: standing hazard 6 applies to D2 exactly
+  as it did to D1-B, since `allMeta` is forced by the UNTIMED
+  `assertMetaCoversEmitted`. Size the win on `meta.cbor` bytes/entries and
+  `cbor_encode`, not a `translate`-phase delta.
+
+---
+
 **Status: CUT from the extract-wave (Inanna, 2026-08-09, wrap-up directive). No
 code was written. No dev was spawned.**
 

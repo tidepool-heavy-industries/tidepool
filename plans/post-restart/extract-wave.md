@@ -491,6 +491,16 @@ deliverable, not green legs.**
 | **`--targets` prerequisite** (`boot-targets`) | multi-target emission, strict-mode skip unreachable **as a separate function**; differential/corpus/fidelity outstanding |
 | **D1-B** (`d1-remove`) | `scanMeta` gone; `nameById` decoupled (`collectReachableConDCsRaw` for CHECK A's names vs the filtered collector for CHECK B). **Wire MOVES, not proven inert.** Its fidelity 30/30 and acceptance 24/24 are complete BUT were taken at `42be934d`, a **pre-E6 tree** — both drive real extracts, which E6's tiering changes, so they do **not** validate the merged tip. Quick tier was killed mid-compile, so **the three pinned id-stability tests never ran** — on the one item (a metadata-source removal) where that trio is genuinely on point |
 
+> **SUPERSEDED 2026-08-11 — both caveats below are now discharged, and the
+> update is itself measured.** The 2 was measured on the centralized tip (it is
+> what `PRE_MODEL_EXTRACT_COMPILES` recorded), and wave 3 then took it to
+> **1** — `838862ba`, receipt at
+> `extract-wave/spawn-latency/05-wave3-measurement.md`. So item 0's headline is
+> **4 → 1, measured at both steps**. The two paragraphs below are retained
+> verbatim because they were correct when written and because the note about
+> the first draft's error is worth keeping visible; read them as history, not
+> as current status.
+
 **Item 0's headline is an EXPECTED 4 → 2, not 4 → 1, and the 2 is UNMEASURED.**
 Two claims, both needing to survive quoting:
 - Even fully verified, this is 4 → 2. The remaining two are the render and loop
@@ -511,10 +521,27 @@ leaving the note visible rather than silently fixing the line.)
   disk at `extract-wave/boot/02-wave3-one-compile.md`, premise-corrected. Both
   its gates (boot-lazy's fold, `--targets` landing) are satisfied by this fold,
   so it spawns with no unknowns.
+  > **EXECUTED 2026-08-11** (lane `spawn-latency`, `838862ba`). Driver-side
+  > only — its entire extract side was already done by `--targets`. Pre-model
+  > extract spawns **2 → 1**; pre-model boot path median **22.449s → 11.664s**
+  > (−48.0%, non-overlapping distributions), receipt at
+  > `extract-wave/spawn-latency/05-wave3-measurement.md`. **Item 0's headline
+  > is now complete and MEASURED: 4 → 1.** The mechanism is one fewer whole GHC
+  > session, not less translation work — both entries are still compiled.
 - **D2** — reachability-narrowed `RuntimeTypeClosure`. Hand-off carries: the
   enumerated pinned trio and which risk each test observes; mandatory freer
   roots **derived from `freer_names`**, never hand-listed; the corrected gate
   set; empirical supplier attribution as step one.
+  > **RE-VALIDATED 2026-08-11, STILL UN-STARTED — blocked on the `batch-turns`
+  > lane, which owns `haskell/app/Main.hs` where D2's whole edit lives.**
+  > Adjusted spec at `extract-wave/spawn-latency/04-turn-latency-plan.md`
+  > §1/§1a. Premise holds at HEAD. **But the "derived from `freer_names`, never
+  > hand-listed" requirement quoted above cannot be satisfied as written** —
+  > `freer_names` is a Rust module, the narrowing is in Haskell, and no
+  > Haskell-side mirror exists; the intent-preserving form is *do not replace
+  > the binder-type closure*. Four further drifts logged there (`--targets`
+  > added a second, CHECK-A-less metadata site; `meta.cbor` now merges across
+  > targets; `isTypeMetadataVar` still unfixed; compile memo).
 - **C2/E5, E1, E2, E3, E4** — unstarted, unchanged.
 
 ## Standing hazards this wave established (not fixed here)

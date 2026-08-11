@@ -1,5 +1,42 @@
 # Wave 3 — `boot-onecompile`: item 0 steps 4–5
 
+**Status: EXECUTED 2026-08-11** (lane `spawn-latency`, dev `wave3-fusion`,
+commit `838862ba`). Both holds cleared before it ran: wave 2 folded and
+`--targets` landed on both sides.
+
+**Measured:** pre-model extract spawns **2 → 1**; pre-model boot path median
+**22.449s → 11.664s** (−48.0%), non-overlapping distributions. Full receipt,
+including an invalid first A/B that was caught and redone under matched
+conditions, in
+`plans/post-restart/extract-wave/spawn-latency/05-wave3-measurement.md`.
+Item 0's end state (exactly ONE GHC compile pre-model) is reached.
+
+**Two claims in this spec were STALE at execution time** — corrected in
+`plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md` §2,
+which is the spec the work was actually built against:
+
+1. The whole "extract side" section below was already DONE (`--targets` landed
+   as its own item; `compile::compile_turns` is the Rust entry). This reduced
+   to driver-side fusion with no Haskell edit — as this file's own premise
+   correction predicted it would.
+2. "render additionally splices `__selfHarnessCompaction`" is **false at
+   HEAD**: the compaction summary is composed in Rust after the render run, so
+   render and loop splice byte-identical `state_in(prior_state)` text. One
+   splice, not two — the fusion was sounder than argued here.
+
+**One obstacle this spec did not mention:** the turn template hard-codes a
+single entry binder (`result`), so a fused module needed a second one. Resolved
+by an additive `TurnTemplate::extra_entries` rendered through the same code
+path as `result` — NOT a hand-written entry in the `helpers` slot, which would
+have re-created the hand-maintained-copy mechanism this wave's ledger keeps
+catching.
+
+---
+
+<details>
+<summary>Original spec as written (HELD status, stale sections retained for
+history)</summary>
+
 **Status: HELD** on TWO things now — wave 2's fold (it rewrites the same three
 functions) and the `--targets` prerequisite (`03-targets-prereq.md`).
 
@@ -119,3 +156,5 @@ re-check that specifically.
 splits. Per the realm-spike conflict experiment these are deliberately NOT
 pre-partitioned. Write a minimal localized diff, do not reorganize surrounding
 code, and log anything non-mechanical in `LEDGER.md` at fold.
+
+</details>
