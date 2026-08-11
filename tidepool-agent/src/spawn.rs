@@ -1,6 +1,4 @@
-//! Atomic coupled spawn — LANE 1 of PRD 18 (per the 2026-08-09 addendum's
-//! locked decisions 3 and 4: ONE authored call yields agent + worktree, and
-//! `createWorktree` is not public vocabulary).
+//! Atomic coupled spawn: one authored call yields an agent + worktree pair.
 //!
 //! One call runs the whole saga:
 //!
@@ -29,13 +27,6 @@
 //! - a rollback that itself fails is [`SpawnError::RollbackFailed`], loud,
 //!   carrying both the original failure and the rollback failure — never a
 //!   silent swallow of either.
-//!
-//! ## What this module does not do
-//!
-//! No git verbs (the manager owns git truth), no backend vocabulary (the
-//! [`OneCycleBackend`] seam owns that), no durable agent registry (the
-//! in-process [`AgentId`] mint is a lane-1 provisional — durable identity is
-//! lifecycle-lane territory, routed in the lane handoff).
 
 use tidepool_worktree::{
     AgentRef, BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId,
@@ -66,9 +57,7 @@ fn now_ms() -> i64 {
 ///
 /// The label is decoration — never a path, never an identity (the minted
 /// [`AgentId`] in front of it is what makes the ref unique), so it is reduced
-/// to `[A-Za-z0-9._-]` with runs of `-` collapsed and the ends trimmed. Same
-/// shape as `create.rs`'s branch-name sanitizer minus `/`, which has no
-/// business in a ref that is written into a filename-adjacent record. An
+/// to `[A-Za-z0-9._-]` with runs of `-` collapsed and the ends trimmed. An
 /// all-punctuation label falls back to `worker` rather than yielding a ref
 /// ending in a bare `-`.
 fn sanitize_label(label: &str) -> String {
@@ -125,9 +114,7 @@ impl std::fmt::Display for SpawnStage {
     }
 }
 
-/// The ONE typed error a coupled spawn can return (PRD 18 addendum decision 2:
-/// typed failure results everywhere; variant list filled by this lane's
-/// contact with reality, deliberately provisional).
+/// The ONE typed error a coupled spawn can return.
 ///
 /// By the time a caller sees any variant except `RollbackFailed`, the rollback
 /// has already happened: no Active binding remains, and the worktree (if one
@@ -177,11 +164,7 @@ pub enum SpawnError {
     NotRunning { agent: AgentId, detail: String },
 
     /// The runtime's hard backstop on tool-call rounds fired
-    /// ([`MAX_TOOL_ROUNDS`]). This is NOT the authored round cap — that is
-    /// resident policy and lives in the Haskell driver loop, which refuses
-    /// politely and lets the child finish. Reaching THIS one means the policy
-    /// cap was absent or broken, so it fails loudly and rolls back rather than
-    /// letting a loop spend a budget nobody is watching.
+    /// ([`MAX_TOOL_ROUNDS`]) — the authored policy cap was absent or broken.
     #[error("agent {agent:?} exceeded the runtime tool-round backstop of {limit}")]
     RoundBackstop { agent: AgentId, limit: u32 },
 }
@@ -211,8 +194,7 @@ impl SpawnError {
 pub const MAX_TOOL_ROUNDS: u32 = 64;
 
 /// What workspace a spawn runs in — a new managed worktree, or an existing
-/// UNBOUND one by durable id (PRD 18 addendum decision 3: `spawnAgent`
-/// accepts a `WorktreeSpec` OR an existing unbound worktree handle).
+/// UNBOUND one by durable id.
 #[derive(Debug, Clone)]
 pub enum SpawnWorkspace {
     New(WorktreeSpec),
@@ -274,8 +256,8 @@ pub enum SpawnStep {
     Done(Box<OneCycleRun>),
 }
 
-/// The coupled pair a successful spawn yields (PRD 19: `WorkerRun` as the
-/// result shape), plus the backend thread identity a later attach would need.
+/// The coupled pair a successful spawn yields, plus the backend thread
+/// identity a later attach would need.
 #[derive(Debug, Clone)]
 pub struct WorkerRun {
     pub agent: AgentId,
@@ -324,10 +306,9 @@ pub struct CoupledSpawner {
     next_agent: u64,
     /// The agent currently mid-turn, if any.
     ///
-    /// ONE at a time, deliberately: multi-agent concurrency is chartered later
-    /// work (README: "multi-agent correlation is wave-2 work"), and a spawner
-    /// that silently supported two would make the untested case reachable. A
-    /// second `begin` while one is running is a loud failure, not a queue.
+    /// ONE at a time, deliberately: a spawner that silently supported two
+    /// would make an untested concurrent case reachable. A second `begin`
+    /// while one is running is a loud failure, not a queue.
     running: Option<RunningAgent>,
 }
 
@@ -368,8 +349,8 @@ impl CoupledSpawner {
         &self.bindings
     }
 
-    /// Mint the next in-process agent identity. PROVISIONAL (lane 1): durable
-    /// agent identity across restarts is lifecycle-lane territory.
+    /// Mint the next in-process agent identity. PROVISIONAL: not durable
+    /// across restarts.
     pub fn mint_agent_id(&mut self) -> AgentId {
         let id = AgentId(self.next_agent);
         self.next_agent += 1;
@@ -393,9 +374,6 @@ impl CoupledSpawner {
         request: &SpawnRequest,
     ) -> Result<SpawnStep, SpawnError> {
         if let Some(running) = &self.running {
-            // Refusing is the point: a spawner that queued or silently
-            // replaced would make multi-agent concurrency — which nothing has
-            // tested — reachable by accident.
             return Err(SpawnError::NotRunning {
                 agent: running.agent,
                 detail: format!(
@@ -409,8 +387,8 @@ impl CoupledSpawner {
         //    here has nothing to compensate: no binding row is ever written.
         let worktree = self.resolve_workspace(&request.workspace)?;
 
-        // 2. Identity. The label is decoration on the `AgentRef` — the id is
-        //    what makes it unique — so sanitizing it cannot collide two agents.
+        // 2. Identity: mint the agent id, then sanitize the label into the
+        //    `AgentRef` tail.
         let agent = self.mint_agent_id();
         let binding_ref = format!("agent-{}-{}", agent.0, sanitize_label(&request.agent_label));
 
@@ -622,10 +600,9 @@ impl CoupledSpawner {
     /// The whole saga behind ONE call, refusing every tool call the child
     /// makes.
     ///
-    /// A COMBINATOR over `begin`/`answer`, not a second primitive — PRD 18's
-    /// rule for synchronous delegation. This is the no-tools path: a request
-    /// carrying no declarations should produce no calls, and one that arrives
-    /// anyway is refused rather than left parked.
+    /// The no-tools path: a request carrying no declarations should produce
+    /// no calls, and one that arrives anyway is refused rather than left
+    /// parked.
     pub fn spawn_one_cycle(
         &mut self,
         backend: &mut dyn AgentBackend,

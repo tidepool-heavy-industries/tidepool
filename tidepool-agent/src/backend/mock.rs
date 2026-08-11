@@ -1,9 +1,8 @@
 //! The scripted seam backend — the ONLY backend any committed test may drive.
 //!
-//! Standing rule (Inanna, 2026-08-09): no live-model turns in tests or
-//! automated code.
+//! Standing rule: no live-model turns in tests or automated code.
 //!
-//! # This mock implements the SEAM, never the protocol (root/human, 2026-08-11)
+//! # This mock implements the SEAM, never the protocol
 //!
 //! It answers seam-trait calls from a fixed script and records what it was
 //! asked. It knows nothing about JSON-RPC, frame ordering, session lifecycle,

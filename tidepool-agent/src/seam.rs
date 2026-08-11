@@ -24,17 +24,13 @@ pub struct BackendThreadId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TurnId(pub String);
 
-/// One dynamic tool as declared to a backend at agent creation.
-///
-/// Emitted by the Haskell Generic tool compiler (`compileTools`), one per
-/// record selector, and frozen for the lifetime of the agent thread — Codex
-/// dynamic tools are thread-scoped, not turn-scoped, so this is not
-/// re-negotiable mid-agent.
+/// One dynamic tool as declared to a backend at agent creation, frozen for
+/// the lifetime of the agent thread — Codex dynamic tools are thread-scoped,
+/// not turn-scoped, so this is not re-negotiable mid-agent.
 ///
 /// `input_schema` is JSON Schema because that is what every current backend
-/// speaks, NOT because the authored surface knows about JSON Schema. It is
-/// derived from the endpoint's input type by the structural interpreter; no
-/// authored Haskell writes one.
+/// speaks, not because the authored surface knows about JSON Schema; it is
+/// derived from the endpoint's input type by the structural interpreter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicToolDeclaration {
     /// The normalized wire name (snake_case of the record selector).
@@ -52,8 +48,7 @@ pub struct ToolCallId(pub String);
 ///
 /// The correlation triple (`thread`, `turn`, `call`) rides every call because
 /// it is what makes a cross-agent misroute DETECTABLE rather than a silent
-/// wrong answer — the adapter bring-up confirmed all three are present on the
-/// wire.
+/// wrong answer.
 ///
 /// While a call is parked the child's turn is stopped: nothing is spent, and
 /// nothing times out except by the backend's own clock. The parent is free to
@@ -110,7 +105,7 @@ pub enum TurnEvent {
 
 /// How hard the model should think. Distinct from [`ModelPolicy`]: the model
 /// is WHICH engine, this is HOW MUCH of it to spend, and the two move
-/// independently (the granted budget for this lane's live leg names both).
+/// independently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningEffort {
     Low,
@@ -131,8 +126,8 @@ pub struct TokenUsage {
     pub total_tokens: i64,
 }
 
-/// Receipt-bearing observations. Model prose is never the source of any field
-/// here — PRD 18: "Runtime receipts are authoritative."
+/// Receipt-bearing observations. Model prose is never the source of any
+/// field here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentActivity {
     /// A command the backend actually ran, with what it actually returned.
@@ -167,40 +162,30 @@ pub enum AgentBackendError {
 }
 
 /// How a spawn names the model it wants. Runtime-RESOLVED, never a hardcoded
-/// slug (Inanna, 2026-08-09): the backend queries its own model list and picks
-/// the concrete model, and [`CycleOutcome::resolved_model`] records EXACTLY
-/// what it got — a receipt naming a tier rather than the model it actually ran
-/// is not checkable.
+/// slug: the backend queries its own model list and picks the concrete
+/// model, and [`CycleOutcome::resolved_model`] records EXACTLY what it got —
+/// a receipt naming a tier rather than the model it actually ran is not
+/// checkable.
 ///
 /// Each variant names an ALLOWLIST, in preference order. The allowlist is the
 /// mechanism by which a banned model is unreachable: resolution takes the first
 /// listed slug the backend actually offers and FAILS otherwise, so no slug
 /// outside the list can be selected however the catalogue changes. A denylist
 /// would have to anticipate every future name; this does not.
-///
-/// A richer semantic vocabulary (`Fast`/`Capable`/`Deep`) is PRD 18 open
-/// decision 3, still open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelPolicy {
     /// Cheap plumbing: prefer `gpt-5.4-mini`, else `gpt-5.6-luna`.
     CheapPlumbing,
     /// The cheapest gpt-5.6 tier, pinned: `gpt-5.6-luna` and nothing else.
     ///
-    /// Exists because the human's 2026-08-11 live-budget grant names that exact
-    /// tier at [`ReasoningEffort::Low`]. [`ModelPolicy::CheapPlumbing`] would
-    /// resolve to `gpt-5.4-mini` on the observed catalogue, which is a
-    /// different model than the one that was granted — so "just reuse
-    /// CheapPlumbing" would spend the budget on something nobody authorized.
+    /// Distinct from [`ModelPolicy::CheapPlumbing`], which would resolve to
+    /// the cheaper `gpt-5.4-mini` — a specific budget grant names this exact
+    /// tier, and cheaper is not the same as granted.
     CheapestGpt56,
 }
 
 /// What one thread is created with. Frozen for the thread's lifetime — dynamic
 /// tools are thread-scoped, not turn-scoped.
-///
-/// Lane 1's authored surface passes no dynamic tools (`dynamic_tools: []`);
-/// the field exists because the transport supports them and the agent wave
-/// proved the round trip live — parent-tool dispatch through the realm is a
-/// later lane's work, not a seam gap.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpec {
     pub ephemeral: bool,
@@ -258,9 +243,6 @@ pub struct CycleOutcome {
     /// [`ModelPolicy`] rule, never the tier name.
     pub resolved_model: String,
     /// What the turn actually cost, when the backend reported it. `None` means
-    /// the backend said nothing about usage — never "it was free". Lane 1 had
-    /// no way to fill this in (the `thread/tokenUsage/updated` notifications
-    /// were read off the wire and discarded); a lane that spends a real budget
-    /// has to report what it spent, so this is where that lands.
+    /// the backend said nothing about usage — never "it was free".
     pub usage: Option<TokenUsage>,
 }

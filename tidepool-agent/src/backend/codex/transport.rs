@@ -14,28 +14,12 @@
 //!
 //! [`Session`](super::process::Session) is generic over this trait with
 //! `RawAsyncClient` as its DEFAULT type parameter, rather than holding a boxed
-//! trait object. Two reasons, in order:
-//!
-//! 1. **The live path stays allocation-identical.** `Session<RawAsyncClient>`
-//!    monomorphizes to the same code the pump compiled to before the trait
-//!    existed: no box, no vtable, and no per-frame virtual call on the read
-//!    loop. A `dyn` version would additionally need boxed futures — `async fn`
-//!    is not dyn-compatible — so every `next_line` on the hot path would
-//!    allocate. Making a test seam cost the production path an allocation per
-//!    frame is exactly the wrong trade.
-//! 2. **The default type parameter means existing code is unedited.** Every
-//!    `Session` mention elsewhere (`driver.rs`'s `Option<Session>`, its
-//!    `&Session` helper arguments) keeps resolving to the live session with no
-//!    change, so introducing the seam moved no live behavior.
-//!
-//! # Errors
-//!
-//! The error type is `codex_codes::Error`, unchanged from what
-//! `RawAsyncClient` already returned, so `SessionError` and its projection in
-//! `driver.rs` needed no new variant. A replay-side mismatch surfaces as
-//! `codex_codes::Error::Protocol` — the variant whose meaning ("the peer did
-//! something the protocol does not allow") is exactly what a transcript
-//! mismatch is.
+//! trait object: `Session<RawAsyncClient>` monomorphizes to the same code the
+//! pump compiled to before the trait existed — no box, no vtable, and no
+//! per-frame virtual call on the read loop. A `dyn` version would additionally
+//! need boxed futures (`async fn` is not dyn-compatible), so every `next_line`
+//! on the hot path would allocate. Making a test seam cost the production path
+//! an allocation per frame is exactly the wrong trade.
 
 use std::future::Future;
 

@@ -51,7 +51,7 @@ pub enum DynamicToolNamespaceTool {
 
 /// `thread/start` params, hand-rolled because `dynamicTools` is missing from
 /// `codex_codes::ThreadStartParams`. Deliberately narrow — only the fields
-/// phase 4 needs, not a general-purpose replacement for the typed struct.
+/// this adapter needs, not a general-purpose replacement for the typed struct.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadStartWithDynamicTools {

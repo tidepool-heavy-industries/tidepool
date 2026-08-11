@@ -106,14 +106,14 @@ impl ConfigSnapshot {
 /// Whether `name` is a `-wal`/`-shm` sidecar SQLite creates on first open in
 /// WAL mode for a database that already existed before the run.
 ///
-/// Confirmed empirically (2026-08-08, phase 3 of PRD 18 bring-up): starting
-/// `codex app-server` against a real `~/.codex` creates `-shm`/`-wal`
-/// siblings for `goals_1.sqlite`, `memories_1.sqlite`, and `state_5.sqlite`
-/// even though their *content* hash is untouched — this is SQLite's WAL
-/// bookkeeping on open, not a new state store, and not the project-trust
-/// write PRD 18 cares about. A sidecar for a `.sqlite` file that did NOT
-/// already exist is still flagged: that would mean a new database was
-/// created this run, which is surprising.
+/// Confirmed empirically: starting `codex app-server` against a real
+/// `~/.codex` creates `-shm`/`-wal` siblings for `goals_1.sqlite`,
+/// `memories_1.sqlite`, and `state_5.sqlite` even though their *content*
+/// hash is untouched — this is SQLite's WAL bookkeeping on open, not a new
+/// state store, and not the project-trust write this checker cares about. A
+/// sidecar for a `.sqlite` file that did NOT already exist is still flagged:
+/// that would mean a new database was created this run, which is
+/// surprising.
 fn is_benign_wal_sidecar(name: &str, before: &BTreeSet<String>) -> bool {
     let Some(base) = name
         .strip_suffix("-wal")
@@ -140,9 +140,8 @@ impl FieldVerdict {
     }
 }
 
-/// The result of comparing two [`ConfigSnapshot`]s. Report every field, not
-/// just the aggregate verdict — "config.toml sha256 identical" is the unit
-/// of evidence PRD 18 asks for, never a bare pass/fail exit code.
+/// The result of comparing two [`ConfigSnapshot`]s: every field individually,
+/// not just an aggregate verdict, so a failure shows which value changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationReport {
     pub config_toml: FieldVerdict,
@@ -289,10 +288,6 @@ mod tests {
 
     #[test]
     fn live_database_churn_is_ignored() {
-        // This is the whole point of scoping the checker: `~/.codex` holds
-        // sqlite databases + -wal/-shm siblings the operator's own sessions
-        // write to continuously. Those files existing before the run and
-        // changing during it must not fail isolation.
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
         write(dir.path(), "logs_2.sqlite", "initial-bytes");
@@ -312,13 +307,6 @@ mod tests {
 
     #[test]
     fn wal_sidecar_appearing_for_a_preexisting_database_is_ignored() {
-        // Confirmed empirically against the operator's real ~/.codex
-        // (phase 3, 2026-08-08): starting `codex app-server` causes SQLite
-        // to create -shm/-wal siblings for goals_1.sqlite,
-        // memories_1.sqlite, and state_5.sqlite on first open in WAL mode —
-        // even though those databases' *content* is never touched, and even
-        // though they had no sidecars at all before the run. This must not
-        // fail isolation: it is SQLite bookkeeping, not a new state store.
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
         write(dir.path(), "goals_1.sqlite", "pre-existing-bytes");
@@ -334,10 +322,6 @@ mod tests {
 
     #[test]
     fn wal_sidecar_for_a_brand_new_database_is_still_flagged() {
-        // Contrast with the case above: if the *base* .sqlite file didn't
-        // exist before the run either, this is a genuinely new local state
-        // store, not bookkeeping on an existing one — still surprising,
-        // still flagged.
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
 

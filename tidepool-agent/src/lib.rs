@@ -13,20 +13,6 @@
 //!    type that is a re-export or a newtype of a `codex-codes` type has already
 //!    broken the boundary, because a backend version bump then reaches the
 //!    Haskell surface.
-//!
-//! PRD 18 non-goal, quoted: "Making `codex-codes` types part of Tidepool's
-//! public Rust or Haskell API." The adapter is pinned, compatibility-tested,
-//! and replaceable — vendoring or rewriting it must be a change confined to
-//! [`backend::codex`].
-//!
-//! # What lives here and what does not
-//!
-//! Here: process lifecycle, request correlation, protocol fixtures, and the
-//! translation between a backend's wire events and the seam vocabulary.
-//!
-//! Not here: the authored Haskell surface (`Call`/`Notify`/`Tool`/`AsServerT`),
-//! the Generic tool compiler, the agent registry, and realm parking. Those
-//! consume this crate; they do not live in it.
 
 pub mod backend;
 pub mod seam;

@@ -14,16 +14,11 @@
 //!
 //! # Protocol truth
 //!
-//! `fixtures/app-server-0.146.0/PROTOCOL-NOTES.md` records the phase-2
-//! findings sourced offline from the pinned CLI tag and the `codex-codes`
-//! generated types: where `dynamicTools` attaches (`ThreadStartParams`,
-//! top-level, NOT nested in `config`), the `experimentalApi` opt-in, the
-//! tool-error shape, and `outputSchema`. The headline finding: `codex-codes`
-//! 0.146.4 does not expose `dynamicTools` or its spec types at all
-//! (experimental-gated fields are dropped from schema generation), so this
-//! module hand-rolls `DynamicToolSpec` and friends and sends `thread/start`
-//! through the crate's raw `request()` escape hatch rather than its typed
-//! helper.
+//! `codex-codes` 0.146.4 drops `dynamicTools` and its spec types entirely —
+//! experimental-gated fields are cut from schema generation — so this module
+//! hand-rolls `DynamicToolSpec` and friends and sends `thread/start` through
+//! the crate's raw `request()` escape hatch. Full offline sourcing:
+//! `fixtures/app-server-0.146.0/PROTOCOL-NOTES.md`.
 //!
 //! # Config isolation
 //!
