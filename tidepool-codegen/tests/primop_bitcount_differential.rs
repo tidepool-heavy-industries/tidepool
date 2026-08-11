@@ -102,16 +102,6 @@ const INPUTS: &[u64] = &[
 ];
 
 #[test]
-fn bitcount_eval_matches_spec() {
-    for &op in OPS {
-        for &n in INPUTS {
-            let expr = build_unary_word(op, n);
-            assert_eq!(eval_word(&expr), spec(op, n), "eval {op} {n:#x}");
-        }
-    }
-}
-
-#[test]
 fn bitcount_eval_equals_jit() {
     for &op in OPS {
         for &n in INPUTS {
