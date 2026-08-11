@@ -1148,7 +1148,7 @@ mod import_gating_pin {
 
     const DECL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}";
 
-    /// The 15 fixed import lines every row carries, regardless of effect set
+    /// The 14 fixed import lines every row carries, regardless of effect set
     /// (mirrors [`super::eval_import_lines`] with `user_library: false`).
     const FIXED_IMPORTS: &str = "\
 import Tidepool.Prelude hiding (error)
@@ -1250,10 +1250,7 @@ import qualified Tidepool.Git as Git";
     /// [`PaginateMode::Passthrough`] (what `tidepool-repl` uses) swaps only
     /// the `paginateResult` alias BODY relative to [`PaginateMode::Truncate`]
     /// — imports stay identical, and with no effects neither mode emits an
-    /// alias at all. Was pinned by `tidepool-repl`'s own copy
-    /// (`passthrough_mode_matches_hand_patched_preamble` /
-    /// `passthrough_mode_is_noop_without_alias`) before this row existed;
-    /// moved here since this is the true owner of preamble behaviour.
+    /// alias at all.
     #[test]
     fn passthrough_mode_swaps_only_the_paginate_alias_body() {
         let decls = crate::standard_decls();

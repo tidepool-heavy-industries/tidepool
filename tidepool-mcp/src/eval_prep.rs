@@ -8,8 +8,8 @@
 //! re-exported from `lib.rs` via `pub use eval_prep::*;`, so existing callers
 //! (`tidepool_mcp::template_haskell`, `standard_decls`, ...) are unaffected.
 //!
-//! Two intentionally-excluded neighbours stay in `lib.rs`: `build_preamble`
-//! (being edited in parallel) and `ensure_effects_module` (it writes a temp
+//! Two intentionally-excluded neighbours stay elsewhere: `build_preamble`
+//! (`preamble.rs`) and `ensure_effects_module` (`lib.rs`; it writes a temp
 //! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
 //!
 //! Failure CLASSIFICATION (mapping an error to its class/phase) is NOT here — it
@@ -61,15 +61,11 @@ macro_rules! base_effects {
 /// single-source [`base_effects!`] list — do not hand-maintain a parallel
 /// order here.
 ///
-/// `RunLLMTurn` (self-iterating-harness WS-B) was split OUT of `Ask` into its
-/// own effect/union-tag, but stays appended here (not opt-in) so ordinary
-/// eval/repl sessions keep the exact `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout`/`forkAll`/`forkMap`/`forkCata` availability they had
-/// when those verbs lived inside `Ask`'s helpers — only the wire constructor
-/// (`RunLLMTurnWith` instead of `AskWith`) changed. `Fork` backs
-/// `Tidepool.Fork`'s `forkSited`/`forkAllSited` (the retarget off
-/// `RunLLMTurn`'s helpers) and must stay in the roster or the generated
-/// `Tidepool.Effects` cannot export those names. All three are UNHANDLED
+/// `RunLLMTurn` and `Fork` must stay in the roster (not opt-in): the generated
+/// `Tidepool.Effects` only exports `runLLMTurn`/`runLLMTurnFork`/
+/// `runLLMTurnFanout`/`forkAll`/`forkMap`/`forkCata` (via `RunLLMTurn`) and
+/// `Tidepool.Fork`'s `forkSited`/`forkAllSited` (via `Fork`) when their decls
+/// are present. All three are UNHANDLED
 /// (interposed) tags: no `tidepool-handlers` entry, serviced by each server's
 /// own suspend machinery (see `tidepool-codegen::jit_machine::drive_effect_loop`'s
 /// `suspend_tag` threshold — every tag from the first interposed effect
@@ -84,15 +80,6 @@ pub fn standard_decls() -> Vec<EffectDecl> {
     crate::base_effects!(std_decls_rows)
 }
 
-/// Generate the Haskell module preamble that wraps user code in `eval` calls.
-///
-/// Emits: language pragmas, `module Expr`, standard imports (`Tidepool.Prelude`,
-/// `Control.Monad.Freer`, qualified `Data.Text`/`Data.Map`/etc.), the user `Library`
-/// import (if present), GADT declarations for each registered effect, the `type M`
-/// alias over the full effect list, and thin helper functions (e.g. `say`, `kvGet`).
-///
-/// The Schema vocabulary + structured `ask`/`llm` come from the Ask/Llm effect
-/// decls (`ask`/Schema always present; `llm` needs the Llm effect).
 /// Source of the generated `Tidepool.Effects` module: effect type_defs,
 /// GADTs, the `M` alias, the `error :: Text -> a` shadow, and the thin
 /// send-wrapper helpers.
@@ -1480,15 +1467,12 @@ mod tests {
     }
 }
 
-/// Pin test: byte-exact output of the `template_haskell*` wrapper paths
-/// (three that existed before the `TurnTemplate` options-struct refactor,
-/// plus the fourth `render: ToWire` + `anchor_result: true` combination the
-/// refactor newly makes expressible — no named wrapper existed for it, so it
-/// is pinned as NEW, not carried over unchanged). Same discipline as
-/// `preamble.rs`'s `import_gating_pin`: hardcoded literal expected text, not
-/// a call back into any production string-builder, so a refactor of the
-/// templating internals cannot keep this green while silently changing the
-/// emitted bytes. `TurnTemplate::render`'s output is a compile-cache input
+/// Pin test: byte-exact output of the `template_haskell*` wrapper paths.
+/// Same discipline as `preamble.rs`'s `import_gating_pin`: hardcoded literal
+/// expected text, not a call back into any production string-builder, so a
+/// refactor of the templating internals cannot keep this green while
+/// silently changing the emitted bytes. `TurnTemplate::render`'s output is a
+/// compile-cache input
 /// (it feeds `compile_haskell`'s source, salted independently of
 /// `ensure_effects_module_at`'s own cache — see that fn's doc), so drift here
 /// is a real regression, not cosmetic.
@@ -1530,12 +1514,9 @@ mod template_haskell_pin {
         );
     }
 
-    /// The fourth flag combination (`show_default=true, anchor_result=true`
-    /// — a REPL turn compiled against a real `Finalize T` row) had no named
-    /// wrapper before the `TurnTemplate` refactor, so it was UNREACHABLE
-    /// through the public API even though `template_haskell_impl` supported
-    /// it internally. `TurnTemplate` makes it directly expressible. Pinned
-    /// as NEW output, not carried over from any prior wrapper.
+    /// The `show_default=true, anchor_result=true` combination (a REPL turn
+    /// compiled against a real `Finalize T` row) has no named wrapper —
+    /// construct [`TurnTemplate`] directly for it.
     #[test]
     fn show_default_anchored_combination_is_expressible_and_pinned() {
         let src = TurnTemplate {

@@ -6,13 +6,13 @@
 //!    `build_tool_description`), and
 //! 3. the repl `:browse` meta-command (`tidepool-repl`'s `browse_effects`).
 //!
-//! Before this module each surface hand-maintained (or re-implemented) its own
-//! per-effect enumeration and sig/first-sentence parsing — the historical
-//! tripled-prose drift class. Now the per-effect enumerations DERIVE from the
-//! decls, and the sig/first-sentence parsers live here once (one parser, three
-//! consumers). Only the framing prose around the enumeration stays hand-written
-//! per surface (it differs: eval points at `tidepool://effect/{name}`, the repl
-//! points at `:browse`).
+//! HAZARD: do not hand-roll a fourth per-effect enumeration or sig parser in
+//! a new surface — the three consumers above previously each maintained (or
+//! reimplemented) their own and drifted from each other. The per-effect
+//! enumerations DERIVE from the decls, and the sig/first-sentence parsers
+//! live here once. Only the framing prose around the enumeration stays
+//! hand-written per surface (it differs: eval points at
+//! `tidepool://effect/{name}`, the repl points at `:browse`).
 
 use crate::effect_decls::EffectDecl;
 
@@ -84,7 +84,7 @@ pub fn describe_effect(decl: &EffectDecl) -> String {
 /// The derived effects-enumeration block for a tool description: one
 /// [`describe_effect`] entry per decl, newline-joined (trailing newline
 /// included). Callers supply their own framing header — this is only the
-/// mechanical per-effect body that used to be hand-written in each server.
+/// mechanical per-effect body.
 pub fn describe_effects_index(decls: &[EffectDecl]) -> String {
     let mut s = String::new();
     for d in decls {
@@ -135,8 +135,8 @@ mod tests {
 
     /// Snapshot-guard: the derived index names every effect and lists at least
     /// one of each effect's helper verbs. Adding a new `*_decl()` (with any
-    /// helper) therefore auto-appears in both servers' tool descriptions with no
-    /// hand-edit — the mechanism that kills the tripled-prose drift class.
+    /// helper) therefore auto-appears in both servers' tool descriptions with
+    /// no hand-edit.
     #[test]
     fn derived_index_covers_every_decl_and_a_helper_verb() {
         let decls = standard_decls();

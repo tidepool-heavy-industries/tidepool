@@ -1,4 +1,4 @@
-//! Single-source effect definitions (T6 spike).
+//! Single-source effect definitions.
 //!
 //! Each effect is defined ONCE as an exported `<effect>_effect_def!` macro — the
 //! same callback idiom as [`crate::base_effects!`], applied per effect. The
@@ -80,8 +80,7 @@
 //!   keep the `Result<Response, EffectError>` method shape.
 //!
 //! The error ADT's `data` decl is single-sourced from the same block that
-//! generates the Rust enum, so the two cannot drift. See
-//! `notes/effect-single-source-spike.md`.
+//! generates the Rust enum, so the two cannot drift.
 //!
 //! **Eager-list invariant.** Errors-tagging a LIST-returning verb makes its
 //! result EAGER: a verb-level `Left` is decided at the boundary, and
@@ -354,7 +353,7 @@ macro_rules! effect_decl_projection {
 }
 pub(crate) use effect_decl_projection;
 
-/// Console effect — THE single definition (prototype effect for the T6 spike).
+/// Console effect — THE single definition.
 ///
 /// Everything about Console derives from this table: `console_decl()` (via
 /// [`effect_decl_projection!`], in `effect_decls.rs`) and `ConsoleReq` /
@@ -715,12 +714,11 @@ macro_rules! ask_effect_def {
     };
 }
 
-/// AskUser effect — single definition (self-iterating-harness Wave 2,
-/// `plans/self-iterating-harness/09-askuser-form-gui.md`).
+/// AskUser effect — single definition.
 ///
-/// A BRAND NEW effect, decl-side only, living ALONGSIDE `Ask` (NOT a rename —
-/// `ask_decl` stays load-bearing for `standard_decls()`/`llm_decl`, see this
-/// wave's escalated decision). Presents a typed form to a HUMAN OPERATOR and
+/// A distinct effect, decl-side only, living ALONGSIDE `Ask` (NOT a rename —
+/// `ask_decl` stays load-bearing for `standard_decls()`/`llm_decl`). Presents
+/// a typed form to a HUMAN OPERATOR and
 /// BLOCKS until they submit — distinct from `Ask`, which suspends to the
 /// CALLING LLM AGENT. Answerer-only: it rides in
 /// `tidepool-harness::selfharness::driver::answerer_decls` (`[AskUser,
@@ -775,11 +773,10 @@ macro_rules! askuser_effect_def {
     };
 }
 
-/// RunLLMTurn effect — single definition (self-iterating-harness WS-B).
+/// RunLLMTurn effect — single definition.
 ///
-/// Split OUT of [`ask_effect_def!`]: `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout` used to be verbs riding `Ask`'s own `AskWith`
-/// constructor; they now have their own GADT/union-tag (`RunLLMTurnWith`,
+/// Separate from [`ask_effect_def!`]: `runLLMTurn`/`runLLMTurnFork`/
+/// `runLLMTurnFanout` have their own GADT/union-tag (`RunLLMTurnWith`,
 /// structurally IDENTICAL to `AskWith` — same `Text -> Value -> M Value`
 /// shape, same `typedSite`/`fork`/`fan`/`prompts` payload scheme) so `Ask`
 /// and `RunLLMTurn` are independently interposed effects sharing the JIT's
@@ -904,7 +901,7 @@ macro_rules! runllmturn_effect_def {
     };
 }
 
-/// Finalize effect — single definition (self-iterating-harness WS-B).
+/// Finalize effect — single definition.
 ///
 /// The Agent-side terminal handoff: `finalize \@T x` hands a typed value UP
 /// to the parent `runLLMTurn` hole and TERMINATES the current Agent turn
