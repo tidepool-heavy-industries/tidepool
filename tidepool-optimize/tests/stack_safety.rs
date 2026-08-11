@@ -1,11 +1,9 @@
 //! Stack-safety tests for the rewrite passes' redex search.
 //!
-//! Each pass's `run` walks the whole tree looking for the first redex. That
-//! search was converted from native recursion (`try_*_at`, depth = tree depth)
-//! to an explicit heap stack (`rewrite::find_redex`). These tests build a tree
-//! far deeper than a small thread's call budget and run every pass on a 256 KiB
-//! thread, asserting clean completion. Under the former recursive search these
-//! overflowed (process abort); the explicit-stack search completes.
+//! Each pass's `run` walks the whole tree looking for the first redex, via an
+//! explicit heap stack (`rewrite::find_redex`) rather than recursion by tree
+//! depth. These tests build a tree far deeper than a small thread's call
+//! budget and run every pass on a 256 KiB thread, asserting clean completion.
 //!
 //! The spine is a redex-free `App(Var f, App(Var f, ... Var x))` tower: no
 //! `Lam`/`Let`/`Case`, so every pass walks the full depth and reports no change

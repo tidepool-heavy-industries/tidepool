@@ -2,10 +2,9 @@
 //!
 //! Every pass (`beta`, `dce`, `inline`, `case_reduce`) performs a single
 //! pre-order, left-to-right search for the first applicable redex, rewrites it,
-//! and returns (the pipeline re-runs to fixpoint). The search formerly recursed
-//! by tree depth (`try_*_at`); [`find_redex`] replaces that with an explicit
-//! heap stack, so the passes walk the same deep trees that bit the emitter
-//! without consuming call stack.
+//! and returns (the pipeline re-runs to fixpoint). [`find_redex`] uses an
+//! explicit heap stack rather than recursing by tree depth, so the passes walk
+//! arbitrarily deep trees without consuming call stack.
 //!
 //! The per-node predicate (`try_at`) inspects ONE node and returns the rewritten
 //! whole-tree iff that node is a redex; non-redex nodes fall through to a

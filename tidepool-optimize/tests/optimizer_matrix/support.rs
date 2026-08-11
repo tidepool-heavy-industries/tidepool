@@ -153,7 +153,7 @@ pub fn run_matrix<S, F>(
 /// Distinct from `tidepool_testing::proptest::check_pass_preserves_eval`:
 /// that oracle deep-forces and takes a single `Pass`, while `optimize` returns
 /// `PipelineStats` rather than a `Changed` bool and every `FullPipeline` cell
-/// here historically compared at WHNF only.
+/// here compares at WHNF only.
 pub fn check_pipeline_preserves_eval(expr: CoreExpr) -> Result<(), TestCaseError> {
     let mut heap1 = VecHeap::new();
     let env = Env::new();
