@@ -17,15 +17,10 @@ pub use tidepool_heap::layout::LitTag;
 
 // --- VMContext field offsets (i32 for Cranelift) ---
 
-/// Offset of alloc_ptr within VMContext.
 pub const VMCTX_ALLOC_PTR_OFFSET: i32 = 0;
-/// Offset of alloc_limit within VMContext.
 pub const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
-/// Offset of gc_trigger within VMContext.
 pub const VMCTX_GC_TRIGGER_OFFSET: i32 = 16;
-/// Offset of tail_callee within VMContext.
 pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
-/// Offset of tail_arg within VMContext.
 pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
 /// Offset of machine_state within VMContext. Host-fn-only: JIT-emitted code
 /// must never load this field directly (passing vmctx to a host-fn call is
