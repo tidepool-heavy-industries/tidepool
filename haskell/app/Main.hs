@@ -331,58 +331,39 @@ processFile timing args path = do
               , keepBinder b
               , let n = occNameString (nameOccName (idName b))
               , not ("$" `isPrefixOf` n)]
-        (allMetaMap, allReachBinds) <- foldM (\(acc, reachAcc) name -> do
+        -- The try-and-skip loop stays UPSTREAM of the shared writer (per
+        -- 'translateTargetClosed''s haddock — this is a completely separate
+        -- function/loop, never folded into it behind a policy flag). It
+        -- forces each candidate's CBOR encoding here (not just its
+        -- translation) so a lazy-thunk failure (e.g. unsupported FFI calls,
+        -- the reason 'evaluate' is used at all) still causes a skip rather
+        -- than aborting the whole sweep — 'writeClosedTargets' below has no
+        -- per-target skip of its own and re-encodes every survivor for the
+        -- actual write.
+        closedTargets <- foldM (\acc name -> do
           result <- try $ do
-            ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs
-                         , cmUnresolved = unresolved, cmReachBinds = reachBinds
-                         } <- translateModuleClosed hscEnv binds name
+            closed@ClosedModule { cmNodes = nodes, cmUnresolved = unresolved } <- translateModuleClosed hscEnv binds name
             if not (null unresolved) then do
               let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
               return Nothing
             else do
-              let cbor = encodeTree nodes
-              -- Force CBOR encoding to surface errors from lazy thunks (e.g. unsupported FFI calls)
-              _ <- evaluate (BS.length cbor)
-              let outFile = outDir </> cborFileName name
-              BS.writeFile outFile cbor
-              hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-              let usedMeta = map dcToMeta (Map.elems usedDCs)
-              -- Keyed by (dcid, qname), matching 'tsUsedDCs' and
-              -- 'mergeMetaPreserving': a dcid-alone key would let this
-              -- cross-target Map.union silently drop one of a colliding pair
-              -- (same varId, different qualified name) before it ever reaches
-              -- the loud collision-preserving merge below.
-              return (Just (Map.fromList [((dcmId entry, dcmQualName entry), entry) | entry <- usedMeta], reachBinds))
+              _ <- evaluate (BS.length (encodeTree nodes))
+              return (Just closed)
           case result of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
-              return (acc, reachAcc)
-            Right Nothing -> return (acc, reachAcc)
-            Right (Just (metaMap, reachBinds)) ->
-              return (acc `Map.union` metaMap, reachAcc ++ reachBinds)
-          ) (Map.empty, []) uniqueNames
-
-        -- Write merged metadata. The scan/transitive walks run over the union
-        -- of every target's REACHABLE binds (not the full closed graph), so
-        -- they harvest only constructors the emitted fixtures reference. The
-        -- meta therefore covers every fixture's needs and nothing else
-        -- (quoter-internal Tidepool.QQ.* AST cons and TH machinery vanish).
-        let tyconMeta = collectDataCons tycons
-            scanMeta = collectUsedDataCons allReachBinds
-            transitiveMeta = collectTransitiveDCons allReachBinds
-            wiredInMeta = wiredInDataCons
-            -- Highest priority first; mergeMetaPreserving keeps colliding
-            -- (same-varId, different-qualified-name) entries distinct so the
-            -- loader rejects them loudly instead of one silently winning.
-            allMeta = mergeMetaPreserving
-                        [ wiredInMeta, tyconMeta, Map.elems allMetaMap
-                        , scanMeta, transitiveMeta ]
-            hasIO = any (targetBindingHasIO binds) uniqueNames
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts []
-        let metaFile = outDir </> "meta.cbor"
-        BS.writeFile metaFile metaCbor
-        hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+              return acc
+            Right Nothing -> return acc
+            Right (Just closed) -> return (acc ++ [(name, name, closed)])
+          ) [] uniqueNames
+        -- Surviving targets hand off to the single write path shared with
+        -- --target/--targets: --all-closed now gets 'writeClosedTargets''s
+        -- D1 assertMetaCoversEmitted defense, var_names, and the asks.json
+        -- sidecar(s) it previously lacked. 'writeClosedTargets' deliberately
+        -- omits the second-translation 'scanMeta' scan (D1-B) — do not
+        -- re-add it here.
+        void $ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
 
       (Just targetName, False) ->
         -- Whole-module mode: serialize all bindings as nested lets around the
@@ -396,7 +377,23 @@ processFile timing args path = do
         void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
-        -- Per-binding mode (original behavior)
+        -- Per-binding mode (original behavior). NOT unified with
+        -- 'writeClosedTargets': 'translateBinds' translates each binding
+        -- standalone, over a bare 'TransState' with no unresolved-id set and
+        -- none of the runLLMTurn interception's aux var ids wired (see its
+        -- definition in Translate.hs) — it never runs the
+        -- 'resolveExternals'/reachability closure 'translateModuleClosed'
+        -- does, so it produces no 'ClosedModule' and structurally has
+        -- neither 'cmReachBinds' (what the D1 CHECK A/B walks need) nor any
+        -- unresolved/dangling tracking (what 'cmVarNames' is built from).
+        -- Routing it through the shared writer would mean rebuilding that
+        -- closure machinery here, i.e. changing Translate.hs's translation
+        -- semantics for this call site — out of a write-path lane's scope,
+        -- and not a real unification if faked. It still gains the two
+        -- things its own data honestly supports: a real 'hasIO' (was
+        -- hardcoded False) and the asks.json sidecar's loud-absence
+        -- contract — sites are structurally always empty on this path,
+        -- since 'translateBind' never wires the runLLMTurn interception.
         let translated = translateBinds binds
             dedupd = dedup Map.empty translated
         mapM_ (\(name, nodes) -> do
@@ -416,10 +413,15 @@ processFile timing args path = do
             -- loader rejects them loudly instead of one silently winning.
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-        let metaCbor = encodeMetadata allMeta False mCapturedTy [] warnTexts []
+            hasIO = any (targetBindingHasIO binds . fst) dedupd
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts []
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+        let asksFile = outDir </> "asks.json"
+        writeFile asksFile (renderAsksJson [])
+        hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (0 sites)"
 
   reportDiags res
 
@@ -635,7 +637,7 @@ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts targets = do
   -- "write" phase (mirrors the single-target original).
   ((), writeMs) <- timeSection $ do
     forM_ writes $ \w -> do
-      let outFile = outDir </> twOutFileBase w ++ ".cbor"
+      let outFile = outDir </> cborFileName (twOutFileBase w)
       BS.writeFile outFile (twCbor w)
       hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (twNodeCount w) ++ " nodes, " ++ show (BS.length (twCbor w)) ++ " bytes)"
       when multi $ do
