@@ -163,6 +163,14 @@ standalone spike in the existing `spike-extract` mould (`haskell/CLAUDE.md`'s
 component table), with no Rust side and no protocol. It is the next step and
 the only next step; §3-§6 below are the design that spike unblocks or kills.
 
+> **SETTLED — see §7.** The spike ran (`haskell/spike-batch/`,
+> `plans/post-restart/batch-turns-spike-findings.md`). Risk 1's framing was
+> wrong and the truth is blunter: `load'` never consults the live HPT for
+> recompile avoidance at all — it clears it at the top of every call and reads
+> its baseline only from a caller-supplied `ModIfaceCache`. Threading one
+> flips cycles 2..N to `UpToDate`. Risks 2 and 3 did not materialize. The
+> binder chain resolves across three cycles.
+
 ---
 
 ## 3. (b) Mid-block compile failure and error attribution
@@ -303,13 +311,11 @@ Splitting the batch costs one extra spawn; forking costs 2^m.
 
 Ordered, each gated on the previous:
 
-1. **Spike (§2.3).** A standalone Haskell spike: N sequential compile cycles in
-   one `runGhc`, measuring whether item 2..N skip the stdlib `load'`, with the
-   thin-iface write+inject between cycles. Green → step 2. Red → this document
-   plus the spike's evidence IS the landing, and the blocking mechanism is
-   named.
+1. ~~**Spike (§2.3).**~~ **DONE — §7.**
 2. **Extract side.** A `batchVariant` over the interleaved tier + the
    `--turn-batch` mode; N item directories + the per-item stdout document.
+   Carries the `ModIfaceCache` thread (§7.1) and is gated on the dep-guts memo
+   probe (§7.3).
 3. **Rust side.** `ExtractCmd` batch args, `run_turn_batch`, and a block
    planner in `run_block` that takes maximal statically-plannable runs and
    falls back per-item on any batch failure.
@@ -319,3 +325,117 @@ Ordered, each gated on the previous:
 Non-negotiable throughout: run-until-first-error and per-item attribution are
 preserved exactly (§3); the per-item path is never removed; the `runCompile`
 skeleton's seams are extended, not reworked (§2.2).
+
+---
+
+## 7. Spike result, and the sizing question it reopens
+
+Full evidence: `plans/post-restart/batch-turns-spike-findings.md`. Spike:
+`haskell/spike-batch/Spike.hs` (`cabal test spike-batch`). Three sequential
+cycles in one `runGhc`, with the production `mkThinSessionIface` /
+`writeSessionIface` / `injectSessionScope` between them, instrumented with a
+caller-supplied `Messager` recording GHC's own per-module recompile verdict.
+
+### 7.1 The mechanism: RED as posed, GREEN under GHC's own documented API
+
+**As production calls it, every cycle recompiles the whole stdlib closure.**
+All 12 modules of `Tidepool.Prelude`'s home-package closure report
+`NeedsRecompile(MustCompile)` on cycles 2 and 3, though those exact modules are
+already in the session HPT.
+
+Risk 1's framing ("does `load'` read *in HPT, no linkable* as up-to-date?")
+was the wrong question. `load'` **clears the home-package table at the top of
+every invocation** and reconstructs its recompile-avoidance baseline solely
+from the caller-supplied `Maybe ModIfaceCache` — never from the live HPT.
+`load' Nothing …` (every call site in this codebase, `GhcPipeline.hs:256`)
+means `old_hpt = mempty` on every call, so every module looks brand new
+regardless of session state.
+
+The fix is GHC's own published mechanism for exactly this caller: `newIfaceCache`
+created once and threaded as `load'`'s first argument. `Note [Caching
+HomeModInfo]` (GHC `Make.hs`) is written for "API clients who call `load` …
+[who] like to cache the HomeModInfo in memory between calls" — a batched
+multi-`load'` caller, which is precisely this lane. Threading it flips cycles
+2-3 to `UpToDate` across all 12 modules, `load'` 418ms → 1ms.
+
+Risks 2 (module-graph state) and 3 (EPS across cycles) **did not materialize** —
+neither scenario tripped them.
+
+**And (a) holds under repetition.** `resolvedPriorBinder = Just True` on cycles
+2 and 3, in *both* scenarios: item k+1's typecheck resolves item k's injected
+binder, three deep, in one continuing session. §2.1's by-construction argument
+is now also an observation.
+
+### 7.2 The sizing claim, and why it is measured against the wrong denominator
+
+The spike closes by scoping the win to ~5-20%: `load'` (145-566ms) over a
+~2.6-2.7s per-cycle GHC cost, with the interleaved compile loop flat at
+~2.0-2.2s per cycle in both scenarios.
+
+**That ratio is real but it is not this lane's ratio.** Both scenarios ran
+entirely inside ONE `runGhc`, so the spike never measured the per-spawn fixed
+cost — which is the whole quantity batching exists to delete. The comparison
+that decides the lane is *N items in one spawn* vs *N spawns*, and the terms
+the spike's design put out of reach are:
+
+- process fork/exec of the extract (through the nix wrapper);
+- `getLibdir`, which shells out to `readProcess "ghc" ["--print-libdir"]`
+  whenever `TIDEPOOL_GHC_LIBDIR` is unset (`GhcPipeline.hs:986-992`) — an
+  entire additional GHC process per extract;
+- `runGhc` session init + `setSessionDynFlags` (unit-database load);
+- the cold `load'` the spike *did* measure at 418-566ms.
+
+The extractor already emits this partition: `TIDEPOOL_TIMING=1` gives one
+`tidepool-timing phase=<name> ms=<int>` line per phase
+(`haskell/src/Tidepool/Timing.hs:87`), and `startup` / `ghc_setup` / `ghc_load`
+are exactly the amortizable terms while `typecheck` / `core` are the per-item
+ones. Measuring a real turn's phase table is outstanding (`batch-baseline`) and
+is what turns the win from an argument into a number. **No batch-mode code
+should be written against the ~5-20% figure or against a hoped-for larger one
+until that table exists.**
+
+### 7.3 The compile loop is probably not irreducible either — and that is the next probe
+
+The spike treats the ~2.0-2.2s interleaved compile loop as flat and
+unavoidable, citing `sessionVariant`'s own rationale
+(`GhcPipeline.hs:702-715`): `load'`-provisioned ifaces carry no -O2
+unfoldings, so home-library calls must resolve against freshly recompiled
+bodies or `resolveExternals` bakes `ErrorSentinel` poison. That rationale is
+correct **per spawn**. It does not obviously survive contact with a batch:
+
+Cycle 1's loop already produces full -O2 `ModGuts` for all 12 stdlib modules,
+in memory. Cycle 2 recompiles those same modules, from the same source, under
+the same flags, in the same session — and then `runCompile` merges
+`concatMap mg_binds depGuts ++ mg_binds targetGuts` (`GhcPipeline.hs:449`).
+**Memoizing cycle 1's dep guts and reusing them for cycles 2..N** would cut the
+per-item marginal cost down to the turn module's own compile, which is small.
+If that holds, the dominant per-cycle cost is amortizable too, and the batch
+win is not bounded by `load'`'s share at all.
+
+The soundness argument, as far as reading goes: the target's Core references
+dep bindings through EXTERNAL names, and `Translate.stableVarId` keys those on
+`(module, occ)` strings — so a memoized dep binding and a freshly recompiled
+one carry the same key by construction. A dep module's INTERNAL top-level
+floats are externalized with their unique baked into the OccName
+(`externalizeInternalTops`, `GhcPipeline.hs:947`), and those uniques *would*
+differ between cycle 1's and a hypothetical cycle 2's compile — but using only
+the memoized copy keeps that set internally consistent, and the target cannot
+reference a dep's internal float anyway (`GhcPipeline.hs:942`: internal names
+are not referenceable across `ModGuts`).
+
+**Treat that as a hypothesis, not a conclusion.** It is exactly the shape of
+claim that reads sound and fails as a `case`-trap at run, and this codebase has
+the scar tissue to prove it (#313, the poison-`ErrorSentinel` commentary the
+rationale above comes from). It gets its own probe, on the differential oracle,
+before any batch mode relies on it — and the batch mode must be correct, if
+slower, without it.
+
+### 7.4 Revised gate order
+
+1. **Measure the real phase table** (`batch-baseline`) — settles §7.2 and sizes
+   everything downstream. No code before this.
+2. **Probe the dep-guts memo** (§7.3) against the differential oracle. Green →
+   the batch's per-item cost is the turn module alone. Red → the batch still
+   wins §7.2's fixed costs, and the memo is a written finding.
+3. Then steps 2-4 of §6, with the `ModIfaceCache` thread (§7.1) included from
+   the start.
