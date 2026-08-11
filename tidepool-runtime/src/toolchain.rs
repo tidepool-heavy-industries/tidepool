@@ -174,7 +174,13 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 // Extract location — delegated
 // ---------------------------------------------------------------------------
 
-/// What to pass to `Command::new` for the extract.
+/// The program name for the extract, as a string.
+///
+/// Deliberately spelled without naming the std spawn constructor: this module
+/// resolves and fingerprints, it never spawns, and
+/// `tidepool-extract-cmd`'s `no_open_coded_extract_spawns` guard is a source
+/// scan that (correctly) cannot tell prose from code. Spawning goes through
+/// `ExtractCmd`, which is what makes the spawn counter complete.
 ///
 /// Thin delegation to [`tidepool_extract_cmd::resolve_bin`], which owns the
 /// extract-binary precedence (see the table in this module's docs). Kept as a
