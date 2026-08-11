@@ -8,10 +8,10 @@ self-iterating harness driver blocks on when it needs a human.
 
 - `server.rs` — axum [`router`], the SSE broadcast stream, and [`WebGate`]:
   the `OperatorGate` impl.
-- `render.rs` — a `FormShape` → maud markup for the `id="panel"` fragment
-  (owned by a sibling workstream; see the frozen-seam note in that file).
+- `render.rs` — a `FormShape` → maud markup for the `id="panel"` fragment.
+  Markup and CSS are free to change; the wire contract below is not.
 - `shell.rs` — the full HTML document: inline CSS + the vendored Datastar
-  client JS, no CDN, no build step (also sibling-owned).
+  client JS, no CDN, no build step.
 - `lib.rs` — `spawn_operator_server(port)`: binds `127.0.0.1:<port>`, spawns
   the axum server on a background task, and returns the `Arc<WebGate>` a
   driver's `set_gate` takes. Both binaries below boot the server through it.
@@ -130,8 +130,8 @@ this door is exactly as much operator authority as one through the page:
   hardcoded `127.0.0.1` listener (`lib.rs::bind_addr`). This module never
   opens a socket of its own, so there is no second bind to audit.
 - **Per-prompt nonce.** `AppState::pending_form()` returns the pending
-  `FormShape` alongside `Slot::rev` — the same revision counter F10 already
-  bumps exactly once per `publish`/`take`, under the same lock as `pending`.
+  `FormShape` alongside `Slot::rev` — the same revision counter that is
+  bumped exactly once per `publish`/`take`, under the same lock as `pending`.
   `AppState::submit_form(nonce, submission)` only resolves when `nonce`
   matches the CURRENT revision; a missing, wrong, or stale nonce (the form
   was superseded since it was last `GET`) is rejected and the pending form is
@@ -146,23 +146,10 @@ this door is exactly as much operator authority as one through the page:
 
 Binds `127.0.0.1` only; reachability IS the authorization boundary — there is
 no auth token on the HTTP surface itself. Off-box access is via SSH
-port-forward or tailnet, not a password. There's no untrusted-input surface
-to defend against here the way the old observatory had to worry about
-model-authored display content: a form is derived from a type's own metadata,
-never authored by a model, so every label the page renders traces back to a
-Haskell declaration — and maud escapes text
-content by construction — this crate doesn't need a separate injection-surface
-story.
+port-forward or tailnet, not a password.
 
-## Superseded
-
-This crate used to serve a 7-pane "observatory" (tree/inspector/transcript/
-meters/trace/heap/log) over `tidepool-harness`'s general session-tree engine,
-with its own binary (`tidepool-harness`). That surface, its binary, and its
-Haskell-side `dialogAsk`/`dialogForm` grab-bag counterpart are all deleted —
-the self-iterating harness's `askUser` effect replaced it (`AskWith` itself
-was kept and repurposed: it's the live wire constructor `ask`/`llm` still
-send today, not part of what was deleted). See `plans/README.md` for the
-current plan index; the wave that made this cut
-(`self-iterating-harness/09-askuser-form-gui.md`) was purged from the working
-tree in the 2026-08-08 plans restructure and lives only in git history.
+**No model-authored content reaches the page.** A form is derived from a
+type's own `Generic` metadata, so every label traces back to a Haskell
+declaration, and maud escapes text content by construction. That is why this
+crate has no injection-surface story of its own — and why introducing a pane
+that renders model-produced text would need one.
