@@ -30,9 +30,9 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_block, compile_session_turn, subtract_import_list_names, ModuleEnv, ParkedThread,
-    PersistentSession, SessionBind, SessionError, SessionLib, TurnClassification, TurnKind,
-    ValueTier,
+    classify_block, compile_session_turn, subtract_import_list_names, BoundBinder, ModuleEnv,
+    ParkedThread, PersistentSession, SessionBind, SessionError, SessionLib, TurnClassification,
+    TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -132,6 +132,67 @@ struct ItemRun {
     index: usize,
     kind: ItemKind,
     outcome: TurnOutcome,
+}
+
+// ---------------------------------------------------------------------------
+// Run-path tails: plain owned data computed BEFORE an effect-machine call that
+// a `finish_*` method needs AFTER it, to do the post-run bookkeeping. Every
+// run path (`run_plain_eval`, `run_bind`, `run_multi_bind`,
+// `run_reference_fragment`, `run_bare_expr`) builds its tail right before the
+// machine call and hands it to `finish_*` once the call returns. Under the
+// parked-thread mechanism the machine call always completes inline, so a tail
+// is consumed on the very same stack frame it was built on — but every field
+// is owned data, borrowing nothing from `self`, so a future suspend-and-resume
+// cutover can stow a tail across the suspension instead of holding it on a
+// live native stack (see `plans/unpark/feasibility-map.md` §3).
+// ---------------------------------------------------------------------------
+
+/// [`Session::run_plain_eval`]'s tail: the turn's own [`DataConTable`] (needed
+/// to render the run result via `value_to_json`) and the probed inner type
+/// (`a` in `M a`).
+struct PlainEvalTail {
+    table: DataConTable,
+    inner_type: Option<String>,
+}
+
+/// [`Session::run_bind`]'s tail: the bound name, the value-binding generation
+/// it mints, the binder's identity/tier/type from the extract, and the source
+/// text recorded as the binding's `defining_expr`.
+struct BindTail {
+    name: String,
+    g: Generation,
+    var_id: u64,
+    tier: ValueTier,
+    type_display: String,
+    defining_expr: String,
+}
+
+/// [`Session::run_multi_bind`]'s tail: the value-binding generation and the
+/// per-component binder metadata the extract returned, plus the source text
+/// shared as every component's `defining_expr`.
+struct MultiBindTail {
+    g: Generation,
+    binders: Vec<BoundBinder>,
+    defining_expr: String,
+}
+
+/// [`Session::run_reference_fragment`]'s tail: the caller-resolved inner type
+/// — the only state this path needs after the run to render its result.
+struct ReferenceTail {
+    inner_type: Option<String>,
+}
+
+/// [`Session::run_bare_expr`]'s tail: the value-binding generation and the
+/// `it` binder's identity/tier/type from the extract, plus the source text
+/// recorded as `it`'s `defining_expr`. `type_display` doubles as the type
+/// reported alongside the rendered value (there is only one type here — the
+/// bound `it`'s).
+struct BareExprTail {
+    g: Generation,
+    var_id: u64,
+    tier: ValueTier,
+    type_display: String,
+    defining_expr: String,
 }
 
 /// Map a binder's [`ValueTier`] to the [`BoundValue`] wrapping its root slot —
@@ -970,17 +1031,21 @@ impl Session {
         // `__t <- <expr>` gives `__t :: a`, not the Eff-wrapped action type.
         let inner_type = self.query_inner_type(expr_text);
 
+        let tail = PlainEvalTail { table, inner_type };
+
         let run_result = if self.core.is_bootstrapped() {
             // Later turn: add this expression as a fragment against ITS OWN table
             // (a standalone plain-eval turn carries its own metadata) with an
             // empty env, and run it on the resident machine.
-            match self
-                .core
-                .add_fragment_with_table("repl_turn", &expr, &table, &ExternalEnv::new())
-            {
+            match self.core.add_fragment_with_table(
+                "repl_turn",
+                &expr,
+                &tail.table,
+                &ExternalEnv::new(),
+            ) {
                 Ok(fid) => self
                     .core
-                    .run_funcid_with_table(fid, &table, handlers, captured)
+                    .run_funcid_with_table(fid, &tail.table, handlers, captured)
                     .map(expect_completed),
                 Err(e) => return TurnOutcome::Error(run_fail("JIT re-entry error", e)),
             }
@@ -988,19 +1053,25 @@ impl Session {
             // First turn: bootstrap the machine from `expr` (the seed IS the
             // program) and publish the cancel handle BEFORE running, so a runaway
             // on this bare-expression path is cancellable from the start.
-            if let Err(e) = self.core.bootstrap_if_needed(&expr, &table) {
+            if let Err(e) = self.core.bootstrap_if_needed(&expr, &tail.table) {
                 return TurnOutcome::Error(run_fail("JIT compile error", e));
             }
             self.publish_cancel();
             self.core
-                .run_entry(&table, handlers, captured)
+                .run_entry(&tail.table, handlers, captured)
                 .map(expect_completed)
         };
 
         match run_result {
-            Ok(value) => self.value_outcome(value_to_json(&value, &table, 0), inner_type),
+            Ok(value) => self.finish_plain_eval(tail, value),
             Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
         }
+    }
+
+    /// Post-run bookkeeping for [`Self::run_plain_eval`]: render the value
+    /// against the turn's own table and the probed inner type.
+    fn finish_plain_eval(&mut self, tail: PlainEvalTail, value: Value) -> TurnOutcome {
+        self.value_outcome(value_to_json(&value, &tail.table, 0), tail.inner_type)
     }
 
     /// Assemble a [`TurnOutcome::Value`], truncating an oversized rendered
@@ -1139,31 +1210,45 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT bind add_function error", e)),
         };
-        let slot = match self.core.bind_funcid(
+
+        let tail = BindTail {
+            name,
+            g,
+            var_id: binder.var_id,
+            tier: binder.tier,
+            type_display: binder.type_display,
+            defining_expr: turn_text.to_string(),
+        };
+
+        match self.core.bind_funcid(
             fid,
             handlers,
             captured,
-            matches!(binder.tier, ValueTier::Tier0Data),
+            matches!(tail.tier, ValueTier::Tier0Data),
         ) {
-            Ok(s) => s,
-            Err(e) => return TurnOutcome::Error(run_fail("bind runtime error", e)),
-        };
+            Ok(slot) => self.finish_bind(tail, slot),
+            Err(e) => TurnOutcome::Error(run_fail("bind runtime error", e)),
+        }
+    }
 
-        self.core.set_val_gen(g);
-        let value = bound_value(binder.tier, slot);
+    /// Post-run bookkeeping for [`Self::run_bind`]: advance the value
+    /// generation, root the bound value, and record it on the value plane.
+    fn finish_bind(&mut self, tail: BindTail, slot: RootSlot) -> TurnOutcome {
+        self.core.set_val_gen(tail.g);
+        let value = bound_value(tail.tier, slot);
         // `bind_materialized` records the value binding AND evicts any pure decl
         // of the same name (cross-plane shadow, one-plane invariant).
         self.bind_materialized(BindingEntry {
-            name: BindingName(name.clone()),
-            id: SessionVarId::from_extract(binder.var_id),
-            module: SessionModule::val(g),
+            name: BindingName(tail.name.clone()),
+            id: SessionVarId::from_extract(tail.var_id),
+            module: SessionModule::val(tail.g),
             value,
-            type_display: Some(binder.type_display.clone()),
-            defining_expr: Some(turn_text.to_string()),
+            type_display: Some(tail.type_display.clone()),
+            defining_expr: Some(tail.defining_expr),
         });
         TurnOutcome::Bound {
-            name,
-            type_display: binder.type_display,
+            name: tail.name,
+            type_display: tail.type_display,
         }
     }
 
@@ -1285,31 +1370,42 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT multi-bind add_function error", e)),
         };
+        let n_fields = names.len();
+        let tail = MultiBindTail {
+            g,
+            binders: turn.binders,
+            defining_expr: turn_text.to_string(),
+        };
+
         // bind_funcid_projected deep-forces the whole tuple first (GC-safe:
         // registers all pending parents as Rust roots), then projects each field
         // from the post-GC NF tuple and tenures each separately.
-        let slots = match self
+        match self
             .core
-            .bind_funcid_projected(fid, handlers, captured, names.len())
+            .bind_funcid_projected(fid, handlers, captured, n_fields)
         {
-            Ok(s) => s,
-            Err(e) => return TurnOutcome::Error(run_fail("multi-bind runtime error", e)),
-        };
+            Ok(slots) => self.finish_multi_bind(tail, slots),
+            Err(e) => TurnOutcome::Error(run_fail("multi-bind runtime error", e)),
+        }
+    }
 
-        self.core.set_val_gen(g);
-        // Zip binders with their slots and record each component.
-        // Tier is read from binder metadata (deep_force already handled NF).
+    /// Post-run bookkeeping for [`Self::run_multi_bind`]: advance the value
+    /// generation, then zip each binder with its projected root and record it
+    /// on the value plane. Tier is read from binder metadata (`deep_force`
+    /// already handled NF).
+    fn finish_multi_bind(&mut self, tail: MultiBindTail, slots: Vec<RootSlot>) -> TurnOutcome {
+        self.core.set_val_gen(tail.g);
         let mut components: Vec<BoundComponent> = Vec::new();
-        for (binder, slot) in turn.binders.iter().zip(slots.into_iter()) {
+        for (binder, slot) in tail.binders.iter().zip(slots.into_iter()) {
             let value = bound_value(binder.tier, slot);
             self.bind_materialized(BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
-                module: SessionModule::val(g),
+                module: SessionModule::val(tail.g),
                 value,
                 type_display: Some(binder.type_display.clone()),
                 // The whole multi-bind turn defines each component (`(a,b) <- e`).
-                defining_expr: Some(turn_text.to_string()),
+                defining_expr: Some(tail.defining_expr.clone()),
             });
             components.push(BoundComponent {
                 name: binder.name.clone(),
@@ -1351,17 +1447,25 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
         };
-        let run_result = self
+
+        let tail = ReferenceTail { inner_type };
+
+        match self
             .core
             .run_funcid_session(fid, handlers, captured)
-            .map(expect_completed);
-        match run_result {
-            Ok(value) => {
-                let rendered = value_to_json(&value, self.core.session_table(), 0);
-                self.value_outcome(rendered, inner_type)
-            }
+            .map(expect_completed)
+        {
+            Ok(value) => self.finish_reference_fragment(tail, value),
             Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
         }
+    }
+
+    /// Post-run bookkeeping for [`Self::run_reference_fragment`]: render the
+    /// value against the live accumulated session table and the caller-resolved
+    /// inner type.
+    fn finish_reference_fragment(&mut self, tail: ReferenceTail, value: Value) -> TurnOutcome {
+        let rendered = value_to_json(&value, self.core.session_table(), 0);
+        self.value_outcome(rendered, tail.inner_type)
     }
 
     /// GHCi-style `it`: a confirmed bare final EXPRESSION (never a bind or a
@@ -1497,33 +1601,55 @@ impl Session {
             }
         };
 
+        let tail = BareExprTail {
+            g,
+            var_id: it_binder.var_id,
+            tier: it_binder.tier,
+            type_display: it_binder.type_display,
+            defining_expr: expr_text.to_string(),
+        };
+
         // Run EXACTLY ONCE: the effectful step loop drives `__user` to
         // completion here (field 0's bind), whichever wrap compiled. Field 1
         // (`toWire it`, pure) rides along in the SAME run — no second
         // compile, no second execution of `__user`'s effect.
-        let (it_slot, rendered_value) = match self.core.bind_funcid_render(
+        match self.core.bind_funcid_render(
             fid,
             handlers,
             captured,
-            matches!(it_binder.tier, ValueTier::Tier0Data),
+            matches!(tail.tier, ValueTier::Tier0Data),
         ) {
-            Ok(sv) => sv,
-            Err(e) => return TurnOutcome::Error(run_fail("runtime error", e)),
-        };
+            Ok((it_slot, rendered_value)) => self.finish_bare_expr(tail, it_slot, rendered_value),
+            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
+        }
+    }
 
-        self.core.set_val_gen(g);
-        let it_value = bound_value(it_binder.tier, it_slot);
+    /// Post-run bookkeeping for [`Self::run_bare_expr`]: advance the value
+    /// generation, root `it`, record it on the value plane, and render the
+    /// SAME run's field-1 value. Field 1 is bridged to an owned [`Value`]
+    /// BEFORE field 0 is tenured (in [`Self::run_bare_expr`]'s machine call),
+    /// which is what makes this safe even when `toWire` is the identity and
+    /// the two fields alias the same heap object (`pure input`) — see
+    /// `bind_funcid_render`'s doc for the field1-before-field0 GC ordering.
+    fn finish_bare_expr(
+        &mut self,
+        tail: BareExprTail,
+        it_slot: RootSlot,
+        rendered_value: Value,
+    ) -> TurnOutcome {
+        self.core.set_val_gen(tail.g);
+        let it_value = bound_value(tail.tier, it_slot);
         self.bind_materialized(BindingEntry {
             name: BindingName("it".to_string()),
-            id: SessionVarId::from_extract(it_binder.var_id),
-            module: SessionModule::val(g),
+            id: SessionVarId::from_extract(tail.var_id),
+            module: SessionModule::val(tail.g),
             value: it_value,
-            type_display: Some(it_binder.type_display.clone()),
-            defining_expr: Some(expr_text.to_string()),
+            type_display: Some(tail.type_display.clone()),
+            defining_expr: Some(tail.defining_expr),
         });
 
         let rendered = value_to_json(&rendered_value, self.core.session_table(), 0);
-        self.value_outcome_bound_it(rendered, Some(it_binder.type_display))
+        self.value_outcome_bound_it(rendered, Some(tail.type_display))
     }
 
     /// Compile-only type query: returns the inner value type `a` for a monadic
