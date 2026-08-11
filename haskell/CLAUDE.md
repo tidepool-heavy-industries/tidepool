@@ -14,7 +14,7 @@ the production executable. Its `Main.hs` depends on the internal library
 implementation (`Tidepool.Binders`, `.GhcPipeline`, `.Session`, `.Translate`,
 `.Resolve`, `.FatIface`, `.CborEncode`, `.DiagJson`, `.Timing`) — compiled ONCE
 and shared by the production binary and the four `src`-dependent test-suites
-below, instead of once per component. Five non-production components exist as
+below, instead of once per component. Four non-production components exist as
 `test-suite` stanzas, so `cabal build` skips them by default:
 
 | Component | Purpose | Run |
@@ -22,10 +22,9 @@ below, instead of once per component. Five non-production components exist as
 | `spike-extract` | scratch pipeline spike | `cabal test spike-extract` |
 | `session-c-test` | Wave-3a session-binder acceptance pin | `cabal test session-c-test` |
 | `varid-mechanism-test` | `stableVarId`/`fieldParentDisamb` contract pin | `cabal test varid-mechanism-test` |
-| `formqq-parser-test` | `[form\|...\|]` DSL line-parser unit tests | `cabal test formqq-parser-test` |
 | `extract-fidelity-test` | erasure symmetry, recognizer qualification, unboxed-tuple arity — through the real pipeline | `cabal test extract-fidelity-test` |
 
-`cabal build --enable-tests` builds all five without running them. Each
+`cabal build --enable-tests` builds all four without running them. Each
 `.cabal` stanza carries its own `Run:` comment; this table just indexes them.
 
 **How the extract binary is resolved.** `tidepool-extract` is the GHC→Core
@@ -144,7 +143,22 @@ surface here — it drifts. Module map:
   encoding, derived from the same `Generic` metadata and sharing their
   `GAllFieldsNamed` compile-time rejection; this is what agent tool
   `input_schema` and subagent `outputSchema` publish).
-- `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters.
+- `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]`/`[uri|]` quasiquoters, all defined
+  entirely in this stdlib (not shipped with GHC). A new stdlib module needs
+  no build-time registration to be eval-importable (the extract binary
+  resolves `haskell/lib` as a GHC include path at runtime).
+  `tidepool-extract-bin`'s derived import closure contains ZERO
+  `lib/Tidepool/**` modules — `app/Main.hs` only ever reaches
+  `tidepool-extract-internal` (the `src/` implementation), never `lib/`, so
+  `lib/` is a pure runtime asset tree as far as the production component's
+  build is concerned; nothing there is host-compiled or needs listing. That a
+  stdlib-defined quoter survives the extract pipeline end-to-end (splice
+  evaluation and all), and that a malformed quote fails loudly at COMPILE
+  time rather than misparsing silently, is proven by
+  `works_stdlib_quoter_survives_extract` and
+  `stdlib_quoter_bad_input_fails_loudly_at_compile_time`
+  (`tidepool-runtime/tests/jit_surface.rs`), built on `[uri|]`. (Doc-history
+  note on this passage's prior wording: `plans/decision-archive/haskell.md`.)
 - `Form` — the operator-input surface: `askUser :: DerivedForm a => M a`
   (`askUser @T` derives the form from `T`'s own `Generic` representation) plus
   `choose`/`chooseMany` for alternatives that exist only as runtime VALUES.
@@ -154,24 +168,6 @@ surface here — it drifts. Module map:
   transport, matching `tidepool-harness`'s `selfharness::operator` module
   docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
   (it builds on `askUserRaw`), and auto-imported whenever it is.
-- `Ui` — the `Ui` eDSL (card/prose/code/choice/textIn/badge smart constructors).
-  `FormQQ` — `[form|]`, a line-based DSL compiling to `[Ui]` (one widget per
-  line: `choice <prompt>: <key> ...` / `text <prompt>` / `multiline <prompt>` /
-  prose passthrough); a QuasiQuoter defined entirely in this stdlib (not
-  shipped with GHC), proving such quoters survive the extract pipeline
-  end-to-end — see `works_form_qq` in `tidepool-runtime/tests/jit_surface.rs`.
-  A new stdlib module needs no build-time registration to be eval-importable
-  (the extract binary resolves `haskell/lib` as a GHC include path at
-  runtime). `tidepool-extract-bin`'s derived import closure contains ZERO
-  `lib/Tidepool/**` modules — `app/Main.hs` only ever reaches
-  `tidepool-extract-internal` (the `src/` implementation), never `lib/`, so
-  `lib/` is a pure runtime asset tree as far as the production component's
-  build is concerned; nothing there is host-compiled or needs listing. The
-  one exception is `formqq-parser-test`, which unit-tests
-  `Tidepool.FormQQ.Parse` directly host-side and so lists it under
-  `other-modules` with `lib` on its own `hs-source-dirs` — that dependency is
-  real and expected to stay in sync. (Doc-history note on this passage's
-  prior wording: `plans/decision-archive/haskell.md`.)
 
 - `Agent/*` — PRD 18 surfaces (provisional, lane 1): `Contract` (mode-
   interpreted endpoint records compiled to declarations and dispatch),

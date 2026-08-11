@@ -1024,104 +1024,32 @@ fn works_parse_iso8601_format_day_roundtrip() {
     );
 }
 
-/// `Ui` (`haskell/lib/Tidepool/Ui.hs`) constructs on the JIT and serializes
-/// to the same JSON contract as `tidepool-harness/src/ui.rs`'s
-/// `wire_shape_is_stable` test (externally tagged by `"ui"`, snake_case
-/// tags, `options` as 2-element arrays). Compared structurally, not as a
-/// literal string — the vendored `object` is `Data.Map.Strict`-backed and
-/// always emits keys in ascending order, so it cannot reproduce the Rust
-/// struct's declaration-order field sequence; JSON object member order
-/// carries no semantics and neither side depends on it.
+/// `[uri|...|]` (`haskell/lib/Tidepool/QQ/Validate.hs`) — a QuasiQuoter
+/// DEFINED IN THE STDLIB (not shipped with GHC/base) compiles and runs a
+/// splice through the real extract pipeline, exactly like the other
+/// `Tidepool.QQ` quoters (`[fmt|]`/`[j|]`/`[patch|]`). The check
+/// (`uriCheck`) runs entirely at COMPILE time inside the splice evaluator;
+/// on success the expansion is a plain `Text` literal — exercised here.
 #[test]
-fn works_ui() {
-    // `Tidepool.Form` (`Text -> Text -> Form ()`) is auto-imported unqualified
-    // by the standard preamble whenever `Ask` is in the effect stack (always,
-    // here), and it exports its own `code`/`prose` display combinators of the
-    // same bare name as `Tidepool.Ui`'s (`Text -> Text -> Ui`) — importing
-    // `Tidepool.Ui` unqualified alone makes bare `code` an "Ambiguous
-    // occurrence". `Tidepool.Ui.code` stays reachable qualified, exactly the
-    // pattern `tidepool_harness::engine::split_imports` documents for a turn
-    // building a raw `Ui` tree by hand.
+fn works_stdlib_quoter_survives_extract() {
     works_with_imports(
-        "Tidepool.Ui\nqualified Tidepool.Ui as U",
-        r#"pure (card "hole"
-             [ U.code "haskell" "resume :: Verdict -> M ()"
-             , choice "verdict?" [("approve", "Approve")]
-             , badge "Exec, Fs" EffectRow
-             ])"#,
-        serde_json::json!({
-            "ui": "card",
-            "title": "hole",
-            "body": [
-                {"ui": "code", "lang": "haskell", "source": "resume :: Verdict -> M ()"},
-                {"ui": "choice", "prompt": "verdict?", "options": [["approve", "Approve"]]},
-                {"ui": "badge", "label": "Exec, Fs", "kind": "effect_row"}
-            ]
-        }),
+        "Tidepool.QQ (uri)",
+        r#"pure [uri|https://example.com/x|]"#,
+        serde_json::json!("https://example.com/x"),
     );
 }
 
-/// `[form|...|]` (`haskell/lib/Tidepool/FormQQ.hs`) — the GO half of the
-/// Wave-C QQ gate: a QuasiQuoter DEFINED IN THE STDLIB (not shipped with
-/// GHC/base) compiles and runs a splice through the real extract pipeline,
-/// exactly like the already-shipped `Tidepool.QQ` quoters
-/// (`[fmt|]`/`[j|]`/`[patch|]`/`[uri|]`). Parsing (blank-line skip, `choice`/
-/// `text`/`multiline`/prose dispatch) happens entirely at COMPILE time inside
-/// the splice evaluator; the expansion is a plain `[Ui]` list built from
-/// `Tidepool.Ui`'s smart constructors, so `card title [form|...|]` is the
-/// idiomatic use — exercised here.
+/// A malformed `[uri|...|]` quote is a COMPILE-TIME error naming the
+/// precise reason — never a silent misparse. Asserts the real rejection
+/// text `uriCheck` constructs (`Tidepool.QQ.Validate`) for a scheme-less
+/// URI, the exact class of silent runtime trap the quoter exists to catch.
 #[test]
-fn works_form_qq() {
-    works_with_imports(
-        "Tidepool.Ui\nTidepool.FormQQ (form)",
-        r#"pure (card "setup"
-             [form|
-Welcome! Fill this in.
-choice env: dev prod
-text token
-multiline notes
-|])"#,
-        serde_json::json!({
-            "ui": "card",
-            "title": "setup",
-            "body": [
-                {"ui": "prose", "text": "Welcome! Fill this in."},
-                {"ui": "choice", "prompt": "env", "options": [["dev", "dev"], ["prod", "prod"]]},
-                {"ui": "text_in", "prompt": "token", "multiline": false},
-                {"ui": "text_in", "prompt": "notes", "multiline": true}
-            ]
-        }),
+fn stdlib_quoter_bad_input_fails_loudly_at_compile_time() {
+    fails_loudly_with_imports(
+        "Tidepool.QQ (uri)",
+        r#"pure [uri|ftp://example.com|]"#,
+        "URI must start with 'http://' or 'https://'",
     );
-}
-
-/// A malformed `[form|...|]` line is a COMPILE-TIME error naming the
-/// offending 1-indexed line number — never a silent misparse. Line 2 here
-/// (`choice missing colon`) has no `:`.
-#[test]
-fn form_qq_bad_line_fails_loudly_with_line_number() {
-    let imports = "Tidepool.Ui\nTidepool.FormQQ (form)".to_string();
-    let code = r#"pure (card "setup"
-             [form|
-choice missing colon
-|])"#
-        .to_string();
-    let got = std::thread::Builder::new()
-        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
-        .spawn(move || {
-            tidepool_codegen::signal_safety::install();
-            eval_raw_with_imports(&imports, &code)
-        })
-        .unwrap()
-        .join()
-        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())
-        .and_then(|r| r);
-    match got {
-        Ok(v) => panic!("expected a compile-time failure naming the bad line, got Ok: {v}"),
-        Err(e) => assert!(
-            e.contains("form: line 2") && e.contains("requires ': key key ...'"),
-            "error must name the offending line and reason, got: {e}"
-        ),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1606,8 +1534,8 @@ fn works_pack_show_output_dialect_win() {
 // `[j|…|]`/`[fmt|…|]` are NOT auto-imported on this raw `template_haskell`
 // path (that injection is the live MCP server request handler's job, which
 // this harness bypasses) — every probe below needs an explicit
-// `Tidepool.QQ (fmt, j)` import, same as `works_form_qq` and
-// `render/fmt_spec_reject.rs`/`render/fmt_nonfinite.rs` elsewhere in this
+// `Tidepool.QQ (fmt, j)` import, same as `works_stdlib_quoter_survives_extract`
+// and `render/fmt_spec_reject.rs`/`render/fmt_nonfinite.rs` elsewhere in this
 // suite.
 // =========================================================================
 

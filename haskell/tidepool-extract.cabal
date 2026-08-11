@@ -9,8 +9,7 @@ build-type:    Simple
 -- package has no public API of its own (it's an app, not a library people
 -- depend on) — an internal library says "shared build unit" without implying
 -- a package-level export surface. tidepool-extract-bin and the three
--- src/-dependent test-suites below all depend on it; formqq-parser-test does
--- not (it only needs lib/Tidepool/FormQQ/Parse.hs, never src/).
+-- src/-dependent test-suites below all depend on it.
 library tidepool-extract-internal
   hs-source-dirs:   src
   exposed-modules:
@@ -133,24 +132,6 @@ test-suite varid-mechanism-test
     mtl
   default-language: GHC2024
   default-extensions: OverloadedStrings
-
--- Unit tests for the pure [form|...|] DSL line parser (no TH/splice
--- evaluation — see FormQQParserTest.hs). The compile-time-fail path is
--- exercised live through the JIT eval pipeline by `works_form_qq` in
--- tidepool-runtime/tests/jit_surface.rs.
--- Run: cabal test formqq-parser-test
--- Needs `lib` on hs-source-dirs (not the internal library): it exercises
--- Tidepool.FormQQ.Parse, an eval-stdlib asset module, not extractor
--- implementation.
-test-suite formqq-parser-test
-  type:             exitcode-stdio-1.0
-  main-is:          FormQQParserTest.hs
-  hs-source-dirs:   test-formqq, lib
-  other-modules:
-    Tidepool.FormQQ.Parse
-  build-depends:
-    base >= 4.20 && < 5
-  default-language: GHC2024
 
 -- Extract-fidelity regressions: coercion-binder erasure symmetry, intrinsic
 -- recognizer module qualification, unboxed-tuple result-arity fail-loud.
