@@ -278,25 +278,27 @@ mod tests {
         assert!(HttpHandler::parse_response("https://x", r#"{"a":1,"b":[1,2,3]}"#).is_ok());
     }
 
-    /// #335 acceptance: `httpGet` on a malformed URL is a typed
-    /// `Left (HttpInvalidUrl _)` the eval pattern-matches — never an abort.
+    /// Bundles `http_get_bad_url_is_typed_left_httpinvalidurl` (#335
+    /// acceptance: `httpGet` on a malformed URL is a typed
+    /// `Left (HttpInvalidUrl _)` the eval pattern-matches, never an abort) +
+    /// `http_get_localhost_is_typed_left_httprestricted` (`httpGet` on a
+    /// restricted/localhost URL is `Left (HttpRestricted _)`) into one
+    /// tidepool-extract compile. Returns the list of FAILED check names
+    /// (empty on success) — see
+    /// `tidepool-runtime/tests/generic_form_roundtrip.rs`'s `check` helper.
     #[tokio::test]
-    async fn http_get_bad_url_is_typed_left_httpinvalidurl() {
-        let v = jit_eval(&[
-            "r <- httpGet \"not-a-url\"",
-            "pure (case r of { Left (HttpInvalidUrl _) -> (\"badurl\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+    async fn test_jit_http_family() {
+        let result = jit_eval(&[
+            "let check nm ok = if ok then [] else [nm]",
+            "badUrl <- httpGet \"not-a-url\"",
+            "let badUrlOk = case badUrl of { Left (HttpInvalidUrl _) -> True; _ -> False }",
+            "restricted <- httpGet \"http://localhost/\"",
+            "let restrictedOk = case restricted of { Left (HttpRestricted _) -> True; _ -> False }",
+            "let c1 = check \"http-get-bad-url-is-typed-left-httpinvalidurl\" badUrlOk",
+            "let c2 = check \"http-get-localhost-is-typed-left-httprestricted\" restrictedOk",
+            "pure (concat [c1, c2])",
         ]);
-        assert_eq!(v, serde_json::json!("badurl"));
-    }
-
-    /// `httpGet` on a restricted (localhost) URL is `Left (HttpRestricted _)`.
-    #[tokio::test]
-    async fn http_get_localhost_is_typed_left_httprestricted() {
-        let v = jit_eval(&[
-            "r <- httpGet \"http://localhost/\"",
-            "pure (case r of { Left (HttpRestricted _) -> (\"restricted\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
-        ]);
-        assert_eq!(v, serde_json::json!("restricted"));
+        assert_eq!(result, serde_json::json!([]), "failed checks: {result}");
     }
 
     // -------------------------------------------------------------------

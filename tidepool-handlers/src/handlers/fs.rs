@@ -1102,40 +1102,47 @@ mod tests {
         assert!(meta.is_dir && !meta.is_file);
     }
 
-    /// #335 end-to-end through the REAL pipeline (extract → generated
-    /// `Tidepool.Effects` with `data FsError` → JIT → Either): a missing-file
-    /// `readFile` is a typed `Left (FsNotFound _)` the eval pattern-matches in
-    /// Haskell — never an abort. This is the acceptance proof that the whole
-    /// errors-block mechanism composes.
+    /// Bundles the repo-root Fs JIT roundtrips into one tidepool-extract
+    /// compile: `test_jit_fs_exists_roundtrip` + `test_jit_fs_listdir_roundtrip`
+    /// (formerly in `lib.rs`) + `fs_read_missing_file_is_typed_left_fsnotfound`
+    /// (#335 end-to-end through the REAL pipeline: a missing-file `readFile`
+    /// is a typed `Left (FsNotFound _)` the eval pattern-matches, never an
+    /// abort) + `fs_read_existing_file_is_right` (the happy path threads
+    /// through the Either: `readFile p >>= liftEither` yields the content).
+    /// Returns the list of FAILED check names (empty on success) — see
+    /// `tidepool-runtime/tests/generic_form_roundtrip.rs`'s `check` helper.
     #[tokio::test]
-    async fn fs_read_missing_file_is_typed_left_fsnotfound() {
-        let v = jit_eval(&[
-            "r <- readFile \"definitely-not-a-real-file-xyz-335.txt\"",
-            "pure (case r of { Left (FsNotFound _) -> (\"notfound\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+    async fn test_jit_fs_repo_root_family() {
+        let result = jit_eval(&[
+            "let check nm ok = if ok then [] else [nm]",
+            "existsOk <- doesFileExist \"Cargo.toml\"",
+            "entries <- listDirectory \".\" >>= liftEither",
+            "missing <- readFile \"definitely-not-a-real-file-xyz-335.txt\"",
+            "let missingOk = case missing of { Left (FsNotFound _) -> True; _ -> False }",
+            "existing <- readFile \"Cargo.toml\" >>= liftEither",
+            "let c1 = check \"fs-exists-cargo-toml\" existsOk",
+            "let c2 = check \"fs-listdir-nonempty\" (length entries > 0)",
+            "let c3 = check \"fs-read-missing-file-is-typed-left-fsnotfound\" missingOk",
+            "let c4 = check \"fs-read-existing-file-is-right-nonempty\" (T.length existing > 0)",
+            "pure (concat [c1, c2, c3, c4])",
         ]);
-        assert_eq!(v, serde_json::json!("notfound"));
+        assert_eq!(result, serde_json::json!([]), "failed checks: {result}");
     }
 
-    /// The happy path still threads through the Either: an existing read is a
-    /// `Right _`, so `readFile p >>= liftEither` (the natural unwrap) yields the
-    /// content.
+    /// Bundles the two temp-dir `readGlob` JIT probes into one
+    /// tidepool-extract compile (both need a root OTHER than the repo root,
+    /// so `jit_eval` doesn't fit — `EvalHarness` does):
+    /// `fs_read_glob_mixed_binary_partitions_via_partition_eithers` (#328/#335
+    /// acceptance: `partitionEithers (map (.contents) rs)` must split the
+    /// per-file outcomes — the binary isolates as `Left`, the text file
+    /// survives as `Right`, and neither poisons the batch) +
+    /// `fs_read_glob_bare_result_renders_via_tojson_wrapper` (a bare
+    /// `[FileRead]` as the eval's final value must render through the
+    /// server's `toJSON _r` wrapper — pins `instance ToJSON FileRead` in the
+    /// generated effects module; `contents` rides the stock `Either`
+    /// instance: `{"Right": text}` / `{"Left": {tag, ...}}`).
     #[tokio::test]
-    async fn fs_read_existing_file_is_right() {
-        let v = jit_eval(&[
-            "src <- readFile \"Cargo.toml\" >>= liftEither",
-            "pure (T.length src > 0)",
-        ]);
-        assert_eq!(v, serde_json::json!(true));
-    }
-
-    /// #328/#335 acceptance: `readGlob` over a mixed glob (one clean UTF-8 text
-    /// file, one invalid-UTF-8 binary file) through the REAL extract → JIT
-    /// pipeline, rooted at a temp dir (not the repo root, so `jit_eval` doesn't
-    /// fit — `EvalHarness` is). `partitionEithers (map (.contents) rs)` must
-    /// split the per-file outcomes: the binary isolates as `Left`, the text
-    /// file survives as `Right`, and neither poisons the batch.
-    #[tokio::test]
-    async fn fs_read_glob_mixed_binary_partitions_via_partition_eithers() {
+    async fn test_jit_fs_read_glob_tempdir_family() {
         use tempfile::tempdir;
         use tidepool_testing::eval_harness::EvalHarness;
 
@@ -1150,13 +1157,17 @@ mod tests {
         let code = tidepool_mcp::wrap_do(concat!(
             "rs <- readGlob \"*\"\n",
             "let (bad, good) = partitionEithers (map (.contents) rs)\n",
-            "pure (object [\"goodCount\" .= length good, \"badCount\" .= length bad, \"goodText\" .= good])",
+            "let sorted = sortOn (.path) rs\n",
+            "pure (object [\n",
+            "  \"partition\" .= object [\"goodCount\" .= length good, \"badCount\" .= length bad, \"goodText\" .= good],\n",
+            "  \"sortedRead\" .= sorted\n",
+            "  ])",
         ));
         let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
 
         // Only Fs is exercised (readGlob), so the handler HList only needs to
         // cover tags 0..2 (Console, KV, Fs) — dispatch never recurses past Fs.
-        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_partition_test_kv.json");
+        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_family_test_kv.json");
         let handlers = frunk::hlist![
             crate::ConsoleHandler,
             crate::KvHandler::new(kv_path),
@@ -1167,53 +1178,13 @@ mod tests {
         let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
         assert_eq!(
             out.json(),
-            serde_json::json!({"goodCount": 1, "badCount": 1, "goodText": ["hello"]}),
-            "{:?}",
-            out.err()
-        );
-    }
-
-    /// A bare `[FileRead]` as the eval's final value must render through the
-    /// server's `toJSON _r` result wrapper — pins `instance ToJSON FileRead`
-    /// in the generated effects module. Without it, ANY eval ending on
-    /// `readGlob` is an extract-time compile error (`No instance for ToJSON
-    /// FileRead`), which is how the harness follow-up path first hit this.
-    /// `contents` rides the stock `Either` instance: `{"Right": text}` /
-    /// `{"Left": {tag, ...}}`.
-    #[tokio::test]
-    async fn fs_read_glob_bare_result_renders_via_tojson_wrapper() {
-        use tempfile::tempdir;
-        use tidepool_testing::eval_harness::EvalHarness;
-
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        std::fs::write(root.join("good.txt"), "hello").unwrap();
-        std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
-
-        let decls = tidepool_mcp::standard_decls();
-        let preamble = tidepool_mcp::build_preamble(&decls, false);
-        let stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let code = tidepool_mcp::wrap_do(concat!(
-            "rs <- readGlob \"*\"\n",
-            "pure (sortOn (.path) rs)",
-        ));
-        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
-
-        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_tojson_test_kv.json");
-        let handlers = frunk::hlist![
-            crate::ConsoleHandler,
-            crate::KvHandler::new(kv_path),
-            FsHandler::new(root),
-        ];
-
-        let harness = EvalHarness::new().with_stdlib().with_effects_module();
-        let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
-        assert_eq!(
-            out.json(),
-            serde_json::json!([
-                {"path": "bad.bin", "contents": {"Left": {"tag": "FsNotUtf8", "path": "bad.bin"}}},
-                {"path": "good.txt", "contents": {"Right": "hello"}},
-            ]),
+            serde_json::json!({
+                "partition": {"goodCount": 1, "badCount": 1, "goodText": ["hello"]},
+                "sortedRead": [
+                    {"path": "bad.bin", "contents": {"Left": {"tag": "FsNotUtf8", "path": "bad.bin"}}},
+                    {"path": "good.txt", "contents": {"Right": "hello"}},
+                ],
+            }),
             "{:?}",
             out.err()
         );

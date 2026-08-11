@@ -141,23 +141,25 @@ mod tests {
         assert!(matches!(req, ExecReq::RunIn(ref d, ref c) if d == "/tmp" && c == "ls"));
     }
 
-    /// #335 end-to-end acceptance: `runIn` with a bad/escaping directory is a
-    /// typed `Left (ExecBadDir _)` the eval pattern-matches — never an abort.
+    /// Bundles `exec_run_in_bad_dir_is_typed_left_execbaddir` (#335 end-to-end
+    /// acceptance: `runIn` with a bad/escaping directory is a typed
+    /// `Left (ExecBadDir _)` the eval pattern-matches, never an abort) +
+    /// `exec_run_existing_command_is_right` (the happy path still threads
+    /// through the Either: `run cmd >>= liftEither` yields the Proc) into one
+    /// tidepool-extract compile. Returns the list of FAILED check names
+    /// (empty on success) — see
+    /// `tidepool-runtime/tests/generic_form_roundtrip.rs`'s `check` helper.
     #[tokio::test]
-    async fn exec_run_in_bad_dir_is_typed_left_execbaddir() {
-        let v = jit_eval(&[
-            "r <- runIn \"../../nope-335\" \"echo hi\"",
-            "pure (case r of { Left (ExecBadDir _) -> (\"baddir\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+    async fn test_jit_exec_family() {
+        let result = jit_eval(&[
+            "let check nm ok = if ok then [] else [nm]",
+            "badDir <- runIn \"../../nope-335\" \"echo hi\"",
+            "let badDirOk = case badDir of { Left (ExecBadDir _) -> True; _ -> False }",
+            "p <- run \"echo hi\" >>= liftEither",
+            "let c1 = check \"exec-run-in-bad-dir-is-typed-left-execbaddir\" badDirOk",
+            "let c2 = check \"exec-run-existing-command-is-right\" (ok p)",
+            "pure (concat [c1, c2])",
         ]);
-        assert_eq!(v, serde_json::json!("baddir"));
-    }
-
-    /// The happy path still threads through the Either: `run` on a valid
-    /// command is `Right _`, so `run cmd >>= liftEither` (the natural unwrap)
-    /// yields the Proc.
-    #[tokio::test]
-    async fn exec_run_existing_command_is_right() {
-        let v = jit_eval(&["p <- run \"echo hi\" >>= liftEither", "pure (ok p)"]);
-        assert_eq!(v, serde_json::json!(true));
+        assert_eq!(result, serde_json::json!([]), "failed checks: {result}");
     }
 }

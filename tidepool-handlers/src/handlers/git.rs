@@ -606,29 +606,35 @@ file_c.txt\n\
             .is_ok()
     }
 
-    /// Full JIT end-to-end: `gitLog 1` on the real repo returns a Commit record
-    /// with a 40-character sha field, exercising the generated Tidepool.Effects
-    /// wiring + Records visibility + con-name/arity agreement through the JIT.
-    /// Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
+    /// Bundles `test_jit_git_log_returns_commit` (full JIT end-to-end:
+    /// `gitLog 1` on the real repo returns a Commit record with a
+    /// 40-character sha field, exercising the generated Tidepool.Effects
+    /// wiring + Records visibility + con-name/arity agreement through the
+    /// JIT) + `test_jit_git_show_bad_revspec_is_typed_left` (#335 acceptance:
+    /// `gitShow` with a bad revspec is a typed `Left (GitBadRevspec _)` the
+    /// eval pattern-matches, never an abort) into one tidepool-extract
+    /// compile. Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
     #[tokio::test]
-    async fn test_jit_git_log_returns_commit() {
+    async fn test_jit_git_family() {
         if !extract_available() {
             eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
             return;
         }
         let decls = tidepool_mcp::standard_decls();
-        // Return the observed values (not a collapsed Bool) so a failure names
+        // Return the observed values (not collapsed Bools) so a failure names
         // which invariant broke and what we actually saw.
         let source = jit_test_source(&[
             "commits <- gitLog 1 >>= liftEither",
             "let n = length commits",
             "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
-            "pure (toJSON [n, shaLen])",
+            "badRevspec <- gitShow \"notaref_zzzzzz\"",
+            "let badRevspecOk = case badRevspec of { Left (GitBadRevspec _) -> True; _ -> False }",
+            "pure (object [\"logCount\" .= n, \"shaLen\" .= shaLen, \"badRevspecOk\" .= badRevspecOk])",
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
         let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
-        let kv_path = std::env::temp_dir().join("tidepool_git_jit_kv.json");
+        let kv_path = std::env::temp_dir().join("tidepool_git_jit_family_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();
         let mut handlers = frunk::hlist![
@@ -650,55 +656,25 @@ file_c.txt\n\
             &captured,
         );
         match result {
-            Ok(v) => assert_eq!(
-                v.to_json(),
-                serde_json::json!([1, 40]),
-                "gitLog 1 should return exactly 1 Commit ([n, shaLen] observed)"
-            ),
-            Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
-        }
-    }
-
-    /// #335 acceptance: `gitShow` with a bad revspec is a typed
-    /// `Left (GitBadRevspec _)` the eval pattern-matches — never an abort.
-    #[tokio::test]
-    async fn test_jit_git_show_bad_revspec_is_typed_left() {
-        if !extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
-        let decls = tidepool_mcp::standard_decls();
-        let source = jit_test_source(&[
-            "r <- gitShow \"notaref_zzzzzz\"",
-            "pure (case r of { Left (GitBadRevspec _) -> (\"badrevspec\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
-        ]);
-        let include = prelude_include();
-        let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
-        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
-        let kv_path = std::env::temp_dir().join("tidepool_git_jit_kv_badrevspec.json");
-        let cwd = repo_root();
-        let captured = CapturedOutput::new();
-        let mut handlers = frunk::hlist![
-            crate::ConsoleHandler,
-            crate::KvHandler::new(kv_path),
-            crate::FsHandler::new(cwd.clone()),
-            crate::HttpHandler,
-            crate::ExecHandler::new(cwd.clone()),
-            crate::LspHandler::new(cwd.clone()),
-            crate::LlmHandler::new("ollama:llama3.2".to_string()),
-            GitHandler::new(cwd.clone()),
-            crate::TimeHandler,
-        ];
-        let result = tidepool_runtime::compile_and_run(
-            &source,
-            "result",
-            &include_paths,
-            &mut handlers,
-            &captured,
-        );
-        match result {
-            Ok(v) => assert_eq!(v.to_json(), serde_json::json!("badrevspec")),
-            Err(e) => panic!("JIT gitShow eval failed: {:?}", e),
+            Ok(v) => {
+                let json = v.to_json();
+                assert_eq!(
+                    json["logCount"],
+                    serde_json::json!(1),
+                    "gitLog 1 should return exactly 1 Commit"
+                );
+                assert_eq!(
+                    json["shaLen"],
+                    serde_json::json!(40),
+                    "gitLog 1 commit sha should be 40 chars"
+                );
+                assert_eq!(
+                    json["badRevspecOk"],
+                    serde_json::json!(true),
+                    "gitShow with a bad revspec should be a typed Left (GitBadRevspec _)"
+                );
+            }
+            Err(e) => panic!("JIT git family eval failed: {:?}", e),
         }
     }
 }

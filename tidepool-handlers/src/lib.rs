@@ -283,35 +283,28 @@ mod tests {
     }
 
     // === JIT-level roundtrip tests ===
+    //
+    // Bundled per effect family into one tidepool-extract compile each (was
+    // one compile per behavior, ~5.4-6.2s apiece). Each bundle returns the
+    // list of FAILED check names (empty on success) so a regression still
+    // names which behavior broke — see
+    // tidepool-runtime/tests/generic_form_roundtrip.rs's `check` helper for
+    // the idiom. Fs's own roundtrips live in `handlers::fs::tests`.
 
+    /// Bundles `test_jit_console_roundtrip` (putStrLn dispatches without
+    /// aborting the eval) + `test_jit_kv_roundtrip` (kvSet/kvGet round-trips
+    /// a JSON value).
     #[tokio::test]
-    async fn test_jit_console_roundtrip() {
-        let result = jit_eval(&["putStrLn \"hello from JIT\"", "pure (toJSON True)"]);
-        assert_eq!(result, serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn test_jit_kv_roundtrip() {
+    async fn test_jit_console_kv_family() {
         let result = jit_eval(&[
+            "let check nm ok = if ok then [] else [nm]",
+            "putStrLn \"hello from JIT\"",
             "kvSet \"jit_test\" (toJSON (42 :: Int))",
             "v <- kvGet \"jit_test\"",
-            "pure (toJSON v)",
+            "let c1 = check \"console-print-dispatches\" True",
+            "let c2 = check \"kv-set-get-roundtrip\" (toJSON v == toJSON (42 :: Int))",
+            "pure (concat [c1, c2])",
         ]);
-        assert_eq!(result, serde_json::json!(42));
-    }
-
-    #[tokio::test]
-    async fn test_jit_fs_exists_roundtrip() {
-        let result = jit_eval(&["b <- doesFileExist \"Cargo.toml\"", "pure (toJSON b)"]);
-        assert_eq!(result, serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn test_jit_fs_listdir_roundtrip() {
-        let result = jit_eval(&[
-            "entries <- listDirectory \".\" >>= liftEither",
-            "pure (toJSON (length entries > 0))",
-        ]);
-        assert_eq!(result, serde_json::json!(true));
+        assert_eq!(result, serde_json::json!([]), "failed checks: {result}");
     }
 }

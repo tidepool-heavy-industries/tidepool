@@ -284,124 +284,68 @@ mod tests {
         }
     }
 
+    /// Bundles the seven `test_llm_structured_*` JIT probes into one
+    /// tidepool-extract compile. `MockLlmHandler` ignores the requested
+    /// schema and always answers the same fixed `response`, so one llm call
+    /// against a response shaped to cover every original case (a plain
+    /// string field, two differently-sized nested arrays of objects, an
+    /// empty object, and mixed scalar types) plus one re-encode through
+    /// `object`/`.=` (the "encode_roundtrip" behavior) stands in for all
+    /// seven original calls:
+    /// - `test_llm_structured_simple_object` -> `raw.greeting`
+    /// - `test_llm_structured_nested_object` -> `raw.languages3`
+    /// - `test_llm_structured_nested_encode_roundtrip` -> `raw.languages2`
+    /// - `test_llm_structured_encode_roundtrip` -> `encoded.result`/`encoded.field`
+    /// - `test_llm_structured_empty_object` -> `raw.empty`
+    /// - `test_llm_structured_mixed_types` + `test_llm_structured_mixed_encode_roundtrip`
+    ///   (identical bodies in the original suite) -> `raw.mixed`
     #[test]
-    fn test_llm_structured_simple_object() {
-        let mock = serde_json::json!({"greeting": "hello"});
-        let result = jit_eval_with_mock_llm(
-            &[
-                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\" >>= liftEither",
-                "pure r",
-            ],
-            mock,
-        );
-        assert_eq!(result["greeting"], "hello");
-    }
-
-    #[test]
-    fn test_llm_structured_nested_object() {
+    fn test_jit_llm_structured_family() {
         let mock = serde_json::json!({
-            "languages": [
+            "greeting": "hello",
+            "empty": {},
+            "mixed": {"name": "test", "count": 42, "active": true},
+            "languages3": [
                 {"name": "Haskell", "year": 1990},
                 {"name": "Rust", "year": 2010},
                 {"name": "Python", "year": 1991}
-            ]
-        });
-        let result = jit_eval_with_mock_llm(
-            &[
-                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\" >>= liftEither",
-                "pure r",
             ],
-            mock,
-        );
-        let langs = result["languages"]
-            .as_array()
-            .expect("languages should be array");
-        assert_eq!(langs.len(), 3);
-        assert_eq!(langs[0]["name"], "Haskell");
-    }
-
-    #[test]
-    fn test_llm_structured_encode_roundtrip() {
-        let mock = serde_json::json!({"greeting": "hello"});
-        let result = jit_eval_with_mock_llm(
-            &[
-                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\" >>= liftEither",
-                "pure (object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")])",
-            ],
-            mock,
-        );
-        assert_eq!(result["result"]["greeting"], "hello");
-        assert_eq!(result["field"], "hello");
-    }
-
-    #[test]
-    fn test_llm_structured_nested_encode_roundtrip() {
-        let mock = serde_json::json!({
-            "languages": [
+            "languages2": [
                 {"name": "Haskell", "year": 1990},
                 {"name": "Rust", "year": 2010}
             ]
         });
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\" >>= liftEither",
-                "pure r",
+                "r <- llm (SObj []) \"test\" >>= liftEither",
+                "let encoded = object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")]",
+                "pure (object [\"raw\" .= r, \"encoded\" .= encoded])",
             ],
             mock,
         );
-        let langs = result["languages"]
+
+        assert_eq!(result["raw"]["greeting"], "hello");
+
+        let langs3 = result["raw"]["languages3"]
             .as_array()
-            .expect("languages should be array");
-        assert_eq!(langs.len(), 2);
-    }
+            .expect("languages3 should be array");
+        assert_eq!(langs3.len(), 3);
+        assert_eq!(langs3[0]["name"], "Haskell");
 
-    #[test]
-    fn test_llm_structured_empty_object() {
-        let mock = serde_json::json!({});
-        let result = jit_eval_with_mock_llm(
-            &["r <- llm (SObj []) \"test\" >>= liftEither", "pure r"],
-            mock,
-        );
-        assert!(result.is_object());
-        assert_eq!(result.as_object().unwrap().len(), 0);
-    }
+        let langs2 = result["raw"]["languages2"]
+            .as_array()
+            .expect("languages2 should be array");
+        assert_eq!(langs2.len(), 2);
 
-    #[test]
-    fn test_llm_structured_mixed_types() {
-        let mock = serde_json::json!({
-            "name": "test",
-            "count": 42,
-            "active": true
-        });
-        let result = jit_eval_with_mock_llm(
-            &[
-                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\" >>= liftEither",
-                "pure r",
-            ],
-            mock,
-        );
-        assert_eq!(result["name"], "test");
-        assert_eq!(result["count"], 42);
-        assert_eq!(result["active"], true);
-    }
+        assert_eq!(result["encoded"]["result"]["greeting"], "hello");
+        assert_eq!(result["encoded"]["field"], "hello");
 
-    #[test]
-    fn test_llm_structured_mixed_encode_roundtrip() {
-        let mock = serde_json::json!({
-            "name": "test",
-            "count": 42,
-            "active": true
-        });
-        let result = jit_eval_with_mock_llm(
-            &[
-                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\" >>= liftEither",
-                "pure r",
-            ],
-            mock,
-        );
-        assert_eq!(result["name"], "test");
-        assert_eq!(result["count"], 42);
-        assert_eq!(result["active"], true);
+        assert!(result["raw"]["empty"].is_object());
+        assert_eq!(result["raw"]["empty"].as_object().unwrap().len(), 0);
+
+        assert_eq!(result["raw"]["mixed"]["name"], "test");
+        assert_eq!(result["raw"]["mixed"]["count"], 42);
+        assert_eq!(result["raw"]["mixed"]["active"], true);
     }
 
     #[tokio::test]
