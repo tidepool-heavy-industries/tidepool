@@ -70,12 +70,10 @@ const ABORT_GRACE_SECS: u64 = 3;
 /// that the session IS the caller's working memory across turns. Losing it after
 /// a runaway may be unavoidable; losing it SILENTLY is a trap — a later turn
 /// would fail with "Variable not in scope: <name>" and read as a Haskell error
-/// rather than as the reclaim that actually caused it. The pre-cutover model
-/// stated the loss (a wedged entry persisted and rejected follow-up ops); this
-/// keeps that virtue while keeping the zombie entry deleted.
+/// rather than as the reclaim that actually caused it.
 ///
-/// It also supersedes the old "session_reset to recover" instruction, which is
-/// now FALSE: the entry is already gone, so there is nothing left to reset.
+/// `session_reset` would not help here either: the entry is already gone, so
+/// there is nothing left to reset.
 const RECLAIMED_NOTICE: &str = "The session was reclaimed: its declarations and \
      bindings are GONE. The next session_run opens a fresh, empty session — no \
      session_reset needed.";
@@ -370,8 +368,7 @@ impl TidepoolReplServer {
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         // Erase H twice over: the spawn closure owns a clone of `base` per
         // SESSION, and hands the session a factory that clones it again per
-        // TURN — the same two-level cloning the pre-cutover worker did (one
-        // clone at spawn, one per job).
+        // TURN.
         let spawn: SessionSpawn = Box::new(move |sc| {
             let h = base.clone();
             Session::open(sc, Box::new(move || Box::new(h.clone()) as BoxedStack))
@@ -986,13 +983,11 @@ impl TidepoolReplServer {
                 }
                 // No handle (first-turn runaway) or no prompt abort → wedged.
                 //
-                // Under the pre-cutover model a runaway stranded a dedicated
-                // worker thread and the session leaked with it. Now the
-                // `Session` was MOVED INTO the blocking closure, so a task that
-                // never returns holds the only copy: there is genuinely nothing
-                // to restore, and a slot claiming otherwise would lie. Drop the
-                // whole manager entry. `session_reset` replaces the entry
-                // wholesale anyway, so the universal get-unstuck button is
+                // The `Session` was MOVED INTO the blocking closure, so a task
+                // that never returns holds the only copy: there is genuinely
+                // nothing to restore, and a slot claiming otherwise would lie.
+                // Drop the whole manager entry. `session_reset` replaces the
+                // entry wholesale anyway, so the universal get-unstuck button is
                 // unaffected — and the next `session_run` simply auto-opens a
                 // fresh session, exactly as it does from cold.
                 *state.lock() = SessionState::Wedged {
@@ -1109,9 +1104,8 @@ enum ReapAction {
 ///
 /// - An abandoned `Suspended` (never resumed) → the stowed continuation is
 ///   ABORTED and the session returns to `Idle` with everything it had already
-///   accumulated intact. That is the threadless equivalent of the old model's
-///   "drop the answer channel and let the parked `recv()` error": the `ask`
-///   fails, the turn unwinds, the session survives.
+///   accumulated intact: the `ask` fails, the turn unwinds, the session
+///   survives.
 /// - A stale `Wedged` (a timed-out turn whose session is gone) → the entry is
 ///   removed, so the next `session_run` auto-opens a fresh one.
 fn reap_once(
@@ -1481,9 +1475,9 @@ mod tests {
                 msg.contains("fresh, empty session"),
                 "a wedge must say what the NEXT turn gets (effect_in_flight={effect_in_flight}): {msg}"
             );
-            // The pre-cutover instruction is now false: the entry is already
-            // gone, so there is nothing left to reset. Telling a caller to run a
-            // recovery step that no longer exists is its own trap.
+            // Telling a caller to run a recovery step that no longer applies is
+            // its own trap: the entry is already gone, so there is nothing left
+            // to reset.
             assert!(
                 !msg.contains("session_reset to recover"),
                 "the stale 'session_reset to recover' instruction must not survive (effect_in_flight={effect_in_flight}): {msg}"
@@ -1491,11 +1485,9 @@ mod tests {
         }
     }
 
-    /// `Wedged` is this lane's new reclaim path: the pre-cutover model tore a
-    /// session down through a `Close` job on the worker's channel, and that
-    /// channel is gone. A wedged turn now holds the only copy of its session, so
-    /// the entry is DROPPED — and the two ways an operator gets unstuck from
-    /// there are the reaper's TTL sweep and `session_reset`.
+    /// A wedged turn holds the only copy of its session, so the entry is
+    /// DROPPED — and the two ways an operator gets unstuck from there are the
+    /// reaper's TTL sweep and `session_reset`.
     ///
     /// Driven at the transition level rather than by manufacturing a runaway: a
     /// pure loop that outruns the JIT cancel through the full abort grace is

@@ -17,10 +17,9 @@ use tidepool_repl::ReplServerConfig;
 /// This binary embeds no stdlib of its own, so it contributes only step 5: the
 /// source tree it was BUILT from. That keeps a `cargo install --path
 /// tidepool-repl` working when the server is launched from an unrelated project
-/// directory. Previously that build-time path was returned unconditionally,
-/// even when it no longer existed — a nonexistent include dir that surfaced as
-/// a GHC scope error at the first turn. It is now the last candidate, and
-/// exhausting the table is a typed error.
+/// directory. It is the last candidate in the table, and exhausting the table
+/// is a typed error rather than a nonexistent include dir surfacing as a GHC
+/// scope error at the first turn.
 ///
 /// # Errors
 /// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table

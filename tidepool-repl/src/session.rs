@@ -72,10 +72,9 @@ pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
 /// resident sessions).
 pub type BoxedStack = Box<dyn DispatchEffect<CapturedOutput> + Send>;
 
-/// Mints a FRESH handler stack per turn. The pre-cutover worker cloned the
-/// server's base stack for every job; this preserves that exactly — one factory
-/// per session (so `new_with_session_builder`'s per-session stack still holds),
-/// invoked once per turn.
+/// Mints a FRESH handler stack per turn: one factory per session (so
+/// `new_with_session_builder`'s per-session stack still holds), invoked once
+/// per turn.
 pub type StackFactory = Box<dyn Fn() -> BoxedStack + Send>;
 
 /// A bridged `ask` request the caller must answer: the prompt and the optional
@@ -124,10 +123,9 @@ impl ResumeAnswer {
     /// suspending run was driven with, so the answer's constructors land in the
     /// same namespace the continuation expects.
     ///
-    /// A bridge failure becomes an ABORT carrying the bridge error, which is
-    /// what the pre-cutover inline dispatcher did with the same failure: the
-    /// `ask` fails, the turn unwinds, and the continuation is consumed rather
-    /// than left stowed with nobody able to answer it.
+    /// A bridge failure becomes an ABORT carrying the bridge error: the `ask`
+    /// fails, the turn unwinds, and the continuation is consumed rather than
+    /// left stowed with nobody able to answer it.
     fn into_input(self, table: &DataConTable) -> ResumeInput {
         match self {
             ResumeAnswer::Answer(json) => {
@@ -331,8 +329,7 @@ impl PendingTail {
         }
     }
 
-    /// The label a run failure on this path reports under (unchanged per path
-    /// from before the cutover, so error text is byte-identical).
+    /// The label a run failure on this path reports under.
     fn error_label(&self) -> &'static str {
         match self {
             PendingTail::PlainEval(_) | PendingTail::Reference(_) | PendingTail::BareExpr(_) => {
@@ -1143,8 +1140,7 @@ impl Session {
     /// The suspension arm shared by all three `settle_*`: bridge the ask request
     /// and stow the tail, or — if the request itself is malformed, most
     /// plausibly a prompt expression that crashed during evaluation — abort the
-    /// stowed continuation and surface the reason. That is exactly the outcome
-    /// the pre-cutover inline dispatcher produced by failing the ask.
+    /// stowed continuation and surface the reason.
     fn stow_ask<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         tail: PendingTail,
@@ -2483,8 +2479,8 @@ impl Session {
                     }));
                 }
                 // 3b. Session-defined values/functions (`f x = …`). These are
-                // decls, not bindings or types, so they fell through to a total
-                // miss before — the exact place a caller reaches for `:i`. (#318)
+                // decls, not bindings or types, so they need their own lookup
+                // here rather than falling through to a total miss. (#318)
                 if let Some(src) = self.core.lib().decl_value_source(name) {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,

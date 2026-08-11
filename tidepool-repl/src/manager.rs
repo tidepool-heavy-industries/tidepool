@@ -316,10 +316,8 @@ mod tests {
 
     /// THE EPOCH GUARD — an ABA on the session slot.
     ///
-    /// The pre-cutover model serialized every operation through one worker
-    /// thread and one job channel, so this race could not arise. Now a turn
-    /// owns its session out on the blocking pool while `session_reset` can
-    /// remove the entry and install a FRESH session underneath it, and the
+    /// A turn owns its session out on the blocking pool while `session_reset`
+    /// can remove the entry and install a FRESH session underneath it, and the
     /// epoch is the ONLY thing distinguishing "hand back / retire the entry I
     /// was checked out of" from "…whatever is there now".
     ///
