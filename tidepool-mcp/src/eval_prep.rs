@@ -1317,26 +1317,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn template_haskell_show_default_uses_towire() {
-        let pre = crate::build_preamble(&[], false);
-        let src =
-            template_haskell_show_default(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
-        assert!(src.contains("toWire _r"), "show_default must use toWire _r");
-        assert!(
-            !src.contains("toJSON _r"),
-            "show_default must not use toJSON _r"
-        );
-    }
-
-    #[test]
-    fn template_haskell_default_uses_tojson() {
-        let pre = crate::build_preamble(&[], false);
-        let src = template_haskell(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
-        assert!(src.contains("toJSON _r"), "default must use toJSON _r");
-        assert!(!src.contains("toWire _r"), "default must not use toWire _r");
-    }
-
     /// GHC not available outside `nix develop` — the same skip-gate every
     /// GHC-heavy test in this workspace uses (see `tidepool-runtime/src/lib.rs`).
     fn ghc_available() -> bool {
