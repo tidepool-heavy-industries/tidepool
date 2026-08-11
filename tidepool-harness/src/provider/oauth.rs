@@ -5,8 +5,8 @@
 //! job — its `OAuthConfig::default()` already carries the real Codex CLI
 //! client id / endpoints. This module supplies only Tidepool-specific
 //! glue: config-dir token persistence (0600, `super::paths`) and the
-//! `ModelProvider` impl (chat calls route through `genai`, see
-//! `super::http`).
+//! `ModelProvider` impl (chat calls are hand-rolled against the ChatGPT
+//! backend — see the chat-routing note below).
 //!
 //! This is the PRIMARY (loopback) Codex-auth flow (verified against
 //! `openai/codex`'s `codex-rs/login` source, Apache-2.0). The
