@@ -182,6 +182,42 @@ macro_rules! opt_bool_or_false {
 }
 pub(crate) use opt_bool_or_false;
 
+/// The [`crate::EffectDecl::extra_imports`] table: companion `import` lines a
+/// generated effect's helpers need beyond the fixed eval surface
+/// (`preamble::eval_import_lines`) — `Exec`'s helpers build on `runArgv`
+/// (`Tidepool.Shell`/`Tidepool.Cargo`), `Git`'s on the Git verbs
+/// (`Tidepool.Git`), `AskUser`'s `Tidepool.Form` on `askUserRaw`. Every other
+/// effect needs nothing beyond the fixed surface.
+///
+/// Matched on the effect's own identifier (`$eff` from the `_effect_def!`
+/// call site) rather than added as a token to the shared `_effect_def!`
+/// grammar: that grammar is ALSO consumed by `tidepool-handlers`'s
+/// `effect_rust_projection!`, which has no `extra_imports` slot — keeping the
+/// lookup here, matched only from [`effect_decl_projection!`]'s own
+/// expansion, means adding a companion import never touches that sibling
+/// crate. This is the ONE place per effect a companion import is declared —
+/// see `preamble.rs`'s import fold, which is the other half of the old
+/// two-planes-must-be-kept-in-sync-by-hand gate (friction #23).
+macro_rules! extra_imports_for {
+    (Exec) => {
+        &[
+            "import qualified Tidepool.Shell as Shell",
+            "import Tidepool.Shell (sh)",
+            "import qualified Tidepool.Cargo as Cargo",
+        ]
+    };
+    (Git) => {
+        &["import qualified Tidepool.Git as Git"]
+    };
+    (AskUser) => {
+        &["import Tidepool.Form"]
+    };
+    ($other:ident) => {
+        &[]
+    };
+}
+pub(crate) use extra_imports_for;
+
 /// Render one variant of an `errors` ADT to `<Ctor> <hsField> …` (Haskell
 /// field types come from each field's `"<hs>" as <rust>` pair).
 macro_rules! error_variant_text {
@@ -307,6 +343,7 @@ macro_rules! effect_decl_projection {
                     $($td,)*
                     $( crate::effect_defs::error_decl_text!($errname $(, $evariant)*) )?
                 ],
+                extra_imports: crate::effect_defs::extra_imports_for!($eff),
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],

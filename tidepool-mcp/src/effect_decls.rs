@@ -25,6 +25,17 @@ pub struct EffectDecl {
     /// Extra Haskell type/function definitions emitted before the GADT.
     /// Use for supporting types (e.g. `data Lang = ...`) and helper functions.
     pub type_defs: &'static [&'static str],
+    /// Extra `import` lines this effect's helpers need beyond the fixed eval
+    /// surface (`eval_import_lines`) — e.g. `Exec` needs `Tidepool.Shell`/
+    /// `Tidepool.Cargo` (its helpers build on `runArgv`), `Git` needs
+    /// `Tidepool.Git`, `AskUser` needs `Tidepool.Form` (built on
+    /// `askUserRaw`). Emitted by both the stmt/eval plane
+    /// (`preamble::pragmas_and_imports`) and the decl plane
+    /// (`preamble::session_decl_module_env`) via ONE fold over the effect
+    /// list, in list order — the single source for what used to be two
+    /// hand-mirrored `type_name == "..."` gates (friction #23: they drifted).
+    /// Empty for every effect that needs nothing beyond the fixed surface.
+    pub extra_imports: &'static [&'static str],
     /// Thin curried helper definitions emitted after the `type M` alias.
     /// Each string is one or more lines of Haskell (signature + definition).
     pub helpers: &'static [&'static str],

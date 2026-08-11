@@ -3000,6 +3000,7 @@ mod slim_tests {
                 description: "Run shell commands. And capture output.",
                 constructors: &["Run :: Text -> Exec (Int, Text, Text)"],
                 type_defs: &[],
+                extra_imports: &[],
                 helpers: &[
                     "-- | Run a shell command; returns a `Proc`.\nrun :: Text -> M Proc\nrun cmd = undefined",
                     "readProcess :: Text -> M Text\nreadProcess cmd = undefined",
@@ -3013,6 +3014,7 @@ mod slim_tests {
                 description: "Persistent key-value store.",
                 constructors: &["KvSet :: Text -> Value -> KV ()"],
                 type_defs: &[],
+                extra_imports: &[],
                 helpers: &["kvSet :: Text -> Value -> M ()\nkvSet k v = undefined"],
                 type_params: &[],
                 default_row_args: &[],
