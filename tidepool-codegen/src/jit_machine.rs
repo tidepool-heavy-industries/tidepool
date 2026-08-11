@@ -60,6 +60,28 @@
 //! single-slot path. The two paths do not interact: a machine using the parked
 //! registry never stows into the slot, and a machine using the slot never
 //! populates the registry.
+//!
+//! # Completion policies on the suspend/park family
+//!
+//! A suspendable turn completes under one of the SAME four
+//! [`ResultMaterialization`] policies the plain routes use — there is one
+//! implementation ([`JitEffectMachine::materialize`]), reached by both
+//! families, so a turn behaves identically whether it completed in its first
+//! run or after any number of ask suspensions:
+//!
+//! | policy | run entry | resume entry | products |
+//! |---|---|---|---|
+//! | `Value` | [`JitEffectMachine::run_fragment_suspendable`] | [`JitEffectMachine::resume_suspended`] | the bridged value |
+//! | `Bind { forced }` | [`JitEffectMachine::run_fragment_suspendable_binding`] | [`JitEffectMachine::resume_suspended_binding`] | bridged value + one tenured root ([`JitEffectMachine::take_last_bound_root`]) |
+//! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | N tenured roots ([`JitEffectMachine::take_last_bound_roots`]) |
+//! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | rendered field 1 + field 0's tenured root |
+//!
+//! All eight are thin wrappers over the one shared suspend body
+//! (`run_suspendable_shared` / `resume_applied` → `finish_suspendable`); the
+//! only thing that varies is which policy is handed to `materialize`. The
+//! PARKED (registry) path deliberately covers only the first two — [`ParkKind`]
+//! has no `Project`/`Render` spelling, since those are single-session repl
+//! paths with no realm counterpart.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,25 +210,29 @@ pub struct ContinuationId(pub u64);
 pub struct RealmId(pub u64);
 
 /// What kind of turn parked a continuation — the registry's spelling of the
-/// single-slot path's `bind_forced: Option<bool>`.
+/// completion policy, covering the two of the single-slot path's four
+/// [`ResultMaterialization`] policies that a realm can request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkKind {
     /// A plain suspendable turn: on completion the `Done` pointer is bridged
-    /// and returned (`bind_forced == None`).
+    /// and returned (`ResultMaterialization::Value`).
     Plain,
     /// A value-plane BIND turn: on completion the result is tenured into
-    /// old-space and its [`crate::old_space::RootSlot`] stashed on the machine
-    /// (`bind_forced == Some(forced)`). `forced` deep-forces to NF before
+    /// old-space and its [`crate::old_space::RootSlot`] returned inline
+    /// (`ResultMaterialization::Bind`). `forced` deep-forces to NF before
     /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
     Binding { forced: bool },
 }
 
 impl ParkKind {
-    /// Project to the `bind_forced` shape the shared suspendable epilogue takes.
-    fn bind_forced(self) -> Option<bool> {
+    /// Project to the [`ResultMaterialization`] the shared suspendable
+    /// epilogue takes. The registry deliberately spells only two of the four
+    /// policies: `Project`/`Render` are single-session repl paths with no
+    /// realm counterpart, so they stay slot-path only.
+    fn materialization(self) -> ResultMaterialization {
         match self {
-            ParkKind::Plain => None,
-            ParkKind::Binding { forced } => Some(forced),
+            ParkKind::Plain => ResultMaterialization::Value,
+            ParkKind::Binding { forced } => ResultMaterialization::Bind { forced },
         }
     }
 }
@@ -369,13 +395,16 @@ impl ParkedRaw {
 ///
 /// The suspend/park family (`run_suspendable*`, `resume_suspended*`,
 /// `run_suspendable_parked`, `run_fragment_suspendable_parked`,
-/// `resume_parked`) is NOT in this table and NOT touched by this refactor: it
-/// already funnels through one shared setup body
-/// ([`JitEffectMachine::run_suspendable_shared`] /
+/// `resume_parked`) is NOT in this table: it funnels through its own shared
+/// setup body ([`JitEffectMachine::run_suspendable_shared`] /
 /// [`JitEffectMachine::resume_applied`]) and one shared epilogue
 /// ([`JitEffectMachine::finish_suspendable`]) with reclaim armed
 /// unconditionally last, exactly the shape this table's six routes are
-/// folded into below — it already satisfies this lane's ask.
+/// folded into below. It DOES share the materialization: `finish_suspendable`
+/// used to hand-roll a copy of the `Bind` arm below (and so covered only two
+/// of the four policies); it now calls [`JitEffectMachine::materialize`], which
+/// is what gives the suspendable path `Project` and `Render` — see the
+/// completion-policy table in the module docs.
 ///
 /// The fold: every routed listed above becomes a thin wrapper over
 /// [`JitEffectMachine::with_active_run`], which owns registry install/reclaim
@@ -413,7 +442,15 @@ enum ResultMaterialization {
 enum Materialized {
     Value(Value),
     Bind(crate::old_space::RootSlot),
-    Project(Vec<crate::old_space::RootSlot>),
+    Project {
+        /// The result tuple's own constructor, read off the NF tuple header
+        /// before its fields are tenured. The plain route ignores it (its
+        /// caller wants slots and nothing else); the SUSPENDABLE route needs
+        /// it because [`SuspendableOutcome::Completed`] must carry SOME
+        /// `Value` — see [`JitEffectMachine::run_fragment_suspendable_projected`].
+        con_id: tidepool_repr::DataConId,
+        slots: Vec<crate::old_space::RootSlot>,
+    },
     Render(crate::old_space::RootSlot, Value),
 }
 
@@ -567,6 +604,19 @@ pub struct JitEffectMachine {
     /// instead, so a second realm's completion cannot overwrite a first
     /// realm's still-unread root (realm-checklist Item 3).
     last_bound_root: Option<crate::old_space::RootSlot>,
+    /// The MULTI-binder sibling of `last_bound_root`: the tenured roots a
+    /// `Project` turn (`(a, b) <- e`) produced on the suspendable path
+    /// (`run_fragment_suspendable_projected` / `resume_suspended_projected`),
+    /// in field order, read out via [`Self::take_last_bound_roots`]. Separate
+    /// from `last_bound_root` because the two policies are mutually exclusive
+    /// per turn and a `Vec<RootSlot>` does not fit
+    /// `ParkedRaw::Completed::bound_root`'s single-slot shape; same `!Send`
+    /// rationale for riding home inside the machine.
+    ///
+    /// SLOT PATH ONLY, structurally: [`ParkKind`] — the registry's spelling of
+    /// the completion policy — cannot express `Project`, so no parked entry
+    /// can write this.
+    last_bound_roots: Option<Vec<crate::old_space::RootSlot>>,
     /// W4 finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
     /// tenured at suspend time by [`Self::tenure_finalized_payload`]. `Some`
@@ -898,6 +948,7 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
+            last_bound_roots: None,
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
@@ -938,6 +989,7 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
+            last_bound_roots: None,
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
@@ -1135,7 +1187,7 @@ impl JitEffectMachine {
 
         let result = self
             .drive_active(&mut ctx, func_ptr, mode, exec_start, resume_suffix)
-            .and_then(|done_ptr| self.materialize(&mut ctx, done_ptr, materialization));
+            .and_then(|done_ptr| self.materialize(ctx.vmctx_mut(), done_ptr, materialization));
 
         // Arm reclaim LAST, unconditionally, on every exit path — this one
         // call site is the whole point of the fold: no route-local judgment
@@ -1213,23 +1265,37 @@ impl JitEffectMachine {
         }
     }
 
-    /// The shared epilogue for every plain (non-suspending) run route —
+    /// The shared epilogue for EVERY completion, plain or suspendable —
     /// [`ResultMaterialization`]'s four policies, each ported verbatim from
-    /// the route body it used to live in. Uniform over pure vs. effectful:
-    /// every operation here only ever needs `ctx.vmctx_mut()`, which both
-    /// [`ActiveContext`] variants provide.
+    /// the route body it used to live in.
+    ///
+    /// The parameter is a bare `&mut VMContext` rather than the
+    /// [`ActiveContext`] the plain routes own, because that is the context
+    /// BOTH callers can supply: `with_active_run` passes `ctx.vmctx_mut()`,
+    /// and [`Self::finish_suspendable`] — which holds a
+    /// [`CompiledEffectMachine`], not an `ActiveContext` — passes
+    /// `machine.vmctx_mut()`. Nothing here ever needed more than the vmctx.
+    ///
+    /// ORDERING (load-bearing, and the reason this is one function): every
+    /// policy that tenures touches `self.session`, so a caller MUST NOT have
+    /// armed reclaim before calling this — `RegistryGuard::arm_reclaim` stores
+    /// a `*mut self.session` that would alias the `tenure` below. Both
+    /// families arm strictly AFTER this returns (`with_active_run`'s single
+    /// arm-last call; `run_suspendable_shared`/`resume_applied`'s tail arm).
     fn materialize(
         &mut self,
-        ctx: &mut ActiveContext,
+        vmctx: &mut VMContext,
         done_ptr: *mut u8,
         materialization: ResultMaterialization,
     ) -> Result<Materialized, JitError> {
+        // One address, used by every arm below: `vmctx` is a live `&mut` for
+        // this whole call, so the pointer stays valid throughout.
+        let vmctx_ptr: *mut VMContext = vmctx;
         match materialization {
             ResultMaterialization::Value => {
                 // SAFETY: done_ptr is a valid heap pointer returned by the
                 // JIT; vmctx_ptr is valid for forcing thunks; signal
                 // protection guards against crashes.
-                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
                 let bridge_res = unsafe {
                     crate::signal_safety::with_signal_protection(|| {
                         heap_bridge::heap_to_value_forcing(done_ptr, vmctx_ptr)
@@ -1255,7 +1321,7 @@ impl JitEffectMachine {
                 let nf_ptr = if forced {
                     let nf = unsafe {
                         crate::signal_safety::with_signal_protection(|| {
-                            crate::host_fns::deep_force(ctx.vmctx_mut() as *mut VMContext, done_ptr)
+                            crate::host_fns::deep_force(vmctx_ptr, done_ptr)
                         })
                     }
                     .map_err(JitError::Signal)?;
@@ -1282,7 +1348,6 @@ impl JitEffectMachine {
                 let from_range = (from.0 as *const u8, unsafe {
                     from.0.add(from.1) as *const u8
                 });
-                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
                 let slot = unsafe {
                     self.session
                         .as_mut()
@@ -1308,7 +1373,7 @@ impl JitEffectMachine {
                 //    and left as-is.
                 let nf_tuple = unsafe {
                     crate::signal_safety::with_signal_protection(|| {
-                        crate::host_fns::deep_force(ctx.vmctx_mut() as *mut VMContext, done_ptr)
+                        crate::host_fns::deep_force(vmctx_ptr, done_ptr)
                     })
                 }
                 .map_err(JitError::Signal)?;
@@ -1328,6 +1393,13 @@ impl JitEffectMachine {
                         )),
                     )));
                 }
+                // The tuple's own constructor, read from the same (post-GC) NF
+                // object the arity came from, BEFORE any field is tenured —
+                // only the suspendable route consumes it (its `Completed` must
+                // carry a `Value`), the plain route drops it.
+                let con_id = tidepool_repr::DataConId(unsafe {
+                    *(nf_tuple.add(crate::layout::CON_TAG_OFFSET as usize) as *const u64)
+                });
                 // 3. Capture from_range AFTER deep_force (GC may have changed
                 //    the active region). tenure() is pure Rust — no JIT GC
                 //    fires — so this range stays valid for all field tenures.
@@ -1338,7 +1410,6 @@ impl JitEffectMachine {
                 let from_range = (from.0 as *const u8, unsafe {
                     from.0.add(from.1) as *const u8
                 });
-                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
                 // 4. Project each field from nf_tuple and tenure. nf_tuple
                 //    stays valid across all tenure() calls (no JIT GC).
                 let mut slots = Vec::with_capacity(n_fields);
@@ -1356,7 +1427,7 @@ impl JitEffectMachine {
                     };
                     slots.push(slot);
                 }
-                Ok(Materialized::Project(slots))
+                Ok(Materialized::Project { con_id, slots })
             }
             ResultMaterialization::Render { field0_forced } => {
                 if let Some(err) = crate::host_fns::take_runtime_error() {
@@ -1395,7 +1466,6 @@ impl JitEffectMachine {
                 let field1_ptr = unsafe {
                     *(done_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
                 };
-                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
 
                 // Root field0_ptr across the field1 bridge below: bridging
                 // can force thunks reachable from field1's subtree, which can
@@ -1416,6 +1486,12 @@ impl JitEffectMachine {
                 // into the JIT heap, so it is unaffected by whatever tenure()
                 // below does to field0's object — even when field0 and
                 // field1 alias.
+                //
+                // This ordering is STRUCTURAL, not a convention any route has
+                // to re-observe: the suspendable render route reaches this
+                // same code (via `finish_suspendable`), so a turn that
+                // suspends at an ask and completes on a later resume gets the
+                // identical bridge-then-tenure sequence.
                 let bridge_res = unsafe {
                     crate::signal_safety::with_signal_protection(|| {
                         heap_bridge::heap_to_value_forcing(field1_ptr, vmctx_ptr)
@@ -1439,10 +1515,7 @@ impl JitEffectMachine {
                 let nf_field0 = if field0_forced {
                     let nf = unsafe {
                         crate::signal_safety::with_signal_protection(|| {
-                            crate::host_fns::deep_force(
-                                ctx.vmctx_mut() as *mut VMContext,
-                                field0_ptr,
-                            )
+                            crate::host_fns::deep_force(vmctx_ptr, field0_ptr)
                         })
                     }
                     .map_err(JitError::Signal)?;
@@ -1463,7 +1536,6 @@ impl JitEffectMachine {
                 let from_range = (from.0 as *const u8, unsafe {
                     from.0.add(from.1) as *const u8
                 });
-                let vmctx_ptr = ctx.vmctx_mut() as *mut VMContext;
                 let slot = unsafe {
                     self.session
                         .as_mut()
@@ -1544,7 +1616,14 @@ impl JitEffectMachine {
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
         let func_id = self.func_id;
-        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, None)
+        self.run_suspendable_with_entry(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            ResultMaterialization::Value,
+        )
     }
 
     /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
@@ -1568,7 +1647,14 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, None)
+        self.run_suspendable_with_entry(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            ResultMaterialization::Value,
+        )
     }
 
     /// Value-plane BIND sibling of [`Self::run_fragment_suspendable`]: drive a
@@ -1587,7 +1673,104 @@ impl JitEffectMachine {
         suspend_tag: u64,
         forced: bool,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.run_suspendable_with_entry(func_id, table, handlers, user, suspend_tag, Some(forced))
+        self.run_suspendable_with_entry(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            ResultMaterialization::Bind { forced },
+        )
+    }
+
+    /// MULTI-binder sibling of [`Self::run_fragment_suspendable_binding`], and
+    /// the suspendable sibling of [`Self::run_fragment_and_bind_projected`]:
+    /// drive a multi-bind fragment (`(a, b) <- e`) through the threadless
+    /// suspend path, and — on `Done` — deep-force the WHOLE result tuple and
+    /// tenure each of its `n_fields` fields into old-space. The tenured roots
+    /// land on the machine in field order, read out via
+    /// [`Self::take_last_bound_roots`] after it moves off the eval thread; the
+    /// caller zips them with its binder metadata. A turn that suspends at an
+    /// ask tenures NOTHING yet — its fields are bound on the eventual
+    /// [`Self::resume_suspended_projected`].
+    ///
+    /// The `SuspendableOutcome::Completed` payload is the result tuple's real
+    /// constructor with its fields ELIDED (`Value::Con(con_id, vec![])`), NOT
+    /// a bridge of the bound values. Deliberate: the outcome type has to carry
+    /// some `Value`, and bridging the tenured fields would import the bridge's
+    /// depth/size failure modes into a path that cannot fail after a
+    /// successful tenure — a multi-bind that binds fine would start erroring
+    /// where its non-suspendable sibling (which never bridges) succeeds. The
+    /// PRODUCTS of this policy are the slots.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine, on `n_fields == 0` (same precondition
+    /// as [`Self::run_fragment_and_bind_projected`]), or if a continuation is
+    /// already suspended.
+    pub fn run_fragment_suspendable_projected<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        n_fields: usize,
+    ) -> Result<SuspendableOutcome, JitError> {
+        assert!(
+            n_fields > 0,
+            "run_fragment_suspendable_projected requires at least one field"
+        );
+        self.run_suspendable_with_entry(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            ResultMaterialization::Project { n_fields },
+        )
+    }
+
+    /// BIND-AND-RENDER sibling of [`Self::run_fragment_suspendable_binding`],
+    /// and the suspendable sibling of [`Self::run_fragment_and_bind_render`]:
+    /// drive the repl's bare-expression fragment — a wrapped
+    /// `pure (it, toWire it)` — through the threadless suspend path, binding
+    /// field 0 and rendering field 1 in ONE run. On `Done` the
+    /// `SuspendableOutcome::Completed` payload is the RENDERED field 1, and
+    /// field 0's tenured root is stashed for [`Self::take_last_bound_root`] —
+    /// the same pair `run_fragment_and_bind_render` returns directly, split
+    /// across the outcome and the machine because a `RootSlot` is `!Send` and
+    /// cannot cross the eval-thread boundary as a bare value.
+    ///
+    /// `field0_forced` mirrors the bind flag: `true` (Tier0 data) deep-forces
+    /// field 0 to NF before tenuring, `false` (Tier1 closure) tenures as-is.
+    ///
+    /// The aliasing discipline — bridge field 1 BEFORE tenuring field 0,
+    /// because an identity `toWire` makes them the SAME heap object and the
+    /// bridge is the owned deep copy that survives the tenure — is not
+    /// restated here: this route reaches the one copy of it inside
+    /// [`Self::materialize`], so it holds identically whether the turn
+    /// completed in its first run or after any number of suspensions.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine, or if a continuation is already
+    /// suspended.
+    pub fn run_fragment_suspendable_render<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        field0_forced: bool,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.run_suspendable_with_entry(
+            func_id,
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            ResultMaterialization::Render { field0_forced },
+        )
     }
 
     /// Shared suspend-capable run body, parametrized by the entry `func_id`.
@@ -1603,7 +1786,7 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
         suspend_tag: u64,
-        bind_forced: Option<bool>,
+        materialization: ResultMaterialization,
     ) -> Result<SuspendableOutcome, JitError> {
         self.run_suspendable_shared(
             func_id,
@@ -1611,7 +1794,7 @@ impl JitEffectMachine {
             handlers,
             user,
             suspend_tag,
-            bind_forced,
+            materialization,
             ParkTarget::Slot,
         )
         .map(ParkedRaw::into_suspendable)
@@ -1630,7 +1813,7 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
         suspend_tag: u64,
-        bind_forced: Option<bool>,
+        materialization: ResultMaterialization,
         park: ParkTarget,
     ) -> Result<ParkedRaw, JitError> {
         assert!(
@@ -1693,12 +1876,13 @@ impl JitEffectMachine {
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         // SAFETY: machine_state outlives this run (owned by self).
         machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
-        // Reclaim is armed LAST (after finish_suspendable), NOT here: a bind finish
-        // tenures into self.session, and arm_reclaim's stored *mut self.session
-        // would alias it (mirrors run_fragment_and_bind's arm-last ordering). Safe
-        // for the non-bind case too — nothing touches self.session before the arm,
-        // and the arm runs unconditionally (even on a run error) so the guard still
-        // reclaims the session buffer on drop.
+        // Reclaim is armed LAST (after finish_suspendable), NOT here: every
+        // materialization policy except `Value` tenures into self.session
+        // (inside `materialize`), and arm_reclaim's stored *mut self.session
+        // would alias it — the same arm-last ordering `with_active_run` owns
+        // for the plain routes. Safe for the `Value` case too — nothing touches
+        // self.session before the arm, and the arm runs unconditionally (even on
+        // a run error) so the guard still reclaims the session buffer on drop.
         let yield_result = initial_step(&mut machine, "stepping main function");
         let finished = match drive_effect_loop(
             &mut machine,
@@ -1713,7 +1897,7 @@ impl JitEffectMachine {
             Ok(outcome) => self.finish_suspendable(
                 &mut machine,
                 outcome,
-                bind_forced,
+                materialization,
                 park,
                 suspend_tag,
                 table,
@@ -1752,7 +1936,14 @@ impl JitEffectMachine {
         suspend_tag: u64,
         input: ResumeInput,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.resume_suspended_inner(table, handlers, user, suspend_tag, input, None)
+        self.resume_suspended_inner(
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            ResultMaterialization::Value,
+        )
     }
 
     /// Value-plane BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
@@ -1769,13 +1960,82 @@ impl JitEffectMachine {
         input: ResumeInput,
         forced: bool,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.resume_suspended_inner(table, handlers, user, suspend_tag, input, Some(forced))
+        self.resume_suspended_inner(
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            ResultMaterialization::Bind { forced },
+        )
     }
 
-    /// Shared body of [`Self::resume_suspended`] /
-    /// [`Self::resume_suspended_binding`], parametrized by `bind_forced` (`None` →
-    /// plain resume; `Some(forced)` → tenure the completed result as a value-plane
-    /// bind).
+    /// MULTI-binder sibling of [`Self::resume_suspended_binding`]: re-enter a
+    /// suspended multi-bind turn (`(a, b) <- e` that stowed at an ask) and, on
+    /// `Done`, deep-force the whole result tuple and tenure each of its
+    /// `n_fields` fields — the roots landing on the machine for
+    /// [`Self::take_last_bound_roots`]. `n_fields` is supplied by the caller
+    /// (which is holding the binder metadata across the suspension), exactly
+    /// as `forced` is on the binding resume. See
+    /// [`Self::run_fragment_suspendable_projected`] for what the `Completed`
+    /// payload carries, and why it is not a bridge of the bound fields.
+    ///
+    /// # Panics
+    /// Panics on `n_fields == 0`. Errors (does not panic) if the machine is
+    /// not currently suspended.
+    pub fn resume_suspended_projected<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        n_fields: usize,
+    ) -> Result<SuspendableOutcome, JitError> {
+        assert!(
+            n_fields > 0,
+            "resume_suspended_projected requires at least one field"
+        );
+        self.resume_suspended_inner(
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            ResultMaterialization::Project { n_fields },
+        )
+    }
+
+    /// BIND-AND-RENDER sibling of [`Self::resume_suspended_binding`]: re-enter
+    /// a suspended bare-expression turn (`pure (it, toWire it)` that stowed at
+    /// an ask) and, on `Done`, bridge field 1 into the returned `Completed`
+    /// value and tenure field 0 for [`Self::take_last_bound_root`]. The
+    /// field1-before-field0-tenure ordering that makes an aliased
+    /// `(it, toWire it)` safe lives in [`Self::materialize`] and is therefore
+    /// identical on this path and on the non-suspending
+    /// [`Self::run_fragment_and_bind_render`].
+    pub fn resume_suspended_render<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+        field0_forced: bool,
+    ) -> Result<SuspendableOutcome, JitError> {
+        self.resume_suspended_inner(
+            table,
+            handlers,
+            user,
+            suspend_tag,
+            input,
+            ResultMaterialization::Render { field0_forced },
+        )
+    }
+
+    /// Shared body of every slot-path resume, parametrized by the
+    /// [`ResultMaterialization`] the completing turn's policy calls for —
+    /// `Value` (plain), `Bind`, `Project`, or `Render`.
     fn resume_suspended_inner<U, H: DispatchEffect<U>>(
         &mut self,
         table: &DataConTable,
@@ -1783,7 +2043,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         input: ResumeInput,
-        bind_forced: Option<bool>,
+        materialization: ResultMaterialization,
     ) -> Result<SuspendableOutcome, JitError> {
         // PEEK the continuation — do NOT consume it yet. The A5 NF-force
         // (segment 40) rejects a bottom-bearing answer WITHOUT consuming the
@@ -1838,7 +2098,7 @@ impl JitEffectMachine {
             user,
             suspend_tag,
             input,
-            bind_forced,
+            materialization,
             ParkTarget::Slot,
             flag,
         )
@@ -1860,7 +2120,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         input: ResumeInput,
-        bind_forced: Option<bool>,
+        materialization: ResultMaterialization,
         park: ParkTarget,
         // A3: the flag to install for THIS run — `self.cancel_flag` for the
         // slot path, or (`resume_parked`'s) already-cloned
@@ -1883,9 +2143,10 @@ impl JitEffectMachine {
         // SAFETY: machine_state outlives this run (owned by self).
         machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
         // Reclaim is armed LAST (after finish_suspendable), NOT here — see
-        // run_suspendable_with_entry: a bind finish tenures into self.session and
-        // arm_reclaim's *mut self.session would alias it. The abort branch arms
-        // explicitly before it returns (it never reaches the tail arm below).
+        // run_suspendable_shared: a Bind/Project/Render finish tenures into
+        // self.session (inside `materialize`) and arm_reclaim's *mut
+        // self.session would alias it. The abort branch arms explicitly before
+        // it returns (it never reaches the tail arm below).
 
         let answer = match input {
             ResumeInput::Answer(val) => val,
@@ -1938,7 +2199,7 @@ impl JitEffectMachine {
                 Ok(outcome) => self.finish_suspendable(
                     &mut machine,
                     outcome,
-                    bind_forced,
+                    materialization,
                     park,
                     suspend_tag,
                     table,
@@ -1956,22 +2217,37 @@ impl JitEffectMachine {
         finished
     }
 
-    /// Shared epilogue for the suspendable path: bridge a `Done` pointer to a
-    /// `Value` (byte-identical to [`Self::run_with_entry`]'s epilogue), or stow
-    /// the continuation on `self` and surface the suspension.
+    /// Shared epilogue for the suspendable path: materialize a `Done` pointer
+    /// under `materialization`, or stow the continuation on `self` and surface
+    /// the suspension.
     ///
-    /// `bind_forced` distinguishes a plain suspendable turn (`None` — bridge the
-    /// `Done` pointer, byte-identical to the pre-W1b epilogue) from a VALUE-PLANE
-    /// BIND (`Some(forced)` — tenure the `Done` result into old-space and bridge
-    /// the tenured value). On the slot path the tenured [`RootSlot`] is ALSO
-    /// stashed on `self.last_bound_root` (byte-identical to before this method
-    /// took a `park` argument); on the registry path it is returned INLINE via
-    /// `ParkedRaw::Completed::bound_root` instead — A1, closing
-    /// realm-checklist Item 3 (two realms' binds completing before either is
-    /// drained would otherwise overwrite one machine-level slot). The bind
-    /// branch touches `self.session` (via `tenure`), so a bind caller MUST NOT
-    /// have armed reclaim before this call (the guard's `*mut self.session` would
-    /// alias) — see `run_fragment_and_bind`'s arm-last ordering.
+    /// `materialization` is the SAME [`ResultMaterialization`] the plain routes
+    /// use, and the `Done` arm below calls the SAME [`Self::materialize`] —
+    /// there is no second copy of the force/tenure/bridge sequence to keep in
+    /// step. All four policies are therefore available to a turn that suspends:
+    /// `Value` and `Bind` (the pre-existing pair), plus `Project` (multi-bind)
+    /// and `Render` (bind + render in one run).
+    ///
+    /// What stays HERE, because it is the suspendable path's own concern, in
+    /// this order:
+    ///
+    /// 1. the machine-level stash — on the SLOT path a tenured root goes to
+    ///    `self.last_bound_root` (`Bind`/`Render`) or `self.last_bound_roots`
+    ///    (`Project`), byte-identically to before; on the REGISTRY path it is
+    ///    returned INLINE via `ParkedRaw::Completed::bound_root` instead — A1,
+    ///    closing realm-checklist Item 3 (two realms' binds completing before
+    ///    either is drained would otherwise overwrite one machine-level slot);
+    /// 2. the bridge that turns a tenured root into the `Value` a
+    ///    [`SuspendableOutcome::Completed`] must carry — for `Bind`, that is
+    ///    the bridge of `slot.current()` (the TENURED, rooted pointer, not
+    ///    `done_ptr`); for `Render` it is the already-bridged field-1 render;
+    ///    for `Project` see [`Self::run_fragment_suspendable_projected`].
+    ///
+    /// ORDERING: [`Self::materialize`] touches `self.session` via `tenure`, so
+    /// a caller MUST NOT have armed reclaim before this call — the guard's
+    /// stored `*mut self.session` would alias it. Both callers
+    /// (`run_suspendable_shared`, `resume_applied`) arm strictly AFTER this
+    /// returns, on every exit path.
     ///
     /// `park` selects where a SUSPENSION puts its continuation: the single
     /// `suspended_continuation` slot ([`ParkTarget::Slot`], every pre-existing
@@ -1989,7 +2265,7 @@ impl JitEffectMachine {
         &mut self,
         machine: &mut CompiledEffectMachine,
         outcome: DriveOutcome,
-        bind_forced: Option<bool>,
+        materialization: ResultMaterialization,
         park: ParkTarget,
         suspend_tag: u64,
         table: &DataConTable,
@@ -1997,85 +2273,78 @@ impl JitEffectMachine {
     ) -> Result<ParkedRaw, JitError> {
         match outcome {
             DriveOutcome::Done(done_ptr) => {
-                if let Some(forced) = bind_forced {
-                    if done_ptr.is_null() {
-                        return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
-                    }
-                    // Optionally deep-force to NF before tenuring (Tier0 data);
-                    // Tier1 closures tenure as-is (callable code, not data). Mirrors
-                    // `run_fragment_and_bind`'s K/E/D epilogue.
-                    let nf_ptr = if forced {
-                        let nf = unsafe {
+                // ONE epilogue for both families. `materialize` owns the null/
+                // runtime-error checks, the optional deep-force, the tenure,
+                // and (for Render) the load-bearing bridge-field1-BEFORE-
+                // tenure-field0 ordering — the suspendable path no longer
+                // re-states any of it. Reclaim is armed by the caller strictly
+                // after this returns, because the tenure inside touches
+                // `self.session`.
+                match self.materialize(machine.vmctx_mut(), done_ptr, materialization)? {
+                    Materialized::Value(value) => Ok(ParkedRaw::Completed {
+                        value,
+                        bound_root: None,
+                    }),
+                    Materialized::Bind(slot) => {
+                        if let ParkTarget::Slot = park {
+                            self.last_bound_root = Some(slot);
+                        }
+                        // Bridge the TENURED (rooted, stable) value for the
+                        // turn's rendered result — never `done_ptr`, which
+                        // tenure has just forwarded. SAFETY: slot.current() is
+                        // the live old-space pointer; forcing is a no-op on the
+                        // already-NF Tier0 case.
+                        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                        let bridge_res = unsafe {
+                            let live = slot.current();
                             crate::signal_safety::with_signal_protection(|| {
-                                crate::host_fns::deep_force(
-                                    machine.vmctx_mut() as *mut VMContext,
-                                    done_ptr,
-                                )
+                                heap_bridge::heap_to_value_forcing(live, vmctx_ptr)
                             })
                         }
                         .map_err(JitError::Signal)?;
-                        if let Some(err) = crate::host_fns::take_runtime_error() {
-                            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-                        }
-                        nf
-                    } else {
-                        done_ptr
-                    };
-                    let from = self
-                        .machine_state
-                        .gc_active_range()
-                        .expect("GC state installed for the suspendable bind run");
-                    let from_range = (from.0 as *const u8, unsafe {
-                        from.0.add(from.1) as *const u8
-                    });
-                    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-                    // SAFETY: nf_ptr is a live heap object in the nursery from-range;
-                    // tenure evacuates its closure into old-space and registers the
-                    // returned slot as a persistent root valid for the machine's
-                    // life. `self.session` is unaliased (reclaim not yet armed).
-                    let slot = unsafe {
-                        self.session
-                            .as_mut()
-                            .expect("session machine for a bind tenure")
-                            .old_space
-                            .tenure(vmctx_ptr, nf_ptr, from_range)
-                    };
-                    if let ParkTarget::Slot = park {
-                        self.last_bound_root = Some(slot);
-                    }
-                    // Bridge the TENURED (rooted, stable) value for the turn's
-                    // rendered result. SAFETY: slot.current() is the live old-space
-                    // pointer; forcing is a no-op on the already-NF Tier0 case.
-                    let bridge_res = unsafe {
-                        let live = slot.current();
-                        crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::heap_to_value_forcing(live, vmctx_ptr)
+                        let value = crate::host_fns::surface_error(
+                            bridge_res.map_err(JitError::HeapBridge),
+                        )?;
+                        Ok(ParkedRaw::Completed {
+                            value,
+                            bound_root: Some(slot),
                         })
                     }
-                    .map_err(JitError::Signal)?;
-                    let value =
-                        crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                    return Ok(ParkedRaw::Completed {
-                        value,
-                        bound_root: Some(slot),
-                    });
+                    Materialized::Project { con_id, slots } => {
+                        // Project is SLOT-PATH ONLY: `ParkKind` (the registry's
+                        // spelling of the policy) has no Project variant, so no
+                        // parked entry can request it. The `if let` mirrors
+                        // Bind's discipline rather than assuming that.
+                        debug_assert!(
+                            matches!(park, ParkTarget::Slot),
+                            "Project materialization is slot-path only — ParkKind cannot request it"
+                        );
+                        if let ParkTarget::Slot = park {
+                            self.last_bound_roots = Some(slots);
+                        }
+                        // The completion carries the result tuple's real
+                        // constructor with its fields ELIDED — see
+                        // `run_fragment_suspendable_projected`'s doc for why the
+                        // fields are deliberately not bridged. The products are
+                        // the slots, taken via `take_last_bound_roots`.
+                        Ok(ParkedRaw::Completed {
+                            value: Value::Con(con_id, Vec::new()),
+                            bound_root: None,
+                        })
+                    }
+                    Materialized::Render(slot, rendered) => {
+                        if let ParkTarget::Slot = park {
+                            self.last_bound_root = Some(slot);
+                        }
+                        // No second bridge: `rendered` IS field 1, already
+                        // bridged inside `materialize` BEFORE field 0 was
+                        // tenured (the aliasing-safe ordering).
+                        Ok(ParkedRaw::Completed {
+                            value: rendered,
+                            bound_root: Some(slot),
+                        })
+                    }
                 }
-                // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
-                // vmctx is valid for forcing thunks; signal protection guards
-                // against crashes.
-                let bridge_res = unsafe {
-                    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
-                    crate::signal_safety::with_signal_protection(|| {
-                        heap_bridge::heap_to_value_forcing(done_ptr, vmctx_ptr)
-                    })
-                }
-                .map_err(JitError::Signal)?;
-                let value =
-                    crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                Ok(ParkedRaw::Completed {
-                    value,
-                    bound_root: None,
-                })
             }
             DriveOutcome::Suspended {
                 request,
@@ -2191,6 +2460,20 @@ impl JitEffectMachine {
     /// thread and records the `BindingEntry` against it.
     pub fn take_last_bound_root(&mut self) -> Option<crate::old_space::RootSlot> {
         self.last_bound_root.take()
+    }
+
+    /// Take the [`RootSlot`]s a MULTI-binder bind tenured on its last
+    /// suspendable completion
+    /// (`run_fragment_suspendable_projected`/`resume_suspended_projected`), in
+    /// field order, clearing them. `None` if the last run was not a projected
+    /// bind or has already been taken. The sibling of
+    /// [`Self::take_last_bound_root`], read at the same point in the caller's
+    /// lifecycle: after the machine moves back off the eval thread, zipped
+    /// with the turn's binder metadata.
+    ///
+    /// [`RootSlot`]: crate::old_space::RootSlot
+    pub fn take_last_bound_roots(&mut self) -> Option<Vec<crate::old_space::RootSlot>> {
+        self.last_bound_roots.take()
     }
 
     /// Take the persistent root slot of a suspended `finalize @T closure`'s
@@ -2588,7 +2871,7 @@ impl JitEffectMachine {
             "stepping effectful computation (multi-bind)",
             " (multi-bind)",
         )? {
-            Materialized::Project(slots) => Ok(slots),
+            Materialized::Project { slots, .. } => Ok(slots),
             _ => unreachable!("ResultMaterialization::Project always yields Materialized::Project"),
         }
     }
@@ -3119,7 +3402,7 @@ impl JitEffectMachine {
             handlers,
             user,
             suspend_tag,
-            kind.bind_forced(),
+            kind.materialization(),
             ParkTarget::Registry {
                 realm,
                 kind,
@@ -3241,7 +3524,7 @@ impl JitEffectMachine {
             user,
             suspend_tag,
             input,
-            kind.bind_forced(),
+            kind.materialization(),
             ParkTarget::Registry {
                 realm,
                 kind,

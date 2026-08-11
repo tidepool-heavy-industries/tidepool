@@ -31,6 +31,20 @@ full invariant is in the `jit_machine.rs` module docstring; the essentials:
   continuation: a bottom (residual unforced thunk) is rejected as a retryable
   error WITHOUT consuming, so the caller can resume again with a fixed answer.
 
+A suspendable turn completes under one of the SAME four result-materialization
+policies the plain routes use — `Value`, `Bind{forced}`, `Project{n_fields}`
+(multi-bind), `Render{field0_forced}` (bind + render in one run) — each with a
+run entry (`run_fragment_suspendable{,_binding,_projected,_render}`) and a
+resume sibling (`resume_suspended{,_binding,_projected,_render}`). There is one
+implementation (`JitEffectMachine::materialize`), reached by both families, so
+a turn behaves identically whether it completed in its first run or after any
+number of ask suspensions — including `Render`'s load-bearing bridge-field1-
+BEFORE-tenure-field0 ordering, which is what keeps an aliased `(it, toWire it)`
+intact. The PARKED (registry) path covers only the first two: `ParkKind` has no
+`Project`/`Render` spelling. Per-policy table in the `jit_machine.rs` module
+docstring; suspend-then-complete coverage in
+`tests/suspendable_materialization.rs`.
+
 A machine can ALSO hold multiple independently parked continuations in the
 continuation registry (realm machinery): each `ContinuationFrame` is a
 registered stowed root, `stowed_roots_count() == parked_count()` holds at
