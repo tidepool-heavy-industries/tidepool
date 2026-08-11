@@ -154,20 +154,37 @@ harnessProfilePragmaLine :: String
 harnessProfilePragmaLine =
   "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}"
 
+-- | The shared epilogue every dispatch arm ends on: render the fixed-shape
+-- JSON diagnostics report to stdout from a captured extraction result, with a
+-- human-readable debug copy on stderr, exiting non-zero on failure. A STRICT
+-- SUPERSET of every former per-call-site copy (once three were textually
+-- identical, byte for byte, modulo comments) — it always keeps the
+-- 'SourceError' distinction, including at call sites reached through
+-- 'runReportingDiags' where no live GHC session exists to ever throw one:
+-- 'fromException' can only take the 'Nothing' branch there, which is exactly
+-- what the old parse-only epilogue always did, so folding it in changes
+-- nothing observable for those callers.
+reportDiags :: Either SomeException () -> IO ()
+reportDiags (Left e) = do
+  let diags = case fromException e of
+        Just (se :: SourceError) -> diagsFromSourceError se
+        Nothing                  -> [diagFromException e]
+  putStrLn (renderDiagsJson diags)
+  -- Debug copy for humans only; stdout (above) is the authoritative machine
+  -- contract.
+  case fromException e of
+    Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+    Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+  exitFailure
+reportDiags (Right ()) = putStrLn (renderDiagsJson [])
+
 -- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
 -- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
--- stdout either way. A caught exception always yields 'diagFromException' (no
--- live GHC session exists at these call sites, so there is never a
--- 'SourceError' to distinguish).
+-- stdout either way via 'reportDiags'. A caught exception always takes
+-- 'reportDiags''s 'Nothing' branch (no live GHC session exists at these call
+-- sites, so there is never a 'SourceError' to distinguish).
 runReportingDiags :: IO () -> IO ()
-runReportingDiags act = do
-  res <- try act
-  case res of
-    Left (e :: SomeException) -> do
-      putStrLn (renderDiagsJson [diagFromException e])
-      hPutStrLn stderr ("Error: " ++ show e)
-      exitFailure
-    Right () -> putStrLn (renderDiagsJson [])
+runReportingDiags act = try act >>= reportDiags
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
@@ -402,19 +419,7 @@ processFile timing args path = do
         BS.writeFile metaFile metaCbor
         hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
-  case res of
-    Left (e :: SomeException) -> do
-      let diags = case fromException e of
-            Just (se :: SourceError) -> diagsFromSourceError se
-            Nothing                  -> [diagFromException e]
-      putStrLn (renderDiagsJson diags)
-      -- Debug copy for humans only; stdout (above) is the authoritative
-      -- machine contract.
-      case fromException e of
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-      exitFailure
-    Right () -> putStrLn (renderDiagsJson [])
+  reportDiags res
 
 -- | Per-target translate step: run 'translateModuleClosed' for ONE target,
 -- timed as the "translate" phase, and fail LOUDLY (never skip) if it
@@ -792,20 +797,7 @@ processSessionFile args path = do
     void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
     when (argSessionBind args) (emitBindArtifacts args result)
-  case res of
-    Left (e :: SomeException) -> do
-      let diags = case fromException e of
-            Just (se :: SourceError) -> diagsFromSourceError se
-            Nothing                  -> [diagFromException e]
-      putStrLn (renderDiagsJson diags)
-      -- Debug copy for humans only — see the identical branch in 'processFile'
-      -- for why @show se@ is printed even though GHC's logger usually already
-      -- did.
-      case fromException e of
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-      exitFailure
-    Right () -> putStrLn (renderDiagsJson [])
+  reportDiags res
 
 -- | Turn mode (@--turn@, plans/one-spawn-turn-protocol.md): classify the RAW
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
@@ -917,17 +909,7 @@ runTurnMode args path = do
         writeFile jout (renderTurnOutJson turnOut)
         hPutStrLn stderr $ "  Wrote: " ++ jout
       Nothing -> return ()
-  case res of
-    Left (e :: SomeException) -> do
-      let diags = case fromException e of
-            Just (se :: SourceError) -> diagsFromSourceError se
-            Nothing                  -> [diagFromException e]
-      putStrLn (renderDiagsJson diags)
-      case fromException e of
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-      exitFailure
-    Right () -> putStrLn (renderDiagsJson [])
+  reportDiags res
 
 -- | Block classify lane (@--classify@, plans/one-spawn-turn-protocol-phase-b.md):
 -- classify EVERY positional file in 'argFiles' with ONE GHC session boot
