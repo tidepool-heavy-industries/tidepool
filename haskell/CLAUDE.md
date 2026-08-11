@@ -27,15 +27,60 @@ below, instead of once per component. Four non-production components exist as
 `cabal build --enable-tests` builds all four without running them. Each
 `.cabal` stanza carries its own `Run:` comment; this table just indexes them.
 
-**How the extract binary is resolved.** `tidepool-extract` is the GHC→Core
-extractor. The Rust runtime invokes it via the `TIDEPOOL_EXTRACT` env var if set,
-else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs`, `cache.rs`).
-On `$PATH` that resolves to `~/.nix-profile/bin/tidepool-extract`
-— a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH
-and `exec`s the `tidepool-extract-bin` binary **in the nix store**. Deploying a new
-extract means updating that nix profile entry (see below) — copying a binary
-under `~/.local/bin` or `~/.cargo/bin` does nothing, as the nix-profile entry is
-earlier on PATH.
+## Toolchain resolution — extract, stdlib, and the deploy handshake
+
+**One locator, `tidepool-runtime/src/toolchain.rs`,** owns both precedence
+tables below plus the startup handshake. Its module docstring is the source of
+truth — read it before touching either table or the handshake mechanism; what
+follows here mirrors it.
+
+**Precedence: the extract binary.**
+
+| # | Source | Notes |
+|---|--------|-------|
+| 1 | `$TIDEPOOL_EXTRACT` | Explicit override. Honored verbatim — a bare name is still PATH-resolved, an absolute path is used as-is. |
+| 2 | `tidepool-extract` on `$PATH` | Normally `~/.nix-profile/bin/tidepool-extract`, a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH and `exec`s the `tidepool-extract-bin` binary **in the nix store**. |
+
+Deploying a new extract means updating that nix profile entry (see below) —
+copying a binary under `~/.local/bin` or `~/.cargo/bin` does nothing, as the
+nix-profile entry is earlier on PATH.
+
+**Precedence: the Haskell stdlib source root.** The stdlib root is the GHC
+include dir under which `Tidepool/Prelude.hs` lives; a candidate without that
+file does not count as a hit.
+
+| # | Source | Rationale |
+|---|--------|-----------|
+| 1 | `$TIDEPOOL_PRELUDE_DIR` | Operator override. **Set-but-not-a-stdlib-root is a hard error**, never a silent fall-through — a typo'd override that quietly served a different stdlib is exactly the failure this locator exists to kill. |
+| 2 | `./haskell/lib`, then `./lib` (walked upward from CWD) | In-repo development: the working tree you are editing wins over anything installed. |
+| 3 | Sibling of the extract's `dist-newstyle` | Walks `$TIDEPOOL_EXTRACT` up to a `dist-newstyle` component and takes its sibling `lib/` — pairs a worktree-built extract with that worktree's stdlib. |
+| 4 | The stdlib embedded in the server binary | Installed mode: materialized to a content-addressed cache dir at startup. Immutable and guaranteed to match the binary. |
+| 5 | The source tree the binary was built from | Last resort (`CARGO_MANIFEST_DIR`-derived) — keeps a repo-installed `tidepool-repl` working when launched outside the repo. |
+| — | otherwise | error, listing every path tried. |
+
+### Deploy handshake
+
+Deploy coupling — extract, both servers, and the stdlib must move together
+(`scripts/redeploy.sh`) — used to be enforced by script discipline alone. It is
+now checked at startup:
+
+- `scripts/redeploy.sh` finishes (after clearing `~/.cache/tidepool/`) by
+  running `tidepool --write-toolchain-stamp`, which fingerprints the CONTENT
+  of the extract binary and the stdlib tree it just deployed and writes a
+  stamp (default: `<cache_dir>/toolchain-stamp.json`, override with
+  `$TIDEPOOL_TOOLCHAIN_STAMP`).
+- Each server calls the handshake once at startup: it fingerprints the
+  extract + stdlib it just resolved and compares them to the stamp. A
+  mismatch means one side moved without the other, and fails loud, naming
+  `scripts/redeploy.sh` as the fix.
+- Severity is `$TIDEPOOL_TOOLCHAIN_HANDSHAKE`: `error` (default — a skew
+  aborts startup), `warn` (log and continue), or `off` (skip the check
+  entirely). **`warn` is the escape hatch** for deliberately running a
+  mismatched pair — e.g. the Local iteration workflow below, pointing
+  `TIDEPOOL_EXTRACT` at a worktree build while running an otherwise-installed
+  server. No stamp on disk (nothing ever deployed via `scripts/redeploy.sh` on
+  this machine, or the cache was hand-cleared) is informational only, not a
+  skew.
 
 **The cross-worktree Haskell cache is nix, not `dist-newstyle`.** Patched GHC
 and every dependency derivation (`base`, `lens`, `cborg`, …) are
@@ -60,15 +105,22 @@ TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
   cargo test -p tidepool-runtime ...
 ```
 
+Running a worktree-built extract against an otherwise-installed server (rather
+than a `cargo test` process) will trip the deploy handshake — the extract you
+just pointed at was not deployed via `scripts/redeploy.sh`, so it won't match
+the stamp. Set `TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn` in that case to log the skew
+and continue instead of aborting startup.
+
 **Deploy to the live MCP server (nix profile):**
 
-`scripts/redeploy.sh` encapsulates this full dance (extract + both Rust servers + cache clear) — prefer it over running these steps by hand.
+`scripts/redeploy.sh` encapsulates this full dance (extract + both Rust servers + cache clear + deploy stamp) — prefer it over running these steps by hand.
 
 ```bash
 git add haskell/...                          # nix flake builds see only TRACKED files
 nix profile upgrade tidepool-extract         # rebuild + install the wrapper+harness
 # (or: nix profile install .#tidepool-extract for a first install)
 rm -rf ~/.cache/tidepool/                     # clear stale cached CBOR
+tidepool --write-toolchain-stamp              # record what was just deployed (see Deploy handshake above)
 # Then /mcp-reconnect so the server picks up the new extract.
 ```
 

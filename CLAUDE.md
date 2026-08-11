@@ -183,7 +183,7 @@ complete here — use tier 2 or 3.
 
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
-`scripts/redeploy.sh` — deploy extract + both servers + cache clear; see `haskell/CLAUDE.md` for what each step does
+`scripts/redeploy.sh` — deploy extract + both servers + cache clear + deploy stamp; see `haskell/CLAUDE.md` for what each step does, including the toolchain locator precedence tables and the deploy handshake
 
 ---
 

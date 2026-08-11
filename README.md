@@ -114,8 +114,10 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 
 **Environment variables:**
 - `TIDEPOOL_EXTRACT` — path to the `tidepool-extract` binary (falls back to `tidepool-extract` on `$PATH`)
-- `TIDEPOOL_PRELUDE_DIR` — override the Haskell stdlib location (normally embedded in the binary)
+- `TIDEPOOL_PRELUDE_DIR` — override the Haskell stdlib source root (normally embedded in the binary). Must point at a directory containing `Tidepool/Prelude.hs` — a set-but-invalid value is a hard startup error, not a silent fall-through.
 - `TIDEPOOL_GHC_LIBDIR` — override GHC's lib directory (avoids calling `ghc --print-libdir`)
+- `TIDEPOOL_TOOLCHAIN_STAMP` — override the deploy-stamp path (default: under the cache dir, `toolchain-stamp.json`). The stamp records what `scripts/redeploy.sh` last deployed; servers compare their resolved extract + stdlib against it at startup.
+- `TIDEPOOL_TOOLCHAIN_HANDSHAKE` — deploy-stamp check severity: `error` (default — an extract/stdlib mismatch aborts startup), `warn` (log and continue), or `off` (skip the check).
 - `RUST_LOG` — set to `debug` or `info` for server diagnostics on stderr
 
 ## LLM provider

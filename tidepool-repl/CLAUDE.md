@@ -149,13 +149,23 @@ the nix-profile wrapper, which supplies its own with-packages GHC. To test a
 working-tree extract change before `scripts/redeploy.sh`, set
 `TIDEPOOL_EXTRACT` in the server's `env` block to the cabal-built
 `tidepool-extract-bin` and make sure the with-packages GHC is on `PATH`
-(the extract shells out to `ghc` and needs `lens` on the DB).
+(the extract shells out to `ghc` and needs `lens` on the DB). This makes the
+resolved extract disagree with the last `scripts/redeploy.sh`-written deploy
+stamp, which the startup handshake (`tidepool-runtime/src/toolchain.rs`) treats
+as skew by default — set `TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn` in the same `env`
+block to log the mismatch and continue instead of refusing to start.
 
 ## Env knobs
 
 - `TIDEPOOL_PRELUDE_DIR` — override the stdlib dir (falls back to in-repo
-  `haskell/lib`).
+  `haskell/lib`). A set-but-invalid value (no `Tidepool/Prelude.hs` under it)
+  is a hard startup error.
 - `TIDEPOOL_LLM_MODEL` — model for the `llm`/`ask`-adjacent structured calls.
+- `TIDEPOOL_TOOLCHAIN_STAMP` — override the deploy-stamp path checked at
+  startup (default: under the cache dir, `toolchain-stamp.json`).
+- `TIDEPOOL_TOOLCHAIN_HANDSHAKE` — deploy-stamp check severity: `error`
+  (default), `warn` (log and continue — the escape hatch for the worktree-extract
+  workflow above), or `off`.
 
 ## Suspension (`ask`) — what it means for a caller
 

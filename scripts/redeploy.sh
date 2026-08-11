@@ -104,8 +104,38 @@ fi
 step "Step 5: clear ~/.cache/tidepool/"
 run rm -rf "${HOME}/.cache/tidepool/"
 
+# Step 6: write the toolchain deploy stamp — content fingerprints of the
+#   extract + stdlib just deployed, checked by every server at startup
+#   (tidepool-runtime/src/toolchain.rs). MUST run after Step 5: the cache
+#   clear above would otherwise delete a stamp written before it.
+#   Skipped when --no-servers was passed: the tidepool binary this stamp
+#   describes was not (re)installed this run, so there is nothing fresh to
+#   fingerprint. Call by ABSOLUTE path (do not trust PATH), same discipline
+#   as Step 2's wrapper probe.
+
+step "Step 6: write toolchain deploy stamp"
+
+if [ "$NO_SERVERS" -eq 1 ]; then
+  echo "  (skipped: --no-servers — the tidepool binary was not installed this run)"
+else
+  stamp_bin="$HOME/.cargo/bin/tidepool"
+  echo "  \$ $stamp_bin --write-toolchain-stamp"
+  if [ "$DRY" -eq 0 ]; then
+    if [ ! -x "$stamp_bin" ]; then
+      echo "error: $stamp_bin missing — expected Step 3 (cargo install --path tidepool) to have installed it" >&2
+      exit 1
+    fi
+    if ! "$stamp_bin" --write-toolchain-stamp; then
+      echo "error: writing the toolchain deploy stamp failed — extract and stdlib are deployed but" >&2
+      echo "       servers cannot prove they were deployed together; see haskell/CLAUDE.md's" >&2
+      echo "       Deploy handshake section" >&2
+      exit 1
+    fi
+  fi
+fi
+
 echo
 echo "================================================================"
-echo "done — now run /mcp reconnect in the Claude session"
+echo "done — deploy stamp written; now run /mcp reconnect in the Claude session"
 echo "(the server processes are stale until reconnect)"
 echo "================================================================"
