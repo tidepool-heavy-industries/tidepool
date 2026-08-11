@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use tidepool_bridge_effects::Proc;
 
 // ============================================================================
-// Tag 5: Exec (shell commands)
+// Tag 4: Exec (shell commands)
 // ============================================================================
 
 // ExecReq + DescribeEffect + EffectHandler dispatch are generated from the

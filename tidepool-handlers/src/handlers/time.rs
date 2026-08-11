@@ -3,7 +3,7 @@ use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
-// Tag 9: Time (UTC wall clock)
+// Tag 8: Time (UTC wall clock)
 // ============================================================================
 
 // TimeReq + DescribeEffect + EffectHandler dispatch are generated from the

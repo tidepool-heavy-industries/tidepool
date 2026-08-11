@@ -89,8 +89,10 @@ macro_rules! handler_for {
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
 ///
-/// Ask (tag 10) is **not** included here; it is interposed by each server's
-/// `AskDispatcher` wrapper (see `TidepoolMcpServer::new`).
+/// Ask (tag 9 on this 9-handler stack — see [`base_decls_with_ask`]) is
+/// **not** included here; it is interposed by `tidepool_runtime::session`'s
+/// `SessionEngine`/`GateDispatcher` (see `TidepoolMcpServer::new`), not by a
+/// handler in this HList.
 pub fn build_base_stack(
     cfg: &HandlerConfig,
 ) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
@@ -150,7 +152,7 @@ pub fn build_debug_stack(
 /// For cheap-startup sessions and tests that exercise the session mechanism
 /// rather than the effects — it avoids constructing the heavier handlers (Llm's
 /// genai client, the cwd-bound Fs/Exec/Lsp). Ask (the next tag) is interposed
-/// by each server's `AskDispatcher` wrapper, as with [`build_base_stack`]. Pair
+/// the same way as with [`build_base_stack`], not by a handler here. Pair
 /// with [`base_decls_with_ask`] (which is generic over any `CollectEffectDecls`
 /// stack) to derive `(decls, ask_tag)`.
 pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
@@ -246,16 +248,14 @@ mod tests {
 
     // === JIT-level roundtrip tests ===
     //
-    // Bundled per effect family into one tidepool-extract compile each (was
-    // one compile per behavior, ~5.4-6.2s apiece). Each bundle returns the
-    // list of FAILED check names (empty on success) so a regression still
-    // names which behavior broke — see
+    // Bundled per effect family into one tidepool-extract compile each. Each
+    // bundle returns the list of FAILED check names (empty on success) so a
+    // regression still names which behavior broke — see
     // tidepool-runtime/tests/generic_form_roundtrip.rs's `check` helper for
     // the idiom. Fs's own roundtrips live in `handlers::fs::tests`.
 
-    /// Bundles `test_jit_console_roundtrip` (putStrLn dispatches without
-    /// aborting the eval) + `test_jit_kv_roundtrip` (kvSet/kvGet round-trips
-    /// a JSON value).
+    /// Checks Console (`putStrLn` dispatches without aborting the eval) and
+    /// KV (`kvSet`/`kvGet` round-trips a JSON value) in one compile.
     #[tokio::test]
     async fn test_jit_console_kv_family() {
         let result = jit_eval(&[
