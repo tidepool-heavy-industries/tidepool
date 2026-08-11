@@ -81,9 +81,11 @@ changes:
 - `panel()` always yields exactly one element, `id="panel"` — the root the
   SSE stream patches in place and the page shell embeds once.
 - Every field input carries `data-bind="<key>"` (the submission key) and
-  `data-kind="enum|int|text|bool"` (how the client JS coerces its value:
-  int → number, bool → boolean, enum/text → string). A radio group shares one
-  `data-bind` key; only the checked option contributes.
+  `data-kind="string|int|number|bool|enum"` (how the client JS coerces its
+  value: `int` → `Number`, `bool` → boolean; `string`/`number`/`enum` are all
+  left as the raw string value — a `number`-kind (float) field is NOT coerced
+  to a JS number today, unlike `int`). A radio group shares one `data-bind`
+  key; only the checked option contributes.
 - Every action element (submit button, continue button) points at a verb via
   `data-on-submit="@post('/submit')"` or `data-on-click="@post('/continue')"`.
   The vendored JS parses the URL out of that literal `@post('...')` string.

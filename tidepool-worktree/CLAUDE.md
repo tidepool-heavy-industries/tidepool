@@ -23,6 +23,7 @@ See the root `CLAUDE.md` for the project map and
 | `snapshot.rs` | temp-index synthetic commit + the untouched-source proof | L2 |
 | `monitor.rs` | poll/reconcile, coalesced deltas, honest classification | L3 |
 | `journal.rs` | durable append-only event journal (no replay) | L3 |
+| `testing.rs` | `ScriptedWriter` — drives a real temp repo with plain git commands, standing in for a coding agent | testing |
 
 ## Rules that are not negotiable here
 
