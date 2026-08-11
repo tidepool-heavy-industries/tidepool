@@ -121,7 +121,70 @@ function/block counts, and `cbor_encode`'s own phase line — not a
 
 **D2's first step remains unchanged and un-done:** dump a `meta.cbor` for a
 PURE entry term and attribute the five freer constructors to a source
-empirically. Bank the answer either way.
+empirically. Bank the answer either way. Two notes on HOW, added below.
+
+### 1a. Findings banked while D2 was blocked (TL, 2026-08-11)
+
+Three things established without touching a sibling-owned file:
+
+1. **`wiredInDataCons` still does NOT carry the five.** Re-verified at HEAD
+   (`Translate.hs:2856-2868`): the list is `cons`/`nil`, `true`/`false`,
+   `char`, `unit`, `int`/`word`/`double`/`float`, 2- and 3-tuples, and the
+   three `Ordering` constructors. No `Val`/`E`/`Union`/`Leaf`/`Node`. The
+   handoff's verification holds at HEAD, so the mandatory-roots hazard is
+   real and unmitigated by that unconditional source.
+
+2. **"DERIVE the five from `freer_names`, never hand-list" is UNIMPLEMENTABLE
+   AS LITERALLY WRITTEN, and the handoff does not say so.** `freer_names` is
+   canonically `tidepool-repr/src/freer_names.rs` (`tidepool-effect`
+   re-exports it thinly; `ConTags::try_from` resolves through that re-export).
+   It is a **Rust** module. The narrowing D2 performs happens in
+   `Translate.hs`/`Main.hs`, which cannot import a Rust `const`, and a grep
+   confirms there is **no Haskell-side mirror of those five names anywhere in
+   the tree** (the only hit for any of the strings is
+   `Session.hs:146`'s unrelated `sessionKindString ValMod = "Val"`).
+
+   So a dev following the requirement literally has exactly two options, and
+   one of them is the thing the requirement forbids: add a Haskell-side list
+   (the banned hand-list) or generate/share a constant across the language
+   boundary (heavy, and new machinery on the extractor's most delicate path).
+
+   **The intent-preserving implementation is neither: keep the five
+   reachability-INDEPENDENT by not replacing the binder-type closure.**
+   `collectTransitiveDCons` (`Translate.hs:1291`) seeds from binder `idType`s
+   and expands via `closeTyCons`/`dataConOrigArgTys`, so from any binder typed
+   `Eff …` it reaches `Eff`'s `Val`/`E`, then through `E`'s field types the
+   `Union` and `FTCQueue` cons. That supplies all five **with no list on
+   either side of the language boundary** — which is exactly what "derived,
+   not hand-listed" was reaching for.
+
+   This reframes D2's central constraint into something narrower and
+   checkable: **D2 must not replace or bypass the binder-type closure.** It
+   may narrow `tyconMeta` (the `collectDataCons`-over-`mg_tcs` sweep, which
+   is the actual bloat and which provably cannot supply the five anyway —
+   they live in the freer-simple PACKAGE, not in any home module's `mg_tcs`).
+   Restate the requirement that way in the dev spec; the original wording
+   invites a compliant-looking implementation that cannot exist.
+
+3. **The empirical attribution probe must run on a REAL generated module.**
+   The turn preamble is built programmatically (`tidepool_mcp::build_preamble`
+   → `pragmas_and_imports` + a generated effects module), so a hand-written
+   approximation of "a pure entry term" is not the same module the boot path
+   compiles — and the handoff's own hazard applies to the probe itself: *a
+   probe over the wrong term shape passes while the real path breaks.* Use a
+   module the production path actually emitted. Two sources that require no
+   new code: the driver records every outer fragment's exact source in
+   `Event::OuterCompile { label, source }` (`transcript.jsonl`), and the
+   compile memo stores the resulting `meta.cbor` keyed by invocation
+   (`plans/compile-memo.md`).
+
+   Cheap decoder-free instrument for the presence half: the qualified
+   spellings are stored as plain CBOR text strings, so
+   `grep -c 'Control.Monad.Freer.Val'` (and the other four, per
+   `tidepool-repr/src/freer_names.rs`) over the raw `meta.cbor` answers
+   "present or not" with no decoder at all. Attribution to a SOURCE still
+   needs the narrowing built and A/B'd — presence alone does not say which
+   collector supplied them.
 
 ---
 
