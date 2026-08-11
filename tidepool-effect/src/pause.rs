@@ -8,21 +8,22 @@
 //! nothing unobserved. Pure JIT stretches can't be interrupted — a thread that
 //! reaches no effect within a grace period is treated as a runaway and detached.
 //!
-//! Two dispatchers share this ONE gate:
+//! Two call sites share this ONE gate, both wrapping the same
+//! `tidepool_runtime::session::GateDispatcher` around their handler stack —
+//! it never intercepts the ask tag (the JIT's own suspend driver catches that
+//! first), only turns every non-ask dispatch into a checkpoint:
 //!
-//! - `tidepool-mcp`'s per-eval `AskDispatcher` drives the full state machine —
-//!   pause → park → resume/abort — plus the compile-phase flag (`set_compiling`)
-//!   so a slow cold-cache GHC compile isn't misdiagnosed as a runaway, and
+//! - `tidepool_runtime::session::SessionEngine`'s per-eval turn driver (the
+//!   oneshot MCP eval path) exercises the full state machine — pause → park →
+//!   resume/abort — plus the compile-phase flag (`set_compiling`) so a slow
+//!   cold-cache GHC compile isn't misdiagnosed as a runaway, and
 //!   `parked_or_in_effect` to distinguish "will park at the next boundary" from
 //!   "pure-compute runaway" at the grace deadline.
-//! - `tidepool_runtime::session::GateDispatcher` — the shared timeout-yield
-//!   checkpoint the oneshot eval engine and every `tidepool-repl` turn wrap
-//!   their handler stack in — uses the abort latch only: on a turn timeout the
-//!   server requests an abort and reads `is_in_effect` at the grace deadline (a
-//!   long external Exec/Http call, not a pure loop). It never requests a pause,
-//!   and it never intercepts the ask tag (the JIT's own suspend driver catches
-//!   that first) — the pause states and grace machinery are simply unused
-//!   there, but the gate is one type.
+//! - `tidepool-repl`'s resident turns use the abort latch only: on a turn
+//!   timeout the server requests an abort and reads `is_in_effect` at the
+//!   grace deadline (a long external Exec/Http call, not a pure loop). They
+//!   never request a pause — the pause states and grace machinery are simply
+//!   unused there, but the gate is one type.
 //!
 //! ## The two cancellation channels (deliberate layering, one surfaced cause)
 //!
