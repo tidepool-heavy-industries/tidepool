@@ -25,6 +25,17 @@
 //!     O(n) nesting) over a list deep enough to exceed `MAX_CALL_DEPTH` must
 //!     still overflow — cleanly (a typed `StackOverflow`, not a SIGSEGV) —
 //!     proving the fix didn't turn the guard into a no-op.
+//!
+//! EXPENSIVE-GATED (test-diet): these two tests are ~116s of deterministic
+//! guard-pinning (compiling tens of thousands of call sites into one
+//! Cranelift function each) that otherwise ran on every quick-tier
+//! `cargo nextest run`. Gated behind `TIDEPOOL_EXPENSIVE_TESTS=1` with the
+//! same early-return `SKIPPED (expensive)` idiom
+//! `tidepool-codegen/tests/haskell_suite_differential.rs` uses. Run them
+//! DELIBERATELY whenever touching `MAX_CALL_DEPTH`, `debug_app_check`/
+//! `debug_app_return`, or anything else in the call-depth guard's path —
+//! this is the property they exist to pin, and the quick tier no longer
+//! exercises it for you.
 
 use tidepool_eval::value::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
@@ -241,6 +252,10 @@ const SEQUENTIAL_CALL_COUNT: usize = 25_000;
 /// that headroom is what production actually gives it.
 #[test]
 fn fifty_thousand_sequential_calls_do_not_false_positive_overflow() {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(|| {
@@ -269,6 +284,10 @@ fn fifty_thousand_sequential_calls_do_not_false_positive_overflow() {
 /// exhaust the stack, which only holds on a stack sized like production's.
 #[test]
 fn genuinely_deep_recursion_still_overflows_cleanly() {
+    if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(|| {
