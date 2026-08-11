@@ -967,8 +967,7 @@ instance ToJSON FileInfo where
     , "newLines" .= fiNewLines fi ]
 
 -- | What a diff is, as data: it either failed to parse (carrying the message)
--- or parsed into a per-file summary.  Documents the two shapes 'checkDiff'
--- used to hand back as an opaque 'Value'.
+-- or parsed into a per-file summary.
 data CheckResult
   = Unparsable Text      -- ^ @{"parses": false, "error": <message>}@
   | Parsed [FileInfo]    -- ^ @{"parses": true, "files": [...]}@

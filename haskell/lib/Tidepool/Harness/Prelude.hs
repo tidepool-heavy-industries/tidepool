@@ -19,13 +19,6 @@
 -- 1). 'gFrom'\/'gTo' below are the SAFE names: an author who needs the
 -- generic round trip reaches for these, never the bare (ambiguous) names
 -- and never a per-file @import qualified GHC.Generics as G@ of their own.
---
--- (An author-contract @render@ used to collide with a generic @render@
--- 'Tidepool.Prelude' re-exported from @Tidepool.Render@ — every existing
--- harness fixture wrote @import Tidepool.Prelude hiding (render)@ to dodge
--- it. That re-export is gone from 'Tidepool.Prelude' now (approved surface
--- decision, generic-surface wave item 4, 2026-08-08: bare @render@ was never
--- an advertised verb), so there is nothing left to hide here.)
 module Tidepool.Harness.Prelude
   ( -- * Tidepool.Prelude
     module Tidepool.Prelude
