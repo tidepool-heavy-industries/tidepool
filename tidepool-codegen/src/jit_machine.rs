@@ -3911,7 +3911,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 // Root the continuation for the whole arm: request-forcing
                 // (heap_force runs thunk code that can allocate → GC) and
                 // response materialization (host_alloc_gc in
-                // alloc_stream_tail_thunk / build_cons_cells) can collect
+                // materialize_cons_list / build_cons_cells) can collect
                 // while the JIT stack is unwound — an UNROOTED continuation
                 // tree is not evacuated and from-space is freed, so
                 // `machine.resume(continuation, …)` would read freed memory.
