@@ -1219,7 +1219,7 @@ fn retarget_result_binder(src: &str) -> String {
 }
 
 /// The 1-based inclusive line count `code` occupies once embedded — mirrors
-/// `tidepool_mcp::eval_prep`'s `template_haskell_impl` end-line computation
+/// `tidepool_mcp::eval_prep`'s `TurnTemplate::render` end-line computation
 /// exactly (an empty block is 1 line; a trailing newline doesn't count as an
 /// extra line).
 pub(crate) fn content_line_count(code: &str) -> usize {

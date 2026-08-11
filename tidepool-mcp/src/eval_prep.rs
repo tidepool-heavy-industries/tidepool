@@ -368,87 +368,25 @@ pub fn wrap_do(code: &str) -> String {
     )
 }
 
-pub fn template_haskell(
-    preamble: &str,
-    effect_stack: &str,
-    code: &str,
-    imports: &str,
-    helpers: &str,
-    input: Option<&serde_json::Value>,
-    budget: Option<u32>,
-) -> String {
-    template_haskell_impl(
-        preamble,
-        effect_stack,
-        code,
-        imports,
-        helpers,
-        input,
-        budget,
-        false,
-        false,
-    )
+/// How a turn's terminal `_r` renders to the caller — see [`TurnTemplate::render`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Render {
+    /// The stateless eval server's machine-JSON contract.
+    #[default]
+    ToJson,
+    /// The REPL's Show-default contract: `Text` renders bare (not
+    /// show-quoted), `Value` passes through as structured JSON, any other
+    /// `Show a` renders via `show`. The `ToWire` class is always emitted by
+    /// [`crate::build_preamble`] / [`crate::build_preamble_non_interactive`].
+    ToWire,
 }
 
-/// Like [`template_haskell`], but the result binding carries an extra `Show`
-/// anchor (see [`template_haskell_impl`]'s `anchor_result` doc) so a turn
-/// compiled against a real `Finalize T` row can resolve `finalize`'s free
-/// result tyvar. Every OTHER caller keeps using [`template_haskell`] /
-/// [`template_haskell_show_default`] unpinned — this is additive to a single
-/// turn's own module, never a change to the shared template those callers see.
-pub fn template_haskell_anchored(
-    preamble: &str,
-    effect_stack: &str,
-    code: &str,
-    imports: &str,
-    helpers: &str,
-    input: Option<&serde_json::Value>,
-    budget: Option<u32>,
-) -> String {
-    template_haskell_impl(
-        preamble,
-        effect_stack,
-        code,
-        imports,
-        helpers,
-        input,
-        budget,
-        false,
-        true,
-    )
-}
-
-/// Like [`template_haskell`] but uses `toWire` instead of `toJSON` for the
-/// result — enabling Show-default rendering (REPL mode). `Text` renders bare
-/// (not show-quoted); `Value` passes through as structured JSON; any other
-/// `Show a` renders via `show`. The `ToWire` class is always emitted by
-/// [`crate::build_preamble`] / [`crate::build_preamble_non_interactive`].
-///
-/// Used by `tidepool-repl` `session_eval` turns; the stateless eval server
-/// uses [`template_haskell`] (preserves the toJSON contract for machine callers).
-pub fn template_haskell_show_default(
-    preamble: &str,
-    effect_stack: &str,
-    code: &str,
-    imports: &str,
-    helpers: &str,
-    input: Option<&serde_json::Value>,
-    budget: Option<u32>,
-) -> String {
-    template_haskell_impl(
-        preamble,
-        effect_stack,
-        code,
-        imports,
-        helpers,
-        input,
-        budget,
-        true,
-        false,
-    )
-}
-
-/// Shared impl behind `template_haskell` / `_show_default` / `_anchored`.
+/// Options for [`TurnTemplate::render`] — the wrap-`code`-in-a-module
+/// template shared by [`template_haskell`]/[`template_haskell_anchored`]/
+/// [`template_haskell_show_default`] (thin named wrappers kept below because
+/// callers read better with a name). Construct this directly for a
+/// combination none of them name, e.g. `render: Render::ToWire` +
+/// `anchor_result: true` (a REPL turn against a real `Finalize` row).
 ///
 /// `anchor_result`: when `true`, the result binding routes `_r` through a
 /// generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
@@ -486,8 +424,135 @@ pub fn template_haskell_show_default(
 /// resolves trivially and changes nothing observable — this is why it's safe
 /// to add without threading the hole's concrete answer type through at all,
 /// only a per-turn boolean (see `tidepool-harness::engine::template_turn_for`).
-#[allow(clippy::too_many_arguments)] // shared impl behind template_haskell / _show_default / _anchored
-fn template_haskell_impl(
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TurnTemplate<'a> {
+    pub preamble: &'a str,
+    pub effect_stack: &'a str,
+    pub code: &'a str,
+    pub imports: &'a str,
+    pub helpers: &'a str,
+    pub input: Option<&'a serde_json::Value>,
+    pub budget: Option<u32>,
+    pub render: Render,
+    pub anchor_result: bool,
+}
+
+impl TurnTemplate<'_> {
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+
+        // Preamble contains: pragmas, module header, standard imports, default decl,
+        // data declarations, type alias. User imports must go after standard imports
+        // (after "import Control.Monad.Freer\n") and before "default".
+        if !self.imports.is_empty() {
+            let insert_point = self
+                .preamble
+                .find("default (Int")
+                .unwrap_or(self.preamble.len());
+            out.push_str(&self.preamble[..insert_point]);
+            for imp in self
+                .imports
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+            {
+                out.push_str(&format!("import {}\n", imp));
+            }
+            out.push_str(&self.preamble[insert_point..]);
+        } else {
+            out.push_str(self.preamble);
+        }
+
+        // Marker for user code section (used by error formatting to trim preamble)
+        out.push_str("-- [user]\n");
+
+        if !self.helpers.is_empty() {
+            out.push_str(self.helpers);
+            if !self.helpers.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+
+        // Inject input binding if provided
+        out.push_str(&input_binding_source(self.input));
+
+        // User code is a real binding (single EXPRESSION; explicit `do` for
+        // sequencing; trailing `where` legal) embedded VERBATIM — no indentation
+        // transform. Explicit `let { }` brackets suspend the layout algorithm
+        // (Report rule L, explicit context), so unindented user lines are legal
+        // and quasiquote payloads keep byte-exact fidelity (indenting them was
+        // the "+2 corrupts multi-line QQ" bug class). `__b` is local to this RHS.
+        out.push_str("__user = let {\n __b =\n");
+        // 1-based inclusive line range of the user's own `code` text within this
+        // module: `start` is the line right after this bracket (where `code`'s
+        // first line lands); `end` follows from `code`'s own newline count. Riding
+        // this on the closing-bracket line (rather than a standalone comment line)
+        // keeps every downstream line number byte-identical to before this range
+        // was computed — no line is inserted, only appended text on an existing one.
+        let start_line = out.matches('\n').count() + 1;
+        out.push_str(self.code);
+        if !self.code.ends_with('\n') {
+            out.push('\n');
+        }
+        let content_lines = if self.code.is_empty() {
+            1
+        } else if self.code.ends_with('\n') {
+            self.code.matches('\n').count()
+        } else {
+            self.code.matches('\n').count() + 1
+        };
+        let end_line = start_line + content_lines - 1;
+        out.push_str(&format!(
+            " }} in __b  -- [user-lines] {start_line}:{end_line}\n"
+        ));
+        out.push('\n');
+
+        // render_call: toWire in REPL (Show-default), toJSON in stateless server.
+        let render_call = if self.render == Render::ToWire {
+            "toWire"
+        } else {
+            "toJSON"
+        };
+
+        // The defaulting anchor (see this struct's doc): `id` under a `Show`
+        // constraint, so it never forces `_r`'s type — only adds the standard-
+        // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
+        // when `anchor_result` is set (a real `Finalize T` row); every other
+        // caller's `_r` is rendered exactly as before.
+        if self.anchor_result {
+            out.push_str("__anchor :: P.Show a => a -> a\n__anchor = P.id\n\n");
+        }
+        let rendered = if self.anchor_result {
+            "(__anchor _r)"
+        } else {
+            "_r"
+        };
+
+        out.push_str(&format!("result :: Eff {} Value\n", self.effect_stack));
+        out.push_str("result = do\n");
+        if self.budget.is_some() {
+            out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
+        }
+        out.push_str("  _r <- __user\n");
+        if let Some(b) = self.budget {
+            out.push_str("  _scV <- kvGet \"__sayChars\"\n");
+            out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
+            out.push_str(&format!(
+                "  paginateResult (max 100 ({} - _sayC)) ({render_call} {rendered})\n",
+                b
+            ));
+        } else {
+            out.push_str(&format!(
+                "  paginateResult 4096 ({render_call} {rendered})\n"
+            ));
+        }
+
+        out
+    }
+}
+
+pub fn template_haskell(
     preamble: &str,
     effect_stack: &str,
     code: &str,
@@ -495,103 +560,75 @@ fn template_haskell_impl(
     helpers: &str,
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
-    show_default: bool,
-    anchor_result: bool,
 ) -> String {
-    let mut out = String::new();
-
-    // Preamble contains: pragmas, module header, standard imports, default decl,
-    // data declarations, type alias. User imports must go after standard imports
-    // (after "import Control.Monad.Freer\n") and before "default".
-    if !imports.is_empty() {
-        let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
-        out.push_str(&preamble[..insert_point]);
-        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            out.push_str(&format!("import {}\n", imp));
-        }
-        out.push_str(&preamble[insert_point..]);
-    } else {
-        out.push_str(preamble);
+    TurnTemplate {
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        ..Default::default()
     }
+    .render()
+}
 
-    // Marker for user code section (used by error formatting to trim preamble)
-    out.push_str("-- [user]\n");
-
-    if !helpers.is_empty() {
-        out.push_str(helpers);
-        if !helpers.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
+/// Like [`template_haskell`], but the result binding carries an extra `Show`
+/// anchor (see [`TurnTemplate`]'s `anchor_result` doc) so a turn compiled
+/// against a real `Finalize T` row can resolve `finalize`'s free result
+/// tyvar. Every OTHER caller keeps using [`template_haskell`] /
+/// [`template_haskell_show_default`] unpinned — this is additive to a single
+/// turn's own module, never a change to the shared template those callers see.
+pub fn template_haskell_anchored(
+    preamble: &str,
+    effect_stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    input: Option<&serde_json::Value>,
+    budget: Option<u32>,
+) -> String {
+    TurnTemplate {
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        anchor_result: true,
+        ..Default::default()
     }
+    .render()
+}
 
-    // Inject input binding if provided
-    out.push_str(&input_binding_source(input));
-
-    // User code is a real binding (single EXPRESSION; explicit `do` for
-    // sequencing; trailing `where` legal) embedded VERBATIM — no indentation
-    // transform. Explicit `let { }` brackets suspend the layout algorithm
-    // (Report rule L, explicit context), so unindented user lines are legal
-    // and quasiquote payloads keep byte-exact fidelity (indenting them was
-    // the "+2 corrupts multi-line QQ" bug class). `__b` is local to this RHS.
-    out.push_str("__user = let {\n __b =\n");
-    // 1-based inclusive line range of the user's own `code` text within this
-    // module: `start` is the line right after this bracket (where `code`'s
-    // first line lands); `end` follows from `code`'s own newline count. Riding
-    // this on the closing-bracket line (rather than a standalone comment line)
-    // keeps every downstream line number byte-identical to before this range
-    // was computed — no line is inserted, only appended text on an existing one.
-    let start_line = out.matches('\n').count() + 1;
-    out.push_str(code);
-    if !code.ends_with('\n') {
-        out.push('\n');
+/// Like [`template_haskell`] but uses `toWire` instead of `toJSON` for the
+/// result — see [`Render::ToWire`].
+///
+/// Used by `tidepool-repl` `session_eval` turns; the stateless eval server
+/// uses [`template_haskell`] (preserves the toJSON contract for machine callers).
+pub fn template_haskell_show_default(
+    preamble: &str,
+    effect_stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    input: Option<&serde_json::Value>,
+    budget: Option<u32>,
+) -> String {
+    TurnTemplate {
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        render: Render::ToWire,
+        ..Default::default()
     }
-    let content_lines = if code.is_empty() {
-        1
-    } else if code.ends_with('\n') {
-        code.matches('\n').count()
-    } else {
-        code.matches('\n').count() + 1
-    };
-    let end_line = start_line + content_lines - 1;
-    out.push_str(&format!(
-        " }} in __b  -- [user-lines] {start_line}:{end_line}\n"
-    ));
-    out.push('\n');
-
-    // render_call: toWire in REPL (Show-default), toJSON in stateless server.
-    let render_call = if show_default { "toWire" } else { "toJSON" };
-
-    // The defaulting anchor (see this fn's doc): `id` under a `Show`
-    // constraint, so it never forces `_r`'s type — only adds the standard-
-    // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
-    // when `anchor_result` is set (a real `Finalize T` row); every other
-    // caller's `_r` is rendered exactly as before.
-    if anchor_result {
-        out.push_str("__anchor :: P.Show a => a -> a\n__anchor = P.id\n\n");
-    }
-    let rendered = if anchor_result { "(__anchor _r)" } else { "_r" };
-
-    out.push_str(&format!("result :: Eff {} Value\n", effect_stack));
-    out.push_str("result = do\n");
-    if budget.is_some() {
-        out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
-    }
-    out.push_str("  _r <- __user\n");
-    if let Some(b) = budget {
-        out.push_str("  _scV <- kvGet \"__sayChars\"\n");
-        out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
-        out.push_str(&format!(
-            "  paginateResult (max 100 ({} - _sayC)) ({render_call} {rendered})\n",
-            b
-        ));
-    } else {
-        out.push_str(&format!(
-            "  paginateResult 4096 ({render_call} {rendered})\n"
-        ));
-    }
-
-    out
+    .render()
 }
 
 /// Escape a string for inclusion in a generated Haskell string literal (the
@@ -1402,13 +1439,15 @@ mod tests {
     }
 }
 
-/// Pin test: byte-exact output of the three `template_haskell*` wrapper
-/// paths, captured BEFORE the `TurnTemplate` options-struct refactor (see
-/// `plans/README.md` / the template-struct spec). Same discipline as
+/// Pin test: byte-exact output of the `template_haskell*` wrapper paths
+/// (three that existed before the `TurnTemplate` options-struct refactor,
+/// plus the fourth `render: ToWire` + `anchor_result: true` combination the
+/// refactor newly makes expressible — no named wrapper existed for it, so it
+/// is pinned as NEW, not carried over unchanged). Same discipline as
 /// `preamble.rs`'s `import_gating_pin`: hardcoded literal expected text, not
 /// a call back into any production string-builder, so a refactor of the
 /// templating internals cannot keep this green while silently changing the
-/// emitted bytes. `template_haskell_impl`'s output is a compile-cache input
+/// emitted bytes. `TurnTemplate::render`'s output is a compile-cache input
 /// (it feeds `compile_haskell`'s source, salted independently of
 /// `ensure_effects_module_at`'s own cache — see that fn's doc), so drift here
 /// is a real regression, not cosmetic.
@@ -1426,7 +1465,7 @@ mod template_haskell_pin {
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
-            "template_haskell output changed — this is a compile-cache input, see template_haskell_impl"
+            "template_haskell output changed — this is a compile-cache input, see TurnTemplate::render"
         );
     }
 
@@ -1436,7 +1475,7 @@ mod template_haskell_pin {
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON (__anchor _r))\n",
-            "template_haskell_anchored output changed — this is a compile-cache input, see template_haskell_impl"
+            "template_haskell_anchored output changed — this is a compile-cache input, see TurnTemplate::render"
         );
     }
 
@@ -1446,7 +1485,31 @@ mod template_haskell_pin {
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire _r)\n",
-            "template_haskell_show_default output changed — this is a compile-cache input, see template_haskell_impl"
+            "template_haskell_show_default output changed — this is a compile-cache input, see TurnTemplate::render"
+        );
+    }
+
+    /// The fourth flag combination (`show_default=true, anchor_result=true`
+    /// — a REPL turn compiled against a real `Finalize T` row) had no named
+    /// wrapper before the `TurnTemplate` refactor, so it was UNREACHABLE
+    /// through the public API even though `template_haskell_impl` supported
+    /// it internally. `TurnTemplate` makes it directly expressible. Pinned
+    /// as NEW output, not carried over from any prior wrapper.
+    #[test]
+    fn show_default_anchored_combination_is_expressible_and_pinned() {
+        let src = TurnTemplate {
+            preamble: PRE,
+            effect_stack: STACK,
+            code: CODE,
+            render: Render::ToWire,
+            anchor_result: true,
+            ..Default::default()
+        }
+        .render();
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire (__anchor _r))\n",
+            "the newly-expressible show_default+anchor_result combination changed"
         );
     }
 }

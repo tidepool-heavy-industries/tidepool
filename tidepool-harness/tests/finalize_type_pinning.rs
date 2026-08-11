@@ -364,7 +364,7 @@ fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
 /// still has the inner `(value :: T)` annotation — see the shape above) —
 /// this is the claim the fix must hold even if the prompt's own wording
 /// drifts. Revert `template_turn_for`'s anchor routing
-/// (`tidepool-harness/src/engine.rs`) or `template_haskell_impl`'s
+/// (`tidepool-harness/src/engine.rs`) or `TurnTemplate::render`'s
 /// `anchor_result` handling (`tidepool-mcp/src/eval_prep.rs`) and this test
 /// goes RED with GHC's "Ambiguous type variable 'a0' ... arising from a use
 /// of 'toJSON' ... (ToJSON a0)" — the exact defect this pins.
