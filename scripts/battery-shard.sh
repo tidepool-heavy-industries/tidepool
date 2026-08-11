@@ -12,12 +12,14 @@
 #   scripts/battery-shard.sh tidepool-runtime
 #   scripts/battery-shard.sh tidepool-codegen -E 'binary(proptest_ghc_idioms)'
 #
-# This does NOT set TIDEPOOL_EXPENSIVE_TESTS — the multi-hundred-second
-# suites (corpus_report, haskell_suite_differential,
-# tidepool-testing::haskell_verified)
+# This does NOT set TIDEPOOL_EXPENSIVE_TESTS — the expensive suites
+# (corpus_report, haskell_suite_differential, tidepool-testing::haskell_verified)
 # stay skipped unless you export TIDEPOOL_EXPENSIVE_TESTS=1 yourself. Run
 # those deliberately, one at a time, with their own budget — they are NOT
-# what this script's ~380s-per-shard promise covers.
+# what this script's ~380s-per-shard promise covers. Only haskell_verified is
+# actually multi-hundred-second (measured: corpus_report ~8s,
+# haskell_suite_differential ~27s, haskell_verified's individual proptest
+# cases alone run 100s+).
 # `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d, so
 # reaching them additionally needs `--run-ignored all` scoped with `-E` (a
 # bare `--run-ignored all` also un-ignores tidepool-codegen's deliberately-off

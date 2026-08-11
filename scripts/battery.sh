@@ -15,9 +15,12 @@
 # finish. Prefer:
 #   - a single crate/test slice: `scripts/battery.sh -p <crate> -E 'test(<name>)'`
 #   - a full crate as a survivable shard: `scripts/battery-shard.sh <crate>`
-# The named multi-hundred-second suites (corpus_report, haskell_suite_differential,
+# The named expensive suites (corpus_report, haskell_suite_differential,
 # tidepool-testing::haskell_verified) are additionally gated behind
 # TIDEPOOL_EXPENSIVE_TESTS=1 and stay skipped even here unless you set it.
+# Only the last of the three is actually multi-hundred-second (measured:
+# corpus_report ~8s, haskell_suite_differential ~27s, haskell_verified's
+# individual proptest cases alone run 100s+).
 # `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d (a
 # default nextest run must report them as ignored, not silently "passed" via
 # early return) — reaching them needs BOTH TIDEPOOL_EXPENSIVE_TESTS=1 AND

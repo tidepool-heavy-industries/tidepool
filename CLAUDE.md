@@ -179,13 +179,17 @@ capped without an edit there. The box-wide ceiling is the product of the two
    finish inside the ~380s budget. Chain shards (one crate per invocation) to
    walk full coverage without tripping the environment's kill.
 4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
-   <crate>` (or targeted per-test). A handful of multi-hundred-second suites
+   <crate>` (or targeted per-test). A handful of suites
    (`corpus_report`, `haskell_suite_differential`,
    `tidepool-testing::haskell_verified`) early-return with a
    `SKIPPED (expensive)` line unless `TIDEPOOL_EXPENSIVE_TESTS=1` is set —
    this holds even under `--ignore-default-filter`, so tier 3 alone never
    accidentally triggers them. Run these deliberately, one at a time, outside
-   the ~380s assumption (some run for many hundreds of seconds).
+   the ~380s assumption: `corpus_report` and `haskell_suite_differential` are
+   actually quick once gated in (measured ~8s and ~27s respectively), but
+   `tidepool-testing::haskell_verified` genuinely runs for many hundreds of
+   seconds — its proptest cases (e.g. `cousins::test_list_fold`) individually
+   take 100s+.
 
 Never run bare `scripts/battery.sh` (tier 0, unbounded) expecting it to
 complete here — use tier 2 or 3.
