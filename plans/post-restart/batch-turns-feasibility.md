@@ -660,3 +660,97 @@ Four points §8 left underspecified. **These are now binding on both halves.**
 4. **The per-item `TurnOut` sidecar is `turn.cbor`**, matching `run_turn`'s
    own `turn_out_path` convention. "Byte-identical single-turn output set"
    means literally that, filename included.
+
+---
+
+## 9. Where this lane actually landed — including an error in §1
+
+Settled: `plans/post-restart/batch-turns-planner-receipt.md`. The planner
+child returned a finding rather than an implementation, and the finding is
+correct. It exposes a mistake in this document that everything downstream
+inherited, so it is recorded here plainly rather than in a footnote.
+
+### 9.1 The error
+
+**§1's table claims the repl's effectful bind goes through `--turn`
+(`session.rs:1711` → `turn.rs:435`). It does not.** Verified by call-edge
+grep:
+
+- `turn::run_turn` — the `--turn` rail §8 was designed on — is called by
+  **`tidepool-harness`** (`harness.rs:1231`), and by tests. Not by any repl
+  item path.
+- **Every** repl compile path calls `compile_session_turn` instead:
+  `probe_pure_type` (`session.rs:1384`), `run_bind` (`:1736`),
+  `run_bind_discard` (`:1877`), `run_multi_bind` (`:1918`), `run_bare_expr`
+  (`:2129`, `:2153`), `query_inner_type` (`:2293`).
+
+The likely cause is a name collision I did not check: `tidepool-repl` has its
+own `Session::run_turn` method (`server.rs:672`), which is a different
+function from `turn::run_turn`. §1 was written from a code read that conflated
+them, and §8 then chose its rail from §1.
+
+**Consequence:** §8's batch wire serves `tidepool-harness`, not the repl —
+and the repl was this lane's stated primary beneficiary *and* its oracle.
+
+### 9.2 And the repl is not migrating to that rail
+
+The natural repair — "the repl will converge onto `--turn` anyway" — is also
+wrong, and checking it is what makes this a real correction rather than a
+deferral. `plans/one-spawn-turn-protocol-phase-b.md` **Decision 2** is
+explicit: `run_turn` becomes the one entry point *for `tidepool-harness` and
+the decl-items harvest*, and it deliberately does **not** absorb the repl's
+five eval wrappers, which keep calling `compile_session_turn`. That is a
+standing decision this lane does not get to overturn.
+
+So reaching the repl needs a **second batch wire, shaped like
+`compile_session_turn`** (full wrapped source per item, no batch-wide
+template) — not a repl migration.
+
+### 9.3 A wire gap that is rail-independent
+
+The planner's second blocker is not about rails and would survive the fix
+above. `run_bare_expr` binds a synthetic `it` / `__it_render` pair whose
+existence is **orthogonal to its `Expr` classify verdict**, and
+`TurnResult::Expr` structurally carries no bound binders. That shape cannot be
+expressed on §8's wire at all. A `compile_session_turn`-shaped batch wire must
+carry per-item binders independently of the verdict kind — which §8, modelled
+on the verdict-driven `--turn` protocol, does not.
+
+Also relevant: a chained run's per-item **growing import list** has no splice
+point in a batch-wide template — a direct consequence of §8.1 ruling 2, which
+I ratified. The per-item `TurnItem<idx>` module rename the extract half needed
+was the first symptom of the same pressure.
+
+### 9.4 What is nonetheless true, and transferable
+
+The hard part of this lane is proven, measured, and **rail-agnostic** — it is
+about GHC session mechanics, not about which CLI mode carries the items:
+
+- one `runGhc`, N sequential cycles, with a threaded `ModIfaceCache` — without
+  which `load'` recompiles the whole stdlib closure every cycle (§7.1);
+- an incremental, per-module dep-guts memo, sound at translate level including
+  the new-module-mid-batch case (§7.6, Scenario D);
+- the binder chain resolving across cycles in one session (§2, §7.1);
+- **67.9% wall-clock reduction on a 5-item batch** (3.09s vs 9.64s).
+
+That mechanism now serves the harness rail end to end, and it is what a repl
+wire would reuse unchanged.
+
+### 9.5 The oracle ran, and it is green
+
+`scripts/battery-shard.sh tidepool-repl`: **198/198, 37m49s** (baseline
+195/195 — the delta is this lane's own added tests). `cross_mode_targeted`
+10/10. Nothing regressed. Note this does *not* discharge the #313-class VarId
+risk (§7.6 gap 2): the repl does not yet route through the batch path, so the
+shard has not exercised the memo under execution. **That check is still
+outstanding and must run when a repl wire lands.**
+
+### 9.6 Corrected next step
+
+1. A `compile_session_turn`-shaped batch wire, carrying per-item wrapped
+   source and per-item binders independently of verdict kind (§9.3).
+2. Then the repl planner, with the shard re-run as the execution-level oracle
+   for the memo.
+3. §1's table is **not to be trusted** until re-derived from call edges — it
+   was already known wrong on spawn counts (§7.2) and is now known wrong on
+   rails.
