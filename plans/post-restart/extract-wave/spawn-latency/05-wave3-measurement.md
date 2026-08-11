@@ -3,8 +3,32 @@
 ## The instrument, named
 
 `scripts/bench-turn.sh` did not exist in this tree when this measurement was
-taken (a sibling dev is building it), so this is a hand measurement with the
+taken (a sibling dev was building it), so this is a hand measurement with the
 method stated.
+
+**It landed later, and it would NOT have served as this item's instrument
+anyway — checked, not assumed.** `bench-turn.sh` has five rows
+(`oneshot_cold`, `oneshot_warm`, `session`, `block5`, `harness`) and **none of
+them is on wave-3's path**: neither the script nor any of its four example
+bins references `SelfHarnessDriver`, `run_one_cycle`, or `render_framing` at
+all. Its `harness` row drives an *answerer* `Harness` turn
+(`drive_turn`/`run_to_hole_or_done`) via `ReplayProvider` — a different path
+from the self-harness driver's pre-model boot cycle, which is what render+loop
+fusion changes.
+
+So this is a standing gap in that instrument, worth knowing for the next perf
+lane: **`bench-turn.sh` has no self-harness-boot row.** Its `block5` row is
+purpose-built for the batch-turns lane and its oneshot/session rows cover the
+eval paths; the self-harness driver is uncovered. Adding such a row is a
+reasonable follow-up, and `acceptance_boot_compile_count` is the instrument to
+build it from.
+
+**No bench-turn regression run was needed for the shared-template change.**
+This change edits `TurnTemplate::render`, which every eval path goes through —
+but the golden tests pin its output **byte-identical** when `extra_entries` is
+empty, and identical bytes mean identical downstream compile cost by
+construction. A timing run would be a weaker check than the byte-identity pin
+it would be re-testing.
 
 **Instrument:** `cargo-nextest`'s per-test duration line for
 `tidepool-harness::acceptance_boot_compile_count::boot_pays_pre_model_extract_compiles_matching_baseline`.
@@ -39,7 +63,7 @@ patch — the "before" was taken on a tree whose only commit past the wave base
 is a plans-only doc commit, so the baseline sha IS the unmodified code. N=3 per
 side, every run reported individually.
 
-## BEFORE — `9ef54deb` (plans-only commit on top of `fc94ac3b`; no code delta)
+## BEFORE — `35b6e22a` (plans-only commit on top of `fc94ac3b`; no code delta)
 
 `PRE_MODEL_EXTRACT_COMPILES = 2` (two `compile_outer` invocations: the pre-loop
 render framing, and the loop body).
@@ -75,18 +99,18 @@ slower than the before median), and the conditions were not matched.
 The fix was to re-take the baseline under MATCHED warm conditions on the same
 box in the same session, by reverse-applying the change as a patch:
 
-    git diff 47b811e2 HEAD -- tidepool-harness/src tidepool-harness/tests \
+    git diff b1a43900 HEAD -- tidepool-harness/src tidepool-harness/tests \
         tidepool-mcp/src > wave3.patch
     git apply -R wave3.patch     # tree is baseline CODE, plans intact
     <5 runs>
     git apply wave3.patch        # restored; `git status` clean
 
 No `git stash` at any point. The restore was confirmed with `git status --short`
-(empty) and `git log` (HEAD unmoved at `032fbbfc`).
+(empty) and `git log` (HEAD unmoved at `d5d9809d`).
 
 ## BEFORE — cold, first pass, SUPERSEDED (kept because it is what nearly shipped)
 
-`9ef54deb`, `PRE_MODEL_EXTRACT_COMPILES = 2`:
+`35b6e22a`, `PRE_MODEL_EXTRACT_COMPILES = 2`:
 21.613 / 27.740 / 25.660 s, median 25.660s. Discarded as unmatched, per above.
 
 ## BEFORE — warm, matched conditions (reverse-applied patch)
@@ -104,7 +128,7 @@ framing, loop body).
 
 **median 22.449s**, range 20.450–24.765s (4.3s spread).
 
-## AFTER — `032fbbfc`, warm, matched conditions
+## AFTER — `d5d9809d`, warm, matched conditions
 
 `PRE_MODEL_EXTRACT_COMPILES = 1` — one fused `compile_turns` spawn emitting
 both entries.
@@ -192,7 +216,7 @@ re-taken there too.
 the pre-rebase after-set's band (median 11.664s) and still comfortably clear of
 the 20.450s baseline floor. Every run PASSed, so the spawn count is still 1.
 
-## Verify legs at the rebased tip (`f9d60a92`)
+## Verify legs at the rebased tip (`f05433e4`)
 
     cargo check --workspace --all-targets            rc=0
     cargo clippy --workspace --all-targets           rc=0, no warnings emitted

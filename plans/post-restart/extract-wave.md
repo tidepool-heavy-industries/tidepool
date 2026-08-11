@@ -494,7 +494,7 @@ deliverable, not green legs.**
 > **SUPERSEDED 2026-08-11 — both caveats below are now discharged, and the
 > update is itself measured.** The 2 was measured on the centralized tip (it is
 > what `PRE_MODEL_EXTRACT_COMPILES` recorded), and wave 3 then took it to
-> **1** — `032fbbfc`, receipt at
+> **1** — `d5d9809d`, receipt at
 > `extract-wave/spawn-latency/05-wave3-measurement.md`. So item 0's headline is
 > **4 → 1, measured at both steps**. The two paragraphs below are retained
 > verbatim because they were correct when written and because the note about
@@ -521,7 +521,7 @@ leaving the note visible rather than silently fixing the line.)
   disk at `extract-wave/boot/02-wave3-one-compile.md`, premise-corrected. Both
   its gates (boot-lazy's fold, `--targets` landing) are satisfied by this fold,
   so it spawns with no unknowns.
-  > **EXECUTED 2026-08-11** (lane `spawn-latency`, `032fbbfc`). Driver-side
+  > **EXECUTED 2026-08-11** (lane `spawn-latency`, `d5d9809d`). Driver-side
   > only — its entire extract side was already done by `--targets`. Pre-model
   > extract spawns **2 → 1**; pre-model boot path median **22.449s → 11.664s**
   > (−48.0%, non-overlapping distributions), receipt at

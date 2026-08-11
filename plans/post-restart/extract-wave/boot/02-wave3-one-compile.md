@@ -1,7 +1,7 @@
 # Wave 3 — `boot-onecompile`: item 0 steps 4–5
 
 **Status: EXECUTED 2026-08-11** (lane `spawn-latency`, dev `wave3-fusion`,
-commit `032fbbfc`). Both holds cleared before it ran: wave 2 folded and
+commit `d5d9809d`). Both holds cleared before it ran: wave 2 folded and
 `--targets` landed on both sides.
 
 **Measured:** pre-model extract spawns **2 → 1**; pre-model boot path median
