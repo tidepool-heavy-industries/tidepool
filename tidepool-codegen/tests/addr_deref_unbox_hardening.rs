@@ -28,11 +28,11 @@
 //! already contain one) round-trips as address 0 with no check anywhere.
 //! Feeding that into `IndexWord8OffAddr` dereferences it directly.
 //!
-//! Mirrors `ffi_strlen_unbox_hardening.rs`'s style: build a minimal
-//! `CoreExpr` by hand, compile, and assert `run_pure()` surfaces a clean
-//! typed `RuntimeError` (`Err(Yield(Runtime(_)))`) rather than a caught
-//! signal (`Err(Yield(Signal(_)))`, meaning the process actually SIGSEGV'd
-//! and `with_signal_protection` only kept the test binary alive) or a silent
+//! These tests build a minimal `CoreExpr` by hand, compile, and assert
+//! `run_pure()` surfaces a clean typed `RuntimeError`
+//! (`Err(Yield(Runtime(_)))`) rather than a caught signal
+//! (`Err(Yield(Signal(_)))`, meaning the process actually SIGSEGV'd and
+//! `with_signal_protection` only kept the test binary alive) or a silent
 //! wrong answer.
 
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};

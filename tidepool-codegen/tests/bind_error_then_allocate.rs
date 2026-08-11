@@ -1,30 +1,22 @@
-//! Finding 4 (repo-review-2026-07-06/01-gc-memory-safety.md): `run_pure_and_bind`'s
-//! error paths (bare `?` / `return Err`) used to bypass `_guard.arm_reclaim(...)`.
-//! `RegistryGuard::drop` with `reclaim: None` frees the retained session buffer
-//! (`clear_run_scratch`) but never writes back `session.heap`/`session.cursor` —
-//! so `session.cursor` is left pointing at whatever high-water mark a PRIOR
-//! (possibly GC-grown) buffer had reached, while `session.heap` stays `None`.
-//! The next run's `install_registries` then falls back to the machine's
-//! original, small, fixed-size `Nursery` buffer, and `make_session_vmctx`
-//! computes `alloc_ptr = nursery.start() + <stale, possibly much larger> cursor`
-//! — an out-of-bounds allocation pointer.
+//! Prior bug: `run_pure_and_bind`'s error paths (bare `?` / `return Err`)
+//! used to bypass `_guard.arm_reclaim(...)`. `RegistryGuard::drop` with
+//! `reclaim: None` frees the retained session buffer (`clear_run_scratch`)
+//! but never writes back `session.heap`/`session.cursor` — so
+//! `session.cursor` is left pointing at whatever high-water mark a PRIOR
+//! (possibly GC-grown) buffer had reached, while `session.heap` stays
+//! `None`. The next run's `install_registries` then falls back to the
+//! machine's original, small, fixed-size `Nursery` buffer, and
+//! `make_session_vmctx` computes
+//! `alloc_ptr = nursery.start() + <stale, possibly much larger> cursor` — an
+//! out-of-bounds allocation pointer.
 //!
-//! This mirrors the harness style of `converge_proof.rs` (same crate): a
-//! session machine driven turn-by-turn via `add_function` + a bind primitive,
-//! with a reference fragment reading back a tenured value to prove
-//! correctness. It reproduces the plan's exact scenario: an ordinary runtime
-//! error in a bind turn (`head []`-shaped — a genuine case-miss trap, not a
-//! test bug), immediately followed by an allocating turn, which must succeed
-//! cleanly (no crash, correct result) rather than computing a bad alloc
-//! pointer from a stale cursor.
-//!
-//! Per the DEV AGENT PROTOCOL boundary for this task: this is a NEW test file
-//! (not an edit to `tidepool-repl/tests/it_binding.rs`, which lives outside
-//! `tidepool-codegen`/`tidepool-heap` and is owned by a concurrent worker) that
-//! drives the actual buggy function (`run_pure_and_bind`, in this crate)
-//! directly, rather than through the full REPL/GHC-extract stack `it_binding.rs`
-//! needs — `converge_proof.rs`'s harness is the closest in-boundary analog to
-//! its turn-by-turn session pattern.
+//! A session machine driven turn-by-turn via `add_function` + a bind
+//! primitive, with a reference fragment reading back a tenured value to
+//! prove correctness: an ordinary runtime error in a bind turn (`head
+//! []`-shaped — a genuine case-miss trap, not a test bug), immediately
+//! followed by an allocating turn, which must succeed cleanly (no crash,
+//! correct result) rather than computing a bad alloc pointer from a stale
+//! cursor.
 
 use serial_test::serial;
 use tidepool_codegen::emit::ExternalEnv;
@@ -91,8 +83,7 @@ fn table() -> DataConTable {
 
 /// `case ErrScrut of { ErrAlt -> 0 }` — the scrutinee's tag matches no
 /// alternative: a genuine runtime case-miss trap (`RuntimeError::CaseTrap`),
-/// not a compile-time or test-construction error. Mirrors the `head []`
-/// scenario named in the plan.
+/// not a compile-time or test-construction error.
 fn build_error_fragment() -> CoreExpr {
     let mut b = TreeBuilder::new();
     let scrut = b.push(CoreFrame::Con {
@@ -126,7 +117,7 @@ fn error_bind_turn_then_allocating_bind_turn_stays_sane() {
             let verify_before = heap_verify_run_count();
             let table = table();
 
-            // Tiny 2 KiB nursery — matches converge_proof's GC-forcing setup.
+            // Tiny 2 KiB nursery.
             let dummy = build_value_fragment(0);
             let mut machine =
                 JitEffectMachine::compile_session(&dummy, &table, 2048).expect("compile_session");
@@ -194,8 +185,8 @@ fn error_bind_turn_then_allocating_bind_turn_stays_sane() {
                 "the successful bind turn must register exactly one persistent root"
             );
 
-            // Read back through a reference fragment (converge_proof pattern)
-            // to prove the tenured value is intact, not just non-null.
+            // Read back through a reference fragment to prove the tenured
+            // value is intact, not just non-null.
             let x = VarId((0xFEu64 << 56) | 0x9999);
             let mut env = ExternalEnv::new();
             env.insert(x, slot.addr());

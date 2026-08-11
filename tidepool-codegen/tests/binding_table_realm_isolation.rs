@@ -1,32 +1,28 @@
-//! Lane C — the Item-2 VarId-keyed cross-realm isolation property, pinned in
-//! its own terms (verdict §7 step 5, `realm-checklist.md` Item 2).
+//! Cross-realm isolation: realm B's bindings must never be seeded into realm
+//! A's compiled fragment. That property holds today only as a corollary of
+//! fresh-id minting plus `BindingTable::seed_external_env` being narrowed to
+//! the fragment's referenced VarIds — `binding_table.rs`'s
+//! `seed_external_env_*` tests pin "narrowing the seed doesn't narrow
+//! GC-root retention," not this isolation property, so this test states it
+//! directly: two independent scopes sharing ONE `BindingTable`, colliding on
+//! display name (`x`, `tmp`), each with freshly-minted `SessionVarId`s.
+//! Asserted on ids, never on counts (a count assertion passes vacuously if
+//! both scopes' ids happen to be seeded and one is also missing), and in
+//! BOTH directions (the leak is not symmetric under all plausible
+//! regressions).
 //!
-//! The realm design leans on "realm B's bindings never get seeded into realm
-//! A's compiled fragment." That property holds today only as a corollary of
-//! fresh-id minting plus commit `5d070690` ("D9"), which narrowed
-//! `BindingTable::seed_external_env` to the fragment's referenced VarIds. D9's
-//! own tests (`binding_table.rs`'s `seed_external_env_*` cases) pin "narrowing
-//! the seed doesn't narrow GC-root retention" — not "realm B's bindings stay
-//! out of realm A's env." This test states the isolation property directly:
-//! two independent scopes sharing ONE `BindingTable`, colliding on display
-//! name (`x`, `tmp`), each with freshly-minted `SessionVarId`s. Asserted on
-//! ids, never on counts (a count assertion passes vacuously if both scopes'
-//! ids happen to be seeded and one is also missing), and in BOTH directions
-//! (the leak is not symmetric under all plausible regressions).
-//!
-//! `tidepool-runtime/tests/realm_varid_pinning.rs` is the real-path sibling —
-//! this test's `referenced` slice is HAND-WIRED (chosen by the test), which
-//! proves the table itself enforces the property but not that any production
-//! caller computes the right slice; the runtime test drives the same property
-//! through `ResidentSession::run`, where `free_vars` computes `referenced`.
+//! `tidepool-runtime/tests/realm_varid_pinning.rs` drives the same property
+//! through `ResidentSession::run`, where `free_vars` computes the referenced
+//! slice; this test's `referenced` slice is HAND-WIRED, so it proves the
+//! table itself enforces the property but not that any production caller
+//! computes the right slice.
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_repr::{BindingName, Generation, SessionModule, SessionVarId, VarId};
 
 /// High-byte tag a real Option-C session binder carries (`stableVarId`,
-/// 0xFE-tagged external) — mirrors `session_seed_external_env_root_retention.rs`'s
-/// fixture helper.
+/// 0xFE-tagged external).
 const EXTERNAL_TAG: u64 = 0xFE;
 
 fn external_var_id(key: u64) -> VarId {

@@ -1,4 +1,4 @@
-//! Finding 1b (`plans/self-iterating-harness/12-contags-staleness-findings.md`):
+//! Prior bug:
 //! `JitEffectMachine.tags: Result<ConTags, &'static str>` is resolved once, at
 //! bootstrap, in `compile_inner`. Every later `add_function`ed fragment is
 //! classified by that same frozen `Result`. If the bootstrap table is missing
@@ -122,7 +122,7 @@ fn add_function_refreshes_missing_con_tags_from_a_later_turns_table() {
         .add_function("turn2", &val_wrapped_int(2), &full, &ExternalEnv::new())
         .expect("second fragment compiles against the complete table");
 
-    // Finding 1b: without the `add_function` refresh, `self.tags` stays
+    // Without the `add_function` refresh, `self.tags` stays
     // frozen at the bootstrap `Err("Node")` forever, and this second run
     // fails MissingConTags again even though `full` has everything the
     // classifier needs. With the refresh, `tags` is re-resolved against

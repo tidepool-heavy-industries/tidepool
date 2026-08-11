@@ -1,15 +1,14 @@
-//! Finding 5 (repo-review-2026-07-06/01-gc-memory-safety.md): the call-depth
-//! counter (`MachineState::call_depth`, checked in `debug_app_check` against
-//! `MAX_CALL_DEPTH = 20_000`) used to be incremented on every non-tail `App`
-//! call and never decremented on return — it counted TOTAL calls made, not
-//! live nesting. `debug_app_return` (paired with `debug_app_check` at every
-//! exit from the regular, non-tail `App` emission) fixes this: the counter
-//! now tracks actual concurrently-live call nesting.
+//! Prior bug: the call-depth counter (`MachineState::call_depth`, checked in
+//! `debug_app_check` against `MAX_CALL_DEPTH = 20_000`) used to be
+//! incremented on every non-tail `App` call and never decremented on
+//! return — it counted TOTAL calls made, not live nesting. `debug_app_return`
+//! (paired with `debug_app_check` at every exit from the regular, non-tail
+//! `App` emission) fixes this: the counter now tracks actual
+//! concurrently-live call nesting.
 //!
-//! Two tests, matching the plan's acceptance criteria (the strict-fold
-//! false-positive; the genuine-recursion clean overflow) at a slightly
-//! smaller scale than "50k" for the sequential case — see
-//! `SEQUENTIAL_CALL_COUNT`'s doc for why:
+//! Two tests, covering the strict-fold false-positive and the
+//! genuine-recursion clean overflow, at a slightly smaller scale than "50k"
+//! for the sequential case — see `SEQUENTIAL_CALL_COUNT`'s doc for why:
 //!
 //! (a) a STRICT, purely SEQUENTIAL chain of applications (`case f r0 of r1
 //!     -> case f r1 of r2 -> ...` — deliberately NOT `let`-bound; this Core
@@ -233,12 +232,11 @@ fn build_deep_nonrec_fold(n: i64) -> (CoreExpr, i64) {
     (fixup_root(&mut tree, root), expected)
 }
 
-/// Comfortably past the pre-fix `MAX_CALL_DEPTH` (20_000) ceiling. The plan's
-/// acceptance criterion names "50k sequential calls"; compiling that many
-/// call sites into ONE Cranelift function (each with its own TCO-check basic
-/// blocks) takes several minutes, so this uses 25_000 instead — comfortably
-/// past the old 20_000 false-positive threshold (proving the property) while
-/// keeping the test at roughly a minute and a half.
+/// Comfortably past the pre-fix `MAX_CALL_DEPTH` (20_000) ceiling. Compiling
+/// 50k call sites into ONE Cranelift function (each with its own TCO-check
+/// basic blocks) takes several minutes, so this uses 25_000 instead —
+/// comfortably past the old 20_000 false-positive threshold (proving the
+/// property) while keeping the test at roughly a minute and a half.
 const SEQUENTIAL_CALL_COUNT: usize = 25_000;
 
 /// (a) many thousands of purely sequential, non-nested applications must

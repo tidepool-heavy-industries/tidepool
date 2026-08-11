@@ -1,10 +1,10 @@
-//! M5 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
-//! the Lit-dispatch case-miss path (and the fully-empty-alts path) passed
-//! the unboxed scrutinee VALUE as `scrut_ptr` to `runtime_shape_trap`, which
-//! dereferences it before its own null/validity check — a case-miss on an
-//! unboxed `Int#` scrutinee (e.g. `case (40# +# 2#) of { 0# -> ... }` with
-//! no `DEFAULT`) fed the raw value `42` in as if it were a heap address,
-//! SIGSEGVing inside the very diagnostic meant to prevent a crash.
+//! Prior bug: the Lit-dispatch case-miss path (and the fully-empty-alts
+//! path) passed the unboxed scrutinee VALUE as `scrut_ptr` to
+//! `runtime_shape_trap`, which dereferences it before its own
+//! null/validity check — a case-miss on an unboxed `Int#` scrutinee (e.g.
+//! `case (40# +# 2#) of { 0# -> ... }` with no `DEFAULT`) fed the raw value
+//! `42` in as if it were a heap address, SIGSEGVing inside the very
+//! diagnostic meant to prevent a crash.
 //!
 //! Fixed: pass the heap pointer only when the scrutinee is actually a
 //! `SsaVal::HeapPtr`; a `Raw` (unboxed) scrutinee passes 0 instead, which

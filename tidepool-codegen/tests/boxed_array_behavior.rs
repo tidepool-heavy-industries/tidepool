@@ -1,11 +1,11 @@
 //! Behavioral coverage for the boxed `SmallArray#`/`Array#` primop family
-//! (`emit/primop.rs:2158` onward). The JIT implements the whole family, but
+//! (`emit/primop.rs:2179` onward). The JIT implements the whole family, but
 //! `tidepool-eval`'s tree-walker has no boxed-array `Value` variant, so these
 //! primops sit entirely outside the eval-vs-JIT differential oracle. Every
 //! case here therefore asserts an explicit expected value against the real
 //! JIT — never against an eval oracle — driven through the real CoreExpr ->
-//! JIT path (the `array_gc_safety.rs` harness idiom: hand-built `CoreExpr`,
-//! tiny nursery, filler allocations to force collections).
+//! JIT path (hand-built `CoreExpr`, tiny nursery, filler allocations to
+//! force collections).
 //!
 //! All cases run under `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` so a
 //! dangling read is deterministic rather than sometimes-working.
@@ -17,8 +17,6 @@ use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_testing::proptest::build_table_for_expr;
 
-// Matches the standard table used across tidepool-codegen's hand-built-tree
-// tests (see array_gc_safety.rs / heap_verify_lane.rs).
 const I_HASH: DataConId = DataConId(7); // I# single-field Int box wrapper
 const JUST: DataConId = DataConId(1);
 

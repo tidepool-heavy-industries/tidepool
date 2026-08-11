@@ -1,15 +1,14 @@
-//! Finding 1 (repo-review-2026-07-06/01-gc-memory-safety.md): allocate-then-
-//! fill emit paths (`ThunkCon`, LetRec `Lam`/`Con` pre-alloc, `emit_lam`
-//! capture fill, `emit_thunk_promised`) could leave counted heap-object slots
-//! uninitialized across a GC point that landed mid-fill. A GC scanning the
-//! object (it's already stack-mapped at that point) would then treat stale
-//! bump-heap bytes in an unfilled slot as a live pointer — "evacuating"
-//! garbage (reading a bogus size, writing a forwarding word into whatever
-//! that garbage pointed at).
+//! Prior bug: allocate-then-fill emit paths (`ThunkCon`, LetRec `Lam`/`Con`
+//! pre-alloc, `emit_lam` capture fill, `emit_thunk_promised`) could leave
+//! counted heap-object slots uninitialized across a GC point that landed
+//! mid-fill. A GC scanning the object (it's already stack-mapped at that
+//! point) would then treat stale bump-heap bytes in an unfilled slot as a
+//! live pointer — "evacuating" garbage (reading a bogus size, writing a
+//! forwarding word into whatever that garbage pointed at).
 //!
-//! Per the plan's own verification note, this is hard to reproduce
-//! deterministically at the unit level — it needs a GC to land in the exact
-//! window between a Con's allocation and its field-loop finishing. This test
+//! This is hard to reproduce deterministically at the unit level — it needs
+//! a GC to land in the exact window between a Con's allocation and its
+//! field-loop finishing. This test
 //! instead STRESS-tests the window: many independent `Just (goSum ...)`
 //! shapes (a `Con` with one thunked, non-trivial field — the `ThunkCon` arm,
 //! Finding 1a) evaluated back to back under a forced-tiny nursery, so many
@@ -147,9 +146,9 @@ fn push_strict_sum(b: &mut TreeBuilder, n: i64) -> usize {
 /// `let j0 = Just (sumTo n0) in let j1 = Just (sumTo n1) in ... in`
 /// `case j0 of Just x0 -> case x0 of I# v0 -> case j1 of Just x1 -> ... -> v0+v1+...`
 ///
-/// Each `Just (sumTo n)` is a `ThunkCon` (Finding 1a): the Con is allocated
-/// with `num_fields=1` and the field is compiled as a thunk (a GC point) —
-/// exactly the allocate-then-fill window Finding 1 names. `count` independent
+/// Each `Just (sumTo n)` is a `ThunkCon`: the Con is allocated with
+/// `num_fields=1` and the field is compiled as a thunk (a GC point) —
+/// exactly the allocate-then-fill window described above. `count` independent
 /// instances, interleaved with the strict sums' own allocation traffic, give a
 /// tiny nursery many chances to land a GC inside that window.
 fn build_many_thunkcon_justs(count: usize, n: i64) -> (CoreExpr, i64) {
@@ -187,9 +186,6 @@ fn build_many_thunkcon_justs(count: usize, n: i64) -> (CoreExpr, i64) {
         let combined = match acc {
             None => unwrap_i,
             Some(prev) => {
-                // Need `unwrap_i` computed before combining; nest via a
-                // LetNonRec so `prev` (already a full case chain) is evaluated
-                // inside this Con's Just-unwrap continuation.
                 let prev_v = prev;
                 b.push(CoreFrame::PrimOp {
                     op: PrimOpKind::IntAdd,

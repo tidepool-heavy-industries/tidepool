@@ -1,28 +1,21 @@
-//! Finding 2 (repo-review-2026-07-06/01-gc-memory-safety.md): boxed
-//! `SmallArray#` element pointers were invisible to `for_each_pointer_field`
-//! (`TAG_LIT` fell into the `_ => {}` catch-all), so a GC that landed after a
-//! `newSmallArray#` with a heap-pointer element — but before anything else kept
-//! that element reachable — collected it as garbage. The next
-//! `readSmallArray#`/`indexSmallArray#` then dereferenced freed nursery memory.
+//! Prior bug: boxed `SmallArray#` element pointers were invisible to
+//! `for_each_pointer_field` (`TAG_LIT` fell into the `_ => {}` catch-all), so
+//! a GC that landed after a `newSmallArray#` with a heap-pointer element —
+//! but before anything else kept that element reachable — collected it as
+//! garbage. The next `readSmallArray#`/`indexSmallArray#` then dereferenced
+//! freed nursery memory (SIGSEGV or garbage under ASAN-free conditions here,
+//! since Rust's allocator doesn't unmap).
 //!
-//! This is a RED-FIRST test per the plan's anti-patterns section: the existing
-//! `proptest_host_arrays.rs` suite explicitly models boxed slots as opaque
-//! tokens the host never dereferences (see that file's module doc), so it
-//! structurally cannot catch this. This test drives `newSmallArray#` /
-//! `indexSmallArray#` through the real CoreExpr -> JIT path with a REAL heap
-//! `Con` element and a tiny nursery, forcing many collections between the
-//! array's creation and its read while the stored element's only remaining
-//! reference is the array slot itself (the binding that built the element is
-//! never referenced again, so nothing else roots it).
-//!
-//! Before the fix: `for_each_pointer_field`'s `TAG_LIT` case did nothing, so
-//! the element `Con` was never evacuated, the nursery buffer holding it was
-//! freed on the next GC's buffer swap (`host_fns/gc.rs` `perform_gc`), and the
-//! final `indexSmallArray#` read dereferenced freed memory (SIGSEGV or garbage
-//! under ASAN-free conditions here, since Rust's allocator doesn't unmap).
-//! After the fix, `for_each_pointer_field`'s new `TAG_LIT` arm walks the
-//! array's payload slots, so the element is evacuated with everything else and
-//! the read is intact.
+//! `proptest_host_arrays.rs` models boxed slots as opaque tokens the host
+//! never dereferences, so it structurally cannot catch this. This test
+//! drives `newSmallArray#` / `indexSmallArray#` through the real CoreExpr ->
+//! JIT path with a REAL heap `Con` element and a tiny nursery, forcing many
+//! collections between the array's creation and its read while the stored
+//! element's only remaining reference is the array slot itself (the binding
+//! that built the element is never referenced again, so nothing else roots
+//! it). `for_each_pointer_field`'s `TAG_LIT` arm now walks the array's
+//! payload slots, so the element is evacuated with everything else and the
+//! read stays intact.
 
 use tidepool_codegen::host_fns::{heap_verify_run_count, set_heap_verify};
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -31,8 +24,6 @@ use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_testing::proptest::build_table_for_expr;
 
-// Matches the standard table used across tidepool-codegen's hand-built-tree
-// tests (see heap_verify_lane.rs / proptest_gc_recursion.rs).
 const I_HASH: DataConId = DataConId(7); // I# single-field Int box wrapper
 const JUST: DataConId = DataConId(1);
 

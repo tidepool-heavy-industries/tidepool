@@ -1,10 +1,5 @@
-//! Acceptance coverage for the `runtime_apply`/`runtime_tail_apply` refactor
-//! (cluster D, jit-chain-2). New tests here fill gaps in the pre-existing
-//! suite for the non-tail application protocol specifically; see the
-//! refactor's commit messages for the full acceptance table mapping all
-//! seven cases (including the ones already covered by pre-existing tests
-//! such as `emit_expr.rs::test_adversarial_thunked_closure_in_app_fun` and
-//! `tco.rs`/`tco_advanced.rs`) to their covering tests.
+//! Acceptance coverage for the `runtime_apply`/`runtime_tail_apply` non-tail
+//! application protocol.
 //!
 //! `compile_and_run`/`compile_expr`'s top-level root is always emitted
 //! `TailCtx::NonTail` (see `compile_expr` in `emit/expr.rs`), so every test in
@@ -74,8 +69,7 @@ fn apply_poison_short_circuits_application_of_non_closure() {
     );
 }
 
-/// High-byte tag mimicking a real session external id (see
-/// `external_env_resolution.rs`'s `EXTERNAL_TAG`); only used here as a
+/// High-byte tag mimicking a real session external id; only used here as a
 /// resolvable-but-distinguishable `VarId` for a hand-seeded binding.
 const EXTERNAL_TAG: u64 = 0xFE;
 
@@ -89,10 +83,7 @@ fn external_var_id(key: u64) -> VarId {
 /// Core program can't produce this from the outside (a genuine result is
 /// always a nonzero heap pointer; only the tail-call trampoline legitimately
 /// returns literal null, and only ever WITH `tail_callee` set), so this
-/// hand-builds a closure whose code pointer is a bogus host fn — exactly the
-/// same "hand-built heap object standing in for a compiled value" technique
-/// `external_env_resolution.rs` uses for its `boxed_int` fixture, applied to
-/// a Closure instead of a Lit.
+/// hand-builds a closure whose code pointer is a bogus host fn.
 unsafe extern "C" fn bogus_callee_returns_null_without_tail(
     _vmctx: *mut VMContext,
     _self_ptr: *mut u8,
@@ -182,11 +173,10 @@ fn apply_null_without_pending_tail_propagates_as_null() {
 /// corruption or a wrong result, not a clean trap.
 #[test]
 fn apply_gc_during_application_relocates_forced_callee() {
-    // The real payload: identical shape to
-    // emit_expr.rs::test_adversarial_thunked_closure_in_app_fun (a thunked
-    // App(identity, closure) Con field, forced via App in the case alt body,
-    // whose forcing allocates the \y -> y+10 closure fresh) — exercises
-    // heap_force triggering an allocation (the closure) mid-force.
+    // The real payload: a thunked App(identity, closure) Con field, forced
+    // via App in the case alt body, whose forcing allocates the \y -> y+10
+    // closure fresh — exercises heap_force triggering an allocation (the
+    // closure) mid-force.
     let mut nodes = Vec::new();
     let box_tag = DataConId(1);
     let x = VarId(0x100);
@@ -297,8 +287,7 @@ fn apply_gc_during_application_relocates_forced_callee() {
     // Sweep nursery sizes rather than hand-computing the exact bump-allocator
     // offset at which the noise Con's construction (which runs on one side of
     // real_case's result being already in hand, as the sibling PrimOp
-    // operand) straddles a GC — mirrors proptest_gc_recursion.rs's rationale
-    // for sweeping nursery sizes instead of pinning one exact value.
+    // operand) straddles a GC.
     for nodes in [nodes_app_first, nodes_noise_first] {
         let tree = RecursiveTree { nodes };
         for nursery_size in (256..=4096).step_by(48) {
