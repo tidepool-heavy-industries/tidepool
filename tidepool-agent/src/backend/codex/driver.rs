@@ -14,7 +14,7 @@
 //!    has no `cwd` field at all, so this is structural rather than a
 //!    convention — [`thread_start_omits_cwd`](tests::thread_start_omits_cwd)
 //!    pins it against a future field addition.
-//! 2. **The model is RESOLVED, never hardcoded** (Inanna, 2026-08-09).
+//! 2. **The model is RESOLVED, never hardcoded.**
 //!    Each [`ModelPolicy`] names an ALLOWLIST ([`preference_for`]); resolution
 //!    queries `model/list` once and takes the first listed slug actually
 //!    offered, failing otherwise. A model outside the list can never be
@@ -44,22 +44,21 @@ use crate::seam::{
     ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 
-/// The cheap-plumbing tier, in preference order (Inanna, 2026-08-09).
+/// The cheap-plumbing tier, in preference order.
 ///
 /// An ALLOWLIST: [`choose_model`] returns the first entry that
 /// `model/list` actually offers and fails otherwise, so no model outside this
 /// list is reachable — including `gpt-5.6-terra`, which overnight policy bans
-/// and which the phase-4 fixture happens to have been recorded on. That
+/// and which the replay fixture happens to have been recorded on. That
 /// fixture is protocol truth, never a model choice.
 pub const CHEAP_PLUMBING_PREFERENCE: [&str; 2] = ["gpt-5.4-mini", "gpt-5.6-luna"];
 
 /// The cheapest gpt-5.6 tier, pinned to exactly one slug.
 ///
-/// A one-entry allowlist is still an allowlist, and that is the point: the
-/// human's 2026-08-11 live-budget grant names `gpt-5.6-luna` specifically, so
-/// resolving to anything else — including the CHEAPER `gpt-5.4-mini` — would
-/// spend a budget on a model nobody authorized. Cheaper is not the same as
-/// granted.
+/// A one-entry allowlist is still an allowlist, and that is the point: a
+/// specific budget grant names `gpt-5.6-luna` exactly, so resolving to
+/// anything else — including the CHEAPER `gpt-5.4-mini` — would spend a
+/// budget on a model nobody authorized. Cheaper is not the same as granted.
 pub const CHEAPEST_GPT56_PREFERENCE: [&str; 1] = ["gpt-5.6-luna"];
 
 /// The allowlist a policy resolves against, in preference order.
@@ -93,8 +92,7 @@ pub(crate) fn effort_to_wire(effort: ReasoningEffort) -> codex_codes::ReasoningE
 /// this bounds a hung server or a runaway turn — it is not a latency budget.
 pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A live `codex app-server` driving one thread at a time through the lane-1
-/// seam.
+/// A live `codex app-server` driving one thread at a time through the seam.
 ///
 /// Owns its own tokio runtime (the `LlmHandler` precedent): the seam is sync
 /// because effect handlers are sync, and [`Session`] is async, so exactly one
@@ -154,10 +152,8 @@ impl CodexAgentBackend {
     /// Every JSONL frame exchanged so far, in wire order.
     ///
     /// Exists so a live run can commit its own transcript and have
-    /// [`replay`](crate::backend::codex::replay) drive the production pump over
-    /// it forever after. That is the whole record/replay bargain: one bounded
-    /// live spend buys repeatable protocol coverage, and a recording is
-    /// evidence where a hand-written imitation would be a guess.
+    /// [`replay`](crate::backend::codex::replay) drive the production pump
+    /// over it forever after.
     pub fn frames(&self) -> &[crate::backend::codex::process::RecordedFrame] {
         self.session.as_ref().map(Session::frames).unwrap_or(&[])
     }
@@ -183,8 +179,8 @@ impl CodexAgentBackend {
             // `experimentalApi` unlocks `thread/start.dynamicTools`
             // (PROTOCOL-NOTES.md §2). Requested unconditionally: a thread with
             // no dynamic tools does not need it, but negotiating a different
-            // handshake per spec would make the lane-1 and later-lane wire
-            // shapes diverge for no gain.
+            // handshake per spec would make the wire shape diverge for no
+            // gain.
             let capabilities = InitializeCapabilities {
                 experimental_api: Some(true),
                 ..Default::default()
@@ -364,10 +360,7 @@ fn thread_start_params(spec: &ThreadSpec) -> ThreadStartWithDynamicTools {
     }
 }
 
-/// Project one seam tool declaration onto the codex wire shape. Lane 1 never
-/// exercises this (the authored surface passes no dynamic tools) but the seam
-/// carries them and the transport supports them, so the mapping is here rather
-/// than being an unimplemented hole a later lane trips over.
+/// Project one seam tool declaration onto the codex wire shape.
 fn declaration_to_spec(declaration: &DynamicToolDeclaration) -> DynamicToolSpec {
     DynamicToolSpec::Function(DynamicToolFunctionSpec {
         name: declaration.name.clone(),
@@ -392,10 +385,9 @@ fn turn_start_params(
             exclude_slash_tmp: Some(false),
             exclude_tmpdir_env_var: Some(false),
             network_access: Some(false),
-            // The worker's bound worktree is the ONLY writable root: PRD 19
-            // couples one managed worktree to one agent, and the sandbox is
-            // where that coupling is enforced against the process rather than
-            // merely asserted about it.
+            // The worker's bound worktree is the ONLY writable root — the
+            // sandbox is where that one-worktree-per-agent coupling is
+            // enforced against the process, not merely asserted about it.
             writable_roots: Some(vec![codex_codes::AbsolutePathBuf(spec.cwd.clone())]),
         }),
         effort: Some(effort_to_wire(spec.effort)),
@@ -580,7 +572,7 @@ mod tests {
         serde_json::from_value(value).expect("Turn fixture must match the real wire shape")
     }
 
-    /// The catalogue the operator's real `model/list` returned during phase 3
+    /// The shape the operator's real `model/list` response takes
     /// (`fixtures/app-server-0.146.0/phase3-handshake.jsonl`), reduced to the
     /// fields `model_slugs` reads plus the one field `Model` requires.
     fn model_list_from_json(models: &[&str]) -> ModelListResponse {
@@ -876,9 +868,8 @@ mod tests {
         );
     }
 
-    /// Lane 1's shallow projection: the phase-4 transcript's completed turn
-    /// carried ONLY an `agentMessage` item, so an empty activity vector is the
-    /// expected shape for a plumbing cycle, not a bug.
+    /// Shallow projection: a turn carrying only an `agentMessage` item
+    /// produces an empty activity vector — the expected shape, not a bug.
     #[test]
     fn a_message_only_turn_projects_no_activity() {
         let turn = turn_from_json(serde_json::json!({
