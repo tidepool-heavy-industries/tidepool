@@ -1,7 +1,6 @@
-//! Regression tests for repo-review-2026-07-06/02-haskell-stdlib.md findings
-//! M1-M4, M6-M9, and a selection of the LOW list (H1-H4/M5/M10 are covered by
-//! `stdlib_regressions_02.rs`, written by the previous wave — not duplicated
-//! here).
+//! Regression tests for stdlib findings M1-M4, M6-M9, and a selection of the
+//! LOW list (H1-H4/M5/M10 are covered by `stdlib_regressions_02.rs` — not
+//! duplicated here).
 //!
 //! M1 — `toJSON` on a non-finite `Double` (`1/0`, `0/0`) must encode as JSON
 //! `Null` (upstream aeson parity), not the garbage finite number that came
@@ -56,7 +55,7 @@
 //! NOT covered here (not JIT-eval-reachable, per M5's precedent):
 //! - `CborEncode.hs`'s stale arity-5/6/7 comment — a comment fix, verified by
 //!   direct inspection against `tidepool-repr/src/serial/read.rs` (requires
-//!   exactly 7).
+//!   exactly 8).
 //! - `app/Main.hs`'s DataCon meta keying (`(dcid, qname)` instead of `dcid`
 //!   alone) — only exercised by the `--all-closed` multi-target fixture
 //!   generation path in the extractor binary itself, not by any single JIT

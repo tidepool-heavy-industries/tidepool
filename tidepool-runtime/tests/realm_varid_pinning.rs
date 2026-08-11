@@ -1,6 +1,5 @@
 //! Lane C — the Item-2 VarId-keyed cross-realm isolation property, pinned
-//! through the REAL production entry point (verdict §7 step 5,
-//! `realm-checklist.md` Item 2).
+//! through the REAL production entry point (verdict §7 step 5).
 //!
 //! `tidepool-codegen/tests/binding_table_realm_isolation.rs` proves the
 //! property against a hand-wired `BindingTable` — useful, but not proof that

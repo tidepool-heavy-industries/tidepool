@@ -1,4 +1,4 @@
-//! Lane A — declaration-accumulation integration test (plan §5.0 VERIFY).
+//! Declaration-accumulation integration test.
 //!
 //! Drives the REAL compile path over successive turns with a growing session
 //! include: each turn either appends a declaration (`SessionLib::define`, which

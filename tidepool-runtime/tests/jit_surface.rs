@@ -927,8 +927,8 @@ fn claims_nobase_nontail_loopifies_not_overflows() {
 
 // --- (b) COMPILE-FAIL probes — assert a compile-time ERROR. ---
 
-/// `let` in braced `do` (`do { let x = e; stmt }`) is a GHC PARSE error
-/// (style-guide gotcha #10/#207). Clean compile-time failure.
+/// `let` in braced `do` (`do { let x = e; stmt }`) is a GHC PARSE error.
+/// Clean compile-time failure.
 #[test]
 fn let_in_braced_do_fails_loudly() {
     fails_loudly("do { let x = 1 :: Int; pure x }", "parse error");
@@ -952,10 +952,9 @@ fn stdlib_quoter_bad_input_fails_loudly_at_compile_time() {
 /// splicing — unguarded, a pathological exponent like this one would
 /// silently WRAP the Int rather than erroring, producing a wrong-but-quiet
 /// `Scientific`. `maxExponentDigits` (Json.hs) rejects it instead. NOTE:
-/// per the TL's fold-before-verify instruction, this probe has not executed
-/// — the marker is derived by hand from the error string `pNumber`
-/// constructs (`"exponent has too many digits (" ++ show (length ds) ++
-/// ") ..."`), not confirmed by a run.
+/// this probe has not executed — the marker is derived by hand from the
+/// error string `pNumber` constructs (`"exponent has too many digits (" ++
+/// show (length ds) ++ ") ..."`), not confirmed by a run.
 #[test]
 fn qq_json_exponent_overflow_rejected_not_wrapped() {
     fails_loudly_with_imports(QQ_IMPORTS, "pure [j|1e9999999|]", "too many digits");
@@ -987,9 +986,8 @@ fn qq_fmt_unclosed_brace_carries_offset() {
 // --- (f) RUNTIME fails_loudly — miscellaneous (the eval itself errors). ---
 
 /// A large Value tree folded by a lens (`toJSON [1..20000] ^.. values`)
-/// overflows with a CLEAN "stack overflow" yield error — NOT the SIGILL the
-/// style-guide #18 claims. The cause is a non-tail lens fold, not "complex
-/// traversal". Doc trued up in tidepool-style-guide.md.
+/// overflows with a CLEAN "stack overflow" yield error — NOT a SIGILL. The
+/// cause is a non-tail lens fold, not general "complex traversal".
 ///
 /// Guards the same masked-StackOverflow case as
 /// `nontail_recursion_fails_loudly` (in `parse_result`).
@@ -1059,10 +1057,9 @@ fn works_freer_node_resolves_without_data_tree() {
 }
 
 /// DuplicateRecordFields shared selector — the `Hit`/`FileRead` library records
-/// both define a `path` field (legal under `DuplicateRecordFields`; `FileRead`
-/// is the #335 successor to the old `Doc` record this probe originally pinned
-/// against, same shared-field shape). In GHC 9.2+ the selectors keep the bare
-/// occ name `path` (record-field namespace, no `$sel:` mangling), so
+/// both define a `path` field (legal under `DuplicateRecordFields`). In GHC
+/// 9.2+ the selectors keep the bare occ name `path` (record-field namespace,
+/// no `$sel:` mangling), so
 /// `stableVarId` fingerprinted identical `<Module>:path` strings → ONE varId
 /// for two distinct selectors. The DataConTable / external resolver coalesced
 /// them: `getField @"path" @Hit` bound to whichever selector won, and applying
